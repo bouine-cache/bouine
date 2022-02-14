@@ -1,0 +1,6 @@
+[Unit]
+Description=Bouine Distributed HTTP cache instance
+[Service]
+ExecStart=bouine
+[Install]
+WantedBy=multi-user.target

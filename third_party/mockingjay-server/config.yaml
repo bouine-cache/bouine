@@ -1,0 +1,171 @@
+# Copyright 2022 Théotime Levêque
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+---
+ - name: Valid JSON endpoint
+   request:
+     uri: /ernest_get_200
+     method: GET
+   response:
+     code: 200
+     body: '{"message": "Ernest is really a nice buddy"}'
+     headers:
+       content-type: application/json
+ - name: Valid HEAD request
+   request:
+     uri: /ernest_head_200
+     method: HEAD
+   response:
+     code: 200
+ - name: Set-Cookie header on response
+   request:
+     uri: /ernest_get_200_cookie
+     method: GET
+   response:
+     code: 200
+     body: '{"message": "Ernest does not like Cookier, he prefers meat"}'
+     headers:
+       content-type: application/json
+       Set-Cookie: 'Expires=Tue, 28 Apr 2037 13:46:30 GMT'
+ - name: no-store Cache Control header on response
+   request:
+     uri: /ernest_get_200_no_store
+     method: GET
+   response:
+     code: 200
+     body: '{"message": "Ernest is shy, do not store a copy"}'
+     headers:
+       content-type: application/json
+       Cache-Control: no-store
+ - name: private Cache Control header on response
+   request:
+     uri: /ernest_get_200_private
+     method: GET
+   response:
+     code: 200
+     body: '{"message": "Ernest is private, do not store a copy"}'
+     headers:
+       content-type: application/json
+       Cache-Control: private
+ - name: public Cache Control header on response
+   request:
+     uri: /ernest_get_200_public
+     method: GET
+   response:
+     code: 200
+     body: '{"message": "Ernest is public, do not store a copy"}'
+     headers:
+       content-type: application/json
+       Cache-Control: public
+ - name: Valid POST request
+   request:
+     uri: /ernest_post_201
+     method: POST
+   response:
+     code: 201
+     body: '{"message": "Ernest is born !"}'
+   headers:
+       content-type: application/json
+ - name: Valid PUT request
+   request:
+     uri: /ernest_put_200
+     method: PUT
+   response:
+     code: 200
+     body: '{"message": "Ernest is (re?)born !"}'
+   headers:
+       content-type: application/json
+ - name: Valid PATCH request
+   request:
+     uri: /ernest_patch_200
+     method: PATCH
+   response:
+     code: 200
+     body: '{"message": "Ernest has changed !"}'
+   headers:
+       content-type: application/json
+ - name: Permanent redirect JSON endpoint
+   request:
+     uri: /ernest_get_301
+     method: GET
+   response:
+     code: 301
+     body: '{"message": "Ernest left the house"}'
+     headers:
+       content-type: application/json
+       location: /permanent_somewhere_else
+ - name: Temporary redirect JSON endpoint
+   request:
+     uri: /ernest_get_302
+     method: GET
+   response:
+     code: 302
+     body: '{"message": "Ernest is on the balcony"}'
+     headers:
+       content-type: application/json
+       location: /temporary_somewhere_else
+ - name: Not found JSON endpoint
+   request:
+     uri: /ernest_get_404
+     method: GET
+   response:
+     code: 404
+     body: '{"message": "Ernest is not there"}'
+     headers:
+       content-type: application/json
+ - name: Method Not Allowed JSON endpoint
+   request:
+     uri: /ernest_get_405
+     method: GET
+   response:
+     code: 405
+     body: '{"message": "Ernest cannot do that!"}'
+     headers:
+       content-type: application/json
+ - name: Gone JSON endpoint
+   request:
+     uri: /ernest_get_410
+     method: GET
+   response:
+     code: 410
+     body: '{"message": "Ernest is gone"}'
+     headers:
+       content-type: application/json
+ - name: URI Too Long JSON endpoint
+   request:
+     uri: /ernest_get_414
+     method: GET
+   response:
+     code: 414
+     body: '{"message": "Ernest is not that long..."}'
+     headers:
+       content-type: application/json
+ - name: Server Error JSON endpoint
+   request:
+     uri: /ernest_get_500
+     method: GET
+   response:
+     code: 500
+     body: '{"message": "Ernest fell!"}'
+     headers:
+       content-type: application/json
+ - name: Not implemented Server Error JSON endpoint
+   request:
+     uri: /ernest_get_501
+     method: GET
+   response:
+     code: 501
+     body: '{"message": "Ernest is not born yet"}'
+     headers:
+       content-type: application/json

@@ -1,0 +1,60 @@
+{
+    "variables": {
+      "project_id": "",
+      "access_key": "",
+      "secret_key": ""
+    },
+    "builders": [
+      {
+        "project_id": "{{ user `project_id` }}",
+        "access_key": "{{ user `access_key` }}",
+        "secret_key": "{{ user `secret_key` }}",
+        "server_name": "tailscale",
+        "image_name": "ubuntu-tailscale",
+        "snapshot_name": "ubuntu-tailscale-snapshot",
+        "type": "scaleway",
+        "image": "ubuntu_focal",
+        "zone": "fr-par-1",
+        "commercial_type": "DEV1-S",
+        "ssh_username": "root"
+      }
+    ],
+    "provisioners": [
+      {
+        "type": "shell",
+        "inline": [
+          "sleep 10",
+          "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo apt-key add -",
+          "curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.list | sudo tee /etc/apt/sources.list.d/tailscale.list",
+          "apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69",
+          "echo \"deb https://dl.k6.io/deb stable main\" | sudo tee /etc/apt/sources.list.d/k6.list",
+          "apt-get update",
+          "apt-get install -y apt-transport-https software-properties-common wget",
+          "wget -q -O - https://packages.grafana.com/gpg.key | apt-key add -",
+          "echo \"deb https://packages.grafana.com/oss/deb stable main\" | tee -a /etc/apt/sources.list.d/grafana.list",
+          "apt-get update",
+          "apt-get install -y tailscale k6 influxdb grafana"
+        ]
+      },
+      {
+        "type": "file",
+        "source": "build/client/files/tailscale.service",
+        "destination": "/etc/systemd/system/tailscale.service"
+      },
+      {
+        "type": "file",
+        "source": "third_party/k6/scenarios",
+        "destination": "/scenarios"
+      },
+      {
+        "type": "file",
+        "source": "build/client/files/grafana",
+        "destination": "/etc/"
+      },
+      {
+        "type": "file",
+        "source": "build/client/files/grafana/dashboards",
+        "destination": "/var/lib/grafana/dashboards"
+      }
+    ]
+  }

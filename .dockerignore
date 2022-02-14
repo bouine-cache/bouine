@@ -1,0 +1,6 @@
+.git
+.env
+.envrc
+tailscale.service
+
+*_test.go

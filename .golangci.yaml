@@ -1,0 +1,41 @@
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - deadcode
+    - dogsled
+    - errcheck
+    - gocyclo
+    - goconst
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - rowserrcheck
+    - staticcheck
+    - structcheck
+    - stylecheck
+    - typecheck
+    - unconvert
+    - unparam
+    - unused
+    - varcheck
+    - whitespace
+    - godot
+    - gofmt
+    - gosimple
+    - revive
+
+linters-settings:
+  godot:
+    scope: declarations
+  goimports:
+    local-prefixes: github.com/thylong/bouine
+  gofmt:
+    simplify: true
+  gocyclo:
+    min-complexity: 10
+  revive:
+    ignore-generated-header: true
+    severity: warning
+    confidence: 0.3

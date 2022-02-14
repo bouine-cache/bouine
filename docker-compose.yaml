@@ -1,0 +1,50 @@
+version: '3.8'
+services:
+  bouine:
+    build:
+      context: .
+    depends_on:
+      - mockingjay
+    links:
+      - mockingjay
+    ports:
+      - 8080:8080
+  test-client:
+    image: loadimpact/k6
+    depends_on:
+      - bouine
+      - influxdb
+      - grafana
+    links:
+      - bouine
+      - influxdb
+    volumes:
+      - ./third_party/k6/scenarios:/scenarios
+      - ./scripts/k6:/influxdb_startup
+    entrypoint: ["ash", "/influxdb_startup/entrypoint.sh", "-h", "influxdb", "-p", "8086", "-t", "5", "--", "k6"] # Tricks to wait for influxdb to be up (without custom Docker image)
+  influxdb:
+    image: influxdb:1.7.11
+    depends_on:
+      - bouine
+    ports:
+      - 8086:8086
+  grafana:
+    image: grafana/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - influxdb
+    links:
+      - influxdb
+    ports:
+      - 3000:3000
+    volumes:
+      - ./build/client/files/grafana:/etc/grafana
+      - ./build/client/files/grafana/dashboards:/var/lib/grafana/dashboards
+  mockingjay: # Mock server
+    image: quii/mockingjay-server:1.12.0
+    ports:
+      - 8084:8084
+    volumes:
+      - ./third_party/mockingjay-server:/config
+    command: ["-config=/config/config.yaml", "-port=8084", "-debug"]

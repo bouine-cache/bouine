@@ -50,6 +50,8 @@ export const options = {
         get200WithCacheControlNoStore: Object.assign({}, commonOptions, {exec: 'get200WithCacheControlNoStore'}),
         get200WithCacheControlPrivate: Object.assign({}, commonOptions, {exec: 'get200WithCacheControlPrivate'}),
         get200WithCacheControlPublic: Object.assign({}, commonOptions, {exec: 'get200WithCacheControlPublic'}),
+        get200WithBasicAuth: Object.assign({}, commonOptions, {exec: 'get200WithBasicAuth'}),
+        get200WithBasicAuthCacheControl: Object.assign({}, commonOptions, {exec: 'get200WithBasicAuthCacheControl'}),
         // Other HTTP verbs test cases
         // FIXME: Broken, seems related to : https://github.com/docker/for-mac/issues/4855
         // head200NoCache: Object.assign({}, commonOptions, {exec: 'head200NoCache'}),
@@ -262,7 +264,7 @@ export function get200WithCacheControlPrivate() {
     // getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlPrivate', '_private');
 }
 
-// This test ensures 200s JSON responses with 'Cache-Control: public' header are  cached
+// This test ensures 200s JSON responses with 'Cache-Control: public' header are cached
 // cacheable by default as specified in https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.5
 export function get200WithCacheControlPublic() {
     // First simple GET request on /ernest_public
@@ -274,9 +276,35 @@ export function get200WithCacheControlPublic() {
     getValidJSONBody(baseURL, true, 200, 'get200WithCacheControlPublic', '_public');
 }
 
-// no cache on:
-// Authorization header (without cache headers)
-// Authorization header (with cache headers)
+// This test ensures 200s JSON responses without Cache-Control directive header are not cached
+// not cacheable by default as specified in https://datatracker.ietf.org/doc/html/rfc7234#section-3
+// FIXME: skip cache middleware on Basic Auth requests without 'Cache-Control: public'
+export function get200WithBasicAuth() {
+    // First simple GET request on /ernest_basic_auth_uncached
+    // Should result in non-cached JSON response
+    // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
+    getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
+
+    // Second simple GET request on /ernest_basic_auth_uncached
+    // Should result in a non-cached JSON response
+    // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
+    // getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
+}
+
+// This test ensures 200s JSON responses with Cache-Control directive header are cached
+// cacheable with "must-revalidate, public, and s-maxage" Cache-Control directives
+// as specified in https://datatracker.ietf.org/doc/html/rfc7234#section-3.2
+export function get200WithBasicAuthCacheControl() {
+    // First simple GET request on /ernest_get_200_basic_auth_cached
+    // Should result in non-cached JSON response
+    // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
+    getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
+
+    // Second simple GET request on /ernest_get_200_basic_auth_cached
+    // Should result in a cached JSON response
+    // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
+    getValidJSONBody('http://aladdin:opensesame@bouine:8080', true, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
+}
 
 // cache on (2 cases each: override not cacheable endpoint if specified + overrides default cache expiration):
 // Expires

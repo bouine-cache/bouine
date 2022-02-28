@@ -68,6 +68,29 @@
      headers:
        content-type: application/json
        Cache-Control: public
+ - name: basic auth request (uncached != Cache-Control public)
+   request:
+     uri: /ernest_get_200_basic_auth_uncached
+     method: GET
+     headers:
+      Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
+   response:
+     code: 200
+     body: '{"message": "Ernest with its ID, knocking at the door"}'
+     headers:
+       content-type: application/json
+ - name: basic auth request (cached = Cache-Control public)
+   request:
+     uri: /ernest_get_200_basic_auth_cached
+     method: GET
+     headers:
+      Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
+   response:
+     code: 200
+     body: '{"message": "Ernest with its ID, often knocking at the door"}'
+     headers:
+       content-type: application/json
+       Cache-Control: public
  - name: Valid POST request
    request:
      uri: /ernest_post_201

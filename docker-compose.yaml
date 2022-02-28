@@ -20,7 +20,7 @@ services:
       - influxdb
     volumes:
       - ./third_party/k6/scenarios:/scenarios
-      - ./scripts/k6:/influxdb_startup
+      - ./third_party/k6/scripts:/influxdb_startup
     entrypoint: ["ash", "/influxdb_startup/entrypoint.sh", "-h", "influxdb", "-p", "8086", "-t", "5", "--", "k6"] # Tricks to wait for influxdb to be up (without custom Docker image)
   influxdb:
     image: influxdb:1.7.11

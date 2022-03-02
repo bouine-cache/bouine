@@ -14,7 +14,6 @@
  * limitations under the License.
  *
  */
-import { check } from 'k6';
 import { Trend } from 'k6/metrics';
 import { getValidJSONBody, headValid, postValid, putValid, patchValid, deleteValid } from './helpers.js'
 
@@ -307,6 +306,7 @@ export function get200WithBasicAuthCacheControl() {
 }
 
 // cache on (2 cases each: override not cacheable endpoint if specified + overrides default cache expiration):
+// FIXME: Not supported yet, will require modifyResponse hook on proxy
 // Expires
 // max-age
 // s-maxage

@@ -34,7 +34,7 @@
      method: GET
    response:
      code: 200
-     body: '{"message": "Ernest does not like Cookier, he prefers meat"}'
+     body: '{"message": "Ernest does not like Cookies, he prefers meat"}'
      headers:
        content-type: application/json
        Set-Cookie: 'Expires=Tue, 28 Apr 2037 13:46:30 GMT'

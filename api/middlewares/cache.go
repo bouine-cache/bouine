@@ -16,12 +16,19 @@ package middlewares
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cache"
 )
 
 // CacheSkippable returns true if proxied responses shouldn't be cached according to RFC7234 (Bouine default configuration).
 func CacheSkippable(c *fiber.Ctx) bool {
+	// force cache middleware on 'Cache-Control: public'
+	if bytes.Equal(c.Context().Response.Header.Peek("Cache-Control"), []byte("public")) {
+		return false
+	}
+
 	// skip cache middleware on res.statusCode == 500
 	if c.Context().Response.StatusCode() == fiber.StatusInternalServerError {
 		return true
@@ -42,6 +49,11 @@ func CacheSkippable(c *fiber.Ctx) bool {
 		return true
 	}
 
+	// skip cache middleware if Authorization header is present in the request
+	if len(c.Context().Request.Header.Peek("Authorization")) > 0 {
+		return true
+	}
+
 	// skip cache middleware on 'Cache-Control: no-store'
 	if bytes.Equal(c.Context().Response.Header.Peek("Cache-Control"), []byte("no-store")) {
 		return true
@@ -52,6 +64,33 @@ func CacheSkippable(c *fiber.Ctx) bool {
 		return true
 	}
 
-	// FIXME: skip cache middleware on Basic Auth requests without 'Cache-Control: public'
 	return false
+}
+
+// CustomExpirationGenerator return cache key expiration time.
+// Use Upstream response expires, max-age or s-maxage otherwise default to config default value.
+func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
+	// s-maxage
+	// if bytes.Contains(c.Context().Response.Header.Peek("Cache-Control"), []byte("s-maxage")) {
+	// 	return <the_s-maxage>
+	// }
+	// max-age
+	// if bytes.Contains(c.Context().Response.Header.Peek("Cache-Control"), []byte("max-age")) {
+	// 	return <the_max-age>
+	// }
+
+	// Expires (in case max-age & s-maxage are missing)
+	// Uses RFC5322 Date/Time format
+	expiresTime, err := time.Parse("Thu, 01 Dec 1994 16:00:00 GMT", string(c.Context().Response.Header.Peek("Expires")))
+	if err != nil {
+		return cfg.Expiration
+	}
+	if expiresDuration := time.Now().Sub(expiresTime); expiresDuration > 0 {
+		return expiresDuration
+	}
+
+	// newCacheTime, _ := strconv.Atoi(c.GetRespHeader("Cache-Time", "600"))
+	// time.Second * time.Duration(newCacheTime)
+
+	return cfg.Expiration
 }

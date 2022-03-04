@@ -8,9 +8,21 @@ func nostoreCacheControlHandler(c *fiber.Ctx) error {
 	return c.SendStatus(200)
 }
 
-// privateCacheControlHandler returns a 200 with 'Cache-Control: no-store'.
+// privateCacheControlHandler returns a 200 with 'Cache-Control: private'.
 func privateCacheControlHandler(c *fiber.Ctx) error {
 	c.Set("Cache-Control", "private")
+	return c.SendStatus(200)
+}
+
+// publicCacheControlHandler returns a 200 with 'Cache-Control: public'.
+func publicCacheControlHandler(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "public")
+	return c.SendStatus(200)
+}
+
+// okHandler returns a 200.
+func okHandler(c *fiber.Ctx) error {
+	c.Set("Authorization", "Basic YWxhZGRpbjpvcGVuc2VzYW1l")
 	return c.SendStatus(200)
 }
 
@@ -27,4 +39,10 @@ func serviceUnavailableHandler(c *fiber.Ctx) error {
 // gatewayTimeoutHandler returns a 504.
 func gatewayTimeoutHandler(c *fiber.Ctx) error {
 	return c.SendStatus(504)
+}
+
+// expiresHeaderHandler returns a 200 with an Expires header (holding a future date value).
+func expiresHeaderHandler(c *fiber.Ctx) error {
+	c.Set("Expires", "Thu, 01 Jan 2043 16:00:00 GMT")
+	return c.SendStatus(fiber.StatusOK)
 }

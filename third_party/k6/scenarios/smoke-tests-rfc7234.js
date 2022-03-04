@@ -310,7 +310,6 @@ export function get200WithCacheControlPublic() {
 
 // This test ensures 200s JSON responses without Cache-Control directive header are not cached
 // not cacheable by default as specified in https://datatracker.ietf.org/doc/html/rfc7234#section-3
-// FIXME: skip cache middleware on Basic Auth requests without 'Cache-Control: public'
 export function get200WithBasicAuth() {
     // First simple GET request on /ernest_basic_auth_uncached
     // Should result in non-cached JSON response
@@ -320,7 +319,7 @@ export function get200WithBasicAuth() {
     // Second simple GET request on /ernest_basic_auth_uncached
     // Should result in a non-cached JSON response
     // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
-    // getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
+    getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
 }
 
 // This test ensures 200s JSON responses with Cache-Control directive header are cached

@@ -174,7 +174,7 @@
      body: '{"message": "Ernest is not that long..."}'
      headers:
        content-type: application/json
- - name: Server Error JSON endpoint
+ - name: Internal Server Error JSON endpoint
    request:
      uri: /ernest_get_500
      method: GET
@@ -190,5 +190,32 @@
    response:
      code: 501
      body: '{"message": "Ernest is not born yet"}'
+     headers:
+       content-type: application/json
+ - name: Bad Gateway Error JSON endpoint
+   request:
+     uri: /ernest_get_502
+     method: GET
+   response:
+     code: 502
+     body: '{"message": "Ernest did not go through!"}'
+     headers:
+       content-type: application/json
+ - name: Service Unavailable Error JSON endpoint
+   request:
+     uri: /ernest_get_503
+     method: GET
+   response:
+     code: 503
+     body: '{"message": "Ernest does not want to play!"}'
+     headers:
+       content-type: application/json
+ - name: Gateway Timeout Error JSON endpoint
+   request:
+     uri: /ernest_get_504
+     method: GET
+   response:
+     code: 504
+     body: '{"message": "Ernest takes forever to start playing..."}'
      headers:
        content-type: application/json

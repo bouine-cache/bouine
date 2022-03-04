@@ -45,6 +45,9 @@ export const options = {
         get414JSONBody: Object.assign({}, commonOptions, {exec: 'get414JSONBody'}),
         get500JSONBody: Object.assign({}, commonOptions, {exec: 'get500JSONBody'}),
         get501JSONBody: Object.assign({}, commonOptions, {exec: 'get501JSONBody'}),
+        get502JSONBody: Object.assign({}, commonOptions, {exec: 'get502JSONBody'}),
+        get503JSONBody: Object.assign({}, commonOptions, {exec: 'get503JSONBody'}),
+        get504JSONBody: Object.assign({}, commonOptions, {exec: 'get504JSONBody'}),
         get200WithSetCookie: Object.assign({}, commonOptions, {exec: 'get200WithSetCookie'}),
         get200WithCacheControlNoStore: Object.assign({}, commonOptions, {exec: 'get200WithCacheControlNoStore'}),
         get200WithCacheControlPrivate: Object.assign({}, commonOptions, {exec: 'get200WithCacheControlPrivate'}),
@@ -167,6 +170,39 @@ export function get501JSONBody() {
     // Second simple GET request on /ernest_501
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 501, 'rfc7234ValidationGet500JSONBody');
+}
+
+// This test ensures 502s JSON responses are not cached
+export function get502JSONBody() {
+    // First simple GET request on /ernest_502
+    // Should result in non-cached JSON response
+    getValidJSONBody(baseURL, false, 502, 'rfc7234ValidationGet502JSONBody');
+
+    // Second simple GET request on /ernest_502
+    // Should result in a cached JSON response
+    getValidJSONBody(baseURL, false, 502, 'rfc7234ValidationGet502JSONBody');
+}
+
+// This test ensures 503s JSON responses are not cached
+export function get503JSONBody() {
+    // First simple GET request on /ernest_503
+    // Should result in non-cached JSON response
+    getValidJSONBody(baseURL, false, 503, 'rfc7234ValidationGet503JSONBody');
+
+    // Second simple GET request on /ernest_503
+    // Should result in a cached JSON response
+    getValidJSONBody(baseURL, false, 503, 'rfc7234ValidationGet503JSONBody');
+}
+
+// This test ensures 504s JSON responses are not cached
+export function get504JSONBody() {
+    // First simple GET request on /ernest_504
+    // Should result in non-cached JSON response
+    getValidJSONBody(baseURL, false, 504, 'rfc7234ValidationGet504JSONBody');
+
+    // Second simple GET request on /ernest_504
+    // Should result in a cached JSON response
+    getValidJSONBody(baseURL, false, 504, 'rfc7234ValidationGet504JSONBody');
 }
 
 // This test ensures 200s JSON responses with Set-Cookie header are cached

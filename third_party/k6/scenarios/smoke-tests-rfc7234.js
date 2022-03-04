@@ -147,7 +147,6 @@ export function get414JSONBody() {
 }
 
 // This test ensures 500s JSON responses are not cached
-// FIXME: second res should return false (need to skip cache on res.statusCode === 500 )
 export function get500JSONBody() {
     // First simple GET request on /ernest_500
     // Should result in non-cached JSON response
@@ -155,7 +154,7 @@ export function get500JSONBody() {
 
     // Second simple GET request on /ernest_500
     // Should result in a cached JSON response
-    // getValidJSONBody(baseURL, false, 500, 'rfc7234ValidationGet500JSONBody');
+    getValidJSONBody(baseURL, false, 500, 'rfc7234ValidationGet500JSONBody');
 }
 
 // This test ensures 501s JSON responses are cached
@@ -239,7 +238,6 @@ export function delete200NoCache() {
 
 // This test ensures 200s JSON responses with 'Cache-Control: no-store' header are not cached
 // not cacheable by default as specified in https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.3
-// FIXME: skip cache middleware on 'Cache-Control: no-store'
 export function get200WithCacheControlNoStore() {
     // First simple GET request on /ernest_no_store
     // Should result in non-cached JSON response
@@ -247,12 +245,11 @@ export function get200WithCacheControlNoStore() {
 
     // Second simple GET request on /ernest_no_store
     // Should result in a cached JSON response
-    // getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlNoStore', '_no_store');
+    getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlNoStore', '_no_store');
 }
 
 // This test ensures 200s JSON responses with 'Cache-Control: private' header are not cached
 // not cacheable by default as specified in https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.6
-// FIXME: skip cache middleware on 'Cache-Control: private'
 export function get200WithCacheControlPrivate() {
     // First simple GET request on /ernest_private
     // Should result in non-cached JSON response
@@ -260,7 +257,7 @@ export function get200WithCacheControlPrivate() {
 
     // Second simple GET request on /ernest_private
     // Should result in a cached JSON response
-    // getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlPrivate', '_private');
+    getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlPrivate', '_private');
 }
 
 // This test ensures 200s JSON responses with 'Cache-Control: public' header are cached

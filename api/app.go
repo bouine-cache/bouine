@@ -52,7 +52,9 @@ func main() {
 
 	// Middlewares
 	app.Use(recover.New())
-	app.Use(cache.New())
+	app.Use(cache.New(cache.Config{
+		Next: middlewares.CacheSkippable,
+	}))
 	app.Use(middlewares.ConsensusMiddleware(consensus.Config{
 		Leader: "leader",
 	}))

@@ -13,7 +13,7 @@ import (
 	"github.com/gofiber/fiber/v2/utils"
 )
 
-func createBouineLeaderServer(handler fiber.Handler, t *testing.T) (*fiber.App, string) {
+func createUpstreamBackendServer(handler fiber.Handler, t *testing.T) (*fiber.App, string) {
 	t.Helper()
 
 	target := fiber.New(fiber.Config{DisableStartupMessage: true})
@@ -35,7 +35,7 @@ func createBouineLeaderServer(handler fiber.Handler, t *testing.T) (*fiber.App, 
 func Test_Proxy_WithValidUpstream(t *testing.T) {
 	t.Parallel()
 
-	target, addr := createBouineLeaderServer(
+	target, addr := createUpstreamBackendServer(
 		func(c *fiber.Ctx) error { return c.SendStatus(fiber.StatusTeapot) }, t,
 	)
 
@@ -69,7 +69,7 @@ func Test_Proxy_WithoutValidUpstream(t *testing.T) {
 func Test_Proxy_SlowUpstream(t *testing.T) {
 	t.Parallel()
 
-	_, addr := createBouineLeaderServer(func(c *fiber.Ctx) error {
+	_, addr := createUpstreamBackendServer(func(c *fiber.Ctx) error {
 		time.Sleep(2 * time.Second)
 		return c.SendString("fiber is awesome")
 	}, t)
@@ -92,7 +92,7 @@ func Test_Proxy_SlowUpstream(t *testing.T) {
 func Test_Proxy_With_Timeout(t *testing.T) {
 	t.Parallel()
 
-	_, addr := createBouineLeaderServer(func(c *fiber.Ctx) error {
+	_, addr := createUpstreamBackendServer(func(c *fiber.Ctx) error {
 		time.Sleep(1 * time.Second)
 		return c.SendString("fiber is awesome")
 	}, t)
@@ -115,7 +115,7 @@ func Test_Proxy_With_Timeout(t *testing.T) {
 func Test_Proxy_Buffer_Size_Response(t *testing.T) {
 	t.Parallel()
 
-	_, addr := createBouineLeaderServer(func(c *fiber.Ctx) error {
+	_, addr := createUpstreamBackendServer(func(c *fiber.Ctx) error {
 		long := strings.Join(make([]string, 5000), "-")
 		c.Set("Very-Long-Header", long)
 		return c.SendString("ok")
@@ -142,7 +142,7 @@ func Test_Proxy_Buffer_Size_Response(t *testing.T) {
 func Test_Proxy_SanitizedRequestFromUpstream(t *testing.T) {
 	t.Parallel()
 
-	// _, addr := createBouineLeaderServer(func(c *fiber.Ctx) error {
+	// _, addr := createUpstreamBackendServer(func(c *fiber.Ctx) error {
 	// 	b := c.Request().Body()
 	// 	return c.SendString(string(b))
 	// }, t)
@@ -168,7 +168,7 @@ func Test_Proxy_SanitizedRequestFromUpstream(t *testing.T) {
 func Test_Proxy_SanitizedResponseFromUpstream(t *testing.T) {
 	t.Parallel()
 
-	// _, addr := createBouineLeaderServer(func(c *fiber.Ctx) error {
+	// _, addr := createUpstreamBackendServer(func(c *fiber.Ctx) error {
 	// 	return c.Status(500).SendString("not modified")
 	// }, t)
 

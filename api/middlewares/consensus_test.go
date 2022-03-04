@@ -14,7 +14,7 @@ func Test_Consensus_WriteAsLeader(t *testing.T) {
 	t.Parallel()
 
 	// Must not forward to leader
-	target, addr := createBouineLeaderServer(ConsensusMiddleware(consensus.Config{Leader: "leader"}), t)
+	target, addr := createUpstreamBackendServer(ConsensusMiddleware(consensus.Config{Leader: "leader"}), t)
 
 	resp, err := target.Test(httptest.NewRequest("GET", "/", nil), 2000)
 	// Next middleware in chain should be invoked
@@ -38,7 +38,7 @@ func Test_Consensus_WriteAsLeader(t *testing.T) {
 func Test_Consensus_WriteAsFollower(t *testing.T) {
 	t.Parallel()
 
-	target, addr := createBouineLeaderServer(ConsensusMiddleware(consensus.Config{Leader: "follower"}), t)
+	target, addr := createUpstreamBackendServer(ConsensusMiddleware(consensus.Config{Leader: "follower"}), t)
 
 	resp, err := target.Test(httptest.NewRequest("GET", "/", nil), 2000)
 	// Must forward to leader

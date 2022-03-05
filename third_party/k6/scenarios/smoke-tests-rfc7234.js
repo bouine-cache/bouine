@@ -336,11 +336,3 @@ export function get200WithBasicAuthCacheControl() {
     // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
     getValidJSONBody('http://aladdin:opensesame@bouine:8080', true, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
 }
-
-// cache on (2 cases each: override not cacheable endpoint if specified + overrides default cache expiration):
-// FIXME: Not supported yet, will require modifyResponse hook on proxy
-// Expires
-// max-age
-// s-maxage
-// Cache Control Extension
-// public

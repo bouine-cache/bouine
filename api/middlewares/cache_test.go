@@ -13,18 +13,25 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-func Test_Cache_CustomExpirationGenerator(t *testing.T) {
+func Test_Cache_CustomExpirationGenerator_ExpiresHeader(t *testing.T) {
 	t.Parallel()
+
+	// Override until wrapper to return predictable duration
+	until = func(deadline time.Time) time.Duration {
+		minute, _ := time.ParseDuration("2m")
+		return minute
+	}
 
 	app := fiber.New()
 
 	cacheCfg := cache.Config{
 		Next:                CacheSkippable,
 		Expiration:          1 * time.Minute,
+		CacheControl:        true,
 		ExpirationGenerator: CustomExpirationGenerator,
 	}
 	app.Use(cache.New(cacheCfg))
-	app.Use(expiresHeaderHandler)
+	app.Use(expiresHeaderHandler) // Expires header is set by the handler
 
 	resp, err := app.Test(httptest.NewRequest("GET", "/", nil))
 	utils.AssertEqual(t, nil, err)
@@ -32,12 +39,48 @@ func Test_Cache_CustomExpirationGenerator(t *testing.T) {
 
 	fmt.Printf("%v\n", resp.Header)
 
+	// Second request is expected to be served from the cache
 	resp, err = app.Test(httptest.NewRequest("GET", "/", nil))
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
 
 	fmt.Printf("%v\n", resp.Header)
-	utils.AssertEqual(t, 1*time.Minute, resp.Header.Get("Cache-Control"))
+	utils.AssertEqual(t, "public, max-age=120", resp.Header.Get("Cache-Control"))
+}
+
+func Test_Cache_CustomExpirationGenerator_MaxAgeCacheControlHeader(t *testing.T) {
+	t.Parallel()
+
+	// Override until wrapper to return predictable duration
+	until = func(deadline time.Time) time.Duration {
+		minute, _ := time.ParseDuration("2m")
+		return minute
+	}
+
+	app := fiber.New()
+
+	cacheCfg := cache.Config{
+		Next:                CacheSkippable,
+		Expiration:          1 * time.Minute,
+		CacheControl:        true,
+		ExpirationGenerator: CustomExpirationGenerator,
+	}
+	app.Use(cache.New(cacheCfg))
+	app.Use(publicMaxAgeCacheControlHandler) // Cache-Control header is set by the handler
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/", nil))
+	utils.AssertEqual(t, nil, err)
+	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
+
+	fmt.Printf("%v\n", resp.Header)
+
+	// Second request is expected to be served from the cache
+	resp, err = app.Test(httptest.NewRequest("GET", "/", nil))
+	utils.AssertEqual(t, nil, err)
+	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
+
+	fmt.Printf("%v\n", resp.Header)
+	utils.AssertEqual(t, "public, max-age=1337", resp.Header.Get("Cache-Control"))
 }
 
 // go test -v -run=^$ -bench=Benchmark_Cache_CacheSkippable_500 -benchmem -count=4.

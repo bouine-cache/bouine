@@ -4,3 +4,5 @@
 tailscale.service
 
 *_test.go
+
+.vscode

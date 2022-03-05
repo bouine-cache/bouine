@@ -74,4 +74,6 @@ export function rfc7234Extended() {
     // Ensure auth request with "must-revalidate, s-maxage=0, max-age=0" can be served as staled (section 3.2)
 
     // Serve stale content if option turned on
+
+    // Cache-Control extensions Not supported yet, will require modifyResponse hook on proxy
 }

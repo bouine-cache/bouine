@@ -163,6 +163,49 @@ func Test_Cache_CustomExpirationGenerator_SMaxAgeCacheControlHeader(t *testing.T
 	utils.AssertEqual(t, "public, max-age=666", resp.Header.Get("Cache-Control"))
 }
 
+// FIXME: waiting for this PR to be merged : https://github.com/gofiber/fiber/pull/1807
+func Test_Cache_CustomExpirationGenerator_E2EHeaders(t *testing.T) {
+	t.Parallel()
+
+	// Override until wrapper to return predictable duration
+	until = func(deadline time.Time) time.Duration {
+		minute, _ := time.ParseDuration("2m")
+		return minute
+	}
+
+	app := fiber.New()
+
+	cacheCfg := cache.Config{
+		Next:         CacheSkippable,
+		Expiration:   1 * time.Minute,
+		CacheControl: true,
+		// E2EHeaders:          true,
+		ExpirationGenerator: CustomExpirationGenerator,
+	}
+	app.Use(cache.New(cacheCfg))
+	app.Get("/", func(c *fiber.Ctx) error {
+		c.Response().Header.Add("X-Foobar", "foobar")
+		return c.SendString("hi")
+	})
+
+	// first request should go through but doesn't hit the cache
+	resp, err := app.Test(httptest.NewRequest("GET", "/", nil))
+	utils.AssertEqual(t, nil, err)
+	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
+	utils.AssertEqual(t, "miss", resp.Header.Get("X-Cache"))
+	// utils.AssertEqual(t, "foobar", resp.Header.Get("X-Foobar"))
+
+	fmt.Printf("%v\n", resp.Header)
+
+	// Second request is expected to be served from the cache
+	resp, err = app.Test(httptest.NewRequest("GET", "/", nil))
+	utils.AssertEqual(t, nil, err)
+	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
+
+	utils.AssertEqual(t, "hit", resp.Header.Get("X-Cache"))
+	// utils.AssertEqual(t, "foobar", resp.Header.Get("X-Foobar"))
+}
+
 // go test -v -run=^$ -bench=Benchmark_Cache_CacheSkippable_500 -benchmem -count=4.
 func Benchmark_Cache_CacheSkippable_500(b *testing.B) {
 	app := fiber.New()

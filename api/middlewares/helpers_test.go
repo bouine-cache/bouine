@@ -26,6 +26,12 @@ func publicMaxAgeCacheControlHandler(c *fiber.Ctx) error {
 	return c.SendStatus(200)
 }
 
+// publicSMaxAgeCacheControlHandler returns a 200 with 'Cache-Control: public, s-maxage=666'.
+func publicSMaxAgeCacheControlHandler(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "public, s-maxage=666")
+	return c.SendStatus(200)
+}
+
 // okHandler returns a 200.
 func okHandler(c *fiber.Ctx) error {
 	c.Set("Authorization", "Basic YWxhZGRpbjpvcGVuc2VzYW1l")

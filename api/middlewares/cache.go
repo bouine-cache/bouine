@@ -16,6 +16,7 @@ package middlewares
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"time"
 
@@ -79,20 +80,20 @@ func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
 	// max-age
 	re := regexp.MustCompile(`max-age=([0-9]*)`)
 	if maxAge := re.FindSubmatch(c.Context().Response.Header.Peek("Cache-Control")); maxAge != nil {
-		maxAgeDuration, _ := time.ParseDuration(string(maxAge[1]))
+		maxAgeDuration, _ := time.ParseDuration(fmt.Sprintf("%ss", maxAge[1]))
 		return maxAgeDuration
 	}
 
 	// s-maxage
 	re = regexp.MustCompile(`s-maxage=([0-9]*)`)
 	if sMaxAge := re.FindSubmatch(c.Context().Response.Header.Peek("Cache-Control")); sMaxAge != nil {
-		sMaxAgeDuration, _ := time.ParseDuration(string(sMaxAge[1]))
+		sMaxAgeDuration, _ := time.ParseDuration(fmt.Sprintf("%ss", sMaxAge[1]))
 		return sMaxAgeDuration
 	}
 
 	// Expires (in case max-age & s-maxage are missing)
 	expiresTime, err := time.Parse(time.RFC1123, string(c.Context().Response.Header.Peek("Expires")))
-	if err != nil || expiresTime.IsZero() {
+	if err != nil {
 		return cfg.Expiration
 	}
 	if expiresDuration := until(expiresTime); expiresDuration > 0 {

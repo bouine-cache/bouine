@@ -89,7 +89,7 @@ func Test_Cache_CustomExpirationGenerator_ExpiresHeader(t *testing.T) {
 }
 
 func Test_Cache_CustomExpirationGenerator_MaxAgeCacheControlHeader(t *testing.T) {
-	// t.Parallel()
+	t.Parallel()
 
 	// Override until wrapper to return predictable duration
 	until = func(deadline time.Time) time.Duration {

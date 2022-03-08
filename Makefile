@@ -36,7 +36,7 @@ push-docker-image: ## Push Docker image
 
 .PHONY: scan-docker-image
 scan-docker-image: ## Scan latest local bouine image (using docker scan from Snyk)
-	docker scan --dependency-tree --severity=low bouine
+	docker scan --dependency-tree --severity=low thylong/bouine
 
 .PHONY: docker-cleanup
 docker-cleanup: ## Delete all the docker-compose containers

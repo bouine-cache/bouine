@@ -17,6 +17,10 @@ repos:
   rev: v1.44.0
   hooks:
   -   id: golangci-lint
+- repo: https://github.com/yoheimuta/protolint
+  rev: v0.37.1
+  hooks:
+  -   id: protolint-docker
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: v4.1.0
   hooks:

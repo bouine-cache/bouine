@@ -28,21 +28,51 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
+	"github.com/gofiber/storage/ristretto"
 	"github.com/thylong/bouine/api/handlers"
 	"github.com/thylong/bouine/api/middlewares"
-	"github.com/thylong/bouine/internal/consensus"
+	// "github.com/thylong/bouine/internal/backend"
+	// "google.golang.org/grpc"
+	// "google.golang.org/grpc/reflection".
 )
 
 var (
 	httpTimeout = flag.Int64("timeout", 3000, "HTTP request timeout in milliseconds")
-	port        = flag.String("port", ":8080", "Port to listen on")
-	prod        = flag.Bool("prod", false, "Enable prefork in Production")
-	upstream    = flag.String("upstream", "http://mockingjay:8084", "Proxied upstream host")
+	// myAddr        = flag.String("address", "0.0.0.0:50051", "TCP host+port for this node").
+	port     = flag.String("port", ":8080", "Port to listen on")
+	prod     = flag.Bool("prod", false, "Enable prefork in Production")
+	upstream = flag.String("upstream", "http://mockingjay:8084", "Proxied upstream host")
+	// raftId   = flag.String("raft_id", "", "Node id used by Raft")
+	// raftDir       = flag.String("raft_data_dir", "data/", "Raft data dir")
+	// raftBootstrap = flag.Bool("raft_bootstrap", false, "Whether to bootstrap the Raft cluster").
 )
 
 func main() {
 	// Parse command-line flags
 	flag.Parse()
+
+	// if *raftId == "" {
+	// 	log.Fatalf("flag --raft_id is required")
+	// }
+
+	// Start raft
+	// ctx := context.Background()
+	// r, tm, err := backend.NewRaft(ctx, *raftDir, *raftId, *myAddr, *raftBootstrap)
+	// if err != nil {
+	// 	log.Fatalf("failed to start raft: %v", err)
+	// }
+	// s := grpc.NewServer()
+	// pb.RegisterExampleServer(s, &rpcInterface{
+	// 	wordTracker: wt,
+	// 	raft:        r,
+	// })
+	// tm.Register(s)
+	// leaderhealth.Setup(r, s, []string{"Example"})
+	// raftadmin.Register(s, r)
+	// reflection.Register(s)
+	// if err := s.Serve(sock); err != nil {
+	// 	log.Fatalf("failed to serve: %v", err)
+	// }
 
 	// Create fiber app
 	app := fiber.New(fiber.Config{
@@ -55,9 +85,11 @@ func main() {
 	app.Use(cache.New(cache.Config{
 		Next:                middlewares.CacheSkippable,
 		ExpirationGenerator: middlewares.CustomExpirationGenerator,
-	}))
-	app.Use(middlewares.ConsensusMiddleware(consensus.Config{
-		Leader: "leader",
+		Storage: ristretto.New(ristretto.Config{
+			NumCounters: 1e7,     // number of keys to track frequency of (10M).
+			MaxCost:     1 << 30, // maximum cost of cache (1GB).
+			BufferItems: 64,      // number of keys per Get buffer.
+		}),
 	}))
 	app.Use(middlewares.ProxyMiddleware(proxy.Config{
 		Servers: []string{

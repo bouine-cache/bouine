@@ -12,25 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-package consensus
+package raft
 
-import "errors"
+// type raftedRistretto struct{}
 
-type Config struct {
-	Leader string
-}
+// func (rr *raftedRistretto) Get(key string) ([]byte, error) {
+// 	return []byte{}, nil
+// }
 
-var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
+// func (rr *raftedRistretto) Set(key string, val []byte, exp time.Duration) error {
+// 	return nil
+// }
 
-// ForwardToLeader forwards request to leader and return leader response.
-func ForwardToLeader(config Config) error {
-	if IsLeader(config) {
-		return ErrForwardToLeaderAsLeader
-	}
-	return nil
-}
+// func (rr *raftedRistretto) Delete(key string) error {
+// 	return nil
+// }
 
-// IsLeader returns true if the current node is cluster leader.
-func IsLeader(config Config) bool {
-	return config.Leader == "leader" // Not implemented yet
-}
+// func (rr *raftedRistretto) Reset() error {
+// 	return nil
+// }
+
+// func (rr *raftedRistretto) Close() error {
+// 	return nil
+// }

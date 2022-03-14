@@ -1,4 +1,4 @@
-FROM golang:1.17 as builder
+ FROM golang:1.17 as builder
 
 WORKDIR /usr/src/app
 
@@ -7,10 +7,16 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 
 COPY . .
+
 RUN CGO_ENABLED=0 go build -o /go/bin/app ./api
+RUN mkdir /data
+RUN touch /data/logs.dat
 
 FROM gcr.io/distroless/static-debian11:nonroot
 
-COPY --from=builder /go/bin/app /
+COPY --from=builder --chown=nonroot:nonroot /go/bin/app /
+COPY --from=builder --chown=nonroot:nonroot /data /data
+
 EXPOSE 8080/tcp
+
 CMD ["/app"]

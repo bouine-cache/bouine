@@ -6,3 +6,6 @@ tailscale.service
 *_test.go
 
 .vscode
+
+# Boltdb
+*.dat

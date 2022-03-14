@@ -16,7 +16,6 @@ package backend
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,22 +32,6 @@ type Config struct {
 	Address string
 }
 
-// type raftedRistretto struct{}
-
-var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
-
-// func (rr *raftedRistretto) Apply(*raft.Log) interface{} {
-// 	return nil
-// }
-
-// func (rr *raftedRistretto) Snapshot() (raft.FSMSnapshot, error) {
-// 	return nil, nil
-// }
-
-// func (rr *raftedRistretto) Restore(snapshot io.ReadCloser) error {
-// 	return nil
-// }
-
 // ForwardToLeader forwards request to leader and return leader response.
 func ForwardToLeader(config Config) error {
 	if IsLeader(config) {
@@ -62,28 +45,26 @@ func IsLeader(config Config) bool {
 	return config.Leader == "leader" // Not implemented yet
 }
 
-func NewRaft(ctx context.Context, raftDir, myID, myAddress string, raftBootstrap bool, fsm raft.FSM) (*raft.Raft, *transport.Manager, error) {
+func NewRaft(ctx context.Context, raftDir, raftNodeID, hostAddress string, raftBootstrap bool, fsm raft.FSM) (*raft.Raft, *transport.Manager, error) {
 	c := raft.DefaultConfig()
-	c.LocalID = raft.ServerID(myID)
+	c.LocalID = raft.ServerID(raftNodeID)
 
-	baseDir := filepath.Join(raftDir, myID)
-
-	ldb, err := boltdb.NewBoltStore(filepath.Join(baseDir, "logs.dat"))
+	ldb, err := boltdb.NewBoltStore(filepath.Join(raftDir, "logs.dat"))
 	if err != nil {
-		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(baseDir, "logs.dat"), err)
+		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(raftDir, "logs.dat"), err)
 	}
 
-	sdb, err := boltdb.NewBoltStore(filepath.Join(baseDir, "stable.dat"))
+	sdb, err := boltdb.NewBoltStore(filepath.Join(raftDir, "stable.dat"))
 	if err != nil {
-		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(baseDir, "stable.dat"), err)
+		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(raftDir, "stable.dat"), err)
 	}
 
-	fss, err := raft.NewFileSnapshotStore(baseDir, 3, os.Stderr)
+	fss, err := raft.NewFileSnapshotStore(raftDir, 3, os.Stderr)
 	if err != nil {
-		return nil, nil, fmt.Errorf(`cannot create snapshot store (%q, ...): %v`, baseDir, err)
+		return nil, nil, fmt.Errorf(`cannot create snapshot store (%q, ...): %v`, raftDir, err)
 	}
 
-	tm := transport.New(raft.ServerAddress(myAddress), []grpc.DialOption{grpc.WithInsecure()})
+	tm := transport.New(raft.ServerAddress(hostAddress), []grpc.DialOption{grpc.WithInsecure()})
 
 	r, err := raft.NewRaft(c, fsm, ldb, sdb, fss, tm.Transport())
 	if err != nil {
@@ -95,8 +76,8 @@ func NewRaft(ctx context.Context, raftDir, myID, myAddress string, raftBootstrap
 			Servers: []raft.Server{
 				{
 					Suffrage: raft.Voter,
-					ID:       raft.ServerID(myID),
-					Address:  raft.ServerAddress(myAddress),
+					ID:       raft.ServerID(raftNodeID),
+					Address:  raft.ServerAddress(hostAddress),
 				},
 			},
 		}
@@ -107,4 +88,23 @@ func NewRaft(ctx context.Context, raftDir, myID, myAddress string, raftBootstrap
 	}
 
 	return r, tm, nil
+}
+
+// BoltdbFilesCleanup deletes logs/stable/snapshots relicates.
+// Not a stable API, used only for testing purposes.
+func BoltdbFilesCleanup(raftDir string) {
+	// TODO: as writing on the filesystem for testing is very intruisive,
+	// this should replaced with a safer solution
+	for _, path := range []string{
+		filepath.Join(raftDir, "logs.dat"),
+		filepath.Join(raftDir, "stable.dat"),
+		filepath.Join(raftDir, "snapshots"),
+	} {
+		logFile, err := filepath.Abs(path)
+		if err != nil {
+			// return errors.New("cannot cleanup /tmp directory from test files")
+			return
+		}
+		os.Remove(logFile)
+	}
 }

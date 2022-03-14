@@ -16,10 +16,9 @@ package backend
 
 import (
 	"context"
-	"reflect"
 	"testing"
+	"time"
 
-	transport "github.com/Jille/raft-grpc-transport"
 	"github.com/gofiber/fiber/v2/utils"
 	"github.com/hashicorp/raft"
 )
@@ -87,32 +86,47 @@ func TestNewRaft(t *testing.T) {
 	type args struct {
 		ctx           context.Context
 		raftDir       string
-		myID          string
-		myAddress     string
+		raftNodeID    string
+		hostAddress   string
 		raftBootstrap bool
 		fsm           raft.FSM
 	}
 	tests := []struct {
-		name    string
-		args    args
-		want    *raft.Raft
-		want1   *transport.Manager
-		wantErr bool
+		name          string
+		args          args
+		wantRaftStats map[string]string
+		wantErr       bool
 	}{
-		// TODO: Add test cases.
+		{name: "missing-config", args: args{ctx: context.Background()}, wantRaftStats: map[string]string{}, wantErr: true},
+		{name: "missing-valid-raftDir", args: args{ctx: context.Background(), raftDir: "/foobar12345678910/", raftNodeID: "1", raftBootstrap: false, hostAddress: "localhost:4566", fsm: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: true},
+		{name: "successful-leader-start", args: args{ctx: context.Background(), raftDir: "/tmp/", raftNodeID: "1", raftBootstrap: true, hostAddress: "localhost:4596", fsm: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, got1, err := NewRaft(tt.args.ctx, tt.args.raftDir, tt.args.myID, tt.args.myAddress, tt.args.raftBootstrap, tt.args.fsm)
+			BoltdbFilesCleanup(tt.args.raftDir)
+			got, _, err := NewRaft(tt.args.ctx, tt.args.raftDir, tt.args.raftNodeID, tt.args.hostAddress, tt.args.raftBootstrap, tt.args.fsm)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewRaft() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("NewRaft() got = %v, want %v", got, tt.want)
+
+			// at this point, boltdb files have been created
+			defer BoltdbFilesCleanup(tt.args.raftDir)
+
+			// prevent further execution of "wantErr: true" cases
+			if err != nil {
+				return
 			}
-			if !reflect.DeepEqual(got1, tt.want1) {
-				t.Errorf("NewRaft() got1 = %v, want %v", got1, tt.want1)
+
+			time.Sleep(2 * time.Second)
+
+			// Apply should not fail on single node leader
+			// note: we don't test the response as a mocked FSM is used.
+			var timeout time.Duration = 1
+			future := got.Apply([]byte("foobar"), timeout)
+			if err = future.Error(); err != nil {
+				t.Errorf("NewRaft() unexpected error = %v", err)
+				return
 			}
 		})
 	}

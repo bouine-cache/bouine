@@ -23,3 +23,6 @@ build/server/files/bouine
 
 # IDEs
 .vscode
+
+# Boltdb
+*.dat

@@ -9,7 +9,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cache"
 	"github.com/gofiber/fiber/v2/utils"
-	"github.com/thylong/bouine/api/handlers"
 	"github.com/valyala/fasthttp"
 )
 
@@ -207,13 +206,13 @@ func Test_Cache_CustomExpirationGenerator_E2EHeaders(t *testing.T) {
 }
 
 // go test -v -run=^$ -bench=Benchmark_Cache_CacheSkippable_500 -benchmem -count=4.
-func Benchmark_Cache_CacheSkippable_500(b *testing.B) {
+func Benchmark_Cache_CacheSkippable_404(b *testing.B) {
 	app := fiber.New()
 
 	app.Use(cache.New(cache.Config{
 		Next: CacheSkippable,
 	}))
-	app.Use(handlers.DefaultHandler)
+
 	h := app.Handler()
 
 	fctx := &fasthttp.RequestCtx{}
@@ -227,7 +226,7 @@ func Benchmark_Cache_CacheSkippable_500(b *testing.B) {
 		h(fctx)
 	}
 
-	utils.AssertEqual(b, fiber.StatusInternalServerError, fctx.Response.Header.StatusCode())
+	utils.AssertEqual(b, fiber.StatusNotFound, fctx.Response.Header.StatusCode())
 	utils.AssertEqual(b, "unreachable", string(fctx.Response.Header.Peek("X-Cache")))
 }
 

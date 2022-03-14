@@ -9,6 +9,7 @@ services:
       - mockingjay
     ports:
       - 8080:8080
+    entrypoint: ["/app", "-raft_bootstrap"]
   test-client:
     image: loadimpact/k6
     depends_on:

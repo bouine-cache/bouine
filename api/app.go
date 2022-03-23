@@ -31,6 +31,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/timeout"
 	"github.com/thylong/bouine/api/middlewares"
 	"github.com/thylong/bouine/pkg/storage"
+	"go.uber.org/zap"
 )
 
 var (
@@ -42,6 +43,7 @@ var (
 	raftID        = flag.String("raft_id", "1", "Node id used by Raft")
 	raftDir       = flag.String("raft_data_dir", "/tmp/", "Raft data dir")
 	raftBootstrap = flag.Bool("raft_bootstrap", false, "Whether to bootstrap the Raft cluster")
+	loggingLevel  = flag.String("logging_level", "info", "The minimum enabled logging level")
 )
 
 func main() {
@@ -53,7 +55,7 @@ func main() {
 	// }
 
 	// Create fiber app
-	app, store := createFiberApp(*httpTimeout, *raftAddress, *prod, *upstream, *raftID, *raftDir, *raftBootstrap)
+	app, store := createFiberApp(*httpTimeout, *raftAddress, *prod, *upstream, *raftID, *raftDir, *raftBootstrap, *loggingLevel)
 
 	go func() {
 		if err := app.Listen(*port); err != nil { // go run app.go -port=:8080
@@ -90,16 +92,32 @@ func main() {
 	// fmt.Println("Closing connections...")
 }
 
-func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream string, raftID string, raftDir string, raftBootstrap bool) (*fiber.App, *storage.Storage) {
+func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream string, raftID string, raftDir string, raftBootstrap bool, loggingLevel string) (*fiber.App, *storage.Storage) {
 	app := fiber.New(fiber.Config{
 		Prefork:               prod, // go run app.go -prod
 		DisableStartupMessage: prod,
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
+		},
 	})
 
 	// Middlewares
 	app.Use(recover.New())
 	app.Use(logger.New())
+
 	// init cache middleware and use raft+ristretto as storage
+	logCfg := zap.NewProductionConfig()
+	if loggingLevel == "debug" {
+		logCfg.Development = true
+		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	}
+
+	storeLogger, err := logCfg.Build()
+	if err != nil {
+		panic(err)
+	}
+	storeLogger.Debug("logger construction succeeded")
+
 	store := storage.New(storage.Config{
 		NumCounters:   1e7,     // number of keys to track frequency of (10M).
 		MaxCost:       1 << 30, // maximum cost of cache (1GB).
@@ -108,6 +126,7 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		RaftDir:       raftDir,
 		RaftBootstrap: raftBootstrap,
 		RaftAddress:   raftAddress,
+		Logger:        *storeLogger,
 	})
 	app.Use(cache.New(cache.Config{
 		Next:                middlewares.CacheSkippable,

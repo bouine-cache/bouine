@@ -24,6 +24,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -48,7 +49,7 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 	BoltdbFilesCleanup(raftDir)
 
 	// NewRaft() with bootstrap
-	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedRistretto{})
+	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedRistretto{Logger: *zap.NewExample()})
 	if err != nil {
 		t.Errorf("NewRaft() unexpected error = %v", err)
 		return

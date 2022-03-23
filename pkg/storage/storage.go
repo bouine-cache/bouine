@@ -19,15 +19,22 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
+	"github.com/Jille/raftadmin"
 	"github.com/dgraph-io/ristretto"
 	"github.com/hashicorp/raft"
 	"github.com/thylong/bouine/pkg/backend"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 // Config defines the config for storage.
@@ -45,6 +52,7 @@ type Config struct {
 	RaftDir       string
 	RaftBootstrap bool
 	RaftAddress   string
+	Logger        zap.Logger
 }
 
 var ConfigDefault = Config{
@@ -53,6 +61,12 @@ var ConfigDefault = Config{
 	BufferItems: 64,
 	DefaultCost: 1,
 }
+
+// ErrForwardToLeaderAsLeader is returned when trying to send a write call to the leader of the quorum as the leader.
+var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
+
+// ErrEstablishingConnToLeader is returned when a gRPC connection to the leader cannot be established.
+var ErrEstablishingConnToLeader = errors.New("cannot forward to leader as leader")
 
 func configDefault(config ...Config) Config {
 	if len(config) < 1 {
@@ -83,6 +97,7 @@ func configDefault(config ...Config) Config {
 type Storage struct {
 	cache       *ristretto.Cache
 	defaultCost int64
+	logger      zap.Logger
 	r           *raft.Raft
 	s           *grpc.Server
 }
@@ -104,7 +119,7 @@ func New(config ...Config) *Storage {
 	ctx := context.Background()
 
 	// start raft
-	fsm := &backend.RaftedRistretto{RistrettoCache: cache}
+	fsm := &backend.RaftedRistretto{RistrettoCache: cache, Logger: cfg.Logger}
 	r, tm, err := backend.NewRaft(
 		ctx, cfg.RaftDir, cfg.RaftID, cfg.RaftAddress, cfg.RaftBootstrap, fsm,
 	)
@@ -116,10 +131,14 @@ func New(config ...Config) *Storage {
 	s := grpc.NewServer()
 	pb.RegisterCacheServer(s, &backend.RPCInterface{Raft: r})
 	tm.Register(s)
+	leaderhealth.Setup(r, s, []string{"bouine"})
+	raftadmin.Register(s, r)
+	reflection.Register(s)
 
 	return &Storage{
 		cache:       cache,
 		defaultCost: cfg.DefaultCost,
+		logger:      cfg.Logger,
 		r:           r,
 		s:           s,
 	}
@@ -159,22 +178,57 @@ func (s *Storage) Get(key string) ([]byte, error) {
 }
 
 func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
-	err := backend.ForwardToLeader(backend.Config{
-		Leader:  "",
-		ID:      "",
-		Address: "",
-	})
-	if (err != nil) && err != backend.ErrForwardToLeaderAsLeader {
+	err := s.forwardToLeader(key, val, exp)
+	if (err != nil) && err != ErrForwardToLeaderAsLeader {
+		s.logger.Info("Set err",
+			zap.String("component", "storage"), zap.String("key", key), zap.String("error_msg", err.Error()),
+		)
+		// Opportunistic local cache copy
+		if len(key) <= 0 || len(val) <= 0 {
+			return nil
+		}
+		saved := s.cache.SetWithTTL(key, val, s.defaultCost, exp)
+		if !saved {
+			return nil
+		}
 		return fmt.Errorf("cannot forward to leader: %s", err)
 	}
 
-	if len(key) <= 0 || len(val) <= 0 {
-		return nil
+	s.cache.SetWithTTL(key, val, s.defaultCost, exp)
+
+	s.logger.Debug("new storage.Set",
+		zap.String("component", "storage"),
+		zap.String("key", key),
+		zap.Duration("exp", exp),
+	)
+
+	// TODO: extract into separated method
+	// (duplicated code with func (r RPCInterface) AddCacheEntry)
+	req := &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: "bar", CacheExpiration: uint64(exp.Seconds())}
+	if len(req.GetCacheKey()) < 1 {
+		s.logger.Debug("storage.Set err: invalid cache key",
+			zap.String("component", "storage"), zap.String("key", key),
+		)
+		return fmt.Errorf("invalid cache key %v", req.GetCacheKey())
 	}
-	saved := s.cache.SetWithTTL(key, val, s.defaultCost, exp)
-	if !saved {
-		return nil
+	if len(req.GetCacheEntry()) < 1 {
+		s.logger.Debug("storage.Set err: invalid cache entry",
+			zap.String("component", "storage"), zap.String("key", key),
+		)
+		return fmt.Errorf("invalid cache entry %v", req.GetCacheEntry())
 	}
+	if _, err := time.ParseDuration(fmt.Sprintf("%ds", req.GetCacheExpiration())); err != nil {
+		s.logger.Debug("storage.Set err",
+			zap.String("component", "storage"), zap.NamedError("invalid cache expiration", err), zap.String("key", key), zap.Uint64("exp", req.GetCacheExpiration()),
+		)
+		return fmt.Errorf("invalid cache expiration %v", req.GetCacheExpiration())
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("cannot Marshal cache entry: %s", err)
+	}
+	s.r.Apply(b, time.Second)
+
 	return nil
 }
 
@@ -198,4 +252,48 @@ func (s *Storage) Reset() error {
 func (s *Storage) Close() error {
 	s.cache.Close()
 	return nil
+}
+
+// forwardToLeader forwards request to leader and return leader response.
+// TODO: migrate to persistent connection.
+func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) error {
+	if s.IsLeader() {
+		return ErrForwardToLeaderAsLeader
+	}
+
+	s.logger.Debug("new forwardToLeader",
+		zap.String("component", "raft"), zap.Any("current leader", s.r.Leader()), zap.String("raft_key", key),
+	)
+
+	// FIXME: nil pointer dereference (when never joined a quorum)
+	conn, err := grpc.Dial(string(s.r.Leader()), grpc.WithInsecure())
+	if err != nil {
+		s.logger.Debug("forwardToLeader err",
+			zap.String("component", "raft"), zap.String("raft_key", key), zap.String("error_msg", err.Error()),
+		)
+		return ErrEstablishingConnToLeader
+	}
+	defer conn.Close()
+
+	client := pb.NewCacheClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())}, nil)
+	if err != nil {
+		s.logger.Debug("forwardToLeader err",
+			zap.String("component", "raft"), zap.String("raft_key", key), zap.String("error_msg", err.Error()),
+		)
+		return fmt.Errorf("failed to forward to the leader: %s", err)
+	}
+
+	return nil
+}
+
+// IsLeader returns true if the current node is the cluster leader.
+func (s *Storage) IsLeader() bool {
+	s.logger.Debug("new IsLeader",
+		zap.String("component", "raft"), zap.String("raft-role", s.r.State().String()),
+	)
+	return strings.Compare(s.r.State().String(), "Leader") == 0
 }

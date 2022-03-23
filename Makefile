@@ -28,7 +28,7 @@ build-binary: ## Build Go binary for present architecture
 .PHONY: build-docker-image
 build-docker-image: ## Build Docker image
 	docker build -t thylong/$(NAME):latest .
-	docker-compose build bouine
+	docker-compose build bouine1 bouine2 bouine3
 
 .PHONY: push-docker-image
 push-docker-image: ## Push Docker image
@@ -60,6 +60,14 @@ test-unit: ## Launch Go unit tests
 .PHONY: test-smoke
 test-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans; \
+	docker-compose run --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
+
+.PHONY: test-distributed-smoke
+test-distributed-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
+	docker-compose down --remove-orphans && \
+	docker-compose up --wait && \
+	raftadmin localhost:50051 add_voter nodeB bouine2:50052 0 && \
+	raftadmin --leader multi:///localhost:50051,localhost:50052 add_voter nodeC bouine3:50053 0; \
 	docker-compose run --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
 
 .PHONY: test-perf

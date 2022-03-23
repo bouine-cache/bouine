@@ -17,7 +17,6 @@ package backend
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -25,37 +24,41 @@ import (
 	"github.com/dgraph-io/ristretto"
 	"github.com/hashicorp/raft"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
+	"go.uber.org/zap"
 )
 
 // RaftedRistretto is the FSM implemented in Bouine to make use of the replicated logs.
 type RaftedRistretto struct {
 	RistrettoCache *ristretto.Cache
+	Logger         zap.Logger
 }
 
 // This variable declaration verifies interface compliance at build time.
 var _ raft.FSM = &RaftedRistretto{}
 
-// ErrForwardToLeaderAsLeader is returned when trying to send a write call to the leader of the quorum as the leader.
-var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
-
 // Apply is called once a log entry is committed by a majority of the cluster.
 // The returned value is returned to the client as the ApplyFuture.Response.
 func (rr *RaftedRistretto) Apply(l *raft.Log) interface{} {
+	rr.Logger.Debug("new Apply", zap.String("component", "raft"))
 	var cacheEntry pb.AddCacheEntryRequest
 	err := json.Unmarshal(l.Data, &cacheEntry)
 	if err != nil {
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(err))
 		return nil
 	}
 	if len(cacheEntry.CacheKey) <= 0 || len(cacheEntry.CacheEntry) <= 0 {
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.NamedError("empty cache key/entry", err))
 		return nil
 	}
 
 	exp, err := time.ParseDuration(fmt.Sprintf("%ds", cacheEntry.CacheExpiration))
 	if err != nil {
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.NamedError("empty cache key/entry", err))
 		return nil
 	}
-	saved := rr.RistrettoCache.SetWithTTL(cacheEntry.CacheKey, cacheEntry.CacheEntry, 1, exp)
+	saved := rr.RistrettoCache.SetWithTTL(cacheEntry.CacheKey, cacheEntry.CacheEntry, 0, exp)
 	if !saved {
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Ristretto not saved !"))
 		return nil
 	}
 	return nil
@@ -63,10 +66,12 @@ func (rr *RaftedRistretto) Apply(l *raft.Log) interface{} {
 
 // Snapshot is not implemented, as Ristretto is an in-memory cache.
 func (rr *RaftedRistretto) Snapshot() (raft.FSMSnapshot, error) {
+	rr.Logger.Debug("new Snapshot", zap.String("component", "raft"))
 	return nil, nil
 }
 
 // Restore is not implemented, as Ristretto is an in-memory cache.
 func (rr *RaftedRistretto) Restore(snapshot io.ReadCloser) error {
+	rr.Logger.Debug("new Restore", zap.String("component", "raft"))
 	return nil
 }

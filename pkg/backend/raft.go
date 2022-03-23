@@ -27,25 +27,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-type Config struct {
-	Leader  string
-	ID      string
-	Address string
-}
-
-// ForwardToLeader forwards request to leader and return leader response.
-func ForwardToLeader(config Config) error {
-	if IsLeader(config) {
-		return ErrForwardToLeaderAsLeader
-	}
-	return nil
-}
-
-// IsLeader returns true if the current node is cluster leader.
-func IsLeader(config Config) bool {
-	return config.Leader == "leader" // Not implemented yet
-}
-
 // NewRaft instantiate a new Raft node based on provided parameters.
 // This will create local boltdb log files, create a gRPC service & a Raft transport.
 func NewRaft(ctx context.Context, raftDir, raftNodeID, hostAddress string, raftBootstrap bool, fsm raft.FSM) (*raft.Raft, *transport.Manager, error) {

@@ -1,23 +1,69 @@
 version: '3.8'
 services:
-  bouine:
+  nginx:
+    image: nginxinc/nginx-unprivileged:latest
+    volumes:
+      - ./third_party/nginx-load-balancer/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - bouine1
+      - bouine2
+      - bouine3
+    links:
+      - bouine1
+      - bouine2
+      - bouine3
+    ports:
+      - "4000:4000"
+  bouine1:
     build:
       context: .
     depends_on:
       - mockingjay
     links:
       - mockingjay
+    expose:
+      - "8080"
+      - "50051"
     ports:
-      - 8080:8080
-    entrypoint: ["/app", "-raft_bootstrap"]
+      - "8081:8080"
+      - "50051:50051"
+    entrypoint: ["/app", "--raft_bootstrap", "--raft_id=nodeA", "--address=0.0.0.0:50051", "--logging_level=debug"]
+  bouine2:
+    build:
+      context: .
+    depends_on:
+      - mockingjay
+    links:
+      - mockingjay
+    expose:
+      - "8080"
+      - "50052"
+    ports:
+      - "8082:8080"
+      - "50052:50052"
+    entrypoint: ["/app", "--raft_id=nodeB", "--address=0.0.0.0:50052", "--logging_level=debug"]
+  bouine3:
+    build:
+      context: .
+    depends_on:
+      - mockingjay
+    links:
+      - mockingjay
+    expose:
+      - "8080"
+      - "50053"
+    ports:
+      - "8083:8080"
+      - "50053:50053"
+    entrypoint: ["/app", "--raft_id=nodeC", "--address=0.0.0.0:50053", "--logging_level=debug"]
   test-client:
     image: loadimpact/k6
     depends_on:
-      - bouine
+      - nginx
       - influxdb
       - grafana
     links:
-      - bouine
+      - nginx
       - influxdb
     volumes:
       - ./third_party/k6/scenarios:/scenarios
@@ -26,7 +72,7 @@ services:
   influxdb:
     image: influxdb:1.7.11
     depends_on:
-      - bouine
+      - bouine1
     ports:
       - 8086:8086
   grafana:

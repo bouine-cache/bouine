@@ -92,7 +92,7 @@ func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
 		return sMaxAgeDuration
 	}
 
-	// Expires (in case max-age & s-maxage are missing)
+	// Expires (in case both max-age & s-maxage are missing)
 	expiresTime, err := time.Parse(time.RFC1123, string(c.Context().Response.Header.Peek("Expires")))
 	if err != nil {
 		return cfg.Expiration

@@ -30,6 +30,7 @@ func Test_createFiberApp(t *testing.T) {
 		raftID        string
 		raftDir       string
 		raftBootstrap bool
+		loggingLevel  string
 	}
 	tests := []struct {
 		name string
@@ -44,13 +45,14 @@ func Test_createFiberApp(t *testing.T) {
 			raftID:        "1",
 			raftDir:       "/tmp/",
 			raftBootstrap: true,
+			loggingLevel:  "debug",
 		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend.BoltdbFilesCleanup(tt.args.raftDir)
 
-			_, _ = createFiberApp(tt.args.httpTimeout, tt.args.raftAddress, tt.args.prod, tt.args.upstream, tt.args.raftID, tt.args.raftDir, tt.args.raftBootstrap)
+			_, _ = createFiberApp(tt.args.httpTimeout, tt.args.raftAddress, tt.args.prod, tt.args.upstream, tt.args.raftID, tt.args.raftDir, tt.args.raftBootstrap, tt.args.loggingLevel)
 			// if !reflect.DeepEqual(app, tt.want) {
 			// 	t.Errorf("createFiberApp() = %v, want %v", app, tt.want)
 			// }

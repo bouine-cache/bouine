@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
 package middlewares
 
 import (
@@ -19,7 +20,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 )
 
-// ProxyMiddleware fetchs and returns a new response from upstream.
+// ProxyMiddleware returns a Fiber proxy middleware.
 func ProxyMiddleware(config proxy.Config) fiber.Handler {
 	// Forwards to upstream
 	return proxy.Balancer(config)

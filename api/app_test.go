@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/thylong/bouine/internal/backend"
+	"github.com/thylong/bouine/pkg/backend"
 )
 
 func Test_createFiberApp(t *testing.T) {

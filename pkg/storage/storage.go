@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
+// Package storage provides a custom storage driver that implements the Storage interface.
+// It combines the Ristretto premade driver with the Hashicorp Raft library to offer a distributed Ristretto K/V storage for cache entries.
 package storage
 
 import (
@@ -22,8 +25,8 @@ import (
 
 	"github.com/dgraph-io/ristretto"
 	"github.com/hashicorp/raft"
-	"github.com/thylong/bouine/internal/backend"
-	pb "github.com/thylong/bouine/internal/backend/proto"
+	"github.com/thylong/bouine/pkg/backend"
+	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"google.golang.org/grpc"
 )
 

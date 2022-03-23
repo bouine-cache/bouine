@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = "github.com/thylong/internal/backend/proto";
+option go_package = "github.com/thylong/pkg/backend/proto";
 
 service Cache {
   rpc AddCacheEntry(AddCacheEntryRequest) returns (AddCacheEntryResponse);

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
 package backend
 
 import (
@@ -45,6 +46,8 @@ func IsLeader(config Config) bool {
 	return config.Leader == "leader" // Not implemented yet
 }
 
+// NewRaft instantiate a new Raft node based on provided parameters.
+// This will create local boltdb log files, create a gRPC service & a Raft transport.
 func NewRaft(ctx context.Context, raftDir, raftNodeID, hostAddress string, raftBootstrap bool, fsm raft.FSM) (*raft.Raft, *transport.Manager, error) {
 	c := raft.DefaultConfig()
 	c.LocalID = raft.ServerID(raftNodeID)
@@ -91,7 +94,8 @@ func NewRaft(ctx context.Context, raftDir, raftNodeID, hostAddress string, raftB
 }
 
 // BoltdbFilesCleanup deletes logs/stable/snapshots relicates.
-// Not a stable API, used only for testing purposes.
+//
+// NOTE: This is exposed for testing purposes and is not a stable API.
 func BoltdbFilesCleanup(raftDir string) {
 	// TODO: as writing on the filesystem for testing is very intruisive,
 	// this should replaced with a safer solution

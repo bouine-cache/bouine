@@ -30,7 +30,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
 	"github.com/thylong/bouine/api/middlewares"
-	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/storage"
 )
 
 var (

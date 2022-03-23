@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
 package middlewares
 
 import (
@@ -74,8 +75,8 @@ func CacheSkippable(c *fiber.Ctx) bool {
 	return false
 }
 
-// CustomExpirationGenerator return cache key expiration time.
-// Use Upstream response expires, max-age or s-maxage otherwise default to config default value.
+// CustomExpirationGenerator returns cache key expiration time.
+// Use Upstream response expires, max-age or s-maxage from the response otherwise fallbacks to default config value.
 func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
 	// max-age
 	re := regexp.MustCompile(`max-age=([0-9]*)`)

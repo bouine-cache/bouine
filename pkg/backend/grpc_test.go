@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
 package backend
 
 import (
@@ -22,7 +23,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	pb "github.com/thylong/bouine/internal/backend/proto"
+	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 )

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
 package backend
 
 import (
@@ -23,17 +24,22 @@ import (
 
 	"github.com/dgraph-io/ristretto"
 	"github.com/hashicorp/raft"
-	pb "github.com/thylong/bouine/internal/backend/proto"
+	pb "github.com/thylong/bouine/pkg/backend/proto"
 )
 
+// RaftedRistretto is the FSM implemented in Bouine to make use of the replicated logs.
 type RaftedRistretto struct {
 	RistrettoCache *ristretto.Cache
 }
 
+// This variable declaration verifies interface compliance at build time.
 var _ raft.FSM = &RaftedRistretto{}
 
+// ErrForwardToLeaderAsLeader is returned when trying to send a write call to the leader of the quorum as the leader.
 var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
 
+// Apply is called once a log entry is committed by a majority of the cluster.
+// The returned value is returned to the client as the ApplyFuture.Response.
 func (rr *RaftedRistretto) Apply(l *raft.Log) interface{} {
 	var cacheEntry pb.AddCacheEntryRequest
 	err := json.Unmarshal(l.Data, &cacheEntry)
@@ -55,10 +61,12 @@ func (rr *RaftedRistretto) Apply(l *raft.Log) interface{} {
 	return nil
 }
 
+// Snapshot is not implemented, as Ristretto is an in-memory cache.
 func (rr *RaftedRistretto) Snapshot() (raft.FSMSnapshot, error) {
 	return nil, nil
 }
 
+// Restore is not implemented, as Ristretto is an in-memory cache.
 func (rr *RaftedRistretto) Restore(snapshot io.ReadCloser) error {
 	return nil
 }

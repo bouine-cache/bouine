@@ -1,8 +1,10 @@
-# bouine
-
+# bouine [![GoDoc](https://godoc.org/github.com/thylong/bouine?status.png)](https://godoc.org/github.com/thylong/bouine)
 <!-- Logo -->
 <!-- Labels (godoc, goreport, gocover, gosec, tests, doc link, Slack, license) -->
 <!-- Pronunciation -->
+
+Bouine is a distributed read/write-through HTTP cache, built on top of [fiber](https://github.com/gofiber/fiber), the current fastest Go web framework (designed with zero memory allocation and performance in mind).
+
 <!-- Short description -->
 
 ## Quickstart

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+
 package backend
 
 import (
@@ -23,7 +24,7 @@ import (
 
 	"github.com/Jille/raft-grpc-leader-rpc/rafterrors"
 	"github.com/hashicorp/raft"
-	pb "github.com/thylong/bouine/internal/backend/proto"
+	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -37,6 +38,8 @@ func SetupgRPCConn(RaftAddress string) (net.Listener, error) {
 	return net.Listen("tcp", RaftAddress)
 }
 
+// RPCInterface holds cache server and Raft reference.
+// This is useful to forward cache write attempts to the leader.
 type RPCInterface struct {
 	pb.UnimplementedCacheServer
 	Raft *raft.Raft

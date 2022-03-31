@@ -5,12 +5,11 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2/utils"
-	"github.com/gofiber/storage/ristretto"
 )
 
-var testStore = ristretto.New()
+var testStore = New()
 
-func Test_RaftedRistretto_Set(t *testing.T) {
+func Test_Badger_Set(t *testing.T) {
 	var (
 		key = "john"
 		val = []byte("doe")
@@ -20,7 +19,7 @@ func Test_RaftedRistretto_Set(t *testing.T) {
 	utils.AssertEqual(t, nil, err)
 }
 
-func Test_RaftedRistretto_Set_Override(t *testing.T) {
+func Test_Badger_Set_Override(t *testing.T) {
 	var (
 		key = "john"
 		val = []byte("doe")
@@ -33,7 +32,7 @@ func Test_RaftedRistretto_Set_Override(t *testing.T) {
 	utils.AssertEqual(t, nil, err)
 }
 
-func Test_RaftedRistretto_Get(t *testing.T) {
+func Test_Badger_Get(t *testing.T) {
 	var (
 		key = "john"
 		val = []byte("doe")
@@ -42,15 +41,12 @@ func Test_RaftedRistretto_Get(t *testing.T) {
 	err := testStore.Set(key, val, 0)
 	utils.AssertEqual(t, nil, err)
 
-	// stabilize with some delay in between -> bug already communicated
-	time.Sleep(10000)
-
 	result, err := testStore.Get(key)
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, val, result)
 }
 
-func Test_RaftedRistretto_Set_Expiration(t *testing.T) {
+func Test_Badger_Set_Expiration(t *testing.T) {
 	var (
 		key = "john"
 		val = []byte("doe")
@@ -60,13 +56,10 @@ func Test_RaftedRistretto_Set_Expiration(t *testing.T) {
 	err := testStore.Set(key, val, exp)
 	utils.AssertEqual(t, nil, err)
 
-	err = testStore.Reset()
-	if err != nil {
-		t.Fail()
-	}
+	time.Sleep(1100 * time.Millisecond)
 }
 
-func Test_Ristretto_Get_Expired(t *testing.T) {
+func Test_Badger_Get_Expired(t *testing.T) {
 	var (
 		key = "john"
 	)
@@ -76,13 +69,14 @@ func Test_Ristretto_Get_Expired(t *testing.T) {
 	utils.AssertEqual(t, true, len(result) == 0)
 }
 
-func Test_Ristretto_Get_NotExist(t *testing.T) {
+func Test_Badger_Get_NotExist(t *testing.T) {
+
 	result, err := testStore.Get("notexist")
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, true, len(result) == 0)
 }
 
-func Test_RaftedRistretto_Delete(t *testing.T) {
+func Test_Badger_Delete(t *testing.T) {
 	var (
 		key = "john"
 		val = []byte("doe")
@@ -90,9 +84,6 @@ func Test_RaftedRistretto_Delete(t *testing.T) {
 
 	err := testStore.Set(key, val, 0)
 	utils.AssertEqual(t, nil, err)
-
-	// stabilize with some delay in between -> bug already communicated
-	time.Sleep(10000)
 
 	err = testStore.Delete(key)
 	utils.AssertEqual(t, nil, err)
@@ -102,7 +93,7 @@ func Test_RaftedRistretto_Delete(t *testing.T) {
 	utils.AssertEqual(t, true, len(result) == 0)
 }
 
-func Test_Ristretto_Reset(t *testing.T) {
+func Test_Badger_Reset(t *testing.T) {
 	var (
 		val = []byte("doe")
 	)
@@ -125,6 +116,6 @@ func Test_Ristretto_Reset(t *testing.T) {
 	utils.AssertEqual(t, true, len(result) == 0)
 }
 
-func Test_RaftedRistretto_Close(t *testing.T) {
+func Test_Badger_Close(t *testing.T) {
 	utils.AssertEqual(t, nil, testStore.Close())
 }

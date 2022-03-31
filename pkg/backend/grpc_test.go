@@ -49,7 +49,7 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 	BoltdbFilesCleanup(raftDir)
 
 	// NewRaft() with bootstrap
-	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedRistretto{Logger: *zap.NewExample()})
+	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedBadger{Logger: *zap.NewExample()})
 	if err != nil {
 		t.Errorf("NewRaft() unexpected error = %v", err)
 		return

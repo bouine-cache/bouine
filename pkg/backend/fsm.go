@@ -21,25 +21,25 @@ import (
 	"io"
 	"time"
 
-	"github.com/dgraph-io/ristretto"
 	"github.com/hashicorp/raft"
+	"github.com/outcaste-io/badger/v3"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"go.uber.org/zap"
 )
 
-// RaftedRistretto is the FSM implemented in Bouine to make use of the replicated logs.
-type RaftedRistretto struct {
-	RistrettoCache *ristretto.Cache
-	Logger         zap.Logger
+// RaftedBadger is the FSM implemented in Bouine to make use of the replicated logs.
+type RaftedBadger struct {
+	BadgerKV *badger.DB
+	Logger   zap.Logger
 }
 
 // This variable declaration verifies interface compliance at build time.
-var _ raft.FSM = &RaftedRistretto{}
+var _ raft.FSM = &RaftedBadger{}
 
 // Apply is called once a log entry is committed by a majority of the cluster.
 // The returned value is returned to the client as the ApplyFuture.Response.
-func (rr *RaftedRistretto) Apply(l *raft.Log) interface{} {
-	rr.Logger.Debug("new Apply", zap.String("component", "raft"))
+func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
+	rr.Logger.Debug("new Apply", zap.String("component", "raft"), zap.Any("log", l.Data))
 	var cacheEntry pb.AddCacheEntryRequest
 	err := json.Unmarshal(l.Data, &cacheEntry)
 	if err != nil {
@@ -56,22 +56,25 @@ func (rr *RaftedRistretto) Apply(l *raft.Log) interface{} {
 		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.NamedError("empty cache key/entry", err))
 		return nil
 	}
-	saved := rr.RistrettoCache.SetWithTTL(cacheEntry.CacheKey, cacheEntry.CacheEntry, 0, exp)
+
+	rr.Logger.Debug("FSM.SetWithTTL", zap.String("component", "raft"), zap.String("ristrettoCache", fmt.Sprintf("%#v", rr.BadgerKV)))
+
+	saved := rr.BadgerKV.SetWithTTL(cacheEntry.CacheKey, cacheEntry.CacheEntry, 1, exp)
 	if !saved {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Ristretto not saved !"))
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Badger not saved !"))
 		return nil
 	}
 	return nil
 }
 
-// Snapshot is not implemented, as Ristretto is an in-memory cache.
-func (rr *RaftedRistretto) Snapshot() (raft.FSMSnapshot, error) {
+// Snapshot is not implemented, as Badger is an in-memory cache.
+func (rr *RaftedBadger) Snapshot() (raft.FSMSnapshot, error) {
 	rr.Logger.Debug("new Snapshot", zap.String("component", "raft"))
 	return nil, nil
 }
 
-// Restore is not implemented, as Ristretto is an in-memory cache.
-func (rr *RaftedRistretto) Restore(snapshot io.ReadCloser) error {
+// Restore is not implemented, as Badger is an in-memory cache.
+func (rr *RaftedBadger) Restore(snapshot io.ReadCloser) error {
 	rr.Logger.Debug("new Restore", zap.String("component", "raft"))
 	return nil
 }

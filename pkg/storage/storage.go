@@ -14,7 +14,7 @@
 //
 
 // Package storage provides a custom storage driver that implements the Storage interface.
-// It combines the Ristretto premade driver with the Hashicorp Raft library to offer a distributed Ristretto K/V storage for cache entries.
+// It combines the Badger premade driver with the Hashicorp Raft library to offer a distributed Badger K/V storage for cache entries.
 package storage
 
 import (
@@ -28,8 +28,9 @@ import (
 
 	"github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
 	"github.com/Jille/raftadmin"
-	"github.com/dgraph-io/ristretto"
+	"github.com/gofiber/utils"
 	"github.com/hashicorp/raft"
+	"github.com/outcaste-io/badger/v3"
 	"github.com/thylong/bouine/pkg/backend"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"go.uber.org/zap"
@@ -39,13 +40,30 @@ import (
 
 // Config defines the config for storage.
 type Config struct {
-	// NumCounters number of keys to track frequency of (10M).
-	NumCounters int64
-	// MaxCost maximum cost of cache (1GB).
-	MaxCost int64
-	// BufferItems number of keys per Get buffer.
-	BufferItems int64
-	DefaultCost int64
+	// Database name
+	//
+	// Optional. Default is "./fiber.badger"
+	Database string
+
+	// Reset clears any existing keys in existing Table
+	//
+	// Optional. Default is false
+	Reset bool
+
+	// Time before deleting expired keys
+	//
+	// Optional. Default is 10 * time.Second
+	GCInterval time.Duration
+
+	// BadgerOptions is a way to set options in badger
+	//
+	// Optional. Default is badger.DefaultOptions("./fiber.badger")
+	BadgerOptions badger.Options
+
+	// UseLogger define if any logger will be used
+	//
+	// Optional. Default is false
+	UseLogger bool
 	// raftID ID of the present raft node
 	RaftID string
 	// RaftDir path to raft persistence directory
@@ -55,39 +73,50 @@ type Config struct {
 	Logger        zap.Logger
 }
 
+const defaultDatabase = "./fiber.badger"
+
 var ConfigDefault = Config{
-	NumCounters: 1e7,
-	MaxCost:     1 << 30,
-	BufferItems: 64,
-	DefaultCost: 1,
+	Database:      defaultDatabase,
+	Reset:         false,
+	GCInterval:    10 * time.Second,
+	BadgerOptions: badger.DefaultOptions(defaultDatabase).WithLogger(nil),
+	Logger:        *zap.NewNop(),
+	UseLogger:     false,
 }
 
 // ErrForwardToLeaderAsLeader is returned when trying to send a write call to the leader of the quorum as the leader.
 var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
 
+// ErrEmptyKey is returned when trying to get on FSM with an empty key.
+var ErrEmptyKey = errors.New("invalid empty key parameter")
+
+// ErrKeyNotFound is returned when a key is not found in the K/V store.
+var ErrKeyNotFound = errors.New("key not found")
+
 // ErrEstablishingConnToLeader is returned when a gRPC connection to the leader cannot be established.
 var ErrEstablishingConnToLeader = errors.New("cannot forward to leader as leader")
 
 func configDefault(config ...Config) Config {
+	// Return default config if nothing provided
 	if len(config) < 1 {
 		return ConfigDefault
 	}
+
+	// Override default config
 	cfg := config[0]
 
-	if cfg.NumCounters < 1 {
-		cfg.NumCounters = ConfigDefault.NumCounters
+	// Set default values
+	if cfg.Database == "" {
+		cfg.Database = ConfigDefault.Database
 	}
-
-	if cfg.MaxCost < 1 {
-		cfg.MaxCost = ConfigDefault.MaxCost
+	if int(cfg.GCInterval.Seconds()) <= 0 {
+		cfg.GCInterval = ConfigDefault.GCInterval
 	}
-
-	if cfg.BufferItems < 1 {
-		cfg.BufferItems = ConfigDefault.BufferItems
-	}
-
-	if cfg.DefaultCost == 0 {
-		cfg.DefaultCost = ConfigDefault.DefaultCost
+	// Detecting if no default Badger option was given
+	// Also detects when a default badger option is given with a custom database name
+	if cfg.BadgerOptions.ValueLogFileSize <= 0 || cfg.BadgerOptions.Dir == "" || cfg.BadgerOptions.ValueDir == "" ||
+		(cfg.BadgerOptions.Dir == defaultDatabase && cfg.BadgerOptions.Dir != cfg.Database) {
+		cfg.BadgerOptions = badger.DefaultOptions(cfg.Database)
 	}
 
 	return cfg
@@ -95,7 +124,11 @@ func configDefault(config ...Config) Config {
 
 // Storage interface that is implemented by storage providers.
 type Storage struct {
-	cache       *ristretto.Cache
+	db          *badger.DB
+	gcInterval  time.Duration
+	done        chan struct{}
+	kv          *badger.DB
+	fsm         *backend.RaftedBadger
 	defaultCost int64
 	logger      zap.Logger
 	r           *raft.Raft
@@ -106,20 +139,25 @@ type Storage struct {
 func New(config ...Config) *Storage {
 	cfg := configDefault(config...)
 
-	// setup local Ristretto cache
-	cache, err := ristretto.NewCache(&ristretto.Config{
-		NumCounters: cfg.NumCounters,
-		MaxCost:     cfg.MaxCost,
-		BufferItems: cfg.BufferItems,
-	})
+	// Set options
+	opt := cfg.BadgerOptions
+
+	// Open database
+	db, err := badger.Open(opt)
 	if err != nil {
 		panic(err)
+	}
+
+	if cfg.Reset {
+		if err := db.DropAll(); err != nil {
+			panic(err)
+		}
 	}
 
 	ctx := context.Background()
 
 	// start raft
-	fsm := &backend.RaftedRistretto{RistrettoCache: cache, Logger: cfg.Logger}
+	fsm := &backend.RaftedBadger{BadgerKV: db, Logger: cfg.Logger}
 	r, tm, err := backend.NewRaft(
 		ctx, cfg.RaftDir, cfg.RaftID, cfg.RaftAddress, cfg.RaftBootstrap, fsm,
 	)
@@ -136,11 +174,10 @@ func New(config ...Config) *Storage {
 	reflection.Register(s)
 
 	return &Storage{
-		cache:       cache,
-		defaultCost: cfg.DefaultCost,
-		logger:      cfg.Logger,
-		r:           r,
-		s:           s,
+		fsm:    fsm,
+		logger: cfg.Logger,
+		r:      r,
+		s:      s,
 	}
 }
 
@@ -160,41 +197,73 @@ func (s *Storage) ListengRPCServer(raftAddress string) error {
 // Get gets the value for the given key.
 // `nil, nil` is returned when the key does not exist.
 func (s *Storage) Get(key string) ([]byte, error) {
+	s.logger.Debug("new storage.Get",
+		zap.String("component", "storage"),
+		zap.String("key", key),
+	)
+
 	if len(key) <= 0 {
-		return nil, nil
+		s.logger.Debug("storage.Get err:",
+			zap.String("component", "storage"),
+			zap.Error(ErrEmptyKey),
+		)
+		return nil, ErrEmptyKey
 	}
-
-	item, found := s.cache.Get(key)
-	if !found {
-		return nil, nil
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			return err
+		}
+		// item.Value() is only valid within the transaction.
+		// We can either copy it ourselves or use the ValueCopy() method.
+		// TODO: Benchmark if it's faster to copy + close tx,
+		// or to keep the tx open until unmarshalling is done.
+		data, err = item.ValueCopy(nil)
+		return err
+	})
+	// If no value was found return false
+	if err == badger.ErrKeyNotFound {
+		s.logger.Debug("storage.Get err:",
+			zap.String("component", "storage"),
+			zap.String("key", key),
+			zap.Error(ErrKeyNotFound),
+		)
+		return nil, ErrKeyNotFound
 	}
-
-	buf, asserted := item.([]byte)
-	if !asserted {
-		return nil, nil
-	}
-
-	return buf, nil
+	return data, err
 }
 
 func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
+	// Ain't Nobody Got Time For That
+	if len(key) <= 0 || len(val) <= 0 {
+		return nil
+	}
+
+	entry := badger.NewEntry(utils.UnsafeBytes(key), val)
+	if exp != 0 {
+		entry.WithTTL(exp)
+	}
+
 	err := s.forwardToLeader(key, val, exp)
 	if (err != nil) && err != ErrForwardToLeaderAsLeader {
 		s.logger.Info("Set err",
 			zap.String("component", "storage"), zap.String("key", key), zap.String("error_msg", err.Error()),
 		)
-		// Opportunistic local cache copy
 		if len(key) <= 0 || len(val) <= 0 {
 			return nil
 		}
-		saved := s.cache.SetWithTTL(key, val, s.defaultCost, exp)
-		if !saved {
-			return nil
+		// Opportunistic local cache copy
+		err := s.db.Update(func(tx *badger.Txn) error {
+			return tx.SetEntry(entry)
+		})
+		if err != nil {
+			return fmt.Errorf("cannot forward to leader: %s", err)
 		}
-		return fmt.Errorf("cannot forward to leader: %s", err)
 	}
 
-	s.cache.SetWithTTL(key, val, s.defaultCost, exp)
+	s.logger.Debug("Storage.SetWithTTL", zap.String("component", "raft"), zap.String("ristrettoCache", fmt.Sprintf("%#v", s.fsm.BadgerKV)))
+	// s.fsm.BadgerKV.SetWithTTL(key, val, 1, exp)
 
 	s.logger.Debug("new storage.Set",
 		zap.String("component", "storage"),
@@ -233,25 +302,51 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 }
 
 func (s *Storage) Delete(key string) error {
-	// TODO: handle BAN (both raft leaders and followers) here
+	s.logger.Debug("new storage.Delete",
+		zap.String("component", "storage"),
+		zap.String("key", key),
+	)
 
+	// Ain't Nobody Got Time For That
 	if len(key) <= 0 {
 		return nil
 	}
-	s.cache.Del(key)
-	return nil
+	return s.db.Update(func(tx *badger.Txn) error {
+		return tx.Delete(utils.UnsafeBytes(key))
+	})
 }
 
 func (s *Storage) Reset() error {
+	s.logger.Info("new storage.Reset",
+		zap.String("component", "storage"),
+	)
+
 	// TODO: handle PURGE (both raft leaders and followers) here
 
-	s.cache.Clear()
-	return nil
+	return s.db.DropAll()
 }
 
 func (s *Storage) Close() error {
-	s.cache.Close()
-	return nil
+	s.logger.Warn("new storage.Close",
+		zap.String("component", "storage"),
+	)
+
+	s.done <- struct{}{}
+	return s.db.Close()
+}
+
+func (s *Storage) gc() {
+	ticker := time.NewTicker(s.gcInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			_ = s.db.RunValueLogGC(0.7)
+		}
+	}
 }
 
 // forwardToLeader forwards request to leader and return leader response.

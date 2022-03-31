@@ -21,6 +21,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/gofiber/utils"
 	"github.com/hashicorp/raft"
 	"github.com/outcaste-io/badger/v3"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
@@ -30,7 +31,7 @@ import (
 // RaftedBadger is the FSM implemented in Bouine to make use of the replicated logs.
 type RaftedBadger struct {
 	BadgerKV *badger.DB
-	Logger   zap.Logger
+	Logger   *zap.Logger
 }
 
 // This variable declaration verifies interface compliance at build time.
@@ -57,10 +58,16 @@ func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 		return nil
 	}
 
-	rr.Logger.Debug("FSM.SetWithTTL", zap.String("component", "raft"), zap.String("ristrettoCache", fmt.Sprintf("%#v", rr.BadgerKV)))
+	rr.Logger.Debug("FSM.Set", zap.String("component", "raft"), zap.String("BadgerKV", fmt.Sprintf("%#v", rr.BadgerKV)))
 
-	saved := rr.BadgerKV.SetWithTTL(cacheEntry.CacheKey, cacheEntry.CacheEntry, 1, exp)
-	if !saved {
+	entry := badger.NewEntry(utils.UnsafeBytes(cacheEntry.CacheKey), []byte(cacheEntry.CacheEntry))
+	if exp != 0 {
+		entry.WithTTL(exp)
+	}
+	// err = rr.BadgerKV.Update(func(tx *badger.Txn) error {
+	// 	return tx.SetEntry(entry)
+	// })
+	if err != nil {
 		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Badger not saved !"))
 		return nil
 	}

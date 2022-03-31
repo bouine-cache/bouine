@@ -70,7 +70,7 @@ type Config struct {
 	RaftDir       string
 	RaftBootstrap bool
 	RaftAddress   string
-	Logger        zap.Logger
+	Logger        *zap.Logger
 }
 
 const defaultDatabase = "./fiber.badger"
@@ -80,7 +80,7 @@ var ConfigDefault = Config{
 	Reset:         false,
 	GCInterval:    10 * time.Second,
 	BadgerOptions: badger.DefaultOptions(defaultDatabase).WithLogger(nil),
-	Logger:        *zap.NewNop(),
+	Logger:        zap.NewExample(),
 	UseLogger:     false,
 }
 
@@ -104,6 +104,8 @@ func configDefault(config ...Config) Config {
 
 	// Override default config
 	cfg := config[0]
+
+	cfg.Logger = zap.NewExample()
 
 	// Set default values
 	if cfg.Database == "" {
@@ -130,7 +132,7 @@ type Storage struct {
 	kv          *badger.DB
 	fsm         *backend.RaftedBadger
 	defaultCost int64
-	logger      zap.Logger
+	logger      *zap.Logger
 	r           *raft.Raft
 	s           *grpc.Server
 }
@@ -139,11 +141,8 @@ type Storage struct {
 func New(config ...Config) *Storage {
 	cfg := configDefault(config...)
 
-	// Set options
-	opt := cfg.BadgerOptions
-
 	// Open database
-	db, err := badger.Open(opt)
+	db, err := badger.Open(badger.DefaultOptions("/tmp/cache"))
 	if err != nil {
 		panic(err)
 	}
@@ -175,6 +174,7 @@ func New(config ...Config) *Storage {
 
 	return &Storage{
 		fsm:    fsm,
+		db:     db,
 		logger: cfg.Logger,
 		r:      r,
 		s:      s,
@@ -210,6 +210,7 @@ func (s *Storage) Get(key string) ([]byte, error) {
 		return nil, ErrEmptyKey
 	}
 	var data []byte
+
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
 		if err != nil {
@@ -235,6 +236,12 @@ func (s *Storage) Get(key string) ([]byte, error) {
 }
 
 func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
+	s.logger.Debug("new storage.Set",
+		zap.String("component", "storage"),
+		zap.String("key", key),
+		zap.ByteString("val", val),
+		zap.Duration("exp", exp),
+	)
 	// Ain't Nobody Got Time For That
 	if len(key) <= 0 || len(val) <= 0 {
 		return nil
@@ -262,7 +269,7 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 		}
 	}
 
-	s.logger.Debug("Storage.SetWithTTL", zap.String("component", "raft"), zap.String("ristrettoCache", fmt.Sprintf("%#v", s.fsm.BadgerKV)))
+	s.logger.Debug("Storage.Set", zap.String("component", "raft"), zap.String("BadgerKV", fmt.Sprintf("%#v", s.fsm.BadgerKV)))
 	// s.fsm.BadgerKV.SetWithTTL(key, val, 1, exp)
 
 	s.logger.Debug("new storage.Set",
@@ -273,22 +280,22 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 
 	// TODO: extract into separated method
 	// (duplicated code with func (r RPCInterface) AddCacheEntry)
-	req := &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: "bar", CacheExpiration: uint64(exp.Seconds())}
+	req := &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())}
 	if len(req.GetCacheKey()) < 1 {
 		s.logger.Debug("storage.Set err: invalid cache key",
-			zap.String("component", "storage"), zap.String("key", key),
+			zap.String("component", "storage"), zap.String("key", req.GetCacheKey()),
 		)
 		return fmt.Errorf("invalid cache key %v", req.GetCacheKey())
 	}
 	if len(req.GetCacheEntry()) < 1 {
 		s.logger.Debug("storage.Set err: invalid cache entry",
-			zap.String("component", "storage"), zap.String("key", key),
+			zap.String("component", "storage"), zap.String("key", req.GetCacheKey()),
 		)
 		return fmt.Errorf("invalid cache entry %v", req.GetCacheEntry())
 	}
 	if _, err := time.ParseDuration(fmt.Sprintf("%ds", req.GetCacheExpiration())); err != nil {
 		s.logger.Debug("storage.Set err",
-			zap.String("component", "storage"), zap.NamedError("invalid cache expiration", err), zap.String("key", key), zap.Uint64("exp", req.GetCacheExpiration()),
+			zap.String("component", "storage"), zap.NamedError("invalid cache expiration", err), zap.String("key", req.GetCacheKey()), zap.Uint64("exp", req.GetCacheExpiration()),
 		)
 		return fmt.Errorf("invalid cache expiration %v", req.GetCacheExpiration())
 	}
@@ -381,6 +388,7 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 		)
 		return fmt.Errorf("failed to forward to the leader: %s", err)
 	}
+	// TODO: check gRPC response (potential rety, etc).
 
 	return nil
 }

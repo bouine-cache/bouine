@@ -93,3 +93,21 @@ func BoltdbFilesCleanup(raftDir string) {
 		os.Remove(logFile)
 	}
 }
+
+// BadgerFilesCleanup deletes cache store.
+//
+// NOTE: This is exposed for testing purposes and is not a stable API.
+func BadgerFilesCleanup(raftDir string) {
+	// TODO: as writing on the filesystem for testing is very intruisive,
+	// this should replaced with a safer solution
+	for _, path := range []string{
+		filepath.Join(raftDir, "cache_store"),
+	} {
+		logFile, err := filepath.Abs(path)
+		if err != nil {
+			// return errors.New("cannot cleanup /tmp directory from test files")
+			return
+		}
+		os.Remove(logFile)
+	}
+}

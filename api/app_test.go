@@ -51,6 +51,9 @@ func Test_createFiberApp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend.BoltdbFilesCleanup(tt.args.raftDir)
+			backend.BadgerFilesCleanup(tt.args.raftDir)
+			defer backend.BoltdbFilesCleanup(tt.args.raftDir)
+			defer backend.BadgerFilesCleanup(tt.args.raftDir)
 
 			_, _ = createFiberApp(tt.args.httpTimeout, tt.args.raftAddress, tt.args.prod, tt.args.upstream, tt.args.raftID, tt.args.raftDir, tt.args.raftBootstrap, tt.args.loggingLevel)
 			// if !reflect.DeepEqual(app, tt.want) {

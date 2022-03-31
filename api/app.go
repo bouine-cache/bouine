@@ -123,7 +123,7 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		RaftDir:       raftDir,
 		RaftBootstrap: raftBootstrap,
 		RaftAddress:   raftAddress,
-		Logger:        *storeLogger,
+		Logger:        storeLogger,
 	})
 	app.Use(cache.New(cache.Config{
 		Next:                middlewares.CacheSkippable,

@@ -26,13 +26,14 @@ import (
 
 func TestNewRaft(t *testing.T) {
 	// Open and reset database
-	db, err := badger.Open(badger.DefaultOptions("/tmp/cache"))
+	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine"))
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
 	if err := db.DropAll(); err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
+	defer db.Close()
 
 	type args struct {
 		ctx           context.Context
@@ -48,8 +49,8 @@ func TestNewRaft(t *testing.T) {
 		wantRaftStats map[string]string
 		wantErr       bool
 	}{
-		// {name: "missing-config", args: args{ctx: context.Background()}, wantRaftStats: map[string]string{}, wantErr: true},
-		// {name: "missing-valid-raftDir", args: args{ctx: context.Background(), raftDir: "/foobar12345678910/", raftNodeID: "1", raftBootstrap: false, hostAddress: "localhost:4566", fsm: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: true},
+		{name: "missing-config", args: args{ctx: context.Background()}, wantRaftStats: map[string]string{}, wantErr: true},
+		{name: "missing-valid-raftDir", args: args{ctx: context.Background(), raftDir: "/foobar12345678910/", raftNodeID: "1", raftBootstrap: false, hostAddress: "localhost:4566", fsm: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: true},
 		{name: "successful-leader-start", args: args{ctx: context.Background(), raftDir: "/tmp/", raftNodeID: "1", raftBootstrap: true, hostAddress: "localhost:4596", fsm: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}}, wantRaftStats: map[string]string{}, wantErr: false},
 	}
 	for _, tt := range tests {

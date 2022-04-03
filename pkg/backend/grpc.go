@@ -54,11 +54,16 @@ func (r RPCInterface) AddCacheEntry(ctx context.Context, req *pb.AddCacheEntryRe
 	if len(req.GetCacheEntry()) < 1 {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid cache entry %v", req.GetCacheEntry())
 	}
-	if _, err := time.ParseDuration(fmt.Sprintf("%ds", req.GetCacheExpiration())); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid cache expiration %v", req.GetCacheExpiration())
-	}
+	exp, _ := time.ParseDuration(fmt.Sprintf("%ds", req.GetCacheExpiration()))
 
-	b, err := json.Marshal(req)
+	jsonMsg := struct {
+		Key string        `json:"key"`
+		Val []byte        `json:"val"`
+		Exp time.Duration `json:"exp"`
+	}{
+		Key: req.GetCacheKey(), Val: []byte(req.GetCacheEntry()), Exp: exp,
+	}
+	b, err := json.Marshal(jsonMsg)
 	if err != nil {
 		return nil, rafterrors.MarkUnretriable(err)
 	}

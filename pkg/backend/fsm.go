@@ -17,14 +17,13 @@ package backend
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"time"
 
 	"github.com/gofiber/utils"
 	"github.com/hashicorp/raft"
 	"github.com/outcaste-io/badger/v3"
-	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"go.uber.org/zap"
 )
 
@@ -40,36 +39,34 @@ var _ raft.FSM = &RaftedBadger{}
 // Apply is called once a log entry is committed by a majority of the cluster.
 // The returned value is returned to the client as the ApplyFuture.Response.
 func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
-	rr.Logger.Debug("new Apply", zap.String("component", "raft"), zap.Any("log", l.Data))
-	var cacheEntry pb.AddCacheEntryRequest
-	err := json.Unmarshal(l.Data, &cacheEntry)
-	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(err))
-		return nil
+	rr.Logger.Debug("new Apply", zap.String("component", "raft"))
+	var req struct {
+		Key string        `json:"key"`
+		Val []byte        `json:"val"`
+		Exp time.Duration `json:"exp"`
 	}
-	if len(cacheEntry.CacheKey) <= 0 || len(cacheEntry.CacheEntry) <= 0 {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.NamedError("empty cache key/entry", err))
+	err := json.Unmarshal(l.Data, &req)
+	if err != nil {
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(errors.New("badger not saved")))
 		return nil
 	}
 
-	exp, err := time.ParseDuration(fmt.Sprintf("%ds", cacheEntry.CacheExpiration))
-	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.NamedError("empty cache key/entry", err))
-		return nil
-	}
+	rr.Logger.Debug("FSM.Set", zap.String("component", "raft"),
+		zap.String("key", req.Key),
+		zap.ByteString("val", req.Val),
+		zap.String("CacheExp", req.Exp.String()),
+	)
 
-	rr.Logger.Debug("FSM.Set", zap.String("component", "raft"), zap.String("BadgerKV", fmt.Sprintf("%#v", rr.BadgerKV)))
-
-	entry := badger.NewEntry(utils.UnsafeBytes(cacheEntry.CacheKey), []byte(cacheEntry.CacheEntry))
-	if exp != 0 {
-		entry.WithTTL(exp)
+	entry := badger.NewEntry(utils.UnsafeBytes(req.Key), req.Val)
+	if req.Exp != 0 {
+		entry.WithTTL(req.Exp)
 	}
-	// err = rr.BadgerKV.Update(func(tx *badger.Txn) error {
-	// 	return tx.SetEntry(entry)
-	// })
+	err = rr.BadgerKV.Update(func(tx *badger.Txn) error {
+		return tx.SetEntry(entry)
+	})
 	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Badger not saved !"))
-		return nil
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Fail to apply on FSM"))
+		return err
 	}
 	return nil
 }

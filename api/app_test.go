@@ -43,7 +43,7 @@ func Test_createFiberApp(t *testing.T) {
 			prod:          false,
 			upstream:      "http://mockingjay:8084",
 			raftID:        "1",
-			raftDir:       "/tmp/",
+			raftDir:       "/tmp/bouine",
 			raftBootstrap: true,
 			loggingLevel:  "debug",
 		}},

@@ -57,6 +57,8 @@ func main() {
 	// Create fiber app
 	app, store := createFiberApp(*httpTimeout, *raftAddress, *prod, *upstream, *raftID, *raftDir, *raftBootstrap, *loggingLevel)
 
+	defer store.Close()
+
 	go func() {
 		if err := app.Listen(*port); err != nil { // go run app.go -port=:8080
 			fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -88,8 +90,6 @@ func main() {
 	}()
 
 	_ = app.Shutdown()
-
-	// fmt.Println("Closing connections...")
 }
 
 func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream string, raftID string, raftDir string, raftBootstrap bool, loggingLevel string) (*fiber.App, *storage.Storage) {
@@ -126,9 +126,10 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		Logger:        storeLogger,
 	})
 	app.Use(cache.New(cache.Config{
-		Next:                middlewares.CacheSkippable,
-		ExpirationGenerator: middlewares.CustomExpirationGenerator,
-		Storage:             store,
+		Next:                 middlewares.CacheSkippable,
+		ExpirationGenerator:  middlewares.CustomExpirationGenerator,
+		Storage:              store,
+		StoreResponseHeaders: true,
 	}))
 	// proxyMiddleware forwards requests to upstream
 	app.Use(middlewares.ProxyMiddleware(proxy.Config{

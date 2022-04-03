@@ -78,8 +78,6 @@ func NewRaft(ctx context.Context, raftDir, raftNodeID, hostAddress string, raftB
 //
 // NOTE: This is exposed for testing purposes and is not a stable API.
 func BoltdbFilesCleanup(raftDir string) {
-	// TODO: as writing on the filesystem for testing is very intruisive,
-	// this should replaced with a safer solution
 	for _, path := range []string{
 		filepath.Join(raftDir, "logs.dat"),
 		filepath.Join(raftDir, "stable.dat"),
@@ -98,8 +96,6 @@ func BoltdbFilesCleanup(raftDir string) {
 //
 // NOTE: This is exposed for testing purposes and is not a stable API.
 func BadgerFilesCleanup(raftDir string) {
-	// TODO: as writing on the filesystem for testing is very intruisive,
-	// this should replaced with a safer solution
 	for _, path := range []string{
 		filepath.Join(raftDir, "cache_store"),
 	} {

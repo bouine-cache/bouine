@@ -75,6 +75,10 @@ test-perf: ## Launch Go unit tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans; \
 	docker-compose run --rm test-client run --out influxdb=http://influxdb:8086/myk6db /scenarios/smoke-tests-rfc7234.js
 
+.PHONY: test-perf
+test-cleanup: ## Launch Go unit tests (k6 debug option: --http-debug)
+	rm -rf /tmp/bouine /tmp/*.dat /tmp/snapshots
+
 .PHONY: doc
 doc: ## Update documentation
 	go doc -http:=6060

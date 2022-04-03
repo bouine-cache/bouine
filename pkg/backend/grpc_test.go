@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
+	"github.com/outcaste-io/badger/v3"
 	pb "github.com/thylong/bouine/pkg/backend/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -49,14 +50,24 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 	BoltdbFilesCleanup(raftDir)
 	BadgerFilesCleanup(raftDir)
 
+	// Open and reset database
+	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DropAll(); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
 	// NewRaft() with bootstrap
-	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedBadger{Logger: zap.NewExample()})
+	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()})
 	if err != nil {
 		t.Errorf("NewRaft() unexpected error = %v", err)
 		return
 	}
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	ctx := context.Background()
 	listener := bufconn.Listen(1024 * 1024)

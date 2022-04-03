@@ -38,6 +38,16 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+// Storage interface that is implemented by storage providers.
+type Storage struct {
+	gcInterval time.Duration
+	done       chan struct{}
+	fsm        *backend.RaftedBadger
+	logger     *zap.Logger
+	r          *raft.Raft
+	s          *grpc.Server
+}
+
 // Config defines the config for storage.
 type Config struct {
 	// Database name
@@ -87,8 +97,11 @@ var ConfigDefault = Config{
 // ErrForwardToLeaderAsLeader is returned when trying to send a write call to the leader of the quorum as the leader.
 var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
 
-// ErrEmptyKey is returned when trying to get on FSM with an empty key.
+// ErrEmptyKey is returned when trying to get/set on FSM with an empty key.
 var ErrEmptyKey = errors.New("invalid empty key parameter")
+
+// ErrEmptyVal is returned when trying to get/set on FSM with an empty value.
+var ErrEmptyVal = errors.New("invalid empty value parameter")
 
 // ErrKeyNotFound is returned when a key is not found in the K/V store.
 var ErrKeyNotFound = errors.New("key not found")
@@ -124,25 +137,12 @@ func configDefault(config ...Config) Config {
 	return cfg
 }
 
-// Storage interface that is implemented by storage providers.
-type Storage struct {
-	db          *badger.DB
-	gcInterval  time.Duration
-	done        chan struct{}
-	kv          *badger.DB
-	fsm         *backend.RaftedBadger
-	defaultCost int64
-	logger      *zap.Logger
-	r           *raft.Raft
-	s           *grpc.Server
-}
-
 // New creates a new storage.
 func New(config ...Config) *Storage {
 	cfg := configDefault(config...)
 
 	// Open database
-	db, err := badger.Open(badger.DefaultOptions("/tmp/cache"))
+	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine"))
 	if err != nil {
 		panic(err)
 	}
@@ -172,13 +172,18 @@ func New(config ...Config) *Storage {
 	raftadmin.Register(s, r)
 	reflection.Register(s)
 
-	return &Storage{
-		fsm:    fsm,
-		db:     db,
-		logger: cfg.Logger,
-		r:      r,
-		s:      s,
+	store := &Storage{
+		fsm:        fsm,
+		logger:     cfg.Logger,
+		gcInterval: cfg.GCInterval,
+		r:          r,
+		s:          s,
 	}
+
+	// Start garbage collector
+	go store.gc()
+
+	return store
 }
 
 // ListengRPCServer listen over TCP connection for gRPC requests.
@@ -197,8 +202,7 @@ func (s *Storage) ListengRPCServer(raftAddress string) error {
 // Get gets the value for the given key.
 // `nil, nil` is returned when the key does not exist.
 func (s *Storage) Get(key string) ([]byte, error) {
-	s.logger.Debug("new storage.Get",
-		zap.String("component", "storage"),
+	s.logger.Debug("new storage.Get", zap.String("component", "storage"),
 		zap.String("key", key),
 	)
 
@@ -211,7 +215,7 @@ func (s *Storage) Get(key string) ([]byte, error) {
 	}
 	var data []byte
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.fsm.BadgerKV.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
 		if err != nil {
 			return err
@@ -232,36 +236,46 @@ func (s *Storage) Get(key string) ([]byte, error) {
 		)
 		return nil, ErrKeyNotFound
 	}
+
+	s.logger.Debug("storage.Get result",
+		zap.String("component", "storage"),
+		zap.ByteString("data", data),
+		zap.Error(err),
+	)
 	return data, err
 }
 
 func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
-	s.logger.Debug("new storage.Set",
-		zap.String("component", "storage"),
+	s.logger.Debug("new storage.Set", zap.String("component", "storage"),
 		zap.String("key", key),
 		zap.ByteString("val", val),
 		zap.Duration("exp", exp),
 	)
 	// Ain't Nobody Got Time For That
-	if len(key) <= 0 || len(val) <= 0 {
-		return nil
+	if len(key) <= 0 {
+		s.logger.Debug("storage.Set err:", zap.String("component", "storage"),
+			zap.Error(ErrEmptyKey),
+		)
+		return ErrEmptyKey
 	}
-
-	entry := badger.NewEntry(utils.UnsafeBytes(key), val)
-	if exp != 0 {
-		entry.WithTTL(exp)
+	if len(val) <= 0 {
+		s.logger.Debug("storage.Set err:", zap.String("component", "storage"),
+			zap.Error(ErrEmptyVal),
+		)
+		return ErrEmptyVal
 	}
 
 	err := s.forwardToLeader(key, val, exp)
 	if (err != nil) && err != ErrForwardToLeaderAsLeader {
-		s.logger.Info("Set err",
-			zap.String("component", "storage"), zap.String("key", key), zap.String("error_msg", err.Error()),
+		s.logger.Info("Set err", zap.String("component", "storage"),
+			zap.String("key", key), zap.String("error_msg", err.Error()),
 		)
-		if len(key) <= 0 || len(val) <= 0 {
-			return nil
-		}
 		// Opportunistic local cache copy
-		err := s.db.Update(func(tx *badger.Txn) error {
+		entry := badger.NewEntry(utils.UnsafeBytes(key), val)
+		if exp != 0 {
+			entry.WithTTL(exp)
+		}
+		err := s.fsm.BadgerKV.Update(func(tx *badger.Txn) error {
 			return tx.SetEntry(entry)
 		})
 		if err != nil {
@@ -269,36 +283,21 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 		}
 	}
 
-	s.logger.Debug("Storage.Set", zap.String("component", "raft"), zap.String("BadgerKV", fmt.Sprintf("%#v", s.fsm.BadgerKV)))
-	// s.fsm.BadgerKV.SetWithTTL(key, val, 1, exp)
+	// s.logger.Debug("Storage.Set", zap.String("component", "raft"), zap.String("BadgerKV", fmt.Sprintf("%#v", s.fsm.BadgerKV)))
+	// entry := badger.NewEntry(utils.UnsafeBytes(key), val)
+	// if exp != 0 {
+	// 	entry.WithTTL(exp)
+	// }
+	// s.fsm.BadgerKV.Update(func(tx *badger.Txn) error {
+	// 	return tx.SetEntry(entry)
+	// })
 
-	s.logger.Debug("new storage.Set",
-		zap.String("component", "storage"),
-		zap.String("key", key),
-		zap.Duration("exp", exp),
-	)
+	req := struct {
+		Key string        `json:"key"`
+		Val []byte        `json:"val"`
+		Exp time.Duration `json:"exp"`
+	}{Key: key, Val: val, Exp: exp}
 
-	// TODO: extract into separated method
-	// (duplicated code with func (r RPCInterface) AddCacheEntry)
-	req := &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())}
-	if len(req.GetCacheKey()) < 1 {
-		s.logger.Debug("storage.Set err: invalid cache key",
-			zap.String("component", "storage"), zap.String("key", req.GetCacheKey()),
-		)
-		return fmt.Errorf("invalid cache key %v", req.GetCacheKey())
-	}
-	if len(req.GetCacheEntry()) < 1 {
-		s.logger.Debug("storage.Set err: invalid cache entry",
-			zap.String("component", "storage"), zap.String("key", req.GetCacheKey()),
-		)
-		return fmt.Errorf("invalid cache entry %v", req.GetCacheEntry())
-	}
-	if _, err := time.ParseDuration(fmt.Sprintf("%ds", req.GetCacheExpiration())); err != nil {
-		s.logger.Debug("storage.Set err",
-			zap.String("component", "storage"), zap.NamedError("invalid cache expiration", err), zap.String("key", req.GetCacheKey()), zap.Uint64("exp", req.GetCacheExpiration()),
-		)
-		return fmt.Errorf("invalid cache expiration %v", req.GetCacheExpiration())
-	}
 	b, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("cannot Marshal cache entry: %s", err)
@@ -309,37 +308,39 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 }
 
 func (s *Storage) Delete(key string) error {
-	s.logger.Debug("new storage.Delete",
-		zap.String("component", "storage"),
+	s.logger.Debug("new storage.Delete", zap.String("component", "storage"),
 		zap.String("key", key),
 	)
 
 	// Ain't Nobody Got Time For That
 	if len(key) <= 0 {
-		return nil
+		return ErrEmptyKey
 	}
-	return s.db.Update(func(tx *badger.Txn) error {
+	return s.fsm.BadgerKV.Update(func(tx *badger.Txn) error {
 		return tx.Delete(utils.UnsafeBytes(key))
 	})
 }
 
 func (s *Storage) Reset() error {
-	s.logger.Info("new storage.Reset",
-		zap.String("component", "storage"),
-	)
+	s.logger.Info("new storage.Reset", zap.String("component", "storage"))
 
 	// TODO: handle PURGE (both raft leaders and followers) here
 
-	return s.db.DropAll()
+	return s.fsm.BadgerKV.DropAll()
 }
 
 func (s *Storage) Close() error {
-	s.logger.Warn("new storage.Close",
-		zap.String("component", "storage"),
-	)
+	s.logger.Warn("new storage.Close", zap.String("component", "storage"))
 
-	s.done <- struct{}{}
-	return s.db.Close()
+	// Stop gRPC server
+	s.s.Stop()
+
+	// Leave Raft quorum
+	s.r.Shutdown()
+
+	// FIXME: times out.
+	// s.done <- struct{}{}
+	return s.fsm.BadgerKV.Close()
 }
 
 func (s *Storage) gc() {
@@ -351,7 +352,7 @@ func (s *Storage) gc() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			_ = s.db.RunValueLogGC(0.7)
+			_ = s.fsm.BadgerKV.RunValueLogGC(0.7)
 		}
 	}
 }
@@ -364,14 +365,16 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 	}
 
 	s.logger.Debug("new forwardToLeader",
-		zap.String("component", "raft"), zap.Any("current leader", s.r.Leader()), zap.String("raft_key", key),
+		zap.String("component", "storage"), zap.Any("current leader", s.r.Leader()), zap.String("raft_key", key),
 	)
 
 	// FIXME: nil pointer dereference (when never joined a quorum)
 	conn, err := grpc.Dial(string(s.r.Leader()), grpc.WithInsecure())
 	if err != nil {
-		s.logger.Debug("forwardToLeader err",
-			zap.String("component", "raft"), zap.String("raft_key", key), zap.String("error_msg", err.Error()),
+		s.logger.Debug("forwardToLeader err", zap.String("component", "storage"),
+			zap.String("raft_key", key),
+			zap.Any("state", s.r.State()),
+			zap.String("error_msg", err.Error()),
 		)
 		return ErrEstablishingConnToLeader
 	}
@@ -384,11 +387,11 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())}, nil)
 	if err != nil {
 		s.logger.Debug("forwardToLeader err",
-			zap.String("component", "raft"), zap.String("raft_key", key), zap.String("error_msg", err.Error()),
+			zap.String("component", "storage"), zap.String("raft_key", key), zap.String("error_msg", err.Error()),
 		)
 		return fmt.Errorf("failed to forward to the leader: %s", err)
 	}
-	// TODO: check gRPC response (potential rety, etc).
+	// TODO: check gRPC response (potential retry, etc).
 
 	return nil
 }
@@ -396,7 +399,7 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 // IsLeader returns true if the current node is the cluster leader.
 func (s *Storage) IsLeader() bool {
 	s.logger.Debug("new IsLeader",
-		zap.String("component", "raft"), zap.String("raft-role", s.r.State().String()),
+		zap.String("component", "storage"), zap.String("raft-role", s.r.State().String()),
 	)
 	return strings.Compare(s.r.State().String(), "Leader") == 0
 }

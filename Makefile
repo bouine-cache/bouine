@@ -77,7 +77,7 @@ test-perf: ## Launch Go unit tests (k6 debug option: --http-debug)
 
 .PHONY: test-perf
 test-cleanup: ## Launch Go unit tests (k6 debug option: --http-debug)
-	rm -rf /tmp/bouine /tmp/*.dat /tmp/snapshots
+	rm -rf /tmp/bouine
 
 .PHONY: doc
 doc: ## Update documentation

@@ -41,7 +41,7 @@ var (
 	prod          = flag.Bool("prod", false, "Enable prefork in Production")
 	upstream      = flag.String("upstream", "http://mockingjay:8084", "Proxied upstream host")
 	raftID        = flag.String("raft_id", "1", "Node id used by Raft")
-	raftDir       = flag.String("raft_data_dir", "/tmp/", "Raft data dir")
+	raftDir       = flag.String("raft_data_dir", "/tmp/bouine", "Raft data dir")
 	raftBootstrap = flag.Bool("raft_bootstrap", false, "Whether to bootstrap the Raft cluster")
 	loggingLevel  = flag.String("logging_level", "info", "The minimum enabled logging level")
 )
@@ -155,5 +155,3 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 	)
 	return app, store
 }
-
-// TODO: Create a server struct holding pointers to dependencies (no global variables)

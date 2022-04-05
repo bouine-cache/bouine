@@ -19,6 +19,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -29,6 +30,51 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 )
+
+var client pb.CacheClient
+
+func TestMain(m *testing.M) {
+	raftDir := "/tmp/bouine/grpc"
+
+	// Delete potential orphans from previous test runs
+	BoltdbFilesCleanup(raftDir)
+	BadgerFilesCleanup(raftDir)
+	defer BoltdbFilesCleanup(raftDir)
+	defer BadgerFilesCleanup(raftDir)
+
+	// Open and reset database
+	db, err := badger.Open(badger.DefaultOptions(raftDir))
+	if err != nil {
+		panic(err)
+	}
+	if err := db.DropAll(); err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	// NewRaft() with bootstrap
+	r, _, err := NewRaft(context.Background(), raftDir, "1", "localhost:4769", true, &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()})
+	if err != nil {
+		panic(err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	ctx := context.Background()
+	listener := bufconn.Listen(1024 * 1024)
+	conn, err := grpc.DialContext(ctx, "", grpc.WithInsecure(), grpc.WithContextDialer(dialer(listener, r)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	// tm.Register(s)
+	defer conn.Close()
+
+	client = pb.NewCacheClient(conn)
+
+	exitVal := m.Run()
+
+	os.Exit(exitVal)
+}
 
 func dialer(listener *bufconn.Listener, r *raft.Raft) func(context.Context, string) (net.Conn, error) {
 	server := grpc.NewServer()
@@ -46,39 +92,7 @@ func dialer(listener *bufconn.Listener, r *raft.Raft) func(context.Context, stri
 }
 
 func TestRPCInterface_AddCacheEntry(t *testing.T) {
-	raftDir := "/tmp/"
-	BoltdbFilesCleanup(raftDir)
-	BadgerFilesCleanup(raftDir)
-
-	// Open and reset database
-	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.DropAll(); err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	// NewRaft() with bootstrap
-	r, _, err := NewRaft(context.Background(), "/tmp/", "1", "localhost:4766", true, &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()})
-	if err != nil {
-		t.Errorf("NewRaft() unexpected error = %v", err)
-		return
-	}
-
-	time.Sleep(3 * time.Second)
-
 	ctx := context.Background()
-	listener := bufconn.Listen(1024 * 1024)
-	conn, err := grpc.DialContext(ctx, "", grpc.WithInsecure(), grpc.WithContextDialer(dialer(listener, r)))
-	if err != nil {
-		log.Fatal(err)
-	}
-	// tm.Register(s)
-	defer conn.Close()
-
-	client := pb.NewCacheClient(conn)
 
 	tests := []struct {
 		name            string
@@ -89,7 +103,7 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 		{name: "invalid request with empty cache param", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: ""}, wantErr: true, wantCommitIndex: 0},
 		{name: "invalid request with empty cache key", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: "bar"}, wantErr: true, wantCommitIndex: 0},
 		{name: "invalid request with empty cache entry", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: ""}, wantErr: true, wantCommitIndex: 0},
-		{name: "valid request", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: "bar"}, wantErr: false, wantCommitIndex: 3},
+		{name: "valid request with Exp", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: "bar", CacheExpiration: 10}, wantErr: false, wantCommitIndex: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

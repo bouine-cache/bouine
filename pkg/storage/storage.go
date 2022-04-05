@@ -94,9 +94,6 @@ var ConfigDefault = Config{
 	UseLogger:     false,
 }
 
-// ErrForwardToLeaderAsLeader is returned when trying to send a write call to the leader of the quorum as the leader.
-var ErrForwardToLeaderAsLeader = errors.New("cannot forward to leader as leader")
-
 // ErrEmptyKey is returned when trying to get/set on FSM with an empty key.
 var ErrEmptyKey = errors.New("invalid empty key parameter")
 
@@ -142,7 +139,7 @@ func New(config ...Config) *Storage {
 	cfg := configDefault(config...)
 
 	// Open database
-	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine"))
+	db, err := badger.Open(badger.DefaultOptions(cfg.RaftDir))
 	if err != nil {
 		panic(err)
 	}
@@ -265,12 +262,29 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 		return ErrEmptyVal
 	}
 
+	if s.IsLeader() {
+		req := struct {
+			Key string        `json:"key"`
+			Val []byte        `json:"val"`
+			Exp time.Duration `json:"exp"`
+		}{Key: key, Val: val, Exp: exp}
+
+		b, err := json.Marshal(req)
+		if err != nil {
+			return fmt.Errorf("cannot Marshal cache entry: %s", err)
+		}
+		s.r.Apply(b, time.Second)
+
+		return nil
+	}
+
 	err := s.forwardToLeader(key, val, exp)
-	if (err != nil) && err != ErrForwardToLeaderAsLeader {
+	// Opportunistic local cache copy
+	// note: This increases drastically the resiliency of the raft cluster
+	if err != nil {
 		s.logger.Info("Set err", zap.String("component", "storage"),
 			zap.String("key", key), zap.String("error_msg", err.Error()),
 		)
-		// Opportunistic local cache copy
 		entry := badger.NewEntry(utils.UnsafeBytes(key), val)
 		if exp != 0 {
 			entry.WithTTL(exp)
@@ -279,31 +293,9 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 			return tx.SetEntry(entry)
 		})
 		if err != nil {
-			return fmt.Errorf("cannot forward to leader: %s", err)
+			return fmt.Errorf("failed opportunistic write to badger: %s", err)
 		}
 	}
-
-	// s.logger.Debug("Storage.Set", zap.String("component", "raft"), zap.String("BadgerKV", fmt.Sprintf("%#v", s.fsm.BadgerKV)))
-	// entry := badger.NewEntry(utils.UnsafeBytes(key), val)
-	// if exp != 0 {
-	// 	entry.WithTTL(exp)
-	// }
-	// s.fsm.BadgerKV.Update(func(tx *badger.Txn) error {
-	// 	return tx.SetEntry(entry)
-	// })
-
-	req := struct {
-		Key string        `json:"key"`
-		Val []byte        `json:"val"`
-		Exp time.Duration `json:"exp"`
-	}{Key: key, Val: val, Exp: exp}
-
-	b, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("cannot Marshal cache entry: %s", err)
-	}
-	s.r.Apply(b, time.Second)
-
 	return nil
 }
 
@@ -360,36 +352,33 @@ func (s *Storage) gc() {
 // forwardToLeader forwards request to leader and return leader response.
 // TODO: migrate to persistent connection.
 func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) error {
-	if s.IsLeader() {
-		return ErrForwardToLeaderAsLeader
-	}
-
 	s.logger.Debug("new forwardToLeader",
 		zap.String("component", "storage"), zap.Any("current leader", s.r.Leader()), zap.String("raft_key", key),
 	)
 
-	// FIXME: nil pointer dereference (when never joined a quorum)
+	// s.r.
 	conn, err := grpc.Dial(string(s.r.Leader()), grpc.WithInsecure())
 	if err != nil {
 		s.logger.Debug("forwardToLeader err", zap.String("component", "storage"),
 			zap.String("raft_key", key),
 			zap.Any("state", s.r.State()),
-			zap.String("error_msg", err.Error()),
+			zap.Error(fmt.Errorf("failed to connect to leader: %s", err)),
 		)
 		return ErrEstablishingConnToLeader
 	}
 	defer conn.Close()
 
 	client := pb.NewCacheClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())}, nil)
+	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())})
 	if err != nil {
+		err = fmt.Errorf("failed to forward to the leader: %s", err)
 		s.logger.Debug("forwardToLeader err",
-			zap.String("component", "storage"), zap.String("raft_key", key), zap.String("error_msg", err.Error()),
+			zap.String("component", "storage"), zap.String("raft-role", s.r.State().String()), zap.String("raft_key", key), zap.Error(err),
 		)
-		return fmt.Errorf("failed to forward to the leader: %s", err)
+		return err
 	}
 	// TODO: check gRPC response (potential retry, etc).
 

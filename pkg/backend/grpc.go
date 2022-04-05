@@ -58,10 +58,10 @@ func (r RPCInterface) AddCacheEntry(ctx context.Context, req *pb.AddCacheEntryRe
 
 	jsonMsg := struct {
 		Key string        `json:"key"`
-		Val []byte        `json:"val"`
+		Val string        `json:"val"`
 		Exp time.Duration `json:"exp"`
 	}{
-		Key: req.GetCacheKey(), Val: []byte(req.GetCacheEntry()), Exp: exp,
+		Key: req.GetCacheKey(), Val: req.GetCacheEntry(), Exp: exp,
 	}
 	b, err := json.Marshal(jsonMsg)
 	if err != nil {

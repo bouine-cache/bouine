@@ -17,7 +17,7 @@ package backend
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -47,7 +47,7 @@ func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 	}
 	err := json.Unmarshal(l.Data, &req)
 	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(errors.New("badger not saved")))
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(fmt.Errorf("json.Unmarshal error: %s", err)))
 		return nil
 	}
 
@@ -65,7 +65,7 @@ func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 		return tx.SetEntry(entry)
 	})
 	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.String("error", "Fail to apply on FSM"))
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))
 		return err
 	}
 	return nil

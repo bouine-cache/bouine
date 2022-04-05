@@ -12,19 +12,29 @@ import (
 
 var testStore *Storage
 
-func TestMain(m *testing.M) {
+func createStorage(raftDir, raftID, raftAddress string, raftBootstrap bool) *Storage {
+	_ = os.MkdirAll(raftDir, 0770)
+	// if err != nil {
+	// 	panic(err)
+	// }
+
 	fmt.Println("Initialize Raft (single node leader)")
-	backend.BadgerFilesCleanup("/tmp/")
-	backend.BoltdbFilesCleanup("/tmp/")
-	testStore = New(Config{RaftID: "test", RaftDir: "/tmp/", RaftBootstrap: true, RaftAddress: "localhost:50051"})
+	// Delete potential orphans from previous test runs
+	backend.BadgerFilesCleanup(raftDir)
+	backend.BoltdbFilesCleanup(raftDir)
+
+	return New(Config{RaftID: raftID, RaftDir: raftDir, RaftBootstrap: raftBootstrap, RaftAddress: raftAddress})
+}
+
+func TestMain(m *testing.M) {
+	testStore = createStorage("/tmp/bouine/storage", "testMain", "localhost:50051", true)
+	defer backend.BadgerFilesCleanup("/tmp/bouine/storage")
+	defer backend.BoltdbFilesCleanup("/tmp/bouine/storage")
 	// wait for leader election to be over
 	time.Sleep(2 * time.Second)
 
 	exitVal := m.Run()
 
-	fmt.Println("Cleanup Badger & Bolt files")
-	defer backend.BadgerFilesCleanup("/tmp/")
-	defer backend.BoltdbFilesCleanup("/tmp/")
 	os.Exit(exitVal)
 }
 
@@ -170,3 +180,66 @@ func Test_Badger_Reset(t *testing.T) {
 func Test_Badger_Close(t *testing.T) {
 	utils.AssertEqual(t, nil, testStore.Close())
 }
+
+// func Test_Storage_forwardToLeader(t *testing.T) {
+// 	firstRaftDir := "/tmp/bouine/storage_forwardToLeader_1"
+// 	secondRaftDir := "/tmp/bouine/storage_forwardToLeader_2"
+// 	backend.BadgerFilesCleanup(firstRaftDir)
+// 	backend.BoltdbFilesCleanup(secondRaftDir)
+// 	defer backend.BadgerFilesCleanup(firstRaftDir)
+// 	defer backend.BoltdbFilesCleanup(secondRaftDir)
+
+// 	// Create two Raft Nodes cluster
+// 	firstTestStore := createStorage(firstRaftDir, "forwardToLeader1", "localhost:50061", true)
+// 	secondTestStore := createStorage(secondRaftDir, "forwardToLeader2", "localhost:50062", false)
+// 	go func() {
+// 		if err := firstTestStore.ListengRPCServer("localhost:50061"); err != nil {
+// 			fmt.Fprintf(os.Stderr, "%s\n", err)
+// 			os.Exit(1)
+// 		}
+// 	}()
+// 	go func() {
+// 		if err := firstTestStore.ListengRPCServer("localhost:50062"); err != nil {
+// 			fmt.Fprintf(os.Stderr, "%s\n", err)
+// 			os.Exit(1)
+// 		}
+// 	}()
+
+// 	// wait for leader elections to be over
+// 	time.Sleep(2 * time.Second)
+
+// 	// register Follower
+// 	timeout, _ := time.ParseDuration("2s")
+// 	f := firstTestStore.r.AddVoter("forwardToLeader2", "localhost:50062", 0, timeout)
+// 	if err := f.Error(); err != nil {
+// 		t.Errorf("Test_Storage_forwardToLeader failed: %s", err)
+// 	}
+// 	time.Sleep(4 * time.Second)
+
+// 	// write to leader (require to have an up to date Leader() value)
+// 	err := firstTestStore.Set("john", []byte("doe"), 10000000000)
+// 	utils.AssertEqual(t, nil, err)
+
+// 	fmt.Println(firstTestStore.r.State().String())
+// 	fmt.Println(secondTestStore.r.State().String())
+// 	os.Exit(1)
+
+// 	time.Sleep(1 * time.Second)
+
+// 	cf := secondTestStore.r.GetConfiguration()
+// 	if err := cf.Error(); err != nil {
+// 		t.Errorf("Test_Storage_forwardToLeader failed: %s", err)
+// 	}
+
+// 	for k, v := range cf.Configuration().Servers {
+// 		fmt.Printf("SERVER%d: %#v\n", k, v)
+// 	}
+
+// 	// forward from second Raft node to cluster
+// 	err = secondTestStore.forwardToLeader("john", []byte("doe"), timeout)
+// 	if err != nil {
+// 		t.Errorf("unexpected error: %s", err)
+// 	}
+// 	// wait for log entry to be committed on the FSM
+// 	time.Sleep(1 * time.Second)
+// }

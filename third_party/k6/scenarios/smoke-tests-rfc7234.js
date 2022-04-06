@@ -14,11 +14,12 @@
  * limitations under the License.
  *
  */
+import { sleep } from 'k6';
 import { Trend } from 'k6/metrics';
 import { getValidJSONBody, headValid, postValid, putValid, patchValid, deleteValid } from './helpers.js'
 
 const waitingTime = new Trend('waitingTime', true);
-const baseURL = 'http://bouine:8080';
+const baseURL = 'http://bouine1:8080';
 // waitingTime.add(res.timings.waiting);
 
 let commonOptions = {
@@ -64,7 +65,7 @@ export const options = {
     },
     thresholds: {
         checks: ['rate>0.99'],
-        http_req_duration: ['p(90)<1000'], // p90 should be inferior to 1second
+        http_req_duration: ['p(90)<2000'], // p90 should be inferior to 1second
     }
 }
 
@@ -92,6 +93,8 @@ export function get3XXJSONBody() {
     // Should result in a cached JSON response
     // getValidJSONBody(baseURL, false, 301, 'rfc7234ValidationGet301JSONBody');
 
+    sleep(Math.random() * 0.15);
+
     // First simple GET request on /ernest_302
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 302, 'rfc7234ValidationGet302JSONBody');
@@ -108,6 +111,8 @@ export function get404JSONBody() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 404, 'rfc7234ValidationGet404JSONBody');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_404
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 404, 'rfc7234ValidationGet404JSONBody');
@@ -119,6 +124,8 @@ export function get405JSONBody() {
     // First simple GET request on /ernest_405
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 405, 'rfc7234ValidationGet405JSONBody');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_405
     // Should result in a cached JSON response
@@ -132,6 +139,8 @@ export function get410JSONBody() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 410, 'rfc7234ValidationGet404JSONBody');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_410
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 410, 'rfc7234ValidationGet404JSONBody');
@@ -144,6 +153,8 @@ export function get414JSONBody() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 414, 'rfc7234ValidationGet404JSONBody');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_414
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 414, 'rfc7234ValidationGet404JSONBody');
@@ -154,6 +165,8 @@ export function get500JSONBody() {
     // First simple GET request on /ernest_500
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 500, 'rfc7234ValidationGet500JSONBody');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_500
     // Should result in a cached JSON response
@@ -167,6 +180,8 @@ export function get501JSONBody() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 501, 'rfc7234ValidationGet500JSONBody');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_501
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 501, 'rfc7234ValidationGet500JSONBody');
@@ -177,6 +192,8 @@ export function get502JSONBody() {
     // First simple GET request on /ernest_502
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 502, 'rfc7234ValidationGet502JSONBody');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_502
     // Should result in a cached JSON response
@@ -189,6 +206,8 @@ export function get503JSONBody() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 503, 'rfc7234ValidationGet503JSONBody');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_503
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, false, 503, 'rfc7234ValidationGet503JSONBody');
@@ -199,6 +218,8 @@ export function get504JSONBody() {
     // First simple GET request on /ernest_504
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 504, 'rfc7234ValidationGet504JSONBody');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_504
     // Should result in a cached JSON response
@@ -212,6 +233,8 @@ export function get200WithSetCookie() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 200, 'rfc7234ValidationGet200WithSetCookie', '_cookie');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_cookie
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 200, 'rfc7234ValidationGet200WithSetCookie', '_cookie');
@@ -222,6 +245,8 @@ export function head200NoCache() {
     // First simple HEAD request on /ernest_cookie
     // Should result in non-cached JSON response
     headValid(baseURL, false, 200, 'rfc7234ValidationHead200');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple HEAD request on /ernest_cookie
     // Should result in a cached JSON response
@@ -234,6 +259,8 @@ export function post200NoCache() {
     // Should result in non-cached JSON response
     postValid(baseURL, false, 201, 'rfc7234ValidationPost201');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple POST request on /ernest_cookie
     // Should result in a non-cached JSON response
     postValid(baseURL, false, 201, 'rfc7234ValidationPost201');
@@ -244,6 +271,8 @@ export function patch200NoCache() {
     // First simple PATCH request on /ernest_cookie
     // Should result in non-cached JSON response
     patchValid(baseURL, false, 200, 'rfc7234ValidationPatch200');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple PATCH request on /ernest_cookie
     // Should result in a non-cached JSON response
@@ -256,6 +285,8 @@ export function put200NoCache() {
     // Should result in non-cached JSON response
     putValid(baseURL, false, 200, 'rfc7234ValidationPut200');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple PUT request on /ernest_cookie
     // Should result in a non-cached JSON response
     putValid(baseURL, false, 200, 'rfc7234ValidationPut200');
@@ -266,6 +297,8 @@ export function delete200NoCache() {
     // First simple DELETE request on /ernest_cookie
     // Should result in non-cached JSON response
     deleteValid(baseURL, false, 200, 'rfc7234ValidationDelete200');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple DELETE request on /ernest_cookie
     // Should result in a non-cached JSON response
@@ -279,6 +312,8 @@ export function get200WithCacheControlNoStore() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlNoStore', '_no_store');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_no_store
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlNoStore', '_no_store');
@@ -290,6 +325,8 @@ export function get200WithCacheControlPrivate() {
     // First simple GET request on /ernest_private
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlPrivate', '_private');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_private
     // Should result in a cached JSON response
@@ -303,6 +340,8 @@ export function get200WithCacheControlPublic() {
     // Should result in non-cached JSON response
     getValidJSONBody(baseURL, false, 200, 'get200WithCacheControlPublic', '_public');
 
+    sleep(Math.random() * 0.15);
+
     // Second simple GET request on /ernest_public
     // Should result in a cached JSON response
     getValidJSONBody(baseURL, true, 200, 'get200WithCacheControlPublic', '_public');
@@ -314,12 +353,14 @@ export function get200WithBasicAuth() {
     // First simple GET request on /ernest_basic_auth_uncached
     // Should result in non-cached JSON response
     // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
-    getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
+    getValidJSONBody('http://aladdin:opensesame@bouine1:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_basic_auth_uncached
     // Should result in a non-cached JSON response
     // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
-    getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
+    getValidJSONBody('http://aladdin:opensesame@bouine1:8080', false, 200, 'get200WithBasicAuth', '_basic_auth_uncached');
 }
 
 // This test ensures 200s JSON responses with Cache-Control directive header are cached
@@ -329,10 +370,12 @@ export function get200WithBasicAuthCacheControl() {
     // First simple GET request on /ernest_get_200_basic_auth_cached
     // Should result in non-cached JSON response
     // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
-    getValidJSONBody('http://aladdin:opensesame@bouine:8080', false, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
+    getValidJSONBody('http://aladdin:opensesame@bouine1:8080', false, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
+
+    sleep(Math.random() * 0.15);
 
     // Second simple GET request on /ernest_get_200_basic_auth_cached
     // Should result in a cached JSON response
     // note: Resulting Authorization header = Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l
-    getValidJSONBody('http://aladdin:opensesame@bouine:8080', true, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
+    getValidJSONBody('http://aladdin:opensesame@bouine1:8080', true, 200, 'get200WithBasicAuthCacheControl', '_basic_auth_cached');
 }

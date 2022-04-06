@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+option go_package = "github.com/thylong/pkg/backend/proto";
+
+service Cache {
+  rpc AddCacheEntry(AddCacheEntryRequest) returns (AddCacheEntryResponse);
+  rpc GetCacheEntry(GetCacheEntryRequest) returns (GetCacheEntryResponse);
+}
+
+message AddCacheEntryRequest {
+  string cache_key = 1;
+  bytes cache_entry = 2;
+  uint64 cache_expiration = 3;
+}
+
+message AddCacheEntryResponse {
+  uint64 commit_index = 1;
+}
+
+message GetCacheEntryRequest {
+  string cache_key = 1;
+}
+
+message GetCacheEntryResponse {
+  string cache_entry = 1;
+}

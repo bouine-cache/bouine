@@ -24,6 +24,9 @@ header:
     - 'scripts/wait-for-it.sh'
     - 'LICENSE'
     - 'NOTICE'
+    - 'internal/backend/proto/service.proto'
+    - 'internal/backend/proto/service.pb.go'
+    - 'internal/backend/proto/service_grpc.pb.go'
 
   comment: on-failure
 

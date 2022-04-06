@@ -9,7 +9,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cache"
 	"github.com/gofiber/fiber/v2/utils"
-	"github.com/thylong/bouine/api/handlers"
 	"github.com/valyala/fasthttp"
 )
 
@@ -163,7 +162,6 @@ func Test_Cache_CustomExpirationGenerator_SMaxAgeCacheControlHeader(t *testing.T
 	utils.AssertEqual(t, "public, max-age=666", resp.Header.Get("Cache-Control"))
 }
 
-// FIXME: waiting for this PR to be merged : https://github.com/gofiber/fiber/pull/1807
 func Test_Cache_CustomExpirationGenerator_E2EHeaders(t *testing.T) {
 	t.Parallel()
 
@@ -176,11 +174,11 @@ func Test_Cache_CustomExpirationGenerator_E2EHeaders(t *testing.T) {
 	app := fiber.New()
 
 	cacheCfg := cache.Config{
-		Next:         CacheSkippable,
-		Expiration:   1 * time.Minute,
-		CacheControl: true,
-		// E2EHeaders:          true,
-		ExpirationGenerator: CustomExpirationGenerator,
+		Next:                 CacheSkippable,
+		Expiration:           1 * time.Minute,
+		CacheControl:         true,
+		StoreResponseHeaders: true,
+		ExpirationGenerator:  CustomExpirationGenerator,
 	}
 	app.Use(cache.New(cacheCfg))
 	app.Get("/", func(c *fiber.Ctx) error {
@@ -193,7 +191,7 @@ func Test_Cache_CustomExpirationGenerator_E2EHeaders(t *testing.T) {
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
 	utils.AssertEqual(t, "miss", resp.Header.Get("X-Cache"))
-	// utils.AssertEqual(t, "foobar", resp.Header.Get("X-Foobar"))
+	utils.AssertEqual(t, "foobar", resp.Header.Get("X-Foobar"))
 
 	fmt.Printf("%v\n", resp.Header)
 
@@ -203,17 +201,17 @@ func Test_Cache_CustomExpirationGenerator_E2EHeaders(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusOK, resp.StatusCode)
 
 	utils.AssertEqual(t, "hit", resp.Header.Get("X-Cache"))
-	// utils.AssertEqual(t, "foobar", resp.Header.Get("X-Foobar"))
+	utils.AssertEqual(t, "foobar", resp.Header.Get("X-Foobar"))
 }
 
 // go test -v -run=^$ -bench=Benchmark_Cache_CacheSkippable_500 -benchmem -count=4.
-func Benchmark_Cache_CacheSkippable_500(b *testing.B) {
+func Benchmark_Cache_CacheSkippable_404(b *testing.B) {
 	app := fiber.New()
 
 	app.Use(cache.New(cache.Config{
 		Next: CacheSkippable,
 	}))
-	app.Use(handlers.DefaultHandler)
+
 	h := app.Handler()
 
 	fctx := &fasthttp.RequestCtx{}
@@ -227,7 +225,7 @@ func Benchmark_Cache_CacheSkippable_500(b *testing.B) {
 		h(fctx)
 	}
 
-	utils.AssertEqual(b, fiber.StatusInternalServerError, fctx.Response.Header.StatusCode())
+	utils.AssertEqual(b, fiber.StatusNotFound, fctx.Response.Header.StatusCode())
 	utils.AssertEqual(b, "unreachable", string(fctx.Response.Header.Peek("X-Cache")))
 }
 

@@ -16,10 +16,10 @@
 package backend
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	transport "github.com/Jille/raft-grpc-transport"
 	"github.com/hashicorp/raft"
@@ -27,41 +27,79 @@ import (
 	"google.golang.org/grpc"
 )
 
+// RaftConfig holds the configuration to create a Raft cluster.
+type RaftConfig struct {
+	RaftDir            string
+	RaftNodeID         string
+	HostAddress        string
+	RaftBootstrap      bool
+	FSM                raft.FSM
+	LogLevel           string
+	HeartbeatTimeout   time.Duration
+	ElectionTimeout    time.Duration
+	LeaderLeaseTimeout time.Duration
+	SnapshotInterval   time.Duration
+}
+
+func overrideDefaultConfig(raftConfig *raft.Config, customConfig *RaftConfig) {
+	raftConfig.LocalID = raft.ServerID(customConfig.RaftNodeID)
+
+	if len(customConfig.LogLevel) > 0 {
+		raftConfig.LogLevel = customConfig.LogLevel
+	}
+
+	if customConfig.HeartbeatTimeout.Seconds() > 0 {
+		raftConfig.HeartbeatTimeout = customConfig.HeartbeatTimeout
+	}
+
+	if customConfig.ElectionTimeout.Seconds() > 0 {
+		raftConfig.ElectionTimeout = customConfig.ElectionTimeout
+	}
+
+	if customConfig.LeaderLeaseTimeout.Seconds() > 0 {
+		raftConfig.LeaderLeaseTimeout = customConfig.LeaderLeaseTimeout
+	}
+
+	if customConfig.SnapshotInterval.Seconds() > 0 {
+		raftConfig.SnapshotInterval = customConfig.SnapshotInterval
+	}
+}
+
 // NewRaft instantiate a new Raft node based on provided parameters.
 // This will create local boltdb log files, create a gRPC service & a Raft transport.
-func NewRaft(ctx context.Context, raftDir, raftNodeID, hostAddress string, raftBootstrap bool, fsm raft.FSM) (*raft.Raft, *transport.Manager, error) {
+func NewRaft(config RaftConfig) (*raft.Raft, *transport.Manager, error) {
 	c := raft.DefaultConfig()
-	c.LocalID = raft.ServerID(raftNodeID)
+	overrideDefaultConfig(c, &config)
 
-	ldb, err := boltdb.NewBoltStore(filepath.Join(raftDir, "logs.dat"))
+	ldb, err := boltdb.NewBoltStore(filepath.Join(config.RaftDir, "logs.dat"))
 	if err != nil {
-		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(raftDir, "logs.dat"), err)
+		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(config.RaftDir, "logs.dat"), err)
 	}
 
-	sdb, err := boltdb.NewBoltStore(filepath.Join(raftDir, "stable.dat"))
+	sdb, err := boltdb.NewBoltStore(filepath.Join(config.RaftDir, "stable.dat"))
 	if err != nil {
-		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(raftDir, "stable.dat"), err)
+		return nil, nil, fmt.Errorf(`boltdb.NewBoltStore(%q): %v`, filepath.Join(config.RaftDir, "stable.dat"), err)
 	}
 
-	fss, err := raft.NewFileSnapshotStore(raftDir, 3, os.Stderr)
+	fss, err := raft.NewFileSnapshotStore(config.RaftDir, 3, os.Stderr)
 	if err != nil {
-		return nil, nil, fmt.Errorf(`cannot create snapshot store (%q, ...): %v`, raftDir, err)
+		return nil, nil, fmt.Errorf(`cannot create snapshot store (%q, ...): %v`, config.RaftDir, err)
 	}
 
-	tm := transport.New(raft.ServerAddress(hostAddress), []grpc.DialOption{grpc.WithInsecure()})
+	tm := transport.New(raft.ServerAddress(config.HostAddress), []grpc.DialOption{grpc.WithInsecure()})
 
-	r, err := raft.NewRaft(c, fsm, ldb, sdb, fss, tm.Transport())
+	r, err := raft.NewRaft(c, config.FSM, ldb, sdb, fss, tm.Transport())
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot create new raft: %v", err)
 	}
 
-	if raftBootstrap {
+	if config.RaftBootstrap {
 		cfg := raft.Configuration{
 			Servers: []raft.Server{
 				{
 					Suffrage: raft.Voter,
-					ID:       raft.ServerID(raftNodeID),
-					Address:  raft.ServerAddress(hostAddress),
+					ID:       raft.ServerID(config.RaftNodeID),
+					Address:  raft.ServerAddress(config.HostAddress),
 				},
 			},
 		}

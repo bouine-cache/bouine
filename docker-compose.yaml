@@ -1,4 +1,11 @@
 version: '3.8'
+networks:
+  appNetwork:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.24.2.0/16"
 services:
   nginx:
     image: nginxinc/nginx-unprivileged:latest
@@ -14,6 +21,9 @@ services:
       - bouine3
     ports:
       - "4000:4000"
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.8
   bouine1:
     build:
       context: .
@@ -27,7 +37,10 @@ services:
     ports:
       - "8081:8080"
       - "50051:50051"
-    entrypoint: ["/app", "--raft_bootstrap", "--raft_id=nodeA", "--address=0.0.0.0:50051", "--logging_level=debug"]
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.1
+    entrypoint: ["/app", "--raft_bootstrap", "--raft_id=nodeA", "--address=172.24.2.1:50051", "--logging_level=debug"]
   bouine2:
     build:
       context: .
@@ -41,7 +54,10 @@ services:
     ports:
       - "8082:8080"
       - "50052:50052"
-    entrypoint: ["/app", "--raft_id=nodeB", "--address=0.0.0.0:50052", "--logging_level=debug"]
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.2
+    entrypoint: ["/app", "--raft_id=nodeB", "--address=172.24.2.2:50052", "--logging_level=debug"]
   bouine3:
     build:
       context: .
@@ -55,7 +71,10 @@ services:
     ports:
       - "8083:8080"
       - "50053:50053"
-    entrypoint: ["/app", "--raft_id=nodeC", "--address=0.0.0.0:50053", "--logging_level=debug"]
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.3
+    entrypoint: ["/app", "--raft_id=nodeC", "--address=172.24.2.3:50053", "--logging_level=debug"]
   test-client:
     image: loadimpact/k6
     depends_on:
@@ -65,6 +84,8 @@ services:
     links:
       - nginx
       - influxdb
+    networks:
+      appNetwork: {}
     volumes:
       - ./third_party/k6/scenarios:/scenarios
       - ./third_party/k6/scripts:/influxdb_startup
@@ -75,6 +96,9 @@ services:
       - bouine1
     ports:
       - 8086:8086
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.5
   grafana:
     image: grafana/grafana
     environment:
@@ -85,6 +109,9 @@ services:
       - influxdb
     ports:
       - 3000:3000
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.6
     volumes:
       - ./build/client/files/grafana:/etc/grafana
       - ./build/client/files/grafana/dashboards:/var/lib/grafana/dashboards
@@ -92,6 +119,9 @@ services:
     image: quii/mockingjay-server:1.12.0
     ports:
       - 8084:8084
+    networks:
+      appNetwork:
+        ipv4_address: 172.24.2.7
     volumes:
       - ./third_party/mockingjay-server:/config
     command: ["-config=/config/config.yaml", "-port=8084", "-debug"]

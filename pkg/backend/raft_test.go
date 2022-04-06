@@ -15,7 +15,6 @@
 package backend
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -35,37 +34,29 @@ func TestNewRaft(t *testing.T) {
 	}
 	defer db.Close()
 
-	type args struct {
-		ctx           context.Context
-		raftDir       string
-		raftNodeID    string
-		hostAddress   string
-		raftBootstrap bool
-		fsm           raft.FSM
-	}
 	tests := []struct {
 		name          string
-		args          args
+		raftConfig    RaftConfig
 		wantRaftStats map[string]string
 		wantErr       bool
 	}{
-		{name: "missing-config", args: args{ctx: context.Background()}, wantRaftStats: map[string]string{}, wantErr: true},
-		{name: "missing-valid-raftDir", args: args{ctx: context.Background(), raftDir: "/foobar12345678910/", raftNodeID: "1", raftBootstrap: false, hostAddress: "localhost:4566", fsm: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: true},
-		{name: "successful-leader-start", args: args{ctx: context.Background(), raftDir: "/tmp/", raftNodeID: "1", raftBootstrap: true, hostAddress: "localhost:4596", fsm: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}}, wantRaftStats: map[string]string{}, wantErr: false},
+		{name: "missing-config", raftConfig: RaftConfig{}, wantRaftStats: map[string]string{}, wantErr: true},
+		{name: "missing-valid-raftDir", raftConfig: RaftConfig{RaftDir: "/foobar12345678910/", RaftNodeID: "1", RaftBootstrap: false, HostAddress: "localhost:4566", FSM: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: true},
+		{name: "successful-leader-start", raftConfig: RaftConfig{RaftDir: "/tmp/", RaftNodeID: "1", RaftBootstrap: true, HostAddress: "localhost:4596", FSM: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}}, wantRaftStats: map[string]string{}, wantErr: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			BoltdbFilesCleanup(tt.args.raftDir)
-			BadgerFilesCleanup(tt.args.raftDir)
-			got, _, err := NewRaft(tt.args.ctx, tt.args.raftDir, tt.args.raftNodeID, tt.args.hostAddress, tt.args.raftBootstrap, tt.args.fsm)
+			BoltdbFilesCleanup(tt.raftConfig.RaftDir)
+			BadgerFilesCleanup(tt.raftConfig.RaftDir)
+			got, _, err := NewRaft(tt.raftConfig)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewRaft() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			// at this point, boltdb and badger files have been created
-			defer BoltdbFilesCleanup(tt.args.raftDir)
-			defer BadgerFilesCleanup(tt.args.raftDir)
+			defer BoltdbFilesCleanup(tt.raftConfig.RaftDir)
+			defer BadgerFilesCleanup(tt.raftConfig.RaftDir)
 
 			// prevent further execution of "wantErr: true" cases
 			if err != nil {

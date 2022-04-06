@@ -66,6 +66,7 @@ test-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
 test-distributed-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans && \
 	docker-compose up --wait && \
+	sleep 2 && \
 	raftadmin localhost:50051 add_voter nodeB bouine2:50052 0 && \
 	raftadmin --leader multi:///localhost:50051,localhost:50052 add_voter nodeC bouine3:50053 0; \
 	docker-compose run --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js

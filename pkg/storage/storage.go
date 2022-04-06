@@ -65,6 +65,12 @@ type Config struct {
 	// Optional. Default is 10 * time.Second
 	GCInterval time.Duration
 
+	HeartbeatTimeout   time.Duration
+	ElectionTimeout    time.Duration
+	CommitTimeout      time.Duration
+	SnapshotInterval   time.Duration
+	LeaderLeaseTimeout time.Duration
+
 	// BadgerOptions is a way to set options in badger
 	//
 	// Optional. Default is badger.DefaultOptions("./fiber.badger")
@@ -150,12 +156,13 @@ func New(config ...Config) *Storage {
 		}
 	}
 
-	ctx := context.Background()
-
 	// start raft
+	cfg.Logger.Debug("Start raft", zap.String("component", "storage"),
+		zap.String("RaftDir", cfg.RaftDir), zap.String("RaftNodeID", cfg.RaftID), zap.String("HostAddress", cfg.RaftAddress), zap.Bool("RaftBootstrap", cfg.RaftBootstrap),
+	)
 	fsm := &backend.RaftedBadger{BadgerKV: db, Logger: cfg.Logger}
 	r, tm, err := backend.NewRaft(
-		ctx, cfg.RaftDir, cfg.RaftID, cfg.RaftAddress, cfg.RaftBootstrap, fsm,
+		backend.RaftConfig{RaftDir: cfg.RaftDir, RaftNodeID: cfg.RaftID, HostAddress: cfg.RaftAddress, RaftBootstrap: cfg.RaftBootstrap, FSM: fsm},
 	)
 	if err != nil {
 		log.Fatalf("failed to start raft: %v", err)
@@ -372,7 +379,7 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: string(val), CacheExpiration: uint64(exp.Seconds())})
+	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: val, CacheExpiration: uint64(exp.Seconds())})
 	if err != nil {
 		err = fmt.Errorf("failed to forward to the leader: %s", err)
 		s.logger.Debug("forwardToLeader err",

@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
 	defer db.Close()
 
 	// NewRaft() with bootstrap
-	r, _, err := NewRaft(context.Background(), raftDir, "1", "localhost:4769", true, &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()})
+	r, _, err := NewRaft(RaftConfig{RaftDir: raftDir, RaftNodeID: "1", HostAddress: "localhost:4769", RaftBootstrap: true, FSM: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}})
 	if err != nil {
 		panic(err)
 	}
@@ -100,10 +100,10 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 		wantCommitIndex uint64
 		wantErr         bool
 	}{
-		{name: "invalid request with empty cache param", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: ""}, wantErr: true, wantCommitIndex: 0},
-		{name: "invalid request with empty cache key", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: "bar"}, wantErr: true, wantCommitIndex: 0},
-		{name: "invalid request with empty cache entry", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: ""}, wantErr: true, wantCommitIndex: 0},
-		{name: "valid request with Exp", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: "bar", CacheExpiration: 10}, wantErr: false, wantCommitIndex: 3},
+		{name: "invalid request with empty cache param", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: []byte("")}, wantErr: true, wantCommitIndex: 0},
+		{name: "invalid request with empty cache key", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: []byte("bar")}, wantErr: true, wantCommitIndex: 0},
+		{name: "invalid request with empty cache entry", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: []byte("")}, wantErr: true, wantCommitIndex: 0},
+		{name: "valid request with Exp", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: []byte("bar"), CacheExpiration: 10}, wantErr: false, wantCommitIndex: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

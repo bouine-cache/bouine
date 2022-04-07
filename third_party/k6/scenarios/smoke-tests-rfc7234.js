@@ -19,7 +19,7 @@ import { Trend } from 'k6/metrics';
 import { getValidJSONBody, headValid, postValid, putValid, patchValid, deleteValid } from './helpers.js'
 
 const waitingTime = new Trend('waitingTime', true);
-const baseURL = 'http://bouine1:8080';
+const baseURL = 'http://nginx:4000';
 // waitingTime.add(res.timings.waiting);
 
 let commonOptions = {

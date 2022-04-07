@@ -22,8 +22,7 @@ services:
     ports:
       - "4000:4000"
     networks:
-      appNetwork:
-        ipv4_address: 172.24.2.8
+      appNetwork: {}
   bouine1:
     build:
       context: .
@@ -97,8 +96,7 @@ services:
     ports:
       - 8086:8086
     networks:
-      appNetwork:
-        ipv4_address: 172.24.2.5
+      appNetwork: {}
   grafana:
     image: grafana/grafana
     environment:
@@ -110,8 +108,7 @@ services:
     ports:
       - 3000:3000
     networks:
-      appNetwork:
-        ipv4_address: 172.24.2.6
+      appNetwork: {}
     volumes:
       - ./build/client/files/grafana:/etc/grafana
       - ./build/client/files/grafana/dashboards:/var/lib/grafana/dashboards
@@ -120,8 +117,7 @@ services:
     ports:
       - 8084:8084
     networks:
-      appNetwork:
-        ipv4_address: 172.24.2.7
+      appNetwork: {}
     volumes:
       - ./third_party/mockingjay-server:/config
     command: ["-config=/config/config.yaml", "-port=8084", "-debug"]

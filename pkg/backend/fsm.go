@@ -67,13 +67,13 @@ func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 	return nil
 }
 
-// Snapshot is not implemented, as Badger is an in-memory cache.
+// Snapshot is not implemented yet.
 func (rr *RaftedBadger) Snapshot() (raft.FSMSnapshot, error) {
 	rr.Logger.Debug("new Snapshot", zap.String("component", "raft"))
 	return nil, nil
 }
 
-// Restore is not implemented, as Badger is an in-memory cache.
+// Restore is not implemented yet.
 func (rr *RaftedBadger) Restore(snapshot io.ReadCloser) error {
 	rr.Logger.Debug("new Restore", zap.String("component", "raft"))
 	return nil

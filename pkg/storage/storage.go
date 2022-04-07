@@ -19,12 +19,14 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
 	"github.com/Jille/raftadmin"
@@ -266,17 +268,15 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 	}
 
 	if s.IsLeader() {
-		req := struct {
-			Key string        `json:"key"`
-			Val []byte        `json:"val"`
-			Exp time.Duration `json:"exp"`
-		}{Key: key, Val: val, Exp: exp}
-
-		b, err := json.Marshal(req)
+		msg, err := proto.Marshal(&pb.AddCacheEntryRequest{
+			CacheKey:        key,
+			CacheEntry:      val,
+			CacheExpiration: durationpb.New(exp),
+		})
 		if err != nil {
 			return fmt.Errorf("cannot Marshal cache entry: %s", err)
 		}
-		s.r.Apply(b, time.Second)
+		s.r.Apply(msg, time.Second)
 		return nil
 	}
 
@@ -374,7 +374,7 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: val, CacheExpiration: uint64(exp.Seconds())})
+	_, err = client.AddCacheEntry(ctx, &pb.AddCacheEntryRequest{CacheKey: key, CacheEntry: val, CacheExpiration: durationpb.New(exp)})
 	if err != nil {
 		err = fmt.Errorf("failed to forward to the leader: %s", err)
 		s.logger.Debug("forwardToLeader err",

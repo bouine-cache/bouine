@@ -16,15 +16,15 @@
 package backend
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/gofiber/utils"
 	"github.com/hashicorp/raft"
 	"github.com/outcaste-io/badger/v3"
+	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 )
 
 // RaftedBadger is the FSM implemented in Bouine to make use of the replicated logs.
@@ -40,26 +40,22 @@ var _ raft.FSM = &RaftedBadger{}
 // The returned value is returned to the client as the ApplyFuture.Response.
 func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 	rr.Logger.Debug("new Apply", zap.String("component", "raft"))
-	var req struct {
-		Key string        `json:"key"`
-		Val []byte        `json:"val"`
-		Exp time.Duration `json:"exp"`
-	}
-	err := json.Unmarshal(l.Data, &req)
+	var req pb.AddCacheEntryRequest
+	err := proto.Unmarshal(l.Data, &req)
 	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(fmt.Errorf("json.Unmarshal error: %s", err)))
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(fmt.Errorf("proto.Unmarshal error: %s", err)))
 		return nil
 	}
 
 	rr.Logger.Debug("FSM.Set", zap.String("component", "raft"),
-		zap.String("key", req.Key),
-		zap.ByteString("val", req.Val),
-		zap.String("CacheExp", req.Exp.String()),
+		zap.String("key", req.GetCacheKey()),
+		zap.ByteString("val", req.GetCacheEntry()),
+		zap.String("CacheExp", req.GetCacheExpiration().AsDuration().String()),
 	)
 
-	entry := badger.NewEntry(utils.UnsafeBytes(req.Key), req.Val)
-	if req.Exp != 0 {
-		entry.WithTTL(req.Exp)
+	entry := badger.NewEntry(utils.UnsafeBytes(req.GetCacheKey()), req.GetCacheEntry())
+	if req.GetCacheExpiration().GetSeconds() != 0 {
+		entry.WithTTL(req.GetCacheExpiration().AsDuration())
 	}
 	err = rr.BadgerKV.Update(func(tx *badger.Txn) error {
 		return tx.SetEntry(entry)

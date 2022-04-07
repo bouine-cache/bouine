@@ -30,6 +30,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 var client pb.CacheClient
@@ -104,7 +105,7 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 		{name: "invalid request with empty cache param", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: []byte("")}, wantErr: true, wantCommitIndex: 0},
 		{name: "invalid request with empty cache key", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "", CacheEntry: []byte("bar")}, wantErr: true, wantCommitIndex: 0},
 		{name: "invalid request with empty cache entry", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: []byte("")}, wantErr: true, wantCommitIndex: 0},
-		{name: "valid request with Exp", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: []byte("bar"), CacheExpiration: 10}, wantErr: false, wantCommitIndex: 3},
+		{name: "valid request with Exp", cacheEntry: &pb.AddCacheEntryRequest{CacheKey: "foo", CacheEntry: []byte("bar"), CacheExpiration: durationpb.New(10 * time.Second)}, wantErr: false, wantCommitIndex: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/duration.proto";
+
 option go_package = "github.com/thylong/pkg/backend/proto";
 
 service Cache {
@@ -10,7 +12,7 @@ service Cache {
 message AddCacheEntryRequest {
   string cache_key = 1;
   bytes cache_entry = 2;
-  uint64 cache_expiration = 3;
+  google.protobuf.Duration cache_expiration = 3;
 }
 
 message AddCacheEntryResponse {

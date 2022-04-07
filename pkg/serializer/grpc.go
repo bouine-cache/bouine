@@ -17,7 +17,6 @@ package serializer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -27,6 +26,7 @@ import (
 	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // SetupgRPCConn setups a gRPC connection listening on given address.
@@ -54,21 +54,13 @@ func (r RPCInterface) AddCacheEntry(ctx context.Context, req *pb.AddCacheEntryRe
 	if len(req.GetCacheEntry()) < 1 {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid cache entry %v", req.GetCacheEntry())
 	}
-	exp, _ := time.ParseDuration(fmt.Sprintf("%ds", req.GetCacheExpiration()))
 
-	jsonMsg := struct {
-		Key string        `json:"key"`
-		Val []byte        `json:"val"`
-		Exp time.Duration `json:"exp"`
-	}{
-		Key: req.GetCacheKey(), Val: req.GetCacheEntry(), Exp: exp,
-	}
-	b, err := json.Marshal(jsonMsg)
+	msg, err := proto.Marshal(req)
 	if err != nil {
 		return nil, rafterrors.MarkUnretriable(err)
 	}
 
-	f := r.Raft.Apply(b, time.Second)
+	f := r.Raft.Apply(msg, time.Second)
 	if err := f.Error(); err != nil {
 		return nil, rafterrors.MarkRetriable(err)
 	}

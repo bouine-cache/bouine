@@ -65,11 +65,11 @@ type Config struct {
 	// Optional. Default is 10 * time.Second
 	GCInterval time.Duration
 
-	HeartbeatTimeout   time.Duration
-	ElectionTimeout    time.Duration
-	CommitTimeout      time.Duration
-	SnapshotInterval   time.Duration
-	LeaderLeaseTimeout time.Duration
+	RaftHeartbeatTimeout   time.Duration
+	RaftElectionTimeout    time.Duration
+	RaftCommitTimeout      time.Duration
+	RaftSnapshotInterval   time.Duration
+	RaftLeaderLeaseTimeout time.Duration
 
 	// BadgerOptions is a way to set options in badger
 	//

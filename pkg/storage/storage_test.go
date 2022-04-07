@@ -25,13 +25,13 @@ func createStorage(raftDir, raftID, raftAddress string, raftBootstrap bool) *Sto
 	backend.BoltdbFilesCleanup(raftDir)
 
 	return New(Config{
-		RaftID:             raftID,
-		RaftDir:            raftDir,
-		RaftBootstrap:      raftBootstrap,
-		RaftAddress:        raftAddress,
-		HeartbeatTimeout:   250 * time.Millisecond,
-		ElectionTimeout:    250 * time.Millisecond,
-		LeaderLeaseTimeout: 125 * time.Millisecond,
+		RaftID:                 raftID,
+		RaftDir:                raftDir,
+		RaftBootstrap:          raftBootstrap,
+		RaftAddress:            raftAddress,
+		RaftHeartbeatTimeout:   250 * time.Millisecond,
+		RaftElectionTimeout:    250 * time.Millisecond,
+		RaftLeaderLeaseTimeout: 125 * time.Millisecond,
 	})
 }
 

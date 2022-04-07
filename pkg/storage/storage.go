@@ -32,7 +32,8 @@ import (
 	"github.com/hashicorp/raft"
 	"github.com/outcaste-io/badger/v3"
 	"github.com/thylong/bouine/pkg/backend"
-	pb "github.com/thylong/bouine/pkg/backend/proto"
+	"github.com/thylong/bouine/pkg/serializer"
+	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -51,17 +52,14 @@ type Storage struct {
 // Config defines the config for storage.
 type Config struct {
 	// Database name
-	//
 	// Optional. Default is "./fiber.badger"
 	Database string
 
 	// Reset clears any existing keys in existing Table
-	//
 	// Optional. Default is false
 	Reset bool
 
 	// Time before deleting expired keys
-	//
 	// Optional. Default is 10 * time.Second
 	GCInterval time.Duration
 
@@ -72,12 +70,10 @@ type Config struct {
 	RaftLeaderLeaseTimeout time.Duration
 
 	// BadgerOptions is a way to set options in badger
-	//
 	// Optional. Default is badger.DefaultOptions("./fiber.badger")
 	BadgerOptions badger.Options
 
 	// UseLogger define if any logger will be used
-	//
 	// Optional. Default is false
 	UseLogger bool
 	// raftID ID of the present raft node
@@ -170,7 +166,7 @@ func New(config ...Config) *Storage {
 
 	// register gRPC interface
 	s := grpc.NewServer()
-	pb.RegisterCacheServer(s, &backend.RPCInterface{Raft: r})
+	pb.RegisterCacheServer(s, &serializer.RPCInterface{Raft: r})
 	tm.Register(s)
 	leaderhealth.Setup(r, s, []string{"bouine"})
 	raftadmin.Register(s, r)
@@ -193,7 +189,7 @@ func New(config ...Config) *Storage {
 // ListengRPCServer listen over TCP connection for gRPC requests.
 func (s *Storage) ListengRPCServer(raftAddress string) error {
 	// setup TCP conn for gRPC
-	sock, err := backend.SetupgRPCConn(raftAddress)
+	sock, err := serializer.SetupgRPCConn(raftAddress)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %s", err)
 	}
@@ -281,7 +277,6 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 			return fmt.Errorf("cannot Marshal cache entry: %s", err)
 		}
 		s.r.Apply(b, time.Second)
-
 		return nil
 	}
 
@@ -332,7 +327,7 @@ func (s *Storage) Close() error {
 	s.logger.Warn("new storage.Close", zap.String("component", "storage"))
 
 	// Stop gRPC server
-	s.s.Stop()
+	s.s.GracefulStop()
 
 	// Leave Raft quorum
 	s.r.Shutdown()

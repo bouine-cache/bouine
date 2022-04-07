@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-package backend
+package serializer
 
 import (
 	"context"
@@ -25,7 +25,8 @@ import (
 
 	"github.com/hashicorp/raft"
 	"github.com/outcaste-io/badger/v3"
-	pb "github.com/thylong/bouine/pkg/backend/proto"
+	"github.com/thylong/bouine/pkg/backend"
+	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
@@ -37,10 +38,10 @@ func TestMain(m *testing.M) {
 	raftDir := "/tmp/bouine/grpc"
 
 	// Delete potential orphans from previous test runs
-	BoltdbFilesCleanup(raftDir)
-	BadgerFilesCleanup(raftDir)
-	defer BoltdbFilesCleanup(raftDir)
-	defer BadgerFilesCleanup(raftDir)
+	backend.BoltdbFilesCleanup(raftDir)
+	backend.BadgerFilesCleanup(raftDir)
+	defer backend.BoltdbFilesCleanup(raftDir)
+	defer backend.BadgerFilesCleanup(raftDir)
 
 	// Open and reset database
 	db, err := badger.Open(badger.DefaultOptions(raftDir))
@@ -53,7 +54,7 @@ func TestMain(m *testing.M) {
 	defer db.Close()
 
 	// NewRaft() with bootstrap
-	r, _, err := NewRaft(RaftConfig{RaftDir: raftDir, RaftNodeID: "1", HostAddress: "localhost:4769", RaftBootstrap: true, FSM: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}})
+	r, _, err := backend.NewRaft(backend.RaftConfig{RaftDir: raftDir, RaftNodeID: "1", HostAddress: "localhost:4769", RaftBootstrap: true, FSM: &backend.RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}})
 	if err != nil {
 		panic(err)
 	}

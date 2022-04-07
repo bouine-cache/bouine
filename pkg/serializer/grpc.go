@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-package backend
+package serializer
 
 import (
 	"context"
@@ -24,7 +24,7 @@ import (
 
 	"github.com/Jille/raft-grpc-leader-rpc/rafterrors"
 	"github.com/hashicorp/raft"
-	pb "github.com/thylong/bouine/pkg/backend/proto"
+	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

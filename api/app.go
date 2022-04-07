@@ -47,27 +47,24 @@ var (
 )
 
 func main() {
-	// Parse command-line flags
 	flag.Parse()
-
-	// if *raftID == "" {
-	// 	log.Fatalf("flag --raft_id is required")
-	// }
 
 	// Create fiber app
 	app, store := createFiberApp(*httpTimeout, *raftAddress, *prod, *upstream, *raftID, *raftDir, *raftBootstrap, *loggingLevel)
-
 	defer store.Close()
 
+	// Listen for gRPC requests
+	// (coming from other nodes & clients)
 	go func() {
-		if err := app.Listen(*port); err != nil { // go run app.go -port=:8080
+		if err := store.ListengRPCServer(*raftAddress); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
 			os.Exit(1)
 		}
 	}()
 
+	// Listen for HTTP requests
 	go func() {
-		if err := store.ListengRPCServer(*raftAddress); err != nil {
+		if err := app.Listen(*port); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
 			os.Exit(1)
 		}
@@ -94,30 +91,22 @@ func main() {
 
 func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream string, raftID string, raftDir string, raftBootstrap bool, loggingLevel string) (*fiber.App, *storage.Storage) {
 	app := fiber.New(fiber.Config{
-		Prefork:               prod, // go run app.go -prod
+		Prefork:               prod,
 		DisableStartupMessage: prod,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
 		},
 	})
 
-	// Middlewares
-	app.Use(recover.New())
-	app.Use(logger.New())
-
-	// init cache middleware and use raft+ristretto as storage
+	// init store logger
 	logCfg := zap.NewProductionConfig()
 	if loggingLevel == "debug" {
 		logCfg.Development = true
 		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	}
+	storeLogger, _ := logCfg.Build()
 
-	storeLogger, err := logCfg.Build()
-	if err != nil {
-		panic(err)
-	}
-	storeLogger.Debug("logger construction succeeded")
-
+	// create distributed K/V store
 	store := storage.New(storage.Config{
 		RaftID:        raftID,
 		RaftDir:       raftDir,
@@ -125,6 +114,11 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		RaftAddress:   raftAddress,
 		Logger:        storeLogger,
 	})
+
+	// Middlewares
+	app.Use(recover.New())
+	app.Use(logger.New())
+	// cache middleware serves cache otherwise Next to proxy
 	app.Use(cache.New(cache.Config{
 		Next:                 middlewares.CacheSkippable,
 		ExpirationGenerator:  middlewares.CustomExpirationGenerator,
@@ -136,7 +130,7 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		Servers: []string{
 			upstream,
 		},
-		Timeout: 5000 * time.Millisecond,
+		Timeout: 3000 * time.Millisecond,
 		ModifyRequest: func(c *fiber.Ctx) error {
 			c.Request().Header.Add("X-Real-IP", c.IP())
 			return nil // Replace anonymous function by Request sanitizer

@@ -1,12 +1,14 @@
 syntax = "proto3";
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/thylong/pkg/backend/proto";
 
 service Cache {
   rpc AddCacheEntry(AddCacheEntryRequest) returns (AddCacheEntryResponse);
   rpc GetCacheEntry(GetCacheEntryRequest) returns (GetCacheEntryResponse);
+  rpc PurgeCache(PurgeCacheRequest) returns (PurgeCacheResponse);
 }
 
 message AddCacheEntryRequest {
@@ -25,4 +27,12 @@ message GetCacheEntryRequest {
 
 message GetCacheEntryResponse {
   string cache_entry = 1;
+}
+
+message PurgeCacheRequest {
+  google.protobuf.Timestamp since = 1;
+}
+
+message PurgeCacheResponse {
+  string status = 1;
 }

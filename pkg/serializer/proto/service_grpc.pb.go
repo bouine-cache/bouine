@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion7
 type CacheClient interface {
 	AddCacheEntry(ctx context.Context, in *AddCacheEntryRequest, opts ...grpc.CallOption) (*AddCacheEntryResponse, error)
 	GetCacheEntry(ctx context.Context, in *GetCacheEntryRequest, opts ...grpc.CallOption) (*GetCacheEntryResponse, error)
+	PurgeCache(ctx context.Context, in *PurgeCacheRequest, opts ...grpc.CallOption) (*PurgeCacheResponse, error)
 }
 
 type cacheClient struct {
@@ -48,12 +49,22 @@ func (c *cacheClient) GetCacheEntry(ctx context.Context, in *GetCacheEntryReques
 	return out, nil
 }
 
+func (c *cacheClient) PurgeCache(ctx context.Context, in *PurgeCacheRequest, opts ...grpc.CallOption) (*PurgeCacheResponse, error) {
+	out := new(PurgeCacheResponse)
+	err := c.cc.Invoke(ctx, "/Cache/PurgeCache", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CacheServer is the server API for Cache service.
 // All implementations must embed UnimplementedCacheServer
 // for forward compatibility
 type CacheServer interface {
 	AddCacheEntry(context.Context, *AddCacheEntryRequest) (*AddCacheEntryResponse, error)
 	GetCacheEntry(context.Context, *GetCacheEntryRequest) (*GetCacheEntryResponse, error)
+	PurgeCache(context.Context, *PurgeCacheRequest) (*PurgeCacheResponse, error)
 	mustEmbedUnimplementedCacheServer()
 }
 
@@ -66,6 +77,9 @@ func (UnimplementedCacheServer) AddCacheEntry(context.Context, *AddCacheEntryReq
 }
 func (UnimplementedCacheServer) GetCacheEntry(context.Context, *GetCacheEntryRequest) (*GetCacheEntryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCacheEntry not implemented")
+}
+func (UnimplementedCacheServer) PurgeCache(context.Context, *PurgeCacheRequest) (*PurgeCacheResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PurgeCache not implemented")
 }
 func (UnimplementedCacheServer) mustEmbedUnimplementedCacheServer() {}
 
@@ -116,6 +130,24 @@ func _Cache_GetCacheEntry_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cache_PurgeCache_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PurgeCacheRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CacheServer).PurgeCache(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/Cache/PurgeCache",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CacheServer).PurgeCache(ctx, req.(*PurgeCacheRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cache_ServiceDesc is the grpc.ServiceDesc for Cache service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -130,6 +162,10 @@ var Cache_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetCacheEntry",
 			Handler:    _Cache_GetCacheEntry_Handler,
+		},
+		{
+			MethodName: "PurgeCache",
+			Handler:    _Cache_PurgeCache_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

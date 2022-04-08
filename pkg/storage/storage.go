@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/Jille/raft-grpc-leader-rpc/leaderhealth"
@@ -268,11 +269,12 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 	}
 
 	if s.IsLeader() {
-		msg, err := proto.Marshal(&pb.AddCacheEntryRequest{
+		any, _ := anypb.New(&pb.AddCacheEntryRequest{
 			CacheKey:        key,
 			CacheEntry:      val,
 			CacheExpiration: durationpb.New(exp),
 		})
+		msg, err := proto.Marshal(any)
 		if err != nil {
 			return fmt.Errorf("cannot Marshal cache entry: %s", err)
 		}
@@ -317,8 +319,6 @@ func (s *Storage) Delete(key string) error {
 
 func (s *Storage) Reset() error {
 	s.logger.Info("new storage.Reset", zap.String("component", "storage"))
-
-	// TODO: handle PURGE (both raft leaders and followers) here
 
 	return s.fsm.BadgerKV.DropAll()
 }

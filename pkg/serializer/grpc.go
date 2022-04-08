@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // SetupgRPCConn setups a gRPC connection listening on given address.
@@ -55,7 +56,8 @@ func (r RPCInterface) AddCacheEntry(ctx context.Context, req *pb.AddCacheEntryRe
 		return nil, status.Errorf(codes.InvalidArgument, "invalid cache entry %v", req.GetCacheEntry())
 	}
 
-	msg, err := proto.Marshal(req)
+	any, _ := anypb.New(req)
+	msg, err := proto.Marshal(any)
 	if err != nil {
 		return nil, rafterrors.MarkUnretriable(err)
 	}
@@ -74,5 +76,24 @@ func (r RPCInterface) AddCacheEntry(ctx context.Context, req *pb.AddCacheEntryRe
 func (r RPCInterface) GetCacheEntry(ctx context.Context, req *pb.GetCacheEntryRequest) (*pb.GetCacheEntryResponse, error) {
 	return &pb.GetCacheEntryResponse{
 		CacheEntry: "",
+	}, nil
+}
+
+// GetCacheEntry get unique cache entry if exists otherwise return a zero-value.
+func (r RPCInterface) PurgeCache(ctx context.Context, req *pb.PurgeCacheRequest) (*pb.PurgeCacheResponse, error) {
+	// TODO: handle PURGE (both raft leaders and followers) here
+	any, _ := anypb.New(req)
+	msg, err := proto.Marshal(any)
+	if err != nil {
+		return nil, rafterrors.MarkUnretriable(err)
+	}
+
+	f := r.Raft.Apply(msg, time.Second)
+	if err := f.Error(); err != nil {
+		return nil, rafterrors.MarkRetriable(err)
+	}
+
+	return &pb.PurgeCacheResponse{
+		Status: "ok",
 	}, nil
 }

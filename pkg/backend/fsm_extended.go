@@ -49,6 +49,7 @@ func (rr *RaftedBadger) applyCacheEntry(req *pb.AddCacheEntryRequest) error {
 
 // applyCacheEntryRequest applies PurgeCacheRequest on FSM.
 func (rr *RaftedBadger) applyPurgeCache() error {
+	// TODO: Prevent Purge to threaten quorum stability
 	err := rr.BadgerKV.DropAll()
 	if err != nil {
 		rr.Logger.Error("applyPurgeCache err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))

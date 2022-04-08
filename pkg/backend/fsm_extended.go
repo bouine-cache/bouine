@@ -25,7 +25,7 @@ import (
 )
 
 // applyCacheEntryRequest applies AddCacheEntryRequest on FSM.
-func (rr *RaftedBadger) applyCacheEntryRequest(req *pb.AddCacheEntryRequest) error {
+func (rr *RaftedBadger) applyCacheEntry(req *pb.AddCacheEntryRequest) error {
 	rr.Logger.Debug("FSM.ApplyCacheEntryRequest", zap.String("component", "raft"),
 		zap.String("key", req.GetCacheKey()),
 		zap.ByteString("val", req.GetCacheEntry()),
@@ -40,7 +40,7 @@ func (rr *RaftedBadger) applyCacheEntryRequest(req *pb.AddCacheEntryRequest) err
 		return tx.SetEntry(entry)
 	})
 	if err != nil {
-		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))
+		rr.Logger.Debug("applyCacheEntry err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))
 		return err
 	}
 	// msg.(*pb.AddCacheEntryRequest).Get
@@ -48,6 +48,21 @@ func (rr *RaftedBadger) applyCacheEntryRequest(req *pb.AddCacheEntryRequest) err
 }
 
 // applyCacheEntryRequest applies PurgeCacheRequest on FSM.
-func (rr *RaftedBadger) applyPurgeCacheRequest() error {
-	return rr.BadgerKV.DropAll()
+func (rr *RaftedBadger) applyPurgeCache() error {
+	err := rr.BadgerKV.DropAll()
+	if err != nil {
+		rr.Logger.Error("applyPurgeCache err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))
+	}
+	return err
+}
+
+// applyInvalidateCacheEntry applies PurgeCacheRequest on FSM.
+func (rr *RaftedBadger) applyInvalidateCacheEntry(req *pb.InvalidateCacheEntryRequest) error {
+	err := rr.BadgerKV.Update(func(tx *badger.Txn) error {
+		return tx.Delete(req.GetCacheKey())
+	})
+	if err != nil {
+		rr.Logger.Error("applyInvalidateCacheEntry err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))
+	}
+	return err
 }

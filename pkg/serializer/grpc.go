@@ -81,7 +81,6 @@ func (r RPCInterface) GetCacheEntry(ctx context.Context, req *pb.GetCacheEntryRe
 
 // GetCacheEntry get unique cache entry if exists otherwise return a zero-value.
 func (r RPCInterface) PurgeCache(ctx context.Context, req *pb.PurgeCacheRequest) (*pb.PurgeCacheResponse, error) {
-	// TODO: handle PURGE (both raft leaders and followers) here
 	any, _ := anypb.New(req)
 	msg, err := proto.Marshal(any)
 	if err != nil {

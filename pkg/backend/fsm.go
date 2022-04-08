@@ -65,9 +65,11 @@ func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 
 	switch msgType := msg.(type) {
 	case *pb.AddCacheEntryRequest:
-		return rr.applyCacheEntryRequest(msg.(*pb.AddCacheEntryRequest))
+		return rr.applyCacheEntry(msg.(*pb.AddCacheEntryRequest))
 	case *pb.PurgeCacheRequest:
-		return rr.applyPurgeCacheRequest()
+		return rr.applyPurgeCache()
+	case *pb.InvalidateCacheEntryRequest:
+		return rr.applyInvalidateCacheEntry(msg.(*pb.InvalidateCacheEntryRequest))
 	default:
 		fmt.Printf("%v\n", msgType)
 		return nil

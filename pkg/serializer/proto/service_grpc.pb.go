@@ -21,6 +21,7 @@ type CacheClient interface {
 	AddCacheEntry(ctx context.Context, in *AddCacheEntryRequest, opts ...grpc.CallOption) (*AddCacheEntryResponse, error)
 	GetCacheEntry(ctx context.Context, in *GetCacheEntryRequest, opts ...grpc.CallOption) (*GetCacheEntryResponse, error)
 	PurgeCache(ctx context.Context, in *PurgeCacheRequest, opts ...grpc.CallOption) (*PurgeCacheResponse, error)
+	InvalidateCacheEntry(ctx context.Context, in *InvalidateCacheEntryRequest, opts ...grpc.CallOption) (*InvalidateCacheEntryResponse, error)
 }
 
 type cacheClient struct {
@@ -58,6 +59,15 @@ func (c *cacheClient) PurgeCache(ctx context.Context, in *PurgeCacheRequest, opt
 	return out, nil
 }
 
+func (c *cacheClient) InvalidateCacheEntry(ctx context.Context, in *InvalidateCacheEntryRequest, opts ...grpc.CallOption) (*InvalidateCacheEntryResponse, error) {
+	out := new(InvalidateCacheEntryResponse)
+	err := c.cc.Invoke(ctx, "/Cache/InvalidateCacheEntry", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CacheServer is the server API for Cache service.
 // All implementations must embed UnimplementedCacheServer
 // for forward compatibility
@@ -65,6 +75,7 @@ type CacheServer interface {
 	AddCacheEntry(context.Context, *AddCacheEntryRequest) (*AddCacheEntryResponse, error)
 	GetCacheEntry(context.Context, *GetCacheEntryRequest) (*GetCacheEntryResponse, error)
 	PurgeCache(context.Context, *PurgeCacheRequest) (*PurgeCacheResponse, error)
+	InvalidateCacheEntry(context.Context, *InvalidateCacheEntryRequest) (*InvalidateCacheEntryResponse, error)
 	mustEmbedUnimplementedCacheServer()
 }
 
@@ -80,6 +91,9 @@ func (UnimplementedCacheServer) GetCacheEntry(context.Context, *GetCacheEntryReq
 }
 func (UnimplementedCacheServer) PurgeCache(context.Context, *PurgeCacheRequest) (*PurgeCacheResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PurgeCache not implemented")
+}
+func (UnimplementedCacheServer) InvalidateCacheEntry(context.Context, *InvalidateCacheEntryRequest) (*InvalidateCacheEntryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method InvalidateCacheEntry not implemented")
 }
 func (UnimplementedCacheServer) mustEmbedUnimplementedCacheServer() {}
 
@@ -148,6 +162,24 @@ func _Cache_PurgeCache_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cache_InvalidateCacheEntry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InvalidateCacheEntryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CacheServer).InvalidateCacheEntry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/Cache/InvalidateCacheEntry",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CacheServer).InvalidateCacheEntry(ctx, req.(*InvalidateCacheEntryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Cache_ServiceDesc is the grpc.ServiceDesc for Cache service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -166,6 +198,10 @@ var Cache_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PurgeCache",
 			Handler:    _Cache_PurgeCache_Handler,
+		},
+		{
+			MethodName: "InvalidateCacheEntry",
+			Handler:    _Cache_InvalidateCacheEntry_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -9,6 +9,8 @@ service Cache {
   rpc AddCacheEntry(AddCacheEntryRequest) returns (AddCacheEntryResponse);
   rpc GetCacheEntry(GetCacheEntryRequest) returns (GetCacheEntryResponse);
   rpc PurgeCache(PurgeCacheRequest) returns (PurgeCacheResponse);
+  rpc InvalidateCacheEntry(InvalidateCacheEntryRequest)
+    returns (InvalidateCacheEntryResponse);
 }
 
 message AddCacheEntryRequest {
@@ -35,4 +37,12 @@ message PurgeCacheRequest {
 
 message PurgeCacheResponse {
   string status = 1;
+}
+
+message InvalidateCacheEntryRequest {
+  bytes cache_key = 1;
+}
+
+message InvalidateCacheEntryResponse {
+  uint64 commit_index = 1;
 }

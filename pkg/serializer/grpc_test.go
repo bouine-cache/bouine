@@ -39,10 +39,8 @@ func TestMain(m *testing.M) {
 	raftDir := "/tmp/bouine/grpc"
 
 	// Delete potential orphans from previous test runs
-	backend.BoltdbFilesCleanup(raftDir)
-	backend.BadgerFilesCleanup(raftDir)
-	defer backend.BoltdbFilesCleanup(raftDir)
-	defer backend.BadgerFilesCleanup(raftDir)
+	backend.TmpDircleanup(raftDir)
+	defer backend.TmpDircleanup(raftDir)
 
 	// Open and reset database
 	db, err := badger.Open(badger.DefaultOptions(raftDir))

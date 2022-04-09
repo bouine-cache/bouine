@@ -31,10 +31,8 @@ import (
 )
 
 func TestRaft_SnapshotRestore(t *testing.T) {
-	BoltdbFilesCleanup("/tmp/bouine/fsm")
-	BadgerFilesCleanup("/tmp/bouine/fsm")
-	defer BoltdbFilesCleanup("/tmp/bouine/fsm")
-	defer BadgerFilesCleanup("/tmp/bouine/fsm")
+	TmpDircleanup("/tmp/bouine/fsm")
+	defer TmpDircleanup("/tmp/bouine/fsm")
 
 	// Open and reset database
 	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine/fsm"))
@@ -65,7 +63,10 @@ func TestRaft_SnapshotRestore(t *testing.T) {
 			CacheEntry:      bytes.NewBufferString(fmt.Sprintf("val%d", i)).Bytes(),
 			CacheExpiration: durationpb.New(10 * time.Second),
 		}
-		any, _ := anypb.New(entry)
+		any, err := anypb.New(entry)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
 
 		msg, err := proto.Marshal(any)
 		if err != nil {

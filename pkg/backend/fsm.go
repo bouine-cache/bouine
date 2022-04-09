@@ -71,7 +71,7 @@ func (rr *RaftedBadger) Apply(l *raft.Log) interface{} {
 	case *pb.InvalidateCacheEntryRequest:
 		return rr.applyInvalidateCacheEntry(msg.(*pb.InvalidateCacheEntryRequest))
 	default:
-		fmt.Printf("%v\n", msgType)
+		rr.Logger.Debug("Apply err", zap.String("component", "raft"), zap.Error(fmt.Errorf("unexpected error type: %s", msgType)))
 		return nil
 	}
 }

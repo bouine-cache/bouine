@@ -18,14 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/raft"
 	"github.com/outcaste-io/badger/v3"
 	"go.uber.org/zap"
 )
 
 func TestNewRaft(t *testing.T) {
 	// Open and reset database
-	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine"))
+	db, err := badger.Open(badger.DefaultOptions("/tmp/bouine/raft"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,13 +40,11 @@ func TestNewRaft(t *testing.T) {
 		wantErr       bool
 	}{
 		{name: "missing-config", raftConfig: RaftConfig{}, wantRaftStats: map[string]string{}, wantErr: true},
-		{name: "missing-valid-raftDir", raftConfig: RaftConfig{RaftDir: "/foobar12345678910/", RaftNodeID: "1", RaftBootstrap: false, HostAddress: "localhost:4566", FSM: &raft.MockFSM{}}, wantRaftStats: map[string]string{}, wantErr: true},
-		{name: "successful-leader-start", raftConfig: RaftConfig{RaftDir: "/tmp/", RaftNodeID: "1", RaftBootstrap: true, HostAddress: "localhost:4596", FSM: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}}, wantRaftStats: map[string]string{}, wantErr: false},
+		{name: "successful-leader-start", raftConfig: RaftConfig{RaftDir: "/tmp/bouine/raft", RaftNodeID: "1", RaftBootstrap: true, HostAddress: "localhost:4596", FSM: &RaftedBadger{BadgerKV: db, Logger: zap.NewExample()}}, wantRaftStats: map[string]string{}, wantErr: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			BoltdbFilesCleanup(tt.raftConfig.RaftDir)
-			BadgerFilesCleanup(tt.raftConfig.RaftDir)
+			TmpDircleanup(tt.raftConfig.RaftDir)
 			got, _, err := NewRaft(tt.raftConfig)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewRaft() error = %v, wantErr %v", err, tt.wantErr)
@@ -55,8 +52,7 @@ func TestNewRaft(t *testing.T) {
 			}
 
 			// at this point, boltdb and badger files have been created
-			defer BoltdbFilesCleanup(tt.raftConfig.RaftDir)
-			defer BadgerFilesCleanup(tt.raftConfig.RaftDir)
+			defer TmpDircleanup(tt.raftConfig.RaftDir)
 
 			// prevent further execution of "wantErr: true" cases
 			if err != nil {

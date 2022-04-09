@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	transport "github.com/Jille/raft-grpc-transport"
@@ -112,36 +113,21 @@ func NewRaft(config RaftConfig) (*raft.Raft, *transport.Manager, error) {
 	return r, tm, nil
 }
 
-// BoltdbFilesCleanup deletes logs/stable/snapshots relicates.
-//
-// NOTE: This is exposed for testing purposes and is not a stable API.
-func BoltdbFilesCleanup(raftDir string) {
-	for _, path := range []string{
-		filepath.Join(raftDir, "logs.dat"),
-		filepath.Join(raftDir, "stable.dat"),
-		filepath.Join(raftDir, "snapshots"),
-	} {
-		logFile, err := filepath.Abs(path)
-		if err != nil {
-			// return errors.New("cannot cleanup /tmp directory from test files")
-			return
-		}
-		os.Remove(logFile)
+// TmpDircleanup deletes local badger & boltdb files.
+// This is an Alias to BoltdbFilesCleanup(raftDir) + BadgerFilesCleanup(raftDir).
+func TmpDircleanup(raftDir string) {
+	absoluteRaftDirPath, _ := filepath.Abs(raftDir)
+	if !strings.HasPrefix(absoluteRaftDirPath, "/tmp") {
+		fmt.Printf("warning: won't clean invalid path %s\n", raftDir)
+		return
 	}
-}
-
-// BadgerFilesCleanup deletes cache store.
-//
-// NOTE: This is exposed for testing purposes and is not a stable API.
-func BadgerFilesCleanup(raftDir string) {
-	for _, path := range []string{
-		filepath.Join(raftDir, "cache_store"),
-	} {
-		logFile, err := filepath.Abs(path)
-		if err != nil {
-			// return errors.New("cannot cleanup /tmp directory from test files")
-			return
-		}
-		os.Remove(logFile)
+	fmt.Printf("deleting %s file\n", absoluteRaftDirPath)
+	err := os.RemoveAll(absoluteRaftDirPath)
+	if err != nil {
+		fmt.Println(err)
+	}
+	err = os.MkdirAll(raftDir, 0770)
+	if err != nil {
+		fmt.Println(err)
 	}
 }

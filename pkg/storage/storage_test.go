@@ -21,8 +21,7 @@ func createStorage(raftDir, raftID, raftAddress string, raftBootstrap bool) *Sto
 
 	fmt.Println("Initialize Raft (single node leader)")
 	// Delete potential orphans from previous test runs
-	backend.BadgerFilesCleanup(raftDir)
-	backend.BoltdbFilesCleanup(raftDir)
+	backend.TmpDircleanup(raftDir)
 
 	return New(Config{
 		RaftID:                 raftID,
@@ -38,8 +37,8 @@ func createStorage(raftDir, raftID, raftAddress string, raftBootstrap bool) *Sto
 func TestMain(m *testing.M) {
 	firstRaftDir := "/tmp/bouine/storage_1"
 	secondRaftDir := "/tmp/bouine/storage_2"
-	defer backend.BadgerFilesCleanup(firstRaftDir)
-	defer backend.BoltdbFilesCleanup(secondRaftDir)
+	defer backend.TmpDircleanup(firstRaftDir)
+	defer backend.TmpDircleanup(secondRaftDir)
 
 	// Create two Raft Nodes cluster
 	firstTestStore = createStorage(firstRaftDir, "node1", "localhost:50061", true)

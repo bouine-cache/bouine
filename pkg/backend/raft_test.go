@@ -19,7 +19,11 @@ import (
 	"time"
 
 	"github.com/outcaste-io/badger/v3"
+	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 func TestNewRaft(t *testing.T) {
@@ -45,17 +49,12 @@ func TestNewRaft(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			TmpDircleanup(tt.raftConfig.RaftDir)
-			got, _, err := NewRaft(tt.raftConfig)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("NewRaft() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			// at this point, boltdb and badger files have been created
 			defer TmpDircleanup(tt.raftConfig.RaftDir)
-
-			// prevent further execution of "wantErr: true" cases
+			got, _, err := NewRaft(tt.raftConfig)
 			if err != nil {
+				if !tt.wantErr {
+					t.Errorf("NewRaft() error = %v, wantErr %v", err, tt.wantErr)
+				}
 				return
 			}
 
@@ -63,15 +62,21 @@ func TestNewRaft(t *testing.T) {
 
 			// Apply should not fail on single node leader
 			// note: we don't test the response as a mocked FSM is used.
-			var timeout time.Duration = 1
+			entry := &pb.AddCacheEntryRequest{
+				CacheKey:        "foo",
+				CacheEntry:      []byte("bar"),
+				CacheExpiration: durationpb.New(10 * time.Second),
+			}
+			any, err := anypb.New(entry)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			msg, err := proto.Marshal(any)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
 
-			defer func() {
-				if r := recover(); r != nil && !tt.wantErr {
-					t.Errorf("NewRaft() unexpected panic = %v", r)
-				}
-			}()
-
-			future := got.Apply([]byte("foobar"), timeout)
+			future := got.Apply(msg, 3*time.Second)
 			if err = future.Error(); err != nil {
 				t.Errorf("NewRaft() unexpected error = %v", err)
 				return

@@ -9,3 +9,6 @@ tailscale.service
 
 # Boltdb
 *.dat
+
+# ignore CLI artifacts
+**bouinectl

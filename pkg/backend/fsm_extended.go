@@ -49,6 +49,7 @@ func (rr *RaftedBadger) applyCacheEntry(req *pb.AddCacheEntryRequest) error {
 
 // applyCacheEntryRequest applies PurgeCacheRequest on FSM.
 func (rr *RaftedBadger) applyPurgeCache() error {
+	rr.Logger.Debug("FSM.applyPurgeCache", zap.String("component", "raft"))
 	// TODO: Prevent Purge to threaten quorum stability
 	err := rr.BadgerKV.DropAll()
 	if err != nil {
@@ -59,9 +60,12 @@ func (rr *RaftedBadger) applyPurgeCache() error {
 
 // applyInvalidateCacheEntry applies PurgeCacheRequest on FSM.
 func (rr *RaftedBadger) applyInvalidateCacheEntry(req *pb.InvalidateCacheEntryRequest) error {
-	err := rr.BadgerKV.Update(func(tx *badger.Txn) error {
-		return tx.Delete(req.GetCacheKey())
-	})
+	rr.Logger.Debug("FSM.applyInvalidateCacheEntry", zap.String("component", "raft"),
+		zap.ByteString("key", req.GetCacheKey()),
+	)
+
+	// req.GetCacheKey() can be either a prefix or a
+	err := rr.BadgerKV.DropPrefixBlocking(req.GetCacheKey())
 	if err != nil {
 		rr.Logger.Error("applyInvalidateCacheEntry err", zap.String("component", "raft"), zap.Error(fmt.Errorf("fail to apply on FSM: %s", err)))
 	}

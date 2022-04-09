@@ -80,6 +80,27 @@ func (r RPCInterface) GetCacheEntry(ctx context.Context, req *pb.GetCacheEntryRe
 }
 
 // GetCacheEntry get unique cache entry if exists otherwise return a zero-value.
+func (r RPCInterface) InvalidateCacheEntry(ctx context.Context, req *pb.InvalidateCacheEntryRequest) (*pb.InvalidateCacheEntryResponse, error) {
+	if len(req.GetCacheKey()) < 1 {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid cache key %v", req.GetCacheKey())
+	}
+	any, _ := anypb.New(req)
+	msg, err := proto.Marshal(any)
+	if err != nil {
+		return nil, rafterrors.MarkUnretriable(err)
+	}
+
+	f := r.Raft.Apply(msg, time.Second)
+	if err := f.Error(); err != nil {
+		return nil, rafterrors.MarkRetriable(err)
+	}
+
+	return &pb.InvalidateCacheEntryResponse{
+		CommitIndex: f.Index(),
+	}, nil
+}
+
+// GetCacheEntry get unique cache entry if exists otherwise return a zero-value.
 func (r RPCInterface) PurgeCache(ctx context.Context, req *pb.PurgeCacheRequest) (*pb.PurgeCacheResponse, error) {
 	any, _ := anypb.New(req)
 	msg, err := proto.Marshal(any)

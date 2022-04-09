@@ -8,7 +8,7 @@ pre-commit-hooks-install: ## Install the pre-commit hooks
 	pre-commit install
 
 .PHONY: build
-build: build-binary build-docker-image build-packer-images ## Build Go binaries, Packer images & Docker image
+build: build-binary build-cli build-docker-image build-packer-images ## Build Go binaries, Packer images & Docker image
 
 .PHONY: build-packer-images
 build-packer-images: build-client-vm-image build-server-vm-image ## Build k6 client & bouine server instance base images with Packer
@@ -23,7 +23,11 @@ build-server-vm-image: ## Build bouine server instance base image with Packer
 
 .PHONY: build-binary
 build-binary: ## Build Go binary for present architecture
-	GOOS=linux GOARCH=amd64 go build -o build/server/files/$(NAME) ./api
+	GOOS=linux GOARCH=amd64 go build -o build/server/files/$(NAME) ./app
+
+.PHONY: build-binary
+build-cli: ## Build bouine CLI to manipulate bouine clusters
+	go build -o bouinectl ./cmd/cli
 
 .PHONY: build-docker-image
 build-docker-image: ## Build Docker image

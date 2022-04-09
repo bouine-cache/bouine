@@ -39,7 +39,7 @@ services:
     networks:
       appNetwork:
         ipv4_address: 172.24.2.1
-    entrypoint: ["/app", "--raft_bootstrap", "--raft_id=nodeA", "--address=172.24.2.1:50051", "--logging_level=debug"]
+    entrypoint: ["/app", "server", "--raft_bootstrap=true", "--raft_id=nodeA", "--raft_address=172.24.2.1:50051", "--logging_level=debug"]
   bouine2:
     build:
       context: .
@@ -56,7 +56,7 @@ services:
     networks:
       appNetwork:
         ipv4_address: 172.24.2.2
-    entrypoint: ["/app", "--raft_id=nodeB", "--address=172.24.2.2:50052", "--logging_level=debug"]
+    entrypoint: ["/app", "server", "--raft_id=nodeB", "--raft_address=172.24.2.2:50052", "--logging_level=debug"]
   bouine3:
     build:
       context: .
@@ -73,7 +73,7 @@ services:
     networks:
       appNetwork:
         ipv4_address: 172.24.2.3
-    entrypoint: ["/app", "--raft_id=nodeC", "--address=172.24.2.3:50053", "--logging_level=debug"]
+    entrypoint: ["/app", "server", "--raft_id=nodeC", "--raft_address=172.24.2.3:50053", "--logging_level=debug"]
   test-client:
     image: loadimpact/k6
     depends_on:

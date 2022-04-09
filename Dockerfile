@@ -1,4 +1,4 @@
- FROM golang:1.17 as builder
+FROM golang:1.17 as builder
 
 WORKDIR /usr/src/app
 
@@ -8,7 +8,7 @@ RUN go mod download && go mod verify
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -o /go/bin/app ./api
+RUN CGO_ENABLED=0 go build -o /go/bin/app ./cmd
 RUN mkdir /data
 RUN touch /data/logs.dat
 
@@ -19,4 +19,4 @@ COPY --from=builder --chown=nonroot:nonroot /data /data
 
 EXPOSE 8080/tcp
 
-CMD ["/app"]
+CMD ["/app", "server"]

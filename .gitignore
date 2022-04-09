@@ -26,3 +26,6 @@ build/server/files/bouine
 
 # Boltdb
 *.dat
+
+# ignore CLI artifacts
+**bouinectl

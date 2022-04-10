@@ -35,7 +35,7 @@ require (
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/outcaste-io/ristretto v0.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/spf13/cobra v1.4.0 // indirect
+	github.com/spf13/cobra v1.4.0
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.opencensus.io v0.22.5 // indirect
 	go.uber.org/atomic v1.9.0 // indirect

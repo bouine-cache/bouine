@@ -16,6 +16,7 @@
 package backend
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,6 +72,10 @@ func overrideDefaultConfig(raftConfig *raft.Config, customConfig *RaftConfig) {
 func NewRaft(config RaftConfig) (*raft.Raft, *transport.Manager, error) {
 	c := raft.DefaultConfig()
 	overrideDefaultConfig(c, &config)
+
+	if len(config.RaftDir) == 0 {
+		return nil, nil, errors.New(`raftDir cannot be empty`)
+	}
 
 	ldb, err := boltdb.NewBoltStore(filepath.Join(config.RaftDir, "logs.dat"))
 	if err != nil {

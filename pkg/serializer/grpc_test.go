@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var client pb.CacheClient
@@ -115,6 +116,63 @@ func TestRPCInterface_AddCacheEntry(t *testing.T) {
 
 			if commitIndex := res.GetCommitIndex(); commitIndex != tt.wantCommitIndex {
 				t.Errorf("AddCacheEntry() commitIndex = %v, wantCommitIndex %v", commitIndex, tt.wantCommitIndex)
+				return
+			}
+		})
+	}
+}
+
+func TestRPCInterface_InvalidateCacheEntry(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name            string
+		cacheEntry      *pb.InvalidateCacheEntryRequest
+		wantCommitIndex uint64
+		wantErr         bool
+	}{
+		{name: "invalid request with empty cache param", cacheEntry: &pb.InvalidateCacheEntryRequest{CacheKey: []byte("")}, wantErr: true, wantCommitIndex: 0},
+		{name: "invalid request with empty cache key", cacheEntry: &pb.InvalidateCacheEntryRequest{CacheKey: []byte("")}, wantErr: true, wantCommitIndex: 0},
+		{name: "valid request", cacheEntry: &pb.InvalidateCacheEntryRequest{CacheKey: []byte("foo")}, wantErr: false, wantCommitIndex: 4}, // The commitIndex is 4 as tests are not being run in parallel and/or on different FSMs.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := client.InvalidateCacheEntry(ctx, tt.cacheEntry)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("AddCacheEntry() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if commitIndex := res.GetCommitIndex(); commitIndex != tt.wantCommitIndex {
+				t.Errorf("AddCacheEntry() commitIndex = %v, wantCommitIndex %v", commitIndex, tt.wantCommitIndex)
+				return
+			}
+		})
+	}
+}
+
+func TestRPCInterface_PurgeCache(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		cacheEntry *pb.PurgeCacheRequest
+		wantStatus string
+		wantErr    bool
+	}{
+		// {name: "invalid request with Since in the future", cacheEntry: &pb.PurgeCacheRequest{Since: timestamppb.New(time.Now().Add(10*time.Hour))}, wantErr: true, wantStatus: "ok"},
+		{name: "valid request", cacheEntry: &pb.PurgeCacheRequest{Since: timestamppb.New(time.Time{})}, wantErr: false, wantStatus: "ok"}, // The commitIndex is 4 as tests are not being run in parallel and/or on different FSMs.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := client.PurgeCache(ctx, tt.cacheEntry)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("AddCacheEntry() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if status := res.GetStatus(); status != tt.wantStatus {
+				t.Errorf("AddCacheEntry() commitIndex = %v, wantCommitIndex %v", status, tt.wantStatus)
 				return
 			}
 		})

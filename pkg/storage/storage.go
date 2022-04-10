@@ -329,7 +329,7 @@ func (s *Storage) Close() error {
 	// Stop gRPC server
 	s.s.GracefulStop()
 
-	// Leave Raft quorum
+	// Leave Raft cluster
 	s.r.Shutdown()
 
 	// FIXME: times out.

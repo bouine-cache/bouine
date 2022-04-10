@@ -39,31 +39,30 @@ var (
 )
 
 func init() {
-	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(startCmd)
 
-	serverCmd.Flags().BoolVarP(&prod, "prod", "", false, "Enable prefork & set logLevel to INFO")
-	serverCmd.Flags().BoolVarP(&raftBootstrap, "raft_bootstrap", "b", false, "Whether to bootstrap the Raft cluster")
-	serverCmd.Flags().StringVarP(&raftAddress, "raft_address", "a", "0.0.0.0:50051", "TCP host+port for this node")
-	serverCmd.Flags().StringVarP(&port, "port", "p", ":8080", "Port to listen on")
-	serverCmd.Flags().StringVarP(&loggingLevel, "logging_level", "l", "info", "The minimum enabled logging level")
-	serverCmd.Flags().StringVarP(&raftDir, "raft_dir", "d", "/tmp/bouine", "Raft data dir")
-	serverCmd.Flags().StringVarP(&raftID, "raft_id", "i", ":8080", "Node id used by Raft")
-	serverCmd.Flags().StringVarP(&upstream, "upstream", "u", "http://mockingjay:8084", "Proxied upstream host")
-	serverCmd.Flags().Int64VarP(&httpTimeout, "timeout", "t", 3000, "HTTP request timeout in milliseconds")
+	startCmd.Flags().BoolVarP(&prod, "prod", "", false, "Enable prefork & set logLevel to INFO")
+	startCmd.Flags().BoolVarP(&raftBootstrap, "raft_bootstrap", "b", false, "Whether to bootstrap the Raft cluster")
+	startCmd.Flags().StringVarP(&raftAddress, "raft_address", "a", "0.0.0.0:50051", "TCP host+port for this node")
+	startCmd.Flags().StringVarP(&port, "port", "p", ":8080", "Port to listen on")
+	startCmd.Flags().StringVarP(&loggingLevel, "logging_level", "l", "info", "The minimum enabled logging level")
+	startCmd.Flags().StringVarP(&raftDir, "raft_dir", "d", "/tmp/bouine", "Raft data dir")
+	startCmd.Flags().StringVarP(&raftID, "raft_id", "i", ":8080", "Node id used by Raft")
+	startCmd.Flags().StringVarP(&upstream, "upstream", "u", "http://mockingjay:8084", "Proxied upstream host")
+	startCmd.Flags().Int64VarP(&httpTimeout, "timeout", "t", 3000, "HTTP request timeout in milliseconds")
 }
 
-// serverCmd represents the server command.
-var serverCmd = &cobra.Command{
-	Use:   "server",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start a bouine instance",
+	Long: `Start a bouine instance.
+	The instance can either be a single standalone node or join an Bouine cluster.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	- To use as a single cluster, set the raft_bootstrap to true.
+	- To start a leader node in a new cluster, set the raft_bootstrap to true.
+	- To start a follower node in a new cluster, starts the node and use bouinectl to add the instance to any cluster.
+	`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("server called")
 		flag.Parse()
 
 		// Create fiber app

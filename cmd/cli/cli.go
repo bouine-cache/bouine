@@ -32,7 +32,7 @@ var purgeCmd = &cobra.Command{
 	Use:   "purge",
 	Short: "purge a cluster cache",
 	Long: `Purge a cluster cache entirely.
-	This will be applied on the FSM of the leader as well as any Candidate and Followers of the quorum.
+	This will be applied on the FSM of the leader as well as any Candidate and Followers of the cluster.
 
 	warning: this generates a heavy activity on the LSM trees of every bouine nodes.`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -59,7 +59,7 @@ var invalidateCmd = &cobra.Command{
 	Use:   "invalidate",
 	Short: "invalidate a cluster cache",
 	Long: `Invalidate specific key from a cluster cache.
-	This will be applied on the FSM of the leader as well as any Candidate and Followers of the quorum.`,
+	This will be applied on the FSM of the leader as well as any Candidate and Followers of the cluster.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		var conn *grpc.ClientConn
 		conn, err := grpc.Dial(raftAddress, grpc.WithInsecure())

@@ -45,7 +45,7 @@ func Test_Proxy_WithValidUpstream(t *testing.T) {
 
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
 
-	app.Use(proxy.Balancer(proxy.Config{Servers: []string{addr}}))
+	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = addr
@@ -63,7 +63,7 @@ func Test_Proxy_WithoutValidUpstream(t *testing.T) {
 		}
 	}()
 	app := fiber.New()
-	app.Use(proxy.Balancer(proxy.Config{Servers: []string{}}))
+	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{}}))
 }
 
 func Test_Proxy_SlowUpstream(t *testing.T) {
@@ -75,7 +75,7 @@ func Test_Proxy_SlowUpstream(t *testing.T) {
 	}, t)
 
 	app := fiber.New()
-	app.Use(proxy.Balancer(proxy.Config{
+	app.Use(ProxyMiddleware(proxy.Config{
 		Servers: []string{addr},
 		Timeout: 3 * time.Second,
 	}))
@@ -98,7 +98,7 @@ func Test_Proxy_With_Timeout(t *testing.T) {
 	}, t)
 
 	app := fiber.New()
-	app.Use(proxy.Balancer(proxy.Config{
+	app.Use(ProxyMiddleware(proxy.Config{
 		Servers: []string{addr},
 		Timeout: 100 * time.Millisecond,
 	}))
@@ -122,14 +122,14 @@ func Test_Proxy_Buffer_Size_Response(t *testing.T) {
 	}, t)
 
 	app := fiber.New()
-	app.Use(proxy.Balancer(proxy.Config{Servers: []string{addr}}))
+	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	resp, err := app.Test(httptest.NewRequest("GET", "/", nil))
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, fiber.StatusInternalServerError, resp.StatusCode)
 
 	app = fiber.New()
-	app.Use(proxy.Balancer(proxy.Config{
+	app.Use(ProxyMiddleware(proxy.Config{
 		Servers:        []string{addr},
 		ReadBufferSize: 1024 * 8,
 	}))

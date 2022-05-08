@@ -1,6 +1,32 @@
 package middlewares
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"net"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/utils"
+)
+
+func createUpstreamBackendServer(handler fiber.Handler, t *testing.T) (*fiber.App, string) {
+	t.Helper()
+
+	target := fiber.New(fiber.Config{DisableStartupMessage: true})
+	target.Get("/", handler)
+
+	ln, err := net.Listen(fiber.NetworkTCP4, "127.0.0.1:0")
+	utils.AssertEqual(t, nil, err)
+
+	go func() {
+		utils.AssertEqual(t, nil, target.Listener(ln))
+	}()
+
+	time.Sleep(2 * time.Second)
+	addr := ln.Addr().String()
+
+	return target, addr
+}
 
 // nostoreCacheControlHandler returns a 200 with 'Cache-Control: no-store'.
 func nostoreCacheControlHandler(c *fiber.Ctx) error {

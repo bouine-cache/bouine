@@ -2,7 +2,6 @@ package middlewares
 
 import (
 	"io/ioutil"
-	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -12,25 +11,6 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/utils"
 )
-
-func createUpstreamBackendServer(handler fiber.Handler, t *testing.T) (*fiber.App, string) {
-	t.Helper()
-
-	target := fiber.New(fiber.Config{DisableStartupMessage: true})
-	target.Get("/", handler)
-
-	ln, err := net.Listen(fiber.NetworkTCP4, "127.0.0.1:0")
-	utils.AssertEqual(t, nil, err)
-
-	go func() {
-		utils.AssertEqual(t, nil, target.Listener(ln))
-	}()
-
-	time.Sleep(2 * time.Second)
-	addr := ln.Addr().String()
-
-	return target, addr
-}
 
 func Test_Proxy_WithValidUpstream(t *testing.T) {
 	t.Parallel()

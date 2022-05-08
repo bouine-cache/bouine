@@ -24,9 +24,14 @@ header:
     - 'scripts/wait-for-it.sh'
     - 'LICENSE'
     - 'NOTICE'
-    - 'internal/backend/proto/service.proto'
-    - 'internal/backend/proto/service.pb.go'
-    - 'internal/backend/proto/service_grpc.pb.go'
+    - 'pkg/serializer/proto/service.proto'
+    - 'pkg/serializer/proto/service.pb.go'
+    - 'pkg/serializer/proto/service_grpc.pb.go'
+    - 'third_party/nginx-load-balancer/nginx.conf'
+    - 'cmd/cli/cli.go'
+    - 'cmd/cli/root.go'
+    - 'cmd/root.go'
+    - 'cmd/server.go'
 
   comment: on-failure
 

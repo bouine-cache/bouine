@@ -142,6 +142,7 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		Storage:              store,
 		StoreResponseHeaders: true,
 	}))
+	app.Use(middlewares.SmartHealthcheckMiddleware())
 	// proxyMiddleware forwards requests to upstream
 	app.Use(middlewares.ProxyMiddleware(proxy.Config{
 		Servers: []string{

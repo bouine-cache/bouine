@@ -81,21 +81,22 @@ const classicHealthcheckKind = 2
 // SmartHealthcheckMiddleware returns a bouine smarthealthcheck middleware.
 // This middleware sends healthchecks to the upstream only when the given period
 // elapsed without any requests being proxied.
-func SmartHealthcheckMiddleware(config Config) fiber.Handler {
-	config.HealthcheckKind = smartHealthcheckKind
-	return healthcheck(config)
+func SmartHealthcheckMiddleware(config ...Config) fiber.Handler {
+	cfg := defaultConfig(config...)
+	cfg.HealthcheckKind = smartHealthcheckKind
+	return healthcheck(cfg)
 }
 
 // ClassicHealthcheckMiddleware returns a bouine ClassicHealthcheck middleware.
 // This healthcheck middlewares sends periodically a request to a given
 // upstream healthcheck endpoint.
-func ClassicHealthcheckMiddleware(config Config) fiber.Handler {
-	config.HealthcheckKind = classicHealthcheckKind
-	return healthcheck(config)
+func ClassicHealthcheckMiddleware(config ...Config) fiber.Handler {
+	cfg := defaultConfig(config...)
+	cfg.HealthcheckKind = classicHealthcheckKind
+	return healthcheck(cfg)
 }
 
-func healthcheck(config ...Config) fiber.Handler {
-	cfg := defaultConfig(config...)
+func healthcheck(cfg Config) fiber.Handler {
 	upstreamC := make(chan string)
 
 	go func() {

@@ -249,7 +249,8 @@ func (s *Storage) Get(key string) ([]byte, error) {
 }
 
 func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
-	s.logger.Debug("new storage.Set", zap.String("component", "storage"),
+	s.logger.Debug("new storage.Set",
+		zap.String("component", "storage"),
 		zap.String("key", key),
 		zap.ByteString("val", val),
 		zap.Duration("exp", exp),
@@ -304,7 +305,8 @@ func (s *Storage) Set(key string, val []byte, exp time.Duration) error {
 }
 
 func (s *Storage) Delete(key string) error {
-	s.logger.Debug("new storage.Delete", zap.String("component", "storage"),
+	s.logger.Debug("new storage.Delete",
+		zap.String("component", "storage"),
 		zap.String("key", key),
 	)
 
@@ -355,13 +357,16 @@ func (s *Storage) gc() {
 // TODO: migrate to persistent connection.
 func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) error {
 	s.logger.Debug("new forwardToLeader",
-		zap.String("component", "storage"), zap.Any("current leader", s.r.Leader()), zap.String("raft_key", key),
+		zap.String("component", "storage"),
+		zap.Any("current leader", s.r.Leader()),
+		zap.String("raft_key", key),
 	)
 
 	// s.r.
 	conn, err := grpc.Dial(string(s.r.Leader()), grpc.WithInsecure())
 	if err != nil {
-		s.logger.Debug("forwardToLeader err", zap.String("component", "storage"),
+		s.logger.Debug("forwardToLeader err",
+			zap.String("component", "storage"),
 			zap.String("raft_key", key),
 			zap.Any("state", s.r.State()),
 			zap.Error(fmt.Errorf("failed to connect to leader: %s", err)),

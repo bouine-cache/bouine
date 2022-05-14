@@ -135,15 +135,16 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 	// Middlewares
 	app.Use(recover.New())
 	app.Use(logger.New())
-	// cache middleware serves cache otherwise Next to proxy
+	// cache middleware with distributed K/V store
 	app.Use(cache.New(cache.Config{
 		Next:                 middlewares.CacheSkippable,
 		ExpirationGenerator:  middlewares.CustomExpirationGenerator,
 		Storage:              store,
 		StoreResponseHeaders: true,
 	}))
+	// active healthcheck middleware
 	app.Use(middlewares.SmartHealthcheckMiddleware())
-	// proxyMiddleware forwards requests to upstream
+	// proxy request to upstream
 	app.Use(middlewares.ProxyMiddleware(proxy.Config{
 		Servers: []string{
 			upstream,

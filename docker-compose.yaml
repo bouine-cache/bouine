@@ -75,7 +75,7 @@ services:
         ipv4_address: 172.24.2.3
     entrypoint: ["/app", "start", "--raft_id=nodeC", "--raft_address=172.24.2.3:50053", "--logging_level=debug"]
   test-client:
-    image: loadimpact/k6
+    image: loadimpact/k6:0.37.0
     depends_on:
       - nginx
       - influxdb

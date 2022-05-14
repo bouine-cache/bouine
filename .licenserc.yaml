@@ -11,6 +11,7 @@ header:
     - 'docker-compose.yaml'
     - '.golangci.yaml'
     - '.licenserc.yaml'
+    - '.pre-commit-config.yaml'
     - '.envrc'
     - 'vendor'
     - 'Makefile'

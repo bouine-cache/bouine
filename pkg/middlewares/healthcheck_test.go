@@ -88,6 +88,7 @@ func Test_Healthcheck_Classical_Unhealthy(t *testing.T) {
 	resp, err = app.Test(httptest.NewRequest("GET", "/", nil), -1)
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, fiber.StatusServiceUnavailable, resp.StatusCode)
+	utils.AssertEqual(t, "unavailable", resp.Header.Get("Cache-Upstream-Status"))
 }
 
 func Test_Healthcheck_Smart_Healthy(t *testing.T) {
@@ -147,6 +148,7 @@ func Test_Healthcheck_SingleUpstream_Smart_Unhealthy(t *testing.T) {
 	resp, err = app.Test(httptest.NewRequest("GET", "/", nil), -1)
 	utils.AssertEqual(t, nil, err)
 	utils.AssertEqual(t, fiber.StatusServiceUnavailable, resp.StatusCode)
+	utils.AssertEqual(t, "unavailable", resp.Header.Get("Cache-Upstream-Status"))
 }
 
 func Test_Healthcheck_MultipleUpstreams(t *testing.T) {

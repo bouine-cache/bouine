@@ -142,7 +142,7 @@ func healthcheck(cfg Config) fiber.Handler {
 		} else if up := cfg.Upstreams.Get(host); !up.Healthy {
 			// Prevent request to saturate unhealthy upstream
 			_ = c.SendStatus(503)
-			c.Response().Header.Add("Upstream-Status", "unavailable")
+			c.Response().Header.Add("Cache-Upstream-Status", "unavailable")
 			return nil
 		}
 

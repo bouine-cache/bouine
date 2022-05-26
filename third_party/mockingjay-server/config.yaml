@@ -13,6 +13,15 @@
 # limitations under the License.
 #
 ---
+ - name: Healthz (healthcheck) endpoint
+   request:
+     uri: /healthz
+     method: GET
+   response:
+     code: 200
+     body: '{"message": "Ernest is in really good shape"}'
+     headers:
+       content-type: application/json
  - name: Valid JSON endpoint
    request:
      uri: /ernest_get_200

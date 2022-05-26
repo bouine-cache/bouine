@@ -39,6 +39,7 @@ import (
 	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -363,7 +364,7 @@ func (s *Storage) forwardToLeader(key string, val []byte, exp time.Duration) err
 	)
 
 	// s.r.
-	conn, err := grpc.Dial(string(s.r.Leader()), grpc.WithInsecure())
+	conn, err := grpc.Dial(string(s.r.Leader()), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		s.logger.Debug("forwardToLeader err",
 			zap.String("component", "storage"),

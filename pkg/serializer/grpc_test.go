@@ -29,6 +29,7 @@ import (
 	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -63,7 +64,7 @@ func TestMain(m *testing.M) {
 
 	ctx := context.Background()
 	listener := bufconn.Listen(1024 * 1024)
-	conn, err := grpc.DialContext(ctx, "", grpc.WithInsecure(), grpc.WithContextDialer(dialer(listener, r)))
+	conn, err := grpc.DialContext(ctx, "", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(dialer(listener, r)))
 	if err != nil {
 		log.Fatal(err)
 	}

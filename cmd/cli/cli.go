@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -37,7 +38,7 @@ var purgeCmd = &cobra.Command{
 	warning: this generates a heavy activity on the LSM trees of every bouine nodes.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		var conn *grpc.ClientConn
-		conn, err := grpc.Dial(raftAddress, grpc.WithInsecure())
+		conn, err := grpc.Dial(raftAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Fatalf("did not connect: %s", err)
 		}
@@ -62,7 +63,7 @@ var invalidateCmd = &cobra.Command{
 	This will be applied on the FSM of the leader as well as any Candidate and Followers of the cluster.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		var conn *grpc.ClientConn
-		conn, err := grpc.Dial(raftAddress, grpc.WithInsecure())
+		conn, err := grpc.Dial(raftAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Fatalf("did not connect: %s", err)
 		}

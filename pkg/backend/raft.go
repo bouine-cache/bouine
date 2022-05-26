@@ -27,6 +27,7 @@ import (
 	"github.com/hashicorp/raft"
 	boltdb "github.com/hashicorp/raft-boltdb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // RaftConfig holds the configuration to create a Raft cluster.
@@ -92,7 +93,7 @@ func NewRaft(config RaftConfig) (*raft.Raft, *transport.Manager, error) {
 		return nil, nil, fmt.Errorf(`cannot create snapshot store (%q, ...): %v`, config.RaftDir, err)
 	}
 
-	tm := transport.New(raft.ServerAddress(config.HostAddress), []grpc.DialOption{grpc.WithInsecure()})
+	tm := transport.New(raft.ServerAddress(config.HostAddress), []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())})
 
 	r, err := raft.NewRaft(c, config.FSM, ldb, sdb, fss, tm.Transport())
 	if err != nil {

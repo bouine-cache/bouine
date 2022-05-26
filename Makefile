@@ -1,4 +1,4 @@
-.DEFAULT_GOAL := help
+ .DEFAULT_GOAL := help
 
 NAME = bouine
 GOLANGCI_LINT_TIMEOUT ?= 1m
@@ -8,22 +8,11 @@ pre-commit-hooks-install: ## Install the pre-commit hooks
 	pre-commit install
 
 .PHONY: build
-build: build-binary build-cli build-docker-image build-packer-images ## Build Go binaries, Packer images & Docker image
-
-.PHONY: build-packer-images
-build-packer-images: build-client-vm-image build-server-vm-image ## Build k6 client & bouine server instance base images with Packer
-
-.PHONY: build-client-vm-image
-build-client-vm-image: ## Build k6 client instance base image with Packer
-	packer build -var "project_id=$(SCW_DEFAULT_PROJECT_ID)" -var="access_key=$(SCW_ACCESS_KEY)" -var="secret_key=$(SCW_SECRET_KEY)" build/client/packer.json
-
-.PHONY: build-server-vm-image
-build-server-vm-image: ## Build bouine server instance base image with Packer
-	packer build -var "project_id=$(SCW_DEFAULT_PROJECT_ID)" -var="access_key=$(SCW_ACCESS_KEY)" -var="secret_key=$(SCW_SECRET_KEY)" build/server/packer.json
+build: build-binary build-cli build-docker-image ## Build Go binaries & Docker image
 
 .PHONY: build-binary
 build-binary: ## Build Go binary for present architecture
-	GOOS=linux GOARCH=amd64 go build -o build/server/files/$(NAME) ./app
+	GOOS=linux GOARCH=amd64 go build -o build/server/files/$(NAME) ./cmd
 
 .PHONY: build-binary
 build-cli: ## Build bouine CLI to manipulate bouine clusters

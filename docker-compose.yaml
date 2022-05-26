@@ -78,40 +78,12 @@ services:
     image: loadimpact/k6:0.37.0
     depends_on:
       - nginx
-      - influxdb
-      - grafana
     links:
       - nginx
-      - influxdb
     networks:
       appNetwork: {}
     volumes:
       - ./third_party/k6/scenarios:/scenarios
-      - ./third_party/k6/scripts:/influxdb_startup
-    entrypoint: ["ash", "/influxdb_startup/entrypoint.sh", "-h", "influxdb", "-p", "8086", "-t", "5", "--", "k6"] # Tricks to wait for influxdb to be up (without custom Docker image)
-  influxdb:
-    image: influxdb:1.7.11
-    depends_on:
-      - bouine1
-    ports:
-      - 8086:8086
-    networks:
-      appNetwork: {}
-  grafana:
-    image: grafana/grafana
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    depends_on:
-      - influxdb
-    links:
-      - influxdb
-    ports:
-      - 3000:3000
-    networks:
-      appNetwork: {}
-    volumes:
-      - ./build/client/files/grafana:/etc/grafana
-      - ./build/client/files/grafana/dashboards:/var/lib/grafana/dashboards
   mockingjay: # Mock server
     image: quii/mockingjay-server:1.12.0
     ports:

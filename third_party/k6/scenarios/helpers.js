@@ -75,7 +75,7 @@ export function postValid(baseURL, cached, expectedStatus, testName, customSuffi
 }
 
 export function deleteValid(baseURL, cached, expectedStatus, testName, customSuffix='') {
-    const res = http.delete(`${baseURL}/ernest_delete_${expectedStatus}${customSuffix}`, { redirects: 0 });
+    const res = http.del(`${baseURL}/ernest_delete_${expectedStatus}${customSuffix}`, null, { redirects: 0 });
 
     check(res, {
         [`${testName} - ${expectedStatus} status is expected`]: (r) => r.status === expectedStatus,

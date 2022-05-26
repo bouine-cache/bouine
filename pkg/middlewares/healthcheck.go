@@ -139,6 +139,9 @@ func healthcheck(cfg Config) fiber.Handler {
 			)
 
 			upstreamC <- host
+
+			// Continue down the middleware chain, return err to Fiber if exist
+			return c.Next()
 		} else if up := cfg.Upstreams.Get(host); !up.Healthy {
 			// Prevent request to saturate unhealthy upstream
 			_ = c.SendStatus(503)
@@ -148,10 +151,12 @@ func healthcheck(cfg Config) fiber.Handler {
 
 		// smartMode: Reset upstream ticker
 		if cfg.HealthcheckKind == smartHealthcheckKind {
+			cfg.Logger.Debug("Resetting ticker",
+				zap.String("component", "healthcheck-middleware"),
+				zap.String("host", host),
+			)
 			cfg.Upstreams.Get(host).Ticker.Reset(cfg.Period)
 		}
-
-		// Continue down the middleware chain, return err to Fiber if exist
 		return c.Next()
 	}
 }

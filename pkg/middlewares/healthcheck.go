@@ -27,7 +27,7 @@ import (
 type Config struct {
 	Period          time.Duration
 	Logger          *zap.Logger
-	Upstreams       *Upstreams
+	Upstreams       []string
 	HealthcheckKind int
 	Client          *fasthttp.Client
 }
@@ -69,7 +69,7 @@ var (
 	configDefault = Config{
 		Period:          10 * time.Second,
 		Logger:          zap.NewExample(),
-		Upstreams:       &Upstreams{entries: make(map[string]*upstream)},
+		Upstreams:       []string{},
 		HealthcheckKind: smartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}
@@ -97,52 +97,46 @@ func ClassicHealthcheckMiddleware(config ...Config) fiber.Handler {
 }
 
 func healthcheck(cfg Config) fiber.Handler {
-	upstreamC := make(chan string)
+	upstreams := &Upstreams{entries: make(map[string]*upstream)}
 
-	go func() {
-		for host := range upstreamC {
-			cfg.Upstreams.Set(
-				host, upstream{Ticker: time.NewTicker(cfg.Period), Healthy: true},
-			)
-
-			// Start a goroutine waiting for upstream ticks
-			go func(host string) {
-				for range cfg.Upstreams.Get(host).Ticker.C {
-					// send healthcheck
-					status, err := checkHealth(&cfg, host)
-					if err != nil {
-						cfg.Logger.Error("healthcheck err",
-							zap.String("component", "healthcheck-middleware"),
-							zap.String("upstream", host),
-							zap.Error(err),
-						)
-					}
-
-					// Change upstream health status
-					entry := cfg.Upstreams.Get(host)
-					entry.Healthy = status
-					cfg.Upstreams.Set(host, *entry)
+	// Register upstreams
+	for _, host := range cfg.Upstreams {
+		cfg.Logger.Debug("New upstream",
+			zap.String("component", "healthcheck-middleware"),
+			zap.String("host", host),
+		)
+		upstreams.Set(
+			host, upstream{Ticker: time.NewTicker(cfg.Period), Healthy: true},
+		)
+		go func(host string) {
+			for range upstreams.Get(host).Ticker.C {
+				// send healthcheck
+				status, err := checkHealth(&cfg, host)
+				if err != nil {
+					cfg.Logger.Error("healthcheck err",
+						zap.String("component", "healthcheck-middleware"),
+						zap.String("upstream", host),
+						zap.Error(err),
+					)
 				}
-			}(host)
-		}
-	}()
+
+				// Change upstream health status
+				entry := upstreams.Get(host)
+				entry.Healthy = status
+				upstreams.Set(host, *entry)
+				cfg.Logger.Info("healthcheck health",
+					zap.String("component", "healthcheck-middleware"),
+					zap.String("upstream", host),
+					zap.Bool("healthy", status),
+				)
+			}
+		}(host)
+	}
 
 	// Return new handler
 	return func(c *fiber.Ctx) error {
-		host := string(c.Request().Host())
-
-		// Register potential new upstream
-		if !cfg.Upstreams.Contains(host) {
-			cfg.Logger.Debug("New upstream",
-				zap.String("component", "healthcheck-middleware"),
-				zap.String("host", host),
-			)
-
-			upstreamC <- host
-
-			// Continue down the middleware chain, return err to Fiber if exist
-			return c.Next()
-		} else if up := cfg.Upstreams.Get(host); !up.Healthy {
+		// TODO: support multiple upstreams again
+		if !upstreams.entries[cfg.Upstreams[0]].Healthy {
 			// Prevent request to saturate unhealthy upstream
 			_ = c.SendStatus(503)
 			c.Response().Header.Add("Cache-Upstream-Status", "unavailable")
@@ -153,9 +147,9 @@ func healthcheck(cfg Config) fiber.Handler {
 		if cfg.HealthcheckKind == smartHealthcheckKind {
 			cfg.Logger.Debug("Resetting ticker",
 				zap.String("component", "healthcheck-middleware"),
-				zap.String("host", host),
+				zap.String("host", cfg.Upstreams[0]),
 			)
-			cfg.Upstreams.Get(host).Ticker.Reset(cfg.Period)
+			upstreams.Get(cfg.Upstreams[0]).Ticker.Reset(cfg.Period)
 		}
 		return c.Next()
 	}

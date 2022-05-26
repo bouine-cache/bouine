@@ -8,6 +8,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/utils"
+	"github.com/valyala/fasthttp"
+	"go.uber.org/zap"
 )
 
 func Test_Healthcheck_Without_Proxy_middleware(t *testing.T) {
@@ -22,7 +24,12 @@ func Test_Healthcheck_Without_Proxy_middleware(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusTeapot, resp.StatusCode)
 
 	app := fiber.New()
-	app.Use(ClassicHealthcheckMiddleware(defaultConfig()))
+	app.Use(ClassicHealthcheckMiddleware(Config{
+		Logger:          zap.NewExample(),
+		Upstreams:       []string{addr},
+		HealthcheckKind: smartHealthcheckKind,
+		Client:          &fasthttp.Client{},
+	}))
 
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = addr
@@ -43,9 +50,13 @@ func Test_Healthcheck_Classical_Healthy(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusTeapot, resp.StatusCode)
 
 	app := fiber.New()
-	config := defaultConfig()
-	config.Period = 70 * time.Millisecond
-	app.Use(ClassicHealthcheckMiddleware(config))
+	app.Use(ClassicHealthcheckMiddleware(Config{
+		Period:          70 * time.Millisecond,
+		Logger:          zap.NewExample(),
+		Upstreams:       []string{addr},
+		HealthcheckKind: smartHealthcheckKind,
+		Client:          &fasthttp.Client{},
+	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	// First request creates the upstream entry
@@ -71,9 +82,13 @@ func Test_Healthcheck_Classical_Unhealthy(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusTeapot, resp.StatusCode)
 
 	app := fiber.New()
-	config := defaultConfig()
-	config.Period = 70 * time.Millisecond
-	app.Use(ClassicHealthcheckMiddleware(config))
+	app.Use(ClassicHealthcheckMiddleware(Config{
+		Period:          70 * time.Millisecond,
+		Logger:          zap.NewExample(),
+		Upstreams:       []string{addr},
+		HealthcheckKind: smartHealthcheckKind,
+		Client:          &fasthttp.Client{},
+	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	// First request creates the upstream entry
@@ -103,9 +118,13 @@ func Test_Healthcheck_Smart_Healthy(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusTeapot, resp.StatusCode)
 
 	app := fiber.New()
-	config := defaultConfig()
-	config.Period = 70 * time.Millisecond
-	app.Use(SmartHealthcheckMiddleware(config))
+	app.Use(SmartHealthcheckMiddleware(Config{
+		Period:          70 * time.Millisecond,
+		Logger:          zap.NewExample(),
+		Upstreams:       []string{addr},
+		HealthcheckKind: smartHealthcheckKind,
+		Client:          &fasthttp.Client{},
+	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	// First request creates the upstream entry
@@ -131,9 +150,13 @@ func Test_Healthcheck_SingleUpstream_Smart_Unhealthy(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusTeapot, resp.StatusCode)
 
 	app := fiber.New()
-	config := defaultConfig()
-	config.Period = 70 * time.Millisecond
-	app.Use(SmartHealthcheckMiddleware(config))
+	app.Use(SmartHealthcheckMiddleware(Config{
+		Period:          70 * time.Millisecond,
+		Logger:          zap.NewExample(),
+		Upstreams:       []string{addr},
+		HealthcheckKind: smartHealthcheckKind,
+		Client:          &fasthttp.Client{},
+	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	// First request creates the upstream entry

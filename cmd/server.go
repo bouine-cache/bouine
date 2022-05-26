@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -107,6 +108,11 @@ var startCmd = &cobra.Command{
 }
 
 func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream string, raftID string, raftDir string, raftBootstrap bool, loggingLevel string) (*fiber.App, *storage.Storage) {
+	u, err := url.Parse(upstream)
+	if err != nil {
+		panic("invalid upstream format")
+	}
+
 	app := fiber.New(fiber.Config{
 		Prefork:               prod,
 		DisableStartupMessage: prod,
@@ -143,7 +149,9 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		StoreResponseHeaders: true,
 	}))
 	// active healthcheck middleware
-	app.Use(middlewares.SmartHealthcheckMiddleware())
+	app.Use(middlewares.SmartHealthcheckMiddleware(middlewares.Config{
+		Upstreams: []string{u.Host},
+	}))
 	// proxy request to upstream
 	app.Use(middlewares.ProxyMiddleware(proxy.Config{
 		Servers: []string{

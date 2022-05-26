@@ -47,7 +47,7 @@ docker-cleanup: ## Delete all the docker-compose containers
 	docker-compose down --remove-orphans
 
 .PHONY: test
-test: lint license-check scan-docker-image test-bench test-unit test-smoke test-perf  ## Launch all tests sequentially
+test: lint license-check scan-docker-image test-bench test-unit test-smoke test-perf test-cleanup ## Launch all tests sequentially
 
 .PHONY: lint
 lint: ## Scan repository with linters

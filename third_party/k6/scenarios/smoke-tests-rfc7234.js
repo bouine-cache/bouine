@@ -19,14 +19,13 @@ import { Trend } from 'k6/metrics';
 import { getValidJSONBody, headValid, postValid, putValid, patchValid, deleteValid } from './helpers.js'
 
 const waitingTime = new Trend('waitingTime', true);
-const baseURL = 'http://nginx:4000';
-// waitingTime.add(res.timings.waiting);
+const baseURL = `${__ENV.BASE_URL}`;
 
 let commonOptions = {
     executor: 'shared-iterations',
     vus: 1,
     iterations: 1,
-    startTime: '0s',
+    startTime: '1s',
     maxDuration: '5s',
     gracefulStop: '5s',
 };

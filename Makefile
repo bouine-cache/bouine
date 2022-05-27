@@ -53,16 +53,16 @@ test-unit: ## Launch Go unit tests
 .PHONY: test-smoke
 test-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans; \
-	docker-compose run --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
+	docker-compose run --env BASE_URL="http://bouine1:8080" --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
 
 .PHONY: test-distributed-smoke
 test-distributed-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans && \
-	docker-compose up --wait && \
+	docker-compose up -d --wait nginx bouine1 bouine2 bouine3 && \
 	sleep 2 && \
 	raftadmin localhost:50051 add_voter nodeB bouine2:50052 0 && \
-	raftadmin --leader multi:///localhost:50051,localhost:50052 add_voter nodeC bouine3:50053 0; \
-	docker-compose run --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
+	raftadmin --leader multi:///localhost:50051,localhost:50052 add_voter nodeC bouine3:50053 0 && \
+	docker-compose run --env BASE_URL="http://nginx:4000" --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
 
 .PHONY: test-perf
 test-perf: ## Launch Go unit tests (k6 debug option: --http-debug)

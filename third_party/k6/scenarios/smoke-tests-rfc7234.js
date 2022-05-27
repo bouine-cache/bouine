@@ -82,7 +82,6 @@ export function get200JSONBody() {
 
 // This test ensures 3XXs JSON responses are cached
 // cacheable by default as specified in https://datatracker.ietf.org/doc/html/rfc7231#section-6.1
-// FIXME: The location header is missing from Bouine response when cache hit on both 301 and 302 (Not stored in cache! PR to cache middleware to store Location header)
 export function get3XXJSONBody() {
     // First simple GET request on /ernest_301
     // Should result in non-cached JSON response
@@ -90,7 +89,7 @@ export function get3XXJSONBody() {
 
     // Second simple GET request on /ernest_301
     // Should result in a cached JSON response
-    // getValidJSONBody(baseURL, false, 301, 'rfc7234ValidationGet301JSONBody');
+    getValidJSONBody(baseURL, true, 301, 'rfc7234ValidationGet301JSONBody');
 
     sleep(Math.random() * 0.15);
 
@@ -100,7 +99,7 @@ export function get3XXJSONBody() {
 
     // Second simple GET request on /ernest_302
     // Should result in a cached JSON response
-    // getValidJSONBody(baseURL, false, 302, 'rfc7234ValidationGet302JSONBody');
+    getValidJSONBody(baseURL, true, 302, 'rfc7234ValidationGet302JSONBody');
 }
 
 // This test ensures 404s JSON responses are cached

@@ -37,6 +37,12 @@
      method: HEAD
    response:
      code: 200
+ - name: Valid DELETE request
+   request:
+     uri: /ernest_delete_200
+     method: DELETE
+   response:
+     code: 200
  - name: Set-Cookie header on response
    request:
      uri: /ernest_get_200_cookie

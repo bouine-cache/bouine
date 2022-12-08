@@ -29,3 +29,6 @@ build/server/files/bouine
 
 # ignore CLI artifacts
 **bouinectl
+
+# MacOS
+.DS_Store

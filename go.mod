@@ -4,13 +4,21 @@ go 1.17
 
 require (
 	github.com/Jille/raft-grpc-transport v1.2.0
-	github.com/gofiber/fiber/v2 v2.34.0
+	github.com/gofiber/fiber/v2 v2.52.1
 	github.com/gofiber/utils v0.1.2
 	github.com/outcaste-io/badger/v3 v3.2202.0
-	github.com/valyala/fasthttp v1.37.0
+	github.com/valyala/fasthttp v1.51.0
 	go.uber.org/zap v1.21.0
 	google.golang.org/grpc v1.46.2
 	google.golang.org/protobuf v1.28.0
+)
+
+require (
+	github.com/google/uuid v1.5.0 // indirect
+	github.com/mattn/go-runewidth v0.0.15 // indirect
+	github.com/philhofer/fwd v1.1.2 // indirect
+	github.com/rivo/uniseg v0.2.0 // indirect
+	github.com/tinylib/msgp v1.1.8 // indirect
 )
 
 require (
@@ -31,8 +39,8 @@ require (
 	github.com/hashicorp/go-msgpack v1.1.5 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
-	github.com/mattn/go-colorable v0.1.12 // indirect
-	github.com/mattn/go-isatty v0.0.14 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/outcaste-io/ristretto v0.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/spf13/cobra v1.4.0
@@ -40,19 +48,19 @@ require (
 	go.opencensus.io v0.23.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
-	golang.org/x/net v0.0.0-20220524220425-1d687d428aca // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/net v0.17.0 // indirect
+	golang.org/x/text v0.13.0 // indirect
 	google.golang.org/genproto v0.0.0-20220525015930-6ca3db687a9d // indirect
 )
 
 require (
 	github.com/Jille/raft-grpc-leader-rpc v1.1.0
 	github.com/Jille/raftadmin v1.2.0
-	github.com/andybalholm/brotli v1.0.4 // indirect
+	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/hashicorp/raft v1.3.9
 	github.com/hashicorp/raft-boltdb v0.0.0-20220329195025-15018e9b97e0
-	github.com/klauspost/compress v1.15.4 // indirect
+	github.com/klauspost/compress v1.17.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
-	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
+	golang.org/x/sys v0.15.0 // indirect
 )

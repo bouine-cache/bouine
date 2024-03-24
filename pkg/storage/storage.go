@@ -33,7 +33,7 @@ import (
 	"github.com/Jille/raftadmin"
 	"github.com/gofiber/utils"
 	"github.com/hashicorp/raft"
-	"github.com/outcaste-io/badger/v3"
+	badger "github.com/outcaste-io/badger/v3"
 	"github.com/thylong/bouine/pkg/backend"
 	"github.com/thylong/bouine/pkg/serializer"
 	pb "github.com/thylong/bouine/pkg/serializer/proto"

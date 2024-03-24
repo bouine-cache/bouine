@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/outcaste-io/badger/v3"
+	badger "github.com/outcaste-io/badger/v3"
 	"github.com/thylong/bouine/pkg/backend"
 	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"

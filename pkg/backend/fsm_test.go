@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/outcaste-io/badger/v3"
+	badger "github.com/outcaste-io/badger/v3"
 	pb "github.com/thylong/bouine/pkg/serializer/proto"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"

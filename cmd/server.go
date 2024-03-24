@@ -1,6 +1,5 @@
 /*
 Copyright © 2022 NAME HERE <EMAIL ADDRESS>
-
 */
 package main
 
@@ -14,41 +13,33 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
+	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cache"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
+	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/thylong/bouine/pkg/middlewares"
-	"github.com/thylong/bouine/pkg/storage"
 	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	httpTimeout   int64
-	raftAddress   string
-	port          string
-	prod          bool
-	upstream      string
-	raftID        string
-	raftDir       string
-	raftBootstrap bool
-	loggingLevel  string
+	httpTimeout  int64
+	port         string
+	prod         bool
+	upstream     string
+	loggingLevel string
 )
 
 func init() {
 	rootCmd.AddCommand(startCmd)
 
 	startCmd.Flags().BoolVarP(&prod, "prod", "", false, "Enable prefork & set logLevel to INFO")
-	startCmd.Flags().BoolVarP(&raftBootstrap, "raft_bootstrap", "b", false, "Whether to bootstrap the Raft cluster")
-	startCmd.Flags().StringVarP(&raftAddress, "raft_address", "a", "0.0.0.0:50051", "TCP host+port for this node")
 	startCmd.Flags().StringVarP(&port, "port", "p", ":8080", "Port to listen on")
 	startCmd.Flags().StringVarP(&loggingLevel, "logging_level", "l", "info", "The minimum enabled logging level")
-	startCmd.Flags().StringVarP(&raftDir, "raft_dir", "d", "/tmp/bouine", "Raft data dir")
-	startCmd.Flags().StringVarP(&raftID, "raft_id", "i", ":8080", "Node id used by Raft")
 	startCmd.Flags().StringVarP(&upstream, "upstream", "u", "http://mockingjay:8084", "Proxied upstream host")
 	startCmd.Flags().Int64VarP(&httpTimeout, "timeout", "t", 3000, "HTTP request timeout in milliseconds")
 }
@@ -67,17 +58,8 @@ var startCmd = &cobra.Command{
 		flag.Parse()
 
 		// Create fiber app
-		app, store := createFiberApp(httpTimeout, raftAddress, prod, upstream, raftID, raftDir, raftBootstrap, loggingLevel)
+		app, store := createFiberApp(httpTimeout, prod, upstream, loggingLevel)
 		defer store.Close()
-
-		// Listen for gRPC requests
-		// (coming from other nodes & clients)
-		go func() {
-			if err := store.ListengRPCServer(raftAddress); err != nil {
-				fmt.Fprintf(os.Stderr, "%s\n", err)
-				os.Exit(1)
-			}
-		}()
 
 		// Listen for HTTP requests
 		go func() {
@@ -107,7 +89,7 @@ var startCmd = &cobra.Command{
 	},
 }
 
-func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream string, raftID string, raftDir string, raftBootstrap bool, loggingLevel string) (*fiber.App, *storage.Storage) {
+func createFiberApp(httpTimeout int64, prod bool, upstream string, loggingLevel string) (*fiber.App, *memory.Storage) {
 	u, err := url.Parse(upstream)
 	if err != nil {
 		panic("invalid upstream format")
@@ -127,15 +109,11 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 		logCfg.Development = true
 		logCfg.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	}
-	storeLogger, _ := logCfg.Build()
+	// storeLogger, _ := logCfg.Build()
 
-	// create distributed K/V store
-	store := storage.New(storage.Config{
-		RaftID:        raftID,
-		RaftDir:       raftDir,
-		RaftBootstrap: raftBootstrap,
-		RaftAddress:   raftAddress,
-		Logger:        storeLogger,
+	// Initialize custom config
+	store := memory.New(memory.Config{
+		GCInterval: 10 * time.Second,
 	})
 
 	// Middlewares
@@ -168,7 +146,7 @@ func createFiberApp(httpTimeout int64, raftAddress string, prod bool, upstream s
 	}))
 
 	// Catch all handler
-	app.Use(timeout.New(
+	app.Use(timeout.NewWithContext(
 		func(c *fiber.Ctx) error {
 			return c.SendStatus(500)
 		},

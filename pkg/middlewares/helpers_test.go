@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
+	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/utils"
 )
 

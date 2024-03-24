@@ -59,6 +59,7 @@ require (
 	github.com/Jille/raft-grpc-leader-rpc v1.1.0
 	github.com/Jille/raftadmin v1.2.1
 	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/gofiber/storage/memory/v2 v2.0.1
 	github.com/hashicorp/raft v1.6.1
 	github.com/hashicorp/raft-boltdb v0.0.0-20231211162105-6c830fa4535e
 	github.com/klauspost/compress v1.17.7 // indirect

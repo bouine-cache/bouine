@@ -11,49 +11,36 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 package main
 
 import (
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/thylong/bouine/pkg/backend"
+	fiber "github.com/gofiber/fiber/v2"
 )
 
 func Test_createFiberApp(t *testing.T) {
 	type args struct {
-		httpTimeout   int64
-		raftAddress   string
-		prod          bool
-		upstream      string
-		raftID        string
-		raftDir       string
-		raftBootstrap bool
-		loggingLevel  string
+		httpTimeout  int64
+		prod         bool
+		upstream     string
+		loggingLevel string
 	}
 	tests := []struct {
 		name string
 		args args
 		want *fiber.App
 	}{
-		{name: "flags with default values except raftBootrap(true)", args: args{
-			httpTimeout:   3000,
-			raftAddress:   "localhost:50051",
-			prod:          false,
-			upstream:      "http://mockingjay:8084",
-			raftID:        "1",
-			raftDir:       "/tmp/bouine",
-			raftBootstrap: true,
-			loggingLevel:  "debug",
+		{name: "flags with default values", args: args{
+			httpTimeout:  3000,
+			prod:         false,
+			upstream:     "http://mockingjay:8084",
+			loggingLevel: "debug",
 		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			backend.TmpDircleanup(tt.args.raftDir)
-			defer backend.TmpDircleanup(tt.args.raftDir)
-
-			_, _ = createFiberApp(tt.args.httpTimeout, tt.args.raftAddress, tt.args.prod, tt.args.upstream, tt.args.raftID, tt.args.raftDir, tt.args.raftBootstrap, tt.args.loggingLevel)
+			_, _ = createFiberApp(tt.args.httpTimeout, tt.args.prod, tt.args.upstream, tt.args.loggingLevel)
 			// if !reflect.DeepEqual(app, tt.want) {
 			// 	t.Errorf("createFiberApp() = %v, want %v", app, tt.want)
 			// }

@@ -14,7 +14,7 @@ build: build-binary build-cli build-docker-image ## Build Go binaries & Docker i
 build-binary: ## Build Go binary for present architecture
 	GOOS=linux GOARCH=amd64 go build -o build/server/files/$(NAME) ./cmd
 
-.PHONY: build-binary
+.PHONY: build-cli
 build-cli: ## Build bouine CLI to manipulate bouine clusters
 	go build -o bouinectl ./cmd/cli
 

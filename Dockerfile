@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build -o /go/bin/app ./cmd
 RUN mkdir /data
 RUN touch /data/logs.dat
 
-FROM gcr.io/distroless/static-debian11:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder --chown=nonroot:nonroot /go/bin/app /
 COPY --from=builder --chown=nonroot:nonroot /data /data

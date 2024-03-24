@@ -33,3 +33,4 @@ build/server/files/bouine
 # MacOS
 .DS_Store
 .nvimlog
+build/** */

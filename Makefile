@@ -8,15 +8,15 @@ pre-commit-hooks-install: ## Install the pre-commit hooks
 	pre-commit install
 
 .PHONY: build
-build: build-binary build-cli build-docker-image ## Build Go binaries & Docker image
+build: build-server build-cli build-docker-image ## Build Go binaries & Docker image
 
-.PHONY: build-binary
-build-binary: ## Build Go binary for present architecture
-	GOOS=linux GOARCH=amd64 go build -o build/server/files/$(NAME) ./cmd
+.PHONY: build-server
+build-server: ## Build Go server for present architecture
+	GOOS=linux GOARCH=amd64 go build -o build/$(NAME) ./cmd
 
 .PHONY: build-cli
 build-cli: ## Build bouine CLI to manipulate bouine clusters
-	go build -o bouinectl ./cmd/cli
+	go build -o build/$(NAME)ctl ./cmd/cli
 
 .PHONY: build-docker-image
 build-docker-image: ## Build Docker image

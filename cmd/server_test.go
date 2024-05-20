@@ -19,7 +19,7 @@ import (
 	fiber "github.com/gofiber/fiber/v2"
 )
 
-func Test_createFiberApp(t *testing.T) {
+func Test_createApp(t *testing.T) {
 	type args struct {
 		httpTimeout  int64
 		prod         bool
@@ -40,9 +40,9 @@ func Test_createFiberApp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _ = createFiberApp(tt.args.httpTimeout, tt.args.prod, tt.args.upstream, tt.args.loggingLevel)
+			_, _ = createApp(tt.args.httpTimeout, tt.args.prod, tt.args.upstream, tt.args.loggingLevel)
 			// if !reflect.DeepEqual(app, tt.want) {
-			// 	t.Errorf("createFiberApp() = %v, want %v", app, tt.want)
+			// 	t.Errorf("createApp() = %v, want %v", app, tt.want)
 			// }
 		})
 	}

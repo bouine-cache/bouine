@@ -1,6 +1,5 @@
 /*
 Copyright © 2022 Théotime LEVEQUE
-
 */
 package main
 

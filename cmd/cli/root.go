@@ -1,6 +1,5 @@
 /*
 Copyright © 2022 Théotime LEVEQUE
-
 */
 package main
 
@@ -10,9 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	raftAddress string
-)
+var raftAddress string
 
 // rootCmd represents the base command when called without any subcommands.
 var rootCmd = &cobra.Command{

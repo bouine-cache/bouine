@@ -21,7 +21,7 @@ build-cli: ## Build bouine CLI to manipulate bouine clusters
 .PHONY: build-docker-image
 build-docker-image: ## Build Docker image
 	docker build -t thylong/$(NAME):latest .
-	docker-compose build bouine1 bouine2 bouine3
+	docker-compose build bouine
 
 .PHONY: push-docker-image
 push-docker-image: ## Push Docker image

@@ -81,6 +81,7 @@ func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
 	// max-age
 	re := regexp.MustCompile(`max-age=([0-9]*)`)
 	if maxAge := re.FindSubmatch(c.Context().Response.Header.Peek("Cache-Control")); maxAge != nil {
+		// TODO: handle badly formatted max-age
 		maxAgeDuration, _ := time.ParseDuration(fmt.Sprintf("%ss", maxAge[1]))
 		return maxAgeDuration
 	}
@@ -88,6 +89,7 @@ func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
 	// s-maxage
 	re = regexp.MustCompile(`s-maxage=([0-9]*)`)
 	if sMaxAge := re.FindSubmatch(c.Context().Response.Header.Peek("Cache-Control")); sMaxAge != nil {
+		// TODO: handle badly formatted s-maxage
 		sMaxAgeDuration, _ := time.ParseDuration(fmt.Sprintf("%ss", sMaxAge[1]))
 		return sMaxAgeDuration
 	}

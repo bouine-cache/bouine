@@ -36,7 +36,7 @@ docker-cleanup: ## Delete all the docker-compose containers
 	docker-compose down --remove-orphans
 
 .PHONY: test
-test: lint license-check scan-docker-image test-bench test-unit test-smoke test-perf test-cleanup ## Launch all tests sequentially
+test: lint license-check scan-docker-image test-bench test-unit test-e2e test-perf test-cleanup ## Launch all tests sequentially
 
 .PHONY: lint
 lint: ## Scan repository with linters
@@ -50,24 +50,24 @@ test-bench: ## Launch Go benchmark tests
 test-unit: ## Launch Go unit tests
 	go test -cover ./...
 
-.PHONY: test-smoke
-test-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
+.PHONY: test-e2e
+test-e2e: ## Launch k6 e2e tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans; \
-	docker-compose run --env BASE_URL="http://bouine1:8080" --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
+	docker-compose run --env BASE_URL="http://bouine1:8080" --rm test-client run --http-debug /scenarios/e2e-tests-rfc7234.js
 
-.PHONY: test-distributed-smoke
-test-distributed-smoke: ## Launch k6 smoke tests (k6 debug option: --http-debug)
+.PHONY: test-e2e-distributed
+test-distributed-e2e: ## Launch k6 e2e tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans && \
 	docker-compose up -d --wait nginx bouine1 bouine2 bouine3 && \
 	sleep 2 && \
 	raftadmin localhost:50051 add_voter nodeB bouine2:50052 0 && \
 	raftadmin --leader multi:///localhost:50051,localhost:50052 add_voter nodeC bouine3:50053 0 && \
-	docker-compose run --env BASE_URL="http://nginx:4000" --rm test-client run --http-debug /scenarios/smoke-tests-rfc7234.js
+	docker-compose run --env BASE_URL="http://nginx:4000" --rm test-client run --http-debug /scenarios/e2e-tests-rfc7234.js
 
 .PHONY: test-perf
 test-perf: ## Launch Go unit tests (k6 debug option: --http-debug)
 	docker-compose down --remove-orphans; \
-	docker-compose run --rm test-client run --out influxdb=http://influxdb:8086/myk6db /scenarios/smoke-tests-rfc7234.js
+	docker-compose run --rm test-client run --out influxdb=http://influxdb:8086/myk6db /scenarios/e2e-tests-rfc7234.js
 
 .PHONY: test-perf
 test-cleanup: ## Launch Go unit tests (k6 debug option: --http-debug)

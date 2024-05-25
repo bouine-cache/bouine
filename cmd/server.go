@@ -40,8 +40,7 @@ func init() {
 	startCmd.Flags().BoolVarP(&prod, "prod", "", false, "Enable prefork & set logLevel to INFO")
 	startCmd.Flags().StringVarP(&port, "port", "p", ":8080", "Port to listen on")
 	startCmd.Flags().StringVarP(&loggingLevel, "logging_level", "l", "info", "The minimum enabled logging level")
-  // TODO: drop mockingjay in default values
-  startCmd.Flags().StringVarP(&upstream, "upstream", "u", "http://mockingjay:8084", "Proxied upstream host")
+	startCmd.Flags().StringVarP(&upstream, "upstream", "u", "", "Proxied upstream host")
 	startCmd.Flags().Int64VarP(&httpTimeout, "timeout", "t", 3000, "HTTP request timeout in milliseconds")
 }
 
@@ -93,7 +92,7 @@ var startCmd = &cobra.Command{
 func createApp(httpTimeout int64, prod bool, upstream string, loggingLevel string) (*fiber.App, *memory.Storage) {
 	u, err := url.Parse(upstream)
 	if err != nil {
-		panic("invalid upstream format")
+		log.Fatalf("invalid upstream format: %s", upstream)
 	}
 
 	app := fiber.New(fiber.Config{

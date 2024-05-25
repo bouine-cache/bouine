@@ -34,3 +34,6 @@ build/server/files/bouine
 .DS_Store
 .nvimlog
 build/** */
+
+# Vim
+Session.vim

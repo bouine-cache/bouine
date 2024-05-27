@@ -25,6 +25,11 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cache"
 )
 
+const (
+	StatusHit  string = "hit"
+	StatusMiss string = "miss"
+)
+
 // use time.Until wrapper to allow predictive testing.
 var until func(time.Time) time.Duration = func(deadline time.Time) time.Duration {
 	return time.Until(deadline)

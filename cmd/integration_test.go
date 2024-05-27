@@ -14,7 +14,7 @@ import (
 	fiber "github.com/gofiber/fiber/v2"
 	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/gofiber/utils"
-	"github.com/thylong/bouine/pkg/middlewares"
+	"github.com/thylong/bouine/pkg/middleware"
 )
 
 var (
@@ -124,7 +124,7 @@ func TestCacheW3CStandards(t *testing.T) {
 			utils.AssertEqual(t, tt.expectedFirstRes.StatusCode, resp.StatusCode)
 			fmt.Printf("%v \n", resp.Header)
 			utils.AssertEqual(t, tt.expectedFirstRes.Header.Get("Cache-Control"), resp.Header.Get("Cache-Control"))
-			utils.AssertEqual(t, resp.Header.Get("X-Cache"), middlewares.StatusMiss)
+			utils.AssertEqual(t, resp.Header.Get("X-Cache"), middleware.StatusMiss)
 
 			// wait between the 2 requests (for freshness & stale checks)
 			time.Sleep(2 * time.Second)
@@ -138,7 +138,7 @@ func TestCacheW3CStandards(t *testing.T) {
 			utils.AssertEqual(t, tt.expectedSecondRes.StatusCode, resp.StatusCode)
 			fmt.Printf("%v \n", resp.Header)
 			utils.AssertEqual(t, tt.expectedSecondRes.Header.Get("Cache-Control"), resp.Header.Get("Cache-Control"))
-			utils.AssertEqual(t, resp.Header.Get("X-Cache"), middlewares.StatusHit)
+			utils.AssertEqual(t, resp.Header.Get("X-Cache"), middleware.StatusHit)
 		})
 	}
 }

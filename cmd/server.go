@@ -20,7 +20,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
 	memory "github.com/gofiber/storage/memory/v2"
-	"github.com/thylong/bouine/pkg/middlewares"
+	"github.com/thylong/bouine/pkg/middleware"
 	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
@@ -121,17 +121,17 @@ func createApp(httpTimeout int64, prod bool, upstream string, loggingLevel strin
 	app.Use(logger.New())
 	// cache middleware with distributed K/V store
 	app.Use(cache.New(cache.Config{
-		Next:                 middlewares.CacheSkippable,
-		ExpirationGenerator:  middlewares.CustomExpirationGenerator,
+		Next:                 middleware.CacheSkippable,
+		ExpirationGenerator:  middleware.CustomExpirationGenerator,
 		Storage:              store,
 		StoreResponseHeaders: true,
 	}))
 	// active healthcheck middleware
-	app.Use(middlewares.SmartHealthcheckMiddleware(middlewares.Config{
+	app.Use(middleware.SmartHealthcheckMiddleware(middleware.Config{
 		Upstreams: []string{u.Host},
 	}))
 	// proxy request to upstream
-	app.Use(middlewares.ProxyMiddleware(proxy.Config{
+	app.Use(middleware.ProxyMiddleware(proxy.Config{
 		Servers: []string{
 			upstream,
 		},

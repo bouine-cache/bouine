@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-package middlewares
+package middleware
 
 import (
 	"fmt"
@@ -65,18 +65,18 @@ func defaultConfig(config ...Config) Config {
 	return cfg
 }
 
-var (
-	configDefault = Config{
-		Period:          10 * time.Second,
-		Logger:          zap.NewExample(),
-		Upstreams:       []string{},
-		HealthcheckKind: smartHealthcheckKind,
-		Client:          &fasthttp.Client{},
-	}
-)
+var configDefault = Config{
+	Period:          10 * time.Second,
+	Logger:          zap.NewExample(),
+	Upstreams:       []string{},
+	HealthcheckKind: smartHealthcheckKind,
+	Client:          &fasthttp.Client{},
+}
 
-const smartHealthcheckKind = 1
-const classicHealthcheckKind = 2
+const (
+	smartHealthcheckKind   = 1
+	classicHealthcheckKind = 2
+)
 
 // SmartHealthcheckMiddleware returns a bouine smarthealthcheck middleware.
 // This middleware sends healthchecks to the upstream only when the given period

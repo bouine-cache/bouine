@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-package middlewares
+package middleware
 
 import fiber "github.com/gofiber/fiber/v2"
 

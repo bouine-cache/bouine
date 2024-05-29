@@ -231,6 +231,41 @@ func TestCacheW3CStandards(t *testing.T) {
 		// 		"Expires":       []string{time.Now().Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")}, "X-Cache": []string{middleware.StatusHit},
 		// 	}},
 		// },
+		// TODO: doesn\'t work as expected, need official cache or core middleware changes
+		// {
+		// 	name:              "HTTP cache must not reuse a response with max-age in a quoted string (before the \"real\" max-age)",
+		// 	endpoint:          "/freshness-max-age-ignore-quoted",
+		// 	reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+		// 	upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"extension=\"max-age=3600\", max-age=1"}}},
+		// 	expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"extension=\"max-age=3600\", max-age=1"}, "X-Cache": []string{middleware.StatusMiss}}},
+		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"extension=\"max-age=3600\", max-age=1"}, "X-Cache": []string{middleware.StatusMiss}}},
+		// },
+		// TODO: doesn\'t work as expected, need official cache or core middleware changes
+		// {
+		// 	name:              "HTTP cache must not reuse a response with max-age in a quoted string (before the \"real\" max-age)",
+		// 	endpoint:          "/freshness-max-age-ignore-quoted",
+		// 	reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+		// 	upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=1, extension=\"max-age=3600\""}}},
+		// 	expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=1, extension=\"max-age=3600\""}, "X-Cache": []string{middleware.StatusMiss}}},
+		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=1, extension=\"max-age=3600\""}, "X-Cache": []string{middleware.StatusMiss}}},
+		// },
+		{
+			name:              "An optimal HTTP cache reuses max-age with the value 003600",
+			endpoint:          "/freshness-max-age-leading-zero",
+			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}, "X-Cache": []string{middleware.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}, "X-Cache": []string{middleware.StatusHit}}},
+		},
+		// TODO: doesn\'t work as expected, need official cache or core middleware changes
+		{
+			name:              "HTTP cache must not reuse a response with a single-quoted Cache-Control: max-age",
+			endpoint:          "/freshness-max-age-single-quoted",
+			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}, "X-Cache": []string{middleware.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}, "X-Cache": []string{middleware.StatusMiss}}},
+		},
 	}
 
 	testUpstream = createUpstreamTestServer(t)

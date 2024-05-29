@@ -46,7 +46,7 @@ func listenUpstreamTestServer(t *testing.T, target *fiber.App) string {
 func createBouineTestServer(t *testing.T, upstreamAddr string) (*fiber.App, *memory.Storage) {
 	t.Helper()
 
-	target, store := createApp(int64(500), false, fmt.Sprintf("http://%s", upstreamAddr), "debug")
+	target, store := createApp(int64(500), false, fmt.Sprintf("http://%s", upstreamAddr), "info")
 
 	return target, store
 }

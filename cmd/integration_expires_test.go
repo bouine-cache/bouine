@@ -10,7 +10,7 @@ import (
 
 	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/utils"
-	"github.com/thylong/bouine/pkg/middleware"
+	"github.com/thylong/bouine/pkg/middleware/core"
 )
 
 func TestCacheExpiresW3CStandards(t *testing.T) {
@@ -34,11 +34,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2038, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2038, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -51,11 +51,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -68,11 +68,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.RFC850)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.RFC850)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -85,11 +85,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.ANSIC)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.ANSIC)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -102,11 +102,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("WED, 21 oct 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("WED, 21 oct 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -119,11 +119,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 OCT 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 OCT 2015 07:28:00 gmt")},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -136,11 +136,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 OCT 2015 07:28:00 GMt")},
-				"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("wed, 21 OCT 2015 07:28:00 GMt")},
-				"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		// TODO: Expires stale doesn't seem to be taken into account by the cache, resulting in a cache hit
@@ -154,11 +154,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu, 18 Aug 2050 02:01:18 UTC")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu, 18 Aug 2050 02:01:18 UTC")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// },
 		// TODO: Expires stale doesn't seem to be taken into account by the cache, resulting in a cache hit
@@ -172,11 +172,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu, 18 Aug 2050 02:01:18 AEST")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu, 18 Aug 2050 02:01:18 AEST")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// },
 		// TODO: Expires stale doesn't seem to be taken into account by the cache, resulting in a cache hit
@@ -190,11 +190,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu, 18 Aug 50 02:01:18 GMT")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu, 18 Aug 50 02:01:18 GMT")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// },
 		// TODO: Expires stale doesn't seem to be taken into account by the cache, resulting in a cache hit
@@ -208,11 +208,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu 18 Aug 50 02:01:18 GMT")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu 18 Aug 50 02:01:18 GMT")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// },
 		// TODO: Expires stale doesn't seem to be taken into account by the cache, resulting in a cache hit
@@ -226,11 +226,11 @@ func TestCacheExpiresW3CStandards(t *testing.T) {
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu,  18  Aug  50  02:01:18 GMT")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format("Thu,  18  Aug  50  02:01:18 GMT")},
-		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Date":    []string{time.Now().Format("wed, 21 OCT 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// },
 	}

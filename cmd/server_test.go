@@ -23,7 +23,7 @@ import (
 
 	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/utils"
-	"github.com/thylong/bouine/pkg/middleware"
+	"github.com/thylong/bouine/pkg/middleware/core"
 )
 
 func Test_createApp(t *testing.T) {
@@ -59,8 +59,8 @@ func Test_createApp(t *testing.T) {
 	app, store := createBouineTestServer(t, upstreamAddr)
 	defer store.Close()
 
-	expectedFirstRes := http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss}}}
-	expectedSecondRes := http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit}}}
+	expectedFirstRes := http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss}}}
+	expectedSecondRes := http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit}}}
 	// first request
 	req := httptest.NewRequest("GET", "/", nil)
 	resp, err := app.Test(req)

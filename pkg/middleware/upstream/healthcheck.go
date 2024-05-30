@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-package middleware
+package upstream
 
 import (
 	"fmt"
@@ -69,13 +69,13 @@ var configDefault = Config{
 	Period:          10 * time.Second,
 	Logger:          zap.NewExample(),
 	Upstreams:       []string{},
-	HealthcheckKind: smartHealthcheckKind,
+	HealthcheckKind: SmartHealthcheckKind,
 	Client:          &fasthttp.Client{},
 }
 
 const (
-	smartHealthcheckKind   = 1
-	classicHealthcheckKind = 2
+	SmartHealthcheckKind   = 1
+	ClassicHealthcheckKind = 2
 )
 
 // SmartHealthcheckMiddleware returns a bouine smarthealthcheck middleware.
@@ -83,7 +83,7 @@ const (
 // elapsed without any requests being proxied.
 func SmartHealthcheckMiddleware(config ...Config) fiber.Handler {
 	cfg := defaultConfig(config...)
-	cfg.HealthcheckKind = smartHealthcheckKind
+	cfg.HealthcheckKind = SmartHealthcheckKind
 	return healthcheck(cfg)
 }
 
@@ -92,12 +92,12 @@ func SmartHealthcheckMiddleware(config ...Config) fiber.Handler {
 // upstream healthcheck endpoint.
 func ClassicHealthcheckMiddleware(config ...Config) fiber.Handler {
 	cfg := defaultConfig(config...)
-	cfg.HealthcheckKind = classicHealthcheckKind
+	cfg.HealthcheckKind = ClassicHealthcheckKind
 	return healthcheck(cfg)
 }
 
 func healthcheck(cfg Config) fiber.Handler {
-	upstreams := &Upstreams{entries: make(map[string]*upstream)}
+	upstreams := &Upstreams{entries: make(map[string]*Upstream)}
 
 	// Register upstreams
 	for _, host := range cfg.Upstreams {
@@ -106,7 +106,7 @@ func healthcheck(cfg Config) fiber.Handler {
 			zap.String("host", host),
 		)
 		upstreams.Set(
-			host, upstream{Ticker: time.NewTicker(cfg.Period), Healthy: true},
+			host, Upstream{Ticker: time.NewTicker(cfg.Period), Healthy: true},
 		)
 		go func(host string) {
 			for range upstreams.Get(host).Ticker.C {
@@ -144,7 +144,7 @@ func healthcheck(cfg Config) fiber.Handler {
 		}
 
 		// smartMode: Reset upstream ticker
-		if cfg.HealthcheckKind == smartHealthcheckKind {
+		if cfg.HealthcheckKind == SmartHealthcheckKind {
 			cfg.Logger.Debug("Resetting ticker",
 				zap.String("component", "healthcheck-middleware"),
 				zap.String("host", cfg.Upstreams[0]),

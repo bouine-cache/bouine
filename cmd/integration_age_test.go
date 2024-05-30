@@ -10,7 +10,7 @@ import (
 
 	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/utils"
-	"github.com/thylong/bouine/pkg/middleware"
+	"github.com/thylong/bouine/pkg/middleware/core"
 )
 
 func TestCacheAgeW3CStandards(t *testing.T) {
@@ -32,10 +32,10 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -46,10 +46,10 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -60,10 +60,10 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
@@ -134,10 +134,10 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -148,10 +148,10 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit},
+				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit

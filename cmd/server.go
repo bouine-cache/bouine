@@ -20,7 +20,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
 	memory "github.com/gofiber/storage/memory/v2"
-	"github.com/thylong/bouine/pkg/middleware"
+	"github.com/thylong/bouine/pkg/middleware/core"
+	"github.com/thylong/bouine/pkg/middleware/upstream"
 	"go.uber.org/zap"
 
 	"github.com/spf13/cobra"
@@ -30,7 +31,7 @@ var (
 	httpTimeout  int64
 	port         string
 	prod         bool
-	upstream     string
+	upstreamAddr string
 	loggingLevel string
 )
 
@@ -40,7 +41,7 @@ func init() {
 	startCmd.Flags().BoolVarP(&prod, "prod", "", false, "Enable prefork & set logLevel to INFO")
 	startCmd.Flags().StringVarP(&port, "port", "p", ":8080", "Port to listen on")
 	startCmd.Flags().StringVarP(&loggingLevel, "logging_level", "l", "info", "The minimum enabled logging level")
-	startCmd.Flags().StringVarP(&upstream, "upstream", "u", "", "Proxied upstream host")
+	startCmd.Flags().StringVarP(&upstreamAddr, "upstream", "u", "", "Proxied upstream host")
 	startCmd.Flags().Int64VarP(&httpTimeout, "timeout", "t", 3000, "HTTP request timeout in milliseconds")
 }
 
@@ -58,7 +59,7 @@ var startCmd = &cobra.Command{
 		flag.Parse()
 
 		// Create fiber app
-		app, store := createApp(httpTimeout, prod, upstream, loggingLevel)
+		app, store := createApp(httpTimeout, prod, upstreamAddr, loggingLevel)
 		defer store.Close()
 
 		// Listen for HTTP requests
@@ -89,10 +90,10 @@ var startCmd = &cobra.Command{
 	},
 }
 
-func createApp(httpTimeout int64, prod bool, upstream string, loggingLevel string) (*fiber.App, *memory.Storage) {
-	u, err := url.Parse(upstream)
+func createApp(httpTimeout int64, prod bool, upstreamAddr string, loggingLevel string) (*fiber.App, *memory.Storage) {
+	u, err := url.Parse(upstreamAddr)
 	if err != nil {
-		log.Fatalf("invalid upstream format: %s", upstream)
+		log.Fatalf("invalid upstream format: %s", upstreamAddr)
 	}
 
 	app := fiber.New(fiber.Config{
@@ -121,19 +122,19 @@ func createApp(httpTimeout int64, prod bool, upstream string, loggingLevel strin
 	app.Use(logger.New())
 	// cache middleware with distributed K/V store
 	app.Use(cache.New(cache.Config{
-		Next:                 middleware.CacheSkippable,
-		ExpirationGenerator:  middleware.CustomExpirationGenerator,
+		Next:                 core.CacheSkippable,
+		ExpirationGenerator:  core.CustomExpirationGenerator,
 		Storage:              store,
 		StoreResponseHeaders: true,
 	}))
 	// active healthcheck middleware
-	app.Use(middleware.SmartHealthcheckMiddleware(middleware.Config{
+	app.Use(upstream.SmartHealthcheckMiddleware(upstream.Config{
 		Upstreams: []string{u.Host},
 	}))
 	// proxy request to upstream
-	app.Use(middleware.ProxyMiddleware(proxy.Config{
+	app.Use(upstream.ProxyMiddleware(proxy.Config{
 		Servers: []string{
-			upstream,
+			upstreamAddr,
 		},
 		Timeout: 3000 * time.Millisecond,
 		ModifyRequest: func(c *fiber.Ctx) error {

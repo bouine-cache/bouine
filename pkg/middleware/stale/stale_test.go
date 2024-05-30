@@ -1,4 +1,4 @@
-package middleware
+package stale
 
 import (
 	"net/http/httptest"
@@ -8,6 +8,7 @@ import (
 	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/utils"
+	"github.com/thylong/bouine/pkg/middleware/upstream"
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
 )
@@ -24,14 +25,14 @@ func Test_Stale_Healthy_Flow(t *testing.T) {
 	utils.AssertEqual(t, fiber.StatusTeapot, resp.StatusCode)
 
 	app := fiber.New()
-	app.Use(ClassicHealthcheckMiddleware(Config{
+	app.Use(upstream.ClassicHealthcheckMiddleware(upstream.Config{
 		Period:          70 * time.Millisecond,
 		Logger:          zap.NewExample(),
 		Upstreams:       []string{addr},
-		HealthcheckKind: smartHealthcheckKind,
+		HealthcheckKind: upstream.SmartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}))
-	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
+	app.Use(upstream.ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
 
 	// First request creates the upstream entry
 	resp, err = app.Test(httptest.NewRequest("GET", "/", nil), -1)

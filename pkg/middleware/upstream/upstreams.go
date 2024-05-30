@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-package middleware
+package upstream
 
 import (
 	"sync"
@@ -19,17 +19,17 @@ import (
 )
 
 type Upstreams struct {
-	entries map[string]*upstream
+	entries map[string]*Upstream
 	Mux     sync.RWMutex
 }
 
-type upstream struct {
+type Upstream struct {
 	Ticker  *time.Ticker
 	Healthy bool
 }
 
 // Set adds a new upstream to the map.
-func (up *Upstreams) Set(key string, value upstream) {
+func (up *Upstreams) Set(key string, value Upstream) {
 	// obtain an exclusive lock
 	up.Mux.Lock()
 	// set the key/value in the map
@@ -39,7 +39,7 @@ func (up *Upstreams) Set(key string, value upstream) {
 }
 
 // Get retrieves the value for a given key.
-func (up *Upstreams) Get(key string) *upstream {
+func (up *Upstreams) Get(key string) *Upstream {
 	// obtain a read lock
 	up.Mux.RLock()
 	// use defer to release the read lock

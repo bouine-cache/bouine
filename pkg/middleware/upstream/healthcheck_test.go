@@ -1,4 +1,4 @@
-package middleware
+package upstream
 
 import (
 	"net/http/httptest"
@@ -27,7 +27,7 @@ func Test_Healthcheck_Without_Proxy_middleware(t *testing.T) {
 	app.Use(ClassicHealthcheckMiddleware(Config{
 		Logger:          zap.NewExample(),
 		Upstreams:       []string{addr},
-		HealthcheckKind: smartHealthcheckKind,
+		HealthcheckKind: SmartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}))
 
@@ -54,7 +54,7 @@ func Test_Healthcheck_Classical_Healthy(t *testing.T) {
 		Period:          70 * time.Millisecond,
 		Logger:          zap.NewExample(),
 		Upstreams:       []string{addr},
-		HealthcheckKind: smartHealthcheckKind,
+		HealthcheckKind: SmartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
@@ -86,7 +86,7 @@ func Test_Healthcheck_Classical_Unhealthy(t *testing.T) {
 		Period:          70 * time.Millisecond,
 		Logger:          zap.NewExample(),
 		Upstreams:       []string{addr},
-		HealthcheckKind: smartHealthcheckKind,
+		HealthcheckKind: SmartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
@@ -122,7 +122,7 @@ func Test_Healthcheck_Smart_Healthy(t *testing.T) {
 		Period:          70 * time.Millisecond,
 		Logger:          zap.NewExample(),
 		Upstreams:       []string{addr},
-		HealthcheckKind: smartHealthcheckKind,
+		HealthcheckKind: SmartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))
@@ -154,7 +154,7 @@ func Test_Healthcheck_SingleUpstream_Smart_Unhealthy(t *testing.T) {
 		Period:          70 * time.Millisecond,
 		Logger:          zap.NewExample(),
 		Upstreams:       []string{addr},
-		HealthcheckKind: smartHealthcheckKind,
+		HealthcheckKind: SmartHealthcheckKind,
 		Client:          &fasthttp.Client{},
 	}))
 	app.Use(ProxyMiddleware(proxy.Config{Servers: []string{addr}}))

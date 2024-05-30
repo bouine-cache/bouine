@@ -13,20 +13,15 @@
 // limitations under the License.
 //
 
-package middleware
+package upstream
 
-import fiber "github.com/gofiber/fiber/v2"
+import (
+	fiber "github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/proxy"
+)
 
-func Stale() fiber.Handler {
-	// Return new handler
-	return func(c *fiber.Ctx) error {
-		return c.Next()
-
-		// procedure:
-		// If Cache-Upstream-Status == unavailable
-		//     async: Edit cache entry to mark as stale (new storage func)
-		//     return nil
-
-		// server stale
-	}
+// ProxyMiddleware returns a Fiber proxy middleware.
+func ProxyMiddleware(config proxy.Config) fiber.Handler {
+	// Forwards to upstream
+	return proxy.Balancer(config)
 }

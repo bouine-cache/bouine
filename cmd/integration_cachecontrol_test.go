@@ -11,7 +11,7 @@ import (
 	fiber "github.com/gofiber/fiber/v2"
 	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/gofiber/utils"
-	"github.com/thylong/bouine/pkg/middleware"
+	"github.com/thylong/bouine/pkg/middleware/core"
 )
 
 func TestCacheW3CStandards(t *testing.T) {
@@ -36,48 +36,48 @@ func TestCacheW3CStandards(t *testing.T) {
 			endpoint:          "/freshness-max-age",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		{
 			name:              "HTTP cache must not reuse a response with Cache-Control: max-age after it becomes stale",
 			endpoint:          "/freshness-max-age-stale",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2"}, "X-Cache": []string{middleware.StatusMiss}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2"}, "X-Cache": []string{core.StatusMiss}}},
 		},
 		{
 			name:              "HTTP cache must not reuse a response with Cache-Control: max-age=0",
 			endpoint:          "/freshness-max-age-0",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=0"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=0"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=0"}, "X-Cache": []string{middleware.StatusMiss}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=0"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=0"}, "X-Cache": []string{core.StatusMiss}}},
 		},
 		{
 			name:              "An optimal HTTP cache reuses a response with Cache-Control: max-age: 2147483647",
 			endpoint:          "/freshness-max-age-max-minus-1",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483647"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483647"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483647"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483647"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483647"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		{
 			name:              "An optimal HTTP cache reuses a response with Cache-Control: max-age: 2147483648",
 			endpoint:          "/freshness-max-age-max",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483648"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483648"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483648"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483648"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483648"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		{
 			name:              "An optimal HTTP cache reuses a response with Cache-Control: max-age: 2147483649",
 			endpoint:          "/freshness-max-age-max-plus-1",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483649"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483649"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483649"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483649"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=2147483649"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		// TODO: doesn\'t work as expected, need official cache or core middleware changes
 		// {
@@ -110,13 +110,13 @@ func TestCacheW3CStandards(t *testing.T) {
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
 				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{middleware.StatusMiss},
+				"X-Cache":       []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
 				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{middleware.StatusHit},
+				"X-Cache":       []string{core.StatusHit},
 			}},
 		},
 		{
@@ -132,13 +132,13 @@ func TestCacheW3CStandards(t *testing.T) {
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{"0"},
 				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{middleware.StatusMiss},
+				"X-Cache":       []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{"0"},
 				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{middleware.StatusHit},
+				"X-Cache":       []string{core.StatusHit},
 			}},
 		},
 		{
@@ -154,13 +154,13 @@ func TestCacheW3CStandards(t *testing.T) {
 				"Cache-Control": []string{"max-age=0"},
 				"Expires":       []string{time.Now().Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
 				"Date":          []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{middleware.StatusMiss},
+				"X-Cache":       []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=0"},
 				"Expires":       []string{time.Now().Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
 				"Date":          []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{middleware.StatusMiss},
+				"X-Cache":       []string{core.StatusMiss},
 			}},
 		},
 		{
@@ -168,32 +168,32 @@ func TestCacheW3CStandards(t *testing.T) {
 			endpoint:          "/freshness-max-age-extension",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"foobar, max-age=3600"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"foobar, max-age=3600"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"foobar, max-age=3600"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"foobar, max-age=3600"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"foobar, max-age=3600"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		{
 			name:              "An optimal HTTP cache reuses a response with positive Cache-Control: MaX-AgE",
 			endpoint:          "/freshness-max-age-case-insenstive",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"MaX-aGe=3600"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"MaX-aGe=3600"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"MaX-aGe=3600"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"MaX-aGe=3600"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"MaX-aGe=3600"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		{
 			name:              "HTTP cache must not reuse a response with negative Cache-Control: max-age",
 			endpoint:          "/freshness-max-age-negative",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=-3600"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=-3600"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=-3600"}, "X-Cache": []string{middleware.StatusMiss}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=-3600"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=-3600"}, "X-Cache": []string{core.StatusMiss}}},
 		},
 		{
 			name:              "An optimal shared HTTP cache reuses a response with positive Cache-Control: s-maxage",
 			endpoint:          "/freshness-s-maxage-shared",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"s-maxage=3600"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"s-maxage=3600"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"s-maxage=3600"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"s-maxage=3600"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"s-maxage=3600"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		// TODO: doesn\'t work as expected, need official cache or core middleware changes
 		// {
@@ -263,8 +263,8 @@ func TestCacheW3CStandards(t *testing.T) {
 			endpoint:          "/freshness-max-age-leading-zero",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}, "X-Cache": []string{middleware.StatusHit}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=003600"}, "X-Cache": []string{core.StatusHit}}},
 		},
 		// TODO: doesn\'t work as expected, need official cache or core middleware changes
 		{
@@ -272,8 +272,8 @@ func TestCacheW3CStandards(t *testing.T) {
 			endpoint:          "/freshness-max-age-single-quoted",
 			reqHeaders:        http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes:       http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}}},
-			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}, "X-Cache": []string{middleware.StatusMiss}}},
-			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}, "X-Cache": []string{middleware.StatusMiss}}},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age='3600'"}, "X-Cache": []string{core.StatusMiss}}},
 		},
 	}
 

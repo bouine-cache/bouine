@@ -14,36 +14,71 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	fiber "github.com/gofiber/fiber/v2"
+	"github.com/gofiber/utils"
+	"github.com/thylong/bouine/pkg/middleware"
 )
 
 func Test_createApp(t *testing.T) {
-	type args struct {
-		httpTimeout  int64
-		prod         bool
-		upstream     string
-		loggingLevel string
-	}
-	tests := []struct {
-		name string
-		args args
-		want *fiber.App
-	}{
-		{name: "flags with default values", args: args{
-			httpTimeout:  3000,
-			prod:         false,
-			upstream:     "http://mockingjay:8084",
-			loggingLevel: "debug",
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _ = createApp(tt.args.httpTimeout, tt.args.prod, tt.args.upstream, tt.args.loggingLevel)
-			// if !reflect.DeepEqual(app, tt.want) {
-			// 	t.Errorf("createApp() = %v, want %v", app, tt.want)
-			// }
-		})
-	}
+	t.Parallel()
+
+	// create testUpstream & add simple handler
+	testUpstream = createUpstreamTestServer(t)
+	testUpstream.Get("/", func(c *fiber.Ctx) error {
+		response := &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Cache-Control": []string{"max-age=3600"}, "Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewBufferString(`{"message": "Hello, World!"}`)),
+		}
+
+		// Set the response headers
+		for key, values := range response.Header {
+			for _, value := range values {
+				c.Set(key, value)
+			}
+		}
+
+		// Read the response body
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			return err
+		}
+
+		// Send the response with the appropriate status code
+		return c.Status(response.StatusCode).Send(body)
+	})
+
+	upstreamAddr = listenUpstreamTestServer(t, testUpstream)
+	app, store := createBouineTestServer(t, upstreamAddr)
+	defer store.Close()
+
+	expectedFirstRes := http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss}}}
+	expectedSecondRes := http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusHit}}}
+	// first request
+	req := httptest.NewRequest("GET", "/", nil)
+	resp, err := app.Test(req)
+	utils.AssertEqual(t, nil, err)
+	defer resp.Body.Close()
+	utils.AssertEqual(t, expectedFirstRes.StatusCode, resp.StatusCode)
+	utils.AssertEqual(t, expectedFirstRes.Header.Get("Cache-Control"), resp.Header.Get("Cache-Control"))
+	utils.AssertEqual(t, expectedFirstRes.Header.Get("X-Cache"), resp.Header.Get("X-Cache"))
+
+	// wait between the 2 requests (for freshness & stale checks)
+	time.Sleep(1 * time.Second)
+
+	// second request
+	req = httptest.NewRequest("GET", "/", nil)
+	resp, err = app.Test(req)
+	utils.AssertEqual(t, nil, err)
+	defer resp.Body.Close()
+	utils.AssertEqual(t, expectedSecondRes.StatusCode, resp.StatusCode)
+	utils.AssertEqual(t, expectedSecondRes.Header.Get("Cache-Control"), resp.Header.Get("Cache-Control"))
+	utils.AssertEqual(t, expectedSecondRes.Header.Get("X-Cache"), resp.Header.Get("X-Cache"))
 }

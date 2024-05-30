@@ -14,6 +14,8 @@ import (
 )
 
 func TestCacheAgeW3CStandards(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name              string
 		endpoint          string
@@ -184,7 +186,7 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 		// },
 	}
 
-	testUpstream = createUpstreamTestServer(t)
+	testUpstream := createUpstreamTestServer(t)
 
 	// register testUpstream handlers
 	for _, tt := range tests {
@@ -212,8 +214,8 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 			return c.Status(response.StatusCode).Send(body)
 		})
 	}
-	upstreamAddr = listenUpstreamTestServer(t, testUpstream)
-	testBouine, store = createBouineTestServer(t, upstreamAddr)
+	upstreamAddr := listenUpstreamTestServer(t, testUpstream)
+	testBouine, store := createBouineTestServer(t, upstreamAddr)
 	defer store.Close()
 
 	for _, tt := range tests {

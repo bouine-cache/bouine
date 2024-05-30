@@ -30,7 +30,7 @@ func Test_createApp(t *testing.T) {
 	t.Parallel()
 
 	// create testUpstream & add simple handler
-	testUpstream = createUpstreamTestServer(t)
+	testUpstream := createUpstreamTestServer(t)
 	testUpstream.Get("/", func(c *fiber.Ctx) error {
 		response := &http.Response{
 			StatusCode: 200,
@@ -55,7 +55,7 @@ func Test_createApp(t *testing.T) {
 		return c.Status(response.StatusCode).Send(body)
 	})
 
-	upstreamAddr = listenUpstreamTestServer(t, testUpstream)
+	upstreamAddr := listenUpstreamTestServer(t, testUpstream)
 	app, store := createBouineTestServer(t, upstreamAddr)
 	defer store.Close()
 

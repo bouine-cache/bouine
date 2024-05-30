@@ -9,11 +9,20 @@ import (
 	"time"
 
 	fiber "github.com/gofiber/fiber/v2"
+	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/gofiber/utils"
 	"github.com/thylong/bouine/pkg/middleware"
 )
 
 func TestCacheW3CStandards(t *testing.T) {
+	t.Parallel()
+
+	var (
+		testUpstream *fiber.App
+		upstreamAddr string
+		testBouine   *fiber.App
+		store        *memory.Storage
+	)
 	tests := []struct {
 		name              string
 		endpoint          string

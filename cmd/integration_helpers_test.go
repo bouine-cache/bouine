@@ -12,13 +12,6 @@ import (
 	"github.com/gofiber/utils"
 )
 
-var (
-	testUpstream *fiber.App
-	upstreamAddr string
-	testBouine   *fiber.App
-	store        *memory.Storage
-)
-
 func createUpstreamTestServer(t *testing.T) *fiber.App {
 	t.Helper()
 

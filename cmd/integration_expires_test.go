@@ -52,11 +52,11 @@ func TestCacheExpires(t *testing.T) {
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Now().Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Now().Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 		},
 		{

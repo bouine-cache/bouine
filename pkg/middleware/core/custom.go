@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	StatusHit  string = "hit"
-	StatusMiss string = "miss"
+	StatusUnreachable string = "unreachable"
+	StatusHit         string = "hit"
+	StatusMiss        string = "miss"
 )
 
 // use time.Until wrapper to allow predictive testing.
@@ -75,6 +76,51 @@ func CacheSkippable(c *fiber.Ctx) bool {
 	// skip cache middleware on 'Cache-Control: private'
 	if bytes.Equal(c.Context().Response.Header.Peek("Cache-Control"), []byte("private")) {
 		return true
+	}
+
+	// skip cache on certain invalid Expires format cases (still tolerate cases mix)
+	// skip cache on past Expires
+	if exp := bytes.ToTitle(c.Context().Response.Header.Peek("Expires")); len(exp) != 0 {
+		// HTTP cache must not reuse a response with an invalid Expires (UTC)
+		if bytes.HasSuffix(exp, []byte("UTC")) {
+			return true
+		}
+		// List of RFC layouts to check against
+		rfcLayouts := []string{
+			time.RFC1123,
+			time.RFC1123Z,
+			time.ANSIC,
+			time.RFC850,
+		}
+
+		// Function to determine which RFC layout the date string matches
+		matchRFCLayout := func(dateStr string, layouts []string) (string, error) {
+			for _, layout := range layouts {
+				if _, err := time.Parse(layout, dateStr); err == nil {
+					return layout, nil
+				}
+			}
+			return "", fmt.Errorf("given Expires does not match any known RFC layout")
+		}
+
+		// Determine which RFC layout the date string matches
+		layout, err := matchRFCLayout(string(exp), rfcLayouts)
+		if err != nil {
+			fmt.Println("Error validating Expires header:", err)
+			return true
+		}
+
+		e, err := time.Parse(layout, string(exp))
+		if err != nil {
+			return false
+		}
+		date, err := time.Parse(layout, string(c.Context().Response.Header.Peek("Date")))
+		if err != nil {
+			return false
+		}
+		if e.Before(date) {
+			return true
+		}
 	}
 
 	return false

@@ -1,14 +1,14 @@
 repos:
 - repo: https://github.com/golangci/golangci-lint
-  rev: v1.57.1
+  rev: v1.59.0
   hooks:
   -   id: golangci-lint
 - repo: https://github.com/yoheimuta/protolint
-  rev: v0.49.3
+  rev: v0.49.7
   hooks:
   -   id: protolint-docker
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v4.5.0
+  rev: v4.6.0
   hooks:
   -   id: check-json
   -   id: check-yaml

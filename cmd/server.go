@@ -19,6 +19,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
+	"github.com/gofiber/fiber/v2/utils"
 	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/thylong/bouine/pkg/middleware/core"
 	"github.com/thylong/bouine/pkg/middleware/upstream"
@@ -122,8 +123,11 @@ func createApp(httpTimeout int64, prod bool, upstreamAddr string, loggingLevel s
 	app.Use(logger.New())
 	// cache middleware with distributed K/V store
 	app.Use(cache.New(cache.Config{
-		Next:                 core.CacheSkippable,
-		ExpirationGenerator:  core.CustomExpirationGenerator,
+		Next:                core.CacheSkippable,
+		ExpirationGenerator: core.CustomExpirationGenerator,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return utils.CopyString(c.Hostname() + c.Path()) // Add support to multiple upstreams
+		},
 		Storage:              store,
 		StoreResponseHeaders: true,
 	}))

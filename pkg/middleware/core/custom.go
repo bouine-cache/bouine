@@ -78,19 +78,38 @@ func CacheSkippable(c *fiber.Ctx) bool {
 		return true
 	}
 
+	fmt.Printf("Expires header %s\n", bytes.ToTitle(c.Context().Response.Header.Peek("Expires")))
+	fmt.Printf("Date header %s\n", bytes.ToTitle(c.Context().Response.Header.Peek("Date")))
+
 	// skip cache on certain invalid Expires format cases (still tolerate cases mix)
 	// skip cache on past Expires
 	if invalidOrOutdatedExpires(
 		bytes.ToTitle(c.Context().Response.Header.Peek("Expires")),
 		bytes.ToTitle(c.Context().Response.Header.Peek("Date")),
+		c.Context().Response.Header.Peek("Cache-Control"),
+		c.Context().Response.Header.Peek("Age"),
 	) {
+		fmt.Println("EXPIRED EXPIRES")
+		return true
+	}
+
+	fmt.Println("Bruh")
+	if AgeExceedsCacheDuration(
+		c.Context().Response.Header.Peek("Age"),
+		c.Context().Response.Header.Peek("Cache-Control"),
+	) {
+		fmt.Println("EXPIRED AGE")
 		return true
 	}
 
 	return false
 }
 
-func invalidOrOutdatedExpires(expHeader, dateHeader []byte) bool {
+// TODO: breakdown this into multiple functions:
+// 1. func for invalidExpires
+// 2. func for Expired (comparison to Date & Age)
+// 3. funcs should return (bool, err) for observability
+func invalidOrOutdatedExpires(expHeader, dateHeader, cacheControlHeader, ageHeader []byte) bool {
 	if len(expHeader) == 0 {
 		return false
 	}
@@ -120,20 +139,87 @@ func invalidOrOutdatedExpires(expHeader, dateHeader []byte) bool {
 	layout, err := matchRFCLayout(string(expHeader), rfcLayouts)
 	if err != nil {
 		fmt.Println("Error validating Expires header:", err)
+
+		re := regexp.MustCompile(`max-age=([0-9]*)`)
+		maxAgeDirective := re.FindSubmatch(cacheControlHeader)
+
+		// If Expires is invalid but max-age is set, we still want to serve cache
+		fmt.Println("getting close")
+		if len(maxAgeDirective) != 0 {
+			if maxAge, err := time.ParseDuration(fmt.Sprintf("%ss", maxAgeDirective[1])); maxAge > 0 && err == nil {
+				// In this case Date header is ignored completely
+				return false
+			}
+		}
 		return true
 	}
 
+	fmt.Println("made it HERE ")
 	e, err := time.Parse(layout, string(expHeader))
 	if err != nil {
+		fmt.Println("made it HERE 1")
 		return false
 	}
-	date, err := time.Parse(time.RFC1123, string(dateHeader))
+
+	dateLayout, err := matchRFCLayout(string(dateHeader), rfcLayouts)
 	if err != nil {
 		return false
 	}
+	date, _ := time.Parse(dateLayout, string(dateHeader))
+
+	fmt.Printf("expHeader %s\n", expHeader)
+	fmt.Printf("dateHeader %s\n", dateHeader)
+	fmt.Printf("Exp layout %s\n", layout)
+	fmt.Printf("Date layout %s\n", dateLayout)
+	fmt.Printf("Exp value %s\n", e.In(time.UTC).String())
+	fmt.Printf("date value %s\n", date.In(time.UTC).String())
+
 	if e.Before(date) {
+		fmt.Println("made it HERE 3")
 		return true
 	}
+
+	// in this case, Expires is older than Age
+	if len(ageHeader) != 0 {
+		age, err := time.ParseDuration(fmt.Sprintf("%ss", ageHeader))
+		// ignore invalid Age headers
+		if err != nil {
+			return false
+		}
+
+		if e.Before(time.Now().Add(age)) {
+			return true
+		}
+	}
+	fmt.Println("made it HERE 4")
+	return false
+}
+
+func AgeExceedsCacheDuration(ageHeader, cacheControlHeader []byte) bool {
+	// in this case, Expires is older than Age
+	fmt.Println("Bruh1")
+	if len(ageHeader) != 0 {
+		// ignore float values
+		if bytes.Contains(ageHeader, []byte(".")) {
+			fmt.Println("Bruh4")
+			return false
+		}
+		age, _ := time.ParseDuration(fmt.Sprintf("%ss", ageHeader))
+
+		re := regexp.MustCompile(`max-age=([0-9]*)`)
+		maxAgeDirective := re.FindSubmatch(cacheControlHeader)
+
+		fmt.Println("Bruh2")
+		// If Expires is invalid but max-age is set, we still want to serve cache
+		if len(maxAgeDirective) != 0 {
+			fmt.Println("Bruh3")
+			// ignore Age float value
+			if maxAge, err := time.ParseDuration(fmt.Sprintf("%ss", maxAgeDirective[1])); age > maxAge && err == nil {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 

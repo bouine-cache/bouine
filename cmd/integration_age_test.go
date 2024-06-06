@@ -13,8 +13,12 @@ import (
 	"github.com/thylong/bouine/pkg/middleware/core"
 )
 
-func TestCacheAgeW3CStandards(t *testing.T) {
+func TestCacheAge(t *testing.T) {
 	t.Parallel()
+
+	var now time.Time
+
+	now = time.Now().UTC()
 
 	tests := []struct {
 		name              string
@@ -29,13 +33,13 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 			endpoint:   "/age-parse-nonnumeric",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Age": []string{"abc"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Age": []string{"abc"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"abc"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Age": []string{"abc"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -43,13 +47,13 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 			endpoint:   "/age-parse-negative",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Age": []string{"-7200"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Age": []string{"-7200"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"-7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Age": []string{"-7200"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -57,73 +61,82 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 			endpoint:   "/age-parse-float",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Age": []string{"7200.0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Age": []string{"7200.0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"7200.0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Age": []string{"7200.0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
-		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
-		// {
-		// 	name:       "HTTP cache should consider a response with a Age value of 2147483647 to be stale",
-		// 	endpoint:   "/age-parse-large-minus-one",
-		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
-		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483647"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
-		// 	}},
-		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483647"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
-		// 	}},
-		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483647"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
-		// 	}},
-		// },
-		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
-		// {
-		// 	name:       "HTTP cache should consider a response with a Age value of 2147483648 to be stale",
-		// 	endpoint:   "/age-parse-large-minus-one",
-		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
-		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483648"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
-		// 	}},
-		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483648"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
-		// 	}},
-		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483648"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
-		// 	}},
-		// },
-		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
-		// {
-		// 	name:       "HTTP cache should consider a response with a Age value of 2147483649 to be stale",
-		// 	endpoint:   "/age-parse-large-minus-one",
-		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
-		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483649"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
-		// 	}},
-		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483649"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
-		// 	}},
-		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"2147483649"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
-		// 	}},
-		// },
-		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
+		{
+			name:       "HTTP cache should consider a response with a Age value of 2147483647 to be stale",
+			endpoint:   "/age-parse-large-minus-one",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483647"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483647"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483647"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+		},
+		{
+			name:       "HTTP cache should consider a response with a Age value of 2147483648 to be stale",
+			endpoint:   "/age-parse-large-minus-one",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483648"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483648"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483648"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+		},
+		{
+			name:       "HTTP cache should consider a response with a Age value of 2147483649 to be stale",
+			endpoint:   "/age-parse-larger",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483649"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483649"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Age":  []string{"2147483649"},
+				"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+		},
+		// FIXME: use regex prior to Age ParseDuration
 		// {
 		// 	name:       "HTTP cache should consider a response with a single Age header line old, 0 to be stale",
 		// 	endpoint:   "/age-parse-suffix",
 		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"7200, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+		// 		"Age":  []string{"7200, 0"},
+		// 		"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"7200, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Age":  []string{"7200, 0"},
+		// 		"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"7200, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Age":  []string{"7200, 0"},
+		// 		"Date": []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 		// 	}},
 		// },
 		{
@@ -131,13 +144,13 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 			endpoint:   "/age-parse-prefix",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Age": []string{"0, 7200"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Age": []string{"0, 7200"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 7200"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Age": []string{"0, 7200"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -145,43 +158,43 @@ func TestCacheAgeW3CStandards(t *testing.T) {
 			endpoint:   "/age-parse-dup-0",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Age": []string{"0, 0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Age": []string{"0, 0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Age": []string{"0, 0"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Age": []string{"0, 0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
-		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
+		// TODO: Ignore as Varnish does?
 		//  {
 		//  	name:       "Does HTTP cache consider an alphabetic parameter on Age header to be valid?",
 		//  	endpoint:   "/age-parse-parameter",
 		//  	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 		//  	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 		//  	}},
 		//  	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		//  	}},
 		//  	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		//  	}},
 		//  },
-		// TODO: Age stale doesn't seem to be taken into account by the cache, resulting in a cache hit
+		// TODO: Ignore as Varnish does?
 		// {
 		// 	name:       "Does HTTP cache should consider a numeric parameter on Age header to be valid?",
 		// 	endpoint:   "/age-parse-numeric-parameter",
 		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"7200;foo=111"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+		// 		"Age": []string{"7200;foo=111"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"7200;foo=111"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Age": []string{"7200;foo=111"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-		// 		"Age": []string{"7200;foo=111"}, "Date": []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Age": []string{"7200;foo=111"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		// 	}},
 		// },
 	}

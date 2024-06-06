@@ -13,13 +13,13 @@ import (
 	"syscall"
 	"time"
 
+	xxhash "github.com/cespare/xxhash/v2"
 	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cache"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/timeout"
-	"github.com/gofiber/fiber/v2/utils"
 	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/thylong/bouine/pkg/middleware/core"
 	"github.com/thylong/bouine/pkg/middleware/upstream"
@@ -126,7 +126,17 @@ func createApp(httpTimeout int64, prod bool, upstreamAddr string, loggingLevel s
 		Next:                core.CacheSkippable,
 		ExpirationGenerator: core.CustomExpirationGenerator,
 		KeyGenerator: func(c *fiber.Ctx) string {
-			return utils.CopyString(c.Hostname() + c.Path()) // Add support to multiple upstreams
+			// PERF: need to re-think this approach for better performances.
+			// Too much copies in particular
+
+			// TODO: normalize to optimize cacheKeyComputation
+
+			digest := xxhash.New()
+			digest.WriteString(c.Hostname())
+			digest.WriteString(c.Path())
+			digest.Write(c.Response().Header.Peek("Vary"))
+
+			return fmt.Sprintf("%d", digest.Sum64())
 		},
 		Storage:              store,
 		StoreResponseHeaders: true,

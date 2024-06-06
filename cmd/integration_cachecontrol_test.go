@@ -14,7 +14,7 @@ import (
 	"github.com/thylong/bouine/pkg/middleware/core"
 )
 
-func TestCacheW3CStandards(t *testing.T) {
+func TestCacheControl(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -22,7 +22,13 @@ func TestCacheW3CStandards(t *testing.T) {
 		upstreamAddr string
 		testBouine   *fiber.App
 		store        *memory.Storage
+		now          time.Time
+		nowAsGMT     string
 	)
+
+	now = time.Now().UTC()
+	nowAsGMT = asGMT(now)
+
 	tests := []struct {
 		name              string
 		endpoint          string
@@ -103,19 +109,19 @@ func TestCacheW3CStandards(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
-				"Expires":       []string{time.Now().Format("Wed, 21 Oct 2015 07:28:00 GMT")},
-				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Expires":       []string{now.Format("Wed, 21 Oct 2015 07:28:00 GMT")},
+				"Date":          []string{nowAsGMT},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
-				"Expires":       []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Expires":       []string{now.Format("wed, 21 oct 2015 07:28:00 GMT")},
+				"Date":          []string{nowAsGMT},
 				"X-Cache":       []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
-				"Expires":       []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Expires":       []string{now.Format("wed, 21 oct 2015 07:28:00 GMT")},
+				"Date":          []string{nowAsGMT},
 				"X-Cache":       []string{core.StatusHit},
 			}},
 		},
@@ -126,18 +132,18 @@ func TestCacheW3CStandards(t *testing.T) {
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{"0"},
-				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Date":          []string{now.Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{"0"},
-				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Date":          []string{now.Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
 				"X-Cache":       []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=3600"},
 				"Expires":       []string{"0"},
-				"Date":          []string{time.Now().Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Date":          []string{now.Add(time.Duration(7200) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
 				"X-Cache":       []string{core.StatusHit},
 			}},
 		},
@@ -147,20 +153,20 @@ func TestCacheW3CStandards(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=0"},
-				"Expires":       []string{time.Now().Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":          []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Expires":       []string{now.Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Date":          []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=0"},
-				"Expires":       []string{time.Now().Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":          []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{core.StatusMiss},
+				"Expires":       []string{now.Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Date":          []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"X-Cache":       []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Cache-Control": []string{"max-age=0"},
-				"Expires":       []string{time.Now().Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"Date":          []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")},
-				"X-Cache":       []string{core.StatusMiss},
+				"Expires":       []string{now.Add(time.Duration(3600) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"Date":          []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")},
+				"X-Cache":       []string{core.StatusUnreachable},
 			}},
 		},
 		{
@@ -229,15 +235,15 @@ func TestCacheW3CStandards(t *testing.T) {
 		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Cache-Control": []string{"max-age=0, s-maxage=3600"},
-		// 		"Expires":       []string{time.Now().Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
+		// 		"Expires":       []string{now.Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")},
 		// 	}},
 		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Cache-Control": []string{"max-age=0, s-maxage=3600"},
-		// 		"Expires":       []string{time.Now().Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")}, "X-Cache": []string{middleware.StatusMiss},
+		// 		"Expires":       []string{now.Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")}, "X-Cache": []string{middleware.StatusMiss},
 		// 	}},
 		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 		// 		"Cache-Control": []string{"max-age=0, s-maxage=3600"},
-		// 		"Expires":       []string{time.Now().Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")}, "X-Cache": []string{middleware.StatusHit},
+		// 		"Expires":       []string{now.Truncate(time.Duration(10) * time.Second).Format("wed, 21 oct 2015 07:28:00 gmt")}, "X-Cache": []string{middleware.StatusHit},
 		// 	}},
 		// },
 		// TODO: doesn\'t work as expected, need official cache or core middleware changes

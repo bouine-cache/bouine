@@ -17,6 +17,14 @@ import (
 func TestCacheExpires(t *testing.T) {
 	t.Parallel()
 
+	var (
+		now      time.Time
+		nowAsGMT string
+	)
+
+	now = time.Now().UTC()
+	nowAsGMT = asGMT(now)
+
 	tests := []struct {
 		name              string
 		endpoint          string
@@ -30,16 +38,16 @@ func TestCacheExpires(t *testing.T) {
 			endpoint:   "/freshness-expires-past",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{time.Now().Add(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Expires": []string{now.Add(time.Second * 2592000).Format(time.RFC1123Z)},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{time.Now().Add(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Expires": []string{now.Add(time.Second * 2592000).Format(time.RFC1123Z)},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{time.Now().Add(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Expires": []string{now.Add(time.Second * 2592000).Format(time.RFC1123Z)},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -47,16 +55,105 @@ func TestCacheExpires(t *testing.T) {
 			endpoint:   "/freshness-expires-future",
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{time.Now().Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Expires": []string{now.Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{time.Now().Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Expires": []string{now.Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{time.Now().Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Expires": []string{now.Truncate(time.Second * 2592000).Format(time.RFC1123Z)},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+		},
+		{
+			name:       "HTTP cache must not reuse a response with a present Expires",
+			endpoint:   "/freshness-expires-present",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{nowAsGMT},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{nowAsGMT},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{nowAsGMT},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+		},
+		// FIX: cannot set a Date header in the future (forbidden header + fastHTTP will override it with AppendHTTPDate func)
+		// {
+		// 	name:       "HTTP cache must not reuse a response with an Expires older than Date, both fast",
+		// 	endpoint:   "/freshness-expires-old-date",
+		// 	reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+		// 	upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+		// 		"Expires": []string{now.Add(time.Second * 300).Format(time.RFC1123Z)},
+		// 		"Date":    []string{now.Add(time.Second * 400).Format(time.RFC1123Z)},
+		// 	}},
+		// 	expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+		// 		"Expires": []string{now.Add(time.Second * 300).Format(time.RFC1123Z)},
+		// 		"Date":    []string{now.Add(time.Second * 400).Format(time.RFC1123Z)}, "X-Cache": []string{core.StatusUnreachable},
+		// 	}},
+		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+		// 		"Expires": []string{now.Add(time.Second * 300).Format(time.RFC1123Z)},
+		// 		"Date":    []string{now.Add(time.Second * 400).Format(time.RFC1123Z)}, "X-Cache": []string{core.StatusUnreachable},
+		// 	}},
+		// },
+		{
+			name:       "HTTP cache must not reuse a response with an invalid Expires (0)",
+			endpoint:   "/freshness-expires-invalid",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{"0"},
+				"Date":    []string{nowAsGMT},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{"0"},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{"0"},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+		},
+		{
+			name:       "An optimal HTTP cache reuses a response with Expires, even if Date is invalid",
+			endpoint:   "/freshness-expires-invalid-date",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{now.Add(time.Second * 20).Format(time.RFC1123Z)},
+				"Date":    []string{"foo"},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{now.Add(time.Second * 20).Format(time.RFC1123Z)},
+				"Date":    []string{"foo"}, "X-Cache": []string{core.StatusMiss},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{now.Add(time.Second * 20).Format(time.RFC1123Z)},
+				"Date":    []string{"foo"}, "X-Cache": []string{core.StatusHit},
+			}},
+		},
+		{
+			name:       "HTTP cache must not reuse a response when the Age header is greater than its Expires minus Date, and Date is slow",
+			endpoint:   "/freshness-expires-age-slow-date",
+			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{now.Add(time.Second * 10).Format(time.RFC1123Z)},
+				"Age":     []string{"3600"},
+				"Date":    []string{nowAsGMT},
+			}},
+			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{now.Add(time.Second * 20).Format(time.RFC1123Z)},
+				"Age":     []string{"3600"},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
+			}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
+				"Expires": []string{now.Add(time.Second * 20).Format(time.RFC1123Z)},
+				"Age":     []string{"3600"},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 		},
 		{
@@ -65,15 +162,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2038 14:14:08 GMT"},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2038 14:14:08 GMT"},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2038 14:14:08 GMT"},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -82,15 +179,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 21 Oct 2286 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 21 Oct 2286 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 21 Oct 2286 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -99,15 +196,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.RFC850)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.RFC850)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.RFC850)},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 		},
 		{
@@ -116,15 +213,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.ANSIC)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.ANSIC)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{time.Date(2286, time.January, 19, 1, 1, 1, 1, time.UTC).Format(time.ANSIC)},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -133,15 +230,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"FRI, 21 Oct 2050 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"FRI, 21 Oct 2050 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"FRI, 21 Oct 2050 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -150,15 +247,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Fri, 21 OCT 2050 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{now.Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Fri, 21 OCT 2050 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Fri, 21 OCT 2050 07:28:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -167,15 +264,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2286 23:00:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2286 23:00:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2286 23:00:00 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -184,15 +281,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2286 23:00:00 UTC"},
-				"Date":    []string{time.Now().Format(time.RFC1123)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{now.Format(time.RFC1123)}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2286 23:00:00 UTC"},
-				"Date":    []string{time.Now().Format(time.RFC1123)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{now.Format(time.RFC1123)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Tue, 19 Jan 2286 23:00:00 UTC"},
-				"Date":    []string{time.Now().Format(time.RFC1123)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{now.Format(time.RFC1123)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 		},
 		// FIX: Reject any suffix, not just UTC (ignored as not convenient for Go support)
@@ -202,15 +299,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug 2050 02:01:18 AEST"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug 2050 02:01:18 AEST"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug 2050 02:01:18 AEST"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 		{
@@ -219,15 +316,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug 50 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug 50 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug 50 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 		},
 		{
@@ -236,15 +333,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu 18 Aug 2050 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
-				"Expires": []string{"Thu 18 Aug 2050 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Expires": []string{"now 2050 02:01:18 GMT"},
+				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu 18 Aug 2050 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusUnreachable},
+				"Date":    []string{nowAsGMT}, "X-Cache": []string{core.StatusUnreachable},
 			}},
 		},
 		// FIX: Expires stale doesn't seem to be taken into account by the cache, resulting in a cache hit (tolerate for convenience)
@@ -254,15 +351,15 @@ func TestCacheExpires(t *testing.T) {
 			reqHeaders: http.Header{"Content-Type": []string{"application/json"}},
 			upstreamRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug  2050 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"},
 			}},
 			expectedFirstRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug  2050 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 			}},
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{
 				"Expires": []string{"Thu, 18 Aug  2050 02:01:18 GMT"},
-				"Date":    []string{time.Now().Format(time.RFC1123Z)}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
+				"Date":    []string{nowAsGMT}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
 	}
@@ -309,7 +406,13 @@ func TestCacheExpires(t *testing.T) {
 			resp, err := testBouine.Test(req)
 			utils.AssertEqual(t, nil, err)
 			defer resp.Body.Close()
-			fmt.Printf("The resp: %#v\n", tt.expectedFirstRes)
+			// Read the response body
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Printf("The expected resp: %#v\n", tt.expectedFirstRes)
+			fmt.Printf("The resp: %s\n", body)
 			fmt.Printf("The resp: %#v\n", resp.Header.Get("Cache-Control"))
 			utils.AssertEqual(t, tt.expectedFirstRes.StatusCode, resp.StatusCode)
 			utils.AssertEqual(t, tt.expectedFirstRes.Header.Get("Cache-Control"), resp.Header.Get("Cache-Control"))

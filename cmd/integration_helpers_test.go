@@ -12,6 +12,13 @@ import (
 	"github.com/gofiber/utils"
 )
 
+func asGMT(t time.Time) string {
+	nowAsRFC1123 := t.Format(time.RFC1123)
+	nowAsGMT := nowAsRFC1123
+
+	return nowAsGMT[:len(nowAsGMT)-3] + "GMT"
+}
+
 func createUpstreamTestServer(t *testing.T) *fiber.App {
 	t.Helper()
 

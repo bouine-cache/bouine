@@ -132,9 +132,7 @@ func createApp(httpTimeout int64, prod bool, upstreamAddr string, loggingLevel s
 			// TODO: normalize to optimize cacheKeyComputation
 
 			digest := xxhash.New()
-			digest.WriteString(c.Hostname())
-			digest.WriteString(c.Path())
-			digest.Write(c.Response().Header.Peek("Vary"))
+			digest.WriteString(c.Hostname() + "_" + c.Path())
 
 			return fmt.Sprintf("%d", digest.Sum64())
 		},

@@ -16,6 +16,7 @@ import (
 	xxhash "github.com/cespare/xxhash/v2"
 	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cache"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/middleware/recover"
@@ -121,6 +122,7 @@ func createApp(httpTimeout int64, prod bool, upstreamAddr string, loggingLevel s
 	// Middlewares
 	app.Use(recover.New())
 	app.Use(logger.New())
+	app.Use(compress.New())
 	// cache middleware with distributed K/V store
 	app.Use(cache.New(cache.Config{
 		Next:                core.CacheSkippable,

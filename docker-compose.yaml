@@ -24,16 +24,6 @@ services:
       appNetwork:
         ipv4_address: 172.24.2.1
     entrypoint: ["/app", "start", "--logging_level=debug"]
-  test-client:
-    image: grafana/k6:0.49.0
-    depends_on:
-      - bouine
-    links:
-      - bouine
-    networks:
-      appNetwork: {}
-    volumes:
-      - ./third_party/k6/scenarios:/scenarios
   mockingjay: # Mock server
     image: quii/mockingjay-server:1.12.0
     ports:

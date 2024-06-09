@@ -167,7 +167,7 @@ func TestCacheAge(t *testing.T) {
 				"Age": []string{"0, 0"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusHit},
 			}},
 		},
-		// TODO: Ignore as Varnish does?
+		// Ignore as Varnish does
 		//  {
 		//  	name:       "Does HTTP cache consider an alphabetic parameter on Age header to be valid?",
 		//  	endpoint:   "/age-parse-parameter",
@@ -182,7 +182,7 @@ func TestCacheAge(t *testing.T) {
 		//  		"Age": []string{"7200;foo=bar"}, "Date": []string{now.Format("wed, 21 oct 2015 07:28:00 gmt")}, "Cache-Control": []string{"max-age=3600"}, "X-Cache": []string{core.StatusMiss},
 		//  	}},
 		//  },
-		// TODO: Ignore as Varnish does?
+		// Ignore as Varnish does
 		// {
 		// 	name:       "Does HTTP cache should consider a numeric parameter on Age header to be valid?",
 		// 	endpoint:   "/age-parse-numeric-parameter",

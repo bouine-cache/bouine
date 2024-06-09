@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 
 	fiber "github.com/gofiber/fiber/v2"
@@ -68,6 +69,11 @@ func CacheSkippable(c *fiber.Ctx) bool {
 		return true
 	}
 
+	// skip cache middleware on 'Cache-Control: max-age=0'
+	if bytes.Equal(c.Context().Response.Header.Peek("Cache-Control"), []byte("max-age=0")) {
+		return true
+	}
+
 	// skip cache middleware on 'Cache-Control: no-store'
 	if bytes.Equal(c.Context().Response.Header.Peek("Cache-Control"), []byte("no-store")) {
 		return true
@@ -108,7 +114,7 @@ func CacheSkippable(c *fiber.Ctx) bool {
 // TODO: breakdown this into multiple functions:
 // 1. func for invalidExpires
 // 2. func for Expired (comparison to Date & Age)
-// 3. funcs should return (bool, err) for observability
+// 3. funcs should return (bool, err) for observability.
 func invalidOrOutdatedExpires(expHeader, dateHeader, cacheControlHeader, ageHeader []byte) bool {
 	if len(expHeader) == 0 {
 		return false
@@ -226,20 +232,42 @@ func AgeExceedsCacheDuration(ageHeader, cacheControlHeader []byte) bool {
 // CustomExpirationGenerator returns cache key expiration time.
 // Use Upstream response expires, max-age or s-maxage from the response otherwise fallbacks to default config value.
 func CustomExpirationGenerator(c *fiber.Ctx, cfg *cache.Config) time.Duration {
+	var maxAgeDuration time.Duration
+	var sMaxAgeDuration time.Duration
+	var err error
+
 	// max-age
 	re := regexp.MustCompile(`max-age=([0-9]*)`)
 	if maxAge := re.FindSubmatch(c.Context().Response.Header.Peek("Cache-Control")); maxAge != nil {
-		// TODO: handle badly formatted max-age
-		maxAgeDuration, _ := time.ParseDuration(fmt.Sprintf("%ss", maxAge[1]))
-		return maxAgeDuration
+		// Still cache if max-age exceeds maximum duration
+		if ma, _ := strconv.Atoi(string(maxAge[1])); ma > 99999999 {
+			maxAge[1] = []byte("99999999")
+		}
+		maxAgeDuration, err = time.ParseDuration(fmt.Sprintf("%ss", maxAge[1]))
+		if err != nil {
+			fmt.Printf("BROOOOOOOOOOOOOOOOOOO: %s\n", err)
+			return time.Duration(0)
+		}
 	}
 
 	// s-maxage
 	re = regexp.MustCompile(`s-maxage=([0-9]*)`)
 	if sMaxAge := re.FindSubmatch(c.Context().Response.Header.Peek("Cache-Control")); sMaxAge != nil {
-		// TODO: handle badly formatted s-maxage
-		sMaxAgeDuration, _ := time.ParseDuration(fmt.Sprintf("%ss", sMaxAge[1]))
+		// Still cache if s-maxage exceeds maximum duration
+		if sma, _ := strconv.Atoi(string(sMaxAge[1])); sma > 99999999 {
+			sMaxAge[1] = []byte("99999999")
+		}
+		sMaxAgeDuration, err = time.ParseDuration(fmt.Sprintf("%ss", sMaxAge[1]))
+		if err != nil {
+			fmt.Printf("BROOOOOOOOOOOOOOOOOOO: %s\n", err)
+			return time.Duration(0)
+		}
+	}
+
+	if sMaxAgeDuration > time.Duration(0) {
 		return sMaxAgeDuration
+	} else if maxAgeDuration > time.Duration(0) {
+		return maxAgeDuration
 	}
 
 	// Expires (in case both max-age & s-maxage are missing)

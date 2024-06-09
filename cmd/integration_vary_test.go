@@ -163,25 +163,24 @@ func TestCacheVary(t *testing.T) {
 			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=5000"}, "X-Cache": []string{core.StatusHit}}},
 			expectedThirdRes:  http.Response{StatusCode: fiber.StatusNotImplemented},
 		},
-		// FIXME: weird case but mandatory to fix !
-		// {
-		// 	name:             "HTTP cache must not reuse two-way Vary response when request doesn't match",
-		// 	endpoint:         "/vary-2-match",
-		// 	firstReqHeaders:  http.Header{"Foo": []string{"1"}, "Bar": []string{"abc"}},
-		// 	SecondReqHeaders: http.Header{"Foo": []string{"2"}, "Bar": []string{"abc"}},
-		// 	ThirdReqHeaders:  http.Header{},
-		// 	upstreamRes: http.Response{
-		// 		StatusCode: 200, Header: http.Header{
-		// 			"Cache-Control": []string{"max-age=5000"},
-		// 			"Last-Modified": []string{asGMT(now.Truncate(time.Second * 3000))},
-		// 			"Vary":          []string{"Foo, Bar"},
-		// 			"Date":          []string{nowAsGMT},
-		// 		},
-		// 	},
-		// 	expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=5000"}, "X-Cache": []string{core.StatusMiss}}},
-		// 	expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=5000"}, "X-Cache": []string{core.StatusMiss}}},
-		// 	expectedThirdRes:  http.Response{StatusCode: fiber.StatusNotImplemented},
-		// },
+		{
+			name:             "HTTP cache must not reuse two-way Vary response when request doesn't match",
+			endpoint:         "/vary-2-match",
+			firstReqHeaders:  http.Header{"Foo": []string{"1"}, "Bar": []string{"abc"}},
+			SecondReqHeaders: http.Header{"Foo": []string{"2"}, "Bar": []string{"abc"}},
+			ThirdReqHeaders:  http.Header{},
+			upstreamRes: http.Response{
+				StatusCode: 200, Header: http.Header{
+					"Cache-Control": []string{"max-age=5000"},
+					"Last-Modified": []string{asGMT(now.Truncate(time.Second * 3000))},
+					"Vary":          []string{"Foo, Bar"},
+					"Date":          []string{nowAsGMT},
+				},
+			},
+			expectedFirstRes:  http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=5000"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedSecondRes: http.Response{StatusCode: 200, Header: http.Header{"Cache-Control": []string{"max-age=5000"}, "X-Cache": []string{core.StatusMiss}}},
+			expectedThirdRes:  http.Response{StatusCode: fiber.StatusNotImplemented},
+		},
 		{
 			name:             "HTTP cache must not reuse two-way Vary response when request omits variant request header",
 			endpoint:         "/vary-2-match-omit",

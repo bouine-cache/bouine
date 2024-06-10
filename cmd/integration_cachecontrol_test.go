@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
 	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/gofiber/utils"
 	"github.com/thylong/bouine/pkg/middleware/core"
+	fiber "github.com/thylong/fiber/v2"
 )
 
 func TestCacheControl(t *testing.T) {

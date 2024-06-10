@@ -15,7 +15,7 @@
 
 package middleware
 
-import fiber "github.com/gofiber/fiber/v2"
+import fiber "github.com/thylong/fiber/v2"
 
 func Prefetch() fiber.Handler {
 	// Return new handler

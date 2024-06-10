@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cache"
+	fiber "github.com/thylong/fiber/v2"
+	"github.com/thylong/fiber/v2/middleware/cache"
 )
 
 const (

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/proxy"
-	"github.com/gofiber/fiber/v2/utils"
+	fiber "github.com/thylong/fiber/v2"
+	"github.com/thylong/fiber/v2/middleware/proxy"
+	"github.com/thylong/fiber/v2/utils"
 )
 
 func Test_Proxy_WithValidUpstream(t *testing.T) {

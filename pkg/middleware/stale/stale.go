@@ -15,7 +15,7 @@
 
 package stale
 
-import fiber "github.com/gofiber/fiber/v2"
+import fiber "github.com/thylong/fiber/v2"
 
 func Stale() fiber.Handler {
 	// Return new handler

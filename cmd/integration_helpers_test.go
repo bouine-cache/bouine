@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
 	memory "github.com/gofiber/storage/memory/v2"
 	"github.com/gofiber/utils"
+	fiber "github.com/thylong/fiber/v2"
 )
 
 func asGMT(t time.Time) string {

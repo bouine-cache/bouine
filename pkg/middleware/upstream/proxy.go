@@ -16,8 +16,8 @@
 package upstream
 
 import (
-	fiber "github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/proxy"
+	fiber "github.com/thylong/fiber/v2"
+	"github.com/thylong/fiber/v2/middleware/proxy"
 )
 
 // ProxyMiddleware returns a Fiber proxy middleware.

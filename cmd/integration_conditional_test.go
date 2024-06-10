@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
 	"github.com/gofiber/utils"
 	"github.com/thylong/bouine/pkg/middleware/core"
+	fiber "github.com/thylong/fiber/v2"
 )
 
 func TestCacheConditionalRequests(t *testing.T) {

@@ -4,8 +4,8 @@ go 1.22
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
-	github.com/gofiber/fiber/v2 v2.0.0-00010101000000-000000000000
 	github.com/gofiber/utils v1.1.0
+	github.com/thylong/fiber/v2 v2.80.0
 	github.com/valyala/fasthttp v1.52.0
 	go.uber.org/zap v1.27.0
 )
@@ -36,4 +36,4 @@ require (
 	golang.org/x/sys v0.18.0 // indirect
 )
 
-// replace github.com/gofiber/fiber/v2 => ../fiber
+// replace github.com/thylong/fiber/v2 => ../fiber

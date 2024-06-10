@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/proxy"
-	"github.com/gofiber/fiber/v2/utils"
+	fiber "github.com/thylong/fiber/v2"
+	"github.com/thylong/fiber/v2/middleware/proxy"
+	"github.com/thylong/fiber/v2/utils"
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
 )

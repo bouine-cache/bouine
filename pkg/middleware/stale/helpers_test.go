@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/utils"
+	fiber "github.com/thylong/fiber/v2"
+	"github.com/thylong/fiber/v2/utils"
 )
 
 func createUpstreamBackendServer(handler fiber.Handler, t *testing.T) (*fiber.App, string) {

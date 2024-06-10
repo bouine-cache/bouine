@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"time"
 
-	fiber "github.com/gofiber/fiber/v2"
+	fiber "github.com/thylong/fiber/v2"
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
 )

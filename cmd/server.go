@@ -128,17 +128,12 @@ func createApp(httpTimeout int64, prod bool, upstreamAddr string, loggingLevel s
 		Next:                core.CacheSkippable,
 		ExpirationGenerator: core.CustomExpirationGenerator,
 		KeyGenerator: func(c *fiber.Ctx) string {
-			// PERF: need to re-think this approach for better performances.
-			// Too much copies in particular
-
-			// TODO: normalize to optimize cacheKeyComputation
-
 			digest := xxhash.New()
 			digest.WriteString(c.Hostname() + "_" + c.Path())
 
 			return fmt.Sprintf("%d", digest.Sum64())
 		},
-		Storage:              store,
+		// Storage:              store,
 		StoreResponseHeaders: true,
 	}))
 	// active healthcheck middleware

@@ -1,0 +1,204 @@
+# Contributing to bouine
+
+Thanks for considering a contribution. `bouine` is built to be a
+production-grade HTTP cache, so the contribution bar is intentionally
+high. This document describes the rules for humans; AI agents follow
+[`AGENTS.md`](AGENTS.md), which is the authoritative how-to for all
+contributors.
+
+> If a rule here conflicts with `AGENTS.md`, `AGENTS.md` wins for
+> *how*, and [`PLAN.md`](PLAN.md) wins for *what*.
+
+---
+
+## Quick links
+
+- Roadmap and architecture: [`PLAN.md`](PLAN.md)
+- Working agreement (binding for all contributors): [`AGENTS.md`](AGENTS.md)
+- Security policy and reporting: [`SECURITY.md`](SECURITY.md)
+- Threat model: [`docs/security/threat-model.md`](docs/security/threat-model.md)
+- Decision records: [`docs/decisions/`](docs/decisions/)
+
+---
+
+## Before you start
+
+1. Read [`PLAN.md`](PLAN.md) so you know which phase the project is in.
+   We do not accept features that are not on the roadmap for the
+   current phase. Open a discussion issue first if you want to argue
+   for inclusion.
+2. Read [`AGENTS.md`](AGENTS.md) end to end. The non-negotiable rules
+   in §2 apply to every contributor, AI or human.
+3. Search existing issues and PRs to avoid duplicate work.
+
+---
+
+## Setting up
+
+```bash
+git clone https://github.com/thylong/bouine.git
+cd bouine
+make hooks      # installs pre-commit + commit-msg hooks (mandatory)
+make build      # builds ./bin/bouine
+make test       # go test -race ./...
+```
+
+You need:
+
+- Go 1.26.x (toolchain pinned in `go.mod`).
+- `pre-commit` (`pip install pre-commit` or `brew install pre-commit`).
+- Docker (for integration and conformance tests).
+- `golangci-lint`, `govulncheck`, `gitleaks` — installed by
+  `make hooks` if absent, or via your package manager.
+
+`make hooks` is **mandatory**. Bypassing pre-commit (`--no-verify`,
+`SKIP=`) is forbidden by [`AGENTS.md §2.11`](AGENTS.md). CI re-runs
+`pre-commit run --all-files` as its first stage; bypassed local hooks
+still fail the build.
+
+---
+
+## The working loop
+
+For any non-trivial change:
+
+1. **Orient** — re-read the relevant sections of `PLAN.md` and
+   `AGENTS.md`. Identify which architectural layer(s) you are touching
+   (see [`AGENTS.md §3`](AGENTS.md)).
+2. **Plan** — open or comment on an issue describing the approach.
+   List the tests that will prove correctness.
+3. **Implement** — smallest reasonable change, follow neighboring
+   patterns, add tests as you go.
+4. **Verify** — `make ci` minimum. If you touched L1–L6, run
+   `make bench` and include the `benchstat` diff in the PR. If you
+   touched cache logic, run `make conformance`. If you touched
+   cluster code, run `make integration`.
+5. **Document** — update godoc, runbooks, and ADRs as needed.
+6. **PR** — small, focused, with the checklist below filled in.
+
+---
+
+## Pull request checklist
+
+Mirrors [`AGENTS.md §17`](AGENTS.md). All boxes must be checked before
+review.
+
+- [ ] `pre-commit run --all-files` passes locally.
+- [ ] Layer dependencies respected (`depguard` clean).
+- [ ] `make ci` is green locally.
+- [ ] Tests added or updated; coverage not reduced.
+- [ ] If you touched the hot path: zero-alloc benchmark proves it.
+- [ ] If you touched cache logic: `cache-tests` score not regressed.
+- [ ] If you touched config: JSON schema regenerated (`make schema`).
+- [ ] If you touched a public API: SDK types updated, semver impact
+      noted in the PR description.
+- [ ] If you touched a threat row: `docs/security/threat-model.md`
+      updated in the same PR.
+- [ ] Godoc updated.
+- [ ] ADR added under `docs/decisions/` if the change is architectural.
+- [ ] No secrets, no PII, no production hostnames committed.
+- [ ] `HANDOFF.md` removed if you created one.
+
+---
+
+## Commit messages
+
+We use [Conventional Commits](https://www.conventionalcommits.org/).
+Allowed prefixes:
+
+`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`.
+
+Examples:
+
+```
+feat(cache): implement stale-while-revalidate state machine
+fix(listener): reject obs-fold in HTTP/1.1 headers
+perf(storage): eliminate alloc on hot-tier lookup
+docs(threat-model): add T36 peer-fetch loop mitigation
+```
+
+The `commit-msg` pre-commit hook validates the header. Release notes
+are generated from these prefixes.
+
+---
+
+## Coding standards (summary)
+
+The authoritative list is in [`AGENTS.md §4`](AGENTS.md). Highlights:
+
+- `gofmt -s` + `goimports`, 100-column soft limit.
+- `golangci-lint` must pass with the mandatory linter set
+  (see [`AGENTS.md §14.4`](AGENTS.md)).
+- No `panic` outside `main`. No `init()` doing work.
+- No global mutable state. Inject clock, randomness, metrics, config.
+- `context.Context` is the first argument of every I/O function.
+- No bare goroutines — use `errgroup` or the supervised pool.
+- Add comments to explain *why*, not *what*. Cite RFC clauses when
+  spec-driven.
+
+---
+
+## Performance discipline
+
+Performance is a feature. See [`AGENTS.md §7`](AGENTS.md). Highlights:
+
+- Hit path: `< 5 µs` CPU at p50, `allocs/op = 0` after warm-up.
+- Hot loops never `fmt.Sprintf`, `errors.New`, or grow maps.
+- PRs touching L1–L6 must include a `benchstat` diff vs `main`.
+- CI gates: `≤ 2%` p99 regression, `≤ 5%` memory regression, zero new
+  hot-path allocations.
+
+---
+
+## Testing discipline
+
+See [`AGENTS.md §8`](AGENTS.md). Highlights:
+
+- Unit tests live alongside code, table-driven, `-race` on.
+- Coverage gate: `≥ 85%` per package, `≥ 95%` for `internal/cache` and
+  `internal/storage`.
+- Use the injected clock — never `time.Now()` in tests.
+- No sleeps. Use deterministic synchronization.
+- Flaky tests are quarantined within one business day.
+
+---
+
+## Security
+
+If you find a vulnerability, **do not open a public issue**.
+Follow [`SECURITY.md`](SECURITY.md).
+
+If your change touches a threat row in
+[`docs/security/threat-model.md`](docs/security/threat-model.md), update
+the document in the same PR. CI fails otherwise.
+
+---
+
+## Documentation
+
+- Every exported identifier has a godoc.
+- Every layer has a `doc.go`.
+- Operator-facing changes update `docs/runbook/`.
+- Architectural decisions get an ADR under `docs/decisions/`.
+- Diagrams use Mermaid in Markdown; no binary images.
+
+---
+
+## Reporting issues
+
+Use the issue templates under `.github/ISSUE_TEMPLATE/`. Include:
+
+- bouine version (`bouine version`).
+- Go version and OS.
+- Minimal config to reproduce.
+- Expected and actual behavior.
+- Logs at `debug` level if relevant.
+- If clustering is involved, the output of `bouine cluster peers` from
+  each node.
+
+---
+
+## License
+
+By contributing, you agree that your contributions are licensed under
+the [Apache License 2.0](LICENSE).

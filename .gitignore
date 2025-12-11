@@ -1,0 +1,45 @@
+# Go build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.prof
+*.pprof
+*.cover
+coverage.*
+cover.html
+
+# Go workspace local sums
+go.work.sum
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# bouine local state
+/var/
+/tmp/
+/.crush/
+HANDOFF.md
+
+# Benchmark outputs (kept in PR descriptions, not the repo)
+/bench/results/
+
+# Generated artifacts
+/docs/_site/
+/web/dashboard/node_modules/
+/web/dashboard/dist/
+
+# Test data fuzz corpora — keep only the seed corpus, not the cached one
+testdata/fuzz/*/
+
+# Local environment overrides
+*.local.yaml
+*.local.yml
+.env
+.env.local

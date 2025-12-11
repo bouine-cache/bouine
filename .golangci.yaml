@@ -1,0 +1,124 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/thylong/bouine
+
+linters:
+  default: none
+  enable:
+    # Mandated set from AGENTS.md §14.4
+    - govet
+    - staticcheck
+    - errcheck
+    - gosec
+    - bodyclose
+    - contextcheck
+    - noctx
+    - nilerr
+    - gocritic
+    - revive
+    - forbidigo
+    - gocyclo
+    - funlen
+    - depguard
+    - unparam
+    - ineffassign
+    - unused
+    - misspell
+
+  settings:
+    gocyclo:
+      min-complexity: 15
+
+    funlen:
+      lines: 80
+      statements: 50
+      ignore-comments: true
+
+    forbidigo:
+      forbid:
+        - pattern: '^fmt\.Print(|f|ln)$'
+          msg: "Use slog. fmt.Print is forbidden outside main (AGENTS.md §4)."
+        - pattern: '^panic$'
+          msg: "panic is forbidden outside main. Return a typed error (AGENTS.md §4)."
+        - pattern: '^os\.Exit$'
+          msg: "os.Exit is forbidden outside main (AGENTS.md §4)."
+
+    revive:
+      severity: warning
+      rules:
+        - name: var-naming
+        - name: exported
+        - name: indent-error-flow
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: errorf
+        - name: increment-decrement
+        - name: range
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unused-parameter
+          disabled: true
+        - name: unreachable-code
+
+    depguard:
+      rules:
+        # Layer-dependency matrix is enforced in lint/depguard.yaml; the
+        # baseline here keeps the data plane free of control-plane
+        # frameworks. AGENTS.md §3.1 is the authoritative source.
+        data-plane-no-fiber:
+          list-mode: lax
+          files:
+            - "**/internal/listener/**"
+            - "**/internal/pipeline/**"
+            - "**/internal/cache/**"
+            - "**/internal/storage/**"
+            - "**/internal/origin/**"
+            - "**/internal/cluster/**"
+          deny:
+            - pkg: "github.com/gofiber/fiber/v3"
+              desc: "Fiber is control-plane only (AGENTS.md §2.2)."
+            - pkg: "github.com/gofiber/fiber/v2"
+              desc: "Fiber is control-plane only (AGENTS.md §2.2)."
+            - pkg: "github.com/valyala/fasthttp"
+              desc: "fasthttp cannot serve H2/H3 on the data plane (AGENTS.md §2.2)."
+        no-banned-log-libs:
+          list-mode: lax
+          deny:
+            - pkg: "github.com/sirupsen/logrus"
+              desc: "Use slog (AGENTS.md §5)."
+            - pkg: "go.uber.org/zap"
+              desc: "Use slog (AGENTS.md §5)."
+
+  exclusions:
+    rules:
+      # Test files relax some discipline; explicitly justified.
+      - path: "_test\\.go"
+        linters:
+          - funlen
+          - gocyclo
+          - gosec
+          - forbidigo
+      # main packages may exit and print.
+      - path: "cmd/.*"
+        linters:
+          - forbidigo
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

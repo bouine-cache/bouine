@@ -1,0 +1,149 @@
+# bouine — Depguard layer-dependency matrix
+#
+# This file mirrors AGENTS.md §3.1. It is loaded by the golangci-lint
+# `depguard` linter via the `additional-config` field, and acts as the
+# build-time enforcement of the layered architecture.
+#
+# Layer numbering (lower = closer to the wire):
+#   L1  internal/listener
+#   L2  internal/pipeline
+#   L3  internal/storage
+#   L4  internal/cache
+#   L5  internal/origin
+#   L6  internal/cluster
+#   L7  internal/admin
+#   L8  internal/observability
+#   L9  internal/ai
+#
+# Cross-layer rule: a package may only depend on packages in lower
+# layers, through declared interfaces. Reverse imports are build errors.
+
+rules:
+  # L1 may only depend on L2 + L8 + pkg/api.
+  listener:
+    list-mode: strict
+    files: ["**/internal/listener/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/listener
+      - github.com/thylong/bouine/internal/pipeline
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/internal/buildinfo
+      - github.com/thylong/bouine/pkg/api
+      - golang.org/x/net
+      - golang.org/x/sync
+      - golang.org/x/sys
+      - github.com/quic-go/quic-go
+
+  # L2 may depend on L4, L5, L8.
+  pipeline:
+    list-mode: strict
+    files: ["**/internal/pipeline/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/pipeline
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/origin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+
+  # L3 may only depend on L8.
+  storage:
+    list-mode: strict
+    files: ["**/internal/storage/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/cespare/xxhash/v2
+      - golang.org/x/sys
+
+  # L4 may depend on L3 (Store interface), L5 (Fetcher), L8.
+  cache:
+    list-mode: strict
+    files: ["**/internal/cache/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/origin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/cespare/xxhash/v2
+
+  # L5 may only depend on L8.
+  origin:
+    list-mode: strict
+    files: ["**/internal/origin/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/origin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - golang.org/x/sync
+
+  # L6 may depend on L3, L4, L8.
+  cluster:
+    list-mode: strict
+    files: ["**/internal/cluster/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/cluster
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/hashicorp/memberlist
+      - golang.org/x/sync
+
+  # L7 may depend on L3 (read-only), L4, L6, L8.
+  admin:
+    list-mode: strict
+    files: ["**/internal/admin/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/admin
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/cluster
+      - github.com/thylong/bouine/internal/config
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/internal/buildinfo
+      - github.com/thylong/bouine/pkg/api
+      - github.com/gofiber/fiber/v3
+      - github.com/prometheus/client_golang
+
+  # L8 is a leaf — only stdlib and telemetry libs.
+  observability:
+    list-mode: strict
+    files: ["**/internal/observability/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/prometheus/client_golang
+      - go.opentelemetry.io/otel
+
+  # L9 may only depend on L7, L8, pkg/api.
+  ai:
+    list-mode: strict
+    files: ["**/internal/ai/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/ai
+      - github.com/thylong/bouine/internal/admin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+
+  # pkg/api and pkg/bouineapi are leaves. They import nothing from
+  # internal/*.
+  public-api:
+    list-mode: strict
+    files:
+      - "**/pkg/api/**"
+      - "**/pkg/bouineapi/**"
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/pkg/api
+      - github.com/thylong/bouine/pkg/bouineapi

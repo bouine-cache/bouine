@@ -27,6 +27,10 @@ field to `Superseded by ADR-NNNN`.
 
 ## Index
 
-| Number | Title                                          | Status   |
-|--------|------------------------------------------------|----------|
-| 0001   | Record architecture decisions                  | Accepted |
+| Number | Title                                              | Status   |
+|--------|----------------------------------------------------|----------|
+| 0001   | Record architecture decisions                      | Accepted |
+| 0002   | HTTP/3 via quic-go                                 | Accepted |
+| 0003   | Hand-rolled PROXY protocol parser                  | Accepted |
+| 0004   | One *http.Server per listener                      | Accepted |
+| 0005   | Round-robin upstream selection via atomic counter  | Accepted |

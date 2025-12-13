@@ -71,8 +71,14 @@ conformance: ## Run the http-tests/cache-tests harness (phase 3+).
 	@echo "conformance: harness lands in phase 3"
 
 .PHONY: integration
-integration: ## Run docker-compose integration scenarios (phase 4+).
-	@echo "integration: harness lands in phase 4"
+integration: testcerts ## Run docker-compose integration scenarios (phase 1+).
+	go test -race -count=1 -timeout=10m -tags=integration ./test/integration/...
+
+.PHONY: testcerts
+testcerts: ## Generate ephemeral TLS certificates for integration tests.
+	@mkdir -p test/integration/.tls
+	@$(GO) run ./scripts/gen-testcerts -out test/integration/.tls
+	@echo "test certs written to test/integration/.tls"
 
 .PHONY: docs
 docs: ## Build the documentation site (phase 4+).

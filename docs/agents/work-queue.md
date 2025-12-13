@@ -18,8 +18,9 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-_(none — phase 0 bootstrap landed in a single sweep)_
+_(none — phase 1 listeners are unclaimed; see PLAN.md §15)_
 
 ## Recently completed
 
+- [DONE] crush — pre-flight — phase 1 prep (config, supervised, tlsutil, metrics, pkg/api, integration skeleton, ADRs 0002-0005) — 2026-05-19
 - [DONE] crush — repo-bootstrap — phase 0 scaffolding (toolchain, hooks, Cobra entry, Fiber `/healthz`) — 2026-05-19

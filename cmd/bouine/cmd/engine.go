@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/thylong/bouine/internal/admin"
+	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
@@ -13,6 +14,7 @@ import (
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/internal/pipeline"
 	"github.com/thylong/bouine/internal/runtime/supervised"
+	"github.com/thylong/bouine/internal/storage"
 )
 
 type engine struct {
@@ -35,8 +37,12 @@ func (e *engine) run(ctx context.Context) error {
 		return err
 	}
 
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes(),
+	})
+
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
-	handler := e.buildHandler(pools, dpMetrics)
+	handler := e.buildHandler(pools, store, dpMetrics)
 
 	g := supervised.NewGroup(ctx, e.logger)
 	e.startAdmin(g)
@@ -47,9 +53,10 @@ func (e *engine) run(ctx context.Context) error {
 
 func (e *engine) buildHandler(
 	pools map[string]*origin.Pool,
+	store storage.Store,
 	dpMetrics *observability.DataPlaneMetrics,
 ) http.Handler {
-	router := e.buildRouter(pools)
+	router := e.buildRouter(pools, store)
 	metricsWrapped := dpMetrics.Middleware(router)
 	return accesslog.Middleware(e.logger, metricsWrapped)
 }
@@ -71,7 +78,7 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 	return pools, nil
 }
 
-func (e *engine) buildRouter(pools map[string]*origin.Pool) *pipeline.Router {
+func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store) *pipeline.Router {
 	router := pipeline.NewRouter(pipeline.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
 		p := pools[rc.Pool]
@@ -85,8 +92,13 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool) *pipeline.Router {
 				break
 			}
 		}
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix,
-			p.Handler(consecutive5xx, nil))
+		upstream := p.Handler(consecutive5xx, nil)
+		cached := cache.NewHandler(cache.HandlerConfig{
+			Upstream: upstream,
+			Store:    store,
+			Logger:   e.logger,
+		})
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, cached)
 	}
 	return router
 }

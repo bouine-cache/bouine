@@ -60,7 +60,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Method invalidation: POST/PUT/DELETE evict the key.
 	if isInvalidating(r.Method) {
 		h.invalidateAndProxy(w, r)
 		return
@@ -68,17 +67,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	key := BuildKey(r)
 
+	// Try Vary-aware lookup: if we have a stored object for this primary
+	// key, use its Vary header to compute the variant key.
 	obj, err := h.store.Get(r.Context(), key)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "error", err)
+	}
+	if obj != nil && obj.Header.Get("Vary") != "" {
+		vk := VariantKey(key, obj.Header.Get("Vary"), r.Header)
+		if vk != key {
+			vobj, verr := h.store.Get(r.Context(), vk)
+			if verr == nil && vobj != nil {
+				obj = vobj
+			} else {
+				obj = nil
+			}
+			key = vk
+		}
 	}
 
 	disp := Evaluate(r, obj, time.Now())
 
 	switch disp.Decision {
-	case Hit:
-		h.serveFromCache(w, r, disp.Object)
-	case StaleHit:
+	case Hit, StaleHit:
+		if ServeRange(w, r, disp.Object) {
+			return
+		}
 		h.serveFromCache(w, r, disp.Object)
 	case Miss:
 		h.fetchAndStore(w, r, key)
@@ -160,8 +174,18 @@ func (h *Handler) writeAndMaybeStore(
 	}
 
 	if IsCacheable(res.StatusCode, r.Header, res.Header) {
-		obj := buildObject(key, r, res)
-		_ = h.store.Put(r.Context(), key, obj)
+		storeKey := key
+		if vary := res.Header.Get("Vary"); vary != "" {
+			storeKey = VariantKey(BuildKey(r), vary, r.Header)
+		}
+		obj := buildObject(storeKey, r, res)
+		_ = h.store.Put(r.Context(), storeKey, obj)
+		// Also store a "primary" entry so Vary-aware lookup finds
+		// the Vary header on the first lookup.
+		if storeKey != key {
+			primaryObj := buildObject(key, r, res)
+			_ = h.store.Put(r.Context(), key, primaryObj)
+		}
 	}
 }
 

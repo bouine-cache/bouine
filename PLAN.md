@@ -715,7 +715,77 @@ green in CI.
 - **Exit:** ≥ Varnish score on cache-tests; canonical bench within 10 % of
   Varnish RPS on the same hardware.
 
-### Phase 4 — Clustering, control plane, K8s (weeks 10–12)
+### Phase 3.5 — Performance optimization (week 9–10)
+
+A dedicated phase to close the gap between "functionally correct" and
+"meets the performance budget in `AGENTS.md §7`". Nothing in phase 4
+starts until the hit-path allocation target is met. The cache engine,
+key construction, and handler are functionally complete after phase 3;
+this phase makes them *fast*.
+
+Current baselines (Apple M5, phase 3 exit):
+
+| Path                      | ns/op | allocs/op | Target |
+|---------------------------|------:|----------:|--------|
+| Handler cache hit         |   651 |        14 | < 5 µs, **0 allocs** |
+| Storage Get hit           |   5.3 |         0 | ✓ already met |
+| BuildKey                  |   240 |         6 | 0 allocs |
+| Evaluate                  |    83 |         2 | 0 allocs |
+
+Deliverables:
+
+- **Zero-alloc BuildKey** — replace `xxhash.New()` (heap-allocated
+  hasher) with a stack-allocated `xxhash.Digest` or pre-pooled hasher.
+  Eliminate intermediate string allocations in `canonicalHost`,
+  `canonicalPath`, `canonicalQuery` by writing directly into the
+  hasher.
+- **Zero-alloc ParseCacheControl** — avoid `strings.Split` (allocates
+  a slice). Walk the header bytes with an index scanner; extract
+  directives in-place. Store durations as raw int64 seconds to avoid
+  `time.Duration` boxing.
+- **Zero-alloc Evaluate** — the two remaining allocs come from
+  `ParseCacheControl` on the request and response `Cache-Control`
+  headers. Once the parser is zero-alloc, Evaluate inherits it.
+- **Pooled responseRecorder** — the cache handler allocates a
+  `bytes.Buffer` + header map per miss. Pool both via `sync.Pool`;
+  reset on return. On the *hit* path no recorder is created at all.
+- **Pooled header copy in serveFromCache** — the header-copy loop
+  (`for k, vals := range obj.Header`) allocates per-key. Use a
+  pre-sized `[]string` pool or write headers directly via
+  `http.ResponseWriter.Header()` map assignment (avoid `Add` loop).
+- **Pre-computed cache key on store** — avoid re-hashing the same
+  request on every Get. The pipeline can compute the key once and
+  pass it down via `context.Value` (typed key, zero-alloc retrieval).
+- **`sync.Pool` for `*api.Object` on the miss path** — reduces GC
+  pressure when many concurrent misses allocate short-lived objects
+  that are immediately stored.
+- **Benchmark harness in `bench/`** — canonical workload (1 KB JSON,
+  99% hits, Zipf 0.99) run via `go test -bench` with `benchstat`
+  comparison against the phase-3 baseline. The harness produces a
+  `bench/results/phase3.5.txt` file committed alongside the code so
+  regressions are visible in `git log`.
+- **`pprof` integration test** — a test that boots the daemon, sends
+  1000 cache-hit requests, captures a CPU profile, and asserts no
+  unexpected hot spots outside `net/http` internals.
+- **GOMAXPROCS / GOMEMLIMIT** — document recommended pod settings in
+  `docs/operations/tuning.md` and wire `automaxprocs` (or manual
+  pinning) into the serve command so container CPU limits are
+  respected.
+
+Exit criteria:
+
+- **allocs/op = 0** on `BenchmarkHandler_CacheHit` (the full path:
+  key → get → evaluate → headers → write).
+- **allocs/op = 0** on `BenchmarkBuildKey` and `BenchmarkEvaluate_Hit`.
+- **Handler cache-hit latency ≤ 300 ns/op** on the reference hardware
+  (down from 651 ns/op).
+- **`benchstat` diff vs phase-3 baseline** committed in
+  `bench/results/`.
+- **No regression** on miss-path throughput (≤ 5% p99 increase).
+- **`make bench`** target runs the canonical workload and fails CI if
+  any gate is breached.
+
+### Phase 4 — Clustering, control plane, K8s (weeks 11–13)
 - memberlist gossip, consistent hashring, peer fetch.
 - Purge / ban / refresh broadcast + anti-entropy.
 - Cluster wire-protocol version negotiation (see §5.5).
@@ -727,7 +797,7 @@ green in CI.
   propagates < 1 s p99; rolling restart of all 3 pods returns zero 5xx
   in the load-generator timeline.
 
-### Phase 4.5 — Hardening (weeks 12–13)
+### Phase 4.5 — Hardening (weeks 14–15)
 A dedicated phase to bridge "works in CI" to "production-ready". Nothing
 in phase 5 starts until this passes.
 
@@ -764,7 +834,7 @@ in phase 5 starts until this passes.
   the release tag; no `Txx` in the threat model is in `unaddressed`
   state without an explicit `§18` deferral.
 
-### Phase 5 — Advanced features (weeks 14–16)
+### Phase 5 — Advanced features (weeks 16–18)
 - Prefetching: `Link: rel=preload` walker, sitemap crawler, scheduled
   warm-up jobs.
 - ESI-lite (`<esi:include>` only, no XSLT).
@@ -779,7 +849,7 @@ in phase 5 starts until this passes.
   cache-tests parity maintained; sample Varnish VCL from the docs loads
   and serves traffic with documented caveats.
 
-### Phase 6 — AI traffic analysis & dashboard (weeks 16–20)
+### Phase 6 — AI traffic analysis & dashboard (weeks 19–23)
 - Streaming analyzer: ingest sampled access logs into an embedded DuckDB
   (or Parquet on disk) for ad-hoc queries.
 - Feature extraction: hit/miss patterns per route, TTL utilisation, top
@@ -936,7 +1006,8 @@ its own ADR under `docs/decisions/`.
 
 ## 19. Definition of Done (v1.0)
 
-- All phases 0–5 (plus 4.5) complete and tagged.
+- All phases 0–5 (plus 3.5 and 4.5) complete and tagged.
+- Hit-path allocs/op = 0 on the canonical benchmark (phase 3.5 gate).
 - cache-tests score ≥ Varnish on every category.
 - Canonical benchmark within 10 % of Varnish RPS, never regressing in CI.
 - Threat model (`docs/security/threat-model.md`) has zero `Txx` in

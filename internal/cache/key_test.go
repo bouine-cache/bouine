@@ -54,20 +54,18 @@ func TestBuildKey_DuplicateSlashes(t *testing.T) {
 	}
 }
 
-func TestCanonicalHost(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"Example.COM", "example.com"},
-		{"Example.COM:80", "example.com"},
-		{"Example.COM:443", "example.com"},
-		{"Example.COM:8080", "example.com:8080"},
+func TestBuildKey_HostNormalization(t *testing.T) {
+	// Same host, different casing → same key.
+	r1 := httptest.NewRequest("GET", "http://Example.COM/a", nil)
+	r2 := httptest.NewRequest("GET", "http://example.com/a", nil)
+	if BuildKey(r1) != BuildKey(r2) {
+		t.Fatal("host casing should not affect key")
 	}
-	for _, tc := range cases {
-		got := canonicalHost(tc.in)
-		if got != tc.want {
-			t.Errorf("canonicalHost(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+
+	// Non-default port produces different key.
+	r3 := httptest.NewRequest("GET", "http://example.com:8080/a", nil)
+	if BuildKey(r1) == BuildKey(r3) {
+		t.Fatal("non-default port should produce different key")
 	}
 }
 

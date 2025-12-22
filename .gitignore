@@ -28,8 +28,8 @@ go.work.sum
 HANDOFF.md
 test/integration/.tls/
 
-# Benchmark outputs (kept in PR descriptions, not the repo)
-/bench/results/
+# Benchmark outputs (current.txt is regenerated; baseline.txt is tracked)
+/bench/results/current.txt
 
 # Generated artifacts
 /docs/_site/

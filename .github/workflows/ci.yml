@@ -110,3 +110,16 @@ jobs:
           path: bin/bouine
           if-no-files-found: error
           retention-days: 7
+
+  bench:
+    name: bench (gate check)
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run benchmarks with gate checks
+        run: make bench

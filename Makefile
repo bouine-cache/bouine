@@ -59,12 +59,14 @@ fuzz: ## Run a short fuzz pass on registered targets (phase 1+).
 	@echo "fuzz: no fuzz targets registered yet (phase 0)"
 
 .PHONY: bench
-bench: ## Run the benchmark suite (phase 1+).
-	@echo "bench: harness lands in phase 1"
+bench: ## Run the benchmark suite with gate checks.
+	bash bench/run.sh
 
 .PHONY: benchstat
-benchstat: ## Compare HEAD bench results against main (phase 1+).
-	@echo "benchstat: harness lands in phase 1"
+benchstat: ## Compare current bench results against the committed baseline.
+	@command -v benchstat >/dev/null || $(GO) install golang.org/x/perf/cmd/benchstat@latest
+	@test -f bench/results/baseline.txt || { echo "no baseline — run 'make bench' first and copy current.txt to baseline.txt"; exit 1; }
+	benchstat bench/results/baseline.txt bench/results/current.txt
 
 .PHONY: conformance
 conformance: ## Run the http-tests/cache-tests harness (phase 3+).

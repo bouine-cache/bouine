@@ -86,7 +86,7 @@ routes:
 YAML
 
 echo ">>> Starting bouine on port $BOUINE_HTTP_PORT..."
-"$BOUINE_BIN" serve --config "$BOUINE_CONFIG" --log-level warn --log-format text &
+"$BOUINE_BIN" serve --config "$BOUINE_CONFIG" --log-level error --log-format text &
 BOUINE_PID=$!
 sleep 2
 
@@ -106,8 +106,8 @@ echo ""
 echo ">>> Running cache-tests against http://127.0.0.1:$BOUINE_HTTP_PORT/ ..."
 echo ""
 
-(cd "$CACHETESTS_DIR" && npm_config_base="http://127.0.0.1:$BOUINE_HTTP_PORT/" \
-    npm_package_config_base="http://127.0.0.1:$BOUINE_HTTP_PORT/" \
+(cd "$CACHETESTS_DIR" && npm_config_base="http://127.0.0.1:$BOUINE_HTTP_PORT" \
+    npm_package_config_base="http://127.0.0.1:$BOUINE_HTTP_PORT" \
     npm_config_id="" npm_package_config_id="" \
     node --no-warnings test-engine/cli.mjs) \
     > "$RESULTS_FILE" 2>"$RESULTS_DIR/bouine.log" || true
@@ -126,18 +126,19 @@ node -e "
   const raw = fs.readFileSync('$RESULTS_FILE', 'utf8').trim();
   try {
     const r = JSON.parse(raw);
-    const arr = Array.isArray(r) ? r : Object.values(r);
-    const pass = arr.filter(t => t && (t.result === true || t.result === 'pass')).length;
-    const fail = arr.filter(t => t && (t.result === false || t.result === 'fail')).length;
-    const setup = arr.filter(t => t && t.result === 'setup_error').length;
-    const other = arr.length - pass - fail - setup;
+    const entries = Object.entries(r);
+    let pass = 0, fail = 0, setup = 0;
+    for (const [id, arr] of entries) {
+      if (!Array.isArray(arr) || arr.length === 0) { pass++; continue; }
+      if (arr[0] === 'Setup') { setup++; continue; }
+      fail++;
+    }
     console.log('');
     console.log('=== Cache-Tests Conformance Summary ===');
-    console.log('  Total:       ' + arr.length);
-    console.log('  Pass:        ' + pass);
+    console.log('  Total:       ' + entries.length);
+    console.log('  Pass:        ' + pass + ' (' + (100*pass/entries.length).toFixed(1) + '%)');
     console.log('  Fail:        ' + fail);
     console.log('  Setup error: ' + setup);
-    if (other > 0) console.log('  Other:       ' + other);
     console.log('========================================');
   } catch(e) {
     console.log('Could not parse results: ' + e.message);

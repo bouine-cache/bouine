@@ -144,10 +144,17 @@ func TestIsCacheable_Authorization(t *testing.T) {
 }
 
 func TestIsCacheable_HeuristicStatus(t *testing.T) {
-	if !IsCacheable(301, http.Header{}, http.Header{}) {
-		t.Fatal("301 should be heuristically cacheable")
+	// 301 with Last-Modified is heuristically cacheable.
+	resp := http.Header{"Last-Modified": {"Mon, 01 Jan 2024 00:00:00 GMT"}}
+	if !IsCacheable(301, http.Header{}, resp) {
+		t.Fatal("301 with Last-Modified should be heuristically cacheable")
 	}
-	if IsCacheable(302, http.Header{}, http.Header{}) {
+	// 301 without Last-Modified is NOT heuristically cacheable.
+	if IsCacheable(301, http.Header{}, http.Header{}) {
+		t.Fatal("301 without Last-Modified should NOT be heuristically cacheable")
+	}
+	// 302 is never heuristically cacheable.
+	if IsCacheable(302, http.Header{}, http.Header{"Last-Modified": {"Mon, 01 Jan 2024 00:00:00 GMT"}}) {
 		t.Fatal("302 should NOT be heuristically cacheable")
 	}
 }

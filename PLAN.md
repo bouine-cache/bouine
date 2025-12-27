@@ -799,9 +799,11 @@ Exit criteria:
 - Hot config reload, TLS cert reload (fsnotify + SIGHUP).
 - Cobra subcommands for cluster ops.
 - Graceful shutdown sequence (see §14.1) implemented and tested.
+- Continue fixing cache-tests failures to reach ≥ 90 % conformance.
 - **Exit:** 3-node cluster survives single-node loss with zero 5xx; purge
   propagates < 1 s p99; rolling restart of all 3 pods returns zero 5xx
-  in the load-generator timeline.
+  in the load-generator timeline; **`make conformance` score ≥ 90 %**
+  (≥ 329/365 tests pass, no regression from previous release).
 
 ### Phase 4.5 — Hardening (weeks 14–15)
 A dedicated phase to bridge "works in CI" to "production-ready". Nothing

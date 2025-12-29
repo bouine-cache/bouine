@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/thylong/bouine/internal/admin"
 	"github.com/thylong/bouine/internal/cache"
+	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
@@ -15,6 +17,7 @@ import (
 	"github.com/thylong/bouine/internal/pipeline"
 	"github.com/thylong/bouine/internal/runtime/supervised"
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 type engine struct {
@@ -44,11 +47,56 @@ func (e *engine) run(ctx context.Context) error {
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 	handler := e.buildHandler(pools, store, dpMetrics)
 
+	// Build optional cluster — must happen before admin so the
+	// /v1/cluster/peers endpoint can reference the Members function.
+	var peersFn func() []api.PeerInfo
+	var clusterNode *cluster.Cluster
+	if e.cfg.Cluster.Enabled && e.cfg.Listen.Cluster != "" {
+		clusterNode, err = e.buildCluster()
+		if err != nil {
+			return err
+		}
+		peersFn = clusterNode.Members
+	}
+
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startAdmin(g)
+	e.startAdmin(g, peersFn)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
+
+	if clusterNode != nil {
+		if len(e.cfg.Cluster.Join) > 0 {
+			if _, jerr := clusterNode.Join(e.cfg.Cluster.Join); jerr != nil {
+				e.logger.Warn("cluster join failed", "error", jerr)
+			}
+		}
+		g.Go("cluster-leave", func(leaveCtx context.Context) error {
+			<-leaveCtx.Done()
+			return clusterNode.Leave(context.WithoutCancel(leaveCtx))
+		})
+	}
+
 	return g.Wait()
+}
+
+func (e *engine) buildCluster() (*cluster.Cluster, error) {
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "bouine"
+	}
+	return cluster.New(cluster.Config{
+		NodeName: hostname,
+		BindAddr: e.cfg.Listen.Cluster,
+		Join:     e.cfg.Cluster.Join,
+		PeerInfo: api.PeerInfo{
+			Name:      hostname,
+			Addr:      e.cfg.Listen.Cluster,
+			AdminAddr: e.cfg.Listen.Admin,
+			DataAddr:  e.cfg.Listen.HTTP,
+			Weight:    1.0,
+		},
+		Logger: e.logger,
+	})
 }
 
 func (e *engine) buildHandler(
@@ -103,7 +151,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group) {
+func (e *engine) startAdmin(g *supervised.Group, peersFn func() []api.PeerInfo) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -112,6 +160,7 @@ func (e *engine) startAdmin(g *supervised.Group) {
 		Addr:    addr,
 		Logger:  e.logger,
 		Metrics: e.metrics,
+		PeersFn: peersFn,
 	})
 	g.Go("admin", srv.Serve)
 }

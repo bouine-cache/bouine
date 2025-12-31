@@ -99,6 +99,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case Hit, StaleHit:
 		// Client-side conditional: return 304 if client's validators match.
 		if ClientConditionalMatch(r, disp.Object) {
+			// 304 MUST include ETag if the full response would have (RFC 9110 §15.4.5).
+			if disp.Object.ETag != "" {
+				w.Header().Set("ETag", disp.Object.ETag)
+			}
 			w.Header().Set("X-Cache", "HIT")
 			w.WriteHeader(http.StatusNotModified)
 			return

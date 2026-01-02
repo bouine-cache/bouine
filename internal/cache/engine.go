@@ -181,9 +181,11 @@ func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 		return false
 	}
 	// Vary: * means every request is unique — never store.
-	// Check for * anywhere in the Vary field list, not just exact match.
-	if varyContainsStar(respHeader.Get("Vary")) {
-		return false
+	// Check for * anywhere in the Vary field list across all Vary headers.
+	for _, v := range respHeader.Values("Vary") {
+		if varyContainsStar(v) {
+			return false
+		}
 	}
 	if respHeader.Get("Set-Cookie") != "" {
 		return false
@@ -310,12 +312,18 @@ func ConditionalHeaders(req *http.Request, obj *api.Object) {
 // parseHTTPDate tries multiple date formats used in HTTP headers
 // (RFC 1123, RFC 850, ANSI C asctime). Also handles case-insensitive
 // timezone (e.g., "gmt" → "GMT"). Returns zero time on failure.
+// Rejects dates with non-standard time fields (e.g., 1-digit hour).
 func parseHTTPDate(s string) time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}
 	}
-	// Normalize common timezone case variants.
+	// Reject dates with non-standard time field widths. A valid
+	// RFC 1123 time portion is "HH:MM:SS" (8 chars). If the time
+	// portion has a 1-digit hour (like "0:00:00"), reject it.
+	if !validHTTPTimeField(s) {
+		return time.Time{}
+	}
 	s = normalizeTZ(s)
 
 	formats := []string{
@@ -331,6 +339,23 @@ func parseHTTPDate(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// validHTTPTimeField checks that the time portion (HH:MM:SS) in an
+// HTTP date has 2-digit fields. Rejects "0:00:00" but accepts
+// "00:00:00".
+func validHTTPTimeField(s string) bool {
+	// Find the time portion by looking for the pattern NN:NN:NN.
+	// In RFC 1123 format, the time is after the year and a space.
+	idx := strings.Index(s, ":")
+	if idx < 2 {
+		return true // no colon or too early — let time.Parse decide
+	}
+	// Check that the char before the first colon is a digit (2-digit hour).
+	if s[idx-2] < '0' || s[idx-2] > '9' {
+		return false // 1-digit hour: the char 2 positions before ':' is not a digit
+	}
+	return true
 }
 
 // normalizeTZ uppercases common timezone abbreviations at the end of

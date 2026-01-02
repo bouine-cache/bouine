@@ -261,13 +261,25 @@ func (h *Handler) doFetch(r *http.Request) collapse.Result {
 
 func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object {
 	now := time.Now()
-	respCC := ParseCacheControl(res.Header.Get("Cache-Control"))
+	// Parse all Cache-Control headers (may be multiple).
+	ccHeader := mergeHeaderValues(res.Header, "Cache-Control")
+	respCC := ParseCacheControl(ccHeader)
 	ttl, explicit := FreshnessLifetime(respCC, res.Header.Get)
 
 	// Heuristic freshness: if no explicit TTL, use 10% of age since
 	// Last-Modified (RFC 9111 §4.2.2).
 	if !explicit {
 		ttl = HeuristicTTL(res.Header, now)
+	}
+
+	// Subtract the origin's Age header from TTL so that objects that
+	// arrive already partially aged are correctly marked as stale
+	// (RFC 9111 §4.2.3). For example, if max-age=60 and Age=50, the
+	// remaining freshness is 10s, not 60s.
+	originAge := parseOriginAge(res.Header)
+	ttl -= originAge
+	if ttl < 0 {
+		ttl = 0
 	}
 
 	obj := &api.Object{

@@ -1,0 +1,69 @@
+// Package shutdown implements the ordered graceful shutdown sequence
+// described in PLAN.md §14.1. Each step has a budget carved from the
+// total terminationGracePeriod.
+package shutdown
+
+import (
+	"context"
+	"log/slog"
+	"sync/atomic"
+	"time"
+)
+
+// Sequencer runs an ordered series of shutdown steps, each with a
+// time budget. Steps run in the order they are registered.
+type Sequencer struct {
+	steps  []step
+	logger *slog.Logger
+	ready  atomic.Bool
+}
+
+type step struct {
+	name   string
+	budget time.Duration
+	fn     func(ctx context.Context) error
+}
+
+// NewSequencer creates a Sequencer. It starts in the "ready" state.
+func NewSequencer(logger *slog.Logger) *Sequencer {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s := &Sequencer{logger: logger}
+	s.ready.Store(true)
+	return s
+}
+
+// AddStep registers a shutdown step. Steps execute in registration
+// order. The budget is the maximum time the step is allowed to take.
+func (s *Sequencer) AddStep(name string, budget time.Duration, fn func(ctx context.Context) error) {
+	s.steps = append(s.steps, step{name: name, budget: budget, fn: fn})
+}
+
+// IsReady reports whether the server is still accepting traffic.
+// Returns false after Execute is called.
+func (s *Sequencer) IsReady() bool {
+	return s.ready.Load()
+}
+
+// Execute runs all steps in order. Each step gets its own context
+// with its budget as the deadline. Errors are logged but don't stop
+// subsequent steps.
+func (s *Sequencer) Execute() {
+	s.ready.Store(false)
+	s.logger.Info("shutdown: starting", "steps", len(s.steps))
+
+	for _, st := range s.steps {
+		ctx, cancel := context.WithTimeout(context.Background(), st.budget)
+		s.logger.Info("shutdown: step starting", "name", st.name, "budget", st.budget)
+
+		if err := st.fn(ctx); err != nil {
+			s.logger.Warn("shutdown: step error", "name", st.name, "error", err)
+		} else {
+			s.logger.Info("shutdown: step done", "name", st.name)
+		}
+		cancel()
+	}
+
+	s.logger.Info("shutdown: complete")
+}

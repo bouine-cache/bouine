@@ -21,6 +21,11 @@ const (
 	MaxHops = 2
 	// BouineHopHeader carries the current hop count for loop detection.
 	BouineHopHeader = "Bouine-Hop"
+	// ClusterVersionHeader carries the cluster protocol version for
+	// negotiation during rolling upgrades (PLAN.md §5.5).
+	ClusterVersionHeader = "X-Bouine-Cluster-Version"
+	// ClusterProtocolVersion is the current protocol version.
+	ClusterProtocolVersion = "1"
 	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
 	peerFetchTimeout = 500 * time.Millisecond
 )
@@ -71,6 +76,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
+	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
 
 	resp, err := f.client.Do(httpReq)
 	if err != nil {

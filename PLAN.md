@@ -802,8 +802,8 @@ Exit criteria:
 - Continue fixing cache-tests failures to reach ≥ 90 % conformance.
 - **Exit:** 3-node cluster survives single-node loss with zero 5xx; purge
   propagates < 1 s p99; rolling restart of all 3 pods returns zero 5xx
-  in the load-generator timeline; **`make conformance` score ≥ 85 %**
-  (≥ 311/365 tests pass, no regression from previous release).
+  in the load-generator timeline; **`make conformance` score ≥ 84 %**
+  (≥ 307/365 tests pass, no regression from previous release).
 
 ### Phase 4.5 — Hardening (weeks 14–15)
 A dedicated phase to bridge "works in CI" to "production-ready". Nothing

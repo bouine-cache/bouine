@@ -865,68 +865,119 @@ but production-ready packages. No new features. No scope creep.
 The goal is a codebase that a new contributor can orient in under
 an hour.
 
-**Dead code removal:**
+**Dead code removal (5 items):**
 
-- Remove `StreamBody` (`internal/origin/pool.go`) — speculative export
-  never called; reimplemented properly in phase 5 when streaming lands.
-- Remove `ErrUnsupportedKey` (`internal/testutil/tlsutil`) — exported
-  error var defined but never returned by any function.
-- Remove `VaryConfig` struct (`internal/cache/vary.go`) — defined for
-  future route-level Vary configuration but never consumed; the
-  `MaxVariants` constant is what callers need.
-- Enforce or remove `MaxVariants` — either wire the cap into the
-  cache handler (preferred) or remove it; a constant that is never
-  read is worse than no constant.
-- Remove `formatHex` (`internal/cache/key.go`) — custom hex formatter
-  that can be replaced with a single `strconv.FormatUint` call.
+- Remove `StreamBody` (`internal/origin/pool.go:216`) — speculative
+  export never called anywhere; reimplemented properly in phase 5
+  when body streaming lands.
+- Remove `ErrUnsupportedKey` (`internal/testutil/tlsutil:139`) —
+  exported error var defined but never returned by any function.
+- Remove `VaryConfig` struct (`internal/cache/vary.go:14`) — defined
+  for future route-level Vary configuration but never consumed by any
+  caller.
+- Enforce or remove `MaxVariants` const (`internal/cache/vary.go:23`)
+  — either wire the cap into the cache handler (preferred: reject
+  storage when variant count per primary key exceeds 64) or remove;
+  a constant that is never read is worse than no constant.
+- Remove `formatHex` (`internal/cache/key.go:170`) — custom hex
+  formatter used only by `BuildVaryKey` which can call
+  `strconv.FormatUint(h, 16)` directly.
 
-**Unwired production code — wire or remove:**
+**Unwired production packages (7 packages with 0 external callers):**
 
-- `internal/storage/tiered.go` (`TieredStore`) — built for hot + warm
-  tier integration but the serve command uses `HotStore` directly.
-  Either wire `TieredStore` into `cmd/bouine/cmd/engine.go` (correct
-  choice — warm tier exists and is tested) or clearly defer with a
-  `//nolint:unused` marker and an issue reference.
-- `internal/origin/hedge.go` (`HedgedTransport`) — exists and is
-  tested but never plugged into the origin pool. Wire via pool config
-  when `pool.connect.hedge_timeout` is set.
-- `internal/listener/proxyproto` — parser exists and passes tests;
-  listeners never wrap connections with it. Wire into listener
-  construction when `listen.proxy_protocol: true`.
-- `internal/listener/h3.go` (`H3Server`) — compiled but never started
-  in `engine.startListeners`. Wire or gate behind a build tag until
-  the quic-go integration is confirmed stable in CI.
+Each must be wired end-to-end and tested, or removed. No orphaned
+packages may remain.
 
-**Structural de-duplication:**
+- `internal/storage/tiered.go` (`TieredStore`, 159 LOC) — built for
+  hot + warm tier integration but `engine.go` uses `HotStore`
+  directly. Wire `TieredStore` into the serve command (correct choice
+  — warm tier + WAL exist and are tested) so the warm tier actually
+  runs in production.
+- `internal/origin/hedge.go` (`HedgedTransport`, 73 LOC) — exists
+  and is tested but never plugged into the origin pool's `Handler()`.
+  Wire via pool config when `pool.connect.hedge_timeout` is set;
+  remove if hedged requests are deferred past v1.0.
+- `internal/listener/proxyproto` (179 LOC) — parser exists and
+  passes test vectors but listeners never wrap connections with it.
+  Wire into listener construction when `listen.proxy_protocol: true`
+  is configured.
+- `internal/listener/h3.go` (`H3Server`, 94 LOC) — compiled but
+  `engine.startListeners` already references it; verify it runs in CI
+  by adding an HTTP/3 integration test.
+- `internal/config/reload.go` (`Watcher`, 157 LOC) — built in phase
+  4 but never started as a supervised goroutine in `engine.run`. Wire
+  it alongside a SIGHUP integration test.
+- `internal/cluster/broadcast.go` (`Broadcaster`, 115 LOC) — exists
+  but `post()` method is a stub (does not actually send HTTP). Wire
+  the POST implementation and test with the 3-node cluster.
+- `internal/testutil/tlsutil` (139 LOC) — only imported from test
+  files; acceptable as-is, but `ErrUnsupportedKey` should be removed.
 
-- Consolidate `statusWriter` (accesslog) and `metricsWriter`
-  (dataplane) into a single `responseWriter` that both middlewares
-  share. Two nearly-identical response-writer wrappers chained per
-  request adds hidden per-request overhead and maintenance surface.
-- `internal/cache/vary.go:ServeRange` — ~80 lines that partially
-  duplicate what `http.ServeContent` already does. Evaluate whether
-  delegating to stdlib (at the cost of reading the full body into
-  memory for the size calculation) is preferable, or keep the custom
-  implementation with a clear comment explaining why.
+**Structural de-duplication (3 items):**
 
-**Over-engineering audits:**
+- Consolidate `statusWriter` (`internal/observability/accesslog`) and
+  `metricsWriter` (`internal/observability/dataplane.go`) into a
+  single shared `responseWriter` middleware. Two nearly-identical
+  response-writer wrappers are chained on every request, each
+  capturing status + bytes. One wrapper should do both.
+- `responseRecorder` in `internal/cache/handler.go` is allocated
+  twice per miss (lines 248 and 283). Pool via `sync.Pool` and reset
+  on put. On the hit path no recorder should be created at all
+  (already the case, but verify with a benchmark assertion).
+- `internal/cache/vary.go:ServeRange` (~80 lines) partially
+  duplicates `http.ServeContent`. Evaluate delegating to stdlib; keep
+  custom only if the stdlib path forces a full body buffer.
 
-- `internal/cache/key.go:appendCanonicalQuery` — always allocates a
-  `url.Values` map even on requests without query strings. Add a
-  fast-path guard: if `u.RawQuery == ""` return early.
-- Re-run `golangci-lint unused` and `staticcheck U1000` after the
-  removals above; fix every finding.
-- Run `go tool cover` per package and remove test code that covers
-  deleted production paths.
+**Over-engineering / unnecessary complexity (5 items):**
 
-**Documentation cleanup:**
+- `cmd/bouine/cmd/engine.go` imports 12 internal packages — the
+  highest fan-in in the codebase. Extract the pool/router/store
+  wiring into a `builder` type to reduce the function surface visible
+  in `run()`.
+- `internal/config/config.go` is 204 LOC of pure struct definitions
+  with no methods. Consider generating the YAML tags from a schema
+  or splitting into `listen.go`, `storage.go`, `routes.go` for
+  discoverability.
+- `internal/cache/engine.go` grew to 422 LOC with `IsCacheable`,
+  `isCacheBlocked`, `isBlockedByPragma`, `hasVaryStar`,
+  `isBlockedBySetCookie`, `parseOriginAge`, `mergeHeaderValues`,
+  `ClientConditionalMatch`, `etagMatch`, `quoteETag`,
+  `parseHTTPDate`, `validHTTPTimeField`, `normalizeTZ`,
+  `HeuristicTTL`, `ComputeAge`, `MergeHeaders304`,
+  `ConditionalHeaders` — 17 exported+unexported functions in one
+  file. Split into `engine.go` (state machine only), `cacheable.go`
+  (storage eligibility), `conditional.go` (304/revalidation), and
+  `httpdate.go` (date parsing).
+- `internal/admin/server.go` purge handler uses a hand-rolled hash
+  (`h = h*31 + uint64(c)`) instead of `cache.BuildKey`. Replace with
+  the canonical key builder so purge-by-URL produces the same key as
+  cache lookup.
+- `context.TODO()` used in 2 production closures
+  (`engine.go:171,174`). Replace with a proper context plumbed from
+  the admin request handler.
 
-- Audit all `// Stable.` / `// Unstable.` doc comments; promote
-  anything that has been stable across two phases.
-- Remove or update any doc comments that reference "Phase N" where
-  the phase has already shipped.
-- Ensure every `internal/*/doc.go` file accurately describes the
-  current state of the package, not the planned state.
+**Stale documentation (10+ occurrences):**
+
+- 10+ doc comments in production code reference "phase 0", "phase 1",
+  or "lands in phase N" as future work even though those phases have
+  shipped. Audit all `internal/*/doc.go` and inline comments; update
+  to describe the current state, not the planned state.
+- Audit all `// Stable.` / `// Unstable.` markers; promote anything
+  that has been stable across two or more phases.
+- `internal/pipeline/router.go` doc says "In phase 1, there is no
+  cache" — cache has been wired since phase 3.
+- `internal/observability/observability.go` doc says "In phase 0 only
+  a thin slog facade is present" — Prometheus + data-plane metrics
+  have shipped.
+- `internal/origin/pool.go` doc says "Phase 1 ships the minimum
+  needed" — active health, hedged transport exist now.
+
+**Benchmark baseline refresh:**
+
+- `bench/results/baseline.txt` was saved during phase 3.5. The
+  conformance fixes added ~80 ns to `Evaluate_Hit`. Re-baseline with
+  the current numbers so `make benchstat` diffs are meaningful going
+  forward.
 
 **Exit criteria:**
 
@@ -939,6 +990,9 @@ an hour.
   generated code and test data).
 - Every unwired package is either wired and tested end-to-end OR
   removed. No orphaned packages remain.
+- Zero `context.TODO()` or `context.Background()` in production code
+  outside `main`.
+- Zero stale "phase N" doc comments referencing shipped phases.
 
 ### Phase 6 — AI traffic analysis & dashboard (weeks 19–23)
 - Streaming analyzer: ingest sampled access logs into an embedded DuckDB

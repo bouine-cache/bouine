@@ -51,6 +51,29 @@ kill %1
 
 ---
 
+## Kubernetes
+
+```bash
+docker build -t bouine:dev .
+
+helm install bouine deploy/helm/bouine \
+  --namespace bouine --create-namespace \
+  --set image.repository=bouine \
+  --set image.tag=dev \
+  --set image.pullPolicy=Never \
+  --set "config.upstream_pools[0].name=app" \
+  --set "config.upstream_pools[0].targets[0]=app.default.svc:8080" \
+  --set "config.routes[0].pool=app" \
+  --set config.cluster.enabled=true
+```
+
+The chart deploys a 3-replica StatefulSet with gossip clustering,
+a headless Service for peer discovery, and a PodDisruptionBudget.
+See [`deploy/helm/bouine/values.yaml`](deploy/helm/bouine/values.yaml)
+for all options.
+
+---
+
 ## Documentation
 
 | Topic                            | Where                                                 |

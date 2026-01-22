@@ -88,6 +88,7 @@ func New(cfg Config) (*Cluster, error) {
 	mlCfg.Name = cfg.NodeName
 	mlCfg.Logger = nil // suppress memberlist's stdlib logger; we use slog
 	mlCfg.Delegate = c
+	mlCfg.Events = c
 
 	if cfg.BindAddr != "" {
 		host, portStr, err := net.SplitHostPort(cfg.BindAddr)

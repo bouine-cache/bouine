@@ -118,13 +118,13 @@ govulncheck: ## Run govulncheck.
 ci: vet lint test-short build hooks-run ## Run the CI gate locally (vet, lint, test, build, hooks).
 
 .PHONY: test-k8s-setup
-test-k8s-setup: build ## Build image and deploy bouine + test origin on Kubernetes.
+test-k8s-setup: build ## Build images and deploy bouine + test origin on Kubernetes.
 	docker build -t bouine:dev .
+	docker build -t bouine-test-origin:dev test/integration/origin/
 	-kubectl create namespace bouine-test 2>/dev/null
-	-kubectl -n bouine-test delete pod origin 2>/dev/null
+	-kubectl -n bouine-test delete pod origin --force 2>/dev/null
 	-kubectl -n bouine-test delete svc origin 2>/dev/null
-	kubectl -n bouine-test run origin --image=golang:1.26-alpine \
-		--overrides='{"spec":{"containers":[{"name":"origin","image":"golang:1.26-alpine","command":["go","run","./..."],"workingDir":"/src","ports":[{"containerPort":8080}],"volumeMounts":[{"name":"src","mountPath":"/src","readOnly":true}]}],"volumes":[{"name":"src","hostPath":{"path":"$(CURDIR)/test/integration/origin"}}]}}'
+	kubectl -n bouine-test run origin --image=bouine-test-origin:dev --image-pull-policy=Never --port=8080
 	kubectl -n bouine-test expose pod origin --port=8080
 	kubectl -n bouine-test wait --for=condition=ready pod/origin --timeout=60s
 	helm upgrade --install bouine deploy/helm/bouine \

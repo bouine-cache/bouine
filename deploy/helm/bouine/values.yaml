@@ -94,4 +94,13 @@ livenessProbe:
 warmVolume:
   enabled: true
   size: 50Gi
-  storageClass: ""  # uses default
+  storageClass: ""
+
+networkPolicy:
+  enabled: false
+
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 15s
+  scrapeTimeout: ""  # uses default

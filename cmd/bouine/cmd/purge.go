@@ -1,14 +1,13 @@
 package cmd
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/bouineapi"
 )
 
 func newPurgeCmd() *cobra.Command {
@@ -19,8 +18,16 @@ func newPurgeCmd() *cobra.Command {
 		Short: "Purge a URL from the cache",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, _ := json.Marshal(map[string]string{"url": args[0]})
-			return adminPost(cmd, server, token, "/v1/purge", body)
+			client := bouineapi.New("http://" + server)
+			if token != "" {
+				client = client.WithToken(token)
+			}
+			res, err := client.Purge(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), res.Status)
+			return err
 		},
 	}
 	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
@@ -38,16 +45,31 @@ func newBanCmd() *cobra.Command {
 			"Example: bouine ban host_regex=example.com path_regex=^/api",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			expr := map[string]string{}
+			expr := api.BanExpr{}
 			for _, a := range args {
 				k, v, ok := strings.Cut(a, "=")
 				if !ok {
 					return fmt.Errorf("invalid predicate %q (expected key=value)", a)
 				}
-				expr[k] = v
+				switch k {
+				case "host_regex":
+					expr.HostRegex = v
+				case "path_regex":
+					expr.PathRegex = v
+				default:
+					return fmt.Errorf("unknown predicate key %q", k)
+				}
 			}
-			body, _ := json.Marshal(expr)
-			return adminPost(cmd, server, token, "/v1/ban", body)
+			client := bouineapi.New("http://" + server)
+			if token != "" {
+				client = client.WithToken(token)
+			}
+			res, err := client.Ban(cmd.Context(), expr)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s (count: %d)\n", res.Status, res.Count)
+			return err
 		},
 	}
 	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
@@ -63,34 +85,19 @@ func newRefreshCmd() *cobra.Command {
 		Short: "Soft-purge a URL (mark stale, revalidate on next request)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, _ := json.Marshal(map[string]string{"url": args[0]})
-			return adminPost(cmd, server, token, "/v1/refresh", body)
+			client := bouineapi.New("http://" + server)
+			if token != "" {
+				client = client.WithToken(token)
+			}
+			res, err := client.Refresh(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), res.Status)
+			return err
 		},
 	}
 	c.Flags().StringVar(&server, "server", "127.0.0.1:9000", "admin server address")
 	c.Flags().StringVar(&token, "token", "", "admin bearer token")
 	return c
-}
-
-func adminPost(cmd *cobra.Command, server, token, path string, body []byte) error {
-	url := "http://" + server + path
-	req, err := http.NewRequestWithContext(cmd.Context(), "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: status %d: %s", path, resp.StatusCode, respBody)
-	}
-	_, err = fmt.Fprintln(cmd.OutOrStdout(), string(respBody))
-	return err
 }

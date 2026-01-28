@@ -1,18 +1,13 @@
 // Package origin is the L5 upstream layer. It manages connection pools
 // to origin servers, selects targets via round-robin (ADR-0005),
-// performs passive health checking (consecutive-5xx ejection), and
-// exposes a reverse-proxy http.Handler that forwards requests to the
-// chosen target.
-//
-// Active health checks, hedged requests, and circuit breakers land in
-// phase 3. Phase 1 ships the minimum needed for a working pass-through
-// reverse proxy.
+// performs passive health checking (consecutive-5xx ejection), active
+// health probes, hedged requests, and exposes a reverse-proxy
+// http.Handler that forwards requests to the chosen target.
 package origin
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -209,11 +204,3 @@ func (p *Pool) MarkHealthy(addr string) {
 
 // Close shuts down idle connections. Satisfies the lifecycle contract.
 func (p *Pool) Close(_ context.Context) error { return nil }
-
-// StreamBody copies src to dst with a bounded buffer. Bodies > 64 KiB
-// are never buffered fully (AGENTS.md §7). This is used by the proxy
-// handler for large response streaming.
-func StreamBody(dst io.Writer, src io.Reader) (int64, error) {
-	buf := make([]byte, 64*1024)
-	return io.CopyBuffer(dst, src, buf)
-}

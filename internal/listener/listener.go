@@ -5,10 +5,6 @@
 // Each protocol gets its own *http.Server (or http3.Server) instance
 // (ADR-0004). All listeners share the same http.Handler — the L2
 // pipeline router.
-//
-// Phase 1 ships HTTP/1.1 + HTTP/2 over TLS + plaintext HTTP/1.1.
-// HTTP/3 is stubbed (requires quic-go, deferred to a follow-up PR in
-// this phase). PROXY protocol is deferred to its own PR (ADR-0003).
 package listener
 
 import (

@@ -19,7 +19,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -133,7 +132,3 @@ func WriteCertFiles(t *testing.T, dir string, hosts ...string) (certPath, keyPat
 
 	return certPath, keyPath
 }
-
-// ErrUnsupportedKey is reported when a helper expects an ECDSA key but
-// gets something else. Exported for tests of the helper itself.
-var ErrUnsupportedKey = errors.New("tlsutil: unsupported private-key type")

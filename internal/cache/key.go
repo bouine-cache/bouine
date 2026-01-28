@@ -4,12 +4,32 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/thylong/bouine/pkg/api"
 )
+
+// BuildKeyFromURL computes the canonical cache key from a raw URL
+// string. Used by admin purge/refresh endpoints where no
+// *http.Request is available.
+func BuildKeyFromURL(rawURL string) api.Key {
+	if rawURL == "" {
+		return 0
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0
+	}
+	r := &http.Request{
+		Method: http.MethodGet,
+		URL:    u,
+		Host:   u.Host,
+	}
+	return BuildKey(r)
+}
 
 // BuildKey constructs the canonical primary cache key from a request.
 // The key is deterministic and stable across nodes (PLAN.md §3.2).
@@ -161,24 +181,5 @@ func BuildVaryKey(vary string, reqHeader http.Header) string {
 	}
 	// Return the hash as a compact string.
 	h := xxhash.Sum64(buf[:n])
-	// Format as hex into a stack buffer.
-	var hex [16]byte
-	hexN := formatHex(hex[:], h)
-	return string(hex[:hexN])
-}
-
-func formatHex(buf []byte, v uint64) int {
-	const digits = "0123456789abcdef"
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = digits[v&0xf]
-		v >>= 4
-	}
-	if i == len(buf) {
-		i--
-		buf[i] = '0'
-	}
-	copy(buf, buf[i:])
-	return len(buf) - i
+	return strconv.FormatUint(h, 16)
 }

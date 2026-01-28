@@ -62,7 +62,7 @@ func (e *engine) run(ctx context.Context) error {
 	}
 
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startAdmin(g, peersFn, store) //nolint:contextcheck // admin closures use TODO ctx
+	e.startAdmin(g, ctx, peersFn, store)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -168,7 +168,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, peersFn func() []api.PeerInfo, store storage.Store) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -184,10 +184,10 @@ func (e *engine) startAdmin(g *supervised.Group, peersFn func() []api.PeerInfo, 
 		PeersFn: peersFn,
 		ReadyFn: seq.IsReady,
 		PurgeFn: func(key api.Key) error {
-			return store.Delete(context.TODO(), key) //nolint:contextcheck // admin-side
+			return store.Delete(ctx, key)
 		},
 		BanFn: func(expr api.BanExpr) (int, error) {
-			return store.Ban(context.TODO(), expr) //nolint:contextcheck // admin-side
+			return store.Ban(ctx, expr)
 		},
 	})
 	g.Go("admin", srv.Serve)

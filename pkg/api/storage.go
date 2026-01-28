@@ -50,8 +50,8 @@ type Object struct {
 	// LastModified is the origin's Last-Modified value.
 	LastModified time.Time `json:"last_modified,omitempty"`
 
-	// SurrogateKeys are the opaque labels for grouped invalidation
-	// (phase 5).
+	// SurrogateKeys are opaque labels for grouped invalidation (deferred
+	// to post-v1.0, see §18).
 	SurrogateKeys []string `json:"surrogate_keys,omitempty"`
 
 	// Hits counts how many times this object has been served.

@@ -23,9 +23,9 @@ config:
     # - cert_file: /etc/bouine/tls/tls.crt
     #   key_file: /etc/bouine/tls/tls.key
   storage:
-    hot_max_bytes: 2GiB
+    hot_max_bytes: 2Go
     warm_dir: /var/lib/bouine
-    warm_max_bytes: 50GiB
+    warm_max_bytes: 50Go
     eviction: sieve
   cluster:
     enabled: true

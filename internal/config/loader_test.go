@@ -67,8 +67,8 @@ listen:
   https: ":443"
   admin: ":9000"
 storage:
-  hot_max_bytes: 2GiB
-  warm_max_bytes: 50GiB
+  hot_max_bytes: 2Go
+  warm_max_bytes: 50Go
 upstream_pools:
   - name: app
     targets: [app.local:8080]
@@ -89,8 +89,8 @@ routes:
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got := cfg.Storage.HotMaxBytes.Bytes(); got != 2<<30 {
-		t.Fatalf("HotMaxBytes = %d, want %d", got, 2<<30)
+	if got := cfg.Storage.HotMaxBytes.Bytes(); got != 2_000_000_000 {
+		t.Fatalf("HotMaxBytes = %d, want %d", got, 2_000_000_000)
 	}
 	if len(cfg.Routes) != 1 || cfg.Routes[0].Pool != "app" {
 		t.Fatalf("unexpected routes: %+v", cfg.Routes)
@@ -126,6 +126,10 @@ func TestByteSize_Forms(t *testing.T) {
 		{"1KiB", 1024},
 		{"2GiB", 2 << 30},
 		{"1.5MiB", int64(1.5 * (1 << 20))},
+		{"1Ko", 1000},
+		{"512Mo", 512_000_000},
+		{"2Go", 2_000_000_000},
+		{"1To", 1_000_000_000_000},
 	}
 	for _, tc := range cases {
 		var b ByteSize

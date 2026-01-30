@@ -199,8 +199,8 @@ type RouteHTTP3 struct {
 // Experimental holds unstable opt-in feature flags. Empty by default.
 type Experimental struct{}
 
-// ByteSize is a typed size in bytes, parsed from strings like "2GiB"
-// or "512MB". It is implemented as int64 so it composes with stdlib
+// ByteSize is a typed size in bytes, parsed from strings like "2Go"
+// or "512Mo". It is implemented as int64 so it composes with stdlib
 // arithmetic.
 //
 // Stable surface — the YAML representation is what matters.

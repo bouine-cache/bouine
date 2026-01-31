@@ -41,7 +41,7 @@ else
 fi
 
 echo ">>> Installing cache-tests dependencies..."
-(cd "$CACHETESTS_DIR" && npm install --silent 2>&1 | tail -3)
+(cd "$CACHETESTS_DIR" && npm install --silent --no-package-lock 2>&1 | tail -3)
 
 # 3. Start the cache-tests origin server via npm (sets env vars).
 echo ">>> Starting cache-tests origin on port $ORIGIN_PORT..."

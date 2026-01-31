@@ -24,6 +24,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=build /bouine /bouine
+COPY config/default.yaml /etc/bouine/config.yaml
 
 USER nonroot:nonroot
 

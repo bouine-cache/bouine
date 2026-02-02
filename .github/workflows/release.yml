@@ -66,7 +66,8 @@ jobs:
         with:
           path: ./
           format: spdx-json
-          artifact-name: bouine-${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
           output-file: dist/bouine-${{ github.ref_name }}.spdx.json
 
       - name: Sign checksums

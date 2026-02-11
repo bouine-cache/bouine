@@ -54,16 +54,18 @@ func (e *engine) run(ctx context.Context) error {
 	// /v1/cluster/peers endpoint can reference the Members function.
 	var peersFn func() []api.PeerInfo
 	var clusterNode *cluster.Cluster
+	var broadcaster *cluster.Broadcaster
 	if e.cfg.Cluster.Enabled && e.cfg.Listen.Cluster != "" {
 		clusterNode, err = e.buildCluster()
 		if err != nil {
 			return err
 		}
 		peersFn = clusterNode.Members
+		broadcaster = cluster.NewBroadcaster(clusterNode, nil)
 	}
 
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startAdmin(g, ctx, peersFn, store)
+	e.startAdmin(g, ctx, peersFn, store, broadcaster)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -169,7 +171,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -185,10 +187,30 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 		PeersFn: peersFn,
 		ReadyFn: seq.IsReady,
 		PurgeFn: func(key api.Key) error {
-			return store.Delete(ctx, key)
+			if err := store.Delete(ctx, key); err != nil {
+				return err
+			}
+			if broadcaster != nil {
+				broadcaster.BroadcastPurge(ctx, key, "")
+			}
+			return nil
 		},
 		BanFn: func(expr api.BanExpr) (int, error) {
-			return store.Ban(ctx, expr)
+			n, err := store.Ban(ctx, expr)
+			if err != nil {
+				return n, err
+			}
+			if broadcaster != nil {
+				broadcaster.BroadcastBan(ctx, expr)
+			}
+			return n, nil
+		},
+		PeerPurgeFn: func(evt api.PurgeEvent) error {
+			return store.Delete(ctx, evt.Key)
+		},
+		PeerBanFn: func(evt api.BanEvent) error {
+			_, err := store.Ban(ctx, evt.Predicate)
+			return err
 		},
 	})
 	g.Go("admin", srv.Serve)

@@ -1,10 +1,22 @@
-# bouine
+<p align="center">
+  <img src="docs/assets/bouine_anglerfish.png" alt="bouine" width="200">
+</p>
 
-`bouine` is a horizontally-scalable, observability-first HTTP reverse-proxy
-cache written in Go 1.26. It targets the same problem space as Varnish
+<h1 align="center">bouine</h1>
+
+<p align="center">
+  <a href="https://github.com/thylong/bouine/actions/workflows/ci.yml"><img src="https://github.com/thylong/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/thylong/bouine/actions/workflows/release.yml"><img src="https://github.com/thylong/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://github.com/thylong/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/thylong/bouine" alt="Latest Release"></a>
+  <a href="https://hub.docker.com/r/thylong/bouine"><img src="https://img.shields.io/docker/v/thylong/bouine?label=docker" alt="Docker"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/thylong/bouine" alt="License"></a>
+</p>
+
+`bouine` is a scalable, cloud native, HTTP reverse-proxy
+cache written in Go. It targets the same problem space as Varnish
 (RFC 9111 cache, fast purge, predicate-based bans) but is designed from
 day one for Kubernetes, multi-instance clustering, and first-class
-metrics/traces/logs.
+observability.
 
 > Status: **v1.0-rc** — phases 0–7 complete. Caching, clustering,
 > prefetching, negative caching, jittered TTLs, soft-purge, and the Go
@@ -111,20 +123,6 @@ The high-level Go module layout follows the layered architecture in
 /pkg/bouineapi               public Go SDK
 /pkg/api                     shared types between SDK, admin server, dashboard
 ```
-
----
-
-## CI status
-
-<!-- TODO: replace with the real shields once the repo is public. -->
-
-| Pipeline   | Status |
-|------------|--------|
-| CI         | ![ci](https://img.shields.io/badge/ci-pending-lightgrey) |
-| Coverage   | ![coverage](https://img.shields.io/badge/coverage-pending-lightgrey) |
-| cache-tests| ![cache-tests](https://img.shields.io/badge/cache--tests-pending-lightgrey) |
-| Bench diff | ![bench](https://img.shields.io/badge/bench-pending-lightgrey) |
-| govulncheck| ![vuln](https://img.shields.io/badge/govulncheck-pending-lightgrey) |
 
 ---
 

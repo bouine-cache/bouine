@@ -1,10 +1,12 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,10 +26,14 @@ type Broadcaster struct {
 
 // NewBroadcaster creates a broadcaster for the given cluster.
 func NewBroadcaster(c *Cluster, fetcher *PeerFetcher) *Broadcaster {
+	logger := c.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Broadcaster{
 		cluster: c,
 		fetcher: fetcher,
-		logger:  c.logger,
+		logger:  logger,
 	}
 }
 
@@ -103,13 +109,25 @@ func (b *Broadcaster) sendBan(ctx context.Context, peer api.PeerInfo, evt api.Ba
 func (b *Broadcaster) post(ctx context.Context, addr, path string, body any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return fmt.Errorf("broadcast marshal: %w", err)
 	}
-	_ = addr
-	_ = path
-	_ = data
-	_ = ctx
-	// Full HTTP post implementation wired in phase 4 when the admin
-	// server mounts the /v1/peer/* endpoints.
+
+	url := "http://" + addr + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url,
+		bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("broadcast request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("broadcast %s%s: %w", addr, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("broadcast %s%s: status %d", addr, path, resp.StatusCode)
+	}
 	return nil
 }

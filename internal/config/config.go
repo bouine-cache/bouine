@@ -176,6 +176,11 @@ type RouteCache struct {
 	// JitterPercent adds a random ±N% to every TTL to prevent
 	// synchronized expiry stampedes. Range 0–50; 0 disables.
 	JitterPercent int `yaml:"jitter_percent"`
+	// StayinAlive enables emergency stale mode: when the upstream is
+	// unreachable or returns 5xx, serve the cached object regardless
+	// of how long ago it expired. Keeps the route alive until the
+	// upstream recovers.
+	StayinAlive bool `yaml:"stayin_alive"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

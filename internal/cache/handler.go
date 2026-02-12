@@ -45,6 +45,7 @@ type Handler struct {
 	logger        *slog.Logger
 	negativeTTL   time.Duration
 	jitterPercent int
+	stayinAlive   bool
 }
 
 // HandlerConfig configures a cache Handler.
@@ -56,6 +57,9 @@ type HandlerConfig struct {
 	NegativeTTL time.Duration
 	// JitterPercent adds random ±N% to TTLs (0–50). 0 disables.
 	JitterPercent int
+	// StayinAlive enables emergency stale mode: serve cached objects
+	// indefinitely when the upstream is unreachable or returning 5xx.
+	StayinAlive bool
 }
 
 // NewHandler creates a caching handler.
@@ -70,6 +74,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		logger:        cfg.Logger,
 		negativeTTL:   cfg.NegativeTTL,
 		jitterPercent: cfg.JitterPercent,
+		stayinAlive:   cfg.StayinAlive,
 	}
 }
 
@@ -80,27 +85,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := BuildKey(r)
-
-	// Try Vary-aware lookup: if we have a stored object for this primary
-	// key, use its Vary header to compute the variant key.
-	obj, err := h.store.Get(r.Context(), key)
-	if err != nil {
-		h.logger.Warn("cache lookup error", "error", err)
-	}
-	if obj != nil && obj.Header.Get("Vary") != "" {
-		vk := VariantKey(key, obj.Header.Get("Vary"), r.Header)
-		if vk != key {
-			vobj, verr := h.store.Get(r.Context(), vk)
-			if verr == nil && vobj != nil {
-				obj = vobj
-			} else {
-				obj = nil
-			}
-			key = vk
-		}
-	}
-
+	key, obj := h.lookup(r)
 	disp := Evaluate(r, obj, time.Now())
 
 	switch disp.Decision {
@@ -113,12 +98,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.serveFromCache(w, r, disp.Object)
 	case Miss:
-		h.fetchAndStore(w, r, key)
+		// StayinAlive: if we have a super-stale object and origin fails,
+		// serve it rather than returning 502.
+		if h.stayinAlive && obj != nil {
+			h.fetchAndStoreStayinAlive(w, r, key, obj)
+		} else {
+			h.fetchAndStore(w, r, key)
+		}
 	case Revalidate:
 		h.revalidate(w, r, key, disp.Object)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
+}
+
+// lookup resolves the cache key and stored object for r, accounting
+// for Vary-based secondary keys.
+func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
+	key := BuildKey(r)
+	obj, err := h.store.Get(r.Context(), key)
+	if err != nil {
+		h.logger.Warn("cache lookup error", "error", err)
+	}
+	if obj == nil || obj.Header.Get("Vary") == "" {
+		return key, obj
+	}
+	vk := VariantKey(key, obj.Header.Get("Vary"), r.Header)
+	if vk == key {
+		return key, obj
+	}
+	vobj, verr := h.store.Get(r.Context(), vk)
+	if verr == nil && vobj != nil {
+		return vk, vobj
+	}
+	return vk, nil
 }
 
 // tryConditional304 returns true and writes a 304 if the client's
@@ -170,6 +183,27 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 	h.writeAndMaybeStore(w, r, key, res)
 }
 
+// fetchAndStoreStayinAlive is like fetchAndStore but falls back to
+// serving the super-stale obj if the upstream is unavailable.
+func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
+	res, _ := h.collapse.Do(key, func() collapse.Result {
+		return h.doFetch(r)
+	})
+	if res.Err != nil {
+		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
+			"error", res.Err, "key", key)
+		h.serveFromCache(w, r, stale)
+		return
+	}
+	if res.StatusCode >= 500 {
+		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
+			"status", res.StatusCode, "key", key)
+		h.serveFromCache(w, r, stale)
+		return
+	}
+	h.writeAndMaybeStore(w, r, key, res)
+}
+
 func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
@@ -183,8 +217,12 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	// stale-if-error (RFC 5861 §4): if origin returns 5xx and the
 	// stale object has SIE configured, serve stale instead.
-	if res.StatusCode >= 500 && stale.StaleIfError > 0 {
-		if stale.StaleButServable(time.Now()) {
+	if res.StatusCode >= 500 {
+		if h.stayinAlive || (stale.StaleIfError > 0 && stale.StaleButServable(time.Now())) {
+			if h.stayinAlive {
+				h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
+					"status", res.StatusCode, "key", stale.Key)
+			}
 			h.serveFromCache(w, r, stale)
 			return
 		}

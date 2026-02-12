@@ -162,9 +162,12 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 		}
 		upstream := p.Handler(consecutive5xx, nil)
 		cached := cache.NewHandler(cache.HandlerConfig{
-			Upstream: upstream,
-			Store:    store,
-			Logger:   e.logger,
+			Upstream:      upstream,
+			Store:         store,
+			Logger:        e.logger,
+			NegativeTTL:   rc.Cache.NegativeTTL,
+			JitterPercent: rc.Cache.JitterPercent,
+			StayinAlive:   rc.Cache.StayinAlive,
 		})
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, cached)
 	}

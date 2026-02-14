@@ -159,6 +159,27 @@ test-k8s-teardown: ## Remove bouine + test origin from Kubernetes.
 clean: ## Remove build artifacts.
 	rm -rf $(BIN_DIR) coverage.* cover.html
 
+.PHONY: admin-token
+admin-token: ## Show the admin bearer token (usage: make admin-token CONFIG=config.yaml).
+	@CONFIG=$${CONFIG:-config/default.yaml}; \
+	if [ ! -f "$$CONFIG" ]; then \
+		echo "Config not found: $$CONFIG  (override with CONFIG=path/to/config.yaml)"; \
+		echo "If bouine is running without a config token, check its logs:"; \
+		echo "  ./bin/bouine serve ... 2>&1 | grep 'admin token'"; \
+		exit 1; \
+	fi; \
+	TOKEN=$$(grep -E '^\s*token:' "$$CONFIG" | head -1 | sed 's/.*token:[[:space:]]*//' | tr -d '"' | tr -d "'"); \
+	if [ -z "$$TOKEN" ]; then \
+		echo "No token set in $$CONFIG."; \
+		echo "bouine auto-generates one at startup — check logs:"; \
+		echo "  ./bin/bouine serve --config $$CONFIG 2>&1 | grep 'admin token'"; \
+		echo "Or set it explicitly:"; \
+		echo "  admin:"; \
+		echo "    token: your-secret-token"; \
+	else \
+		echo "$$TOKEN"; \
+	fi
+
 .PHONY: release
 release: ## Create a GitHub release (usage: make release TAG=v0.1.0).
 	@test -n "$(TAG)" || { echo "usage: make release TAG=v0.1.0"; exit 1; }

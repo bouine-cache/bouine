@@ -34,6 +34,9 @@ type Config struct {
 	// Routes are matched in declaration order; the first match wins.
 	Routes []Route `yaml:"routes"`
 
+	// Admin controls the admin API security settings.
+	Admin AdminConfig `yaml:"admin"`
+
 	// Experimental holds opt-in feature flags that have not graduated
 	// to the stable schema.
 	Experimental Experimental `yaml:"experimental"`
@@ -203,6 +206,14 @@ type RouteHTTP3 struct {
 
 // Experimental holds unstable opt-in feature flags. Empty by default.
 type Experimental struct{}
+
+// AdminConfig controls admin API security.
+type AdminConfig struct {
+	// Token is the bearer token required on all admin write endpoints.
+	// If empty, a random token is generated at startup and logged as
+	// a WARN so operators are forced to notice it.
+	Token string `yaml:"token"`
+}
 
 // ByteSize is a typed size in bytes, parsed from strings like "2Go"
 // or "512Mo". It is implemented as int64 so it composes with stdlib

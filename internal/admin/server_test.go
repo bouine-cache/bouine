@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 func newTestServer(t *testing.T, ready func() bool) *Server {
@@ -83,5 +84,61 @@ func TestMetrics_Mounted(t *testing.T) {
 	}
 	if !bytes.Contains(body, []byte("go_info")) {
 		t.Fatalf("expected go_info metric, got: %s", body[:min(len(body), 200)])
+	}
+}
+
+func TestAuth_WriteRequiresToken(t *testing.T) {
+	s := New(Config{
+		Token:   "secret",
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error { return nil },
+	})
+
+	// Write without token → 401.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
+		bytes.NewBufferString(`{"url":"https://example.com/"}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: got %d, want 401", rr.Code)
+	}
+
+	// Write with wrong token → 401.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
+		bytes.NewBufferString(`{"url":"https://example.com/"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer wrong")
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: got %d, want 401", rr.Code)
+	}
+
+	// Write with correct token → 200.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
+		bytes.NewBufferString(`{"url":"https://example.com/"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("correct token: got %d, want 200", rr.Code)
+	}
+}
+
+func TestAuth_ReadEndpointsExempt(t *testing.T) {
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	for _, path := range []string{"/healthz", "/readyz", "/version"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code == http.StatusUnauthorized {
+			t.Errorf("%s returned 401 (should be exempt)", path)
+		}
 	}
 }

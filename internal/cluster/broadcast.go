@@ -22,18 +22,25 @@ type Broadcaster struct {
 	fetcher *PeerFetcher
 	seq     atomic.Uint64
 	logger  *slog.Logger
+	token   string
 }
 
 // NewBroadcaster creates a broadcaster for the given cluster.
-func NewBroadcaster(c *Cluster, fetcher *PeerFetcher) *Broadcaster {
+// token is the admin bearer token used when posting to peer admin APIs.
+func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcaster {
 	logger := c.logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	tok := ""
+	if len(token) > 0 {
+		tok = token[0]
 	}
 	return &Broadcaster{
 		cluster: c,
 		fetcher: fetcher,
 		logger:  logger,
+		token:   tok,
 	}
 }
 
@@ -119,6 +126,9 @@ func (b *Broadcaster) post(ctx context.Context, addr, path string, body any) err
 		return fmt.Errorf("broadcast request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if b.token != "" {
+		req.Header.Set("Authorization", "Bearer "+b.token)
+	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)

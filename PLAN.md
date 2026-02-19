@@ -990,19 +990,157 @@ packages may remain.
 
 ### Phase 6 — Operator dashboard (weeks 21–23)
 
-A lightweight, zero-JS-build dashboard embedded directly into the admin
-server. Operators get live visibility without deploying Grafana.
+A lightweight operator dashboard embedded directly into the admin server.
+Operators get live visibility without deploying Grafana. No Node toolchain,
+no JS build step.
 
-- Dashboard (HTMX + Go `html/template`, embedded via `embed.FS` into admin):
-  - Live RED & USE charts (htmx polling / SSE partial swaps).
-  - Per-route hit/miss heatmaps.
-  - Cache invalidation UI (purge, ban, refresh via the admin API).
-  - Cluster peer view with ring state.
-  - Zero JS build step — server-rendered HTML fragments with htmx
-    attributes; no Node toolchain required.
-- All dashboard features are **opt-in** (gated by `dashboard.enabled`).
-- **Exit:** dashboard renders correctly; passes Lighthouse a11y ≥ 90;
-  no measurable impact on data-plane p99.
+#### 6.1 Technology stack
+
+- **Templates**: [`a-h/templ`](https://github.com/a-h/templ) — type-safe Go
+  HTML components compiled to `.go` files, identical pattern to the
+  `rules-engine-board` internal service.
+- **Interactivity**: [htmx](https://htmx.org/) loaded from a pinned CDN URL
+  in the base layout. All partial refreshes use `hx-get` + `hx-target` +
+  `hx-trigger="every Ns"` (polling only — no SSE).
+- **Charts**: [Chart.js](https://www.chartjs.org/) loaded from CDN, wired via
+  `<script>` blocks inside templ components, same approach as `rules-engine-board`.
+- **Embedding**: the compiled `_templ.go` files and any static assets live in
+  `web/dashboard/`; the admin server mounts them via `embed.FS`.
+- **No external CSS framework** — a single hand-written `styles.templ`
+  component (following `rules-engine-board/internal/templates/styles.templ`).
+
+#### 6.2 Directory layout
+
+```
+/web/dashboard/
+  embed.go               # //go:embed directive
+/internal/dashboard/
+  handler.go             # http.Handler mounting all dashboard routes
+  models/
+    overview.go          # DashboardData, RouteMetric, PeerInfo, etc.
+  templates/
+    layout.templ         # base HTML, htmx + Chart.js CDN, nav
+    layout_templ.go      # generated
+    overview.templ       # main dashboard page
+    overview_templ.go
+    routes.templ         # per-route hit/miss table + sparklines
+    routes_templ.go
+    invalidation.templ   # purge / ban / refresh forms
+    invalidation_templ.go
+    cluster.templ        # peer list + ring state
+    cluster_templ.go
+    config.templ         # config reload with confirmation dialog
+    config_templ.go
+    styles.templ         # all CSS inlined
+    styles_templ.go
+```
+
+#### 6.3 Authentication — session cookie
+
+The dashboard is served at `GET /dashboard/*` on the admin port. It uses a
+**session cookie** rather than the `Authorization: Bearer` header because
+browsers cannot set arbitrary headers on navigation requests.
+
+Flow:
+
+1. `GET /dashboard/login` renders a login form (token input field).
+2. `POST /dashboard/login` validates the submitted token with
+   `crypto/subtle.ConstantTimeCompare` against `admin.Token`. On success it
+   sets a `Set-Cookie: bouine_session=<hmac-signed-token>; HttpOnly; SameSite=Strict`
+   with a 24-hour expiry and redirects to `/dashboard/`.
+3. A `dashboardAuth` middleware on all `GET /dashboard/*` routes validates the
+   cookie. If absent or invalid it redirects to `/dashboard/login`.
+4. The existing `authMiddleware` for `Authorization: Bearer` is unchanged —
+   it continues to protect the JSON API endpoints. The dashboard session
+   cookie is never accepted on API endpoints.
+5. The HMAC secret is derived from `admin.Token` using `crypto/hmac` +
+   `crypto/sha256`. No new config field is required.
+
+#### 6.4 Data layer — in-memory ring buffers
+
+Each dashboard view is backed by a purpose-built, thread-safe ring buffer
+that is updated on every request processed by the data plane. No DuckDB,
+no external storage.
+
+| Buffer | Resolution | Retention | Used by |
+|---|---|---|---|
+| `RequestRing` | 10s buckets | 6 h (2160 buckets) | RED chart |
+| `RouteRing` | 1 min buckets | 24 h (1440 × N routes) | Per-route heatmap |
+| `PeerRing` | 30s snapshot | 30 min | Cluster peer view |
+
+Each ring lives in `internal/observability/rings.go` and is wired into the
+`DataPlaneMetrics` middleware alongside the existing Prometheus counters —
+single update point, no extra lock.
+
+#### 6.5 Dashboard views
+
+**Overview** (`/dashboard/`)
+- RED counters (requests/s, error rate, p50/p99 latency) — polled every 5s.
+- Cache result donut (HIT / MISS / STALE_HIT / BYPASS) — polled every 5s.
+- Time-range selector (1H / 6H / 24H) swaps chart data via htmx.
+
+**Routes** (`/dashboard/routes`)
+- Table of all configured routes: path prefix, pool, hit ratio, avg TTL,
+  requests/min — polled every 10s via `hx-trigger="every 10s"`.
+- Sparkline per route (last 30 min of hit ratio) rendered as an inline SVG
+  in the templ component — no Chart.js needed for sparklines.
+
+**Cache invalidation** (`/dashboard/invalidation`)
+- Three forms: Purge (URL), Ban (host\_regex + path\_regex), Refresh (URL).
+- Each form submits to the existing admin API (`POST /v1/purge` etc.) via
+  htmx `hx-post`, passing the session token as a request header injected by
+  a `hx-headers` attribute set in the base layout.
+- Response rendered inline (success / error) via `hx-target` + `hx-swap`.
+
+**Cluster** (`/dashboard/cluster`)
+- Table of live peers (name, addr, weight, joined\_at) — polled every 10s.
+- Ring state: consistent-hash ring visualised as a horizontal band showing
+  which key-ranges each node owns (SVG, server-rendered from ring snapshot).
+
+**Config reload** (`/dashboard/config`)
+- A single "Reload config" button.
+- On click: htmx posts to a new `POST /dashboard/config/reload` endpoint
+  (not the raw admin API) which:
+  1. Calls `config.Parse` on the current config file path.
+  2. If parse **fails**: returns a 422 with the error message rendered inline
+     — config is **not** applied.
+  3. If parse **succeeds**: shows a confirmation dialog (`<dialog>` element,
+     toggled by htmx `hx-on` attribute) asking "Apply new config?" with
+     Cancel / Confirm buttons.
+  4. On Confirm: calls the Watcher's reload callback and returns 200.
+- No diff is shown — only success or error message.
+- The endpoint is protected by the `dashboardAuth` middleware (session
+  cookie), not the bearer token middleware.
+
+#### 6.6 Not in phase 6 (explicit exclusions)
+
+- No AI suggestions, no DuckDB, no ML layer → phase 6.5.
+- No config editor (edit YAML in browser) → future.
+- No alerting / notification integrations → future.
+- No multi-tenant namespacing → future.
+- No mobile-specific layout (responsive is fine, native mobile is not a goal).
+
+#### 6.7 Dependencies to add
+
+| Module | Purpose | License |
+|---|---|---|
+| `a-h/templ` | Type-safe HTML templates compiled to Go | MIT |
+
+Chart.js and htmx are loaded from CDN (pinned versions). No new runtime Go
+dependencies.
+
+#### 6.8 Exit criteria
+
+- All 5 views render correctly in Chrome and Firefox.
+- Lighthouse accessibility score ≥ 90 on the overview page.
+- `go generate ./...` regenerates `*_templ.go` cleanly.
+- Data-plane p99 latency regression ≤ 0.5% vs baseline (ring-buffer updates
+  must be lock-free on the hot path — use `sync/atomic` counters, batch into
+  ring on background goroutine).
+- Config reload: attempting to load an invalid config file returns 422 and
+  leaves the running config unchanged (tested with a malformed YAML fixture).
+- Session cookie: unauthenticated request to `/dashboard/` redirects to
+  `/dashboard/login` with status 302.
 
 ### Phase 6.5 — AI traffic analysis (weeks 24–27)
 

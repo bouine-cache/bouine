@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bouine — Mix B: Glow dense</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html[data-theme="dark"]{
+  --bg:#08060f;--s:#0e0b18;--card:#110e1c;--b:#1e1830;
+  --t:#ede6ff;--m:#6050a0;--a:#c4b5fd;--a2:#8b5cf6;--a3:#6d28d9;
+  --g:#34d399;--r:#fb7185;--y:#fbbf24;
+  --pg:rgba(139,92,246,.5);
+}
+html[data-theme="light"]{
+  --bg:#f8f5ff;--s:#fff;--card:#fdfbff;--b:#e4d9ff;
+  --t:#180840;--m:#8b7ab8;--a:#5b21b6;--a2:#7c3aed;--a3:#a78bfa;
+  --g:#059669;--r:#e11d48;--y:#b45309;
+  --pg:rgba(91,33,182,.2);
+}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t);min-height:100vh;display:flex;font-size:13px;transition:background .25s,color .25s}
+/* Wide sidebar — from #3 aesthetics, #9 density */
+aside{width:180px;background:var(--s);border-right:1px solid var(--b);padding:0;display:flex;flex-direction:column;flex-shrink:0}
+.logo{padding:1rem 1rem .85rem;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:.55rem}
+.logo-gem{width:28px;height:28px;border-radius:7px;background:linear-gradient(135deg,var(--a3),var(--a2));display:flex;align-items:center;justify-content:center;font-size:.8rem;flex-shrink:0}
+html[data-theme="dark"] .logo-gem{box-shadow:0 0 10px var(--pg)}
+.logo-name{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.82rem;letter-spacing:.04em;color:var(--a)}
+.logo-v{font-size:.6rem;color:var(--m);margin-top:.1rem}
+nav{padding:.5rem 0;flex:1}
+.ng{padding:.4rem .75rem .15rem;font-size:.58rem;text-transform:uppercase;letter-spacing:.14em;color:var(--m);opacity:.7}
+nav a{display:flex;align-items:center;gap:.5rem;padding:.45rem .75rem;font-size:.76rem;font-weight:500;color:var(--m);text-decoration:none;border-radius:0;transition:all .15s;position:relative;margin:0 .35rem .1rem;border-radius:5px}
+nav a.active{background:rgba(139,92,246,.12);color:var(--a)}
+html[data-theme="dark"] nav a.active{box-shadow:inset 1px 0 0 var(--a2)}
+html[data-theme="light"] nav a.active{box-shadow:inset 2px 0 0 var(--a)}
+nav a:hover:not(.active){background:rgba(139,92,246,.05);color:var(--t)}
+nav a .ni{font-size:.8rem;width:16px;text-align:center;flex-shrink:0}
+.sbf{padding:.75rem;border-top:1px solid var(--b);font-family:'JetBrains Mono',monospace;font-size:.62rem}
+.sbf .sl{display:flex;justify-content:space-between;margin-bottom:.2rem}
+.sbf .sk{color:var(--m)}.sbf .sv{color:var(--a)}
+/* Main */
+main{flex:1;display:flex;flex-direction:column;overflow:auto}
+.hdr{height:40px;background:var(--s);border-bottom:1px solid var(--b);display:flex;align-items:center;padding:0 1rem;gap:1rem;flex-shrink:0}
+.ph{font-size:.82rem;font-weight:600;color:var(--t)}
+.hdr-r{margin-left:auto;display:flex;gap:.4rem}
+.tp{display:flex;gap:.2rem}
+.tb{padding:.18rem .5rem;border:1px solid var(--b);background:transparent;color:var(--m);font-size:.68rem;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;transition:all .15s}
+.tb.active{background:rgba(139,92,246,.15);color:var(--a);border-color:rgba(139,92,246,.3)}
+html[data-theme="dark"] .tb.active{box-shadow:0 0 6px rgba(139,92,246,.2)}
+/* Body */
+.body{padding:1rem;flex:1;overflow:auto}
+.row4{display:grid;grid-template-columns:repeat(4,1fr);gap:.65rem;margin-bottom:.65rem}
+.mc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:.85rem;position:relative;overflow:hidden}
+html[data-theme="dark"] .mc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
+.mc::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--a2),transparent);opacity:.3}
+.mk{font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.4rem;font-weight:600}
+.mv{font-family:'JetBrains Mono',monospace;font-size:1.65rem;font-weight:700;letter-spacing:-.02em;line-height:1;margin-bottom:.25rem}
+html[data-theme="dark"] .mv{color:var(--a);text-shadow:0 0 16px rgba(139,92,246,.3)}
+html[data-theme="light"] .mv{color:var(--a)}
+.md{font-size:.67rem;color:var(--m)}
+.good{color:var(--g)}.bad{color:var(--r)}
+.row21{display:grid;grid-template-columns:2fr 1fr;gap:.65rem;margin-bottom:.65rem}
+.cc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:.85rem}
+html[data-theme="dark"] .cc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
+.ct{font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.6rem;font-family:'JetBrains Mono',monospace}
+.ch{height:160px}
+/* Table */
+.tc{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:.65rem}
+html[data-theme="dark"] .tc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
+.th{padding:.55rem .85rem;border-bottom:1px solid var(--b);display:flex;justify-content:space-between;align-items:center}
+.th .tl{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--m);font-family:'JetBrains Mono',monospace}
+table{width:100%;border-collapse:collapse}
+th{padding:.38rem .85rem;font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--m);text-align:left;border-bottom:1px solid var(--b)}
+td{padding:.5rem .85rem;font-size:.77rem;border-bottom:1px solid rgba(139,92,246,.05)}
+tr:last-child td{border:none}
+tr:hover td{background:rgba(139,92,246,.04)}
+td:first-child{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--a)}
+.lz{display:inline-flex;align-items:center;gap:.25rem;padding:.1rem .42rem;border-radius:999px;font-size:.63rem;font-weight:700;font-family:'JetBrains Mono',monospace}
+.lz.g{background:rgba(52,211,153,.1);color:var(--g)}
+.lz.y{background:rgba(251,191,36,.1);color:var(--y)}
+.lz.d{background:rgba(139,92,246,.07);color:var(--m)}
+.lz::before{content:'●';font-size:.45rem}
+.sp{display:inline-flex;align-items:flex-end;gap:1px;height:16px}
+.sp span{width:3px;background:var(--a2);border-radius:1px;opacity:.6}
+/* Bottom */
+.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:.65rem}
+.bc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:.85rem}
+html[data-theme="dark"] .bc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
+.bc-t{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.7rem;font-family:'JetBrains Mono',monospace}
+.pr{display:flex;align-items:center;justify-content:space-between;padding:.35rem 0;border-bottom:1px solid var(--b)}
+.pr:last-child{border:none}
+.pn{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--a)}
+.pa{font-size:.6rem;color:var(--m);margin-top:.08rem}
+.pd{width:6px;height:6px;border-radius:50%;background:var(--g)}
+html[data-theme="dark"] .pd{box-shadow:0 0 5px var(--g)}
+.ir2{display:flex;gap:.35rem;margin-bottom:.4rem}
+.ir2 input{flex:1;background:rgba(139,92,246,.04);border:1px solid var(--b);color:var(--t);padding:.35rem .5rem;border-radius:5px;font-size:.73rem;min-width:0;font-family:inherit}
+.ir2 input:focus{outline:none;border-color:rgba(139,92,246,.4)}
+.btn{padding:.35rem .65rem;border-radius:5px;border:none;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s}
+.bp{background:var(--a2);color:#fff}.bp:hover{background:var(--a)}
+.bo{background:transparent;border:1px solid var(--b);color:var(--m)}.bo:hover{border-color:var(--a);color:var(--a)}
+.relt{font-size:.72rem;color:var(--m);line-height:1.6;margin-bottom:.8rem}
+.btnr{width:100%;padding:.45rem;border-radius:5px;border:1px solid rgba(139,92,246,.25);background:rgba(139,92,246,.06);color:var(--a);font-size:.73rem;font-weight:600;cursor:pointer;font-family:'JetBrains Mono',monospace;letter-spacing:.04em;transition:all .2s}
+html[data-theme="dark"] .btnr:hover{background:rgba(139,92,246,.15);box-shadow:0 0 12px rgba(139,92,246,.2)}
+html[data-theme="light"] .btnr:hover{background:rgba(91,33,182,.08)}
+.tog{position:fixed;bottom:1rem;right:1rem;z-index:999;padding:.28rem .6rem;border-radius:5px;border:1px solid var(--b);background:var(--card);color:var(--m);font-size:.67rem;cursor:pointer;font-family:'JetBrains Mono',monospace}
+</style>
+</head>
+<body>
+<aside>
+  <div class="logo">
+    <div class="logo-gem">🐟</div>
+    <div><div class="logo-name">bouine</div><div class="logo-v">v1.0-rc</div></div>
+  </div>
+  <nav>
+    <div class="ng">Monitor</div>
+    <a href="#" class="active"><span class="ni">◈</span>Overview</a>
+    <a href="#"><span class="ni">⬡</span>Routes</a>
+    <a href="#"><span class="ni">◎</span>Cluster</a>
+    <div class="ng">Operate</div>
+    <a href="#"><span class="ni">⌦</span>Invalidation</a>
+    <a href="#"><span class="ni">⚙</span>Config</a>
+  </nav>
+  <div class="sbf">
+    <div class="sl"><span class="sk">peers</span><span class="sv">3/3</span></div>
+    <div class="sl"><span class="sk">hit</span><span class="sv">87.4%</span></div>
+    <div class="sl"><span class="sk">req/s</span><span class="sv">2,847</span></div>
+  </div>
+</aside>
+<main>
+  <div class="hdr">
+    <span class="ph">Overview</span>
+    <div class="hdr-r">
+      <div class="tp"><button class="tb">1H</button><button class="tb active">6H</button><button class="tb">24H</button></div>
+    </div>
+  </div>
+  <div class="body">
+    <div class="row4">
+      <div class="mc"><div class="mk">Requests / s</div><div class="mv">2,847</div><div class="md"><span class="good">↑ 12%</span> vs prior</div></div>
+      <div class="mc"><div class="mk">Hit ratio</div><div class="mv">87.4%</div><div class="md"><span class="good">↑ 2.1pp</span></div></div>
+      <div class="mc"><div class="mk">p99 latency</div><div class="mv">0.8ms</div><div class="md">→ stable</div></div>
+      <div class="mc"><div class="mk">Error rate</div><div class="mv">0.02%</div><div class="md"><span class="good">↓ improving</span></div></div>
+    </div>
+    <div class="row21">
+      <div class="cc"><div class="ct">throughput</div><div class="ch"><canvas id="c1"></canvas></div></div>
+      <div class="cc"><div class="ct">cache split</div><div class="ch"><canvas id="c2"></canvas></div></div>
+    </div>
+    <div class="tc">
+      <div class="th"><span class="tl">Route performance</span><span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">↻ 10s</span></div>
+      <table>
+        <thead><tr><th>Prefix</th><th>Pool</th><th>Hit %</th><th>Req/min</th><th>TTL</th><th>Trend</th></tr></thead>
+        <tbody>
+          <tr><td>/products/</td><td>storefront</td><td><span class="lz g">91.2%</span></td><td>842</td><td>60s</td><td><div class="sp"><span style="height:40%"></span><span style="height:62%"></span><span style="height:78%"></span><span style="height:86%"></span><span style="height:90%"></span><span style="height:88%"></span><span style="height:95%"></span><span style="height:98%"></span></div></td></tr>
+          <tr><td>/search/</td><td>search</td><td><span class="lz g">78.5%</span></td><td>1,203</td><td>30s</td><td><div class="sp"><span style="height:56%"></span><span style="height:62%"></span><span style="height:71%"></span><span style="height:74%"></span><span style="height:72%"></span><span style="height:79%"></span><span style="height:77%"></span><span style="height:81%"></span></div></td></tr>
+          <tr><td>/static/</td><td>cdn</td><td><span class="lz g">99.1%</span></td><td>412</td><td>24h</td><td><div class="sp"><span style="height:96%"></span><span style="height:98%"></span><span style="height:97%"></span><span style="height:99%"></span><span style="height:100%"></span><span style="height:99%"></span><span style="height:98%"></span><span style="height:100%"></span></div></td></tr>
+          <tr><td>/api/v1/</td><td>api</td><td><span class="lz y">52.3%</span></td><td>3,041</td><td>10s</td><td><div class="sp"><span style="height:46%"></span><span style="height:53%"></span><span style="height:49%"></span><span style="height:58%"></span><span style="height:53%"></span><span style="height:57%"></span><span style="height:51%"></span><span style="height:55%"></span></div></td></tr>
+          <tr><td>/checkout/</td><td>cart-api</td><td><span class="lz d">bypass</span></td><td>187</td><td>—</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="row3">
+      <div class="bc"><div class="bc-t">Cluster peers</div>
+        <div class="pr"><div><div class="pn">bouine-0</div><div class="pa">10.42.0.5:8443</div></div><span class="pd"></span></div>
+        <div class="pr"><div><div class="pn">bouine-1</div><div class="pa">10.42.0.6:8443</div></div><span class="pd"></span></div>
+        <div class="pr"><div><div class="pn">bouine-2</div><div class="pa">10.42.0.7:8443</div></div><span class="pd"></span></div>
+      </div>
+      <div class="bc"><div class="bc-t">Invalidation</div>
+        <div class="ir2"><input value="https://thylong.com/posts/go-cache"><button class="btn bp">Purge</button><button class="btn bo">↺</button></div>
+        <div class="ir2"><input placeholder="host_regex=example.com"><button class="btn bo">Ban</button></div>
+      </div>
+      <div class="bc"><div class="bc-t">Config reload</div>
+        <div class="relt">Validates before applying. Invalid configs rejected — running config always preserved.</div>
+        <button class="btnr">↻ reload config</button>
+      </div>
+    </div>
+  </div>
+</main>
+<button class="tog" id="tog" onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');h.setAttribute('data-theme',d==='light'?'dark':'light');b.textContent=h.getAttribute('data-theme')==='light'?'🌙 dark':'☀ light';setTimeout(mk,30);})(this)">☀ light</button>
+<script>
+const D=()=>document.documentElement.getAttribute('data-theme')==='dark';
+function mk(){
+  const L=Array.from({length:24},(_,i)=>`${i*15}m`),d=D();
+  if(window._c1)window._c1.destroy();if(window._c2)window._c2.destroy();
+  window._c1=new Chart(document.getElementById('c1'),{type:'line',data:{labels:L,datasets:[
+    {data:L.map(()=>2000+Math.random()*1500),borderColor:d?'#c4b5fd':'#5b21b6',backgroundColor:d?'rgba(196,181,253,.07)':'rgba(91,33,182,.05)',fill:true,tension:.4,pointRadius:0,borderWidth:1.5},
+    {data:L.map(()=>Math.random()*40),borderColor:d?'#fb7185':'#e11d48',backgroundColor:'transparent',tension:.4,pointRadius:0,borderWidth:1},
+  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9}}}},scales:{x:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9},maxTicksLimit:8}},y:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}}}});
+  window._c2=new Chart(document.getElementById('c2'),{type:'doughnut',data:{labels:['HIT','MISS','STALE','BYP'],datasets:[{data:[87.4,8.2,3.1,1.3],backgroundColor:d?['#c4b5fd','#fb7185','#fbbf24','#1e1830']:['#5b21b6','#e11d48','#b45309','#e4d9ff'],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:6}}},cutout:'70%'}});
+}
+mk();
+</script>
+</body>
+</html>

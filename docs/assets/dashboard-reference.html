@@ -19,9 +19,9 @@ html[data-theme="light"]{
   --g:#059669;--r:#e11d48;--y:#b45309;
   --pg:rgba(91,33,182,.2);
 }
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t);min-height:100vh;display:flex;font-size:13px;transition:background .25s,color .25s}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t);min-height:100vh;display:flex;font-size:13px;transition:background .25s,color .25s;position:relative}
 /* Wide sidebar — from #3 aesthetics, #9 density */
-aside{width:180px;background:var(--s);border-right:1px solid var(--b);padding:0;display:flex;flex-direction:column;flex-shrink:0}
+aside{width:180px;background:var(--s);border-right:1px solid var(--b);padding:0;display:flex;flex-direction:column;flex-shrink:0;position:relative;z-index:1}
 .logo{padding:1rem 1rem .85rem;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:.55rem}
 .logo-gem{width:28px;height:28px;border-radius:7px;background:linear-gradient(135deg,var(--a3),var(--a2));display:flex;align-items:center;justify-content:center;font-size:.8rem;flex-shrink:0}
 html[data-theme="dark"] .logo-gem{box-shadow:0 0 10px var(--pg)}
@@ -39,7 +39,7 @@ nav a .ni{font-size:.8rem;width:16px;text-align:center;flex-shrink:0}
 .sbf .sl{display:flex;justify-content:space-between;margin-bottom:.2rem}
 .sbf .sk{color:var(--m)}.sbf .sv{color:var(--a)}
 /* Main */
-main{flex:1;display:flex;flex-direction:column;overflow:auto}
+main{flex:1;display:flex;flex-direction:column;overflow:auto;position:relative;z-index:1}
 .hdr{height:40px;background:var(--s);border-bottom:1px solid var(--b);display:flex;align-items:center;padding:0 1rem;gap:1rem;flex-shrink:0}
 .ph{font-size:.82rem;font-weight:600;color:var(--t)}
 .hdr-r{margin-left:auto;display:flex;gap:.4rem}
@@ -188,6 +188,67 @@ function mk(){
   window._c2=new Chart(document.getElementById('c2'),{type:'doughnut',data:{labels:['HIT','MISS','STALE','BYP'],datasets:[{data:[87.4,8.2,3.1,1.3],backgroundColor:d?['#c4b5fd','#fb7185','#fbbf24','#1e1830']:['#5b21b6','#e11d48','#b45309','#e4d9ff'],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:6}}},cutout:'70%'}});
 }
 mk();
+</script>
+
+<!-- WebGL noise canvas — same shader as the documentation homepage -->
+<div id="bouine-tint" style="position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 80% 70% at 50% 30%,rgba(139,92,246,.12) 0%,transparent 65%)"></div>
+<canvas id="bouine-noise" style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0"></canvas>
+<script>
+(function(){
+  var c=document.getElementById('bouine-noise');
+  if(!c)return;
+  var gl=c.getContext('webgl');
+  if(!gl)return;
+  var V='attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
+  var F=[
+    'precision mediump float;',
+    'uniform float t;uniform vec2 r;',
+    'float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}',
+    'void main(){',
+    '  vec2 co=gl_FragCoord.xy+vec2(sin(t*.1)*.5,cos(t*.13)*.5);',
+    '  vec2 s=co+t*.01;',
+    '  float u1=max(hash(s),.0001);',
+    '  float u2=hash(s+vec2(1.,0.));',
+    '  float n=sqrt(-2.*log(u1))*cos(6.28318*u2);',
+    '  gl_FragColor=vec4(vec3(clamp(n*.08+.5,0.,1.)),1.);',
+    '}'
+  ].join('');
+  function sh(tp,sr){var s=gl.createShader(tp);gl.shaderSource(s,sr);gl.compileShader(s);return s;}
+  var p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,V));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,F));
+  gl.linkProgram(p);
+  var buf=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+  var tl=gl.getUniformLocation(p,'t');
+  var rl=gl.getUniformLocation(p,'r');
+  var al=gl.getAttribLocation(p,'a');
+  var last=0;
+  function updateBlend(){
+    var dark=document.documentElement.getAttribute('data-theme')!=='light';
+    c.style.mixBlendMode=dark?'overlay':'multiply';
+    c.style.opacity=dark?'0.30':'0.08';
+  }
+  function resize(){c.width=innerWidth;c.height=innerHeight;gl.viewport(0,0,c.width,c.height);}
+  function frame(tm){
+    if(tm-last>=83){
+      resize();
+      updateBlend();
+      gl.useProgram(p);
+      gl.uniform1f(tl,tm*.001);
+      gl.uniform2f(rl,c.width,c.height);
+      gl.enableVertexAttribArray(al);
+      gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+      gl.vertexAttribPointer(al,2,gl.FLOAT,false,0,0);
+      gl.drawArrays(gl.TRIANGLES,0,6);
+      last=tm;
+    }
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize',resize);
+  requestAnimationFrame(frame);
+})();
 </script>
 </body>
 </html>

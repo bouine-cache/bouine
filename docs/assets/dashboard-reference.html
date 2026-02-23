@@ -2,25 +2,22 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>bouine — Mix B: Glow dense</title>
+<title>bouine — Dashboard reference</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 html[data-theme="dark"]{
   --bg:#08060f;--s:#0e0b18;--card:#110e1c;--b:#1e1830;
   --t:#ede6ff;--m:#6050a0;--a:#c4b5fd;--a2:#8b5cf6;--a3:#6d28d9;
-  --g:#34d399;--r:#fb7185;--y:#fbbf24;
-  --pg:rgba(139,92,246,.5);
+  --g:#34d399;--r:#fb7185;--y:#fbbf24;--pg:rgba(139,92,246,.5);
 }
 html[data-theme="light"]{
   --bg:#f8f5ff;--s:#fff;--card:#fdfbff;--b:#e4d9ff;
   --t:#180840;--m:#8b7ab8;--a:#5b21b6;--a2:#7c3aed;--a3:#a78bfa;
-  --g:#059669;--r:#e11d48;--y:#b45309;
-  --pg:rgba(91,33,182,.2);
+  --g:#059669;--r:#e11d48;--y:#b45309;--pg:rgba(91,33,182,.2);
 }
 body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t);min-height:100vh;display:flex;font-size:13px;transition:background .25s,color .25s;position:relative}
-/* Wide sidebar — from #3 aesthetics, #9 density */
 aside{width:180px;background:var(--s);border-right:1px solid var(--b);padding:0;display:flex;flex-direction:column;flex-shrink:0;position:relative;z-index:1}
 .logo{padding:1rem 1rem .85rem;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:.55rem}
 .logo-gem{width:28px;height:28px;border-radius:7px;background:linear-gradient(135deg,var(--a3),var(--a2));display:flex;align-items:center;justify-content:center;font-size:.8rem;flex-shrink:0}
@@ -29,7 +26,7 @@ html[data-theme="dark"] .logo-gem{box-shadow:0 0 10px var(--pg)}
 .logo-v{font-size:.6rem;color:var(--m);margin-top:.1rem}
 nav{padding:.5rem 0;flex:1}
 .ng{padding:.4rem .75rem .15rem;font-size:.58rem;text-transform:uppercase;letter-spacing:.14em;color:var(--m);opacity:.7}
-nav a{display:flex;align-items:center;gap:.5rem;padding:.45rem .75rem;font-size:.76rem;font-weight:500;color:var(--m);text-decoration:none;border-radius:0;transition:all .15s;position:relative;margin:0 .35rem .1rem;border-radius:5px}
+nav a{display:flex;align-items:center;gap:.5rem;padding:.45rem .75rem;font-size:.76rem;font-weight:500;color:var(--m);text-decoration:none;transition:all .15s;margin:0 .35rem .1rem;border-radius:5px;cursor:pointer}
 nav a.active{background:rgba(139,92,246,.12);color:var(--a)}
 html[data-theme="dark"] nav a.active{box-shadow:inset 1px 0 0 var(--a2)}
 html[data-theme="light"] nav a.active{box-shadow:inset 2px 0 0 var(--a)}
@@ -38,75 +35,131 @@ nav a .ni{font-size:.8rem;width:16px;text-align:center;flex-shrink:0}
 .sbf{padding:.75rem;border-top:1px solid var(--b);font-family:'JetBrains Mono',monospace;font-size:.62rem}
 .sbf .sl{display:flex;justify-content:space-between;margin-bottom:.2rem}
 .sbf .sk{color:var(--m)}.sbf .sv{color:var(--a)}
-/* Main */
 main{flex:1;display:flex;flex-direction:column;overflow:auto;position:relative;z-index:1}
-.hdr{height:40px;background:var(--s);border-bottom:1px solid var(--b);display:flex;align-items:center;padding:0 1rem;gap:1rem;flex-shrink:0}
+.hdr{height:40px;background:var(--s);border-bottom:1px solid var(--b);display:flex;align-items:center;padding:0 1rem;gap:.85rem;flex-shrink:0}
+.brand{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.82rem;color:var(--a);letter-spacing:.04em}
 .ph{font-size:.82rem;font-weight:600;color:var(--t)}
-.hdr-r{margin-left:auto;display:flex;gap:.4rem}
-.tp{display:flex;gap:.2rem}
-.tb{padding:.18rem .5rem;border:1px solid var(--b);background:transparent;color:var(--m);font-size:.68rem;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;transition:all .15s}
+.hdr-r{margin-left:auto;display:flex;gap:.5rem;align-items:center}
+.pill{display:flex;align-items:center;gap:.3rem;font-size:.7rem;color:var(--m);padding:.18rem .5rem;border-radius:999px;border:1px solid var(--b);font-family:'JetBrains Mono',monospace}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--g)}
+html[data-theme="dark"] .dot{box-shadow:0 0 4px var(--g)}
+.tabs{height:36px;border-bottom:1px solid var(--b);background:var(--s);display:flex;align-items:stretch;padding:0 1rem;gap:.15rem;flex-shrink:0}
+.tabs a{display:flex;align-items:center;font-size:.75rem;color:var(--m);text-decoration:none;padding:0 .65rem;border-bottom:2px solid transparent;transition:all .15s;font-weight:500;cursor:pointer}
+.tabs a.active{color:var(--a);border-bottom-color:var(--a2)}
+.tabs a:hover:not(.active){color:var(--t)}
+.tg{margin-left:auto;display:flex;gap:.2rem;align-items:center}
+.tb{padding:.18rem .5rem;border:1px solid var(--b);background:transparent;color:var(--m);font-size:.68rem;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace}
 .tb.active{background:rgba(139,92,246,.15);color:var(--a);border-color:rgba(139,92,246,.3)}
 html[data-theme="dark"] .tb.active{box-shadow:0 0 6px rgba(139,92,246,.2)}
-/* Body */
-.body{padding:1rem;flex:1;overflow:auto}
-.row4{display:grid;grid-template-columns:repeat(4,1fr);gap:.65rem;margin-bottom:.65rem}
+.body{padding:1rem;flex:1;overflow:auto;display:none}
+.body.active{display:block}
+.r4{display:grid;grid-template-columns:repeat(4,1fr);gap:.7rem;margin-bottom:.7rem}
 .mc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:.85rem;position:relative;overflow:hidden}
 html[data-theme="dark"] .mc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
 .mc::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--a2),transparent);opacity:.3}
 .mk{font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.4rem;font-weight:600}
-.mv{font-family:'JetBrains Mono',monospace;font-size:1.65rem;font-weight:700;letter-spacing:-.02em;line-height:1;margin-bottom:.25rem}
-html[data-theme="dark"] .mv{color:var(--a);text-shadow:0 0 16px rgba(139,92,246,.3)}
-html[data-theme="light"] .mv{color:var(--a)}
+.mv{font-family:'JetBrains Mono',monospace;font-size:1.65rem;font-weight:700;letter-spacing:-.02em;line-height:1;margin-bottom:.25rem;color:var(--a)}
+html[data-theme="dark"] .mv{text-shadow:0 0 16px rgba(139,92,246,.3)}
 .md{font-size:.67rem;color:var(--m)}
 .good{color:var(--g)}.bad{color:var(--r)}
-.row21{display:grid;grid-template-columns:2fr 1fr;gap:.65rem;margin-bottom:.65rem}
+.r21{display:grid;grid-template-columns:2fr 1fr;gap:.7rem;margin-bottom:.7rem}
 .cc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:.85rem}
 html[data-theme="dark"] .cc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
 .ct{font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.6rem;font-family:'JetBrains Mono',monospace}
-.ch{height:160px}
-/* Table */
-.tc{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:.65rem}
+.ch{height:165px}
+.tc{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden;margin-bottom:.7rem}
 html[data-theme="dark"] .tc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
-.th{padding:.55rem .85rem;border-bottom:1px solid var(--b);display:flex;justify-content:space-between;align-items:center}
-.th .tl{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--m);font-family:'JetBrains Mono',monospace}
+.th{padding:.6rem .9rem;border-bottom:1px solid var(--b);display:flex;justify-content:space-between;align-items:center;background:rgba(139,92,246,.03)}
+.tl{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--m);font-family:'JetBrains Mono',monospace}
 table{width:100%;border-collapse:collapse}
-th{padding:.38rem .85rem;font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--m);text-align:left;border-bottom:1px solid var(--b)}
-td{padding:.5rem .85rem;font-size:.77rem;border-bottom:1px solid rgba(139,92,246,.05)}
+th{padding:.4rem .9rem;font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--m);text-align:left;border-bottom:1px solid var(--b);white-space:nowrap}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--a)}
+th .sort-icon{margin-left:.3rem;opacity:.4;font-size:.55rem}
+th.asc .sort-icon::after{content:'↑';opacity:1;color:var(--a)}
+th.desc .sort-icon::after{content:'↓';opacity:1;color:var(--a)}
+th:not(.asc):not(.desc) .sort-icon::after{content:'↕'}
+td{padding:.52rem .9rem;font-size:.78rem;border-bottom:1px solid rgba(139,92,246,.05)}
+html[data-theme="light"] td{border-bottom:1px solid rgba(109,40,217,.04)}
 tr:last-child td{border:none}
 tr:hover td{background:rgba(139,92,246,.04)}
 td:first-child{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--a)}
 .lz{display:inline-flex;align-items:center;gap:.25rem;padding:.1rem .42rem;border-radius:999px;font-size:.63rem;font-weight:700;font-family:'JetBrains Mono',monospace}
+.lz::before{content:'●';font-size:.45rem}
 .lz.g{background:rgba(52,211,153,.1);color:var(--g)}
 .lz.y{background:rgba(251,191,36,.1);color:var(--y)}
 .lz.d{background:rgba(139,92,246,.07);color:var(--m)}
-.lz::before{content:'●';font-size:.45rem}
+.lz.r{background:rgba(251,113,133,.1);color:var(--r)}
 .sp{display:inline-flex;align-items:flex-end;gap:1px;height:16px}
 .sp span{width:3px;background:var(--a2);border-radius:1px;opacity:.6}
-/* Bottom */
-.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:.65rem}
+.r3{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem;margin-bottom:.7rem}
+.r2{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:.7rem}
 .bc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:.85rem}
 html[data-theme="dark"] .bc{box-shadow:0 1px 12px rgba(0,0,0,.4)}
 .bc-t{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.7rem;font-family:'JetBrains Mono',monospace}
-.pr{display:flex;align-items:center;justify-content:space-between;padding:.35rem 0;border-bottom:1px solid var(--b)}
+.pr{display:flex;align-items:center;justify-content:space-between;padding:.38rem 0;border-bottom:1px solid var(--b)}
 .pr:last-child{border:none}
 .pn{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--a)}
 .pa{font-size:.6rem;color:var(--m);margin-top:.08rem}
 .pd{width:6px;height:6px;border-radius:50%;background:var(--g)}
 html[data-theme="dark"] .pd{box-shadow:0 0 5px var(--g)}
-.ir2{display:flex;gap:.35rem;margin-bottom:.4rem}
-.ir2 input{flex:1;background:rgba(139,92,246,.04);border:1px solid var(--b);color:var(--t);padding:.35rem .5rem;border-radius:5px;font-size:.73rem;min-width:0;font-family:inherit}
-.ir2 input:focus{outline:none;border-color:rgba(139,92,246,.4)}
-.btn{padding:.35rem .65rem;border-radius:5px;border:none;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s}
+/* stat rows */
+.stat-row{display:flex;justify-content:space-between;align-items:baseline;padding:.3rem 0;border-bottom:1px solid var(--b);font-size:.75rem}
+.stat-row:last-child{border:none}
+.stat-k{color:var(--m);font-size:.7rem}
+.stat-v{font-family:'JetBrains Mono',monospace;color:var(--a);font-weight:600}
+/* tier bar */
+.tier-bar-wrap{margin:.5rem 0;font-size:.68rem}
+.tier-bar-label{display:flex;justify-content:space-between;color:var(--m);margin-bottom:.25rem}
+.tier-bar{height:6px;border-radius:3px;background:rgba(139,92,246,.12);overflow:hidden}
+.tier-bar-fill{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--a2),var(--a));transition:width .4s ease}
+/* forms */
+.fgroup{margin-bottom:.85rem}
+.fgroup label{display:block;font-size:.62rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--m);margin-bottom:.3rem}
+.finput{width:100%;background:rgba(139,92,246,.04);border:1px solid var(--b);color:var(--t);padding:.4rem .6rem;border-radius:6px;font-size:.78rem;font-family:inherit}
+.finput:focus{outline:none;border-color:rgba(139,92,246,.45);box-shadow:0 0 0 2px rgba(139,92,246,.1)}
+.frow{display:flex;gap:.4rem;align-items:stretch}
+.frow .finput{flex:1}
+.btn{padding:.38rem .75rem;border-radius:6px;border:none;font-size:.72rem;font-weight:600;cursor:pointer;font-family:inherit;transition:all .15s;white-space:nowrap}
 .bp{background:var(--a2);color:#fff}.bp:hover{background:var(--a)}
-.bo{background:transparent;border:1px solid var(--b);color:var(--m)}.bo:hover{border-color:var(--a);color:var(--a)}
-.relt{font-size:.72rem;color:var(--m);line-height:1.6;margin-bottom:.8rem}
-.btnr{width:100%;padding:.45rem;border-radius:5px;border:1px solid rgba(139,92,246,.25);background:rgba(139,92,246,.06);color:var(--a);font-size:.73rem;font-weight:600;cursor:pointer;font-family:'JetBrains Mono',monospace;letter-spacing:.04em;transition:all .2s}
-html[data-theme="dark"] .btnr:hover{background:rgba(139,92,246,.15);box-shadow:0 0 12px rgba(139,92,246,.2)}
-html[data-theme="light"] .btnr:hover{background:rgba(91,33,182,.08)}
+.bo{background:rgba(139,92,246,.06);border:1px solid var(--b);color:var(--m)}.bo:hover{border-color:var(--a);color:var(--a)}
+.br{background:rgba(251,113,133,.08);border:1px solid rgba(251,113,133,.25);color:var(--r)}
+.bg2{background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.25);color:var(--g)}
+/* history list */
+.hist-item{display:flex;align-items:center;gap:.6rem;padding:.4rem 0;border-bottom:1px solid var(--b);font-size:.73rem}
+.hist-item:last-child{border:none}
+.hist-type{font-family:'JetBrains Mono',monospace;font-size:.62rem;padding:.1rem .4rem;border-radius:3px;flex-shrink:0;font-weight:700}
+.ht-purge{background:rgba(196,181,253,.1);color:var(--a)}
+.ht-ban{background:rgba(251,191,36,.1);color:var(--y)}
+.ht-refresh{background:rgba(52,211,153,.1);color:var(--g)}
+.hist-url{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--t);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hist-time{font-size:.62rem;color:var(--m);flex-shrink:0}
+/* config */
+.code-block{background:var(--bg);border:1px solid var(--b);border-radius:6px;padding:.75rem;font-family:'JetBrains Mono',monospace;font-size:.7rem;line-height:1.7;color:var(--t);overflow:auto;max-height:280px;margin-bottom:.7rem}
+.code-key{color:var(--a)}.code-val{color:var(--y)}.code-str{color:var(--g)}.code-cm{color:var(--m)}
+/* confirm dialog */
+.confirm-box{display:none;background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.3);border-radius:8px;padding:.85rem;margin-top:.6rem}
+.confirm-box.show{display:block}
+.confirm-box p{font-size:.75rem;color:var(--t);margin-bottom:.6rem}
+/* ring svg */
+.ring-wrap{display:flex;flex-direction:column;align-items:center;gap:.5rem}
+.ring-legend{display:flex;flex-wrap:wrap;gap:.4rem .8rem;justify-content:center;font-size:.68rem;font-family:'JetBrains Mono',monospace}
+.ring-legend-item{display:flex;align-items:center;gap:.3rem}
+.ring-legend-dot{width:8px;height:8px;border-radius:50%}
+/* page title row */
+.pg-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:.85rem}
+.pg-hd h2{font-size:.95rem;font-weight:700;color:var(--t)}
+.pg-hd .sub{font-size:.7rem;color:var(--m)}
+/* search bar */
+.search-bar{background:rgba(139,92,246,.04);border:1px solid var(--b);color:var(--t);padding:.38rem .6rem;border-radius:6px;font-size:.75rem;font-family:inherit;width:220px}
+.search-bar:focus{outline:none;border-color:rgba(139,92,246,.4)}
+/* Toggle */
 .tog{position:fixed;bottom:1rem;right:1rem;z-index:999;padding:.28rem .6rem;border-radius:5px;border:1px solid var(--b);background:var(--card);color:var(--m);font-size:.67rem;cursor:pointer;font-family:'JetBrains Mono',monospace}
 </style>
 </head>
 <body>
+
+<!-- ═══════════════════ SIDEBAR ═══════════════════ -->
 <aside>
   <div class="logo">
     <div class="logo-gem">🐟</div>
@@ -114,12 +167,12 @@ html[data-theme="light"] .btnr:hover{background:rgba(91,33,182,.08)}
   </div>
   <nav>
     <div class="ng">Monitor</div>
-    <a href="#" class="active"><span class="ni">◈</span>Overview</a>
-    <a href="#"><span class="ni">⬡</span>Routes</a>
-    <a href="#"><span class="ni">◎</span>Cluster</a>
+    <a class="active" onclick="nav('overview',this)"><span class="ni">◈</span>Overview</a>
+    <a onclick="nav('routes',this)"><span class="ni">⬡</span>Routes</a>
+    <a onclick="nav('cluster',this)"><span class="ni">◎</span>Cluster</a>
     <div class="ng">Operate</div>
-    <a href="#"><span class="ni">⌦</span>Invalidation</a>
-    <a href="#"><span class="ni">⚙</span>Config</a>
+    <a onclick="nav('invalidation',this)"><span class="ni">⌦</span>Invalidation</a>
+    <a onclick="nav('config',this)"><span class="ni">⚙</span>Config</a>
   </nav>
   <div class="sbf">
     <div class="sl"><span class="sk">peers</span><span class="sv">3/3</span></div>
@@ -127,127 +180,415 @@ html[data-theme="light"] .btnr:hover{background:rgba(91,33,182,.08)}
     <div class="sl"><span class="sk">req/s</span><span class="sv">2,847</span></div>
   </div>
 </aside>
+
+<!-- ═══════════════════ MAIN ═══════════════════ -->
 <main>
   <div class="hdr">
-    <span class="ph">Overview</span>
+    <span class="brand">bouine</span>
+    <span class="ph" id="page-title">Overview</span>
     <div class="hdr-r">
-      <div class="tp"><button class="tb">1H</button><button class="tb active">6H</button><button class="tb">24H</button></div>
+      <div class="pill"><span class="dot"></span>3 peers healthy</div>
     </div>
   </div>
-  <div class="body">
-    <div class="row4">
+  <div class="tabs">
+    <a class="active" onclick="nav('overview',null)">Overview</a>
+    <a onclick="nav('routes',null)">Routes</a>
+    <a onclick="nav('cluster',null)">Cluster</a>
+    <a onclick="nav('invalidation',null)">Invalidation</a>
+    <a onclick="nav('config',null)">Config</a>
+    <div class="tg">
+      <button class="tb" onclick="setTime(this)">1H</button>
+      <button class="tb active" onclick="setTime(this)">6H</button>
+      <button class="tb" onclick="setTime(this)">24H</button>
+    </div>
+  </div>
+
+  <!-- ── OVERVIEW ── -->
+  <div class="body active" id="pg-overview">
+    <div class="r4">
       <div class="mc"><div class="mk">Requests / s</div><div class="mv">2,847</div><div class="md"><span class="good">↑ 12%</span> vs prior</div></div>
       <div class="mc"><div class="mk">Hit ratio</div><div class="mv">87.4%</div><div class="md"><span class="good">↑ 2.1pp</span></div></div>
       <div class="mc"><div class="mk">p99 latency</div><div class="mv">0.8ms</div><div class="md">→ stable</div></div>
       <div class="mc"><div class="mk">Error rate</div><div class="mv">0.02%</div><div class="md"><span class="good">↓ improving</span></div></div>
     </div>
-    <div class="row21">
+    <div class="r21">
       <div class="cc"><div class="ct">throughput</div><div class="ch"><canvas id="c1"></canvas></div></div>
       <div class="cc"><div class="ct">cache split</div><div class="ch"><canvas id="c2"></canvas></div></div>
     </div>
+
+    <!-- Sortable route performance table -->
     <div class="tc">
-      <div class="th"><span class="tl">Route performance</span><span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">↻ 10s</span></div>
-      <table>
-        <thead><tr><th>Prefix</th><th>Pool</th><th>Hit %</th><th>Req/min</th><th>TTL</th><th>Trend</th></tr></thead>
+      <div class="th">
+        <span class="tl">Route performance</span>
+        <span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">↻ 10s · click header to sort</span>
+      </div>
+      <table id="route-table">
+        <thead>
+          <tr>
+            <th class="sortable" data-col="0" onclick="sortTable('route-table',0,this)">Prefix<span class="sort-icon"></span></th>
+            <th class="sortable" data-col="1" onclick="sortTable('route-table',1,this)">Pool<span class="sort-icon"></span></th>
+            <th class="sortable desc" data-col="2" onclick="sortTable('route-table',2,this)">Hit %<span class="sort-icon"></span></th>
+            <th class="sortable" data-col="3" onclick="sortTable('route-table',3,this)">Req/min<span class="sort-icon"></span></th>
+            <th class="sortable" data-col="4" onclick="sortTable('route-table',4,this)">TTL<span class="sort-icon"></span></th>
+            <th>Trend</th>
+          </tr>
+        </thead>
         <tbody>
-          <tr><td>/products/</td><td>storefront</td><td><span class="lz g">91.2%</span></td><td>842</td><td>60s</td><td><div class="sp"><span style="height:40%"></span><span style="height:62%"></span><span style="height:78%"></span><span style="height:86%"></span><span style="height:90%"></span><span style="height:88%"></span><span style="height:95%"></span><span style="height:98%"></span></div></td></tr>
-          <tr><td>/search/</td><td>search</td><td><span class="lz g">78.5%</span></td><td>1,203</td><td>30s</td><td><div class="sp"><span style="height:56%"></span><span style="height:62%"></span><span style="height:71%"></span><span style="height:74%"></span><span style="height:72%"></span><span style="height:79%"></span><span style="height:77%"></span><span style="height:81%"></span></div></td></tr>
-          <tr><td>/static/</td><td>cdn</td><td><span class="lz g">99.1%</span></td><td>412</td><td>24h</td><td><div class="sp"><span style="height:96%"></span><span style="height:98%"></span><span style="height:97%"></span><span style="height:99%"></span><span style="height:100%"></span><span style="height:99%"></span><span style="height:98%"></span><span style="height:100%"></span></div></td></tr>
-          <tr><td>/api/v1/</td><td>api</td><td><span class="lz y">52.3%</span></td><td>3,041</td><td>10s</td><td><div class="sp"><span style="height:46%"></span><span style="height:53%"></span><span style="height:49%"></span><span style="height:58%"></span><span style="height:53%"></span><span style="height:57%"></span><span style="height:51%"></span><span style="height:55%"></span></div></td></tr>
-          <tr><td>/checkout/</td><td>cart-api</td><td><span class="lz d">bypass</span></td><td>187</td><td>—</td><td>—</td></tr>
+          <tr><td>/products/</td><td>storefront</td><td data-val="91.2"><span class="lz g">91.2%</span></td><td data-val="842">842</td><td data-val="60">60s</td><td><div class="sp"><span style="height:40%"></span><span style="height:62%"></span><span style="height:78%"></span><span style="height:86%"></span><span style="height:90%"></span><span style="height:88%"></span><span style="height:95%"></span><span style="height:98%"></span></div></td></tr>
+          <tr><td>/search/</td><td>search</td><td data-val="78.5"><span class="lz g">78.5%</span></td><td data-val="1203">1,203</td><td data-val="30">30s</td><td><div class="sp"><span style="height:56%"></span><span style="height:62%"></span><span style="height:71%"></span><span style="height:74%"></span><span style="height:72%"></span><span style="height:79%"></span><span style="height:77%"></span><span style="height:81%"></span></div></td></tr>
+          <tr><td>/static/</td><td>cdn</td><td data-val="99.1"><span class="lz g">99.1%</span></td><td data-val="412">412</td><td data-val="86400">24h</td><td><div class="sp"><span style="height:96%"></span><span style="height:98%"></span><span style="height:97%"></span><span style="height:99%"></span><span style="height:100%"></span><span style="height:99%"></span><span style="height:98%"></span><span style="height:100%"></span></div></td></tr>
+          <tr><td>/api/v1/</td><td>api</td><td data-val="52.3"><span class="lz y">52.3%</span></td><td data-val="3041">3,041</td><td data-val="10">10s</td><td><div class="sp"><span style="height:46%"></span><span style="height:53%"></span><span style="height:49%"></span><span style="height:58%"></span><span style="height:53%"></span><span style="height:57%"></span><span style="height:51%"></span><span style="height:55%"></span></div></td></tr>
+          <tr><td>/checkout/</td><td>cart-api</td><td data-val="0"><span class="lz d">bypass</span></td><td data-val="187">187</td><td data-val="0">—</td><td>—</td></tr>
         </tbody>
       </table>
     </div>
-    <div class="row3">
-      <div class="bc"><div class="bc-t">Cluster peers</div>
-        <div class="pr"><div><div class="pn">bouine-0</div><div class="pa">10.42.0.5:8443</div></div><span class="pd"></span></div>
-        <div class="pr"><div><div class="pn">bouine-1</div><div class="pa">10.42.0.6:8443</div></div><span class="pd"></span></div>
-        <div class="pr"><div><div class="pn">bouine-2</div><div class="pa">10.42.0.7:8443</div></div><span class="pd"></span></div>
+
+    <!-- Bottom: Peers | Hot & Warm | Hash ring -->
+    <div class="r3">
+      <div class="bc">
+        <div class="bc-t">Cluster peers</div>
+        <div class="pr"><div><div class="pn">bouine-0</div><div class="pa">10.42.0.5:8443 · joined 2h ago</div></div><span class="pd"></span></div>
+        <div class="pr"><div><div class="pn">bouine-1</div><div class="pa">10.42.0.6:8443 · joined 2h ago</div></div><span class="pd"></span></div>
+        <div class="pr"><div><div class="pn">bouine-2</div><div class="pa">10.42.0.7:8443 · joined 1h ago</div></div><span class="pd"></span></div>
       </div>
-      <div class="bc"><div class="bc-t">Invalidation</div>
-        <div class="ir2"><input value="https://thylong.com/posts/go-cache"><button class="btn bp">Purge</button><button class="btn bo">↺</button></div>
-        <div class="ir2"><input placeholder="host_regex=example.com"><button class="btn bo">Ban</button></div>
+      <div class="bc">
+        <div class="bc-t">Hot &amp; Warm store</div>
+        <div class="stat-row"><span class="stat-k">hot entries</span><span class="stat-v">142,831</span></div>
+        <div class="tier-bar-wrap">
+          <div class="tier-bar-label"><span>hot used</span><span>1.21 Go / 2 Go</span></div>
+          <div class="tier-bar"><div class="tier-bar-fill" style="width:60%"></div></div>
+        </div>
+        <div class="stat-row"><span class="stat-k">warm entries</span><span class="stat-v">38,204</span></div>
+        <div class="tier-bar-wrap">
+          <div class="tier-bar-label"><span>warm used</span><span>12.4 Go / 50 Go</span></div>
+          <div class="tier-bar"><div class="tier-bar-fill" style="width:25%"></div></div>
+        </div>
+        <div class="stat-row" style="margin-top:.3rem"><span class="stat-k">evictions / min</span><span class="stat-v">124</span></div>
       </div>
-      <div class="bc"><div class="bc-t">Config reload</div>
-        <div class="relt">Validates before applying. Invalid configs rejected — running config always preserved.</div>
-        <button class="btnr">↻ reload config</button>
+      <div class="bc">
+        <div class="bc-t">Consistent hash ring</div>
+        <div class="ring-wrap">
+          <svg width="140" height="140" viewBox="0 0 140 140"><g transform="translate(70,70)">
+            <circle r="58" fill="none" stroke="var(--b)" stroke-width="16"/>
+            <!-- bouine-0: ~120° arc starting at 0° -->
+            <circle r="58" fill="none" stroke="#8b5cf6" stroke-width="16" stroke-dasharray="121.9 243.8" stroke-dashoffset="0" opacity=".85"/>
+            <!-- bouine-1: ~110° arc -->
+            <circle r="58" fill="none" stroke="#34d399" stroke-width="16" stroke-dasharray="111 243.8" stroke-dashoffset="-121.9" opacity=".85"/>
+            <!-- bouine-2: ~130° arc -->
+            <circle r="58" fill="none" stroke="#fb7185" stroke-width="16" stroke-dasharray="132.8 243.8" stroke-dashoffset="-232.9" opacity=".85"/>
+            <!-- Labels -->
+            <text x="0" y="-72" text-anchor="middle" fill="var(--a)" font-size="9" font-family="JetBrains Mono,monospace">b-0</text>
+            <text x="64" y="40" text-anchor="middle" fill="var(--g)" font-size="9" font-family="JetBrains Mono,monospace">b-1</text>
+            <text x="-58" y="40" text-anchor="middle" fill="var(--r)" font-size="9" font-family="JetBrains Mono,monospace">b-2</text>
+            <text x="0" y="4" text-anchor="middle" fill="var(--m)" font-size="8" font-family="JetBrains Mono,monospace">256</text>
+            <text x="0" y="14" text-anchor="middle" fill="var(--m)" font-size="7" font-family="JetBrains Mono,monospace">vnodes</text>
+          </g></svg>
+          <div class="ring-legend">
+            <div class="ring-legend-item"><div class="ring-legend-dot" style="background:#8b5cf6"></div><span style="color:var(--m)">bouine-0 · 34%</span></div>
+            <div class="ring-legend-item"><div class="ring-legend-dot" style="background:#34d399"></div><span style="color:var(--m)">bouine-1 · 31%</span></div>
+            <div class="ring-legend-item"><div class="ring-legend-dot" style="background:#fb7185"></div><span style="color:var(--m)">bouine-2 · 35%</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ROUTES ── -->
+  <div class="body" id="pg-routes">
+    <div class="pg-hd">
+      <div><h2>Routes</h2><div class="sub">5 configured routes · polled every 10s</div></div>
+      <input class="search-bar" placeholder="Filter by prefix or pool…" oninput="filterRoutes(this.value)">
+    </div>
+    <div class="tc" style="margin-bottom:.7rem">
+      <table id="route-table-full">
+        <thead>
+          <tr>
+            <th class="sortable" onclick="sortTable('route-table-full',0,this)">Prefix<span class="sort-icon"></span></th>
+            <th class="sortable" onclick="sortTable('route-table-full',1,this)">Pool<span class="sort-icon"></span></th>
+            <th class="sortable desc" onclick="sortTable('route-table-full',2,this)">Hit %<span class="sort-icon"></span></th>
+            <th class="sortable" onclick="sortTable('route-table-full',3,this)">Req/min<span class="sort-icon"></span></th>
+            <th class="sortable" onclick="sortTable('route-table-full',4,this)">TTL<span class="sort-icon"></span></th>
+            <th>SWR</th><th>SIE</th><th>neg_ttl</th><th>stayin_alive</th><th>jitter</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>/products/</td><td>storefront</td><td data-val="91.2"><span class="lz g">91.2%</span></td><td data-val="842">842</td><td data-val="60">60s</td><td>5s</td><td>300s</td><td>—</td><td><span class="lz d">false</span></td><td>10%</td></tr>
+          <tr><td>/search/</td><td>search</td><td data-val="78.5"><span class="lz g">78.5%</span></td><td data-val="1203">1,203</td><td data-val="30">30s</td><td>10s</td><td>120s</td><td>5s</td><td><span class="lz d">false</span></td><td>15%</td></tr>
+          <tr><td>/static/</td><td>cdn</td><td data-val="99.1"><span class="lz g">99.1%</span></td><td data-val="412">412</td><td data-val="86400">86400s</td><td>—</td><td>604800s</td><td>—</td><td><span class="lz d">false</span></td><td>5%</td></tr>
+          <tr><td>/api/v1/</td><td>api</td><td data-val="52.3"><span class="lz y">52.3%</span></td><td data-val="3041">3,041</td><td data-val="10">10s</td><td>5s</td><td>60s</td><td>5s</td><td><span class="lz g">true</span></td><td>20%</td></tr>
+          <tr><td>/checkout/</td><td>cart-api</td><td data-val="0"><span class="lz d">bypass</span></td><td data-val="187">187</td><td data-val="0">—</td><td>—</td><td>—</td><td>—</td><td><span class="lz d">false</span></td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="r2">
+      <div class="cc"><div class="ct">hit ratio by route (6h)</div><div class="ch"><canvas id="c-routes"></canvas></div></div>
+      <div class="cc"><div class="ct">req/min by route</div><div class="ch"><canvas id="c-routes2"></canvas></div></div>
+    </div>
+  </div>
+
+  <!-- ── CLUSTER ── -->
+  <div class="body" id="pg-cluster">
+    <div class="pg-hd"><div><h2>Cluster</h2><div class="sub">gossip membership · consistent hash ring · peer fetch</div></div></div>
+    <div class="r21" style="margin-bottom:.7rem">
+      <div class="bc">
+        <div class="bc-t">Peer nodes</div>
+        <table>
+          <thead><tr><th>Node</th><th>Data addr</th><th>Admin addr</th><th>Weight</th><th>Joined</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td>bouine-0</td><td>10.42.0.5:80</td><td>10.42.0.5:9000</td><td>1.0</td><td>2h ago</td><td><span class="lz g">online</span></td></tr>
+            <tr><td>bouine-1</td><td>10.42.0.6:80</td><td>10.42.0.6:9000</td><td>1.0</td><td>2h ago</td><td><span class="lz g">online</span></td></tr>
+            <tr><td>bouine-2</td><td>10.42.0.7:80</td><td>10.42.0.7:9000</td><td>1.0</td><td>1h ago</td><td><span class="lz g">online</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="bc">
+        <div class="bc-t">Ring stats</div>
+        <div class="stat-row"><span class="stat-k">virtual nodes / real</span><span class="stat-v">256</span></div>
+        <div class="stat-row"><span class="stat-k">load factor</span><span class="stat-v">1.25</span></div>
+        <div class="stat-row"><span class="stat-k">hop limit</span><span class="stat-v">2</span></div>
+        <div class="stat-row"><span class="stat-k">peer fetch timeout</span><span class="stat-v">500ms</span></div>
+        <div class="stat-row"><span class="stat-k">protocol version</span><span class="stat-v">v1</span></div>
+      </div>
+    </div>
+    <div class="r2">
+      <div class="bc">
+        <div class="bc-t">Consistent hash ring — key ownership</div>
+        <div class="ring-wrap" style="padding:.5rem 0">
+          <svg width="220" height="220" viewBox="0 0 220 220"><g transform="translate(110,110)">
+            <circle r="90" fill="none" stroke="var(--b)" stroke-width="24"/>
+            <circle r="90" fill="none" stroke="#8b5cf6" stroke-width="24" stroke-dasharray="189.4 378.8" stroke-dashoffset="0" opacity=".8"/>
+            <circle r="90" fill="none" stroke="#34d399" stroke-width="24" stroke-dasharray="172.4 378.8" stroke-dashoffset="-189.4" opacity=".8"/>
+            <circle r="90" fill="none" stroke="#fb7185" stroke-width="24" stroke-dasharray="206.3 378.8" stroke-dashoffset="-361.8" opacity=".8"/>
+            <text x="0" y="-110" text-anchor="middle" fill="var(--a)" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">bouine-0</text>
+            <text x="0" y="-98" text-anchor="middle" fill="var(--m)" font-size="9" font-family="JetBrains Mono,monospace">34% · 87 vnodes</text>
+            <text x="100" y="60" text-anchor="middle" fill="var(--g)" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">bouine-1</text>
+            <text x="100" y="72" text-anchor="middle" fill="var(--m)" font-size="9" font-family="JetBrains Mono,monospace">31% · 79 vnodes</text>
+            <text x="-100" y="60" text-anchor="middle" fill="var(--r)" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">bouine-2</text>
+            <text x="-100" y="72" text-anchor="middle" fill="var(--m)" font-size="9" font-family="JetBrains Mono,monospace">35% · 90 vnodes</text>
+            <circle r="12" fill="var(--card)" stroke="var(--b)" stroke-width="1"/>
+            <text x="0" y="4" text-anchor="middle" fill="var(--m)" font-size="8" font-family="JetBrains Mono,monospace">256</text>
+          </g></svg>
+        </div>
+      </div>
+      <div class="bc">
+        <div class="bc-t">Peer fetch stats</div>
+        <div class="stat-row"><span class="stat-k">peer hits (6h)</span><span class="stat-v">24,182</span></div>
+        <div class="stat-row"><span class="stat-k">peer misses (6h)</span><span class="stat-v">3,041</span></div>
+        <div class="stat-row"><span class="stat-k">avg peer latency</span><span class="stat-v">0.31ms</span></div>
+        <div class="stat-row"><span class="stat-k">hop limit hits</span><span class="stat-v">0</span></div>
+        <div class="stat-row" style="margin-top:.5rem"><span class="stat-k">gossip interval</span><span class="stat-v">5s</span></div>
+        <div class="stat-row"><span class="stat-k">digest gossiped</span><span class="stat-v">4,302</span></div>
+        <div class="stat-row"><span class="stat-k">join retry budget</span><span class="stat-v">60s · 2s step</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── INVALIDATION ── -->
+  <div class="body" id="pg-invalidation">
+    <div class="pg-hd"><div><h2>Invalidation</h2><div class="sub">purge · ban · refresh — broadcast to all cluster peers</div></div></div>
+    <div class="r3">
+      <div class="bc">
+        <div class="bc-t">Purge — exact URL</div>
+        <div class="fgroup"><label>URL</label>
+          <div class="frow"><input class="finput" placeholder="https://example.com/products/42" id="purge-url"><button class="btn bp" onclick="addHistory('purge',document.getElementById('purge-url').value)">Purge</button></div>
+        </div>
+        <div style="font-size:.7rem;color:var(--m);line-height:1.5">Removes the exact cache key. In a cluster, forwarded to the key's owner node. Vary variants are all purged.</div>
+      </div>
+      <div class="bc">
+        <div class="bc-t">Ban — predicate</div>
+        <div class="fgroup"><label>Host regex</label><input class="finput" placeholder="example\.com" id="ban-host"></div>
+        <div class="fgroup"><label>Path regex</label><input class="finput" placeholder="^/api/v1/" id="ban-path"></div>
+        <button class="btn" style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);color:var(--y)" onclick="addHistory('ban',document.getElementById('ban-host').value||document.getElementById('ban-path').value)">Issue ban</button>
+        <div style="font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.6rem">Lazy predicate — entries are checked on next lookup. Broadcast to all peers.</div>
+      </div>
+      <div class="bc">
+        <div class="bc-t">Refresh — soft-purge</div>
+        <div class="fgroup"><label>URL</label>
+          <div class="frow"><input class="finput" placeholder="https://example.com/page" id="refresh-url"><button class="btn bg2" onclick="addHistory('refresh',document.getElementById('refresh-url').value)">Refresh</button></div>
+        </div>
+        <div style="font-size:.7rem;color:var(--m);line-height:1.5">Marks entry stale. Next request revalidates with origin using <code style="font-family:JetBrains Mono,monospace;font-size:.68rem">If-None-Match</code>. If origin returns 304, cached body reused.</div>
+      </div>
+    </div>
+    <div class="bc" style="margin-top:.7rem">
+      <div class="bc-t">Recent invalidations</div>
+      <div id="hist-list">
+        <div class="hist-item"><span class="hist-type ht-purge">PURGE</span><span class="hist-url">https://thylong.com/posts/bouine-v1</span><span class="hist-time">2 min ago</span></div>
+        <div class="hist-item"><span class="hist-type ht-ban">BAN</span><span class="hist-url">host_regex=thylong.com path_regex=^/posts/</span><span class="hist-time">14 min ago</span></div>
+        <div class="hist-item"><span class="hist-type ht-refresh">REFRESH</span><span class="hist-url">https://thylong.com/about/</span><span class="hist-time">31 min ago</span></div>
+        <div class="hist-item"><span class="hist-type ht-purge">PURGE</span><span class="hist-url">https://thylong.com/</span><span class="hist-time">1h ago</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CONFIG ── -->
+  <div class="body" id="pg-config">
+    <div class="pg-hd"><div><h2>Config reload</h2><div class="sub">validate · confirm · apply — running config is never altered by parse errors</div></div></div>
+    <div class="r2">
+      <div class="bc">
+        <div class="bc-t">Current config (read-only)</div>
+        <div class="code-block">
+<span class="code-cm"># /etc/bouine/config.yaml</span>
+<span class="code-key">listen</span>:
+  <span class="code-key">http</span>: <span class="code-str">":80"</span>
+  <span class="code-key">admin</span>: <span class="code-str">":9000"</span>
+  <span class="code-key">cluster</span>: <span class="code-str">":8443"</span>
+
+<span class="code-key">storage</span>:
+  <span class="code-key">hot_max_bytes</span>: <span class="code-val">2Go</span>
+  <span class="code-key">warm_dir</span>: <span class="code-str">"/var/lib/bouine"</span>
+  <span class="code-key">warm_max_bytes</span>: <span class="code-val">50Go</span>
+  <span class="code-key">eviction</span>: <span class="code-str">sieve</span>
+
+<span class="code-key">cluster</span>:
+  <span class="code-key">enabled</span>: <span class="code-val">true</span>
+  <span class="code-key">replicas</span>: <span class="code-val">2</span>
+  <span class="code-key">hop_limit</span>: <span class="code-val">2</span>
+
+<span class="code-key">routes</span>:
+  - <span class="code-key">match</span>: { <span class="code-key">path_prefix</span>: <span class="code-str">/products/</span> }
+    <span class="code-key">pool</span>: <span class="code-str">storefront</span>
+    <span class="code-key">cache</span>:
+      <span class="code-key">ttl_default</span>: <span class="code-val">60s</span>
+      <span class="code-key">stale_while_revalidate</span>: <span class="code-val">5s</span>
+      <span class="code-key">jitter_percent</span>: <span class="code-val">10</span>
+        </div>
+        <div style="font-size:.68rem;color:var(--m)">Last reloaded: <span style="font-family:'JetBrains Mono',monospace;color:var(--a)">2h ago</span></div>
+      </div>
+      <div class="bc">
+        <div class="bc-t">Reload config</div>
+        <div style="font-size:.75rem;color:var(--m);line-height:1.7;margin-bottom:1rem">
+          Reads the config file from disk, runs full validation, and only applies if parsing succeeds. The running configuration is <strong style="color:var(--t)">never affected</strong> by parse errors.
+        </div>
+        <div style="margin-bottom:.85rem">
+          <div class="stat-row"><span class="stat-k">config path</span><span class="stat-v" style="font-size:.68rem">/etc/bouine/config.yaml</span></div>
+          <div class="stat-row"><span class="stat-k">last reload</span><span class="stat-v">2h ago · success</span></div>
+          <div class="stat-row"><span class="stat-k">uptime</span><span class="stat-v">3d 14h 22m</span></div>
+        </div>
+        <button class="btn bp" style="width:100%;margin-bottom:.5rem" onclick="document.getElementById('confirm-box').classList.toggle('show')">↻ Reload config</button>
+        <div class="confirm-box" id="confirm-box">
+          <p>Config file validated successfully. Apply new configuration?</p>
+          <div style="display:flex;gap:.5rem">
+            <button class="btn bp" onclick="document.getElementById('confirm-box').classList.remove('show');alert('Config applied.')">Apply</button>
+            <button class="btn bo" onclick="document.getElementById('confirm-box').classList.remove('show')">Cancel</button>
+          </div>
+        </div>
+        <div style="font-size:.68rem;color:var(--m);margin-top:.5rem">Hot-reloadable: routes, pools, TTLs, TLS certs. Not reloadable: listen addresses, storage, cluster settings.</div>
       </div>
     </div>
   </div>
 </main>
-<button class="tog" id="tog" onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');h.setAttribute('data-theme',d==='light'?'dark':'light');b.textContent=h.getAttribute('data-theme')==='light'?'🌙 dark':'☀ light';setTimeout(mk,30);})(this)">☀ light</button>
-<script>
-const D=()=>document.documentElement.getAttribute('data-theme')==='dark';
-function mk(){
-  const L=Array.from({length:24},(_,i)=>`${i*15}m`),d=D();
-  if(window._c1)window._c1.destroy();if(window._c2)window._c2.destroy();
-  window._c1=new Chart(document.getElementById('c1'),{type:'line',data:{labels:L,datasets:[
-    {data:L.map(()=>2000+Math.random()*1500),borderColor:d?'#c4b5fd':'#5b21b6',backgroundColor:d?'rgba(196,181,253,.07)':'rgba(91,33,182,.05)',fill:true,tension:.4,pointRadius:0,borderWidth:1.5},
-    {data:L.map(()=>Math.random()*40),borderColor:d?'#fb7185':'#e11d48',backgroundColor:'transparent',tension:.4,pointRadius:0,borderWidth:1},
-  ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9}}}},scales:{x:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9},maxTicksLimit:8}},y:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}}}});
-  window._c2=new Chart(document.getElementById('c2'),{type:'doughnut',data:{labels:['HIT','MISS','STALE','BYP'],datasets:[{data:[87.4,8.2,3.1,1.3],backgroundColor:d?['#c4b5fd','#fb7185','#fbbf24','#1e1830']:['#5b21b6','#e11d48','#b45309','#e4d9ff'],borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:6}}},cutout:'70%'}});
-}
-mk();
-</script>
 
-<!-- WebGL noise canvas — same shader as the documentation homepage -->
+<button class="tog" id="tog" onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');h.setAttribute('data-theme',d==='light'?'dark':'light');b.textContent=h.getAttribute('data-theme')==='light'?'🌙 dark':'☀ light';setTimeout(mk,30);})(this)">☀ light</button>
+
+<!-- WebGL noise canvas -->
 <div id="bouine-tint" style="position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 120% 80% at 20% 20%,rgba(109,40,217,.25) 0%,transparent 55%),radial-gradient(ellipse 100% 90% at 80% 80%,rgba(139,92,246,.2) 0%,transparent 55%),radial-gradient(ellipse 80% 60% at 50% 50%,rgba(91,33,182,.12) 0%,transparent 60%)"></div>
 <canvas id="bouine-noise" style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0"></canvas>
+
 <script>
+// ── Navigation ──
+function nav(page, el) {
+  document.querySelectorAll('.body').forEach(b => b.classList.remove('active'));
+  document.getElementById('pg-' + page).classList.add('active');
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.querySelectorAll('.tabs a').forEach(a => a.classList.remove('active'));
+  if (el) el.classList.add('active');
+  const idx = {overview:0,routes:1,cluster:2,invalidation:3,config:4}[page];
+  document.querySelectorAll('nav a')[idx].classList.add('active');
+  document.querySelectorAll('.tabs a')[idx].classList.add('active');
+  document.getElementById('page-title').textContent = {overview:'Overview',routes:'Routes',cluster:'Cluster',invalidation:'Invalidation',config:'Config'}[page];
+  if (page === 'routes') setTimeout(mkRouteCharts, 50);
+}
+
+// ── Time range ──
+function setTime(btn) {
+  document.querySelectorAll('.tb').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  mk();
+}
+
+// ── Sortable tables ──
+function sortTable(tableId, col, th) {
+  var table = document.getElementById(tableId);
+  var tbody = table.querySelector('tbody');
+  var rows = Array.from(tbody.querySelectorAll('tr'));
+  var isAsc = th.classList.contains('asc');
+  table.querySelectorAll('th').forEach(h => { h.classList.remove('asc','desc'); });
+  th.classList.add(isAsc ? 'desc' : 'asc');
+  rows.sort(function(a, b) {
+    var aCell = a.querySelectorAll('td')[col];
+    var bCell = b.querySelectorAll('td')[col];
+    var aVal = aCell.getAttribute('data-val') !== null ? parseFloat(aCell.getAttribute('data-val')) : aCell.textContent.trim();
+    var bVal = bCell.getAttribute('data-val') !== null ? parseFloat(bCell.getAttribute('data-val')) : bCell.textContent.trim();
+    if (typeof aVal === 'number') return isAsc ? bVal - aVal : aVal - bVal;
+    return isAsc ? bVal.localeCompare(aVal) : aVal.localeCompare(bVal);
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+// ── Route filter ──
+function filterRoutes(q) {
+  var tbody = document.querySelector('#route-table-full tbody');
+  tbody.querySelectorAll('tr').forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    row.style.display = text.includes(q.toLowerCase()) ? '' : 'none';
+  });
+}
+
+// ── Invalidation history ──
+function addHistory(type, val) {
+  if (!val || !val.trim()) return;
+  var list = document.getElementById('hist-list');
+  var cls = {purge:'ht-purge',ban:'ht-ban',refresh:'ht-refresh'}[type];
+  var div = document.createElement('div');
+  div.className = 'hist-item';
+  div.innerHTML = '<span class="hist-type ' + cls + '">' + type.toUpperCase() + '</span>' +
+    '<span class="hist-url">' + val + '</span>' +
+    '<span class="hist-time">just now</span>';
+  list.insertBefore(div, list.firstChild);
+}
+
+// ── Charts ──
+var D = () => document.documentElement.getAttribute('data-theme') !== 'light';
+function mk() {
+  var L = Array.from({length:24}, (_, i) => `${i*15}m`), d = D();
+  if (window._c1) window._c1.destroy();
+  if (window._c2) window._c2.destroy();
+  var gc = c => ({color: d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'}), tc = c => ({color: d?'#6050a0':'#9ca3af', font:{size:9}});
+  window._c1 = new Chart(document.getElementById('c1'), {type:'line', data:{labels:L, datasets:[
+    {data:L.map(()=>2000+Math.random()*1500), borderColor:d?'#c4b5fd':'#5b21b6', backgroundColor:d?'rgba(196,181,253,.07)':'rgba(91,33,182,.05)', fill:true, tension:.4, pointRadius:0, borderWidth:1.5},
+    {data:L.map(()=>Math.random()*40), borderColor:d?'#fb7185':'#e11d48', backgroundColor:'transparent', tension:.4, pointRadius:0, borderWidth:1},
+  ]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:d?'#6050a0':'#8b7ab8', font:{size:9}}}}, scales:{x:{grid:gc(), ticks:{...tc(), maxTicksLimit:8}}, y:{grid:gc(), ticks:tc()}}}});
+  window._c2 = new Chart(document.getElementById('c2'), {type:'doughnut', data:{labels:['HIT','MISS','STALE','BYP'], datasets:[{data:[87.4,8.2,3.1,1.3], backgroundColor:d?['#c4b5fd','#fb7185','#fbbf24','#1e1830']:['#5b21b6','#e11d48','#b45309','#e4d9ff'], borderWidth:0}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom', labels:{color:d?'#6050a0':'#8b7ab8', font:{size:9}, padding:6}}}, cutout:'70%'}});
+}
+function mkRouteCharts() {
+  var d = D();
+  if (window._cr1) window._cr1.destroy();
+  if (window._cr2) window._cr2.destroy();
+  var routes = ['/products/','/search/','/static/','/api/v1/'];
+  var hits = [91.2, 78.5, 99.1, 52.3];
+  var reqs = [842, 1203, 412, 3041];
+  var colors = d ? ['#c4b5fd','#8b5cf6','#6d28d9','#a78bfa'] : ['#5b21b6','#7c3aed','#a78bfa','#4c1d95'];
+  window._cr1 = new Chart(document.getElementById('c-routes'), {type:'bar', data:{labels:routes, datasets:[{data:hits, backgroundColor:colors, borderRadius:4}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{grid:{display:false}, ticks:{color:d?'#6050a0':'#9ca3af', font:{size:9}}}, y:{max:100, grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'}, ticks:{color:d?'#6050a0':'#9ca3af', font:{size:9}}}}}});
+  window._cr2 = new Chart(document.getElementById('c-routes2'), {type:'bar', data:{labels:routes, datasets:[{data:reqs, backgroundColor:colors, borderRadius:4}]}, options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{grid:{display:false}, ticks:{color:d?'#6050a0':'#9ca3af', font:{size:9}}}, y:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'}, ticks:{color:d?'#6050a0':'#9ca3af', font:{size:9}}}}}});
+}
+mk();
+
+// ── WebGL noise ──
 (function(){
-  var c=document.getElementById('bouine-noise');
-  if(!c)return;
-  var gl=c.getContext('webgl');
-  if(!gl)return;
-  var V='attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
-  var F=[
-    'precision mediump float;',
-    'uniform float t;uniform vec2 r;',
-    'float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}',
-    'void main(){',
-    '  vec2 co=gl_FragCoord.xy+vec2(sin(t*.1)*.5,cos(t*.13)*.5);',
-    '  vec2 s=co+t*.01;',
-    '  float u1=max(hash(s),.0001);',
-    '  float u2=hash(s+vec2(1.,0.));',
-    '  float n=sqrt(-2.*log(u1))*cos(6.28318*u2);',
-    '  gl_FragColor=vec4(vec3(clamp(n*.08+.5,0.,1.)),1.);',
-    '}'
-  ].join('');
+  var c = document.getElementById('bouine-noise');
+  if (!c) return;
+  var gl = c.getContext('webgl');
+  if (!gl) return;
+  var V = 'attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
+  var F = ['precision mediump float;','uniform float t;uniform vec2 r;','float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}','void main(){','  vec2 co=gl_FragCoord.xy+vec2(sin(t*.1)*.5,cos(t*.13)*.5);','  vec2 s=co+t*.01;','  float u1=max(hash(s),.0001);','  float u2=hash(s+vec2(1.,0.));','  float n=sqrt(-2.*log(u1))*cos(6.28318*u2);','  gl_FragColor=vec4(vec3(clamp(n*.08+.5,0.,1.)),1.);','}'].join('');
   function sh(tp,sr){var s=gl.createShader(tp);gl.shaderSource(s,sr);gl.compileShader(s);return s;}
-  var p=gl.createProgram();
-  gl.attachShader(p,sh(gl.VERTEX_SHADER,V));
-  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,F));
-  gl.linkProgram(p);
-  var buf=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
-  var tl=gl.getUniformLocation(p,'t');
-  var rl=gl.getUniformLocation(p,'r');
-  var al=gl.getAttribLocation(p,'a');
-  var last=0;
-  function updateBlend(){
-    var dark=document.documentElement.getAttribute('data-theme')!=='light';
-    c.style.mixBlendMode='overlay';
-    c.style.opacity=dark?'0.55':'0.20';
-  }
+  var p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,V));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,F));gl.linkProgram(p);
+  var buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+  var tl=gl.getUniformLocation(p,'t'),rl=gl.getUniformLocation(p,'r'),al=gl.getAttribLocation(p,'a'),last=0;
+  function ub(){var dark=document.documentElement.getAttribute('data-theme')!=='light';c.style.mixBlendMode='overlay';c.style.opacity=dark?'0.55':'0.20';}
   function resize(){c.width=innerWidth;c.height=innerHeight;gl.viewport(0,0,c.width,c.height);}
-  function frame(tm){
-    if(tm-last>=83){
-      resize();
-      updateBlend();
-      gl.useProgram(p);
-      gl.uniform1f(tl,tm*.001);
-      gl.uniform2f(rl,c.width,c.height);
-      gl.enableVertexAttribArray(al);
-      gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-      gl.vertexAttribPointer(al,2,gl.FLOAT,false,0,0);
-      gl.drawArrays(gl.TRIANGLES,0,6);
-      last=tm;
-    }
-    requestAnimationFrame(frame);
-  }
-  window.addEventListener('resize',resize);
-  requestAnimationFrame(frame);
+  function frame(tm){if(tm-last>=83){resize();ub();gl.useProgram(p);gl.uniform1f(tl,tm*.001);gl.uniform2f(rl,c.width,c.height);gl.enableVertexAttribArray(al);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.vertexAttribPointer(al,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLES,0,6);last=tm;}requestAnimationFrame(frame);}
+  window.addEventListener('resize',resize);requestAnimationFrame(frame);
 })();
 </script>
 </body>

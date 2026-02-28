@@ -1056,11 +1056,11 @@ Flow:
 5. The HMAC secret is derived from `admin.Token` using `crypto/hmac` +
    `crypto/sha256`. No new config field is required.
 
-#### 6.4 Data layer — in-memory ring buffers
+#### 6.4 Data layer — in-memory ring buffers with cluster fan-out
 
-Each dashboard view is backed by a purpose-built, thread-safe ring buffer
-that is updated on every request processed by the data plane. No DuckDB,
-no external storage.
+Each pod maintains in-process ring buffers updated on every data-plane request.
+No DuckDB, no external storage. The dashboard always shows **cluster-wide**
+aggregated metrics — not just the serving pod's view.
 
 | Buffer | Resolution | Retention | Used by |
 |---|---|---|---|
@@ -1071,6 +1071,71 @@ no external storage.
 Each ring lives in `internal/observability/rings.go` and is wired into the
 `DataPlaneMetrics` middleware alongside the existing Prometheus counters —
 single update point, no extra lock.
+
+##### Cluster-wide aggregation — fan-out (phase 6, ≤1–5 pods)
+
+The dashboard handler fans out to all live peers via a new
+`GET /v1/peer/metrics` admin endpoint, collects their ring snapshots, and
+merges them before rendering. The serving pod is the coordinator.
+
+```
+Browser → bouine-0 /dashboard
+  bouine-0 → /v1/peer/metrics (itself)
+  bouine-0 → bouine-1:9000 /v1/peer/metrics
+  bouine-0 → bouine-2:9000 /v1/peer/metrics
+  bouine-0 merges → renders page
+```
+
+**Fan-out timeout**: 200ms. If a peer is unreachable, the last-known snapshot
+is used and that pod is marked `stale` in the cluster view.
+
+**Merge strategy** (documented explicitly to avoid ambiguity):
+- Counters (requests, hits, misses, evictions): **sum** across pods.
+- Ratios (hit %, error %): **weighted average** by request count.
+- Latency percentiles (p50, p99): **max** across pods (conservative).
+- Route list: **union**, summing per-route counters.
+
+##### Scaling boundary and upgrade path (> 5 pods)
+
+Fan-out becomes a bottleneck beyond ~5 pods: 20 pods means 19 outbound HTTP
+calls on every 5s poll, plus merge work on the coordinator. At that scale,
+switch to **gossip push aggregation**:
+
+- Each pod computes a compact `MetricsSummary` struct (~1 KB) every 5s and
+  pushes it to K=3 random peers via memberlist user messages (`NotifyMsg`).
+- Each pod maintains `map[nodeName]*MetricsSummary` — a locally merged view
+  built from gossip messages, with no outbound calls at dashboard request time.
+- Full propagation across 20 pods takes 2–3 gossip rounds (~10–15s lag),
+  acceptable for a monitoring dashboard.
+
+The dashboard handler interface (`GET /dashboard/metrics` reads from the local
+aggregate) is **identical in both modes** — only the population strategy
+changes. The migration from fan-out to gossip push requires no template changes.
+
+| Cluster size | Strategy | Notes |
+|---|---|---|
+| 1–5 pods | Fan-out on request | Phase 6 implementation |
+| 6+ pods | Gossip push + local aggregate | Upgrade path, no dashboard changes |
+| Any size + history | Add DuckDB | Phase 6.5 |
+
+The fan-out code is annotated with a comment marking the scaling boundary so
+the upgrade path is discoverable.
+
+##### Persistence across restarts
+
+Each pod snapshots its ring buffers to `$warm_dir/metrics.snap` (a compact
+binary file, ~50 KB) in two situations:
+
+1. **Graceful shutdown** — as step 6 of the shutdown sequencer, after WAL
+   sync, before closing the admin listener.
+2. **Background flush** — a goroutine flushes every 60s to limit data loss
+   on crashes.
+
+On startup, `engine.run()` loads the snapshot before the admin server starts
+if the file is < 10 minutes old. Stale snapshots are silently ignored.
+
+Snapshots are **per-pod** — each pod restores its own history. In cluster
+mode the fan-out or gossip path still aggregates across all pods.
 
 #### 6.5 Dashboard views
 
@@ -1115,6 +1180,7 @@ single update point, no extra lock.
 #### 6.6 Not in phase 6 (explicit exclusions)
 
 - No AI suggestions, no DuckDB, no ML layer → phase 6.5.
+- No gossip push aggregation → upgrade path beyond 5 pods, documented in §6.4.
 - No config editor (edit YAML in browser) → future.
 - No alerting / notification integrations → future.
 - No multi-tenant namespacing → future.
@@ -1141,6 +1207,14 @@ dependencies.
   leaves the running config unchanged (tested with a malformed YAML fixture).
 - Session cookie: unauthenticated request to `/dashboard/` redirects to
   `/dashboard/login` with status 302.
+- Cluster metrics: dashboard served from any pod shows aggregate data across
+  all live peers, not just the serving pod's local rings.
+- Fan-out: if a peer is unreachable, the dashboard degrades gracefully (stale
+  badge visible) rather than failing the page load.
+- Snapshot: after a graceful restart, the overview chart resumes from the
+  last snapshot without a visible data gap (tested with a 30s restart).
+- Fan-out code is annotated with `// SCALE: migrate to gossip push beyond ~5
+  pods — see PLAN.md §6.4` to make the upgrade path discoverable.
 
 ### Phase 6.5 — AI traffic analysis (weeks 24–27)
 

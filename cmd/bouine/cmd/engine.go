@@ -14,6 +14,7 @@ import (
 	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/config"
+	"github.com/thylong/bouine/internal/dashboard"
 	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/accesslog"
@@ -50,10 +51,8 @@ func (e *engine) run(ctx context.Context) error {
 	})
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
-	handler := e.buildHandler(pools, store, dpMetrics)
 
-	// Resolve admin token once here so both the broadcaster and the
-	// admin server use the same value.
+	// Resolve admin token before rings and dashboard so all share the same value.
 	token := e.cfg.Admin.Token
 	if token == "" {
 		tok := make([]byte, 16)
@@ -63,6 +62,24 @@ func (e *engine) run(ctx context.Context) error {
 			"token", token,
 			"hint", "set admin.token in config to silence this warning")
 	}
+
+	// Initialise ring buffers for dashboard time-series.
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "bouine"
+	}
+	rings := observability.NewRings(hostname)
+	snapshotPath := ""
+	if e.cfg.Storage.WarmDir != "" {
+		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"
+	}
+	if snapshotPath != "" {
+		if err := rings.Load(snapshotPath); err != nil {
+			e.logger.Warn("rings snapshot load failed", "error", err)
+		}
+	}
+	dpMetrics.Rings = rings
+	handler := e.buildHandler(pools, store, dpMetrics)
 
 	// Build optional cluster — must happen before admin so the
 	// /v1/cluster/peers endpoint can reference the Members function.
@@ -79,7 +96,11 @@ func (e *engine) run(ctx context.Context) error {
 	}
 
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startAdmin(g, ctx, peersFn, store, broadcaster, token)
+	g.Go("rings", func(rCtx context.Context) error {
+		rings.Start(rCtx, snapshotPath)
+		return nil
+	})
+	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -188,7 +209,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -196,6 +217,22 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 
 	// Build shutdown sequencer — IsReady wired to /readyz.
 	seq := shutdown.NewSequencer(e.logger)
+
+	// Build dashboard handler and peer-metrics handler.
+	dashMux := http.NewServeMux()
+	snapshotPath := ""
+	if e.cfg.Storage.WarmDir != "" {
+		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"
+	}
+	dashHandler := dashboard.New(dashboard.Config{
+		Rings:        rings,
+		PeersFn:      peersFn,
+		SelfAddr:     addr,
+		Token:        token,
+		Logger:       e.logger,
+		SnapshotPath: snapshotPath,
+	}, dashMux)
+	_ = dashHandler // registered via dashMux
 
 	srv := admin.New(admin.Config{
 		Addr:    addr,
@@ -230,6 +267,8 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 			_, err := store.Ban(ctx, evt.Predicate)
 			return err
 		},
+		PeerMetricsHandler: dashboard.PeerMetricsHandler(rings),
+		DashboardHandler:   dashMux,
 	})
 	g.Go("admin", srv.Serve)
 }

@@ -57,6 +57,12 @@ type Config struct {
 	PeerPurgeFn func(evt api.PurgeEvent) error
 	// PeerBanFn, if non-nil, handles incoming ban broadcasts from peers.
 	PeerBanFn func(evt api.BanEvent) error
+	// PeerMetricsHandler, if non-nil, is mounted at GET /v1/peer/metrics
+	// (behind bearer-token auth) so peers can fetch this node's ring summary.
+	PeerMetricsHandler http.Handler
+	// DashboardHandler, if non-nil, is mounted at /dashboard/ outside the
+	// bearer-token middleware; the dashboard manages its own session-cookie auth.
+	DashboardHandler http.Handler
 }
 
 // Server is the admin HTTP server with lifecycle methods matching the
@@ -92,8 +98,6 @@ func New(cfg Config) *Server {
 			IdleTimeout:       30 * time.Second,
 		},
 	}
-	s.inner.Handler = s.authMiddleware(mux)
-
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.version)
@@ -118,7 +122,19 @@ func New(cfg Config) *Server {
 	if cfg.PeerBanFn != nil {
 		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
 	}
+	if cfg.PeerMetricsHandler != nil {
+		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
+	}
 	mux.HandleFunc("POST /v1/config/reload", s.configReload)
+
+	topHandler := s.authMiddleware(mux)
+	if cfg.DashboardHandler != nil {
+		outerMux := http.NewServeMux()
+		outerMux.Handle("/dashboard/", cfg.DashboardHandler)
+		outerMux.Handle("/", topHandler)
+		topHandler = outerMux
+	}
+	s.inner.Handler = topHandler
 
 	return s
 }

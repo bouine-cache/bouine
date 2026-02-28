@@ -17,6 +17,7 @@ type DataPlaneMetrics struct {
 	RequestsTotal    *prometheus.CounterVec
 	RequestDuration  *prometheus.HistogramVec
 	ResponseBytesOut *prometheus.CounterVec
+	Rings            *Rings // nil when dashboard is disabled
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -65,6 +66,19 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 			Observe(time.Since(start).Seconds())
 		m.ResponseBytesOut.WithLabelValues(r.Method, route).
 			Add(float64(sw.bytes))
+
+		// Update ring buffers for the dashboard (if enabled).
+		if m.Rings != nil {
+			xCache := w.Header().Get("X-Cache")
+			hit := xCache == "HIT"
+			miss := xCache == "MISS"
+			stale := xCache == "STALE"
+			durMs := time.Since(start).Milliseconds()
+			m.Rings.Request.RecordRequest(hit, miss, stale, sw.status, durMs)
+			if route != "_default" {
+				m.Rings.Route.RecordRoute(route, hit, miss)
+			}
+		}
 	})
 }
 

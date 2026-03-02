@@ -11,7 +11,6 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
-// mockPeerServer creates a test server that returns a MetricsSummary as JSON.
 func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -22,13 +21,12 @@ func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *httptest.Se
 
 func TestAggregator_CollectSingleNode(t *testing.T) {
 	rings := observability.NewRings("self")
-	rings.Request.RecordRequest(true, false, false, 200, 5)
+	rings.Request.RecordRequest("HIT", 200, 5)
 	rings.Request.Flush(time.Now())
 
 	agg := NewAggregator(rings, nil, "", "", nil)
 	merged, peers := agg.Collect(t.Context())
 
-	// Single-node: peerResults contains only self.
 	if len(peers) != 1 {
 		t.Errorf("expected 1 peer result (self), got %d", len(peers))
 	}
@@ -57,22 +55,18 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	peerAddr := srv.Listener.Addr().String()
 
 	rings := observability.NewRings("self")
-	rings.Request.RecordRequest(true, false, false, 200, 2)
+	rings.Request.RecordRequest("HIT", 200, 2)
 	rings.Request.Flush(time.Now())
 
 	peersFn := func() []api.PeerInfo {
 		return []api.PeerInfo{{Name: "peer-1", AdminAddr: peerAddr}}
 	}
-	// selfAddr is different from peer so peer isn't self-excluded.
 	agg := NewAggregator(rings, peersFn, "127.0.0.1:9999", "", nil)
 	merged, peers := agg.Collect(t.Context())
 
-	// Expect self + one remote peer.
 	if len(peers) != 2 {
 		t.Errorf("expected 2 peer results, got %d", len(peers))
 	}
-
-	// Count live peers.
 	livePeers := 0
 	for _, p := range peers {
 		if !p.Stale {
@@ -83,7 +77,6 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 		t.Error("expected at least one live peer")
 	}
 
-	// Total requests across all buckets: self(1) + peer(50) = 51.
 	var totalReq int64
 	for _, b := range merged.RequestSnap {
 		totalReq += b.Requests
@@ -113,7 +106,6 @@ func TestAggregator_PeerTimeout(t *testing.T) {
 	if elapsed >= 500*time.Millisecond {
 		t.Errorf("Collect took too long: %v (expected < 500ms)", elapsed)
 	}
-	// Slow peer should be marked stale.
 	for _, p := range peers {
 		if p.NodeName == "slow" && !p.Stale {
 			t.Error("timed-out peer should be marked stale")
@@ -121,9 +113,59 @@ func TestAggregator_PeerTimeout(t *testing.T) {
 	}
 }
 
+func TestAggregator_LastKnownOnStale(t *testing.T) {
+	rings := observability.NewRings("self")
+
+	// First call with a live peer that gives data.
+	peerSnap := make([]observability.RequestBucket, 2160)
+	peerSnap[0] = observability.RequestBucket{Requests: 99}
+	peerSum := observability.MetricsSummary{
+		NodeName:    "flaky",
+		CollectedAt: time.Now(),
+		RequestSnap: peerSnap,
+	}
+	liveSrv := mockPeerServer(t, peerSum)
+
+	peersFn := func() []api.PeerInfo {
+		return []api.PeerInfo{{Name: "flaky", AdminAddr: liveSrv.Listener.Addr().String()}}
+	}
+	agg := NewAggregator(rings, peersFn, "self:9999", "", nil)
+	_, peers := agg.Collect(t.Context())
+	// Verify live peer found.
+	var got99 bool
+	for _, p := range peers {
+		if p.NodeName == "flaky" && !p.Stale {
+			got99 = true
+		}
+	}
+	if !got99 {
+		t.Error("expected live peer in first collect")
+	}
+	liveSrv.Close()
+
+	// Second call — peer is now down; should use last-known snapshot.
+	_, peers2 := agg.Collect(t.Context())
+	var staleFound bool
+	for _, p := range peers2 {
+		if p.NodeName == "flaky" && p.Stale {
+			staleFound = true
+			var total int64
+			for _, b := range p.Summary.RequestSnap {
+				total += b.Requests
+			}
+			if total != 99 {
+				t.Errorf("last-known stale requests: want 99, got %d", total)
+			}
+		}
+	}
+	if !staleFound {
+		t.Error("expected stale peer with last-known data in second collect")
+	}
+}
+
 func TestPeerMetricsHandler(t *testing.T) {
 	rings := observability.NewRings("node-x")
-	rings.Request.RecordRequest(true, false, false, 200, 7)
+	rings.Request.RecordRequest("HIT", 200, 7)
 	rings.Request.Flush(time.Now())
 
 	h := PeerMetricsHandler(rings)

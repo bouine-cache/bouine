@@ -3,6 +3,7 @@ module github.com/thylong/bouine
 go 1.26.3
 
 require (
+	github.com/a-h/templ v0.3.1020
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hashicorp/memberlist v0.5.4

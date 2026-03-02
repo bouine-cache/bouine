@@ -21,21 +21,27 @@ const (
 	requestBucketSecs = 10                              // 10-second buckets
 	requestBuckets    = 6 * 60 * 60 / requestBucketSecs // 2160 = 6h
 	routeBuckets      = 24 * 60                         // 1440 = 24h, 1-min buckets
+	sparklinePoints   = 8                               // per-route sparkline width
+	opsLogCap         = 100                             // max ops-log entries
 )
 
 // ── Request ring ─────────────────────────────────────────────────────
 
 // RequestBucket holds aggregated counters for one time window.
+// All five X-Cache categories are tracked so the dashboard can render
+// a full cache-breakdown donut.
 type RequestBucket struct {
-	Requests  int64
-	Hits      int64
-	Misses    int64
-	StaleHits int64
-	Errors    int64
-	DurSumMs  int64 // sum of request durations in ms (for avg)
-	DurN      int64 // number of samples with duration
-	P99MS     int64 // running max latency ms (approximation)
-	Timestamp int64 // unix seconds of window start
+	Requests    int64
+	Hits        int64
+	Misses      int64
+	StaleHits   int64
+	Bypasses    int64 // X-Cache: BYPASS
+	Revalidated int64 // X-Cache: REVALIDATED
+	Errors      int64 // HTTP 5xx
+	DurSumMs    int64 // sum of request durations in ms (for avg)
+	DurN        int64 // number of samples with duration
+	P99MS       int64 // running max latency ms (approximation)
+	Timestamp   int64 // unix seconds of window start
 }
 
 // RequestRing is a circular buffer of requestBuckets.
@@ -47,28 +53,34 @@ type RequestRing struct {
 	head    int // next write position
 
 	// live accumulators — updated atomically on the hot path
-	liveRequests  atomic.Int64
-	liveHits      atomic.Int64
-	liveMisses    atomic.Int64
-	liveStaleHits atomic.Int64
-	liveErrors    atomic.Int64
-	liveDurSumMs  atomic.Int64
-	liveDurN      atomic.Int64
-	liveP99MS     atomic.Int64 // max duration seen since last flush
+	liveRequests    atomic.Int64
+	liveHits        atomic.Int64
+	liveMisses      atomic.Int64
+	liveStaleHits   atomic.Int64
+	liveBypasses    atomic.Int64
+	liveRevalidated atomic.Int64
+	liveErrors      atomic.Int64
+	liveDurSumMs    atomic.Int64
+	liveDurN        atomic.Int64
+	liveP99MS       atomic.Int64 // max duration seen since last flush
 }
 
 // RecordRequest is called on the hot path for every completed request.
-// Zero allocations — only atomic adds.
-func (r *RequestRing) RecordRequest(hit, miss, stale bool, statusCode int, durMs int64) {
+// xCache is the value of the X-Cache response header ("HIT", "MISS",
+// "STALE", "BYPASS", "REVALIDATED"). Zero allocations — only atomic adds.
+func (r *RequestRing) RecordRequest(xCache string, statusCode int, durMs int64) {
 	r.liveRequests.Add(1)
-	if hit {
+	switch xCache {
+	case "HIT":
 		r.liveHits.Add(1)
-	}
-	if miss {
+	case "MISS":
 		r.liveMisses.Add(1)
-	}
-	if stale {
+	case "STALE":
 		r.liveStaleHits.Add(1)
+	case "BYPASS":
+		r.liveBypasses.Add(1)
+	case "REVALIDATED":
+		r.liveRevalidated.Add(1)
 	}
 	if statusCode >= 500 {
 		r.liveErrors.Add(1)
@@ -91,15 +103,17 @@ func (r *RequestRing) RecordRequest(hit, miss, stale bool, statusCode int, durMs
 // Called by the background goroutine every requestBucketSecs.
 func (r *RequestRing) Flush(now time.Time) {
 	b := RequestBucket{
-		Requests:  r.liveRequests.Swap(0),
-		Hits:      r.liveHits.Swap(0),
-		Misses:    r.liveMisses.Swap(0),
-		StaleHits: r.liveStaleHits.Swap(0),
-		Errors:    r.liveErrors.Swap(0),
-		DurSumMs:  r.liveDurSumMs.Swap(0),
-		DurN:      r.liveDurN.Swap(0),
-		P99MS:     r.liveP99MS.Swap(0),
-		Timestamp: now.Unix(),
+		Requests:    r.liveRequests.Swap(0),
+		Hits:        r.liveHits.Swap(0),
+		Misses:      r.liveMisses.Swap(0),
+		StaleHits:   r.liveStaleHits.Swap(0),
+		Bypasses:    r.liveBypasses.Swap(0),
+		Revalidated: r.liveRevalidated.Swap(0),
+		Errors:      r.liveErrors.Swap(0),
+		DurSumMs:    r.liveDurSumMs.Swap(0),
+		DurN:        r.liveDurN.Swap(0),
+		P99MS:       r.liveP99MS.Swap(0),
+		Timestamp:   now.Unix(),
 	}
 	r.mu.Lock()
 	r.buckets[r.head] = b
@@ -149,14 +163,15 @@ type routeCounters struct {
 }
 
 // RecordRoute is called on the hot path.
-func (r *RouteRing) RecordRoute(route string, hit, miss bool) {
+// xCache is the X-Cache header value; "HIT" increments hits, "MISS" misses.
+func (r *RouteRing) RecordRoute(route, xCache string) {
 	v, _ := r.liveRoutes.LoadOrStore(route, &routeCounters{})
 	c := v.(*routeCounters)
 	c.requests.Add(1)
-	if hit {
+	switch xCache {
+	case "HIT":
 		c.hits.Add(1)
-	}
-	if miss {
+	case "MISS":
 		c.misses.Add(1)
 	}
 }
@@ -185,15 +200,15 @@ func (r *RouteRing) Flush(now time.Time) {
 	})
 }
 
-// RouteStats returns the latest aggregated stats per route over windowBuckets.
+// RouteStats returns the latest aggregated stats per route over windowBuckets
+// minutes, including a sparkline of the most recent sparklinePoints buckets.
 func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	// Aggregate totals over the window.
 	agg := make(map[string]*RouteStat)
-	cutoff := len(r.buckets) - windowBuckets*20
-	if cutoff < 0 {
-		cutoff = 0
-	}
+	cutoff := max(0, len(r.buckets)-windowBuckets*20)
 	for _, b := range r.buckets[cutoff:] {
 		s, ok := agg[b.Route]
 		if !ok {
@@ -204,10 +219,33 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 		s.Hits += b.Hits
 		s.Misses += b.Misses
 	}
+
+	// Build sparkline (last sparklinePoints per-minute counts) per route.
+	// Walk backwards through all buckets collecting up to sparklinePoints
+	// distinct timestamps per route.
+	type tsCount struct {
+		ts  int64
+		req int64
+	}
+	sparkRaw := make(map[string][]tsCount)
+	for i := len(r.buckets) - 1; i >= 0; i-- {
+		b := r.buckets[i]
+		pts := sparkRaw[b.Route]
+		if len(pts) < sparklinePoints {
+			sparkRaw[b.Route] = append(pts, tsCount{b.Timestamp, b.Requests})
+		}
+	}
+
 	out := make([]RouteStat, 0, len(agg))
 	for _, s := range agg {
 		if s.Requests > 0 {
 			s.HitPct = math.Round(float64(s.Hits)/float64(s.Requests)*1000) / 10
+		}
+		// Reverse sparkline so oldest-first.
+		raw := sparkRaw[s.Route]
+		s.Sparkline = make([]int64, sparklinePoints)
+		for i, pt := range raw {
+			s.Sparkline[sparklinePoints-1-i] = pt.req
 		}
 		out = append(out, *s)
 	}
@@ -216,11 +254,66 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 
 // RouteStat is the aggregated view of one route over a time window.
 type RouteStat struct {
-	Route    string
-	Requests int64
-	Hits     int64
-	Misses   int64
-	HitPct   float64 // 0-100
+	Route     string
+	Requests  int64
+	Hits      int64
+	Misses    int64
+	HitPct    float64 // 0-100
+	Sparkline []int64 // last sparklinePoints per-minute request counts
+}
+
+// ── Ops log ring ─────────────────────────────────────────────────────
+
+// OpsLogEntry records a single operator invalidation action.
+type OpsLogEntry struct {
+	Timestamp int64  // unix seconds
+	Op        string // "purge" | "ban" | "refresh"
+	Arg       string // URL or predicate summary
+	Result    string // "ok" | error message
+}
+
+// OpsLogRing is a circular buffer of the last opsLogCap operator actions.
+// It is safe for concurrent use and never allocates on Record after warm-up.
+type OpsLogRing struct {
+	mu      sync.Mutex
+	entries [opsLogCap]OpsLogEntry
+	head    int
+	count   int
+}
+
+// Record appends an invalidation event to the ring.
+func (r *OpsLogRing) Record(op, arg, result string) {
+	e := OpsLogEntry{
+		Timestamp: time.Now().Unix(),
+		Op:        op,
+		Arg:       arg,
+		Result:    result,
+	}
+	r.mu.Lock()
+	r.entries[r.head] = e
+	r.head = (r.head + 1) % opsLogCap
+	if r.count < opsLogCap {
+		r.count++
+	}
+	r.mu.Unlock()
+}
+
+// Snapshot returns the most recent n entries, oldest first.
+func (r *OpsLogRing) Snapshot(n int) []OpsLogEntry {
+	if n > opsLogCap {
+		n = opsLogCap
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > r.count {
+		n = r.count
+	}
+	out := make([]OpsLogEntry, n)
+	for i := range n {
+		idx := (r.head - n + i + opsLogCap) % opsLogCap
+		out[i] = r.entries[idx]
+	}
+	return out
 }
 
 // ── Rings manager ────────────────────────────────────────────────────
@@ -229,6 +322,7 @@ type RouteStat struct {
 type Rings struct {
 	Request  *RequestRing
 	Route    *RouteRing
+	OpsLog   *OpsLogRing
 	NodeName string
 }
 
@@ -237,6 +331,7 @@ func NewRings(nodeName string) *Rings {
 	return &Rings{
 		Request:  &RequestRing{},
 		Route:    &RouteRing{},
+		OpsLog:   &OpsLogRing{},
 		NodeName: nodeName,
 	}
 }
@@ -368,8 +463,6 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 		RouteStats:  nil,
 	}
 
-	// Align by recency: find the latest timestamp in the first summary
-	// and sum buckets at the same relative offset from all summaries.
 	for _, s := range summaries {
 		for i, b := range s.RequestSnap {
 			m := &merged.RequestSnap[i]
@@ -377,6 +470,8 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 			m.Hits += b.Hits
 			m.Misses += b.Misses
 			m.StaleHits += b.StaleHits
+			m.Bypasses += b.Bypasses
+			m.Revalidated += b.Revalidated
 			m.Errors += b.Errors
 			m.DurSumMs += b.DurSumMs
 			m.DurN += b.DurN
@@ -389,18 +484,27 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 		}
 	}
 
-	// Merge route stats.
+	// Merge route stats — sum counters, take max sparkline values.
 	routeAgg := make(map[string]*RouteStat)
 	for _, s := range summaries {
 		for _, rs := range s.RouteStats {
 			a, ok := routeAgg[rs.Route]
 			if !ok {
-				a = &RouteStat{Route: rs.Route}
-				routeAgg[rs.Route] = a
+				cp := rs
+				routeAgg[rs.Route] = &cp
+				continue
 			}
 			a.Requests += rs.Requests
 			a.Hits += rs.Hits
 			a.Misses += rs.Misses
+			if len(rs.Sparkline) == sparklinePoints {
+				if len(a.Sparkline) != sparklinePoints {
+					a.Sparkline = make([]int64, sparklinePoints)
+				}
+				for i := range sparklinePoints {
+					a.Sparkline[i] += rs.Sparkline[i]
+				}
+			}
 		}
 	}
 	for _, a := range routeAgg {

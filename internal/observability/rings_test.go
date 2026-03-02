@@ -6,14 +6,12 @@ import (
 	"time"
 )
 
-// TestRequestRing_RecordAndFlush verifies that RecordRequest accumulates
-// counters atomically and Flush drains them into a ring bucket.
 func TestRequestRing_RecordAndFlush(t *testing.T) {
 	r := &RequestRing{}
 
-	r.RecordRequest(true, false, false, 200, 5)
-	r.RecordRequest(true, false, false, 200, 15)
-	r.RecordRequest(false, true, false, 500, 3)
+	r.RecordRequest("HIT", 200, 5)
+	r.RecordRequest("HIT", 200, 15)
+	r.RecordRequest("MISS", 500, 3)
 
 	r.Flush(time.Now())
 
@@ -42,13 +40,30 @@ func TestRequestRing_RecordAndFlush(t *testing.T) {
 	}
 }
 
-// TestRequestRing_SnapshotOrder verifies oldest-first ordering.
+func TestRequestRing_AllCategories(t *testing.T) {
+	r := &RequestRing{}
+	r.RecordRequest("HIT", 200, 1)
+	r.RecordRequest("MISS", 200, 1)
+	r.RecordRequest("STALE", 200, 1)
+	r.RecordRequest("BYPASS", 200, 1)
+	r.RecordRequest("REVALIDATED", 200, 1)
+	r.Flush(time.Now())
+	snap := r.Snapshot(1)
+	b := snap[0]
+	if b.Requests != 5 {
+		t.Errorf("want 5 requests, got %d", b.Requests)
+	}
+	if b.Hits != 1 || b.Misses != 1 || b.StaleHits != 1 || b.Bypasses != 1 || b.Revalidated != 1 {
+		t.Errorf("category counts wrong: %+v", b)
+	}
+}
+
 func TestRequestRing_SnapshotOrder(t *testing.T) {
 	r := &RequestRing{}
 	base := time.Now().Truncate(10 * time.Second)
 
 	for i := range 5 {
-		r.RecordRequest(false, false, false, 200, int64(i+1))
+		r.RecordRequest("MISS", 200, int64(i+1))
 		r.Flush(base.Add(time.Duration(i) * 10 * time.Second))
 	}
 
@@ -64,13 +79,11 @@ func TestRequestRing_SnapshotOrder(t *testing.T) {
 	}
 }
 
-// TestRequestRing_SnapshotWraparound verifies the ring buffer wraps without
-// losing data or panicking.
 func TestRequestRing_SnapshotWraparound(t *testing.T) {
 	r := &RequestRing{}
 	now := time.Now()
 	for i := range requestBuckets + 10 {
-		r.RecordRequest(true, false, false, 200, 1)
+		r.RecordRequest("HIT", 200, 1)
 		r.Flush(now.Add(time.Duration(i) * requestBucketSecs * time.Second))
 	}
 	snap := r.Snapshot(requestBuckets)
@@ -79,14 +92,12 @@ func TestRequestRing_SnapshotWraparound(t *testing.T) {
 	}
 }
 
-// TestRouteRing_RecordAndFlush verifies per-route accumulation and stat
-// aggregation.
 func TestRouteRing_RecordAndFlush(t *testing.T) {
 	r := &RouteRing{}
-	r.RecordRoute("/api/v1", true, false)
-	r.RecordRoute("/api/v1", true, false)
-	r.RecordRoute("/api/v1", false, true)
-	r.RecordRoute("/static", true, false)
+	r.RecordRoute("/api/v1", "HIT")
+	r.RecordRoute("/api/v1", "HIT")
+	r.RecordRoute("/api/v1", "MISS")
+	r.RecordRoute("/static", "HIT")
 	r.Flush(time.Now())
 
 	stats := r.RouteStats(1)
@@ -115,15 +126,60 @@ func TestRouteRing_RecordAndFlush(t *testing.T) {
 	}
 }
 
-// TestRings_SaveLoad verifies gob round-trip through Save and Load.
+func TestRouteRing_Sparkline(t *testing.T) {
+	r := &RouteRing{}
+	now := time.Now()
+	for i := range 10 {
+		for range i + 1 {
+			r.RecordRoute("/test", "HIT")
+		}
+		r.Flush(now.Add(time.Duration(i) * time.Minute))
+	}
+	stats := r.RouteStats(30)
+	if len(stats) == 0 {
+		t.Fatal("expected at least one route stat")
+	}
+	if len(stats[0].Sparkline) != sparklinePoints {
+		t.Errorf("sparkline len: want %d, got %d", sparklinePoints, len(stats[0].Sparkline))
+	}
+}
+
+func TestOpsLogRing_RecordAndSnapshot(t *testing.T) {
+	r := &OpsLogRing{}
+	r.Record("purge", "https://example.com/foo", "ok")
+	r.Record("ban", "^/api/", "ok")
+
+	snap := r.Snapshot(10)
+	if len(snap) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(snap))
+	}
+	if snap[0].Op != "purge" {
+		t.Errorf("oldest entry op: want purge, got %s", snap[0].Op)
+	}
+	if snap[1].Op != "ban" {
+		t.Errorf("newest entry op: want ban, got %s", snap[1].Op)
+	}
+}
+
+func TestOpsLogRing_Wraparound(t *testing.T) {
+	r := &OpsLogRing{}
+	for range opsLogCap + 5 {
+		r.Record("purge", "url", "ok")
+	}
+	snap := r.Snapshot(opsLogCap)
+	if len(snap) != opsLogCap {
+		t.Errorf("expected %d entries, got %d", opsLogCap, len(snap))
+	}
+}
+
 func TestRings_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "metrics.snap")
 
 	ri := NewRings("node-1")
-	ri.Request.RecordRequest(true, false, false, 200, 10)
+	ri.Request.RecordRequest("HIT", 200, 10)
 	ri.Request.Flush(time.Now())
-	ri.Route.RecordRoute("/test", true, false)
+	ri.Route.RecordRoute("/test", "HIT")
 	ri.Route.Flush(time.Now())
 
 	if err := ri.Save(path); err != nil {
@@ -153,8 +209,6 @@ func TestRings_SaveLoad(t *testing.T) {
 	}
 }
 
-// TestRings_LoadMissingFile verifies that a missing snapshot file is silently
-// ignored (returns nil error).
 func TestRings_LoadMissingFile(t *testing.T) {
 	ri := NewRings("node-x")
 	if err := ri.Load("/tmp/bouine-nonexistent-snap-12345.snap"); err != nil {
@@ -162,7 +216,6 @@ func TestRings_LoadMissingFile(t *testing.T) {
 	}
 }
 
-// TestMergeSummaries verifies counter addition and p99 max semantics.
 func TestMergeSummaries(t *testing.T) {
 	now := time.Now()
 	a := MetricsSummary{
@@ -199,7 +252,6 @@ func TestMergeSummaries(t *testing.T) {
 	}
 }
 
-// TestMergeSummaries_Empty verifies empty input returns zero value.
 func TestMergeSummaries_Empty(t *testing.T) {
 	m := MergeSummaries(nil)
 	if m.NodeName != "" {

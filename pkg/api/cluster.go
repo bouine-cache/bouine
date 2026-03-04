@@ -37,6 +37,18 @@ type RingDigest struct {
 	Version uint64 `json:"version"`
 }
 
+// RingSegment describes a single node's ownership share of the
+// consistent-hash ring, used by the cluster dashboard visualization.
+//
+// Stable.
+type RingSegment struct {
+	// NodeName is the owning node.
+	NodeName string `json:"node_name"`
+	// Frac is the fraction of the hash space owned [0.0, 1.0].
+	// All segment Frac values sum to 1.0.
+	Frac float64 `json:"frac"`
+}
+
 // PurgeEvent is broadcast when a key is explicitly invalidated.
 //
 // Stable.

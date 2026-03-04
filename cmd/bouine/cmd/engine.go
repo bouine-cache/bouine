@@ -27,16 +27,18 @@ import (
 )
 
 type engine struct {
-	cfg     *config.Config
-	logger  *slog.Logger
-	metrics *observability.Metrics
+	cfg        *config.Config
+	configPath string
+	logger     *slog.Logger
+	metrics    *observability.Metrics
 }
 
-func newEngine(cfg *config.Config, logger *slog.Logger) *engine {
+func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engine {
 	return &engine{
-		cfg:     cfg,
-		logger:  logger,
-		metrics: observability.NewMetrics(),
+		cfg:        cfg,
+		configPath: configPath,
+		logger:     logger,
+		metrics:    observability.NewMetrics(),
 	}
 }
 
@@ -100,7 +102,7 @@ func (e *engine) run(ctx context.Context) error {
 		rings.Start(rCtx, snapshotPath)
 		return nil
 	})
-	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings)
+	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -209,14 +211,14 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
 	}
 
 	seq := shutdown.NewSequencer(e.logger)
-	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr)
+	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode)
 
 	srv := admin.New(admin.Config{
 		Addr:    addr,
@@ -258,11 +260,16 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 }
 
 // buildDashboard wires and returns the dashboard ServeMux.
-func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string) *http.ServeMux {
+// clusterNode may be nil in single-node mode.
+func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string, clusterNode *cluster.Cluster) *http.ServeMux {
 	dashMux := http.NewServeMux()
 	snapshotPath := ""
 	if e.cfg.Storage.WarmDir != "" {
 		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"
+	}
+	var ringFn func() []api.RingSegment
+	if clusterNode != nil {
+		ringFn = clusterNode.RingSegments
 	}
 	_ = dashboard.New(dashboard.Config{
 		Rings:        rings,
@@ -273,6 +280,9 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 		SnapshotPath: snapshotPath,
 		StoreFn:      store.Stats,
 		HotMaxBytes:  e.cfg.Storage.HotMaxBytes.Bytes(),
+		ConfigPath:   e.configPath,
+		ReloadFn:     func(_ *config.Config) error { return nil }, // hot-reload in future phase
+		RingFn:       ringFn,
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
 			key := cache.BuildKeyFromURL(urlStr)
 			if err := store.Delete(dCtx, key); err != nil {

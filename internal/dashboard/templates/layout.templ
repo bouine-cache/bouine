@@ -9,64 +9,97 @@ templ Layout(props LayoutProps) {
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width,initial-scale=1"/>
 			<title>bouine · { props.PageTitle }</title>
-			<script src="https://unpkg.com/htmx.org@2.0.3" crossorigin="anonymous"></script>
-			<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+			<script src="https://unpkg.com/htmx.org@2.0.3" crossorigin="anonymous" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" referrerpolicy="no-referrer"></script>
+			<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 			@Styles()
 		</head>
 		<body>
-			<div id="bouine-tint"></div>
-			<canvas id="bouine-noise"></canvas>
-			<aside>
-				<div class="logo">
-					<div class="logo-gem">🐟</div>
+			<div id="bouine-tint" aria-hidden="true"></div>
+			<canvas id="bouine-noise" aria-hidden="true"></canvas>
+			<aside aria-label="Sidebar">
+				<div class="logo" aria-label="bouine dashboard">
+					<div class="logo-gem" aria-hidden="true">🐟</div>
 					<div>
 						<div class="logo-name">bouine</div>
 						<div class="logo-v">v1.0-rc</div>
 					</div>
 				</div>
-				<nav>
-					<div class="ng">Monitor</div>
-					<a href="/dashboard/" class={ templ.KV("active", props.Page == "overview") }>
-						<span class="ni">◈</span>Overview
+				<nav role="navigation" aria-label="Main navigation">
+					<div class="ng" aria-hidden="true">Monitor</div>
+					<a
+						href="/dashboard/"
+						class={ templ.KV("active", props.Page == "overview") }
+						if props.Page == "overview" {
+							aria-current="page"
+						}
+					>
+						<span class="ni" aria-hidden="true">◈</span>Overview
 					</a>
-					<a href="/dashboard/routes" class={ templ.KV("active", props.Page == "routes") }>
-						<span class="ni">⬡</span>Routes
+					<a
+						href="/dashboard/routes"
+						class={ templ.KV("active", props.Page == "routes") }
+						if props.Page == "routes" {
+							aria-current="page"
+						}
+					>
+						<span class="ni" aria-hidden="true">⬡</span>Routes
 					</a>
-					<a href="/dashboard/cluster" class={ templ.KV("active", props.Page == "cluster") }>
-						<span class="ni">◎</span>Cluster
+					<a
+						href="/dashboard/cluster"
+						class={ templ.KV("active", props.Page == "cluster") }
+						if props.Page == "cluster" {
+							aria-current="page"
+						}
+					>
+						<span class="ni" aria-hidden="true">◎</span>Cluster
 					</a>
-					<div class="ng">Operate</div>
-					<a href="/dashboard/invalidation" class={ templ.KV("active", props.Page == "invalidation") }>
-						<span class="ni">⌦</span>Invalidation
+					<div class="ng" aria-hidden="true">Operate</div>
+					<a
+						href="/dashboard/invalidation"
+						class={ templ.KV("active", props.Page == "invalidation") }
+						if props.Page == "invalidation" {
+							aria-current="page"
+						}
+					>
+						<span class="ni" aria-hidden="true">⌦</span>Invalidation
 					</a>
-					<a href="/dashboard/config" class={ templ.KV("active", props.Page == "config") }>
-						<span class="ni">⚙</span>Config
+					<a
+						href="/dashboard/config"
+						class={ templ.KV("active", props.Page == "config") }
+						if props.Page == "config" {
+							aria-current="page"
+						}
+					>
+						<span class="ni" aria-hidden="true">⚙</span>Config
 					</a>
 				</nav>
 				<div class="sbf">
 					<div class="sl"><span class="sk">node</span><span class="sv">{ props.NodeName }</span></div>
 				</div>
 			</aside>
-			<main>
+			<main role="main">
 				<div class="hdr">
-					<span class="brand">bouine</span>
-					<span class="ph">{ props.PageTitle }</span>
+					<span class="brand" aria-label="bouine">bouine</span>
+					<h1 class="ph">{ props.PageTitle }</h1>
 					<div class="hdr-r">
-						<div class="pill"><span class="dot-g"></span>dashboard</div>
+						<div class="pill" aria-label="Status: dashboard active">
+							<span class="dot-g" aria-hidden="true"></span>dashboard
+						</div>
 						<button
 							style="background:transparent;border:1px solid var(--b);color:var(--m);font-size:.67rem;padding:.2rem .5rem;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace"
-							onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙':'☀';})(this)"
+							aria-label="Toggle colour theme"
+							onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.setAttribute('aria-label',next==='light'?'Switch to dark theme':'Switch to light theme');b.textContent=next==='light'?'🌙':'☀';})(this)"
 						>☀</button>
 					</div>
 				</div>
-				<div class="tabs">
-					<a href="/dashboard/" class={ templ.KV("active", props.Page == "overview") }>Overview</a>
-					<a href="/dashboard/routes" class={ templ.KV("active", props.Page == "routes") }>Routes</a>
-					<a href="/dashboard/cluster" class={ templ.KV("active", props.Page == "cluster") }>Cluster</a>
-					<a href="/dashboard/invalidation" class={ templ.KV("active", props.Page == "invalidation") }>Invalidation</a>
-					<a href="/dashboard/config" class={ templ.KV("active", props.Page == "config") }>Config</a>
+				<div class="tabs" role="tablist" aria-label="Dashboard sections">
+					<a href="/dashboard/" class={ templ.KV("active", props.Page == "overview") } role="tab" if props.Page == "overview" { aria-selected="true" } else { aria-selected="false" }>Overview</a>
+					<a href="/dashboard/routes" class={ templ.KV("active", props.Page == "routes") } role="tab" if props.Page == "routes" { aria-selected="true" } else { aria-selected="false" }>Routes</a>
+					<a href="/dashboard/cluster" class={ templ.KV("active", props.Page == "cluster") } role="tab" if props.Page == "cluster" { aria-selected="true" } else { aria-selected="false" }>Cluster</a>
+					<a href="/dashboard/invalidation" class={ templ.KV("active", props.Page == "invalidation") } role="tab" if props.Page == "invalidation" { aria-selected="true" } else { aria-selected="false" }>Invalidation</a>
+					<a href="/dashboard/config" class={ templ.KV("active", props.Page == "config") } role="tab" if props.Page == "config" { aria-selected="true" } else { aria-selected="false" }>Config</a>
 				</div>
-				<div class="body">
+				<div class="body" role="tabpanel">
 					{ children... }
 				</div>
 			</main>

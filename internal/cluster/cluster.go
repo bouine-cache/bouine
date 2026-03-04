@@ -308,3 +308,47 @@ func (r *ring) digest() api.RingDigest {
 		Size: len(r.owners) / r.vnodes,
 	}
 }
+
+// RingSegments returns the proportional hash-space ownership for every real
+// node in the consistent-hash ring, suitable for a visual ring-band diagram.
+// Returns nil when the cluster has no members.
+//
+// Stable.
+func (c *Cluster) RingSegments() []api.RingSegment {
+	c.mu.RLock()
+	segs := c.ring.segments()
+	c.mu.RUnlock()
+	return segs
+}
+
+// segments computes per-node hash-space ownership fractions summing to 1.0.
+func (r *ring) segments() []api.RingSegment {
+	if len(r.nodes) == 0 {
+		return nil
+	}
+	const maxU64 = float64(1<<64 - 1)
+	fracs := make(map[string]float64, len(r.owners)/max(r.vnodes, 1))
+	for i, h := range r.nodes {
+		var next uint64
+		if i+1 < len(r.nodes) {
+			next = r.nodes[i+1]
+		} else {
+			next = ^uint64(0)
+		}
+		var arc float64
+		if next >= h {
+			arc = float64(next - h)
+		} else {
+			arc = float64(^uint64(0)-h) + float64(next) // wrap-around
+		}
+		fracs[r.owners[h]] += arc / maxU64
+	}
+	out := make([]api.RingSegment, 0, len(fracs))
+	for name, frac := range fracs {
+		out = append(out, api.RingSegment{NodeName: name, Frac: frac})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].NodeName < out[j].NodeName
+	})
+	return out
+}

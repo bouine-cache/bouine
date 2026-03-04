@@ -41,7 +41,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 
-			return newEngine(cfg, logger).run(ctx)
+			return newEngine(cfg, configPath, logger).run(ctx)
 		},
 	}
 

@@ -392,6 +392,7 @@ func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiOK(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("HX-Trigger", "refreshOpsLog")
 	_, _ = fmt.Fprintf(w, `<span class="flash-ok">✓ %s</span>`, msg)
 }
 

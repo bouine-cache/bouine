@@ -445,6 +445,7 @@ func validateRegex(fieldName, s string) string {
 
 func (h *Handler) apiError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusBadRequest)
+	// Return 200 so htmx swaps the error fragment into the target element.
+	// htmx silently discards 4xx/5xx responses by default and never updates the DOM.
 	_, _ = fmt.Fprintf(w, `<span class="flash-err">✗ %s</span>`, msg)
 }

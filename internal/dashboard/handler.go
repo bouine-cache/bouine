@@ -314,27 +314,25 @@ func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "purge not configured")
 		return
 	}
-	// ParseForm first: htmx sends application/x-www-form-urlencoded.
-	// json.Decode is a fallback for direct API callers.
 	_ = r.ParseForm()
-	url := r.FormValue("url")
-	if url == "" {
+	rawURL := r.FormValue("url")
+	if rawURL == "" {
 		var req struct {
 			URL string `json:"url"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		url = req.URL
+		rawURL = req.URL
 	}
-	if url == "" {
-		h.apiError(w, "missing url")
+	if msg := validateCacheURL(rawURL); msg != "" {
+		h.apiError(w, msg)
 		return
 	}
-	if err := h.cfg.PurgeFn(r.Context(), url); err != nil {
-		h.cfg.Rings.OpsLog.Record("purge", url, err.Error())
+	if err := h.cfg.PurgeFn(r.Context(), rawURL); err != nil {
+		h.cfg.Rings.OpsLog.Record("purge", rawURL, err.Error())
 		h.apiError(w, err.Error())
 		return
 	}
-	h.cfg.Rings.OpsLog.Record("purge", url, "ok")
+	h.cfg.Rings.OpsLog.Record("purge", rawURL, "ok")
 	h.apiOK(w, "purged")
 }
 

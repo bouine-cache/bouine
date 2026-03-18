@@ -13,7 +13,7 @@ templ Layout(props LayoutProps) {
 			<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 			@Styles()
 		</head>
-		<body>
+		<body hx-boost="true">
 			<div id="bouine-tint" aria-hidden="true"></div>
 			<canvas id="bouine-noise" aria-hidden="true"></canvas>
 			<aside aria-label="Sidebar">
@@ -111,8 +111,9 @@ templ Layout(props LayoutProps) {
 }
 
 // noiseScript renders the WebGL noise canvas animation.
+// The _bouineNoise guard prevents double-initialisation after hx-boost swaps.
 script noiseScript() {
-	(function(){
+	if(window._bouineNoise)return;window._bouineNoise=true;
 		var c=document.getElementById('bouine-noise');
 		if(!c)return;var gl=c.getContext('webgl');if(!gl)return;
 		var V='attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
@@ -125,7 +126,6 @@ script noiseScript() {
 		function resize(){c.width=innerWidth;c.height=innerHeight;gl.viewport(0,0,c.width,c.height);}
 		function frame(tm){if(tm-last>=83){resize();ub();gl.useProgram(p);gl.uniform1f(tl,tm*.001);gl.uniform2f(rl,c.width,c.height);gl.enableVertexAttribArray(al);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.vertexAttribPointer(al,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLES,0,6);last=tm;}requestAnimationFrame(frame);}
 		window.addEventListener('resize',resize);requestAnimationFrame(frame);
-	})();
 }
 
 // tableHelperScript provides sortTable / filterTable used on routes & ops-log.

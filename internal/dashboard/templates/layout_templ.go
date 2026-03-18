@@ -52,7 +52,7 @@ func Layout(props LayoutProps) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</head><body><div id=\"bouine-tint\" aria-hidden=\"true\"></div><canvas id=\"bouine-noise\" aria-hidden=\"true\"></canvas><aside aria-label=\"Sidebar\"><div class=\"logo\" aria-label=\"bouine dashboard\"><div class=\"logo-gem\" aria-hidden=\"true\">🐟</div><div><div class=\"logo-name\">bouine</div><div class=\"logo-v\">v1.0-rc</div></div></div><nav role=\"navigation\" aria-label=\"Main navigation\"><div class=\"ng\" aria-hidden=\"true\">Monitor</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</head><body hx-boost=\"true\"><div id=\"bouine-tint\" aria-hidden=\"true\"></div><canvas id=\"bouine-noise\" aria-hidden=\"true\"></canvas><aside aria-label=\"Sidebar\"><div class=\"logo\" aria-label=\"bouine dashboard\"><div class=\"logo-gem\" aria-hidden=\"true\">🐟</div><div><div class=\"logo-name\">bouine</div><div class=\"logo-v\">v1.0-rc</div></div></div><nav role=\"navigation\" aria-label=\"Main navigation\"><div class=\"ng\" aria-hidden=\"true\">Monitor</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -456,10 +456,11 @@ func Layout(props LayoutProps) templ.Component {
 }
 
 // noiseScript renders the WebGL noise canvas animation.
+// The _bouineNoise guard prevents double-initialisation after hx-boost swaps.
 func noiseScript() templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_noiseScript_2004`,
-		Function: `function __templ_noiseScript_2004(){(function(){
+		Name: `__templ_noiseScript_dec6`,
+		Function: `function __templ_noiseScript_dec6(){if(window._bouineNoise)return;window._bouineNoise=true;
 		var c=document.getElementById('bouine-noise');
 		if(!c)return;var gl=c.getContext('webgl');if(!gl)return;
 		var V='attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
@@ -472,10 +473,9 @@ func noiseScript() templ.ComponentScript {
 		function resize(){c.width=innerWidth;c.height=innerHeight;gl.viewport(0,0,c.width,c.height);}
 		function frame(tm){if(tm-last>=83){resize();ub();gl.useProgram(p);gl.uniform1f(tl,tm*.001);gl.uniform2f(rl,c.width,c.height);gl.enableVertexAttribArray(al);gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.vertexAttribPointer(al,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLES,0,6);last=tm;}requestAnimationFrame(frame);}
 		window.addEventListener('resize',resize);requestAnimationFrame(frame);
-	})();
 }`,
-		Call:       templ.SafeScript(`__templ_noiseScript_2004`),
-		CallInline: templ.SafeScriptInline(`__templ_noiseScript_2004`),
+		Call:       templ.SafeScript(`__templ_noiseScript_dec6`),
+		CallInline: templ.SafeScriptInline(`__templ_noiseScript_dec6`),
 	}
 }
 

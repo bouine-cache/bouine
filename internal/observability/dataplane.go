@@ -75,6 +75,7 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 			if route != "_default" {
 				m.Rings.Route.RecordRoute(route, xCache)
 			}
+			m.Rings.URL.RecordURL(r.URL.Path, route, xCache)
 		}
 	})
 }

@@ -1216,6 +1216,53 @@ dependencies.
 - Fan-out code is annotated with `// SCALE: migrate to gossip push beyond ~5
   pods — see PLAN.md §6.4` to make the upgrade path discoverable.
 
+#### 6.9 Route label fix — `X-Bouine-Route` and metrics accuracy
+
+**Problem (discovered post-ship):** `pipeline/router.go` matched routes but
+never wrote `X-Bouine-Route` onto the request. The dataplane middleware
+(`observability/dataplane.go`) reads that header to derive the `route` label
+used by **all four consumers** — Prometheus counters, histogram, bytes counter,
+and the RouteRing dashboard key. With the header absent every request falls
+through to `"_default"`, so:
+
+- `bouine_requests_total{route="_default"}` — all traffic in one label.
+- `bouine_request_duration_seconds{route="_default"}` — same.
+- `bouine_response_bytes_total{route="_default"}` — same.
+- Dashboard Routes page — one row `_default`, never the actual routes.
+- Dashboard Overview top-routes list — single meaningless entry.
+
+**Fix plan (3 steps, one commit each):**
+
+**Step 1 — Set the header (bug fix, unblocks everything).**
+In `pipeline/router.go`, when a route matches set:
+```go
+r.Header.Set("X-Bouine-Route", routeLabel(re))
+```
+where `routeLabel` returns `host:pathPrefix` (or just `pathPrefix` when host
+is empty). This single change fixes all four consumers simultaneously with no
+further code changes.
+
+**Step 2 — Add an optional `name` field to config routes.**
+Config routes today have no explicit display name. Add `Name string
+\`yaml:"name"\`` to `config.Route`. When set, the pipeline uses it as the
+route label; when absent, falls back to `host:pathPrefix`. This lets operators
+write human-readable route names that appear in dashboards and Prometheus.
+Touches: `internal/config/config.go`, `internal/pipeline/router.go`,
+`cmd/bouine/cmd/engine.go`.
+
+**Step 3 — Per-URL drill-down via `URLRing`.**
+Even with Step 1, a broad route prefix like `/` collapses all traffic into one
+row. Add a `URLRing` that records the first 2-3 path segments of every request
+(normalized: drop query string, truncate after third `/`) as a secondary ring
+key. The Routes page gains a top-5 URL breakdown per route. Touches:
+`internal/observability/rings.go` (new `URLRing`), `dataplane.go`,
+`internal/dashboard/templates/routes.templ`.
+
+**Metrics impact of Step 1 (explicit):**
+All four Prometheus series and the RouteRing are fed from the same `route`
+variable in `dataplane.go`. A single header-set in the router propagates
+correct labels everywhere without touching the observability layer.
+
 ### Phase 6.5 — AI traffic analysis (weeks 24–27)
 
 A streaming traffic analytics layer and ML-assisted suggestion engine,

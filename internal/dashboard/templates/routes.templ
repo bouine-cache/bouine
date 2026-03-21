@@ -5,7 +5,8 @@ import (
 	"strconv"
 )
 
-// Routes renders the per-route performance table with sparklines.
+// Routes renders the per-route performance table with sparklines,
+// followed by a per-URL drill-down showing the top-N cached paths.
 templ Routes(d RoutesData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
@@ -31,11 +32,11 @@ templ Routes(d RoutesData) {
 			<table id="route-tbl">
 				<thead>
 					<tr>
-						<th onclick="sortTable('route-tbl',0,this)">Prefix ↕</th>
-						<th onclick="sortTable('route-tbl',1,this)">Trend</th>
-						<th onclick="sortTable('route-tbl',2,this)">Requests ↕</th>
-						<th onclick="sortTable('route-tbl',3,this)">Hits ↕</th>
-						<th onclick="sortTable('route-tbl',4,this)">Hit % ↕</th>
+						<th onclick="sortTable('route-tbl',0,this)" scope="col">Route ↕</th>
+						<th onclick="sortTable('route-tbl',1,this)" scope="col">Trend</th>
+						<th onclick="sortTable('route-tbl',2,this)" scope="col">Requests ↕</th>
+						<th onclick="sortTable('route-tbl',3,this)" scope="col">Hits ↕</th>
+						<th onclick="sortTable('route-tbl',4,this)" scope="col">Hit % ↕</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -70,6 +71,46 @@ templ Routes(d RoutesData) {
 				</tbody>
 			</table>
 		</div>
+		if len(d.URLStats) > 0 {
+			<div class="tc" style="margin-top:.5rem">
+				<div class="th">
+					<span class="tl">URL drill-down</span>
+					<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">
+						{ strconv.Itoa(len(d.URLStats)) } paths · top 3 path segments
+					</span>
+				</div>
+				<table id="url-tbl">
+					<thead>
+						<tr>
+							<th onclick="sortTable('url-tbl',0,this)" scope="col">Path ↕</th>
+							<th onclick="sortTable('url-tbl',1,this)" scope="col">Route ↕</th>
+							<th onclick="sortTable('url-tbl',2,this)" scope="col">Requests ↕</th>
+							<th onclick="sortTable('url-tbl',3,this)" scope="col">Hits ↕</th>
+							<th onclick="sortTable('url-tbl',4,this)" scope="col">Hit % ↕</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, us := range d.URLStats {
+							<tr>
+								<td>{ us.URL }</td>
+								<td style="color:var(--m);font-size:.7rem">{ us.Route }</td>
+								<td data-val={ strconv.FormatInt(us.Requests, 10) }>{ strconv.FormatInt(us.Requests, 10) }</td>
+								<td data-val={ strconv.FormatInt(us.Hits, 10) }>{ strconv.FormatInt(us.Hits, 10) }</td>
+								<td data-val={ fmt.Sprintf("%.1f", us.HitPct) }>
+									if us.HitPct >= 80 {
+										<span class="lz g">{ FmtHitPct(us.HitPct) }</span>
+									} else if us.HitPct >= 50 {
+										<span class="lz y">{ FmtHitPct(us.HitPct) }</span>
+									} else {
+										<span class="lz r">{ FmtHitPct(us.HitPct) }</span>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+		}
 	}
 }
 
@@ -86,8 +127,7 @@ func sparkBarStyle(v, maxV int64) string {
 	if maxV == 0 {
 		return "height:2px"
 	}
-	h := int(float64(v) / float64(maxV) * 16)
-	h = max(h, 2)
+	h := max(int(float64(v)/float64(maxV)*16), 2)
 	return fmt.Sprintf("height:%dpx", h)
 }
 

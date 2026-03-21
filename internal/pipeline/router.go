@@ -28,6 +28,7 @@ type Router struct {
 type routeEntry struct {
 	host       string
 	pathPrefix string
+	label      string // value written to X-Bouine-Route; set by AddRoute
 	handler    http.Handler
 }
 
@@ -63,11 +64,25 @@ func NewRouter(cfg RouterConfig) *Router {
 }
 
 // AddRoute registers a route entry. host and pathPrefix may be empty
-// (match-all).
-func (rt *Router) AddRoute(host, pathPrefix string, handler http.Handler) {
+// (match-all). label is written to the X-Bouine-Route request header
+// on every matched request so downstream metrics and ring buffers receive
+// a stable, operator-visible key. An empty label defaults to
+// host:pathPrefix (or just pathPrefix when host is empty).
+func (rt *Router) AddRoute(host, pathPrefix, label string, handler http.Handler) {
+	if label == "" {
+		switch {
+		case host != "":
+			label = host + ":" + pathPrefix
+		case pathPrefix != "":
+			label = pathPrefix
+		default:
+			label = "_catch-all"
+		}
+	}
 	rt.routes = append(rt.routes, routeEntry{
 		host:       strings.ToLower(host),
 		pathPrefix: pathPrefix,
+		label:      label,
 		handler:    handler,
 	})
 }
@@ -93,6 +108,10 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if re.pathPrefix != "" && !strings.HasPrefix(r.URL.Path, re.pathPrefix) {
 			continue
 		}
+		// Set on the request before dispatching so the dataplane metrics
+		// middleware — which wraps this router and reads r.Header after
+		// ServeHTTP returns — receives the correct route label.
+		r.Header.Set("X-Bouine-Route", re.label)
 		re.handler.ServeHTTP(w, r)
 		return
 	}

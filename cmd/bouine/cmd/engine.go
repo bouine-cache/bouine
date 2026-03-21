@@ -219,7 +219,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 			JitterPercent: rc.Cache.JitterPercent,
 			StayinAlive:   rc.Cache.StayinAlive,
 		})
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, cached)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, cached)
 	}
 	return router
 }

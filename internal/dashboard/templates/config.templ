@@ -1,49 +1,124 @@
 package templates
 
-// Config renders the config-reload view with validate-first confirmation.
+import "fmt"
+
+// Config renders the config-reload view with the structured running-config viewer.
 templ Config(d ConfigData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
 			<div>
 				<h2>Config reload</h2>
-				<div class="sub">validate → confirm → apply</div>
+				<div class="sub">validate · confirm · apply — running config is never altered by parse errors</div>
 			</div>
 		</div>
 		<div class="r2">
-			<div class="bc">
-				<div class="bc-t">Runtime state</div>
-				<div class="stat-row">
-					<span class="stat-k">node</span>
-					<span class="stat-v">{ d.NodeName }</span>
+			<!-- left: running config viewer -->
+			<div class="bc" style="overflow:auto">
+				<div class="bc-t" style="display:flex;justify-content:space-between;align-items:center">
+					Current config (read-only)
+					if d.ConfigPath != "" {
+						<span style="font-size:.6rem;color:var(--m);font-family:'JetBrains Mono',monospace">
+							{ d.ConfigPath }
+							if d.LastReload != "" {
+								· { d.LastReload }
+							}
+						</span>
+					}
 				</div>
-				<div class="stat-row">
-					<span class="stat-k">snapshot path</span>
-					<span class="stat-v" style="font-size:.65rem">
-						if d.SnapshotPath != "" {
-							{ d.SnapshotPath }
-						} else {
-							disabled
+				if len(d.Sections) == 0 {
+					<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
+				}
+				for _, sec := range d.Sections {
+					<div class="cfg-section">
+						<div class="cfg-section-hd">
+							<span class="cfg-section-icon">{ sec.Icon }</span>
+							{ sec.Title }
+							if sec.Badge != "" {
+								<span class={ "cfg-badge", cfgBadgeClass(sec.BadgeKind) }>{ sec.Badge }</span>
+							}
+						</div>
+						if len(sec.Rows) > 0 {
+							<div class="cfg-grid">
+								for _, row := range sec.Rows {
+									<div class="cfg-row">
+										<span class="cfg-key">{ row.Key }</span>
+										<span class="cfg-sep">:</span>
+										<span class={ cfgValClass(row.Kind) }>{ row.Value }</span>
+										if row.Hint != "" {
+											<span class="cfg-hint">{ row.Hint }</span>
+										}
+									</div>
+								}
+							</div>
 						}
-					</span>
-				</div>
-				if d.Flash != "" {
-					<div class="flash-ok" style="margin-top:.75rem">{ d.Flash }</div>
+						if len(sec.Routes) > 0 {
+							for _, rc := range sec.Routes {
+								<div class="cfg-route">
+									<div class="cfg-route-hd">
+										<span class="cfg-route-path">{ rc.PathPrefix }</span>
+										<span class="cfg-route-pool">→ { rc.Pool }</span>
+									</div>
+									if len(rc.Rows) > 0 {
+										<div class="cfg-grid cfg-grid-dense">
+											for _, row := range rc.Rows {
+												<div class="cfg-row">
+													<span class="cfg-key">{ row.Key }</span>
+													<span class="cfg-sep">:</span>
+													<span class={ cfgValClass(row.Kind) }>{ row.Value }</span>
+												</div>
+											}
+										</div>
+									}
+								</div>
+							}
+						}
+					</div>
 				}
 			</div>
+			<!-- right: reload action -->
 			<div class="bc">
 				<div class="bc-t">Reload config</div>
-				<div style="font-size:.74rem;color:var(--m);line-height:1.7;margin-bottom:.85rem">
-					Reads config from disk, validates fully, and only applies on success.
-					The running configuration is <strong style="color:var(--t)">never affected</strong> by parse errors.
+				<div style="font-size:.75rem;color:var(--m);line-height:1.7;margin-bottom:.85rem">
+					Reads the config file from disk, runs full validation, and only applies if
+					parsing succeeds. The running configuration is <strong style="color:var(--t)">never affected</strong> by parse errors.
 				</div>
+				<div style="margin-bottom:.85rem">
+					<div class="stat-row">
+						<span class="stat-k">config path</span>
+						<span class="stat-v" style="font-size:.65rem">
+							if d.ConfigPath != "" {
+								{ d.ConfigPath }
+							} else {
+								not configured
+							}
+						</span>
+					</div>
+					<div class="stat-row">
+						<span class="stat-k">last reload</span>
+						<span class="stat-v">
+							if d.LastReload != "" {
+								{ d.LastReload }
+							} else {
+								—
+							}
+						</span>
+					</div>
+					<div class="stat-row">
+						<span class="stat-k">uptime</span>
+						<span class="stat-v">{ d.Uptime }</span>
+					</div>
+					if d.SnapshotPath != "" {
+						<div class="stat-row">
+							<span class="stat-k">snapshot path</span>
+							<span class="stat-v" style="font-size:.65rem">{ d.SnapshotPath }</span>
+						</div>
+					}
+				</div>
+				if d.Flash != "" {
+					<div class="flash-ok" style="margin-bottom:.75rem">{ d.Flash }</div>
+				}
 				<div id="reload-section">
-					<button
-						class="btn bp"
-						style="width:100%"
-						hx-post="/dashboard/config/reload"
-						hx-target="#reload-section"
-						hx-swap="innerHTML"
-					>↻ Reload config</button>
+					<button class="btn bp" style="width:100%;margin-bottom:.5rem" hx-post="/dashboard/config/reload" hx-target="#reload-section" hx-swap="innerHTML">↻ Reload config</button>
 				</div>
 				<div style="font-size:.68rem;color:var(--m);margin-top:.5rem">
 					Hot-reloadable: routes, pools, TTLs, TLS certs.<br/>
@@ -53,3 +128,30 @@ templ Config(d ConfigData) {
 		</div>
 	}
 }
+
+func cfgBadgeClass(kind string) string {
+	switch kind {
+	case "g":
+		return "cfg-badge cfg-badge-g"
+	case "y":
+		return "cfg-badge cfg-badge-y"
+	default:
+		return "cfg-badge"
+	}
+}
+
+func cfgValClass(kind string) string {
+	switch kind {
+	case "num", "dur":
+		return "cfg-num"
+	case "bool-t":
+		return "cfg-bool cfg-bool-t"
+	case "bool-f":
+		return "cfg-bool cfg-bool-f"
+	default:
+		return "cfg-str"
+	}
+}
+
+// ensure fmt is used
+var _ = fmt.Sprintf

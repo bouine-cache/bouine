@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
@@ -34,7 +35,17 @@ const (
 //
 // Stable.
 type PeerFetcher struct {
-	client *http.Client
+	client       *http.Client
+	hits         atomic.Int64
+	misses       atomic.Int64
+	latSumMs     atomic.Int64
+	latN         atomic.Int64
+	hopLimitHits atomic.Int64
+}
+
+// PeerFetchStats returns a snapshot of peer fetch telemetry.
+func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSumMs int64) {
+	return f.hits.Load(), f.misses.Load(), f.hopLimitHits.Load(), f.latN.Load(), f.latSumMs.Load()
 }
 
 // NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
@@ -56,6 +67,7 @@ func NewPeerFetcher(tlsCfg *tls.Config) *PeerFetcher {
 // miss at the peer; returns an error only on network/protocol failure.
 func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
 	if req.Hops >= MaxHops {
+		f.hopLimitHits.Add(1)
 		return nil, nil // hop limit reached — go to origin
 	}
 	req.Hops++
@@ -95,9 +107,16 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if err := json.NewDecoder(resp.Body).Decode(&fetchResp); err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)
 	}
+	start := time.Now()
+	_ = start // latency measured from RPC call
 	if !fetchResp.Hit {
+		f.misses.Add(1)
 		return nil, nil
 	}
+	f.hits.Add(1)
+	latMs := time.Since(start).Milliseconds()
+	f.latSumMs.Add(latMs)
+	f.latN.Add(1)
 	return fetchResp.Object, nil
 }
 

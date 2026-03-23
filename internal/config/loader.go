@@ -135,6 +135,21 @@ func (b *ByteSize) UnmarshalYAML(value *yaml.Node) error {
 // Bytes returns the value as a plain int64.
 func (b ByteSize) Bytes() int64 { return int64(b) }
 
+// String returns a human-readable representation of the byte size.
+func (b ByteSize) String() string {
+	v := int64(b)
+	switch {
+	case v >= 1<<30:
+		return fmt.Sprintf("%.0fGo", float64(v)/(1<<30))
+	case v >= 1<<20:
+		return fmt.Sprintf("%.0fMo", float64(v)/(1<<20))
+	case v >= 1<<10:
+		return fmt.Sprintf("%.0fKo", float64(v)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", v)
+	}
+}
+
 // byteSizeUnits maps the uppercased unit suffix to its multiplier.
 // Unknown units are rejected by parseByteSize.
 var byteSizeUnits = map[string]float64{

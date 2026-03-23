@@ -1,57 +1,130 @@
 package templates
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
 
-// Overview renders the main dashboard page with RED metrics, charts,
-// cluster peers summary, top routes, and the hot-tier utilisation card.
+	"github.com/thylong/bouine/pkg/api"
+)
+
+// Overview renders the main dashboard page.
 templ Overview(d OverviewData) {
 	@Layout(d.LayoutProps) {
-		<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;flex-shrink:0">
-			<div
-				class="r4"
-				style="flex:1;margin-bottom:0"
-				hx-get={ "/dashboard/?range=" + d.TimeRange }
-				hx-trigger="every 5s"
-				hx-swap="outerHTML"
-				hx-select=".r4"
-			>
-				<div class="mc">
-					<div class="mk">Requests / s</div>
-					<div class="mv">{ FmtReqS(d.ReqPerSec) }</div>
-					<div class="md">last 60s</div>
-				</div>
-				<div class="mc">
-					<div class="mk">Hit ratio</div>
-					<div class="mv">{ FmtHitPct(d.HitPct) }</div>
-					<div class="md">last 60s</div>
-				</div>
-				<div class="mc">
-					<div class="mk">p99 latency</div>
-					<div class="mv">{ FmtLatMs(d.P99MS) }</div>
-					<div class="md">last 60s</div>
-				</div>
-				<div class="mc">
-					<div class="mk">Error rate</div>
-					<div class="mv">{ FmtHitPct(d.ErrPct) }</div>
-					<div class="md">last 60s</div>
+		<!-- metric cards -->
+		<div
+			class="r4"
+			hx-get={ pageHref("overview", d.TimeRange) }
+			hx-trigger="every 5s"
+			hx-swap="outerHTML"
+			hx-select=".r4"
+		>
+			<div class="mc">
+				<div class="mk">Requests / s</div>
+				<div class="mv">{ FmtReqS(d.ReqPerSec) }</div>
+				<div class="md">
+					if d.TrendReq.Up {
+						<span class="good">{ d.TrendReq.Label }</span>
+					} else if d.TrendReq.Down {
+						<span class="bad">{ d.TrendReq.Label }</span>
+					} else {
+						{ d.TrendReq.Label }
+					}
 				</div>
 			</div>
-			<div style="display:flex;gap:.3rem;margin-left:.6rem;flex-shrink:0" role="group" aria-label="Time range selector">
-				@rangeBtn("1h", d.TimeRange)
-				@rangeBtn("6h", d.TimeRange)
-				@rangeBtn("24h", d.TimeRange)
+			<div class="mc">
+				<div class="mk">Hit ratio</div>
+				<div class="mv">{ FmtHitPct(d.HitPct) }</div>
+				<div class="md">
+					if d.TrendHit.Up {
+						<span class="good">{ d.TrendHit.Label }</span>
+					} else if d.TrendHit.Down {
+						<span class="bad">{ d.TrendHit.Label }</span>
+					} else {
+						{ d.TrendHit.Label }
+					}
+				</div>
+			</div>
+			<div class="mc">
+				<div class="mk">p99 latency</div>
+				<div class="mv">{ FmtLatMs(d.P99MS) }</div>
+				<div class="md">
+					if d.TrendLat.Up {
+						<span class="good">{ d.TrendLat.Label }</span>
+					} else if d.TrendLat.Down {
+						<span class="bad">{ d.TrendLat.Label }</span>
+					} else {
+						{ d.TrendLat.Label }
+					}
+				</div>
+			</div>
+			<div class="mc">
+				<div class="mk">Error rate</div>
+				<div class="mv">{ FmtHitPct(d.ErrPct) }</div>
+				<div class="md">
+					if d.TrendErr.Down {
+						<span class="bad">{ d.TrendErr.Label }</span>
+					} else if d.TrendErr.Up {
+						<span class="good">{ d.TrendErr.Label }</span>
+					} else {
+						{ d.TrendErr.Label }
+					}
+				</div>
 			</div>
 		</div>
+		<!-- charts row -->
 		<div class="r21">
 			<div class="cc">
 				<div class="ct">throughput ({ d.TimeRange })</div>
-				<div class="ch"><canvas id="c-req" aria-label="Throughput time series chart"></canvas></div>
+				<div class="ch"><canvas id="c-req" aria-label="Throughput chart"></canvas></div>
 			</div>
 			<div class="cc">
 				<div class="ct">cache split (last 60s)</div>
-				<div class="ch"><canvas id="c-split" aria-label="Cache result breakdown chart"></canvas></div>
+				<div class="ch"><canvas id="c-split" aria-label="Cache split chart"></canvas></div>
 			</div>
 		</div>
+		<!-- inline route table -->
+		<div class="tc" style="margin-bottom:.5rem;flex-shrink:0">
+			<div class="th">
+				<span class="tl">Route performance</span>
+				<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">↻ 10s · click header to sort</span>
+			</div>
+			<table id="ov-route-tbl">
+				<thead><tr>
+					<th class="sortable" onclick="sortTable('ov-route-tbl',0,this)">Prefix<span class="sort-icon"></span></th>
+					<th class="sortable" onclick="sortTable('ov-route-tbl',1,this)">Pool<span class="sort-icon"></span></th>
+					<th class="sortable desc" onclick="sortTable('ov-route-tbl',2,this)">Hit %<span class="sort-icon"></span></th>
+					<th class="sortable" onclick="sortTable('ov-route-tbl',3,this)">Req/min<span class="sort-icon"></span></th>
+					<th class="sortable" onclick="sortTable('ov-route-tbl',4,this)">TTL<span class="sort-icon"></span></th>
+					<th>Trend</th>
+				</tr></thead>
+				<tbody>
+					if len(d.RouteRows) == 0 {
+						<tr><td colspan="6" style="color:var(--m);text-align:center;padding:1rem">No traffic yet</td></tr>
+					}
+					for _, r := range d.RouteRows {
+						<tr>
+							<td>{ r.Name }</td>
+							<td style="color:var(--m)">{ r.Pool }</td>
+							<td data-val={ fmt.Sprintf("%.1f", r.HitPct) }>
+								if r.IsBypass {
+									<span class="lz d">bypass</span>
+								} else if r.HitPct >= 80 {
+									<span class="lz g">{ FmtHitPct(r.HitPct) }</span>
+								} else if r.HitPct >= 50 {
+									<span class="lz y">{ FmtHitPct(r.HitPct) }</span>
+								} else {
+									<span class="lz r">{ FmtHitPct(r.HitPct) }</span>
+								}
+							</td>
+							<td data-val={ strconv.FormatInt(r.Requests, 10) }>{ strconv.FormatInt(r.Requests, 10) }</td>
+							<td data-val="0">{ r.TTL }</td>
+							<td>@sparkline(r.Sparkline)</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+		<!-- bottom row: peers | hot+warm | ring -->
 		<div class="r3">
 			<div class="bc">
 				<div class="bc-t">Cluster peers</div>
@@ -63,10 +136,13 @@ templ Overview(d OverviewData) {
 						<div>
 							<div class="pn">{ peer.NodeName }</div>
 							<div class="pa">
+								if peer.DataAddr != "" {
+									{ peer.DataAddr } ·{ " " }
+								}
 								if peer.Stale {
 									stale
 								} else {
-									live
+									{ TimeAgo(peer.JoinedAt) }
 								}
 							</div>
 						</div>
@@ -74,95 +150,91 @@ templ Overview(d OverviewData) {
 					</div>
 				}
 			</div>
-			<div class="bc"
-				hx-get={ "/dashboard/?range=" + d.TimeRange }
-				hx-trigger="every 10s"
-				hx-swap="outerHTML"
-				hx-select=".r3 .bc:nth-child(2)"
-			>
-				<div class="bc-t">Top routes</div>
-				if len(d.RouteStats) == 0 {
-					<div style="font-size:.7rem;color:var(--m)">No data yet</div>
-				}
-				for _, rs := range d.RouteStats {
-					<div class="stat-row">
-						<span class="stat-k">{ rs.Route }</span>
-						<span class="stat-v">{ FmtHitPct(rs.HitPct) }</span>
+			<div class="bc">
+				<div class="bc-t">Hot &amp; Warm store</div>
+				<div class="stat-row">
+					<span class="stat-k">hot entries</span>
+					<span class="stat-v">{ FmtInt(int(d.HotEntries)) }</span>
+				</div>
+				<div class="tier-bar-wrap">
+					<div class="tier-bar-label">
+						<span>hot used</span>
+						<span>{ FmtBytes(d.HotBytes) } / { FmtBytes(d.HotMaxBytes) }</span>
 					</div>
-				}
+					<div class="tier-bar" role="progressbar" aria-valuenow={ fmt.Sprintf("%.0f", d.HotFillPct()) } aria-valuemin="0" aria-valuemax="100">
+						<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.HotFillPct()) }></div>
+					</div>
+				</div>
+				<div class="stat-row">
+					<span class="stat-k">warm entries</span>
+					<span class="stat-v">{ FmtInt(int(d.WarmEntries)) }</span>
+				</div>
+				<div class="tier-bar-wrap">
+					<div class="tier-bar-label">
+						<span>warm used</span>
+						<span>{ FmtBytes(d.WarmBytes) } / { FmtBytes(d.WarmMaxBytes) }</span>
+					</div>
+					<div class="tier-bar">
+						<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.WarmFillPct()) }></div>
+					</div>
+				</div>
+				<div class="stat-row" style="margin-top:.3rem">
+					<span class="stat-k">evictions / min</span>
+					<span class="stat-v">{ FmtInt(int(d.Evictions)) }</span>
+				</div>
 			</div>
 			<div class="bc">
-				<div class="bc-t">
-					Hot tier
-					if d.HotMaxBytes > 0 {
-						— { FmtBytes(d.HotBytes) } / { FmtBytes(d.HotMaxBytes) }
-					}
-				</div>
-				<div style="font-size:.72rem;color:var(--t);margin-bottom:.3rem">
-					{ fmt.Sprintf("%d entries", d.HotEntries) }
-				</div>
-				<div class="tier-bar"
-					role="progressbar"
-					aria-label="Hot-tier utilisation"
-					aria-valuenow={ fmt.Sprintf("%.0f", d.HotFillPct()) }
-					aria-valuemin="0"
-					aria-valuemax="100"
-				>
-					<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.HotFillPct()) }></div>
-				</div>
-				<div style="margin-top:.85rem">
-					<div class="bc-t">Quick purge</div>
-					<div class="fgroup" style="margin-top:.45rem">
-						<label for="qp-url" style="font-size:.62rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--m);display:block;margin-bottom:.3rem">URL</label>
-						<div class="frow" hx-target="#qp-result" hx-swap="innerHTML">
-							<input class="finput" id="qp-url" name="url" placeholder="https://example.com/path" aria-label="URL to purge"/>
-							<button
-								class="btn bp"
-								hx-post="/dashboard/api/purge"
-								hx-vals="js:{&quot;url&quot;: document.getElementById('qp-url').value}"
-								aria-label="Purge URL from cache"
-							>Purge</button>
-						</div>
-					</div>
-					<div id="qp-result" style="font-size:.7rem;color:var(--m)" aria-live="polite"></div>
-				</div>
+				<div class="bc-t">Consistent hash ring</div>
+				if len(d.RingSegs) == 0 {
+					<div style="font-size:.72rem;color:var(--m);line-height:1.6">Single-node · no ring data</div>
+				} else {
+					@compactRingSVG(d.RingSegs)
+				}
 			</div>
 		</div>
-		@overviewChartScript(d.ChartLabels, d.ChartReqs, d.ChartHits,
+		@overviewChartScript(d.ChartLabels, d.ChartReqs, d.ChartErrs,
 			d.CacheSplit.Hits, d.CacheSplit.Misses, d.CacheSplit.Stales,
 			d.CacheSplit.Bypasses, d.CacheSplit.Revalidated)
 	}
 }
 
-// rangeBtn renders one time-range selector anchor styled as a button.
-templ rangeBtn(label, active string) {
-	<a
-		href={ templ.SafeURL("/dashboard/?range=" + label) }
-		style={ rangeBtnStyle(label == active) }
-		aria-label={ label + " time range" }
-		aria-pressed={ boolStr(label == active) }
-	>{ label }</a>
+// compactRingSVG renders a 120×120 circular ring donut for the overview tile.
+templ compactRingSVG(segs []api.RingSegment) {
+	<div style="display:flex;flex-direction:column;align-items:center;gap:.4rem">
+		<svg width="120" height="120" viewBox="0 0 140 140" role="img" aria-label="Hash ring ownership">
+			<g transform="translate(70,70)">
+				<circle r="46" fill="none" stroke="var(--b)" stroke-width="14"/>
+				for _, arc := range BuildRingArcs(segs, 46) {
+					<circle r="46" fill="none" stroke={ arc.Color } stroke-width="14" stroke-dasharray={ arc.DashArray } stroke-dashoffset={ arc.DashOffset } opacity=".85">
+						<title>{ arc.NodeName } — { arc.PctLabel }</title>
+					</circle>
+					<text x={ fmt.Sprintf("%.1f", arc.LabelX) } y={ fmt.Sprintf("%.1f", arc.LabelY) } text-anchor="middle" fill={ arc.Color } font-size="8" font-family="JetBrains Mono,monospace" font-weight="700">{ shortName(arc.NodeName) }</text>
+				}
+				<text x="0" y="4" text-anchor="middle" fill="var(--m)" font-size="8" font-family="JetBrains Mono,monospace">ring</text>
+			</g>
+		</svg>
+		<div class="ring-legend">
+			for i, seg := range segs {
+				<span>
+					<span class="ring-legend-dot" style={ ringDotStyle(i) }></span>
+					<span style="color:var(--m);font-size:.65rem">{ seg.NodeName } · { fmt.Sprintf("%.0f%%", seg.Frac*100) }</span>
+				</span>
+			}
+		</div>
+	</div>
 }
 
-func rangeBtnStyle(isActive bool) string {
-	base := "padding:.18rem .5rem;border:1px solid var(--b);background:transparent;font-size:.68rem;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;text-decoration:none;"
-	if isActive {
-		return base + "border-color:var(--a2);color:var(--a);"
+func shortName(name string) string {
+	if len(name) > 6 {
+		return name[:3] + "…"
 	}
-	return base + "color:var(--m);"
-}
-
-func boolStr(v bool) string {
-	if v {
-		return "true"
-	}
-	return "false"
+	return name
 }
 
 script overviewChartScript(
 	labels []string,
 	reqs []int64,
-	hits []int64,
+	errs []int64,
 	splitHits int64,
 	splitMisses int64,
 	splitStales int64,
@@ -172,14 +244,16 @@ script overviewChartScript(
 	var d=document.documentElement.getAttribute('data-theme')!=='light';
 	var gc={color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'};
 	var tc={color:d?'#6050a0':'#9ca3af',font:{size:9}};
-	new Chart(document.getElementById('c-req'),{type:'line',data:{labels:labels,datasets:[
+	if(window._cReq){window._cReq.destroy();}
+	if(window._cSplit){window._cSplit.destroy();}
+	window._cReq=new Chart(document.getElementById('c-req'),{type:'line',data:{labels:labels,datasets:[
 		{label:'req/s',data:reqs,borderColor:d?'#c4b5fd':'#5b21b6',backgroundColor:d?'rgba(196,181,253,.07)':'rgba(91,33,182,.05)',fill:true,tension:.4,pointRadius:0,borderWidth:1.5},
-		{label:'hits',data:hits,borderColor:d?'#34d399':'#059669',backgroundColor:'transparent',tension:.4,pointRadius:0,borderWidth:1},
+		{label:'errors',data:errs,borderColor:d?'#fb7185':'#e11d48',backgroundColor:'transparent',tension:.4,pointRadius:0,borderWidth:1},
 	]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9}}}},scales:{x:{grid:gc,ticks:{color:tc.color,font:tc.font,maxTicksLimit:8}},y:{grid:gc,ticks:{color:tc.color,font:tc.font}}}}});
 	var splitColors=d?['#c4b5fd','#6050a0','#fbbf24','#fb7185','#34d399']:['#5b21b6','#a78bfa','#b45309','#e11d48','#059669'];
-	new Chart(document.getElementById('c-split'),{
+	window._cSplit=new Chart(document.getElementById('c-split'),{
 		type:'doughnut',
-		data:{labels:['HIT','MISS','STALE','BYPASS','REVALIDATED'],datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]},
-		options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:5}}},cutout:'65%'}
+		data:{labels:['HIT','MISS','STALE','BYP','REVAL'],datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]},
+		options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:5}}},cutout:'70%'}
 	});
 }

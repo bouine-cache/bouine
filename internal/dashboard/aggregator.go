@@ -65,20 +65,23 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 		peers = a.peersFn()
 	}
 
+	// Members() includes self, so we separate self from remote peers.
+	// We always fan-out to non-self peers and inject the local rings
+	// summary directly (no network call for self).
 	nonSelf := 0
 	for _, p := range peers {
 		if p.AdminAddr != a.selfAddr && p.Name != a.rings.NodeName {
 			nonSelf++
 		}
 	}
-	total := nonSelf + 1
+	total := nonSelf + 1 // non-self peers + local rings
 
 	ch := make(chan fetchResult, total)
 	ch <- fetchResult{summary: a.rings.Summary()}
 
 	for _, p := range peers {
 		if p.AdminAddr == a.selfAddr || p.Name == a.rings.NodeName {
-			continue
+			continue // handled via local rings above
 		}
 		go func(peer api.PeerInfo) {
 			sum, err := a.fetchPeer(ctx, peer)

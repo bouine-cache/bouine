@@ -17,10 +17,15 @@ templ Cluster(d ClusterData) {
 				<div class="sub">gossip membership · consistent hash ring · peer fetch</div>
 			</div>
 		</div>
-		<div class="r21" style="margin-bottom:.6rem">
+		<div id="cluster-r21" class="r21" style="margin-bottom:.6rem"
+			hx-get="/dashboard/cluster"
+			hx-trigger="every 10s"
+			hx-swap="outerHTML"
+			hx-select="#cluster-r21"
+		>
 			<div class="bc">
 				<div class="bc-t">Peer nodes</div>
-				<table hx-get="/dashboard/cluster" hx-trigger="every 10s" hx-swap="outerHTML" hx-select=".r21">
+				<table>
 					<thead>
 						<tr>
 							<th scope="col">Node</th>

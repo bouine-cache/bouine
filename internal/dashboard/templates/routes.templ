@@ -144,8 +144,8 @@ script routeChartsScript(routes []string, hits []float64, reqs []int64) {
 	// Fix explicit canvas px size before Chart.js touches them.
 	// responsive:false + manual sizing prevents the ResizeObserver feedback
 	// loop that caused the canvas to grow on every htmx swap.
-	// Absolutely-position canvas inside position:relative .ch so Chart.js fills
-	// it via CSS (responsive:true) without ever driving the container height.
+	// rAF ensures flex layout has settled before Chart.js measures .ch clientHeight.
+	requestAnimationFrame(function(){
 	[cHitEl,cReqEl].forEach(function(c){
 		c.removeAttribute('height');c.removeAttribute('width');
 		c.style.position='absolute';c.style.top='0';c.style.left='0';
@@ -156,6 +156,7 @@ script routeChartsScript(routes []string, hits []float64, reqs []int64) {
 	var axGrid={color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'};
 	window._cRHit=new Chart(cHitEl,{type:'bar',data:{labels:routes,datasets:[{data:hits,backgroundColor:colors,borderRadius:4}]},options:Object.assign({},baseOpts,{scales:{x:{grid:{display:false},ticks:axTick},y:{max:100,grid:axGrid,ticks:axTick}}})});
 	window._cRReq=new Chart(cReqEl,{type:'bar',data:{labels:routes,datasets:[{data:reqs,backgroundColor:colors,borderRadius:4}]},options:Object.assign({},baseOpts,{scales:{x:{grid:{display:false},ticks:axTick},y:{grid:axGrid,ticks:axTick}}})});
+	});// end rAF
 }
 
 func routeNames(rows []RouteRow) []string {

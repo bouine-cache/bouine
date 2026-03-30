@@ -63,6 +63,8 @@ type Config struct {
 	// DashboardHandler, if non-nil, is mounted at /dashboard/ outside the
 	// bearer-token middleware; the dashboard manages its own session-cookie auth.
 	DashboardHandler http.Handler
+	// FaviconHandler, if non-nil, serves /favicon/* assets (no auth required).
+	FaviconHandler http.Handler
 }
 
 // Server is the admin HTTP server with lifecycle methods matching the
@@ -131,6 +133,13 @@ func New(cfg Config) *Server {
 	if cfg.DashboardHandler != nil {
 		outerMux := http.NewServeMux()
 		outerMux.Handle("/dashboard/", cfg.DashboardHandler)
+		// Favicon assets and webmanifest — no auth required so browsers can fetch them.
+		if cfg.FaviconHandler != nil {
+			outerMux.Handle("/favicon/", cfg.FaviconHandler)
+			outerMux.HandleFunc("/favicon.ico", faviconRedirect)
+			outerMux.HandleFunc("/apple-touch-icon.png", appleTouchRedirect)
+			outerMux.HandleFunc("/site.webmanifest", manifestRedirect)
+		}
 		outerMux.Handle("/", topHandler)
 		topHandler = outerMux
 	}
@@ -314,6 +323,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// faviconRedirect, appleTouchRedirect, manifestRedirect are convenience
+// handlers that redirect root-level browser requests to /favicon/*.
+func faviconRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/favicon/favicon.ico", http.StatusMovedPermanently)
+}
+
+func appleTouchRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/favicon/apple-touch-icon.png", http.StatusMovedPermanently)
+}
+
+func manifestRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/favicon/site.webmanifest", http.StatusMovedPermanently)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

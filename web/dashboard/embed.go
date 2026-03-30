@@ -6,11 +6,11 @@ import (
 	"net/http"
 )
 
-//go:embed favicon
-var faviconFS embed.FS
+//go:embed favicon logo.png logo-white.png
+var staticFS embed.FS
 
 // FaviconHandler returns an http.Handler that serves all favicon assets.
 // Mount it at /favicon/ on the admin mux.
 func FaviconHandler() http.Handler {
-	return http.FileServer(http.FS(faviconFS))
+	return http.FileServer(http.FS(staticFS))
 }

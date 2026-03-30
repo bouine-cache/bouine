@@ -52,7 +52,7 @@ func Layout(props LayoutProps) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</head><body hx-boost=\"true\"><div id=\"bouine-tint\" aria-hidden=\"true\"></div><canvas id=\"bouine-noise\" aria-hidden=\"true\"></canvas><aside aria-label=\"Sidebar\"><div class=\"logo\" aria-label=\"bouine dashboard\"><div class=\"logo-gem\" aria-hidden=\"true\">🐟</div><div><div class=\"logo-name\">bouine</div><div class=\"logo-v\">v1.0-rc</div></div></div><nav role=\"navigation\" aria-label=\"Main navigation\"><div class=\"ng\" aria-hidden=\"true\">Monitor</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</head><body hx-boost=\"true\"><div id=\"bouine-tint\" aria-hidden=\"true\"></div><canvas id=\"bouine-noise\" aria-hidden=\"true\"></canvas><aside aria-label=\"Sidebar\"><div class=\"logo\" aria-label=\"bouine dashboard\"><img src=\"/logo-white.png\" alt=\"bouine\" class=\"logo-img\" id=\"bouine-logo\"><div><div class=\"logo-name\">bouine</div><div class=\"logo-v\">v1.0-rc</div></div></div><nav role=\"navigation\" aria-label=\"Main navigation\"><div class=\"ng\" aria-hidden=\"true\">Monitor</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -653,7 +653,7 @@ func Layout(props LayoutProps) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 69, "</div></main><button class=\"tog\" aria-label=\"Toggle colour theme\" onclick=\"(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙 dark':'☀ light';})(this)\">☀ light</button>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 69, "</div></main><button class=\"tog\" aria-label=\"Toggle colour theme\" onclick=\"(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙 dark':'☀ light';var lg=document.getElementById('bouine-logo');if(lg)lg.src=next==='light'?'/logo.png':'/logo-white.png';})(this)\">☀ light</button>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

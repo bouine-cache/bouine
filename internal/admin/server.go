@@ -139,6 +139,8 @@ func New(cfg Config) *Server {
 			outerMux.HandleFunc("/favicon.ico", faviconRedirect)
 			outerMux.HandleFunc("/apple-touch-icon.png", appleTouchRedirect)
 			outerMux.HandleFunc("/site.webmanifest", manifestRedirect)
+			outerMux.Handle("/logo.png", cfg.FaviconHandler)
+			outerMux.Handle("/logo-white.png", cfg.FaviconHandler)
 		}
 		outerMux.Handle("/", topHandler)
 		topHandler = outerMux

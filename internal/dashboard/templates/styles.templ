@@ -11,8 +11,9 @@ templ Styles() {
 		body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t);min-height:100vh;display:flex;font-size:13px;transition:background .25s,color .25s;position:relative;overflow:hidden}
 		aside{width:180px;background:var(--s);border-right:1px solid var(--b);padding:0;display:flex;flex-direction:column;flex-shrink:0;position:relative;z-index:1;height:100vh}
 		.logo{padding:.85rem 1rem;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:.55rem}
-		.logo-gem{width:28px;height:28px;border-radius:7px;background:linear-gradient(135deg,var(--a3),var(--a2));display:flex;align-items:center;justify-content:center;font-size:.8rem;flex-shrink:0}
-		html[data-theme="dark"] .logo-gem{box-shadow:0 0 10px var(--pg)}
+		.logo-gem{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+		.logo-img{width:28px;height:28px;border-radius:7px;object-fit:contain;flex-shrink:0}
+		html[data-theme="dark"] .logo-img{filter:drop-shadow(0 0 6px var(--pg))}
 		.logo-name{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.82rem;letter-spacing:.04em;color:var(--a)}
 		.logo-v{font-size:.6rem;color:var(--m);margin-top:.1rem}
 		nav{padding:.5rem 0;flex:1}

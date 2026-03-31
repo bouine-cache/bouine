@@ -142,14 +142,14 @@ script routeChartsScript(routes []string, hits []float64, reqs []int64) {
 	var cReqEl=document.getElementById('c-routes-req');
 	if(!cHitEl||!cReqEl)return;
 	// Fix explicit canvas px size before Chart.js touches them.
-	// responsive:false + manual sizing prevents the ResizeObserver feedback
-	// loop that caused the canvas to grow on every htmx swap.
-	// rAF ensures flex layout has settled before Chart.js measures .ch clientHeight.
+	// .r2 has a fixed height:200px so .ch is already bounded — absolute
+	// positioning conflicts with Chart.js overriding canvas.style.width in px,
+	// causing the first chart to overflow its grid column. Reset any stale
+	// inline styles and let Chart.js measure the naturally-bounded container.
 	requestAnimationFrame(function(){
 	[cHitEl,cReqEl].forEach(function(c){
 		c.removeAttribute('height');c.removeAttribute('width');
-		c.style.position='absolute';c.style.top='0';c.style.left='0';
-		c.style.right='0';c.style.bottom='0';c.style.width='100%';c.style.height='100%';
+		c.style.cssText='';
 	});
 	var baseOpts={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}};
 	var axTick={color:d?'#6050a0':'#9ca3af',font:{size:9}};

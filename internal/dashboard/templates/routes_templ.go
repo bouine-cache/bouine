@@ -522,8 +522,8 @@ func Routes(d RoutesData) templ.Component {
 
 func routeChartsScript(routes []string, hits []float64, reqs []int64) templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_routeChartsScript_4609`,
-		Function: `function __templ_routeChartsScript_4609(routes, hits, reqs){var d=document.documentElement.getAttribute('data-theme')!=='light';
+		Name: `__templ_routeChartsScript_f94d`,
+		Function: `function __templ_routeChartsScript_f94d(routes, hits, reqs){var d=document.documentElement.getAttribute('data-theme')!=='light';
 	var colors=d?['#c4b5fd','#8b5cf6','#6d28d9','#a78bfa','#6050a0']:['#5b21b6','#7c3aed','#a78bfa','#4c1d95','#8b7ab8'];
 	try{if(window._cRHit)window._cRHit.destroy();}catch(e){}
 	try{if(window._cRReq)window._cRReq.destroy();}catch(e){}
@@ -531,14 +531,14 @@ func routeChartsScript(routes []string, hits []float64, reqs []int64) templ.Comp
 	var cReqEl=document.getElementById('c-routes-req');
 	if(!cHitEl||!cReqEl)return;
 	// Fix explicit canvas px size before Chart.js touches them.
-	// responsive:false + manual sizing prevents the ResizeObserver feedback
-	// loop that caused the canvas to grow on every htmx swap.
-	// rAF ensures flex layout has settled before Chart.js measures .ch clientHeight.
+	// .r2 has a fixed height:200px so .ch is already bounded — absolute
+	// positioning conflicts with Chart.js overriding canvas.style.width in px,
+	// causing the first chart to overflow its grid column. Reset any stale
+	// inline styles and let Chart.js measure the naturally-bounded container.
 	requestAnimationFrame(function(){
 	[cHitEl,cReqEl].forEach(function(c){
 		c.removeAttribute('height');c.removeAttribute('width');
-		c.style.position='absolute';c.style.top='0';c.style.left='0';
-		c.style.right='0';c.style.bottom='0';c.style.width='100%';c.style.height='100%';
+		c.style.cssText='';
 	});
 	var baseOpts={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}};
 	var axTick={color:d?'#6050a0':'#9ca3af',font:{size:9}};
@@ -547,8 +547,8 @@ func routeChartsScript(routes []string, hits []float64, reqs []int64) templ.Comp
 	window._cRReq=new Chart(cReqEl,{type:'bar',data:{labels:routes,datasets:[{data:reqs,backgroundColor:colors,borderRadius:4}]},options:Object.assign({},baseOpts,{scales:{x:{grid:{display:false},ticks:axTick},y:{grid:axGrid,ticks:axTick}}})});
 	});// end rAF
 }`,
-		Call:       templ.SafeScript(`__templ_routeChartsScript_4609`, routes, hits, reqs),
-		CallInline: templ.SafeScriptInline(`__templ_routeChartsScript_4609`, routes, hits, reqs),
+		Call:       templ.SafeScript(`__templ_routeChartsScript_f94d`, routes, hits, reqs),
+		CallInline: templ.SafeScriptInline(`__templ_routeChartsScript_f94d`, routes, hits, reqs),
 	}
 }
 

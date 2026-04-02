@@ -49,6 +49,11 @@ type Listen struct {
 	HTTP3   string `yaml:"http3"`
 	Admin   string `yaml:"admin"`
 	Cluster string `yaml:"cluster"`
+	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the HTTP and
+	// HTTPS listeners. Required when bouine sits behind an L4 load-balancer
+	// (e.g. AWS NLB, HAProxy) that prepends a PROXY header so the real
+	// client IP is visible in access logs and the request's RemoteAddr.
+	ProxyProtocol bool `yaml:"proxy_protocol"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are
@@ -149,6 +154,10 @@ type ConnectPolicy struct {
 	Timeout        time.Duration `yaml:"timeout"`
 	KeepAlive      time.Duration `yaml:"keep_alive"`
 	MaxConnections int           `yaml:"max_connections"`
+	// HedgeTimeout fires a duplicate request to the same pool when the
+	// primary does not respond within this duration. Zero disables hedging.
+	// Only applies to idempotent methods (GET, HEAD, OPTIONS).
+	HedgeTimeout time.Duration `yaml:"hedge_timeout"`
 }
 
 // Route declares a host/path match and its per-request behaviour.

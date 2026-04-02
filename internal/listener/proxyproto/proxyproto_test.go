@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -136,4 +137,99 @@ func TestNoHeader(t *testing.T) {
 	if h.Version != 0 {
 		t.Fatalf("expected no header, got %+v", h)
 	}
+}
+
+// pipe returns two connected net.Conn pairs using net.Pipe.
+func pipe(t *testing.T) (client, server net.Conn) {
+	t.Helper()
+	c, s := net.Pipe()
+	t.Cleanup(func() { _ = c.Close(); _ = s.Close() })
+	return c, s
+}
+
+func TestConn_V1RemoteAddr(t *testing.T) {
+	client, raw := pipe(t)
+	conn := newConn(raw)
+
+	// Write PROXY header + payload from the client side.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.WriteString(client, "PROXY TCP4 1.2.3.4 5.6.7.8 1000 80\r\nHELLO")
+	}()
+
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	if string(buf) != "HELLO" {
+		t.Fatalf("payload = %q, want HELLO", buf)
+	}
+
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() != "1.2.3.4" {
+		t.Fatalf("RemoteAddr IP = %s, want 1.2.3.4", addr.IP)
+	}
+	if addr.Port != 1000 {
+		t.Fatalf("RemoteAddr Port = %d, want 1000", addr.Port)
+	}
+	<-done
+}
+
+func TestConn_NoHeader_FallsThrough(t *testing.T) {
+	client, raw := pipe(t)
+	conn := newConn(raw)
+
+	go func() { _, _ = io.WriteString(client, "GET / HTTP/1.1\r\n") }()
+
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf) != "GET " {
+		t.Fatalf("first bytes = %q, want GET ", buf)
+	}
+	// RemoteAddr should fall through to the raw connection.
+	if conn.RemoteAddr() == nil {
+		t.Fatal("RemoteAddr is nil")
+	}
+}
+
+func TestListener_AcceptsProxyConn(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	pl := NewListener(ln)
+	t.Cleanup(func() { _ = pl.Close() })
+
+	dialDone := make(chan struct{})
+	go func() {
+		defer close(dialDone)
+		c, dErr := net.Dial("tcp", pl.Addr().String())
+		if dErr != nil {
+			return
+		}
+		_, _ = io.WriteString(c, "PROXY TCP4 9.9.9.9 1.1.1.1 5555 80\r\nDATA")
+		_ = c.Close()
+	}()
+
+	conn, err := pl.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	if string(buf) != "DATA" {
+		t.Fatalf("payload = %q, want DATA", buf)
+	}
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() != "9.9.9.9" {
+		t.Fatalf("RemoteAddr = %s, want 9.9.9.9", addr.IP)
+	}
+	<-dialDone
 }

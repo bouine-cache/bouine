@@ -153,3 +153,63 @@ func TestTiered_EphemeralMode(t *testing.T) {
 		t.Fatalf("ephemeral mode should have 0 warm entries, got %d", st.WarmEntries)
 	}
 }
+
+// TestTiered_WarmGet verifies that an object written to the warm tier
+// is readable after it has been evicted from the hot tier, and that
+// reopening the store with WAL replay restores the index so a Get
+// succeeds without a hot-tier entry.
+func TestTiered_WarmGet(t *testing.T) {
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	newStore := func() *TieredStore {
+		ts, err := NewTieredStore(TieredConfig{
+			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:        walPath,
+			BodyThreshold: 512, // large objects (>512 B) go to warm tier
+		})
+		if err != nil {
+			t.Fatalf("NewTieredStore: %v", err)
+		}
+		return ts
+	}
+
+	// Write a large object that crosses the threshold.
+	ts1 := newStore()
+	k := KeyHash([]byte("warm-get-key"))
+	obj := bigObj(k, 1024)
+	if err := ts1.Put(ctx, k, obj); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// Warm entry must be present.
+	if st := ts1.Stats(); st.WarmEntries == 0 {
+		t.Fatal("expected warm entry after Put")
+	}
+	// Delete from hot tier so next Get must fall through to warm.
+	if err := ts1.hot.Delete(ctx, k); err != nil {
+		t.Fatalf("hot delete: %v", err)
+	}
+	got, err := ts1.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get after hot eviction: %v", err)
+	}
+	if got == nil || got.StatusCode != 200 {
+		t.Fatalf("expected object from warm tier, got %v", got)
+	}
+	_ = ts1.Close(ctx)
+
+	// Reopen: WAL replay must restore the index so warm Get still works.
+	ts2 := newStore()
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+	// Hot tier is empty after reopen.
+	got2, err := ts2.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if got2 == nil || got2.StatusCode != 200 {
+		t.Fatalf("expected object from warm tier after reopen, got %v", got2)
+	}
+}

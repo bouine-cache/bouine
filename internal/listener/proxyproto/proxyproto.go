@@ -23,6 +23,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var (
@@ -176,4 +177,85 @@ func readFull(br *bufio.Reader, buf []byte) error {
 		}
 	}
 	return nil
+}
+
+// Conn wraps a net.Conn and transparently parses a PROXY protocol
+// header from the first bytes of the stream. RemoteAddr returns the
+// client address reported by the header when present; otherwise it
+// falls through to the underlying connection.
+//
+// Stable.
+type Conn struct {
+	net.Conn
+	br      *bufio.Reader
+	src     net.Addr
+	once    sync.Once
+	initErr error
+}
+
+func newConn(c net.Conn) *Conn {
+	return &Conn{
+		Conn: c,
+		br:   bufio.NewReaderSize(c, 128),
+	}
+}
+
+func (c *Conn) doInit() {
+	hdr, err := ReadHeader(c.br)
+	if err != nil {
+		c.initErr = err
+		return
+	}
+	if hdr.Version > 0 && hdr.SrcAddr != nil {
+		c.src = &net.TCPAddr{IP: hdr.SrcAddr, Port: hdr.SrcPort}
+	}
+}
+
+// Read parses the PROXY header on the first call, then delegates to
+// the buffered reader so no bytes consumed during header detection
+// are lost.
+func (c *Conn) Read(b []byte) (int, error) {
+	c.once.Do(c.doInit)
+	if c.initErr != nil {
+		return 0, c.initErr
+	}
+	return c.br.Read(b)
+}
+
+// RemoteAddr returns the source address from the PROXY header when
+// one is present; otherwise returns the underlying connection address.
+// Note: the first call blocks briefly if bytes are not yet in the
+// TCP buffer (the upstream load-balancer should send the header
+// immediately on connect).
+func (c *Conn) RemoteAddr() net.Addr {
+	c.once.Do(c.doInit)
+	if c.src != nil {
+		return c.src
+	}
+	return c.Conn.RemoteAddr()
+}
+
+// Listener wraps a net.Listener so every accepted connection
+// transparently parses a PROXY protocol v1/v2 header.
+// Insert it before tls.NewListener so the header is consumed from
+// the raw TCP bytes, not the TLS payload.
+//
+// Stable.
+type Listener struct {
+	net.Listener
+}
+
+// NewListener wraps ln with PROXY protocol parsing.
+func NewListener(ln net.Listener) *Listener {
+	return &Listener{Listener: ln}
+}
+
+// Accept returns a *Conn that parses the PROXY header on the first
+// read or RemoteAddr call.
+func (l *Listener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return newConn(c), nil
 }

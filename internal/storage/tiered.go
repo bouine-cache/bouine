@@ -75,17 +75,57 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 			return nil, err
 		}
 		ts.wal = l
+
+		// Replay WAL to rebuild the warm-tier in-memory index so
+		// Get() can locate objects on disk without a full segment scan.
+		if ts.warm != nil {
+			if rErr := wal.Replay(cfg.WALDir, func(e wal.Entry) error {
+				switch {
+				case e.IsPut():
+					ts.warm.SetIndex(e.Key, int(e.SegID), e.Offset)
+				case e.IsDelete():
+					ts.warm.DelIndex(e.Key)
+				}
+				return nil
+			}); rErr != nil {
+				// Non-fatal: an empty or absent WAL is fine (fresh start).
+				ts.logger.Warn("wal replay failed; warm-tier index may be incomplete",
+					"error", rErr)
+			}
+		}
 	}
 
 	return ts, nil
 }
 
-// Get looks up the hot tier first. If the object is not in the hot
-// tier but the warm tier is available, it is not fetched from disk
-// on a cold read path in phase 2. Warm-tier lookups will be added
-// in phase 3 when the cache engine drives revalidation.
+// Get looks up the hot tier first. On a miss, the warm tier is
+// consulted and the object is promoted back into the hot tier so
+// the next hit is served from RAM.
 func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error) {
-	return t.hot.Get(ctx, key)
+	obj, err := t.hot.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if obj != nil {
+		return obj, nil
+	}
+	if t.warm == nil {
+		return nil, nil
+	}
+	body, wErr := t.warm.Get(uint64(key))
+	if wErr != nil {
+		return nil, wErr
+	}
+	if body == nil {
+		return nil, nil
+	}
+	var loaded api.Object
+	if jsonErr := json.Unmarshal(body, &loaded); jsonErr != nil {
+		return nil, jsonErr
+	}
+	// Promote to hot tier (best-effort: ignore error).
+	_ = t.hot.Put(ctx, key, &loaded)
+	return &loaded, nil
 }
 
 // Put stores an object in the hot tier and, for large objects, also

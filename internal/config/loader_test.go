@@ -68,7 +68,7 @@ listen:
   admin: ":9000"
 storage:
   hot_max_bytes: 2Go
-  warm_max_bytes: 50Go
+  warm_max_bytes: 20Go
 upstream_pools:
   - name: app
     targets: [app.local:8080]

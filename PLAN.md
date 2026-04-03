@@ -113,7 +113,7 @@ dependencies for a surface that serves ≤ 10 RPS.
 /internal/admin              L7 — net/http admin: purge, ban, config, dash
 /internal/observability      L8 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
-/internal/ai                 L9 — traffic analytics (phase 6.5)
+/internal/ai                 L9 — traffic analytics (phase 8)
 /internal/vcl                VCL-compatible shim (deferred — see §18)
 /web/dashboard               L9 — HTMX dashboard templates (phase 6)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
@@ -477,7 +477,7 @@ storage:
   warm_dir:        /var/lib/bouine     # encryption-at-rest delegated to the
                                        # cloud provider (EBS/PD/Azure Disk).
                                        # bouine never encrypts the warm tier.
-  warm_max_bytes:  50Go
+  warm_max_bytes:  20Go
   eviction:        sieve     # or "w-tinylfu"
 
 cluster:
@@ -851,142 +851,154 @@ in phase 5 starts until this passes.
 - **Exit:** prefetch hit-ratio uplift demonstrated on a synthetic workload;
   cache-tests parity maintained.
 
-### Phase 7 — Simplification & complexity reduction (week 19–20)
+### Phase 7 — Simplification & complexity reduction
 
 A dedicated engineering pass to eliminate dead code, reduce
-over-engineering, consolidate duplicated patterns, and wire unwired
-but production-ready packages. No new features. No scope creep.
+over-engineering, consolidate duplicated patterns, and complete
+missing production wiring. No new features. No scope creep.
 The goal is a codebase that a new contributor can orient in under
-an hour.
+an hour and that has no orphaned code silently doing nothing.
 
-**Dead code removal (5 items):**
+**Status:** Partially complete. Commit `ab3e411` wired
+`HedgedTransport`, `config.Watcher`, `proxyproto.Listener`, and
+`TieredStore` (4 of 7 unwired-package items). The items below are
+the confirmed remainder after auditing the live codebase.
 
-- Remove `StreamBody` (`internal/origin/pool.go:216`) — speculative
-  export never called anywhere; reimplemented properly in phase 5
-  when body streaming lands.
-- Remove `ErrUnsupportedKey` (`internal/testutil/tlsutil:139`) —
-  exported error var defined but never returned by any function.
-- Remove `VaryConfig` struct (`internal/cache/vary.go:14`) — defined
-  for future route-level Vary configuration but never consumed by any
-  caller.
-- Enforce or remove `MaxVariants` const (`internal/cache/vary.go:23`)
-  — either wire the cap into the cache handler (preferred: reject
-  storage when variant count per primary key exceeds 64) or remove;
-  a constant that is never read is worse than no constant.
-- Remove `formatHex` (`internal/cache/key.go:170`) — custom hex
-  formatter used only by `BuildVaryKey` which can call
-  `strconv.FormatUint(h, 16)` directly.
+---
 
-**Unwired production packages (7 packages with 0 external callers):**
+#### 7.1 Remaining unwired packages (3 items)
 
-Each must be wired end-to-end and tested, or removed. No orphaned
-packages may remain.
+- **`internal/listener/h3.go` — HTTP/3 integration test missing.**
+  `engine.startListeners` references `H3Server` and it compiles, but
+  there is no CI test that actually makes an HTTP/3 request through
+  a running server. Add an integration scenario in
+  `test/integration/` that dials via QUIC and confirms a 200 is
+  returned through the H3 path.
 
-- `internal/storage/tiered.go` (`TieredStore`, 159 LOC) — built for
-  hot + warm tier integration but `engine.go` uses `HotStore`
-  directly. Wire `TieredStore` into the serve command (correct choice
-  — warm tier + WAL exist and are tested) so the warm tier actually
-  runs in production.
-- `internal/origin/hedge.go` (`HedgedTransport`, 73 LOC) — exists
-  and is tested but never plugged into the origin pool's `Handler()`.
-  Wire via pool config when `pool.connect.hedge_timeout` is set;
-  remove if hedged requests are deferred past v1.0.
-- `internal/listener/proxyproto` (179 LOC) — parser exists and
-  passes test vectors but listeners never wrap connections with it.
-  Wire into listener construction when `listen.proxy_protocol: true`
-  is configured.
-- `internal/listener/h3.go` (`H3Server`, 94 LOC) — compiled but
-  `engine.startListeners` already references it; verify it runs in CI
-  by adding an HTTP/3 integration test.
-- `internal/config/reload.go` (`Watcher`, 157 LOC) — built in phase
-  4 but never started as a supervised goroutine in `engine.run`. Wire
-  it alongside a SIGHUP integration test.
-- `internal/cluster/broadcast.go` (`Broadcaster`, 115 LOC) — exists
-  but `post()` method is a stub (does not actually send HTTP). Wire
-  the POST implementation and test with the 3-node cluster.
-- `internal/testutil/tlsutil` (139 LOC) — only imported from test
-  files; acceptable as-is, but `ErrUnsupportedKey` should be removed.
+- **`internal/cluster/broadcast.go` — `post()` stub never sends HTTP.**
+  `Broadcaster.post()` is declared but its HTTP call is a stub;
+  cluster purge/ban broadcast silently drops messages in production.
+  Implement the outbound HTTP POST (reuse the existing
+  `http.DefaultClient` pattern from the peer-metrics aggregator),
+  add a test with an `httptest.Server` peer, and add a Prometheus
+  counter for broadcast failures.
 
-**Structural de-duplication (3 items):**
+- **`MaxVariants` cap in `internal/cache/vary.go` — constant is never
+  enforced.** `MaxVariants = 64` is defined and documented but
+  `cache.Handler` never checks the variant count before calling
+  `store.Put`. Wire the check: before storing a new variant, count
+  existing variants for the primary key via `store.Get`; if count ≥
+  `MaxVariants`, log a warning, increment a
+  `bouine_vary_cap_hits_total` counter, and skip the Put.
 
-- Consolidate `statusWriter` (`internal/observability/accesslog`) and
-  `metricsWriter` (`internal/observability/dataplane.go`) into a
-  single shared `responseWriter` middleware. Two nearly-identical
-  response-writer wrappers are chained on every request, each
-  capturing status + bytes. One wrapper should do both.
-- `responseRecorder` in `internal/cache/handler.go` is allocated
-  twice per miss (lines 248 and 283). Pool via `sync.Pool` and reset
-  on put. On the hit path no recorder should be created at all
-  (already the case, but verify with a benchmark assertion).
-- `internal/cache/vary.go:ServeRange` (~80 lines) partially
-  duplicates `http.ServeContent`. Evaluate delegating to stdlib; keep
-  custom only if the stdlib path forces a full body buffer.
+---
 
-**Over-engineering / unnecessary complexity (5 items):**
+#### 7.2 Dead code removal (3 items confirmed present)
 
-- `cmd/bouine/cmd/engine.go` imports 12 internal packages — the
-  highest fan-in in the codebase. Extract the pool/router/store
-  wiring into a `builder` type to reduce the function surface visible
-  in `run()`.
-- `internal/config/config.go` is 204 LOC of pure struct definitions
-  with no methods. Consider generating the YAML tags from a schema
-  or splitting into `listen.go`, `storage.go`, `routes.go` for
-  discoverability.
-- `internal/cache/engine.go` grew to 422 LOC with `IsCacheable`,
-  `isCacheBlocked`, `isBlockedByPragma`, `hasVaryStar`,
-  `isBlockedBySetCookie`, `parseOriginAge`, `mergeHeaderValues`,
-  `ClientConditionalMatch`, `etagMatch`, `quoteETag`,
-  `parseHTTPDate`, `validHTTPTimeField`, `normalizeTZ`,
-  `HeuristicTTL`, `ComputeAge`, `MergeHeaders304`,
-  `ConditionalHeaders` — 17 exported+unexported functions in one
-  file. Split into `engine.go` (state machine only), `cacheable.go`
-  (storage eligibility), `conditional.go` (304/revalidation), and
-  `httpdate.go` (date parsing).
-- `internal/admin/server.go` purge handler uses a hand-rolled hash
-  (`h = h*31 + uint64(c)`) instead of `cache.BuildKey`. Replace with
-  the canonical key builder so purge-by-URL produces the same key as
-  cache lookup.
-- `context.TODO()` used in 2 production closures
-  (`engine.go:171,174`). Replace with a proper context plumbed from
-  the admin request handler.
+The following identifiers were audited and confirmed to still exist
+in the current codebase:
 
-**Stale documentation (10+ occurrences):**
+- **`ErrUnsupportedKey` (`internal/testutil/tlsutil`)** — exported
+  error variable that is defined but never returned by any function
+  in the package. Remove; update the package's `doc.go` accordingly.
 
-- 10+ doc comments in production code reference "phase 0", "phase 1",
-  or "lands in phase N" as future work even though those phases have
-  shipped. Audit all `internal/*/doc.go` and inline comments; update
-  to describe the current state, not the planned state.
-- Audit all `// Stable.` / `// Unstable.` markers; promote anything
-  that has been stable across two or more phases.
-- `internal/pipeline/router.go` doc says "In phase 1, there is no
-  cache" — cache has been wired since phase 3.
-- `internal/observability/observability.go` doc says "In phase 0 only
-  a thin slog facade is present" — Prometheus + data-plane metrics
-  have shipped.
-- `internal/origin/pool.go` doc says "Phase 1 ships the minimum
-  needed" — active health, hedged transport exist now.
+- **`responseRecorder` double-allocation in `internal/cache/handler.go`
+  (lines ~325 and ~360)** — allocated twice per miss path with
+  identical fields. Pool via `sync.Pool` (add a
+  `var recorderPool sync.Pool` alongside the pool-bounded byte
+  buffers). Reset all fields on put. Assert `allocs/op == 0` on the
+  hit path in the benchmark suite (already passing; the assertion
+  documents the contract).
 
-**Benchmark baseline refresh:**
+- **Stale `// Phase N` doc comments (confirmed locations):**
+  `internal/pipeline/router.go:35-36` ("Phase 1 ships a minimal
+  set"), `internal/cache/vary.go:87` ("phase 3"), `internal/config/
+  config.go:24,27`, `internal/config/loader.go:77`,
+  `internal/storage/store.go:6`, `internal/storage/tiered.go:170`,
+  `internal/origin/health.go:151`, `internal/origin/pool.go:193`.
+  Update each to describe current behaviour, not historical intent.
 
-- `bench/results/baseline.txt` was saved during phase 3.5. The
-  conformance fixes added ~80 ns to `Evaluate_Hit`. Re-baseline with
-  the current numbers so `make benchstat` diffs are meaningful going
-  forward.
+---
 
-**Exit criteria:**
+#### 7.3 Structural refactoring (3 items)
+
+- **Consolidate `statusWriter` / `metricsWriter` into one shared type.**
+  `internal/observability/accesslog.statusWriter` and
+  `internal/observability/dataplane.metricsWriter` are byte-for-byte
+  identical (fields: `ResponseWriter`, `status int`, `bytes int64`;
+  methods: `WriteHeader`, `Write`). Extract to
+  `internal/observability/responsewriter.go` as an exported
+  `ResponseWriter` struct. Both middlewares embed it; the per-request
+  allocation count is unchanged, but the wrapper is chained once per
+  request instead of twice.
+
+- **Split `internal/cache/engine.go` (429 LOC, 24 functions).**
+  The file is a mixture of the RFC 9111 state machine, HTTP date
+  parsing, ETag handling, conditional-request logic, heuristic TTL,
+  and header merging. Split into four files, each with a `doc.go`
+  comment:
+  - `engine.go` — `Evaluate`, `evalMiss`, `evalStale`,
+    `evalNoCache`, `isFresh`, `revalidateOrMiss` (state machine).
+  - `cacheable.go` — `IsCacheable`, `isCacheBlocked`,
+    `isBlockedByPragma`, `hasVaryStar`, `isBlockedBySetCookie`,
+    `isHeuristicStatus`.
+  - `conditional.go` — `ClientConditionalMatch`, `etagMatch`,
+    `MergeHeaders304`, `ConditionalHeaders`, `quoteETag`.
+  - `httpdate.go` — `HeuristicTTL`, `ComputeAge`, `parseOriginAge`,
+    `parseHTTPDate`, `mergeHeaderValues`, `validHTTPTimeField`,
+    `normalizeTZ`.
+
+- **Extract `builder` type from `cmd/bouine/cmd/engine.go`.**
+  `engine.go` imports 25 packages and exposes `buildPools`,
+  `buildRouter`, `buildStore`, `buildCluster`, `buildDashboard`,
+  `startAdmin`, `startListeners`, `startHealthChecks`, `run` as
+  methods on a single 498-LOC file. Extract `buildPools`,
+  `buildRouter`, `buildStore`, `buildCluster` into a `builder` value
+  type in `cmd/bouine/cmd/builder.go`. `run()` calls
+  `b := newBuilder(cfg, logger)` and reads from it. This reduces
+  `engine.go` to lifecycle orchestration only and makes the wiring
+  independently testable.
+
+---
+
+#### 7.4 Context hygiene (1 item)
+
+- `internal/runtime/shutdown/shutdown.go:57` calls
+  `context.WithTimeout(context.Background(), ...)` inside a method
+  that already receives no context. This is the only production
+  `context.Background()` outside of `main`. Pass the parent context
+  into `Sequencer.Shutdown(ctx context.Context)` and plumb it through
+  so the shutdown budget derives from the daemon's root context.
+
+---
+
+#### 7.5 Benchmark baseline refresh
+
+`bench/results/baseline.txt` was saved during phase 3.5. Both the
+conformance fixes and the Phase 6 ring-buffer additions have since
+changed the hot-path timing. Re-run `make bench` on the phase 7
+baseline (after all structural changes, before tagging) and overwrite
+`bench/results/baseline.txt` so `make benchstat` diffs are meaningful
+for future work.
+
+---
+
+#### 7.6 Exit criteria
 
 - `golangci-lint unused` and `staticcheck U1000` report zero findings.
-- `go test -race ./...` still green; no coverage regression ≥ 2 %.
-- `make bench` gates still pass (no performance regression from
-  removals).
+- `go test -race ./...` green; no coverage regression ≥ 2 %.
+- `make bench` gates pass; `bench/results/baseline.txt` refreshed.
 - `make conformance` score does not decrease.
-- Net LOC reduction ≥ 5 % vs the phase 6 baseline (excluding
+- Net LOC reduction ≥ 3 % vs the phase 6 baseline (realistic after
+  `ab3e411` already completed the largest unwiring items; excludes
   generated code and test data).
-- Every unwired package is either wired and tested end-to-end OR
-  removed. No orphaned packages remain.
-- Zero `context.TODO()` or `context.Background()` in production code
-  outside `main`.
-- Zero stale "phase N" doc comments referencing shipped phases.
+- All 3 remaining unwired items (§7.1) are wired and have tests, or
+  formally removed with a documented rationale.
+- Zero stale "Phase N" doc comments in production code (§7.2 list).
+- `internal/cache/engine.go` split into 4 files (§7.3).
+- `cmd/bouine/cmd/engine.go` ≤ 300 LOC after `builder` extraction.
+- `context.Background()` removed from `shutdown.go` (§7.4).
+- HTTP/3 integration test green in CI.
 
 ### Phase 6 — Operator dashboard (weeks 21–23)
 
@@ -1116,7 +1128,7 @@ changes. The migration from fan-out to gossip push requires no template changes.
 |---|---|---|
 | 1–5 pods | Fan-out on request | Phase 6 implementation |
 | 6+ pods | Gossip push + local aggregate | Upgrade path, no dashboard changes |
-| Any size + history | Add DuckDB | Phase 6.5 |
+| Any size + history | Add DuckDB | Phase 8 |
 
 The fan-out code is annotated with a comment marking the scaling boundary so
 the upgrade path is discoverable.
@@ -1179,7 +1191,7 @@ mode the fan-out or gossip path still aggregates across all pods.
 
 #### 6.6 Not in phase 6 (explicit exclusions)
 
-- No AI suggestions, no DuckDB, no ML layer → phase 6.5.
+- No AI suggestions, no DuckDB, no ML layer → phase 8.
 - No gossip push aggregation → upgrade path beyond 5 pods, documented in §6.4.
 - No config editor (edit YAML in browser) → future.
 - No alerting / notification integrations → future.
@@ -1263,7 +1275,7 @@ All four Prometheus series and the RouteRing are fed from the same `route`
 variable in `dataplane.go`. A single header-set in the router propagates
 correct labels everywhere without touching the observability layer.
 
-### Phase 6.5 — AI traffic analysis (weeks 24–27)
+### Phase 8 — AI traffic analysis (post-v1.0)
 
 A streaming traffic analytics layer and ML-assisted suggestion engine,
 running in a separate goroutine pool with a strict CPU budget so it
@@ -1452,7 +1464,7 @@ its own ADR under `docs/decisions/`.
 
 ## 19. Definition of Done (v1.0)
 
-- All phases 0–7 (plus 3.5, 4.5, 6, and 6.5) complete and tagged.
+- All phases 0–7 (plus 3.5, 4.5, 6, and 8) complete and tagged.
 - Hit-path allocs/op = 0 on the canonical benchmark (phase 3.5 gate).
 - cache-tests score ≥ Varnish on every category.
 - Canonical benchmark within 10 % of Varnish RPS, never regressing in CI.

@@ -21,10 +21,10 @@ type Config struct {
 	// admin listener has its own minimal TLS hook (see internal/admin).
 	TLS TLS `yaml:"tls"`
 
-	// Storage controls the hot + warm tiers (phase 2+).
+	// Storage controls the hot + warm tiers.
 	Storage Storage `yaml:"storage"`
 
-	// Cluster controls peer discovery and fan-out (phase 4+).
+	// Cluster controls peer discovery and fan-out.
 	Cluster Cluster `yaml:"cluster"`
 
 	// UpstreamPools declares the origin / backend pools that routes

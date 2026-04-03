@@ -148,7 +148,7 @@ func (hc *ActiveHealthChecker) recordSuccess(t *Target) {
 	t.errors.Store(0)
 	if !t.healthy.Load() {
 		// Count consecutive successes needed to restore.
-		// For simplicity in phase 1, one success restores.
+		// One success restores.
 		t.healthy.Store(true)
 		hc.logger.Info("target restored by active health check",
 			"pool", hc.pool.Name,

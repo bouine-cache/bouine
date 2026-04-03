@@ -23,6 +23,7 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/thylong/bouine/internal/pipeline/collapse"
@@ -39,6 +40,31 @@ var (
 	headerREVALIDATED = []string{"REVALIDATED"}
 )
 
+// recorderPool reuses responseRecorder instances on the miss/invalidation
+// paths to reduce allocations. The hit path never allocates a recorder.
+var recorderPool = sync.Pool{
+	New: func() any {
+		return &responseRecorder{
+			header: make(http.Header, 8),
+			body:   &bytes.Buffer{},
+		}
+	},
+}
+
+func acquireRecorder() *responseRecorder {
+	rec := recorderPool.Get().(*responseRecorder)
+	rec.statusCode = 0
+	rec.body.Reset()
+	for k := range rec.header {
+		delete(rec.header, k)
+	}
+	return rec
+}
+
+func releaseRecorder(rec *responseRecorder) {
+	recorderPool.Put(rec)
+}
+
 // Handler is the caching HTTP handler. It wraps an upstream
 // http.Handler (the origin pool) and a storage.Store.
 type Handler struct {
@@ -49,6 +75,12 @@ type Handler struct {
 	negativeTTL   time.Duration
 	jitterPercent int
 	stayinAlive   bool
+	// variantCounts tracks stored Vary variants per primary key to
+	// enforce MaxVariants cap. Protected by variantMu.
+	variantMu     sync.Mutex
+	variantCounts map[api.Key]int
+	// VaryCapHits is incremented when a variant is rejected; nil-safe.
+	VaryCapHits interface{ Inc() }
 }
 
 // HandlerConfig configures a cache Handler.
@@ -63,6 +95,9 @@ type HandlerConfig struct {
 	// StayinAlive enables emergency stale mode: serve cached objects
 	// indefinitely when the upstream is unreachable or returning 5xx.
 	StayinAlive bool
+	// VaryCapHits, if non-nil, is incremented when a variant is rejected
+	// because MaxVariants is exceeded.
+	VaryCapHits interface{ Inc() }
 }
 
 // NewHandler creates a caching handler.
@@ -78,6 +113,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		negativeTTL:   cfg.NegativeTTL,
 		jitterPercent: cfg.JitterPercent,
 		stayinAlive:   cfg.StayinAlive,
+		variantCounts: make(map[api.Key]int),
+		VaryCapHits:   cfg.VaryCapHits,
 	}
 }
 
@@ -303,17 +340,39 @@ func (h *Handler) writeAndMaybeStore(
 	}
 
 	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
-		storeKey := key
+		// Always compute from the canonical URL so the cap is enforced
+		// against the primary key regardless of whether lookup() already
+		// resolved the variant key.
+		primaryKey := BuildKey(r)
+		storeKey := primaryKey
 		if vary := res.Header.Get("Vary"); vary != "" {
-			storeKey = VariantKey(BuildKey(r), vary, r.Header)
+			storeKey = VariantKey(primaryKey, vary, r.Header)
+		}
+		// Enforce MaxVariants cap: skip storage if this primary key already
+		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
+		// variants are a DoS vector.
+		if storeKey != primaryKey {
+			h.variantMu.Lock()
+			n := h.variantCounts[primaryKey]
+			if n >= MaxVariants {
+				h.variantMu.Unlock()
+				h.logger.Warn("vary cap exceeded, skipping variant storage",
+					"primary_key", primaryKey, "cap", MaxVariants)
+				if h.VaryCapHits != nil {
+					h.VaryCapHits.Inc()
+				}
+				return
+			}
+			h.variantCounts[primaryKey] = n + 1
+			h.variantMu.Unlock()
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.jitterPercent)
 		_ = h.store.Put(r.Context(), storeKey, obj)
 		// Also store a "primary" entry so Vary-aware lookup finds
 		// the Vary header on the first lookup.
-		if storeKey != key {
-			primaryObj := buildObject(key, r, res, h.negativeTTL, h.jitterPercent)
-			_ = h.store.Put(r.Context(), key, primaryObj)
+		if storeKey != primaryKey {
+			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.jitterPercent)
+			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
 		}
 	}
 }
@@ -322,10 +381,8 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	// Capture the upstream response first — only invalidate on success
 	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
 	// indicates a server error).
-	rec := &responseRecorder{
-		header: make(http.Header),
-		body:   &bytes.Buffer{},
-	}
+	rec := acquireRecorder()
+	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, r)
 
 	// Only invalidate on 2xx/3xx success.
@@ -357,10 +414,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) doFetch(r *http.Request) collapse.Result {
-	rec := &responseRecorder{
-		header: make(http.Header),
-		body:   &bytes.Buffer{},
-	}
+	rec := acquireRecorder()
 	h.upstream.ServeHTTP(rec, r)
 
 	return collapse.Result{

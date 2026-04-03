@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/thylong/bouine/internal/observability/responsewriter"
 )
 
 // Middleware wraps an http.Handler and emits a structured access log
@@ -17,7 +19,7 @@ import (
 func Middleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: 200}
+		sw := responsewriter.New(w)
 
 		next.ServeHTTP(sw, r)
 
@@ -26,28 +28,11 @@ func Middleware(logger *slog.Logger, next http.Handler) http.Handler {
 			"host", r.Host,
 			"path", r.URL.Path,
 			"proto", r.Proto,
-			"status", sw.status,
-			"bytes_out", sw.bytes,
+			"status", sw.Status,
+			"bytes_out", sw.Bytes,
 			"dur_ms", time.Since(start).Milliseconds(),
 			"remote", r.RemoteAddr,
 			"cache_status", sw.Header().Get("X-Cache"),
 		)
 	})
-}
-
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int64
-}
-
-func (w *statusWriter) WriteHeader(code int) {
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *statusWriter) Write(b []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(b)
-	w.bytes += int64(n)
-	return n, err
 }

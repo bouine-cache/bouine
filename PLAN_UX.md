@@ -269,7 +269,7 @@ cluster  : ":8443"    # gossip · peer fetch mTLS
 ```
 hot_max_bytes : 2Go              # in-RAM SIEVE cache
 warm_dir      : "/var/lib/bouine" # mmap segments path
-warm_max_bytes: 50Go             # max warm tier size
+warm_max_bytes: 20Go             # max warm tier size
 eviction      : sieve            # or w-tinylfu
 ```
 

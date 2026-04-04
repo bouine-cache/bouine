@@ -142,7 +142,15 @@ func New(cfg Config) *Server {
 			outerMux.Handle("/logo.png", cfg.FaviconHandler)
 			outerMux.Handle("/logo-white.png", cfg.FaviconHandler)
 		}
-		outerMux.Handle("/", topHandler)
+		// Redirect bare root to the dashboard so operators who type the
+		// admin address in a browser land somewhere useful.
+		outerMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" {
+				http.Redirect(w, r, "/dashboard/", http.StatusFound)
+				return
+			}
+			topHandler.ServeHTTP(w, r)
+		})
 		topHandler = outerMux
 	}
 	s.inner.Handler = topHandler

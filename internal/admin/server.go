@@ -142,6 +142,9 @@ func New(cfg Config) *Server {
 			outerMux.Handle("/logo.png", cfg.FaviconHandler)
 			outerMux.Handle("/logo-white.png", cfg.FaviconHandler)
 		}
+		// Capture authHandler before topHandler is reassigned; the closure
+		// below must not call outerMux or it recurses infinitely.
+		authHandler := topHandler
 		// Redirect bare root to the dashboard so operators who type the
 		// admin address in a browser land somewhere useful.
 		outerMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +152,7 @@ func New(cfg Config) *Server {
 				http.Redirect(w, r, "/dashboard/", http.StatusFound)
 				return
 			}
-			topHandler.ServeHTTP(w, r)
+			authHandler.ServeHTTP(w, r)
 		})
 		topHandler = outerMux
 	}

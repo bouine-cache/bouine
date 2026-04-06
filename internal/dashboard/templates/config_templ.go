@@ -10,7 +10,9 @@ import templruntime "github.com/a-h/templ/runtime"
 
 import "fmt"
 
-// Config renders the config-reload view with the structured running-config viewer.
+// Config renders the config-reload view. The left panel has a Structured /
+// JSON toggle so operators can switch between the visual section view and
+// a raw pretty-printed JSON of the running config.
 func Config(d ConfigData) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -44,7 +46,7 @@ func Config(d ConfigData) templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"pg-hd\"><div><h2>Config reload</h2><div class=\"sub\">validate · confirm · apply — running config is never altered by parse errors</div></div></div><div class=\"r2\"><!-- left: running config viewer --><div class=\"bc\" style=\"overflow:auto\"><div class=\"bc-t\" style=\"display:flex;justify-content:space-between;align-items:center\">Current config (read-only) ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"pg-hd\"><div><h2>Config reload</h2><div class=\"sub\">validate · confirm · apply — running config is never altered by parse errors</div></div><div class=\"tg\" role=\"group\" aria-label=\"Config view mode\"><a id=\"cfg-btn-structured\" class=\"tb active\" aria-pressed=\"true\" style=\"cursor:pointer\" onclick=\"cfgToggle('structured')\">Structured</a> <a id=\"cfg-btn-json\" class=\"tb\" aria-pressed=\"false\" style=\"cursor:pointer\" onclick=\"cfgToggle('json')\">JSON</a></div></div><div class=\"r2\"><!-- left: running config viewer (two overlapping views) --><div class=\"bc\" style=\"overflow:auto;position:relative\"><div class=\"bc-t\" style=\"display:flex;justify-content:space-between;align-items:center\">Current config (read-only) ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -56,7 +58,7 @@ func Config(d ConfigData) templ.Component {
 				var templ_7745c5c3_Var3 string
 				templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(d.ConfigPath)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 21, Col: 21}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 39, Col: 21}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 				if templ_7745c5c3_Err != nil {
@@ -74,7 +76,7 @@ func Config(d ConfigData) templ.Component {
 					var templ_7745c5c3_Var4 string
 					templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(d.LastReload)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 23, Col: 25}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 41, Col: 25}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 					if templ_7745c5c3_Err != nil {
@@ -86,7 +88,7 @@ func Config(d ConfigData) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</div><!-- Structured view --><div id=\"cfg-view-structured\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -104,7 +106,7 @@ func Config(d ConfigData) templ.Component {
 				var templ_7745c5c3_Var5 string
 				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(sec.Icon)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 34, Col: 48}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 54, Col: 49}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 				if templ_7745c5c3_Err != nil {
@@ -117,7 +119,7 @@ func Config(d ConfigData) templ.Component {
 				var templ_7745c5c3_Var6 string
 				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(sec.Title)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 35, Col: 18}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 55, Col: 19}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 				if templ_7745c5c3_Err != nil {
@@ -153,7 +155,7 @@ func Config(d ConfigData) templ.Component {
 					var templ_7745c5c3_Var9 string
 					templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(sec.Badge)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 37, Col: 77}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 57, Col: 78}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 					if templ_7745c5c3_Err != nil {
@@ -181,7 +183,7 @@ func Config(d ConfigData) templ.Component {
 						var templ_7745c5c3_Var10 string
 						templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(row.Key)
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 44, Col: 41}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 64, Col: 42}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 						if templ_7745c5c3_Err != nil {
@@ -216,7 +218,7 @@ func Config(d ConfigData) templ.Component {
 						var templ_7745c5c3_Var13 string
 						templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(row.Value)
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 46, Col: 59}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 66, Col: 60}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 						if templ_7745c5c3_Err != nil {
@@ -234,7 +236,7 @@ func Config(d ConfigData) templ.Component {
 							var templ_7745c5c3_Var14 string
 							templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(row.Hint)
 							if templ_7745c5c3_Err != nil {
-								return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 48, Col: 44}
+								return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 68, Col: 45}
 							}
 							_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 							if templ_7745c5c3_Err != nil {
@@ -264,7 +266,7 @@ func Config(d ConfigData) templ.Component {
 						var templ_7745c5c3_Var15 string
 						templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(rc.PathPrefix)
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 58, Col: 54}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 78, Col: 55}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var15))
 						if templ_7745c5c3_Err != nil {
@@ -277,7 +279,7 @@ func Config(d ConfigData) templ.Component {
 						var templ_7745c5c3_Var16 string
 						templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(rc.Pool)
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 59, Col: 52}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 79, Col: 53}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 						if templ_7745c5c3_Err != nil {
@@ -300,7 +302,7 @@ func Config(d ConfigData) templ.Component {
 								var templ_7745c5c3_Var17 string
 								templ_7745c5c3_Var17, templ_7745c5c3_Err = templ.JoinStringErrs(row.Key)
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 65, Col: 44}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 85, Col: 45}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var17))
 								if templ_7745c5c3_Err != nil {
@@ -335,7 +337,7 @@ func Config(d ConfigData) templ.Component {
 								var templ_7745c5c3_Var20 string
 								templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(row.Value)
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 67, Col: 62}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 87, Col: 63}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 								if templ_7745c5c3_Err != nil {
@@ -362,106 +364,138 @@ func Config(d ConfigData) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "</div><!-- right: reload action --><div class=\"bc\"><div class=\"bc-t\">Reload config</div><div style=\"font-size:.75rem;color:var(--m);line-height:1.7;margin-bottom:.85rem\">Reads the config file from disk, runs full validation, and only applies if parsing succeeds. The running configuration is <strong style=\"color:var(--t)\">never affected</strong> by parse errors.</div><div style=\"margin-bottom:.85rem\"><div class=\"stat-row\"><span class=\"stat-k\">config path</span> <span class=\"stat-v\" style=\"font-size:.65rem\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "</div><!-- JSON view (hidden by default) --><div id=\"cfg-view-json\" style=\"display:none\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			if d.ConfigPath != "" {
-				var templ_7745c5c3_Var21 string
-				templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(d.ConfigPath)
+			if d.RawJSON != "" {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "<pre style=\"font-family:'JetBrains Mono',monospace;font-size:.72rem;line-height:1.7;color:var(--t);white-space:pre-wrap;word-break:break-all;margin:0;padding:.25rem 0\">")
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 90, Col: 22}
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var21 string
+				templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(d.RawJSON)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 101, Col: 185}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var21))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "</pre>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
 			} else {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "not configured")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "<div style=\"font-size:.72rem;color:var(--m);padding:.5rem 0\">Config not available.</div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">last reload</span> <span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "</div></div><!-- right: reload action --><div class=\"bc\"><div class=\"bc-t\">Reload config</div><div style=\"font-size:.75rem;color:var(--m);line-height:1.7;margin-bottom:.85rem\">Reads the config file from disk, runs full validation, and only applies if parsing succeeds. The running configuration is <strong style=\"color:var(--t)\">never affected</strong> by parse errors.</div><div style=\"margin-bottom:.85rem\"><div class=\"stat-row\"><span class=\"stat-k\">config path</span> <span class=\"stat-v\" style=\"font-size:.65rem\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			if d.LastReload != "" {
+			if d.ConfigPath != "" {
 				var templ_7745c5c3_Var22 string
-				templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinStringErrs(d.LastReload)
+				templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinStringErrs(d.ConfigPath)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 100, Col: 22}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 119, Col: 22}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var22))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			} else {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "—")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "not configured")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">uptime</span> <span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">last reload</span> <span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var23 string
-			templ_7745c5c3_Var23, templ_7745c5c3_Err = templ.JoinStringErrs(d.Uptime)
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 108, Col: 37}
+			if d.LastReload != "" {
+				var templ_7745c5c3_Var23 string
+				templ_7745c5c3_Var23, templ_7745c5c3_Err = templ.JoinStringErrs(d.LastReload)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 129, Col: 22}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var23))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			} else {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "—")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var23))
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">uptime</span> <span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "</span></div>")
+			var templ_7745c5c3_Var24 string
+			templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(d.Uptime)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 137, Col: 37}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var24))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "</span></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if d.SnapshotPath != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "<div class=\"stat-row\"><span class=\"stat-k\">snapshot path</span> <span class=\"stat-v\" style=\"font-size:.65rem\">")
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				var templ_7745c5c3_Var24 string
-				templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(d.SnapshotPath)
-				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 113, Col: 69}
-				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var24))
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "</span></div>")
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "</div>")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			if d.Flash != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "<div class=\"flash-ok\" style=\"margin-bottom:.75rem\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<div class=\"stat-row\"><span class=\"stat-k\">snapshot path</span> <span class=\"stat-v\" style=\"font-size:.65rem\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var25 string
-				templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(d.Flash)
+				templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(d.SnapshotPath)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 118, Col: 65}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 142, Col: 69}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "</div>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "</span></div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "<div id=\"reload-section\"><button class=\"btn bp\" style=\"width:100%;margin-bottom:.5rem\" hx-post=\"/dashboard/config/reload\" hx-target=\"#reload-section\" hx-swap=\"innerHTML\">↻ Reload config</button></div><div style=\"font-size:.68rem;color:var(--m);margin-top:.5rem\">Hot-reloadable: routes, pools, TTLs, TLS certs.<br>Not reloadable: listen addresses, storage, cluster settings.</div></div></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "</div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			if d.Flash != "" {
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "<div class=\"flash-ok\" style=\"margin-bottom:.75rem\">")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				var templ_7745c5c3_Var26 string
+				templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs(d.Flash)
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `config.templ`, Line: 147, Col: 65}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "</div>")
+				if templ_7745c5c3_Err != nil {
+					return templ_7745c5c3_Err
+				}
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "<div id=\"reload-section\"><button class=\"btn bp\" style=\"width:100%;margin-bottom:.5rem\" hx-post=\"/dashboard/config/reload\" hx-target=\"#reload-section\" hx-swap=\"innerHTML\">↻ Reload config</button></div><div style=\"font-size:.68rem;color:var(--m);margin-top:.5rem\">Hot-reloadable: routes, pools, TTLs, TLS certs.<br>Not reloadable: listen addresses, storage, cluster settings.</div></div></div>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = cfgToggleScript().Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -473,6 +507,33 @@ func Config(d ConfigData) templ.Component {
 		}
 		return nil
 	})
+}
+
+func cfgToggleScript() templ.ComponentScript {
+	return templ.ComponentScript{
+		Name: `__templ_cfgToggleScript_c384`,
+		Function: `function __templ_cfgToggleScript_c384(){window.cfgToggle = function(mode) {
+		var s = document.getElementById('cfg-view-structured');
+		var j = document.getElementById('cfg-view-json');
+		var bs = document.getElementById('cfg-btn-structured');
+		var bj = document.getElementById('cfg-btn-json');
+		if (!s || !j) return;
+		if (mode === 'json') {
+			s.style.display = 'none';
+			j.style.display = '';
+			bs.classList.remove('active'); bs.setAttribute('aria-pressed','false');
+			bj.classList.add('active');    bj.setAttribute('aria-pressed','true');
+		} else {
+			j.style.display = 'none';
+			s.style.display = '';
+			bj.classList.remove('active'); bj.setAttribute('aria-pressed','false');
+			bs.classList.add('active');    bs.setAttribute('aria-pressed','true');
+		}
+	};
+}`,
+		Call:       templ.SafeScript(`__templ_cfgToggleScript_c384`),
+		CallInline: templ.SafeScriptInline(`__templ_cfgToggleScript_c384`),
+	}
 }
 
 func cfgBadgeClass(kind string) string {

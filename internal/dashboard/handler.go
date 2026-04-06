@@ -394,12 +394,19 @@ func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
 	uptime := templates.FmtUptime(time.Since(h.cfg.StartTime))
+	var rawJSON string
+	if h.cfg.Config != nil {
+		if b, err := json.MarshalIndent(h.cfg.Config, "", "  "); err == nil {
+			rawJSON = string(b)
+		}
+	}
 	h.render(w, r, templates.Config(templates.ConfigData{
 		LayoutProps:  h.layoutProps("config", "Config", timeRange),
 		ConfigPath:   h.cfg.ConfigPath,
 		SnapshotPath: h.cfg.SnapshotPath,
 		Uptime:       uptime,
 		Sections:     templates.BuildConfigSections(h.cfg.Config),
+		RawJSON:      rawJSON,
 	}))
 }
 

@@ -735,15 +735,18 @@ func noiseScript() templ.ComponentScript {
 	}
 }
 
-// tableHelperScript provides sortTable / filterTable used on routes & ops-log.
+// tableHelperScript exposes sortTable / filterTable as window globals.
+// Templ script components wrap the body in a named function scope, so
+// local function declarations are not accessible from inline onclick
+// attributes. Assigning to window makes them truly global.
 func tableHelperScript() templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_tableHelperScript_60cb`,
-		Function: `function __templ_tableHelperScript_60cb(){function sortTable(id,col,th){var t=document.getElementById(id),tb=t.querySelector('tbody');var rows=Array.from(tb.querySelectorAll('tr'));var isAsc=th.classList.contains('asc');t.querySelectorAll('th').forEach(function(h){h.classList.remove('asc','desc');});th.classList.add(isAsc?'desc':'asc');rows.sort(function(a,b){var ac=a.querySelectorAll('td')[col],bc=b.querySelectorAll('td')[col];var av=ac.getAttribute('data-val')!==null?parseFloat(ac.getAttribute('data-val')):ac.textContent.trim();var bv=bc.getAttribute('data-val')!==null?parseFloat(bc.getAttribute('data-val')):bc.textContent.trim();if(typeof av==='number')return isAsc?bv-av:av-bv;return isAsc?bv.localeCompare(av):av.localeCompare(bv);});rows.forEach(function(r){tb.appendChild(r);});}
-	function filterTable(input,tableId){var q=input.value.toLowerCase();document.querySelector('#'+tableId+' tbody').querySelectorAll('tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});}
+		Name: `__templ_tableHelperScript_e469`,
+		Function: `function __templ_tableHelperScript_e469(){window.sortTable=function(id,col,th){var t=document.getElementById(id),tb=t.querySelector('tbody');var rows=Array.from(tb.querySelectorAll('tr'));var isAsc=th.classList.contains('asc');t.querySelectorAll('th').forEach(function(h){h.classList.remove('asc','desc');});th.classList.add(isAsc?'desc':'asc');rows.sort(function(a,b){var ac=a.querySelectorAll('td')[col],bc=b.querySelectorAll('td')[col];var av=ac.getAttribute('data-val')!==null?parseFloat(ac.getAttribute('data-val')):ac.textContent.trim();var bv=bc.getAttribute('data-val')!==null?parseFloat(bc.getAttribute('data-val')):bc.textContent.trim();if(typeof av==='number')return isAsc?bv-av:av-bv;return isAsc?bv.localeCompare(av):av.localeCompare(bv);});rows.forEach(function(r){tb.appendChild(r);});};
+	window.filterTable=function(input,tableId){var q=input.value.toLowerCase();document.querySelector('#'+tableId+' tbody').querySelectorAll('tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});};
 }`,
-		Call:       templ.SafeScript(`__templ_tableHelperScript_60cb`),
-		CallInline: templ.SafeScriptInline(`__templ_tableHelperScript_60cb`),
+		Call:       templ.SafeScript(`__templ_tableHelperScript_e469`),
+		CallInline: templ.SafeScriptInline(`__templ_tableHelperScript_e469`),
 	}
 }
 

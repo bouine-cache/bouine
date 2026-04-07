@@ -46,11 +46,11 @@ templ Invalidation(d InvalidationData) {
 			</div>
 		</div>
 		<!-- Recent invalidations history -->
-		<div class="bc"
+		<div id="ops-log-panel" class="bc"
 			hx-get="/dashboard/invalidation"
 			hx-trigger="every 15s, refreshOpsLog from:body"
 			hx-swap="outerHTML"
-			hx-select=".bc:last-of-type"
+			hx-select="#ops-log-panel"
 		>
 			<div class="bc-t">Recent invalidations</div>
 			if len(d.OpsLog) == 0 {

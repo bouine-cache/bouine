@@ -61,13 +61,13 @@ templ Cluster(d ClusterData) {
 			</div>
 			<div class="bc">
 				<div class="bc-t">Ring stats</div>
-				<div class="stat-row"><span class="stat-k">virtual nodes / real</span><span class="stat-v">{ strconv.Itoa(d.Meta.VirtualNodes) }</span></div>
-				<div class="stat-row"><span class="stat-k">load factor</span><span class="stat-v">{ fmt.Sprintf("%.2f", d.Meta.LoadFactor) }</span></div>
-				<div class="stat-row"><span class="stat-k">hop limit</span><span class="stat-v">{ strconv.Itoa(d.Meta.HopLimit) }</span></div>
-				<div class="stat-row"><span class="stat-k">peer fetch timeout</span><span class="stat-v">{ d.Meta.PeerFetchTimeout }</span></div>
-				<div class="stat-row"><span class="stat-k">protocol version</span><span class="stat-v">{ d.Meta.ProtocolVersion }</span></div>
-				<div class="stat-row"><span class="stat-k">gossip interval</span><span class="stat-v">{ d.Meta.GossipInterval }</span></div>
-				<div class="stat-row"><span class="stat-k">join retry budget</span><span class="stat-v">{ d.Meta.JoinRetryBudget }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Number of virtual nodes placed on the ring per real node. More virtual nodes → more uniform key-space distribution.">virtual nodes / real</span><span class="stat-v">{ strconv.Itoa(d.Meta.VirtualNodes) }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Maximum allowed load imbalance between nodes relative to the average. 1.25 means a node can hold up to 25% more keys than perfect balance before the ring rebalances.">load factor</span><span class="stat-v">{ fmt.Sprintf("%.2f", d.Meta.LoadFactor) }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Maximum number of peer-fetch hops a single request can make before bouine falls through to the origin. Prevents infinite loops in multi-node clusters.">hop limit</span><span class="stat-v">{ strconv.Itoa(d.Meta.HopLimit) }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Maximum time to wait for a cache lookup response from a peer node before giving up and going to origin.">peer fetch timeout</span><span class="stat-v">{ d.Meta.PeerFetchTimeout }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Internal cluster wire protocol version. Both endpoints must be within a N/N-1 compatibility window for peer fetch and broadcast to work.">protocol version</span><span class="stat-v">{ d.Meta.ProtocolVersion }</span></div>
+				<div class="stat-row"><span class="stat-k" title="How often memberlist gossip rounds occur. Controls how quickly membership changes (joins, leaves, failures) propagate to all nodes.">gossip interval</span><span class="stat-v">{ d.Meta.GossipInterval }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Total time bouine keeps retrying cluster joins on startup before accepting single-node mode. Retries every 2s within this window.">join retry budget</span><span class="stat-v">{ d.Meta.JoinRetryBudget }</span></div>
 			</div>
 		</div>
 		<div class="r2">
@@ -81,10 +81,10 @@ templ Cluster(d ClusterData) {
 			</div>
 			<div class="bc">
 				<div class="bc-t">Peer fetch stats</div>
-				<div class="stat-row"><span class="stat-k">peer hits (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Hits6h, 10) }</span></div>
-				<div class="stat-row"><span class="stat-k">peer misses (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Misses6h, 10) }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Cache hits served from a peer node over the last 6 hours. The requesting pod found the key in another pod's hot tier instead of fetching from origin.">peer hits (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Hits6h, 10) }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Peer fetch attempts that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.">peer misses (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Misses6h, 10) }</span></div>
 				<div class="stat-row">
-					<span class="stat-k">avg peer latency</span>
+					<span class="stat-k" title="Average round-trip time for peer-to-peer cache lookup RPCs. High values indicate network congestion or overloaded peers.">avg peer latency</span>
 					<span class="stat-v">
 						if d.FetchStats.AvgLatMs > 0 {
 							{ fmt.Sprintf("%.2fms", d.FetchStats.AvgLatMs) }
@@ -93,9 +93,9 @@ templ Cluster(d ClusterData) {
 						}
 					</span>
 				</div>
-				<div class="stat-row"><span class="stat-k">hop limit hits</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HopLimitHits, 10) }</span></div>
+				<div class="stat-row"><span class="stat-k" title="Number of requests that reached the hop limit and went straight to origin. A non-zero value may indicate a routing misconfiguration or ring imbalance.">hop limit hits</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HopLimitHits, 10) }</span></div>
 				<div class="stat-row" style="margin-top:.5rem">
-					<span class="stat-k">uptime avg 30m</span>
+					<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable. Computed from 30-second health samples.">uptime avg 30m</span>
 					<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
 				</div>
 			</div>

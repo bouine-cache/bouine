@@ -146,92 +146,92 @@ func Cluster(d ClusterData) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</tbody></table></div><div class=\"bc\"><div class=\"bc-t\">Ring stats</div><div class=\"stat-row\"><span class=\"stat-k\">virtual nodes / real</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</tbody></table></div><div class=\"bc\"><div class=\"bc-t\">Ring stats</div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Number of virtual nodes placed on the ring per real node. More virtual nodes → more uniform key-space distribution.\">virtual nodes / real</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var8 string
 			templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(d.Meta.VirtualNodes))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 64, Col: 130}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 64, Col: 256}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">load factor</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Maximum allowed load imbalance between nodes relative to the average. 1.25 means a node can hold up to 25% more keys than perfect balance before the ring rebalances.\">load factor</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var9 string
 			templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%.2f", d.Meta.LoadFactor))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 65, Col: 126}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 65, Col: 300}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">hop limit</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Maximum number of peer-fetch hops a single request can make before bouine falls through to the origin. Prevents infinite loops in multi-node clusters.\">hop limit</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var10 string
 			templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(d.Meta.HopLimit))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 66, Col: 115}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 66, Col: 274}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">peer fetch timeout</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Maximum time to wait for a cache lookup response from a peer node before giving up and going to origin.\">peer fetch timeout</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var11 string
 			templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(d.Meta.PeerFetchTimeout)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 67, Col: 118}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 67, Col: 230}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">protocol version</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Internal cluster wire protocol version. Both endpoints must be within a N/N-1 compatibility window for peer fetch and broadcast to work.\">protocol version</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var12 string
 			templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(d.Meta.ProtocolVersion)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 68, Col: 115}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 68, Col: 260}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">gossip interval</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"How often memberlist gossip rounds occur. Controls how quickly membership changes (joins, leaves, failures) propagate to all nodes.\">gossip interval</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var13 string
 			templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(d.Meta.GossipInterval)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 69, Col: 113}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 69, Col: 253}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">join retry budget</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Total time bouine keeps retrying cluster joins on startup before accepting single-node mode. Retries every 2s within this window.\">join retry budget</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var14 string
 			templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(d.Meta.JoinRetryBudget)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 70, Col: 116}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 70, Col: 254}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 			if templ_7745c5c3_Err != nil {
@@ -252,33 +252,33 @@ func Cluster(d ClusterData) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "</div><div class=\"bc\"><div class=\"bc-t\">Peer fetch stats</div><div class=\"stat-row\"><span class=\"stat-k\">peer hits (6h)</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "</div><div class=\"bc\"><div class=\"bc-t\">Peer fetch stats</div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Cache hits served from a peer node over the last 6 hours. The requesting pod found the key in another pod's hot tier instead of fetching from origin.\">peer hits (6h)</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var15 string
 			templ_7745c5c3_Var15, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.Hits6h, 10))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 84, Col: 133}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 84, Col: 291}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var15))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">peer misses (6h)</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Peer fetch attempts that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.\">peer misses (6h)</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var16 string
 			templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.Misses6h, 10))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 85, Col: 137}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 85, Col: 292}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">avg peer latency</span> <span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Average round-trip time for peer-to-peer cache lookup RPCs. High values indicate network congestion or overloaded peers.\">avg peer latency</span> <span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -298,20 +298,20 @@ func Cluster(d ClusterData) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "</span></div><div class=\"stat-row\"><span class=\"stat-k\">hop limit hits</span><span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "</span></div><div class=\"stat-row\"><span class=\"stat-k\" title=\"Number of requests that reached the hop limit and went straight to origin. A non-zero value may indicate a routing misconfiguration or ring imbalance.\">hop limit hits</span><span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var18 string
 			templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.FormatInt(d.FetchStats.HopLimitHits, 10))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 96, Col: 139}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `cluster.templ`, Line: 96, Col: 298}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "</span></div><div class=\"stat-row\" style=\"margin-top:.5rem\"><span class=\"stat-k\">uptime avg 30m</span> <span class=\"stat-v\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "</span></div><div class=\"stat-row\" style=\"margin-top:.5rem\"><span class=\"stat-k\" title=\"Average percentage of the last 30 minutes during which each peer was reachable. Computed from 30-second health samples.\">uptime avg 30m</span> <span class=\"stat-v\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

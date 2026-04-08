@@ -194,6 +194,9 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	reqData := make([]int64, 0, chartBuckets)
 	errData := make([]int64, 0, chartBuckets)
 	for _, b := range snap[start:] {
+		if b.Timestamp == 0 {
+			continue // unfilled ring slot
+		}
 		labels = append(labels, time.Unix(b.Timestamp, 0).Format("15:04:05"))
 		reqData = append(reqData, b.Requests)
 		errData = append(errData, b.Errors)

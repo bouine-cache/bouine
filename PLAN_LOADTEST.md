@@ -227,6 +227,74 @@ working set.
 | Event | Burst of 100 purges/sec for 10s |
 | Measurements | Broadcast latency, peer-side purge processing time, cache-hit ratio drop and recovery |
 
+
+### 5.6 Dashboard under load (admin-plane interference)
+
+**Goal**: Measure whether the operator dashboard degrades data-plane
+performance. The dashboard runs on the admin port but shares the Go
+runtime, GC, and goroutine scheduler with the data plane. Fan-out
+aggregation (`GET /v1/peer/metrics` to all peers every 5s poll) adds
+network and CPU work proportional to cluster size.
+
+#### 5.6.a Dashboard idle vs active polling
+
+| Parameter | Value |
+|---|---|
+| Topology | 3-node cluster under 25k RPS (mixed workload §3.6) |
+| Condition A | No dashboard sessions open |
+| Condition B | 1 dashboard session open (5s overview poll + 10s routes poll) |
+| Condition C | 5 concurrent dashboard sessions (simulates ops team during incident) |
+| Measurements | Data-plane p50/p99 delta between conditions, admin goroutine count, GC pause histogram, fan-out latency |
+
+**Output**: `dashboard_overhead.svg` — p99 latency bar chart for each
+condition; expect ≤ 0.5% regression for 1 session, ≤ 2% for 5.
+
+#### 5.6.b Fan-out saturation at scale
+
+| Parameter | Value |
+|---|---|
+| Topology | 10-node cluster under 50k total RPS |
+| Dashboard | 1 session polling overview (fans out to 9 peers every 5s) |
+| Measurements | Fan-out round-trip time, percentage of stale badges, admin request queue depth, data-plane p99 |
+
+Tests whether the 200ms fan-out timeout is sufficient at 10 nodes and
+whether the admin HTTP client pool contends with data-plane connections.
+
+#### 5.6.c Purge/ban via dashboard under load
+
+| Parameter | Value |
+|---|---|
+| Topology | 3-node cluster under 10k RPS |
+| Event | Operator issues 10 purges and 5 bans via the dashboard UI in 30s |
+| Measurements | Data-plane p99 during the invalidation burst, ops-log write latency, peer broadcast completion time, dashboard response time for the htmx swap |
+
+Tests the proxy endpoint path (`POST /dashboard/api/purge` → store.Delete
+→ broadcaster.BroadcastPurge`) under realistic operator activity.
+
+#### 5.6.d Config reload via dashboard under load
+
+| Parameter | Value |
+|---|---|
+| Topology | Single node under 25k RPS |
+| Event | Operator clicks "Reload config" (validate → confirm → apply) |
+| Measurements | Config parse duration, data-plane p99 during apply, goroutine count spike, any dropped requests |
+
+Tests whether `config.Load()` + watcher reload contends with the data
+plane on the same `GOMAXPROCS` budget.
+
+#### 5.6.e Ring buffer memory pressure
+
+| Parameter | Value |
+|---|---|
+| Topology | Single node under 50k RPS with 500 distinct URL paths |
+| Duration | 6 hours (fills the full RequestRing) |
+| Measurements | RSS growth curve, URLRing entry count (cap 512), GC pressure from ring flushes, snapshot file size |
+
+Tests that the ring buffers (RequestRing 2160 buckets, RouteRing
+24h × N routes, URLRing capped at 512 entries, OpsLogRing 100 entries)
+do not cause unbounded memory growth even at sustained high traffic
+with many distinct paths.
+
 ---
 
 ## 6. Output & Visualisation
@@ -256,6 +324,9 @@ bench/loadtest/results/<scenario>/<tut>/
 | `hedging_tail.svg` | CDF of latency with/without hedging |
 | `resource_usage.svg` | CPU% and RSS over time during sustained load |
 | `collapse_efficiency.svg` | Origin requests vs client requests for collapsible workload |
+| `dashboard_overhead.svg` | p99 latency impact of 0/1/5 dashboard sessions under load |
+| `fanout_vs_nodes.svg` | Fan-out round-trip time vs cluster size (1–10 nodes) |
+| `ring_rss_6h.svg` | RSS growth over 6h sustained load (ring memory pressure) |
 
 ### Summary report
 
@@ -307,6 +378,9 @@ regresses beyond the defined thresholds.
 | Hedged fetch p99 improvement | ≥ 3x reduction vs non-hedged on outlier workload |
 | RSS at steady state (10k RPS, 1 GiB cache) | ≤ 2 GiB |
 | Zero allocs/op on hit path | confirmed by pprof during load |
+| Dashboard 1-session overhead | ≤ 0.5% p99 regression on data plane |
+| Dashboard 5-session overhead | ≤ 2% p99 regression on data plane |
+| Ring RSS after 6h at 50k RPS | ≤ 50 MiB above baseline (no unbounded growth) |
 
 ---
 
@@ -322,7 +396,8 @@ regresses beyond the defined thresholds.
 | 6 | K8s multi-node setup for §4.x scenarios | 4h |
 | 7 | Implement §4.1–§4.5 (cluster scaling, gossip, rolling update) | 6h |
 | 8 | Implement §5.1–§5.5 (stress/limit tests) | 4h |
+| 8b | Implement §5.6 (dashboard under load, 5 sub-scenarios) | 4h |
 | 9 | Auto-generate REPORT.md | 2h |
 | 10 | CI nightly workflow | 2h |
 
-**Total: ~33h** — split across 3–4 focused sessions.
+**Total: ~37h** — split across 3–4 focused sessions.

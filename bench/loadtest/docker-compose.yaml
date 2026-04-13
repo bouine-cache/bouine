@@ -1,0 +1,107 @@
+version: "3.9"
+
+# Single-node load test topology:
+#   origin → [bouine | nginx | varnish | envoy]
+#               ↑
+#           load-gen (vegeta / k6)
+#
+# All proxies share the same origin and cache size (1 GiB).
+# The RESULTS_DIR env var controls where output files are written.
+
+x-proxy-common: &proxy-common
+  networks: [lb-net]
+  restart: "no"
+  ulimits:
+    nofile: { soft: 65536, hard: 65536 }
+
+services:
+
+  # ── Origin ────────────────────────────────────────────────────────
+  origin:
+    build:
+      context: ../..
+      dockerfile: test/integration/origin/Dockerfile
+    networks: [lb-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  # ── Proxies ───────────────────────────────────────────────────────
+  bouine:
+    <<: *proxy-common
+    build: { context: ../.. }
+    command: ["serve", "--config", "/etc/bouine/config.yaml"]
+    volumes:
+      - ./config/bouine.yaml:/etc/bouine/config.yaml:ro
+    depends_on:
+      origin: { condition: service_healthy }
+    ports: ["8080:8080", "9000:9000"]
+
+  nginx:
+    <<: *proxy-common
+    image: nginx:1.27-alpine
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx-cache:/var/cache/nginx
+    depends_on:
+      origin: { condition: service_healthy }
+    ports: ["8081:8080"]
+
+  varnish:
+    <<: *proxy-common
+    image: varnish:7.6
+    command: ["-F", "-a", "0.0.0.0:8080", "-f", "/etc/varnish/default.vcl", "-s", "malloc,1G"]
+    volumes:
+      - ./config/varnish.vcl:/etc/varnish/default.vcl:ro
+    depends_on:
+      origin: { condition: service_healthy }
+    ports: ["8082:8080"]
+
+  envoy:
+    <<: *proxy-common
+    image: envoyproxy/envoy:v1.32-latest
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+    volumes:
+      - ./config/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      origin: { condition: service_healthy }
+    ports: ["8083:8080"]
+
+  # ── Load generator ────────────────────────────────────────────────
+  load-gen:
+    <<: *proxy-common
+    image: grafana/k6:latest
+    entrypoint: ["sh"]
+    command: ["-c", "sleep infinity"]
+    volumes:
+      - ./scenarios:/scenarios:ro
+      - ${RESULTS_DIR:-./results}:/results
+    environment:
+      - BOUINE_ADDR=http://bouine:8080
+      - NGINX_ADDR=http://nginx:8080
+      - VARNISH_ADDR=http://varnish:8080
+      - ENVOY_ADDR=http://envoy:8080
+      - BOUINE_ADMIN=http://bouine:9000
+    depends_on:
+      - bouine
+      - nginx
+      - varnish
+      - envoy
+
+  # ── Prometheus scrape (optional) ─────────────────────────────────
+  prometheus:
+    <<: *proxy-common
+    image: prom/prometheus:latest
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=1h"]
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+networks:
+  lb-net:
+    driver: bridge
+
+volumes:
+  nginx-cache:

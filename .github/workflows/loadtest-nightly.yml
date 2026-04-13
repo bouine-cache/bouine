@@ -1,0 +1,224 @@
+name: load-test-nightly
+
+on:
+  schedule:
+    # 02:00 UTC every day — off-peak, avoids contention with CI
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Scenario group to run (single|cluster|dashboard|all)"
+        required: false
+        default: "single"
+
+concurrency:
+  group: loadtest-nightly
+  cancel-in-progress: false   # never cancel a running load test mid-stream
+
+jobs:
+  # -------------------------------------------------------------------------
+  # §3.1–§3.6 single-node scenarios (Docker Compose, self-hosted runner)
+  # -------------------------------------------------------------------------
+  single-node:
+    name: Single-node scenarios (§3.1–§3.6)
+    runs-on: [self-hosted, load-test]
+    if: |
+      github.event_name == 'schedule' ||
+      github.event.inputs.scenarios == 'single' ||
+      github.event.inputs.scenarios == 'all'
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install k6
+        run: |
+          if ! command -v k6 &>/dev/null; then
+            curl -fsSL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
+              | tar -xz --strip-components=1 -C /usr/local/bin k6-v0.54.0-linux-amd64/k6
+          fi
+          k6 version
+
+      - name: Install Python deps
+        run: pip install -q plotly kaleido
+
+      - name: Build images
+        run: make loadtest-setup
+
+      - name: Run §3.1–§3.6
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: make loadtest-single
+
+      - name: Generate charts + report
+        run: make loadtest-report
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-single-${{ github.run_id }}
+          path: bench/loadtest/results/
+          retention-days: 30
+
+      - name: Check regressions
+        run: |
+          python3 bench/loadtest/analysis/report.py \
+            --results-dir bench/loadtest/results \
+            --charts-dir  bench/loadtest/results/charts \
+            --output      bench/loadtest/REPORT.md
+          # Fail if bouine p99 > 10ms on hit-only scenario
+          python3 - << 'EOF'
+          import json, sys, pathlib, math
+
+          def pct(data, p):
+              if not data: return 0
+              s = sorted(data)
+              return s[max(0, int(math.ceil(p/100*len(s)))-1)]
+
+          f = pathlib.Path("bench/loadtest/results/3.2_hit_only/bouine.json")
+          if not f.exists():
+              print("No hit-only results — skipping regression gate")
+              sys.exit(0)
+
+          durations = []
+          with open(f) as fh:
+              for line in fh:
+                  line = line.strip()
+                  if not line: continue
+                  try:
+                      r = json.loads(line)
+                      if r.get("type") == "Point" and r.get("metric") == "http_req_duration":
+                          durations.append(float(r["data"]["value"]))
+                  except Exception:
+                      pass
+
+          p99 = pct(durations, 99)
+          threshold = 10.0
+          print(f"Hit-only p99 = {p99:.2f} ms  (threshold = {threshold} ms)")
+          if p99 > threshold:
+              print(f"REGRESSION: p99 {p99:.2f} ms exceeds {threshold} ms budget")
+              sys.exit(1)
+          EOF
+
+      - name: Open issue on regression
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `⚠️ Load-test regression detected — ${new Date().toISOString().slice(0, 10)}`;
+            const body = [
+              '## Load-test nightly regression',
+              '',
+              `Run: [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              '',
+              'The `3.2_hit_only` bouine p99 exceeded the 10 ms budget.',
+              'Download the artifacts from the run above for details.',
+              '',
+              '### Next steps',
+              '1. Download `loadtest-single-*` artifact',
+              '2. Run `make loadtest-report` locally with the result files',
+              '3. Check `bench/loadtest/REPORT.md` for the failing scenario section',
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title,
+              body,
+              labels: ['performance', 'regression', 'load-test'],
+            });
+
+  # -------------------------------------------------------------------------
+  # §4.1–§4.5 cluster scenarios (Kubernetes, separate runner)
+  # -------------------------------------------------------------------------
+  cluster:
+    name: Cluster scenarios (§4.1–§4.5)
+    runs-on: [self-hosted, load-test-k8s]
+    if: |
+      github.event_name == 'schedule' ||
+      github.event.inputs.scenarios == 'cluster' ||
+      github.event.inputs.scenarios == 'all'
+    timeout-minutes: 90
+    needs: []   # runs concurrently with single-node
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install k6
+        run: |
+          if ! command -v k6 &>/dev/null; then
+            curl -fsSL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
+              | tar -xz --strip-components=1 -C /usr/local/bin k6-v0.54.0-linux-amd64/k6
+          fi
+
+      - name: Build + push images
+        env:
+          KO_DOCKER_REPO: ${{ secrets.LOADTEST_REGISTRY }}
+        run: |
+          make loadtest-setup
+          docker tag bouine:loadtest "$KO_DOCKER_REPO/bouine:loadtest-${{ github.sha }}"
+          docker push "$KO_DOCKER_REPO/bouine:loadtest-${{ github.sha }}" || true
+
+      - name: Deploy 3-node cluster
+        run: |
+          make test-k8s-setup
+          kubectl -n bouine-test rollout status statefulset/bouine --timeout=120s
+
+      - name: Run cluster scenarios
+        run: make loadtest-cluster
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-cluster-${{ github.run_id }}
+          path: bench/loadtest/results/
+          retention-days: 30
+
+      - name: Teardown
+        if: always()
+        run: make test-k8s-teardown
+
+  # -------------------------------------------------------------------------
+  # §5.6a–d dashboard-under-load (lightweight, runs on cluster runner)
+  # -------------------------------------------------------------------------
+  dashboard-load:
+    name: Dashboard under load (§5.6a–d)
+    runs-on: [self-hosted, load-test-k8s]
+    if: |
+      github.event_name == 'schedule' ||
+      github.event.inputs.scenarios == 'dashboard' ||
+      github.event.inputs.scenarios == 'all'
+    timeout-minutes: 60
+    needs: [cluster]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: command -v k6 || pip install k6 2>/dev/null || true
+
+      - name: Run §5.6a–d
+        env:
+          ADMIN_TOKEN: dev-secret
+        run: make loadtest-dashboard
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-dashboard-${{ github.run_id }}
+          path: bench/loadtest/results/
+          retention-days: 30

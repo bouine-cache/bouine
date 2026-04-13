@@ -84,6 +84,38 @@ func main() {
 		fmt.Fprintf(w, "slow %dms", ms)
 	})
 
+	mux.HandleFunc("/large", func(w http.ResponseWriter, r *http.Request) {
+		kb, _ := strconv.Atoi(r.URL.Query().Get("kb"))
+		if kb <= 0 {
+			kb = 64
+		}
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(make([]byte, kb*1024))
+	})
+	mux.HandleFunc("/unique", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=3600")
+		fmt.Fprintf(w, "unique %s at %s", r.URL.Path, time.Now().Format(time.RFC3339Nano))
+	})
+	mux.HandleFunc("/ttl", func(w http.ResponseWriter, r *http.Request) {
+		s, _ := strconv.Atoi(r.URL.Query().Get("s"))
+		if s <= 0 {
+			s = 60
+		}
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", s))
+		fmt.Fprintf(w, "ttl=%ds at %s", s, time.Now().Format(time.RFC3339Nano))
+	})
+	mux.HandleFunc("/outlier", func(w http.ResponseWriter, r *http.Request) {
+		// 5% of requests take 2000ms; rest take 10ms (for hedging tests)
+		if time.Now().UnixNano()%20 == 0 {
+			time.Sleep(2000 * time.Millisecond)
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+		w.Header().Set("Cache-Control", "max-age=60")
+		fmt.Fprint(w, "outlier")
+	})
+
 	log.Printf("test-origin listening on %s", *addr)
 	log.Fatal((&http.Server{
 		Addr:              *addr,

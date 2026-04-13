@@ -184,6 +184,83 @@ admin-token: ## Show the admin bearer token (usage: make admin-token CONFIG=conf
 		echo "$$TOKEN"; \
 	fi
 
+# ---------------------------------------------------------------------------
+# Load-test targets
+# ---------------------------------------------------------------------------
+
+LOADTEST_DIR := bench/loadtest
+RESULTS_DIR  := $(LOADTEST_DIR)/results
+CHARTS_DIR   := $(RESULTS_DIR)/charts
+PYTHON       ?= python3
+
+.PHONY: loadtest-setup
+loadtest-setup: build ## Build all TUT images + origin for load testing.
+	docker build -t bouine:loadtest .
+	docker build -t bouine-test-origin:loadtest test/integration/origin/
+	@echo "bouine:loadtest and bouine-test-origin:loadtest images built."
+	@echo "Pull NGINX/Varnish/Envoy base images:"
+	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml pull nginx varnish envoy 2>/dev/null || true
+
+.PHONY: loadtest-single
+loadtest-single: loadtest-setup ## Run §3.1–§3.6 single-node scenarios (all 4 TUTs).
+	@mkdir -p $(RESULTS_DIR)
+	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
+	@echo "Waiting for services to be healthy..."
+	@sleep 5
+	@for scenario in 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
+	                  3.4_working_set_overflow 3.5_vary_blowup 3.6_mixed_realistic; do \
+		echo "--- Running $$scenario ---"; \
+		docker compose -f $(LOADTEST_DIR)/docker-compose.yaml run --rm load-gen \
+			bash /scenarios/$$scenario/run.sh; \
+	done
+	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml down
+
+.PHONY: loadtest-cluster
+loadtest-cluster: ## Run §4.1–§4.5 cluster + §5.1–§5.5 stress scenarios (requires K8s).
+	@mkdir -p $(RESULTS_DIR)
+	@for scenario in 4.1_cluster_scaling 4.2_gossip_convergence 4.3_peer_fetch_pressure \
+	                  4.4_hedging 4.5_rolling_update \
+	                  5.1_connection_exhaustion 5.2_large_body 5.3_slow_origin \
+	                  5.4_request_collapsing 5.5_purge_broadcast; do \
+		echo "--- Running $$scenario ---"; \
+		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
+	done
+
+.PHONY: loadtest-dashboard
+loadtest-dashboard: ## Run §5.6a–e dashboard-under-load scenarios.
+	@mkdir -p $(RESULTS_DIR)
+	@for scenario in 5.6a_dashboard_polling 5.6b_fanout_saturation \
+	                  5.6c_dashboard_invalidation 5.6d_config_reload; do \
+		echo "--- Running $$scenario ---"; \
+		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
+	done
+	@echo "Note: §5.6e (6h ring test) must be run manually:"
+	@echo "  RING_TEST_DURATION=6h bash $(LOADTEST_DIR)/scenarios/5.6e_ring_memory_pressure/run.sh"
+
+.PHONY: loadtest-report
+loadtest-report: ## Generate SVG charts + REPORT.md from existing result files.
+	@command -v $(PYTHON) >/dev/null || { echo "python3 is required"; exit 1; }
+	@$(PYTHON) -c "import plotly, kaleido" 2>/dev/null || \
+		$(PYTHON) -m pip install -q plotly kaleido
+	mkdir -p $(CHARTS_DIR)
+	cd $(LOADTEST_DIR) && $(PYTHON) analysis/plot.py \
+		--results-dir results \
+		--output-dir results/charts
+	cd $(LOADTEST_DIR) && $(PYTHON) analysis/report.py \
+		--results-dir results \
+		--charts-dir results/charts \
+		--output REPORT.md
+	@echo "Report: $(LOADTEST_DIR)/REPORT.md"
+	@echo "Charts: $(CHARTS_DIR)/"
+
+.PHONY: loadtest-clean
+loadtest-clean: ## Remove load-test result files and charts.
+	rm -rf $(RESULTS_DIR)
+	@echo "Load test results cleaned."
+
+.PHONY: loadtest
+loadtest: loadtest-single loadtest-report ## Run all single-node scenarios and generate report.
+
 .PHONY: release
 release: ## Create a GitHub release (usage: make release TAG=v0.1.0).
 	@test -n "$(TAG)" || { echo "usage: make release TAG=v0.1.0"; exit 1; }

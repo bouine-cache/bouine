@@ -1,0 +1,14 @@
+# bench/loadtest results — ignore large binary outputs
+results/*.csv
+results/*.hdr
+results/*.pb.gz
+results/*.prom
+results/**/*.csv
+results/**/*.hdr
+results/**/*.pb.gz
+results/**/*.prom
+# Keep summary JSON and generated charts
+!results/**/*.json
+!results/**/*.svg
+!results/**/*.md
+!results/.gitkeep

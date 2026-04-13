@@ -48,3 +48,5 @@ testdata/fuzz/*/
 *.local.yml
 .env
 .env.local
+
+/origin

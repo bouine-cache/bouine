@@ -298,7 +298,11 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		// Merge 304 headers into stored object (RFC 9111 §3.2).
+		// Clone the header map before mutating: stale.Header is shared with
+		// any other goroutine that looked up the same object, and
+		// maps.Copy/range iteration on it would race with our writes.
 		refreshed := *stale
+		refreshed.Header = stale.Header.Clone()
 		refreshed.StoredAt = time.Now()
 		MergeHeaders304(&refreshed, res.Header)
 		// Recompute TTL from the (possibly updated) headers.

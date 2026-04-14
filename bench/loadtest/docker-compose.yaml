@@ -19,8 +19,7 @@ services:
   # ── Origin ────────────────────────────────────────────────────────
   origin:
     build:
-      context: ../..
-      dockerfile: test/integration/origin/Dockerfile
+      context: ../../test/integration/origin
     networks: [lb-net]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]

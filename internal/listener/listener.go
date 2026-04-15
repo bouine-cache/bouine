@@ -17,9 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"github.com/thylong/bouine/internal/listener/proxyproto"
 )
 
@@ -47,8 +44,9 @@ type Server struct {
 	proxyProtocol bool
 }
 
-// NewHTTP creates a plaintext HTTP/1.1 listener. It also supports h2c
-// (cleartext HTTP/2 upgrade) for in-mesh traffic.
+// NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
+// Uses the Go 1.24+ native Protocols API instead of the deprecated
+// golang.org/x/net/http2/h2c package.
 //
 // Stable.
 func NewHTTP(cfg Config) *Server {
@@ -56,10 +54,14 @@ func NewHTTP(cfg Config) *Server {
 		cfg.Logger = slog.Default()
 	}
 
-	h2s := &http2.Server{}
+	var protos http.Protocols
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true) // h2c — cleartext HTTP/2 upgrade
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           h2c.NewHandler(cfg.Handler, h2s),
+		Handler:           cfg.Handler,
+		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -69,8 +71,8 @@ func NewHTTP(cfg Config) *Server {
 	return &Server{inner: srv, name: "http", logger: cfg.Logger, proxyProtocol: cfg.ProxyProtocol}
 }
 
-// NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener. ALPN negotiation
-// ("h2", "http/1.1") is driven by the provided tls.Config.
+// NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener using the Go 1.24+
+// native Protocols API for ALPN negotiation ("h2", "http/1.1").
 //
 // Stable.
 func NewHTTPS(cfg Config) *Server {
@@ -82,18 +84,20 @@ func NewHTTPS(cfg Config) *Server {
 	}
 	cfg.TLSConfig.NextProtos = append(cfg.TLSConfig.NextProtos, "h2", "http/1.1")
 
+	var protos http.Protocols
+	protos.SetHTTP1(true)
+	protos.SetHTTP2(true) // TLS ALPN negotiated HTTP/2
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           cfg.Handler,
 		TLSConfig:         cfg.TLSConfig,
+		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
-	}
-	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
-		cfg.Logger.Error("h2 configure failed", "error", err)
 	}
 	return &Server{inner: srv, name: "https", logger: cfg.Logger, proxyProtocol: cfg.ProxyProtocol}
 }

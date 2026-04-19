@@ -6,5 +6,13 @@ listen:
   admin: ":9000"
 
 storage:
-  hot_max_bytes: 512Mo
+  hot_max_bytes: 512MiB
   eviction: sieve
+
+admin:
+  # SECURITY: set a strong, unique token before exposing port 9000.
+  # If this field is omitted bouine auto-generates a random token at
+  # startup and logs it at INFO level — check container logs to retrieve it.
+  # Example (Kubernetes): inject via a Secret mounted as a config volume
+  # or use --admin-token-file pointing at a secrets volume.
+  # token: "REPLACE_ME"

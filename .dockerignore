@@ -1,0 +1,43 @@
+# Build context exclusions — keeps the context lean and prevents
+# unrelated file changes from busting the go mod download layer cache.
+
+# Build artifacts
+bin/
+*.test
+*.out
+coverage.*
+cover.html
+
+# Development tools & IDE
+.crush/
+.idea/
+.vscode/
+*.local.yaml
+*.local.yml
+.env
+.env.local
+
+# Git
+.git/
+.github/
+
+# Documentation (not needed in image)
+docs/
+PLAN*.md
+AGENTS.md
+HANDOFF.md
+*.md
+!go.mod
+!go.sum
+
+# Test infrastructure (large, never needed in the binary)
+bench/
+test/
+testdata/
+
+# Stray directories that can appear from kubectl port-forward cleanup
+origin
+
+# macOS metadata
+.DS_Store
+**/.DS_Store

@@ -28,7 +28,8 @@ type Router struct {
 type routeEntry struct {
 	host       string
 	pathPrefix string
-	label      string // value written to X-Bouine-Route; set by AddRoute
+	label      string   // value written to X-Bouine-Route; set by AddRoute
+	labelVal   []string // pre-allocated []string{label}: avoids alloc on hot path
 	handler    http.Handler
 }
 
@@ -83,6 +84,7 @@ func (rt *Router) AddRoute(host, pathPrefix, label string, handler http.Handler)
 		host:       strings.ToLower(host),
 		pathPrefix: pathPrefix,
 		label:      label,
+		labelVal:   []string{label}, // pre-allocated once; reused on every request
 		handler:    handler,
 	})
 }
@@ -108,10 +110,9 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if re.pathPrefix != "" && !strings.HasPrefix(r.URL.Path, re.pathPrefix) {
 			continue
 		}
-		// Set on the request before dispatching so the dataplane metrics
-		// middleware — which wraps this router and reads r.Header after
-		// ServeHTTP returns — receives the correct route label.
-		r.Header.Set("X-Bouine-Route", re.label)
+		// Direct map write: avoids CanonicalMIMEHeaderKey call and
+		// []string{label} allocation. "X-Bouine-Route" is already canonical.
+		r.Header["X-Bouine-Route"] = re.labelVal
 		re.handler.ServeHTTP(w, r)
 		return
 	}

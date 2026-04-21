@@ -116,9 +116,16 @@ func (p *Pool) pick() *Target {
 	return nil
 }
 
+// targetKey is the context key used to pass the selected *Target to
+// the ReverseProxy Director / ModifyResponse / ErrorHandler without
+// creating a new closure per request.
+type targetKey struct{}
+
 // Handler returns an http.Handler that reverse-proxies to this pool.
-// Each request picks a target via round-robin, forwards it, and
-// records passive health metrics.
+// The returned handler picks a target per request via round-robin and
+// forwards through a single, shared httputil.ReverseProxy — avoiding
+// the per-request allocation of a new ReverseProxy struct and its
+// three function closures.
 func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Handler {
 	if transport == nil {
 		transport = &http.Transport{
@@ -132,47 +139,70 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 		}
 	}
 
+	// Construct the ReverseProxy once. The selected target is stored in
+	// the request context so Director/ModifyResponse/ErrorHandler can
+	// read it without capturing a per-request pointer.
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+
+		Director: func(req *http.Request) {
+			t, _ := req.Context().Value(targetKey{}).(*Target)
+			if t == nil {
+				return
+			}
+			req.URL.Scheme = t.url.Scheme
+			req.URL.Host = t.url.Host
+			if req.URL.Scheme == "" {
+				req.URL.Scheme = "http"
+			}
+			req.Host = t.url.Host
+		},
+
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			t, _ := req.Context().Value(targetKey{}).(*Target)
+			addr := ""
+			if t != nil {
+				addr = t.addr
+			}
+			p.logger.Warn("upstream error",
+				"pool", p.Name,
+				"target", addr,
+				"error", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+		},
+
+		ModifyResponse: func(resp *http.Response) error {
+			t, _ := resp.Request.Context().Value(targetKey{}).(*Target)
+			if t == nil {
+				return nil
+			}
+			if consecutive5xx > 0 && resp.StatusCode >= 500 {
+				cnt := t.errors.Add(1)
+				if cnt >= int64(consecutive5xx) {
+					t.healthy.Store(false)
+					p.logger.Warn("target ejected",
+						"pool", p.Name,
+						"target", t.addr,
+						"consecutive_5xx", cnt)
+				}
+			} else {
+				t.errors.Store(0)
+			}
+			return nil
+		},
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t := p.pick()
 		if t == nil {
 			http.Error(w, "no healthy upstream", http.StatusBadGateway)
 			return
 		}
-
-		proxy := &httputil.ReverseProxy{
-			Transport: transport,
-			Director: func(req *http.Request) {
-				req.URL.Scheme = t.url.Scheme
-				req.URL.Host = t.url.Host
-				if req.URL.Scheme == "" {
-					req.URL.Scheme = "http"
-				}
-				req.Host = t.url.Host
-			},
-			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-				p.logger.Warn("upstream error",
-					"pool", p.Name,
-					"target", t.addr,
-					"error", err)
-				http.Error(w, "upstream error", http.StatusBadGateway)
-			},
-			ModifyResponse: func(resp *http.Response) error {
-				if consecutive5xx > 0 && resp.StatusCode >= 500 {
-					cnt := t.errors.Add(1)
-					if cnt >= int64(consecutive5xx) {
-						t.healthy.Store(false)
-						p.logger.Warn("target ejected",
-							"pool", p.Name,
-							"target", t.addr,
-							"consecutive_5xx", cnt)
-					}
-				} else {
-					t.errors.Store(0)
-				}
-				return nil
-			},
-		}
-		proxy.ServeHTTP(w, r)
+		// Attach the selected target to the request context so the shared
+		// proxy functions above can read it. WithContext copies the
+		// *http.Request struct and wraps the context — one allocation, but
+		// far cheaper than the previous per-request ReverseProxy + 3 closures.
+		proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), targetKey{}, t)))
 	})
 }
 

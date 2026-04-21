@@ -2,7 +2,7 @@ package observability
 
 import (
 	"net/http"
-	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -53,17 +53,53 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	return m
 }
 
+// statusStrings is a pre-allocated table of HTTP status code strings
+// for codes 100–599. Avoids strconv.Itoa allocation on every request.
+// Index 0 → "100", index 499 → "599".
+var statusStrings [500]string
+
+// statusString returns the decimal string for an HTTP status code
+// with zero allocation for codes 100–599.
+func statusString(code int) string {
+	if code >= 100 && code < 600 {
+		s := statusStrings[code-100]
+		if s != "" {
+			return s
+		}
+	}
+	// Fallback (unreachable for valid HTTP status codes).
+	return "0"
+}
+
+func init() {
+	for i := range statusStrings {
+		code := i + 100
+		// Manual integer-to-string, no allocation.
+		hundreds := code / 100
+		tens := (code % 100) / 10
+		ones := code % 10
+		statusStrings[i] = string([]byte{
+			byte('0' + hundreds),
+			byte('0' + tens),
+			byte('0' + ones),
+		})
+	}
+}
+
 // Middleware wraps an http.Handler and records RED metrics for every
 // request. It sits between the access-log middleware and the pipeline
 // router.
 func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := responsewriter.New(w)
+		sw := responsewriter.Acquire(w)
+		defer responsewriter.Release(sw)
 
 		next.ServeHTTP(sw, r)
 
-		status := strconv.Itoa(sw.Status)
+		status := statusString(sw.Status)
+		// Route label is written by the pipeline router as a direct header
+		// map entry to avoid CanonicalMIMEHeaderKey on every request.
 		route := r.Header.Get("X-Bouine-Route")
 		if route == "" {
 			route = "_default"
@@ -88,19 +124,17 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-type metricsWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int64
-}
+// sampleCounter tracks requests for 1:100 access-log sampling.
+// Using atomic so the counter is lock-free.
+var sampleCounter atomic.Uint64
 
-func (w *metricsWriter) WriteHeader(code int) {
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *metricsWriter) Write(b []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(b)
-	w.bytes += int64(n)
-	return n, err
+// ShouldLogAccess reports whether this request should be written to
+// the access log. Only 200-OK responses are sampled at 1:100; all
+// other status codes (redirects, errors, unusual 2xx) are always
+// logged since they are rare relative to cache-hit volume.
+func ShouldLogAccess(status int) bool {
+	if status != http.StatusOK {
+		return true
+	}
+	return sampleCounter.Add(1)%100 == 0
 }

@@ -10,19 +10,32 @@
 // Eviction Algorithm for Web Caches" (Zhang et al., NSDI 2024).
 package sieve
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // Entry is a node in the SIEVE eviction list. Exported so the hot
 // tier can embed it alongside the cached object.
+//
+// The visited field uses atomic.Bool so the hot store can read it safely
+// under a read lock (RLock fast path) without a data race against the
+// eviction path that writes under a write lock.
 type Entry[K comparable] struct {
 	Key     K
+	visited atomic.Bool // safe to read under RLock; written under WLock
 	prev    *Entry[K]
 	next    *Entry[K]
-	visited bool
 }
 
+// Visited returns the current value of the visited bit.
+// Safe to call while holding only the shard read lock.
+func (e *Entry[K]) Visited() bool { return e.visited.Load() }
+
 // List is a SIEVE eviction list. It is NOT goroutine-safe; the caller
-// (the per-shard hot tier) must hold the shard lock.
+// (the per-shard hot tier) must hold the shard write lock for all
+// mutations. Reads of the visited bit via Entry.Visited() are safe
+// under the shard read lock.
 type List[K comparable] struct {
 	head *Entry[K]
 	tail *Entry[K]
@@ -50,11 +63,16 @@ func (l *List[K]) Len() int { return l.len }
 // Returns the entry and whether it was newly inserted.
 func (l *List[K]) Access(key K, lookup func(K) *Entry[K]) (*Entry[K], bool) {
 	if e := lookup(key); e != nil {
-		e.visited = true
+		e.visited.Store(true)
 		return e, false
 	}
 	e := l.pool.Get().(*Entry[K])
-	*e = Entry[K]{Key: key, visited: false}
+	// Reset fields individually: atomic.Bool must not be copied via struct
+	// assignment (the zero value of atomic.Bool has a noCopy sentinel).
+	e.Key = key
+	e.visited.Store(false)
+	e.prev = nil
+	e.next = nil
 	l.pushHead(e)
 	return e, true
 }
@@ -88,7 +106,7 @@ func (l *List[K]) Evict() (K, bool) {
 			}
 		}
 
-		if !cur.visited {
+		if !cur.visited.Load() {
 			// Evict this entry.
 			l.hand = cur.prev
 			l.remove(cur)
@@ -98,7 +116,7 @@ func (l *List[K]) Evict() (K, bool) {
 		}
 
 		// Give a second chance.
-		cur.visited = false
+		cur.visited.Store(false)
 		l.hand = cur.prev
 		if l.hand == nil {
 			l.hand = l.tail

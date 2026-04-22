@@ -19,6 +19,7 @@ package cache
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -31,6 +32,11 @@ import (
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 )
+
+// bgRevalSem bounds concurrent background stale-while-revalidate
+// goroutines. When full, excess revalidation attempts are silently
+// dropped — the next client will re-trigger if still stale.
+var bgRevalSem = make(chan struct{}, 256)
 
 // Pre-allocated header values to avoid per-request slice literals.
 var (
@@ -170,6 +176,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveFromCache(w, r, disp.Object, now)
+		// Lead 5 — SWR background refresh: if the object was served stale
+		// and it has a stale-while-revalidate window, kick off a background
+		// revalidation so the next request finds a fresh copy. The collapse
+		// group deduplicates concurrent triggers for the same key.
+		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
+			h.triggerBgRevalidate(r, key, disp.Object)
+		}
 	case Miss:
 		// StayinAlive: if we have a super-stale object and origin fails,
 		// serve it rather than returning 502.
@@ -359,11 +372,14 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		refreshed.Header = stale.Header.Clone()
 		refreshed.StoredAt = time.Now()
 		MergeHeaders304(&refreshed, res.Header)
-		// Recompute TTL from the (possibly updated) headers.
-		newCC := ParseCacheControl(refreshed.Header.Get("Cache-Control"))
+		// Recompute CacheControl string and parsed TTL from updated headers.
+		refreshed.CacheControl = mergeHeaderValues(refreshed.Header, "Cache-Control")
+		newCC := ParseCacheControl(refreshed.CacheControl)
 		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 			refreshed.TTL = ttl
 		}
+		// Refresh OriginAge from the (possibly updated) header.
+		refreshed.OriginAge = parseOriginAge(refreshed.Header)
 		// Update ETag if the 304 provides a new one.
 		if newETag := res.Header.Get("ETag"); newETag != "" {
 			refreshed.ETag = newETag
@@ -374,6 +390,63 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	}
 
 	h.writeAndMaybeStore(w, r, key, res)
+}
+
+// triggerBgRevalidate fires a background goroutine that fetches a fresh
+// copy of the stale object and updates the store. Called after serving a
+// stale-while-revalidate response. bgRevalSem prevents goroutine explosion.
+func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.Object) {
+	select {
+	case bgRevalSem <- struct{}{}:
+	default:
+		return // semaphore full — next client will retry
+	}
+	// Detach from the client's context so the background fetch is not
+	// cancelled when the response is sent.
+	bgCtx := context.WithoutCancel(r.Context())
+	bgReq := r.Clone(bgCtx)
+	go func() {
+		defer func() { <-bgRevalSem }()
+		h.doBackgroundRevalidate(bgCtx, bgReq, key, stale)
+	}()
+}
+
+// doBackgroundRevalidate fetches a fresh copy of stale and stores it.
+// Uses the collapse group to deduplicate concurrent SWR triggers for
+// the same key.
+func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, key api.Key, stale *api.Object) {
+	revalReq := r.Clone(ctx)
+	ConditionalHeaders(revalReq, stale)
+
+	res, _ := h.collapse.Do(key, func() collapse.Result {
+		return h.doFetch(revalReq)
+	})
+	if res.Err != nil {
+		return
+	}
+
+	if res.StatusCode == http.StatusNotModified {
+		refreshed := *stale
+		refreshed.Header = stale.Header.Clone()
+		refreshed.StoredAt = time.Now()
+		MergeHeaders304(&refreshed, res.Header)
+		refreshed.CacheControl = mergeHeaderValues(refreshed.Header, "Cache-Control")
+		newCC := ParseCacheControl(refreshed.CacheControl)
+		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
+			refreshed.TTL = ttl
+		}
+		refreshed.OriginAge = parseOriginAge(refreshed.Header)
+		if newETag := res.Header.Get("ETag"); newETag != "" {
+			refreshed.ETag = newETag
+		}
+		_ = h.store.Put(ctx, key, &refreshed)
+		return
+	}
+
+	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
+		obj := buildObject(key, r, res, h.negativeTTL, h.jitterPercent)
+		_ = h.store.Put(ctx, key, obj)
+	}
 }
 
 func (h *Handler) writeAndMaybeStore(
@@ -514,14 +587,16 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL 
 	}
 
 	obj := &api.Object{
-		Key:        key,
-		StatusCode: res.StatusCode,
-		Header:     res.Header.Clone(),
-		Body:       res.Body,
-		BodySize:   int64(len(res.Body)),
-		StoredAt:   now,
-		TTL:        ttl,
-		ETag:       res.Header.Get("ETag"),
+		Key:          key,
+		StatusCode:   res.StatusCode,
+		Header:       res.Header.Clone(),
+		Body:         res.Body,
+		BodySize:     int64(len(res.Body)),
+		StoredAt:     now,
+		TTL:          ttl,
+		ETag:         res.Header.Get("ETag"),
+		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
+		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing in isFresh
 	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid

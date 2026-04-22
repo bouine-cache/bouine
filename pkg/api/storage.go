@@ -56,6 +56,17 @@ type Object struct {
 
 	// Hits counts how many times this object has been served.
 	Hits uint64 `json:"hits"`
+
+	// CacheControl is the merged Cache-Control header from the origin
+	// response, stored verbatim at cache-fill time. Avoids re-reading the
+	// header map on every cache hit in Evaluate. Not serialized (it is
+	// re-derived from Header on warm-tier load).
+	CacheControl string `json:"-"`
+
+	// OriginAge is the Age header value from the origin at cache-fill
+	// time. Pre-parsed once so isFresh never re-parses it per request.
+	// Not serialized (re-derived from Header on warm-tier load).
+	OriginAge time.Duration `json:"-"`
 }
 
 // Fresh reports whether the object is still within its TTL relative to

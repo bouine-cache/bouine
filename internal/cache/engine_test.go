@@ -11,13 +11,14 @@ import (
 
 func freshObj(ttl time.Duration) *api.Object {
 	return &api.Object{
-		StatusCode: 200,
-		Header:     http.Header{"Cache-Control": {"max-age=60"}},
-		Body:       []byte("cached"),
-		BodySize:   6,
-		StoredAt:   time.Now(),
-		TTL:        ttl,
-		ETag:       `"abc"`,
+		StatusCode:   200,
+		Header:       http.Header{"Cache-Control": {"max-age=60"}},
+		CacheControl: "max-age=60",
+		Body:         []byte("cached"),
+		BodySize:     6,
+		StoredAt:     time.Now(),
+		TTL:          ttl,
+		ETag:         `"abc"`,
 	}
 }
 
@@ -59,6 +60,7 @@ func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Minute)
 	obj.Header.Set("Cache-Control", "no-cache")
+	obj.CacheControl = "no-cache"
 	d := Evaluate(r, obj, time.Now())
 	if d.Decision != Revalidate {
 		t.Fatalf("expected Revalidate for no-cache, got %d", d.Decision)
@@ -113,6 +115,7 @@ func TestEvaluate_MustRevalidate(t *testing.T) {
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // stale
 	obj.Header.Set("Cache-Control", "max-age=1, must-revalidate")
+	obj.CacheControl = "max-age=1, must-revalidate"
 	d := Evaluate(r, obj, time.Now())
 	if d.Decision != Revalidate {
 		t.Fatalf("expected Revalidate for must-revalidate, got %d", d.Decision)

@@ -57,6 +57,11 @@ type Config struct {
 	PeerPurgeFn func(evt api.PurgeEvent) error
 	// PeerBanFn, if non-nil, handles incoming ban broadcasts from peers.
 	PeerBanFn func(evt api.BanEvent) error
+	// PeerFetchHandler, if non-nil, serves peer cache-lookup requests
+	// from other cluster nodes. Mounted at POST /v1/peer/fetch (no auth
+	// required — callers are trusted cluster peers on the internal
+	// network; protected by network policy / mTLS in production).
+	PeerFetchHandler http.Handler
 	// PeerMetricsHandler, if non-nil, is mounted at GET /v1/peer/metrics
 	// (behind bearer-token auth) so peers can fetch this node's ring summary.
 	PeerMetricsHandler http.Handler
@@ -123,6 +128,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.PeerBanFn != nil {
 		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
+	}
+	if cfg.PeerFetchHandler != nil {
+		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
 	}
 	if cfg.PeerMetricsHandler != nil {
 		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)

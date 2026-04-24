@@ -322,13 +322,18 @@ func (s *Server) peerBan(w http.ResponseWriter, r *http.Request) {
 // (non-GET) requests. Safe read-only endpoints used by K8s probes
 // and monitoring are always allowed without a token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	// Paths exempt from auth (K8s probes, Prometheus scrape).
+	// Paths exempt from auth (K8s probes, Prometheus scrape, cluster RPCs).
 	exempt := map[string]bool{
 		"/healthz":          true,
 		"/readyz":           true,
 		"/metrics":          true,
 		"/version":          true,
 		"/v1/cluster/peers": true,
+		// Peer-to-peer fetch RPC: callers are cluster peers on the internal
+		// network. Token-auth is not used here; network policy / mTLS guards
+		// access in production. Must remain auth-exempt so peers without a
+		// shared token can still perform lookups.
+		"/v1/peer/fetch": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if exempt[r.URL.Path] {

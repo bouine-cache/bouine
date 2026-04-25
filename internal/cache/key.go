@@ -216,6 +216,9 @@ func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL) int {
 
 // BuildVaryKey constructs the secondary key from the Vary header
 // values in the response and the corresponding request headers.
+// List-valued headers (Accept-Language, Accept-Encoding, Accept) are
+// normalised by sorting their comma-separated tokens so that
+// "en, fr" and "fr, en" produce the same cache key.
 func BuildVaryKey(vary string, reqHeader http.Header) string {
 	if vary == "" || vary == "*" {
 		return vary
@@ -233,7 +236,13 @@ func BuildVaryKey(vary string, reqHeader http.Header) string {
 			buf[n] = '='
 			n++
 		}
-		n += copy(buf[n:], reqHeader.Get(f))
+		val := reqHeader.Get(f)
+		// Normalise list-valued headers: sort their comma-separated tokens
+		// so "en, fr" and "fr, en" hash identically.
+		if isListValuedVaryField(f) {
+			val = normaliseListHeader(val)
+		}
+		n += copy(buf[n:], val)
 		if n < len(buf) {
 			buf[n] = ';'
 			n++
@@ -242,4 +251,29 @@ func BuildVaryKey(vary string, reqHeader http.Header) string {
 	// Return the hash as a compact string.
 	h := xxhash.Sum64(buf[:n])
 	return strconv.FormatUint(h, 16)
+}
+
+// isListValuedVaryField reports whether a Vary field name contains a
+// list of tokens whose order should be normalised for cache key purposes.
+func isListValuedVaryField(f string) bool {
+	switch f {
+	case "accept-language", "accept-encoding", "accept", "accept-charset":
+		return true
+	}
+	return false
+}
+
+// normaliseListHeader sorts the comma-separated tokens in a list header
+// value so that equivalent but differently-ordered values produce the
+// same string. Quality factors (q=...) are kept with their token.
+func normaliseListHeader(v string) string {
+	if v == "" || !strings.Contains(v, ",") {
+		return strings.TrimSpace(v)
+	}
+	parts := strings.Split(v, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }

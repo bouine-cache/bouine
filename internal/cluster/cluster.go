@@ -199,11 +199,45 @@ func (c *Cluster) NotifyMsg([]byte) {}
 // GetBroadcasts returns pending broadcast messages.
 func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte { return nil }
 
-// LocalState returns a snapshot of local state for anti-entropy.
-func (c *Cluster) LocalState(_ bool) []byte { return nil }
+// LocalState serialises the ring digest for anti-entropy. Peers
+// exchange digests on every full-state push/pull cycle; if digests
+// differ they re-reconcile their peer tables. The join flag is true
+// on the first sync after joining.
+func (c *Cluster) LocalState(_ bool) []byte {
+	digest := c.Digest()
+	b, _ := json.Marshal(digest)
+	return b
+}
 
-// MergeRemoteState merges state from a remote node during anti-entropy.
-func (c *Cluster) MergeRemoteState(_ []byte, _ bool) {}
+// MergeRemoteState reconciles a remote node's ring digest with the
+// local peer table. If the remote node reports peers this node doesn't
+// know about it re-parses their NodeMeta as PeerInfo and adds them to
+// the ring so ownership stays consistent across restarts.
+func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
+	if len(buf) == 0 {
+		return
+	}
+	var remote api.RingDigest
+	if err := json.Unmarshal(buf, &remote); err != nil {
+		c.logger.Debug("cluster: bad remote state", "error", err)
+		return
+	}
+	local := c.Digest()
+	if local.Hash == remote.Hash {
+		return // rings already in sync
+	}
+	c.logger.Debug("cluster: ring digest mismatch, re-syncing",
+		"local", local.Hash, "remote", remote.Hash,
+		"join", join)
+	// Re-synchronise by re-processing all live memberlist nodes so any
+	// peer that was missed during network partitions or rolling restarts
+	// is added to the ring.
+	for _, n := range c.ml.Members() {
+		if _, ok := c.peers[n.Name]; !ok {
+			c.NotifyJoin(n)
+		}
+	}
+}
 
 // ---- memberlist.EventDelegate ----
 

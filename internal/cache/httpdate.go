@@ -13,7 +13,8 @@ import (
 
 // HeuristicTTL computes a heuristic freshness lifetime from
 // Last-Modified per RFC 9111 §4.2.2. The heuristic is 10% of
-// the time since Last-Modified. Returns 0 if not applicable.
+// the interval between the Date header (or now as fallback) and
+// Last-Modified. Returns 0 if not applicable.
 func HeuristicTTL(header http.Header, now time.Time) time.Duration {
 	lm := header.Get("Last-Modified")
 	if lm == "" {
@@ -23,7 +24,16 @@ func HeuristicTTL(header http.Header, now time.Time) time.Duration {
 	if lmTime.IsZero() {
 		return 0
 	}
-	age := now.Sub(lmTime)
+	// RFC 9111 §4.2.2: use the Date header as the reference time so the
+	// freshness lifetime is stable across proxy hops and does not grow
+	// when the response is served from a cache that has held it for a while.
+	refTime := now
+	if dateStr := header.Get("Date"); dateStr != "" {
+		if dt := parseHTTPDate(dateStr); !dt.IsZero() {
+			refTime = dt
+		}
+	}
+	age := refTime.Sub(lmTime)
 	if age <= 0 {
 		return 0
 	}

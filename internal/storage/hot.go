@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -174,10 +176,81 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	return nil
 }
 
-// Ban evaluates a predicate against all entries. Phase 4 adds the
-// lazy-evaluated ban list; for now this is an eager scan.
-func (h *HotStore) Ban(_ context.Context, _ api.BanExpr) (int, error) {
-	return 0, nil
+// Ban performs an eager scan of the hot tier, deleting all entries
+// whose stored object matches the ban predicate (RFC 9111 §4.4 lazy
+// bans are deferred to post-v1.0; this eager scan handles the common
+// case of host/path/surrogate-key invalidation on administrative APIs).
+func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
+	pred, err := compileBanPredicate(expr)
+	if err != nil {
+		return 0, err
+	}
+
+	total := 0
+	for i := range h.shards {
+		s := &h.shards[i]
+		s.mu.Lock()
+		for key, e := range s.entries {
+			if pred(e.obj) {
+				s.bytes -= objSize(e.obj)
+				s.evict.Remove(e.sieve)
+				delete(s.entries, key)
+				h.stats.evictions.Add(1)
+				total++
+			}
+		}
+		s.mu.Unlock()
+	}
+	return total, nil
+}
+
+// banPredicate is a compiled function that returns true when an Object
+// should be evicted by a ban expression.
+type banPredicate func(*api.Object) bool
+
+// compileBanPredicate pre-compiles the regexps in expr and returns a
+// closure that evaluates the full predicate against a single Object.
+func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
+	var hostRE, pathRE *regexp.Regexp
+	if expr.HostRegex != "" {
+		re, err := regexp.Compile(expr.HostRegex)
+		if err != nil {
+			return nil, fmt.Errorf("ban: invalid host_regex: %w", err)
+		}
+		hostRE = re
+	}
+	if expr.PathRegex != "" {
+		re, err := regexp.Compile(expr.PathRegex)
+		if err != nil {
+			return nil, fmt.Errorf("ban: invalid path_regex: %w", err)
+		}
+		pathRE = re
+	}
+	return func(obj *api.Object) bool {
+		// Skip objects stored after the ban was issued.
+		if !expr.CreatedAt.IsZero() && obj.StoredAt.After(expr.CreatedAt) {
+			return false
+		}
+		if hostRE != nil && !hostRE.MatchString(obj.Header.Get("Host")) {
+			return false
+		}
+		if pathRE != nil && !pathRE.MatchString(obj.Header.Get("X-Bouine-Path")) {
+			return false
+		}
+		if expr.SurrogateKey != "" {
+			found := false
+			for _, sk := range obj.SurrogateKeys {
+				if sk == expr.SurrogateKey {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}, nil
 }
 
 // Stats returns an atomic snapshot.

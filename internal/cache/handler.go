@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/pipeline/collapse"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
@@ -177,6 +178,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// L4 span: cache engine layer.
+	ctx, span := tracing.StartSpan(r.Context(), "bouine.cache")
+	defer span.End()
+	r = r.WithContext(ctx)
+
 	// Take a single timestamp; thread it through Evaluate and serve
 	// functions to avoid a second time.Now() syscall per hit.
 	now := time.Now()
@@ -225,9 +231,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// StayinAlive: if we have a super-stale object and origin fails,
-		// serve it rather than returning 502.
-		if h.stayinAlive && obj != nil {
+		// StayinAlive or stale-if-error: if we have a stale object and origin
+		// fails / is skipped due to SIE, serve the stale copy. SIE objects
+		// go through fetchAndStoreStayinAlive which handles 5xx fallback.
+		if obj != nil && (h.stayinAlive || obj.StaleForSIE(now)) {
 			h.fetchAndStoreStayinAlive(w, r, key, obj)
 		} else {
 			h.fetchAndStore(w, r, key)
@@ -586,8 +593,11 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) doFetch(r *http.Request) collapse.Result {
+	// L5 span: upstream origin pool layer.
+	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
+	defer span.End()
 	rec := acquireRecorder()
-	h.upstream.ServeHTTP(rec, r)
+	h.upstream.ServeHTTP(rec, r.WithContext(ctx))
 
 	return collapse.Result{
 		StatusCode: rec.statusCode,
@@ -598,9 +608,19 @@ func (h *Handler) doFetch(r *http.Request) collapse.Result {
 
 func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL time.Duration, jitterPct int) *api.Object {
 	now := time.Now()
-	// Parse all Cache-Control headers (may be multiple).
+	// Parse Cache-Control (may be multiple headers — merge first).
+	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
+	// use it as the authoritative directive source when present.
 	ccHeader := mergeHeaderValues(res.Header, "Cache-Control")
-	respCC := ParseCacheControl(ccHeader)
+	var respCC Directives
+	if cdnCC, hasCDN := cdnCacheControl(res.Header); hasCDN {
+		respCC = cdnCC
+		// Store CDN-Cache-Control string as the object's pre-parsed CC so
+		// Evaluate reads the CDN directives on every hit path.
+		ccHeader = mergeHeaderValues(res.Header, "CDN-Cache-Control")
+	} else {
+		respCC = ParseCacheControl(ccHeader)
+	}
 	ttl, explicit := FreshnessLifetimeH(respCC, res.Header)
 
 	// Heuristic freshness: if no explicit TTL, use 10% of age since
@@ -654,9 +674,9 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL 
 	return obj
 }
 
-// isInvalidating returns true for any unsafe method that should
-// trigger cache invalidation (RFC 9111 §4.4). Only GET, HEAD, and
-// OPTIONS are safe; everything else invalidates.
+// isInvalidating returns true for unsafe methods that should trigger
+// isInvalidating returns true for unsafe methods that should trigger
+// cache invalidation (RFC 9111 §4.4). GET, HEAD, and OPTIONS are safe.
 func isInvalidating(method string) bool {
 	return method != http.MethodGet &&
 		method != http.MethodHead &&

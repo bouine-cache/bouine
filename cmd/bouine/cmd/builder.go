@@ -16,6 +16,7 @@ import (
 	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/accesslog"
+	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/internal/pipeline"
 	"github.com/thylong/bouine/internal/storage"
@@ -98,7 +99,9 @@ func (e *engine) buildHandler(
 ) http.Handler {
 	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher)
 	metricsWrapped := dpMetrics.Middleware(router)
-	return accesslog.Middleware(e.logger, metricsWrapped)
+	// L2 span: pipeline routing layer.
+	tracedL2 := tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
+	return accesslog.Middleware(e.logger, tracedL2)
 }
 
 func (e *engine) buildPools() (map[string]*origin.Pool, error) {

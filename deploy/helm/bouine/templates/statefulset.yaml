@@ -43,6 +43,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # GC tuning: keep pauses small relative to the memory limit.
+            # Set GOMEMLIMIT to ~75% of the pod's memory limit so the Go
+            # runtime increases GC frequency before the OOM-killer fires.
+            - name: GOMEMLIMIT
+              value: "{{ .Values.goMemLimit | default "3GiB" }}"
+            - name: GOGC
+              value: "{{ .Values.goGC | default "100" }}"
+            {{- if .Values.extraEnv }}
+            {{- toYaml .Values.extraEnv | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 80

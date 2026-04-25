@@ -23,9 +23,9 @@ config:
     # - cert_file: /etc/bouine/tls/tls.crt
     #   key_file: /etc/bouine/tls/tls.key
   storage:
-    hot_max_bytes: 2Go
+    hot_max_bytes: 2GiB
     warm_dir: /var/lib/bouine
-    warm_max_bytes: 20Go
+    warm_max_bytes: 20GiB
     eviction: sieve
   cluster:
     enabled: true
@@ -67,7 +67,9 @@ containerSecurityContext:
 
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  # minAvailable: 2 ensures at least 2 pods remain during rollout on a
+  # 3-replica StatefulSet, satisfying SLO DP-5 (zero 5xx on rolling restart).
+  minAvailable: 2
 
 topologySpreadConstraints:
   - maxSkew: 1
@@ -75,6 +77,21 @@ topologySpreadConstraints:
     whenUnsatisfiable: DoNotSchedule
 
 terminationGracePeriodSeconds: 30
+
+# Go runtime tuning. GOMEMLIMIT should be ~75% of resources.limits.memory.
+# GOGC=100 (default) paired with GOMEMLIMIT keeps GC pauses bounded.
+goMemLimit: "3GiB"
+goGC: "100"
+
+# Extra environment variables injected into the bouine container.
+# Useful for secret references (e.g., admin token from a Secret):
+#   extraEnv:
+#     - name: BOUINE_ADMIN_TOKEN
+#       valueFrom:
+#         secretKeyRef:
+#           name: bouine-admin-token
+#           key: token
+extraEnv: []
 
 readinessProbe:
   httpGet:

@@ -18,6 +18,7 @@ import (
 	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/origin"
+	"github.com/thylong/bouine/internal/prefetch"
 	"github.com/thylong/bouine/internal/runtime/shutdown"
 	"github.com/thylong/bouine/internal/runtime/supervised"
 	"github.com/thylong/bouine/internal/storage"
@@ -100,7 +101,23 @@ func (e *engine) run(ctx context.Context) error {
 		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
 	}
 
-	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher)
+	// Build handler first with no prefetcher (nil), then create the
+	// prefetcher using the full cache handler as its upstream so its
+	// background GETs are stored. The two are decoupled at this layer:
+	// the cache handler checks h.prefetcher == nil at call time, so
+	// setting it after construction is safe (no data race — it is set
+	// before Serve() starts accepting connections).
+	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher, nil)
+
+	// Prefetcher: warms the cache by following Link: rel=preload headers
+	// from stored origin responses and optionally crawling sitemaps.
+	pf := prefetch.New(prefetch.Config{
+		Handler:         handler,
+		MaxConcurrency:  32,
+		SitemapURLs:     e.cfg.Prefetch.SitemapURLs,
+		SitemapInterval: e.cfg.Prefetch.SitemapInterval,
+		Logger:          e.logger,
+	})
 
 	// Config watcher — fsnotify + SIGHUP hot reload.
 	watcher := config.NewWatcher(config.WatcherConfig{
@@ -114,6 +131,7 @@ func (e *engine) run(ctx context.Context) error {
 		rings.Start(rCtx, snapshotPath)
 		return nil
 	})
+	g.Go("prefetch", pf.Run)
 	g.Go("config-watcher", watcher.Run)
 	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher)
 	e.startListeners(g, handler)

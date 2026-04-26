@@ -44,7 +44,7 @@ aren't `slog`-compatible, HTTP servers other than
 | `google.golang.org/protobuf`                    | BSD-3      | (transitive)             | Prometheus expfmt. |
 | `golang.org/x/sync`                             | BSD-3      | `internal/runtime/supervised` | errgroup. Pre-approved in `AGENTS.md §5`. |
 | `golang.org/x/crypto`                           | BSD-3      | (transitive)             | Standard extended crypto. |
-| `golang.org/x/net`                              | BSD-3      | `internal/listener`      | HTTP/2 server configuration, h2c handler. |
+| `golang.org/x/net`                              | BSD-3      | `internal/listener`      | HTTP/2 server configuration. h2c was replaced by native Go 1.24+ Protocols API. |
 | `golang.org/x/sys`                              | BSD-3      | (transitive)             | Low-level syscalls. |
 | `golang.org/x/text`                             | BSD-3      | (transitive)             | Unicode handling. |
 | `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`   | YAML config parsing. Standard for Go config files. |
@@ -78,3 +78,9 @@ without code requires a justification in the PR.
 - The full allow-list is reviewed at the end of each phase.
 - A CVE in any entry above triggers a security review pass against the
   threat model.
+| `github.com/a-h/templ`                          | MIT        | `internal/dashboard/templates` | Type-safe HTML templating for the operator dashboard. |
+| `github.com/fsnotify/fsnotify`                  | BSD-3      | `internal/config`              | File-system watcher for SIGHUP + fsnotify hot reload. |
+| `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`    | YAML config parsing. Chosen for strict mode and good error messages. |
+| `go.opentelemetry.io/otel`                      | Apache-2.0 | `internal/observability/tracing` | OTel API; no-op by default, wired to OTLP exporter via config. |
+| `go.opentelemetry.io/otel/trace`                | Apache-2.0 | `internal/observability/tracing` | OTel trace types. |
+| `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` | Apache-2.0 | (planned) | OTLP/HTTP exporter for Jaeger/Tempo. Pending C1. |

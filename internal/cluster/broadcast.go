@@ -75,6 +75,11 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 		}(p)
 	}
 	wg.Wait()
+	// Also queue via gossip for redundant delivery to temporarily
+	// unreachable peers (idempotent: duplicate delivery is safe).
+	if body, err := json.Marshal(api.PurgeEvent{Key: key, VaryKey: varyKey}); err == nil {
+		b.cluster.QueueBroadcast(body)
+	}
 }
 
 // BroadcastBan sends a ban predicate to all live peers.

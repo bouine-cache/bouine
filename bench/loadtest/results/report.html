@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bouine load-test results</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#1a1a2e; --surface:#16213e; --border:#0f3460; --text:#e0e0e0; --muted:#888; }
+  * { box-sizing:border-box; margin:0; padding:0 }
+  body { background:var(--bg); color:var(--text); font-family: 'Segoe UI',system-ui,sans-serif; padding:2rem }
+  h1 { font-size:1.8rem; margin-bottom:.5rem; color:#fff }
+  .subtitle { color:var(--muted); margin-bottom:2.5rem; font-size:.9rem }
+  section { background:var(--surface); border:1px solid var(--border); border-radius:8px;
+             padding:1.5rem; margin-bottom:2rem }
+  h2 { font-size:1rem; color:#ccc; margin-bottom:1rem; font-weight:600 }
+  .chart-wrap { position:relative; height:340px }
+  table { width:100%; border-collapse:collapse; font-size:.78rem }
+  th, td { padding:.5rem .75rem; text-align:left; border-bottom:1px solid var(--border) }
+  th { background:#0f3460; color:#ccc; font-weight:600; position:sticky; top:0 }
+  tr:hover td { background:#1e2a4a }
+  td:nth-child(n+4) { font-variant-numeric:tabular-nums; font-family:monospace }
+  .legend { display:flex; gap:1.5rem; margin-top:1rem; flex-wrap:wrap }
+  .litem { display:flex; align-items:center; gap:.4rem; font-size:.82rem; color:#ccc }
+  .lswatch { width:14px; height:14px; border-radius:3px }
+</style>
+</head>
+<body>
+<h1>bouine · load-test results</h1>
+<p class="subtitle">
+  k6 --summary-export JSON &nbsp;·&nbsp; 3k RPS hit/mixed, 1.5k RPS miss &nbsp;·&nbsp;
+  30 s per run &nbsp;·&nbsp; Docker bridge network (macOS)
+</p>
+
+<div class="legend">
+  <div class="litem"><div class="lswatch" style="background:#4f8ef7"></div>bouine</div><div class="litem"><div class="lswatch" style="background:#f7a24f"></div>nginx</div><div class="litem"><div class="lswatch" style="background:#4ff77e"></div>varnish</div><div class="litem"><div class="lswatch" style="background:#f74f4f"></div>envoy</div>
+</div>
+
+
+  <section>
+    <h2>§3.2 Hit-only (warm cache, 3k RPS)</h2>
+    <div class="chart-wrap"><canvas id="chart_prog_3_2"></canvas></div>
+  </section>
+
+  <section>
+    <h2>§3.3 Miss storm (no-store, 1.5k RPS)</h2>
+    <div class="chart-wrap"><canvas id="chart_prog_3_3"></canvas></div>
+  </section>
+
+  <section>
+    <h2>§3.6 Mixed realistic (60/15/…, 3k RPS)</h2>
+    <div class="chart-wrap"><canvas id="chart_prog_3_6"></canvas></div>
+  </section>
+
+  <section>
+    <h2>§3.2 Hit-only (warm cache, 3k RPS) — TUT comparison (latest round)</h2>
+    <div class="chart-wrap"><canvas id="chart_tut_3_2"></canvas></div>
+  </section>
+
+  <section>
+    <h2>§3.3 Miss storm (no-store, 1.5k RPS) — TUT comparison (latest round)</h2>
+    <div class="chart-wrap"><canvas id="chart_tut_3_3"></canvas></div>
+  </section>
+
+  <section>
+    <h2>§3.6 Mixed realistic (60/15/…, 3k RPS) — TUT comparison (latest round)</h2>
+    <div class="chart-wrap"><canvas id="chart_tut_3_6"></canvas></div>
+  </section>
+
+  <section>
+    <h2>§3.6 Mixed — bouine cache hit rate across optimisation rounds</h2>
+    <div class="chart-wrap"><canvas id="chart_hitrate"></canvas></div>
+  </section>
+
+  <section>
+    <h2>Raw data table</h2>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>Scenario</th><th>TUT</th><th>Round</th>
+        <th>RPS</th><th>avg (ms)</th><th>med (ms)</th>
+        <th>p90 (ms)</th><th>p95 (ms)</th><th>max (ms)</th>
+        <th>fail%</th><th>hit%</th>
+      </tr></thead>
+      <tbody><tr><td>3.2</td><td>bouine</td><td>Baseline (pre-fixes)</td><td>3000</td><td>338.358</td><td>197.375</td><td>298.500</td><td>354.466</td><td>99166.667</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>bouine</td><td>Round 1 – race fix + age pool</td><td>3000</td><td>301.936</td><td>197.500</td><td>297.250</td><td>350.083</td><td>70274.500</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>bouine</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>2996</td><td>166.396</td><td>123.542</td><td>219.041</td><td>276.708</td><td>108752.833</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>bouine</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>3000</td><td>185.779</td><td>123.958</td><td>232.000</td><td>311.835</td><td>62230.209</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>nginx</td><td>Baseline (pre-fixes)</td><td>3000</td><td>144.713</td><td>119.375</td><td>192.416</td><td>235.958</td><td>44405.875</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>nginx</td><td>Round 1 – race fix + age pool</td><td>3000</td><td>144.779</td><td>122.084</td><td>198.125</td><td>242.458</td><td>10173.583</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>nginx</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>3000</td><td>166.314</td><td>120.917</td><td>219.875</td><td>303.583</td><td>31592.084</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>nginx</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>3000</td><td>180.824</td><td>122.666</td><td>243.625</td><td>349.417</td><td>58998.667</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>varnish</td><td>Baseline (pre-fixes)</td><td>2999</td><td>162.544</td><td>114.083</td><td>181.625</td><td>217.944</td><td>57318.916</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>varnish</td><td>Round 1 – race fix + age pool</td><td>2995</td><td>181.011</td><td>113.542</td><td>177.792</td><td>212.242</td><td>78282.376</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>varnish</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>2999</td><td>176.717</td><td>117.667</td><td>200.750</td><td>263.333</td><td>59328.667</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>varnish</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>3000</td><td>197.262</td><td>118.625</td><td>206.067</td><td>275.191</td><td>61076.667</td><td>0.00%</td><td>100.0%</td></tr><tr><td>3.2</td><td>envoy</td><td>Baseline (pre-fixes)</td><td>3000</td><td>214.043</td><td>126.125</td><td>209.167</td><td>260.154</td><td>99743.417</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.2</td><td>envoy</td><td>Round 1 – race fix + age pool</td><td>2996</td><td>227.229</td><td>131.458</td><td>229.166</td><td>300.697</td><td>67830.500</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.2</td><td>envoy</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>2999</td><td>232.465</td><td>133.000</td><td>227.083</td><td>300.166</td><td>61392.833</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.2</td><td>envoy</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>2998</td><td>256.634</td><td>131.208</td><td>252.125</td><td>370.308</td><td>76142.833</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>bouine</td><td>Baseline (pre-fixes)</td><td>1500</td><td>646.681</td><td>377.334</td><td>613.417</td><td>992.459</td><td>81183.375</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>bouine</td><td>Round 1 – race fix + age pool</td><td>1500</td><td>448.964</td><td>362.000</td><td>502.667</td><td>802.291</td><td>9046.625</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>bouine</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>1500</td><td>157.222</td><td>139.416</td><td>186.084</td><td>231.834</td><td>8435.625</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>bouine</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>1500</td><td>165.064</td><td>138.542</td><td>179.709</td><td>211.334</td><td>9556.916</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>nginx</td><td>Baseline (pre-fixes)</td><td>1471</td><td>514068.126</td><td>171.230</td><td>1500757.242</td><td>3000202.954</td><td>5002147.836</td><td>1.30%</td><td>0.0%</td></tr><tr><td>3.3</td><td>nginx</td><td>Round 1 – race fix + age pool</td><td>1468</td><td>578320.733</td><td>170.583</td><td>2000327.943</td><td>3500577.291</td><td>5010112.002</td><td>1.84%</td><td>0.0%</td></tr><tr><td>3.3</td><td>nginx</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>1470</td><td>541115.351</td><td>167.625</td><td>1501389.909</td><td>3001477.595</td><td>5001548.086</td><td>1.75%</td><td>0.0%</td></tr><tr><td>3.3</td><td>nginx</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>1465</td><td>582583.808</td><td>178.708</td><td>2000533.305</td><td>3500539.926</td><td>5012661.586</td><td>1.91%</td><td>0.0%</td></tr><tr><td>3.3</td><td>varnish</td><td>Baseline (pre-fixes)</td><td>1500</td><td>146.487</td><td>121.875</td><td>198.708</td><td>281.377</td><td>11572.791</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>varnish</td><td>Round 1 – race fix + age pool</td><td>1500</td><td>159.713</td><td>130.000</td><td>223.246</td><td>313.231</td><td>18075.417</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>varnish</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>1500</td><td>165.858</td><td>125.541</td><td>218.166</td><td>298.252</td><td>15480.167</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>varnish</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>1500</td><td>176.376</td><td>122.875</td><td>228.875</td><td>325.250</td><td>51551.375</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>envoy</td><td>Baseline (pre-fixes)</td><td>1500</td><td>164.761</td><td>140.208</td><td>181.167</td><td>216.373</td><td>11405.167</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>envoy</td><td>Round 1 – race fix + age pool</td><td>1500</td><td>243.022</td><td>141.250</td><td>172.958</td><td>187.916</td><td>88958.917</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>envoy</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>1500</td><td>306.659</td><td>138.042</td><td>171.791</td><td>188.833</td><td>101027.292</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.3</td><td>envoy</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>1499</td><td>656.346</td><td>157.792</td><td>248.125</td><td>363.675</td><td>149378.542</td><td>0.00%</td><td>0.0%</td></tr><tr><td>3.6</td><td>bouine</td><td>Baseline (pre-fixes)</td><td>2999</td><td>484.705</td><td>223.917</td><td>455.017</td><td>694.109</td><td>91851.917</td><td>2.01%</td><td>73.0%</td></tr><tr><td>3.6</td><td>bouine</td><td>Round 1 – race fix + age pool</td><td>3000</td><td>467.409</td><td>216.583</td><td>418.637</td><td>552.089</td><td>95471.959</td><td>1.94%</td><td>73.1%</td></tr><tr><td>3.6</td><td>bouine</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>3000</td><td>277.639</td><td>130.041</td><td>257.750</td><td>334.079</td><td>62034.251</td><td>2.06%</td><td>72.8%</td></tr><tr><td>3.6</td><td>bouine</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>2999</td><td>229.909</td><td>133.208</td><td>288.709</td><td>427.229</td><td>81175.750</td><td>2.04%</td><td>72.9%</td></tr><tr><td>3.6</td><td>nginx</td><td>Baseline (pre-fixes)</td><td>3000</td><td>23880.784</td><td>113.667</td><td>233.875</td><td>474.644</td><td>5001645.336</td><td>2.00%</td><td>72.9%</td></tr><tr><td>3.6</td><td>nginx</td><td>Round 1 – race fix + age pool</td><td>3000</td><td>22398.217</td><td>115.125</td><td>225.042</td><td>409.966</td><td>5000185.169</td><td>2.03%</td><td>72.7%</td></tr><tr><td>3.6</td><td>nginx</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>3000</td><td>22142.668</td><td>121.708</td><td>275.571</td><td>625.392</td><td>4502195.377</td><td>1.92%</td><td>72.9%</td></tr><tr><td>3.6</td><td>nginx</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>3000</td><td>23608.506</td><td>121.792</td><td>314.542</td><td>909.213</td><td>5000131.753</td><td>2.00%</td><td>72.8%</td></tr><tr><td>3.6</td><td>varnish</td><td>Baseline (pre-fixes)</td><td>2999</td><td>170.058</td><td>107.000</td><td>227.600</td><td>342.500</td><td>62148.459</td><td>2.01%</td><td>93.0%</td></tr><tr><td>3.6</td><td>varnish</td><td>Round 1 – race fix + age pool</td><td>3000</td><td>189.683</td><td>113.146</td><td>247.667</td><td>360.548</td><td>38618.042</td><td>1.93%</td><td>93.3%</td></tr><tr><td>3.6</td><td>varnish</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>2999</td><td>233.243</td><td>114.791</td><td>260.334</td><td>385.125</td><td>67226.375</td><td>1.96%</td><td>93.0%</td></tr><tr><td>3.6</td><td>varnish</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>2997</td><td>199.406</td><td>113.416</td><td>288.516</td><td>425.291</td><td>83114.833</td><td>2.05%</td><td>92.9%</td></tr><tr><td>3.6</td><td>envoy</td><td>Baseline (pre-fixes)</td><td>3000</td><td>193.046</td><td>127.875</td><td>238.879</td><td>290.171</td><td>41594.292</td><td>1.94%</td><td>0.0%</td></tr><tr><td>3.6</td><td>envoy</td><td>Round 1 – race fix + age pool</td><td>2992</td><td>263.769</td><td>130.625</td><td>241.583</td><td>291.967</td><td>74121.625</td><td>2.00%</td><td>0.0%</td></tr><tr><td>3.6</td><td>envoy</td><td>Round 2 – ResponseWriter pool, route label, ReverseProxy</td><td>3000</td><td>281.185</td><td>141.417</td><td>272.992</td><td>353.750</td><td>71746.167</td><td>2.03%</td><td>0.0%</td></tr><tr><td>3.6</td><td>envoy</td><td>Round 3 – CC cache, OriginAge, SWR bg refresh</td><td>2998</td><td>418.110</td><td>147.000</td><td>312.250</td><td>457.692</td><td>113010.500</td><td>1.98%</td><td>0.0%</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+
+<script>
+window.addEventListener('DOMContentLoaded', () => {
+  Chart.defaults.color = '#aaa';
+
+  new Chart(document.getElementById('chart_prog_3_2'), {
+    type: 'bar',
+    data: {
+      labels: ["Baseline (pre-fixes)", "Round 1 \u2013 race fix + age pool", "Round 2 \u2013 ResponseWriter pool, route label, ReverseProxy", "Round 3 \u2013 CC cache, OriginAge, SWR bg refresh"],
+      datasets: [
+        { label: 'bouine avg',    data: [338.4, 301.9, 166.4, 185.8],   backgroundColor: '#4f8ef7', borderRadius: 4 },
+        { label: 'bouine p95',    data: [354.5, 350.1, 276.7, 311.8],   backgroundColor: '#4f8ef788', borderRadius: 4 },
+        { label: 'nginx avg',     data: [144.7, 144.8, 166.3, 180.8],    backgroundColor: '#f7a24f', borderRadius: 4 },
+        { label: 'varnish avg',   data: [162.5, 181.0, 176.7, 197.3],  backgroundColor: '#4ff77e', borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.2 Hit-only (warm cache, 3k RPS) — latency across optimisation rounds (ms)', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa', maxRotation: 30 }, grid: { color: '#333' } },
+        y: { title: { display: true, text: 'µs (ms × 1000 shown as ms)', color: '#aaa' },
+              ticks: { color: '#aaa', callback: v => v + ' ms' }, grid: { color: '#333' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart_prog_3_3'), {
+    type: 'bar',
+    data: {
+      labels: ["Baseline (pre-fixes)", "Round 1 \u2013 race fix + age pool", "Round 2 \u2013 ResponseWriter pool, route label, ReverseProxy", "Round 3 \u2013 CC cache, OriginAge, SWR bg refresh"],
+      datasets: [
+        { label: 'bouine avg',    data: [646.7, 449.0, 157.2, 165.1],   backgroundColor: '#4f8ef7', borderRadius: 4 },
+        { label: 'bouine p95',    data: [992.5, 802.3, 231.8, 211.3],   backgroundColor: '#4f8ef788', borderRadius: 4 },
+        { label: 'nginx avg',     data: [514068.1, 578320.7, 541115.4, 582583.8],    backgroundColor: '#f7a24f', borderRadius: 4 },
+        { label: 'varnish avg',   data: [146.5, 159.7, 165.9, 176.4],  backgroundColor: '#4ff77e', borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.3 Miss storm (no-store, 1.5k RPS) — latency across optimisation rounds (ms)', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa', maxRotation: 30 }, grid: { color: '#333' } },
+        y: { title: { display: true, text: 'µs (ms × 1000 shown as ms)', color: '#aaa' },
+              ticks: { color: '#aaa', callback: v => v + ' ms' }, grid: { color: '#333' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart_prog_3_6'), {
+    type: 'bar',
+    data: {
+      labels: ["Baseline (pre-fixes)", "Round 1 \u2013 race fix + age pool", "Round 2 \u2013 ResponseWriter pool, route label, ReverseProxy", "Round 3 \u2013 CC cache, OriginAge, SWR bg refresh"],
+      datasets: [
+        { label: 'bouine avg',    data: [484.7, 467.4, 277.6, 229.9],   backgroundColor: '#4f8ef7', borderRadius: 4 },
+        { label: 'bouine p95',    data: [694.1, 552.1, 334.1, 427.2],   backgroundColor: '#4f8ef788', borderRadius: 4 },
+        { label: 'nginx avg',     data: [23880.8, 22398.2, 22142.7, 23608.5],    backgroundColor: '#f7a24f', borderRadius: 4 },
+        { label: 'varnish avg',   data: [170.1, 189.7, 233.2, 199.4],  backgroundColor: '#4ff77e', borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.6 Mixed realistic (60/15/…, 3k RPS) — latency across optimisation rounds (ms)', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa', maxRotation: 30 }, grid: { color: '#333' } },
+        y: { title: { display: true, text: 'µs (ms × 1000 shown as ms)', color: '#aaa' },
+              ticks: { color: '#aaa', callback: v => v + ' ms' }, grid: { color: '#333' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart_tut_3_2'), {
+    type: 'bar',
+    data: {
+      labels: ["bouine", "nginx", "varnish", "envoy"],
+      datasets: [
+        { label: 'avg latency',  data: [185.8, 180.8, 197.3, 256.6],  backgroundColor: ["#4f8ef7", "#f7a24f", "#4ff77e", "#f74f4f"],  borderRadius: 4 },
+        { label: 'p95 latency',  data: [311.8, 349.4, 275.2, 370.3],  backgroundColor: ["#4f8ef788", "#f7a24f88", "#4ff77e88", "#f74f4f88"], borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.2 Hit-only (warm cache, 3k RPS) — TUT comparison (latest round, ms)', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa' }, grid: { color: '#333' } },
+        y: { ticks: { color: '#aaa', callback: v => v + ' ms' }, grid: { color: '#333' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart_tut_3_3'), {
+    type: 'bar',
+    data: {
+      labels: ["bouine", "nginx", "varnish", "envoy"],
+      datasets: [
+        { label: 'avg latency',  data: [165.1, 582583.8, 176.4, 656.3],  backgroundColor: ["#4f8ef7", "#f7a24f", "#4ff77e", "#f74f4f"],  borderRadius: 4 },
+        { label: 'p95 latency',  data: [211.3, 3500539.9, 325.2, 363.7],  backgroundColor: ["#4f8ef788", "#f7a24f88", "#4ff77e88", "#f74f4f88"], borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.3 Miss storm (no-store, 1.5k RPS) — TUT comparison (latest round, ms)', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa' }, grid: { color: '#333' } },
+        y: { ticks: { color: '#aaa', callback: v => v + ' ms' }, grid: { color: '#333' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart_tut_3_6'), {
+    type: 'bar',
+    data: {
+      labels: ["bouine", "nginx", "varnish", "envoy"],
+      datasets: [
+        { label: 'avg latency',  data: [229.9, 23608.5, 199.4, 418.1],  backgroundColor: ["#4f8ef7", "#f7a24f", "#4ff77e", "#f74f4f"],  borderRadius: 4 },
+        { label: 'p95 latency',  data: [427.2, 909.2, 425.3, 457.7],  backgroundColor: ["#4f8ef788", "#f7a24f88", "#4ff77e88", "#f74f4f88"], borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.6 Mixed realistic (60/15/…, 3k RPS) — TUT comparison (latest round, ms)', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa' }, grid: { color: '#333' } },
+        y: { ticks: { color: '#aaa', callback: v => v + ' ms' }, grid: { color: '#333' } }
+      }
+    }
+  });
+
+  new Chart(document.getElementById('chart_hitrate'), {
+    type: 'line',
+    data: {
+      labels: ["Baseline (pre-fixes)", "Round 1 \u2013 race fix + age pool", "Round 2 \u2013 ResponseWriter pool, route label, ReverseProxy", "Round 3 \u2013 CC cache, OriginAge, SWR bg refresh"],
+      datasets: [{
+        label: 'bouine hit rate (%)',
+        data: [73.0, 73.1, 72.8, 72.9],
+        borderColor: '#4f8ef7',
+        backgroundColor: '#4f8ef733',
+        fill: true, tension: 0.3, pointRadius: 6,
+        pointBackgroundColor: '#4f8ef7'
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { title: { display: true, text: '§3.6 Mixed — bouine cache hit rate across optimisation rounds', color: '#ccc', font: { size: 14 } },
+                  legend: { labels: { color: '#ccc' } } },
+      scales: {
+        x: { ticks: { color: '#aaa', maxRotation: 30 }, grid: { color: '#333' } },
+        y: { min: 0, max: 100, ticks: { color: '#aaa', callback: v => v + '%' }, grid: { color: '#333' } }
+      }
+    }
+  });
+});
+</script>
+</body>
+</html>

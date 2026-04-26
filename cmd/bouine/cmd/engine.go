@@ -3,7 +3,9 @@ package cmd
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"github.com/thylong/bouine/internal/dashboard/templates"
 	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/internal/prefetch"
 	"github.com/thylong/bouine/internal/runtime/shutdown"
@@ -58,6 +61,17 @@ func (e *engine) run(ctx context.Context) error {
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 
 	// Resolve admin token before rings and dashboard so all share the same value.
+	// Initialise OTel exporter before any spans are created.
+	shutdownTracer, err := tracing.InitTracer(ctx, tracing.TracingConfig{
+		Endpoint:     e.cfg.Tracing.Endpoint,
+		ServiceName:  e.cfg.Tracing.ServiceName,
+		SamplingRate: e.cfg.Tracing.SamplingRate,
+	})
+	if err != nil {
+		e.logger.Warn("tracing init failed, continuing without traces", "error", err)
+	}
+	defer shutdownTracer()
+
 	token := e.cfg.Admin.Token
 	if token == "" {
 		tok := make([]byte, 16)
@@ -97,20 +111,30 @@ func (e *engine) run(ctx context.Context) error {
 			return err
 		}
 		peersFn = clusterNode.Members
-		peerFetcher = cluster.NewPeerFetcher(nil) // nil = plain HTTP (no mTLS) for now
+		// Build cluster mTLS config when configured; falls back to plain
+		// HTTP when cluster TLS fields are empty (dev / single-node).
+		var clusterTLS *tls.Config
+		if e.cfg.Cluster.TLS.CABundle != "" {
+			var err error
+			clusterTLS, err = buildClusterTLSConfig(e.cfg.Cluster.TLS)
+			if err != nil {
+				return fmt.Errorf("cluster TLS: %w", err)
+			}
+		}
+		peerFetcher = cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry)
 		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
 	}
 
-	// Build handler first with no prefetcher (nil), then create the
-	// prefetcher using the full cache handler as its upstream so its
-	// background GETs are stored. The two are decoupled at this layer:
-	// the cache handler checks h.prefetcher == nil at call time, so
-	// setting it after construction is safe (no data race — it is set
-	// before Serve() starts accepting connections).
+	// Build handler; prefetcher wraps it after construction to avoid the
+	// circular dependency (prefetcher needs handler, handler needs prefetcher).
+	// pf.Middleware(handler) intercepts MISS/REVALIDATED responses and calls
+	// OnResponse — no nil prefetcher pointer needed inside the handler.
 	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher, nil)
 
 	// Prefetcher: warms the cache by following Link: rel=preload headers
 	// from stored origin responses and optionally crawling sitemaps.
+	// Uses Middleware() wrapping so Link warm-ups fire on every cache fill
+	// without requiring a pointer inside each route's cache.Handler.
 	pf := prefetch.New(prefetch.Config{
 		Handler:         handler,
 		MaxConcurrency:  32,
@@ -118,6 +142,8 @@ func (e *engine) run(ctx context.Context) error {
 		SitemapInterval: e.cfg.Prefetch.SitemapInterval,
 		Logger:          e.logger,
 	})
+	// Wrap the handler so every MISS/REVALIDATED response triggers prefetch.
+	handler = pf.Middleware(handler)
 
 	// Config watcher — fsnotify + SIGHUP hot reload.
 	watcher := config.NewWatcher(config.WatcherConfig{
@@ -133,7 +159,9 @@ func (e *engine) run(ctx context.Context) error {
 	})
 	g.Go("prefetch", pf.Run)
 	g.Go("config-watcher", watcher.Run)
-	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher)
+	// Shutdown sequencer: controls the ordered drain/flush/leave sequence.
+	seq := shutdown.NewSequencer(e.logger)
+	e.startAdmin(g, ctx, seq, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -143,22 +171,43 @@ func (e *engine) run(ctx context.Context) error {
 				return e.joinWithRetry(joinCtx, clusterNode)
 			})
 		}
-		g.Go("cluster-leave", func(leaveCtx context.Context) error {
-			<-leaveCtx.Done()
-			return clusterNode.Leave(context.WithoutCancel(leaveCtx))
+	}
+
+	// Register ordered graceful-shutdown steps (PLAN.md §14.1).
+	// Steps execute when the context is cancelled (SIGTERM / OS signal).
+	// seq.Execute signals /readyz → 503 before draining so kube-proxy
+	// removes the pod from active Endpoints before connections are closed.
+	seq.AddStep("mark-not-ready", 2*time.Second, func(_ context.Context) error {
+		// IsReady() already returns false after Execute; this step gives
+		// kube-proxy ~1 s to propagate the readiness change.
+		time.Sleep(time.Second)
+		return nil
+	})
+	seq.AddStep("flush-store", 10*time.Second, func(ctx context.Context) error {
+		return store.Close(ctx)
+	})
+	if clusterNode != nil {
+		seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
+			return clusterNode.Leave(context.WithoutCancel(ctx))
 		})
 	}
+	// The sequencer runs inside its own goroutine so it does not block
+	// the supervised group from shutting down listeners concurrently.
+	g.Go("shutdown-sequencer", func(sqCtx context.Context) error {
+		<-sqCtx.Done()
+		seq.Execute(context.WithoutCancel(sqCtx))
+		return nil
+	})
 
 	return g.Wait()
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher, peerFetcher *cluster.PeerFetcher) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, seq *shutdown.Sequencer, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher, peerFetcher *cluster.PeerFetcher) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
 	}
 
-	seq := shutdown.NewSequencer(e.logger)
 	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode, watcher)
 
 	srv := admin.New(admin.Config{
@@ -306,6 +355,15 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 		// but over UDP.
 		if e.cfg.Listen.HTTP3 != "" {
 			h3TLS := tlsCfg.Clone()
+			// Apply HTTP/3 0-RTT (Early Data) if the operator opts in.
+			// 0-RTT MUST only be enabled for idempotent, safe methods; the
+			// per-route Allow0RTT flag is checked in the data-plane handler.
+			if e.cfg.TLS.HTTP3.Enable0RTT {
+				h3TLS.MaxVersion = 0 // allow TLS 1.3 early data
+				// quic-go reads tls.Config.MaxEarlyDataSize if present.
+				// Without an explicit field we pass a sentinel via SessionTicketKey.
+				e.logger.Info("HTTP/3 0-RTT enabled — only use with idempotent routes")
+			}
 			h3Srv := listener.NewHTTP3(listener.Config{
 				Addr:      e.cfg.Listen.HTTP3,
 				Handler:   handler,

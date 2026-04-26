@@ -10,11 +10,16 @@ package tracing
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -62,4 +67,60 @@ func RecordError(span trace.Span, err error) {
 	}
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
+}
+
+// InitTracer configures the global OTel TracerProvider from cfg.
+// When cfg.Endpoint is empty the existing no-op provider remains.
+// Returns a shutdown function that must be called on process exit
+// to flush buffered spans.
+func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
+	if cfg.Endpoint == "" {
+		return func() {}, nil
+	}
+	exp, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithEndpoint(cfg.Endpoint),
+		otlptracehttp.WithInsecure(), // use http:// by default; caller can override with https://
+	)
+	if err != nil {
+		return func() {}, fmt.Errorf("otlp exporter: %w", err)
+	}
+
+	sample := sdktrace.AlwaysSample()
+	if cfg.SamplingRate > 0 && cfg.SamplingRate < 1 {
+		sample = sdktrace.TraceIDRatioBased(cfg.SamplingRate)
+	} else if cfg.SamplingRate == 0 {
+		sample = sdktrace.NeverSample()
+	}
+
+	svcName := cfg.ServiceName
+	if svcName == "" {
+		svcName = "bouine"
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exp),
+		sdktrace.WithSampler(sample),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName(svcName),
+		)),
+	)
+	otel.SetTracerProvider(tp)
+
+	return func() { //nolint:contextcheck
+		_ = tp.Shutdown(context.Background())
+	}, nil
+}
+
+// TracingConfig holds the OTel export configuration loaded from YAML.
+//
+//nolint:revive // TracingConfig name is intentional; avoids ambiguity with config.TracingConfig
+type TracingConfig struct {
+	// Endpoint is the OTLP/HTTP collector endpoint, e.g. "http://otel-collector:4318".
+	// Empty string disables exporting (no-op tracer).
+	Endpoint string `yaml:"endpoint"`
+	// ServiceName is the service.name resource attribute. Defaults to "bouine".
+	ServiceName string `yaml:"service_name"`
+	// SamplingRate is a float in [0, 1]. 0 = never sample, 1 = always sample (default).
+	SamplingRate float64 `yaml:"sampling_rate"`
 }

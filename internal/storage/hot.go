@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 
@@ -24,6 +25,17 @@ type HotStore struct {
 	mask     uint64
 	maxBytes int64
 	stats    hotStats
+	// activeBans is the lazy ban list. Each entry was added via Ban() and
+	// is checked against objects returned by Get(). Objects stored AFTER
+	// the ban's CreatedAt are not subject to it (RFC 9111 §4.4 semantics).
+	bansMu     sync.Mutex
+	activeBans []activeBan
+}
+
+// activeBan is a compiled, time-stamped ban predicate in the lazy list.
+type activeBan struct {
+	pred    banPredicate
+	created time.Time
 }
 
 type shard struct {
@@ -98,6 +110,21 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 	if e != nil && e.sieve.Visited() {
 		obj := e.obj
 		s.mu.RUnlock()
+		// Lazy ban check: if any active ban matches this object, evict and
+		// return nil (RFC 9111 §4.4 lazy semantics).
+		if h.matchesActiveBan(obj) {
+			// Upgrade to write lock to delete the entry.
+			s.mu.Lock()
+			if cur, ok := s.entries[key]; ok && cur.obj == obj {
+				s.bytes -= objSize(obj)
+				s.evict.Remove(cur.sieve)
+				delete(s.entries, key)
+				h.stats.evictions.Add(1)
+			}
+			s.mu.Unlock()
+			h.stats.misses.Add(1)
+			return nil, nil
+		}
 		h.stats.hits.Add(1)
 		return obj, nil
 	}
@@ -201,6 +228,15 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 		}
 		s.mu.Unlock()
 	}
+	// Register in the lazy ban list so objects filled AFTER this scan
+	// are also checked on next lookup (RFC 9111 §4.4 lazy semantics).
+	createdAt := expr.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	h.bansMu.Lock()
+	h.activeBans = append(h.activeBans, activeBan{pred: pred, created: createdAt})
+	h.bansMu.Unlock()
 	return total, nil
 }
 
@@ -251,6 +287,35 @@ func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
 		}
 		return true
 	}, nil
+}
+
+// matchesActiveBan reports whether obj is subject to any active lazy ban.
+// Expired bans (where the ban's CreatedAt is far in the past and unlikely to
+// be relevant) are pruned to bound the list size.
+func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
+	h.bansMu.Lock()
+	defer h.bansMu.Unlock()
+	if len(h.activeBans) == 0 {
+		return false
+	}
+	var live []activeBan
+	for _, b := range h.activeBans {
+		// Keep bans for 24h after creation; older bans cannot match objects
+		// stored after them (StoredAt > ban.created).
+		if time.Since(b.created) < 24*time.Hour {
+			live = append(live, b)
+		}
+	}
+	h.activeBans = live
+	for _, b := range live {
+		if obj.StoredAt.After(b.created) {
+			continue // object stored after ban — not subject to it
+		}
+		if b.pred(obj) {
+			return true
+		}
+	}
+	return false
 }
 
 // Stats returns an atomic snapshot.

@@ -104,6 +104,9 @@ type Handler struct {
 	negativeTTL   time.Duration
 	jitterPercent int
 	stayinAlive   bool
+	defaultTTL    time.Duration // operator fallback when origin sends no freshness
+	defaultSWR    time.Duration // operator-level stale-while-revalidate floor
+	defaultSIE    time.Duration // operator-level stale-if-error floor
 	// variantCounts tracks stored Vary variants per primary key to
 	// enforce MaxVariants cap. Protected by variantMu.
 	variantMu     sync.Mutex
@@ -135,6 +138,16 @@ type HandlerConfig struct {
 	// StayinAlive enables emergency stale mode: serve cached objects
 	// indefinitely when the upstream is unreachable or returning 5xx.
 	StayinAlive bool
+	// DefaultTTL is the operator-configured TTL used when the origin sends
+	// no explicit freshness (no max-age, no Expires, no Last-Modified).
+	// Zero means fall back to heuristic or treat as uncacheable.
+	DefaultTTL time.Duration
+	// DefaultSWR is applied to every stored object when the origin does not
+	// send stale-while-revalidate. Zero leaves the object at origin semantics.
+	DefaultSWR time.Duration
+	// DefaultSIE is applied to every stored object when the origin does not
+	// send stale-if-error. Zero disables SIE fallback for this route.
+	DefaultSIE time.Duration
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -168,6 +181,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		negativeTTL:   cfg.NegativeTTL,
 		jitterPercent: cfg.JitterPercent,
 		stayinAlive:   cfg.StayinAlive,
+		defaultTTL:    cfg.DefaultTTL,
+		defaultSWR:    cfg.DefaultSWR,
+		defaultSIE:    cfg.DefaultSIE,
 		variantCounts: make(map[api.Key]int),
 		VaryCapHits:   cfg.VaryCapHits,
 		ownerFn:       cfg.OwnerFn,
@@ -505,7 +521,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	}
 
 	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
-		obj := buildObject(key, r, res, h.negativeTTL, h.jitterPercent)
+		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 		_ = h.store.Put(ctx, key, obj)
 	}
 }
@@ -558,12 +574,12 @@ func (h *Handler) writeAndMaybeStore(
 			h.variantCounts[primaryKey] = n + 1
 			h.variantMu.Unlock()
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.jitterPercent)
+		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 		_ = h.store.Put(r.Context(), storeKey, obj)
 		// Also store a "primary" entry so Vary-aware lookup finds
 		// the Vary header on the first lookup.
 		if storeKey != primaryKey {
-			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.jitterPercent)
+			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
 		}
 		// Notify the prefetcher so it can schedule background warm-up
@@ -624,7 +640,7 @@ func (h *Handler) doFetch(r *http.Request) collapse.Result {
 	}
 }
 
-func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL time.Duration, jitterPct int) *api.Object {
+func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL, defaultTTL, defaultSWR, defaultSIE time.Duration, jitterPct int) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
@@ -639,31 +655,11 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL 
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
-	ttl, explicit := FreshnessLifetimeH(respCC, res.Header)
+	_, _ = FreshnessLifetimeH(respCC, res.Header) // computed inside computeTTL
 
-	// Heuristic freshness: if no explicit TTL, use 10% of age since
-	// Last-Modified (RFC 9111 §4.2.2).
-	if !explicit {
-		ttl = HeuristicTTL(res.Header, now)
-	}
-
-	// Negative caching: assign configured TTL for error statuses.
-	if !explicit && ttl == 0 && negativeTTL > 0 && IsNegativeCacheable(res.StatusCode) {
-		ttl = negativeTTL
-	}
-
-	// Jitter: randomize TTL to prevent synchronized expiry stampedes.
-	ttl = JitterTTL(ttl, jitterPct)
-
-	// Subtract the origin's Age header from TTL so that objects that
-	// arrive already partially aged are correctly marked as stale
-	// (RFC 9111 §4.2.3). For example, if max-age=60 and Age=50, the
-	// remaining freshness is 10s, not 60s.
 	originAge := parseOriginAge(res.Header)
-	ttl -= originAge
-	if ttl < 0 {
-		ttl = 0
-	}
+	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
+	ttl := computeTTL(res.Header, res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
 
 	obj := &api.Object{
 		Key:          key,
@@ -679,9 +675,13 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL 
 	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
+	} else if defaultSWR > 0 {
+		obj.StaleWhileRevalidate = defaultSWR
 	}
 	if respCC.StaleIfErrorSet {
 		obj.StaleIfError = respCC.StaleIfError
+	} else if defaultSIE > 0 {
+		obj.StaleIfError = defaultSIE
 	}
 	if lm := res.Header.Get("Last-Modified"); lm != "" {
 		if t, err := time.Parse(http.TimeFormat, lm); err == nil {
@@ -689,7 +689,57 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL 
 		}
 	}
 	obj.VaryKey = BuildVaryKey(res.Header.Get("Vary"), r.Header)
+
+	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
+
 	return obj
+}
+
+// computeTTL derives the freshness lifetime for a response, applying
+// explicit freshness, heuristic TTL, operator defaults, jitter, and
+// the origin Age adjustment.
+func computeTTL(header http.Header, status int, respCC Directives,
+	negativeTTL, defaultTTL time.Duration, jitterPct int,
+	originAge time.Duration, now time.Time) time.Duration {
+	ttl, explicit := FreshnessLifetimeH(respCC, header)
+	if !explicit {
+		ttl = HeuristicTTL(header, now)
+	}
+	if !explicit && ttl == 0 && defaultTTL > 0 {
+		ttl = defaultTTL
+	} else if !explicit && ttl == 0 && negativeTTL > 0 && IsNegativeCacheable(status) {
+		ttl = negativeTTL
+	}
+	ttl = JitterTTL(ttl, jitterPct)
+	ttl -= originAge
+	if ttl < 0 {
+		ttl = 0
+	}
+	return ttl
+}
+
+// parseSurrogateKeys extracts surrogate/cache-tag keys from standard and
+// dialect response headers (Fastly: Surrogate-Key, Cloudflare: Cache-Tag,
+// Varnish: X-Cache-Tags). The first non-empty header wins; tokens are
+// whitespace/comma-separated and de-duplicated.
+func parseSurrogateKeys(h http.Header) []string {
+	for _, hdr := range []string{"Surrogate-Key", "Cache-Tag", "X-Cache-Tags"} {
+		v := h.Get(hdr)
+		if v == "" {
+			continue
+		}
+		seen := make(map[string]bool)
+		var keys []string
+		for _, tag := range strings.Fields(strings.ReplaceAll(v, ",", " ")) {
+			tag = strings.TrimSpace(tag)
+			if tag != "" && !seen[tag] {
+				keys = append(keys, tag)
+				seen[tag] = true
+			}
+		}
+		return keys
+	}
+	return nil
 }
 
 // isInvalidating returns true for unsafe methods that should trigger

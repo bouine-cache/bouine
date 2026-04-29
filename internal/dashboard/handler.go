@@ -46,6 +46,9 @@ type Config struct {
 	RingFn func() []api.RingSegment
 	// PeerFetchStatsFn returns live peer fetch telemetry (M7).
 	PeerFetchStatsFn func() templates.PeerFetchStats
+	// CFStatusFn returns the current Cloudflare propagation status.
+	// nil means CF is not configured.
+	CFStatusFn func() templates.CFStatusCard
 }
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
@@ -140,6 +143,14 @@ func (h *Handler) layoutProps(page, title, timeRange string) templates.LayoutPro
 		SidebarReqS:   reqs,
 		SidebarHitPct: hitPct,
 	}
+}
+
+func (h *Handler) cfStatusCard() *templates.CFStatusCard {
+	if h.cfg.CFStatusFn == nil {
+		return nil
+	}
+	card := h.cfg.CFStatusFn()
+	return &card
 }
 
 func (h *Handler) storeStats() (hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, evictions int64) {
@@ -297,6 +308,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		WarmBytes: warmBytes, WarmMaxBytes: warmMax, WarmEntries: warmEntries,
 		Evictions: evictions,
 		RingSegs:  ringSegs,
+		CFStatus:  h.cfStatusCard(),
 	}))
 }
 

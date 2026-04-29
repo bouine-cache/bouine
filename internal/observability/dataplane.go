@@ -21,6 +21,10 @@ type DataPlaneMetrics struct {
 	ResponseBytesOut *prometheus.CounterVec
 	VaryCapHits      prometheus.Counter // incremented when MaxVariants cap is hit
 	Rings            *Rings             // nil when dashboard is disabled
+	// Cloudflare propagation counters.
+	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
+	CFPurgeDuration *prometheus.HistogramVec // labels: operation
+	CFPurgeSkipped  *prometheus.CounterVec   // labels: reason
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -49,7 +53,24 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Help:      "Number of Vary variant storage attempts rejected because MaxVariants was exceeded.",
 		}),
 	}
-	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits)
+	m.CFPurgeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_purge_total",
+		Help:      "Cloudflare cache invalidation API calls by operation and status.",
+	}, []string{"operation", "status"})
+	m.CFPurgeDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_purge_duration_seconds",
+		Help:      "Latency of Cloudflare cache invalidation API calls.",
+		Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
+	}, []string{"operation"})
+	m.CFPurgeSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_purge_skipped_total",
+		Help:      "Invalidations not forwarded to Cloudflare (disabled or incompatible regex).",
+	}, []string{"reason"})
+	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
+		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped)
 	return m
 }
 

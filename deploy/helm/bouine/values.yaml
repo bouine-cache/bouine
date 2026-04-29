@@ -34,6 +34,19 @@ config:
     hop_limit: 2
   upstream_pools: []
   routes: []
+  # Cloudflare Cache API invalidation propagation.
+  # When zone_id and api_token are set, bouine forwards purge/ban/refresh
+  # operations to the downstream Cloudflare CDN automatically.
+  # cloudflare:
+  #   zone_id: "abc123"           # non-secret, visible in CF dashboard URL
+  #   # api_token is injected via cloudflare.apiTokenSecretName below; do
+  #   # not place the token value here.
+  #   propagate:
+  #     purge: true
+  #     ban: true
+  #     refresh: true
+  #   async: true                 # default; omit to keep async behaviour
+  #   timeout: 10s
 
 service:
   type: ClusterIP
@@ -82,6 +95,27 @@ terminationGracePeriodSeconds: 30
 # GOGC=100 (default) paired with GOMEMLIMIT keeps GC pauses bounded.
 goMemLimit: "3GiB"
 goGC: "100"
+
+# Cloudflare CDN invalidation propagation.
+# When zone_id and an API token are set, purge/ban/refresh operations are
+# forwarded to the Cloudflare Cache API so both caches stay in sync.
+#
+# async: true (the default) means admin API responses return immediately while
+# CF propagation runs in a background goroutine. Set to false only when you
+# need synchronous confirmation (adds ~50–300 ms to every invalidation call).
+#
+# API token secret:
+#   1. Create a Kubernetes Secret:
+#        kubectl create secret generic bouine-cf-token \
+#          --from-literal=CF_API_TOKEN=<your-Cache-Purge-token>
+#   2. Set apiTokenSecretName below, or inject via extraEnv.
+#   The operator injects CF_API_TOKEN; bouine reads it at startup as a
+#   fallback when cloudflare.api_token is empty in the config file.
+cloudflare:
+  # apiTokenSecretName configures automatic CF_API_TOKEN injection from a
+  # Kubernetes Secret.
+  # apiTokenSecretName: bouine-cf-token
+  # apiTokenSecretKey: "CF_API_TOKEN"  # key inside the Secret (default shown)
 
 # Extra environment variables injected into the bouine container.
 # Useful for secret references (e.g., admin token from a Secret):

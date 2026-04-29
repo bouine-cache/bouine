@@ -37,6 +37,11 @@ type Config struct {
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin"`
 
+	// Cloudflare configures optional invalidation propagation to the
+	// downstream Cloudflare CDN. When zone_id and api_token are set,
+	// purge/ban/refresh operations are forwarded to the CF edge.
+	Cloudflare CloudflareConfig `yaml:"cloudflare"`
+
 	// Tracing configures OpenTelemetry span export. Empty endpoint = no-op.
 	Tracing TracingConfig `yaml:"tracing"`
 
@@ -240,6 +245,45 @@ type RouteHTTP3 struct {
 
 // Experimental holds unstable opt-in feature flags. Empty by default.
 type Experimental struct{}
+
+// CloudflareConfig configures Cloudflare Cache API invalidation propagation.
+type CloudflareConfig struct {
+	// ZoneID is the Cloudflare zone identifier (non-secret; visible in the
+	// Cloudflare dashboard URL). Required when propagation is enabled.
+	ZoneID string `yaml:"zone_id"`
+	// APIToken must have the "Cache Purge" permission for this zone.
+	// Inject via the CF_API_TOKEN environment variable; never hardcode.
+	APIToken string `yaml:"api_token"`
+	// Propagate controls which bouine operations forward to Cloudflare.
+	Propagate CloudflarePropagation `yaml:"propagate"`
+	// Async controls whether CF propagation blocks the admin response.
+	// Defaults to true when omitted: the /v1/purge|ban|refresh response
+	// returns immediately and CF invalidation fires in a background goroutine.
+	// Set async: false to wait for CF confirmation (~50–300 ms extra latency).
+	Async *bool `yaml:"async"`
+	// Timeout for individual CF API calls (default 10s).
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// IsAsync reports whether CF propagation should run asynchronously.
+// Nil (field omitted in YAML) and explicit true both return true.
+func (c CloudflareConfig) IsAsync() bool {
+	if c.Async == nil {
+		return true
+	}
+	return *c.Async
+}
+
+// CloudflarePropagation selects which bouine invalidation operations are
+// forwarded to the Cloudflare edge.
+type CloudflarePropagation struct {
+	// Purge forwards POST /v1/purge to CF PurgeSingleFile.
+	Purge bool `yaml:"purge"`
+	// Ban forwards POST /v1/ban to CF PurgeByTags/PurgeByPrefixes/PurgeByHostnames.
+	Ban bool `yaml:"ban"`
+	// Refresh forwards POST /v1/refresh to CF PurgeSingleFile.
+	Refresh bool `yaml:"refresh"`
+}
 
 // TracingConfig configures OTel trace export.
 type TracingConfig struct {

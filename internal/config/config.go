@@ -106,9 +106,29 @@ type Storage struct {
 	Eviction     string   `yaml:"eviction"` // "sieve" or "w-tinylfu"
 }
 
+// Cluster consistency modes. The mode controls how cache keys are
+// distributed across nodes and how invalidations propagate.
+const (
+	// ClusterModeStrong shards keys via consistent hash ring; peer fetch on
+	// miss; 1 copy per key; invalidation via HTTP fan-out + gossip.
+	ClusterModeStrong = "strong"
+	// ClusterModeEventual caches locally with no peer fetch; N independent
+	// copies; invalidation via gossip only (eventual consistency).
+	ClusterModeEventual = "eventual"
+	// ClusterModeFull caches locally with active replication to all peers;
+	// N complete copies; invalidation + replication via gossip.
+	ClusterModeFull = "full"
+)
+
 // Cluster controls peer membership and fan-out. Phase 4+.
 type Cluster struct {
-	Enabled  bool     `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// Mode determines the cluster consistency model. Accepted values:
+	//   "strong"    — consistent hash ring, peer fetch on miss (default)
+	//   "eventual"  — local cache, gossip invalidation, no peer fetch
+	//   "full"      — local cache + full replication, gossip everything
+	// Empty defaults to "strong" for backward compatibility.
+	Mode     string   `yaml:"mode"`
 	Join     []string `yaml:"join"`
 	Replicas int      `yaml:"replicas"`
 	HopLimit int      `yaml:"hop_limit"`

@@ -28,6 +28,7 @@ func Defaults() Config {
 			},
 		},
 		Cluster: Cluster{
+			Mode:     ClusterModeStrong,
 			HopLimit: 2,
 		},
 	}
@@ -103,6 +104,25 @@ func (c *Config) Validate() error {
 		if _, ok := seen[r.Pool]; !ok {
 			return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
 		}
+	}
+
+	// Cluster mode validation.
+	if c.Cluster.Enabled {
+		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
+		switch c.Cluster.Mode {
+		case ClusterModeStrong, ClusterModeEventual, ClusterModeFull:
+			// valid
+		case "":
+			c.Cluster.Mode = ClusterModeStrong
+		default:
+			return fmt.Errorf("config: cluster.mode must be %q, %q, or %q, got %q",
+				ClusterModeStrong, ClusterModeEventual, ClusterModeFull, c.Cluster.Mode)
+		}
+	} else if c.Cluster.Mode != "" && c.Cluster.Mode != ClusterModeStrong {
+		return fmt.Errorf("config: cluster.mode %q requires cluster.enabled = true", c.Cluster.Mode)
+	}
+	if c.Cluster.Mode == "" {
+		c.Cluster.Mode = ClusterModeStrong
 	}
 
 	return nil

@@ -1,60 +1,78 @@
-BenchmarkHandler_CacheHit-10     	      10	      1583 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	       833.3 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	       850.0 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1262 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1379 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1146 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1179 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1242 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1275 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	      10	      1471 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      2088 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1692 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1442 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1542 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1742 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1454 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1571 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1692 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1929 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkHandler_CacheMiss-10    	      10	      1796 ns/op	    4868 B/op	      18 allocs/op
-BenchmarkBuildKey-10             	      10	       620.8 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       920.8 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       691.7 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       504.2 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       741.7 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       808.4 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       758.3 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       537.5 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       475.0 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	      10	       454.2 ns/op	     432 B/op	       4 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       241.6 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       216.7 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       216.6 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       225.0 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       245.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       225.0 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       225.0 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       212.5 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       220.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	      10	       225.0 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        16.60 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        25.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        12.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        25.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        29.10 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        25.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        12.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        12.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	         8.300 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRequestRing_RecordRequest-10    	      10	        12.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        50.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        33.30 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        25.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        37.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        37.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        41.70 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        29.10 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        37.50 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        25.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkRouteRing_RecordRoute-10        	      10	        33.40 ns/op	       0 B/op	       0 allocs/op
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=503 key=991667529428693608
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=500 key=5819696653607461234
+2026/05/30 15:24:30 WARN vary cap exceeded, skipping variant storage primary_key=3441938378762230195 cap=64
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=503 key=991667529428693608
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=500 key=5819696653607461234
+2026/05/30 15:24:30 WARN vary cap exceeded, skipping variant storage primary_key=3441938378762230195 cap=64
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=503 key=991667529428693608
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=500 key=5819696653607461234
+2026/05/30 15:24:30 WARN vary cap exceeded, skipping variant storage primary_key=3441938378762230195 cap=64
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=503 key=991667529428693608
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=500 key=5819696653607461234
+2026/05/30 15:24:30 WARN vary cap exceeded, skipping variant storage primary_key=3441938378762230195 cap=64
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=503 key=991667529428693608
+2026/05/30 15:24:30 WARN stayin-alive: upstream 5xx, serving stale indefinitely status=500 key=5819696653607461234
+2026/05/30 15:24:30 WARN vary cap exceeded, skipping variant storage primary_key=3441938378762230195 cap=64
+goos: darwin
+goarch: arm64
+pkg: github.com/thylong/bouine/internal/cache
+cpu: Apple M5
+BenchmarkHandler_CacheHit-10     	 1664548	       727.0 ns/op	    2576 B/op	      13 allocs/op
+BenchmarkHandler_CacheHit-10     	 1677937	       712.4 ns/op	    2576 B/op	      13 allocs/op
+BenchmarkHandler_CacheHit-10     	 1670715	       713.9 ns/op	    2576 B/op	      13 allocs/op
+BenchmarkHandler_CacheHit-10     	 1697713	       709.0 ns/op	    2576 B/op	      13 allocs/op
+BenchmarkHandler_CacheHit-10     	 1691782	       710.2 ns/op	    2576 B/op	      13 allocs/op
+BenchmarkHandler_CacheMiss-10    	  912124	      1333 ns/op	    5914 B/op	      30 allocs/op
+BenchmarkHandler_CacheMiss-10    	  903344	      1365 ns/op	    5914 B/op	      30 allocs/op
+BenchmarkHandler_CacheMiss-10    	  912327	      1339 ns/op	    5914 B/op	      30 allocs/op
+BenchmarkHandler_CacheMiss-10    	  848328	      1345 ns/op	    5914 B/op	      30 allocs/op
+BenchmarkHandler_CacheMiss-10    	  904093	      1350 ns/op	    5914 B/op	      30 allocs/op
+BenchmarkBuildKey-10             	25899862	        46.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBuildKey-10             	26164620	        45.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBuildKey-10             	26367637	        45.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBuildKey-10             	25871337	        45.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBuildKey-10             	25535763	        45.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	29509375	        39.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	29987505	        39.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	30347382	        39.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	30130975	        39.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	29866222	        39.87 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/thylong/bouine/internal/cache	24.495s
+goos: darwin
+goarch: arm64
+pkg: github.com/thylong/bouine/internal/storage
+cpu: Apple M5
+BenchmarkHotStore_Get_Hit-10         	163548600	         7.082 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	172890162	         6.940 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	173347381	         7.037 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	173458584	         6.924 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	173672114	         6.919 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	309118545	         3.625 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	345718082	         3.473 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	346150724	         3.470 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	340703450	         3.493 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	345691275	         3.465 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Put-10             	 3234892	       375.7 ns/op	    1688 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3075799	       380.3 ns/op	    1688 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3082100	       384.2 ns/op	    1688 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3069240	       381.1 ns/op	    1688 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 2982943	       374.6 ns/op	    1688 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5213106	       225.6 ns/op	    1170 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5325691	       227.4 ns/op	    1170 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5290689	       230.1 ns/op	    1170 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5110905	       229.2 ns/op	    1170 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5266224	       234.3 ns/op	    1170 B/op	       6 allocs/op
+BenchmarkSIEVE_Access-10             	173589867	         6.915 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	173586331	         6.915 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	173536021	         6.917 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	173462125	         7.021 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	172247463	         6.947 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/thylong/bouine/internal/storage	33.750s
+PASS
+ok  	github.com/thylong/bouine/internal/storage/sieve	0.397s
+PASS
+ok  	github.com/thylong/bouine/internal/storage/wal	0.551s
+PASS
+ok  	github.com/thylong/bouine/internal/storage/warm	0.417s

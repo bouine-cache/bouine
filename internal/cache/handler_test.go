@@ -1,15 +1,18 @@
 package cache
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 func origin200(body, cc string) http.Handler {
@@ -295,3 +298,103 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 type counterFunc func()
 
 func (f counterFunc) Inc() { f() }
+
+func TestHandler_EventualNoPeerFetch(t *testing.T) {
+	// In eventual mode, ownerFn and peerFetch are nil. A miss goes
+	// straight to origin without attempting peer fetch.
+	originCalls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originCalls++
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "eventual-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream: upstream,
+		Store:    store,
+		// ownerFn and peerFetch are nil (default zero-value) —
+		// simulates eventual mode where no peer fetch occurs.
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/e", nil))
+	if rr.Code != 200 {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if originCalls != 1 {
+		t.Fatalf("expected 1 origin call, got %d", originCalls)
+	}
+	if rr.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("X-Cache = %q, want MISS", rr.Header().Get("X-Cache"))
+	}
+
+	// Second request should be a HIT — served from local cache.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/e", nil))
+	if rr2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("X-Cache = %q, want HIT", rr2.Header().Get("X-Cache"))
+	}
+}
+
+func TestHandler_FullReplicationHook(t *testing.T) {
+	// In full mode, ReplicateFn is called after a cacheable response
+	// is stored. This verifies the hook fires and receives the object.
+	var replicated atomic.Int32
+	replicateFn := func(_ context.Context, obj *api.Object) {
+		if obj == nil {
+			t.Error("replicateFn received nil object")
+			return
+		}
+		replicated.Add(1)
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "full-mode-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:    upstream,
+		Store:       store,
+		ReplicateFn: replicateFn,
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/f", nil))
+	if rr.Code != 200 {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if replicated.Load() != 1 {
+		t.Fatalf("replicateFn called %d times, want 1", replicated.Load())
+	}
+}
+
+func TestHandler_FullReplicationHookNotCalledOnBypass(t *testing.T) {
+	// Non-cacheable responses (e.g. 200 with no Cache-Control) should
+	// NOT trigger the replication hook.
+	var replicated atomic.Int32
+	replicateFn := func(_ context.Context, _ *api.Object) {
+		replicated.Add(1)
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// No Cache-Control → not cacheable.
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "no-cache-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:    upstream,
+		Store:       store,
+		ReplicateFn: replicateFn,
+	})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/nocache", nil))
+	if rr.Code != 200 {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if replicated.Load() != 0 {
+		t.Fatalf("replicateFn called %d times, want 0 (non-cacheable)", replicated.Load())
+	}
+}

@@ -110,9 +110,16 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 		return nil, fmt.Errorf("peer fetch marshal: %w", err)
 	}
 
-	url := "http://" + peer.Addr + PeerFetchPath
+	// Peer-fetch RPCs are served on the peer's admin port (where
+	// /v1/peer/fetch is registered). The cluster gossip port (peer.Addr)
+	// is used for memberlist only; HTTP peer fetch uses peer.AdminAddr.
+	fetchAddr := peer.AdminAddr
+	if fetchAddr == "" {
+		fetchAddr = peer.Addr // fallback for nodes without AdminAddr
+	}
+	url := "http://" + fetchAddr + PeerFetchPath
 	if f.client.Transport.(*http.Transport).TLSClientConfig != nil {
-		url = "https://" + peer.Addr + PeerFetchPath
+		url = "https://" + fetchAddr + PeerFetchPath
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

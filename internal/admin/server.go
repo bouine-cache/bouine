@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -357,8 +358,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// access in production. Must remain auth-exempt so peers without a
 		// shared token can still perform lookups.
 		"/v1/peer/fetch": true,
+		// Peer-to-peer invalidation RPCs: same rationale as peer fetch.
+		// Peers forward purge/ban events via HTTP fan-out in strong mode.
+		"/v1/peer/purge": true,
+		"/v1/peer/ban":   true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Panic recovery: log and return 500 instead of crashing the connection.
+		defer func() {
+			if v := recover(); v != nil {
+				s.cfg.Logger.Error("admin handler panic",
+					"path", r.URL.Path,
+					"method", r.Method,
+					"panic", v)
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				s.cfg.Logger.Error("admin handler stack",
+					"path", r.URL.Path,
+					"stack", string(buf[:n]))
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
 		if exempt[r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return

@@ -149,3 +149,61 @@ func TestByteSize_Forms(t *testing.T) {
 		}
 	}
 }
+
+func TestClusterMode_DefaultIsStrong(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Cluster.Mode != ClusterModeStrong {
+		t.Fatalf("default cluster mode = %q, want %q", cfg.Cluster.Mode, ClusterModeStrong)
+	}
+}
+
+func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.Cluster.Mode != ClusterModeStrong {
+		t.Fatalf("empty mode = %q, want %q", cfg.Cluster.Mode, ClusterModeStrong)
+	}
+}
+
+func TestClusterMode_ValidModes(t *testing.T) {
+	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual, ClusterModeFull} {
+		cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: mode}}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("mode %q: unexpected error: %v", mode, err)
+		}
+		if cfg.Cluster.Mode != mode {
+			t.Errorf("mode %q: got %q", mode, cfg.Cluster.Mode)
+		}
+	}
+}
+
+func TestClusterMode_InvalidValue(t *testing.T) {
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: "invalid"}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid cluster mode")
+	}
+	if !strings.Contains(err.Error(), "cluster.mode must be") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClusterMode_NonStrongRequiresEnabled(t *testing.T) {
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: false, Mode: ClusterModeEventual}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for eventual mode without cluster enabled")
+	}
+	if !strings.Contains(err.Error(), "requires cluster.enabled") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClusterMode_StrongWithoutEnabled(t *testing.T) {
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: false, Mode: ClusterModeStrong}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("strong mode without enabled should be valid: %v", err)
+	}
+}

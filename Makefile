@@ -80,6 +80,27 @@ conformance-view: build ## Run conformance tests then open the comparison UI in 
 integration: testcerts ## Run docker-compose integration scenarios (phase 1+).
 	go test -race -count=1 -timeout=10m -tags=integration ./test/integration/...
 
+.PHONY: integration-cluster
+integration-cluster: integration-cluster-strong integration-cluster-eventual integration-cluster-full ## Run all 3 cluster consistency mode tests sequentially.
+
+.PHONY: integration-cluster-strong
+integration-cluster-strong: ## Run strong-mode cluster integration tests.
+	@echo ">>> Cluster integration: STRONG mode"
+	go test -v -race -count=1 -timeout=15m -tags=integration \
+	    -run TestStrong ./test/integration/...
+
+.PHONY: integration-cluster-eventual
+integration-cluster-eventual: ## Run eventual-mode cluster integration tests.
+	@echo ">>> Cluster integration: EVENTUAL mode"
+	go test -v -race -count=1 -timeout=15m -tags=integration \
+	    -run TestEventual ./test/integration/...
+
+.PHONY: integration-cluster-full
+integration-cluster-full: ## Run full-replication cluster integration tests.
+	@echo ">>> Cluster integration: FULL mode"
+	go test -v -race -count=1 -timeout=15m -tags=integration \
+	    -run TestFull ./test/integration/...
+
 .PHONY: testcerts
 testcerts: ## Generate ephemeral TLS certificates for integration tests.
 	@mkdir -p test/integration/.tls

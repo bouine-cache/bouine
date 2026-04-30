@@ -122,15 +122,52 @@ func (e *engine) run(ctx context.Context) error {
 				return fmt.Errorf("cluster TLS: %w", err)
 			}
 		}
+		// Register cluster-level Prometheus metrics and set the mode gauge.
+		// Must happen BEFORE NewBroadcaster, which copies clusterNode.metrics.
+		clusterMetrics := cluster.RegisterMetrics(e.metrics.Registry)
+		clusterMetrics.SetMode(e.cfg.Cluster.Mode)
+		clusterNode.SetMetrics(clusterMetrics)
+
 		peerFetcher = cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry)
 		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
+
+		// Wire gossip invalidation handler for all cluster modes.
+		// In strong mode gossip is the backup path; in eventual/full
+		// modes it is the primary invalidation path.
+		clusterNode.SetInvalidator(cluster.Invalidator{
+			PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
+				return store.Delete(ctx, evt.Key)
+			},
+			BanFn: func(ctx context.Context, evt api.BanEvent) error {
+				_, err := store.Ban(ctx, evt.Predicate)
+				return err
+			},
+		})
+		// In full mode, also wire the replication handler so gossip
+		// received objects are stored locally.
+		if e.cfg.Cluster.Mode == config.ClusterModeFull {
+			clusterNode.SetReplicator(cluster.Replicator{
+				StoreObject: func(ctx context.Context, obj *api.Object) error {
+					return store.Put(ctx, obj.Key, obj)
+				},
+			})
+		}
+		// Emit startup warnings for mode-specific configuration that
+		// is silently ignored or has operational implications.
+		if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
+			e.logger.Warn("cluster.hop_limit is set but has no effect in non-strong mode; peer fetch is disabled",
+				"mode", e.cfg.Cluster.Mode, "hop_limit", e.cfg.Cluster.HopLimit)
+		}
+		if e.cfg.Cluster.Mode == config.ClusterModeFull {
+			e.logger.Warn("cluster.mode is 'full' — every node holds a copy of every cached object; memory usage scales linearly with cluster size")
+		}
 	}
 
 	// Build handler; prefetcher wraps it after construction to avoid the
 	// circular dependency (prefetcher needs handler, handler needs prefetcher).
 	// pf.Middleware(handler) intercepts MISS/REVALIDATED responses and calls
 	// OnResponse — no nil prefetcher pointer needed inside the handler.
-	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher, nil)
+	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher, broadcaster, nil)
 
 	// Prefetcher: warms the cache by following Link: rel=preload headers
 	// from stored origin responses and optionally crawling sitemaps.
@@ -312,6 +349,9 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 	if clusterNode != nil {
 		clusterMeta.VirtualNodes = clusterNode.Config().VirtualNodes
 		clusterMeta.LoadFactor = clusterNode.Config().LoadFactor
+		clusterMeta.Mode = clusterNode.Mode()
+	} else {
+		clusterMeta.Mode = "single-node"
 	}
 	if e.cfg.Cluster.HopLimit > 0 {
 		clusterMeta.HopLimit = e.cfg.Cluster.HopLimit

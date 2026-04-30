@@ -8,6 +8,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/hashicorp/memberlist"
@@ -39,6 +40,30 @@ type Config struct {
 	// LoadFactor caps the maximum load per node relative to the
 	// average. Default 1.25.
 	LoadFactor float64
+	// Mode determines how cache keys are distributed across the cluster.
+	// "strong" uses a consistent hash ring with peer fetch on miss.
+	// "eventual" caches locally with no peer fetch; invalidation by gossip.
+	// "full" caches locally with full replication to all peers; gossip everything.
+	// Defaults to "strong" for backward compatibility.
+	Mode string
+	// PushPullInterval is the interval between memberlist push/pull sync
+	// rounds. Lower values accelerate gossip convergence at the cost of
+	// higher network traffic. Default 5s; production deployments may use
+	// higher values. Set to 0 to use memberlist's default (30s).
+	PushPullInterval time.Duration
+}
+
+// Invalidator holds callbacks for applying purge and ban events received
+// via gossip. Set via SetInvalidator after cluster creation.
+type Invalidator struct {
+	PurgeFn func(ctx context.Context, evt api.PurgeEvent) error
+	BanFn   func(ctx context.Context, evt api.BanEvent) error
+}
+
+// Replicator holds a callback for storing replicated objects received
+// via gossip in full mode. Set via SetReplicator after cluster creation.
+type Replicator struct {
+	StoreObject func(ctx context.Context, obj *api.Object) error
 }
 
 // Member holds runtime state about a peer node in the cluster.
@@ -63,6 +88,9 @@ type Cluster struct {
 	// memberlist's compound-message gossip protocol.
 	gossipMu    sync.Mutex
 	gossipQueue []gossipBroadcast
+	inv         Invalidator
+	rep         Replicator
+	metrics     *Metrics
 }
 
 // New creates a Cluster and starts the gossip listener. Call Join
@@ -93,6 +121,15 @@ func New(cfg Config) (*Cluster, error) {
 	mlCfg.Logger = nil // suppress memberlist's stdlib logger; we use slog
 	mlCfg.Delegate = c
 	mlCfg.Events = c
+	// Use the configured PushPullInterval if set (integration tests use
+	// 2 s for fast convergence). If zero, fall back to a faster default
+	// of 5 s instead of memberlist's 30 s so invalidations propagate
+	// promptly in production deployments as well.
+	if cfg.PushPullInterval > 0 {
+		mlCfg.PushPullInterval = cfg.PushPullInterval
+	} else {
+		mlCfg.PushPullInterval = 5 * time.Second
+	}
 
 	if cfg.BindAddr != "" {
 		host, portStr, err := net.SplitHostPort(cfg.BindAddr)
@@ -196,10 +233,60 @@ func (c *Cluster) NodeMeta(limit int) []byte {
 	return b
 }
 
-// NotifyMsg handles incoming gossip user messages (purge/ban events).
-// Currently logged at debug; a full receive handler is in Phase 4.5.
+// NotifyMsg handles incoming gossip user messages (purge/ban/replication
+// events). Dispatches based on the explicit "type" field in the JSON
+// payload. Malformed or unrecognised payloads are logged and skipped.
 func (c *Cluster) NotifyMsg(msg []byte) {
-	c.logger.Debug("cluster: gossip message received", "len", len(msg))
+	// All gossip events carry a "type" discriminator. Peek at it first.
+	var header struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(msg, &header); err != nil {
+		c.logger.Debug("cluster: malformed gossip message", "error", err)
+		return
+	}
+	switch header.Type {
+	case api.GossipTypePurge:
+		if c.inv.PurgeFn != nil {
+			var evt api.PurgeEvent
+			if err := json.Unmarshal(msg, &evt); err != nil {
+				c.logger.Warn("cluster: gossip purge unmarshal failed", "error", err)
+				return
+			}
+			if err := c.inv.PurgeFn(context.Background(), evt); err != nil {
+				c.logger.Warn("cluster: gossip purge apply failed", "error", err)
+			}
+			c.metrics.IncGossipInvalidation("purge")
+		}
+	case api.GossipTypeBan:
+		if c.inv.BanFn != nil {
+			var evt api.BanEvent
+			if err := json.Unmarshal(msg, &evt); err != nil {
+				c.logger.Warn("cluster: gossip ban unmarshal failed", "error", err)
+				return
+			}
+			if err := c.inv.BanFn(context.Background(), evt); err != nil {
+				c.logger.Warn("cluster: gossip ban apply failed", "error", err)
+			}
+			c.metrics.IncGossipInvalidation("ban")
+		}
+	case api.GossipTypeReplication:
+		if c.rep.StoreObject != nil {
+			var evt api.ReplicationEvent
+			if err := json.Unmarshal(msg, &evt); err != nil {
+				c.logger.Warn("cluster: gossip replication unmarshal failed", "error", err)
+				return
+			}
+			if err := c.rep.StoreObject(context.Background(), evt.Object); err != nil {
+				c.logger.Warn("cluster: gossip replication apply failed", "error", err)
+			} else {
+				c.metrics.IncReplicationReceived()
+				c.metrics.AddReplicationBytes("received", float64(len(msg)))
+			}
+		}
+	default:
+		c.logger.Debug("cluster: unrecognized gossip message", "type", header.Type, "len", len(msg))
+	}
 }
 
 // QueueBroadcast enqueues a message for gossip delivery. The message is
@@ -211,8 +298,13 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 	c.gossipMu.Lock()
 	c.gossipQueue = append(c.gossipQueue, gossipBroadcast{data: msg})
 	c.gossipMu.Unlock()
+	// Wake the gossip loop so queued messages are delivered promptly.
+	// SendBestEffort broadcasts to a single peer; the gossip layer
+	// propagates to all members from there.
 	if c.ml != nil {
-		_ = c.ml.SendBestEffort(nil, msg) // wake gossip loop; error is non-critical
+		for _, n := range c.ml.Members() {
+			_ = c.ml.SendBestEffort(n, msg)
+		}
 	}
 }
 
@@ -278,7 +370,10 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	// peer that was missed during network partitions or rolling restarts
 	// is added to the ring.
 	for _, n := range c.ml.Members() {
-		if _, ok := c.peers[n.Name]; !ok {
+		c.mu.RLock()
+		_, ok := c.peers[n.Name]
+		c.mu.RUnlock()
+		if !ok {
 			c.NotifyJoin(n)
 		}
 	}
@@ -436,3 +531,18 @@ func (r *ring) segments() []api.RingSegment {
 func (c *Cluster) Config() Config {
 	return c.cfg
 }
+
+// Mode returns the cluster consistency mode ("strong", "eventual", or "full").
+func (c *Cluster) Mode() string { return c.cfg.Mode }
+
+// SetMetrics registers cluster-level Prometheus counters. Must be called
+// before Join. Nil receiver is a no-op.
+func (c *Cluster) SetMetrics(m *Metrics) { c.metrics = m }
+
+// SetInvalidator registers callbacks for applying purge and ban events
+// received via gossip. Must be called before Join.
+func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
+
+// SetReplicator registers a callback for storing replicated objects
+// received via gossip in full mode. Must be called before Join.
+func (c *Cluster) SetReplicator(rep Replicator) { c.rep = rep }

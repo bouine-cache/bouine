@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -219,12 +221,84 @@ func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 	}
 }
 
+func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
+	// Start a server that returns 500 to force a failure.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+
+	c := minimalCluster(t, "node-0")
+	c.metrics = m
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastPurge(context.Background(), api.Key(1), "")
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var got float64
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_broadcast_failures_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			got += m.GetCounter().GetValue()
+		}
+	}
+	if got != 1 {
+		t.Errorf("expected 1 broadcast failure, got %v", got)
+	}
+}
+
+func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
+	// Use an unreachable address to get a dial error.
+	c := minimalCluster(t, "node-0")
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	c.metrics = m
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: "127.0.0.1:1", // nothing listening
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastPurge(context.Background(), api.Key(77), "")
+
+	families, _ := reg.Gather()
+	var reason string
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_broadcast_failures_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "reason" {
+					reason = lp.GetValue()
+				}
+			}
+		}
+	}
+	if reason != "dial" && reason != "timeout" {
+		t.Errorf("expected dial or timeout reason, got %q", reason)
+	}
+}
+
 // minimalCluster builds a Cluster with no memberlist for unit testing.
 func minimalCluster(_ *testing.T, _ string) *Cluster {
 	return &Cluster{
-		cfg:    Config{NodeName: "node-0", Mode: "strong"},
-		peers:  make(map[string]*Member),
-		ring:   newRing(256),
-		logger: nil,
+		cfg:     Config{NodeName: "node-0", Mode: "strong"},
+		peers:   make(map[string]*Member),
+		ring:    newRing(256),
+		logger:  nil,
+		metrics: &Metrics{},
 	}
 }

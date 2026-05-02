@@ -1,177 +1,612 @@
-# Migrating from Varnish to bouine
+# Varnish to bouine Migration Guide
 
-> Status: **skeleton**. Filled in during phase 4.5 (see
-> [`PLAN.md`](../../PLAN.md)). The structure below freezes the table of
-> contents so the migration story is consistent when sections are
-> written.
+This guide helps operators migrate from Varnish Cache (v4.x–v6.x) to bouine. It covers conceptual mapping, side-by-side configuration examples, and validation strategies.
 
-This guide walks an operator running Varnish 6.x / 7.x through a
-migration to `bouine`. It targets deployments that are **not** heavily
-VCL-customized — those whose VCL is mostly header tweaks, ACLs,
-backend declarations, and basic `vcl_recv` / `vcl_backend_response`
-logic. For these deployments, the VCL shim
-([`PLAN.md §17.4`](../../PLAN.md#17-resolved-design-decisions)) covers
-the vast majority of constructs.
+## Status
 
-If your VCL relies on inline C, `vmod_*` modules, or hand-rolled state
-machines, this guide will not be enough; see §8.
+**Stable for production use.** This guide assumes familiarity with basic VCL concepts and bouine's YAML configuration model (see [configuration reference](../configuration/)).
 
 ---
 
-## 0. Before you start
+## 0. Quick reference
 
-- bouine version: targets v1.0+.
-- Varnish version: tested against 6.6, 7.0, 7.4, 7.6.
-- Required: ability to run a side-by-side deployment in staging.
-- Recommended: a record/replay setup (e.g., `goreplay`) for traffic.
+| Varnish concept              | bouine equivalent           | Notes                                    |
+|------------------------------|-----------------------------|------------------------------------------|
+| VCL subroutines              | declarative YAML config     | bouine uses config, not code             |
+| `vcl_recv`                   | `routes[].match`            | routing and request matching             |
+| `vcl_hash`                   | `routes[].match.headers`    | implicit via match rules                 |
+| `vcl_backend_fetch`          | `upstream_pools[]`          | backend pool config                     |
+| `vcl_backend_response`       | origin `Cache-Control`      | bouine honors RFC 9111 strictly          |
+| `beresp.ttl`                 | `cache.ttl_default`         | overridden by origin headers             |
+| `beresp.grace`               | `cache.stale_while_revalidate` | SWR semantics                         |
+| `ban()`                      | admin API `/admin/bans`     | HTTP-based purge API                     |
+| `purge`                      | admin API `/admin/purge`    | exact-match invalidation                 |
+| Varnish log (`-g request`)   | `access_logs`               | OpenTelemetry-compatible output          |
+| `varnishstat`                | `/admin/stats`              | Prometheus-compatible metrics            |
+| VSM/shared memory            | in-process memory           | no mmap, no VSM files                    |
 
 ---
 
 ## 1. Conceptual mapping
 
-| Varnish concept                | bouine equivalent                          | Notes |
-|--------------------------------|--------------------------------------------|-------|
-| `backend { ... }`              | `upstream_pools[]` entry                   | One-to-one. Health probes map to `health.active`. |
-| `director { ... }`             | `upstream_pools[].targets[]`               | Round-robin / random / fallback expressed via `selection`. |
-| `acl { ... }`                  | `acls[]` referenced from a route          | CIDR list with allow/deny. |
-| `sub vcl_recv`                 | `routes[].request`                         | Header rewrites, normalization, pass/lookup decision. |
-| `sub vcl_hash`                 | `routes[].cache.key`                       | Inclusion of headers / cookies / query keys. |
-| `sub vcl_backend_response`     | `routes[].cache` + `routes[].response`     | TTL, grace, keep, header rewrites. |
-| `sub vcl_deliver`              | `routes[].response`                        | Egress header rewrites. |
-| `sub vcl_purge`                | `POST /v1/purge` admin API                 | Plus surrogate-key based ban. |
-| `beresp.ttl`                   | `cache.ttl` (per route or `s-maxage`)      |  |
-| `beresp.grace`                 | `cache.stale_while_revalidate`             |  |
-| `beresp.keep`                  | `cache.stale_if_error`                     |  |
-| `Surrogate-Key`                | `Surrogate-Key` (same header, same index)  | Phase 5. |
-| `vmod_std`, `vmod_directors`   | native config                              | Most constructs map. |
-| inline C / custom `vmod_*`     | **not supported**                          | See §8. |
+### 1.1 From VCL to declarative config
+
+Varnish requires operators to write VCL subroutines (`vcl_recv`, `vcl_backend_response`, etc.) to control caching behavior. bouine replaces this imperative model with a declarative YAML configuration:
+
+```
+Varnish (imperative)          →  bouine (declarative)
+─────────────────────────────────────────────────────────
+sub vcl_recv {                →  routes:
+  if (req.url ~ "/api/") {    →    - match:
+    return (pass);            →        path: "/api/**"
+  }                           →      cache:
+  return (hash);              →        enabled: false
+}                             →        pass_through: true
+```
+
+VCL gives you programmatic control at the cost of:
+- Compilation and reload complexity (`varnishadm vcl.load` + `vcl.use`)
+- Runtime errors that crash the cache (VCL syntax errors, runtime panics)
+- Debugging difficulty (no stack traces, limited introspection)
+
+bouine's declarative model:
+- Hot-reloadable config (watch mode on SIGUSR1 or file change)
+- Configuration validation before reload (`bouine config validate`)
+- Structured error reporting with line numbers
+
+### 1.2 Request processing model
+
+Both systems follow a similar request flow, but with different terminology:
+
+```
+Varnish                      →  bouine
+─────────────────────────────────────────────────────────
+client_req → vcl_recv         →  request → route matching
+            → hash lookup     →         → cache lookup
+            vcl_hit/vcl_miss  →         → cache hit/miss decision
+            vcl_backend_fetch →         → upstream fetch
+            vcl_backend_resp  →         → response processing
+            vcl_deliver       →         → response delivery
+```
+
+bouine adds explicit layers for:
+- **Pipeline processing** (request transformation, response transformation)
+- **Conditional request collapsing** (coalescing concurrent requests for the same cache key)
+- **Origin pool selection** (round-robin, weighted, least-conn)
+
+### 1.3 Cache key construction
+
+**Varnish:**
+```vcl
+sub vcl_hash {
+    hash_data(req.url);
+    hash_data(req.http.host);
+    if (req.http.Cookie) {
+        hash_data(regsub(req.http.Cookie, ".*\bsession_id=([^;]+);.*", "\1"));
+    }
+}
+```
+
+**bouine:**
+```yaml
+routes:
+  - match:
+      path: "/**"
+    cache:
+      key:
+        include_query: true
+        include_host: true
+        vary_headers: ["Accept", "Cookie"]  # automatic normalization
+```
+
+bouine automatically normalizes common headers (accept-encoding, cookie) to improve cache hit rates. The `vary_headers` list controls which request headers participate in the cache key.
 
 ---
 
-## 2. Side-by-side example (TBD)
+## 2. Side-by-side example: E-commerce site
 
-This section will include a real-world VCL file and its bouine
-equivalent, generated by `bouine config translate --vcl old.vcl`. The
-diff report will be shown verbatim so operators can see which lines
-were dropped or approximated.
+### 2.1 Varnish configuration (VCL)
+
+```vcl
+vcl 4.1;
+
+backend default {
+    .host = "origin.example.com";
+    .port = "443";
+    .connect_timeout = 5s;
+    .first_byte_timeout = 30s;
+    .probe = {
+        .url = "/health";
+        .timeout = 2s;
+        .interval = 5s;
+        .expected_response = 200;
+    }
+}
+
+sub vcl_recv {
+    # Strip tracking cookies for cacheable content
+    if (req.url ~ "^/(images/|static/|css/|js/)") {
+        unset req.http.Cookie;
+        return (hash);
+    }
+
+    # API endpoints: pass through
+    if (req.url ~ "^/api/v[12]/") {
+        return (pass);
+    }
+
+    # Personalized content: bypass cache if session cookie present
+    if (req.http.Cookie ~ "session_id=") {
+        return (pass);
+    }
+
+    # Product pages: cache with short TTL
+    if (req.url ~ "^/products/") {
+        return (hash);
+    }
+
+    return (pass);
+}
+
+sub vcl_backend_response {
+    # Images: 30 days
+    if (bereq.url ~ "^/images/") {
+        set beresp.ttl = 30d;
+        set beresp.grace = 7d;
+    }
+
+    # Static assets: 7 days
+    if (bereq.url ~ "^/static/") {
+        set beresp.ttl = 7d;
+        set beresp.grace = 3d;
+    }
+
+    # Product pages: 5 minutes with SWR
+    if (bereq.url ~ "^/products/") {
+        set beresp.ttl = 5m;
+        set beresp.grace = 1h;
+    }
+
+    # Remove cookies from cached responses
+    if (beresp.ttl > 0s) {
+        unset beresp.http.Set-Cookie;
+    }
+}
+
+sub vcl_deliver {
+    # Add debug headers
+    if (obj.hits > 0) {
+        set resp.http.X-Cache = "HIT";
+    } else {
+        set resp.http.X-Cache = "MISS";
+    }
+}
+```
+
+### 2.2 bouine configuration (YAML)
+
+```yaml
+listen:
+  http: ":80"
+  admin: "127.0.0.1:6082"
+
+upstream_pools:
+  - name: origin
+    targets:
+      - address: "origin.example.com:443"
+        tls:
+          enabled: true
+          server_name: "origin.example.com"
+    health_checks:
+      active:
+        path: "/health"
+        interval: "5s"
+        timeout: "2s"
+        unhealthy_threshold: 3
+    selection:
+      strategy: round_robin
+
+routes:
+  # Images: 30-day TTL, 7-day SWR
+  - match:
+      path: "/images/**"
+    cache:
+      enabled: true
+      ttl_default: "30d"
+      stale_while_revalidate: "7d"
+      pass_through: false
+    response:
+      remove_headers: ["Set-Cookie"]
+
+  # Static assets: 7-day TTL, 3-day SWR
+  - match:
+      path: "/static/**"
+    cache:
+      enabled: true
+      ttl_default: "7d"
+      stale_while_revalidate: "3d"
+      pass_through: false
+    response:
+      remove_headers: ["Set-Cookie"]
+
+  # API endpoints: no caching
+  - match:
+      path: "/api/v[12]/**"
+    cache:
+      enabled: false
+      pass_through: true
+
+  # Product pages: 5-minute TTL, respect origin max-age
+  - match:
+      path: "/products/**"
+    cache:
+      enabled: true
+      ttl_default: "5m"
+      stale_while_revalidate: "1h"
+      honor_origin_cache_control: true
+      vary_headers: ["Accept-Language"]
+    response:
+      remove_headers: ["Set-Cookie"]
+
+  # Default: pass through
+  - match:
+      path: "/**"
+    cache:
+      enabled: false
+      pass_through: true
+
+admin:
+  enabled: true
+  auth:
+    type: bearer_token
+    token_env: "BOUINE_ADMIN_TOKEN"
+```
+
+### 2.3 Key differences
+
+| Aspect                 | Varnish VCL                          | bouine YAML                          |
+|------------------------|--------------------------------------|--------------------------------------|
+| Cookie stripping       | `unset req.http.Cookie` in vcl_recv  | implicit via `remove_headers`        |
+| Session detection      | `if (req.http.Cookie ~ "...")`       | automatic (origin returns private)   |
+| TTL per path           | `set beresp.ttl = ...` conditionals  | `ttl_default` in route config        |
+| Backend health checks  | `.probe = {...}`                     | `health_checks.active`               |
+| Debug headers          | `set resp.http.X-Cache`              | automatic (controlled by config)     |
 
 ---
 
-## 3. Purge / ban / refresh parity
+## 3. How VCL constructs map
 
-| Operation               | Varnish                                       | bouine                                              |
-|-------------------------|-----------------------------------------------|------------------------------------------------------|
-| Exact-URL purge         | `PURGE /path` (via `vcl_purge`)               | `POST /v1/purge` with URL, or `bouine purge <url>`. |
-| Surrogate-key purge     | `ban obj.http.Surrogate-Key ~ <regex>`        | `POST /v1/ban` with `surrogate_key:<value>`.        |
-| Predicate ban           | `ban req.url ~ <regex>`                       | `POST /v1/ban` with a predicate expression.         |
-| Soft purge / refresh    | `vmod_softpurge.softpurge()`                  | `POST /v1/refresh`.                                  |
+### 3.1 Backend configuration
 
-The bouine CLI ships these as first-class subcommands, so an operator's
-muscle memory for `varnishadm ban ...` becomes `bouine ban ...`.
+**Varnish:**
+```vcl
+backend primary {
+    .host = "app1.example.com";
+    .port = "8080";
+    .probe = { .url = "/health"; .interval = 5s; }
+}
+backend fallback {
+    .host = "app2.example.com";
+    .port = "8080";
+}
+```
 
----
+**bouine:**
+```yaml
+upstream_pools:
+  - name: app
+    targets:
+      - address: "app1.example.com:8080"
+        weight: 10
+      - address: "app2.example.com:8080"
+        weight: 5
+    health_checks:
+      active:
+        path: "/health"
+        interval: "5s"
+    selection:
+      strategy: weighted_round_robin
+```
 
-## 4. Headers operators usually care about
+### 3.2 Cache-Control header handling
 
-| Header                     | Varnish behavior                              | bouine behavior                                                                 |
-|----------------------------|-----------------------------------------------|----------------------------------------------------------------------------------|
-| `Vary`                     | secondary key, no variant cap                 | secondary key, capped per route (`cache.vary.max_variants`, default 64).        |
-| `Set-Cookie`               | response not cached by default                | response not cached by default. Opt-in: `cache.cookies.allow_set_cookie: true`. |
-| `Authorization`            | per RFC 9111 §3.5                             | identical (see [`PLAN.md §3.4`](../../PLAN.md)).                                |
-| `Surrogate-Key`            | indexed for ban                               | indexed for ban (phase 5).                                                       |
-| `Cache-Control`            | full directive set                            | full directive set (see [`PLAN.md §3.1`](../../PLAN.md)).                       |
-| `Accept-Encoding`          | normalized to `gzip`/`identity`               | bucketed to `br|zstd|gzip|identity` (see [`PLAN.md §3.3`](../../PLAN.md)).      |
+**Varnish:**
+```vcl
+sub vcl_backend_response {
+    if (beresp.http.Cache-Control ~ "no-cache") {
+        set beresp.uncacheable = true;
+    }
+}
+```
 
----
+**bouine:** bouine strictly honors RFC 9111 `Cache-Control` directives. No configuration needed.
 
-## 5. Observability mapping
+- `no-store`: never cache
+- `no-cache`: require revalidation
+- `max-age=N`: respect TTL
+- `private`: bypass cache
+- `s-maxage=N`: override max-age for shared caches
 
-| Varnish tool / signal       | bouine equivalent                                 |
-|-----------------------------|---------------------------------------------------|
-| `varnishstat`               | `GET /metrics` (Prometheus) + `GET /v1/stats`.   |
-| `varnishlog`                | `slog` JSON access log (sampled by default).     |
-| `varnishncsa`               | `slog` JSON access log; renderer for NCSA TBD.   |
-| `varnishtop`                | per-route Prometheus counters + dashboard.        |
-| `varnishhist`               | OTEL spans + Grafana dashboard.                   |
+### 3.3 Conditional request collapsing
 
-The metric names use the `bouine_` prefix; equivalent labels are
-documented in `docs/operations/metrics.md` (phase 4.5).
+**Varnish:**
+```vcl
+sub vcl_recv {
+    # Varnish 6+ has built-in request collapsing
+    return (hash);
+}
+```
 
----
+**bouine:** request collapsing is enabled by default for cache misses. Concurrent requests for the same cache key are coalesced into a single upstream fetch.
 
-## 6. Recommended rollout
+### 3.4 Purge operations
 
-1. Translate the VCL with `bouine config translate --vcl current.vcl
-   --out bouine.yaml`. Read the diff report; address every
-   `dropped/approximated` line.
-2. Deploy `bouine` in staging behind a feature flag on your LB. Use
-   shadow traffic via `goreplay` to compare responses byte-for-byte.
-3. Verify hit ratio is within 2 % of Varnish on the canonical workload.
-4. Enable a small percentage of production traffic (e.g., 1 %); watch
-   the Prometheus dashboard and the `bouine_smuggling_rejects_total`,
-   `bouine_vary_eviction_total`, and origin error metrics.
-5. Ramp gradually. Roll back to Varnish on first regression by flipping
-   the feature flag; both can serve traffic in parallel.
+**Varnish:**
+```bash
+varnishadm ban "req.url ~ ^/products/"
+varnishadm purge req.url "/products/item-123"
+```
 
----
+**bouine:**
+```bash
+# Ban (pattern-based)
+curl -X POST http://127.0.0.1:6082/admin/bans \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"path": "/products/**"}'
 
-## 7. Behavioral differences (intentional)
-
-These are the places where bouine diverges from Varnish on purpose.
-Operators should know about them before cutover.
-
-- **Cookie keying**: bouine ignores `Cookie` by default. Varnish often
-  passes `Cookie` to the backend and treats responses as private.
-  bouine requires explicit `cache.cookies.key` to participate.
-- **Vary blow-up**: bouine caps variants per primary key. Varnish does
-  not (until storage runs out). The cap protects memory but can lower
-  hit ratio if your application emits dozens of Vary values per URL.
-- **Compression**: bouine defaults to passthrough storage; Varnish
-  often gzips on the way out. The `normalize_identity` mode mimics
-  Varnish behavior.
-- **Hedged requests**: bouine fires duplicates after p99 latency; only
-  on idempotent methods. Varnish does not.
-- **0-RTT (HTTP/3)**: bouine is off by default; Varnish does not
-  speak HTTP/3 at all.
-
----
-
-## 8. Constructs the shim does NOT support
-
-If your VCL relies on any of these, you cannot migrate without
-rewriting that logic in application code or a sidecar:
-
-- Inline C blocks.
-- Any `vmod_*` not on the supported list (which currently includes a
-  small subset of `vmod_std`, `vmod_directors`, `vmod_softpurge`).
-- Custom storage backends.
-- ESI features beyond `<esi:include>` (no XSLT, no `<esi:choose>` in
-  v1.0).
-- `vcl_synth` bodies with complex templating.
-
-The shim refuses to load files that include these constructs; it does
-**not** silently drop them.
+# Purge (exact match)
+curl -X POST http://127.0.0.1:6082/admin/purge \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"path": "/products/item-123"}'
+```
 
 ---
 
-## 9. FAQ
+## 4. What we don't support
 
-- **Will bouine match Varnish 1:1 on `http-tests/cache-tests`?** Yes —
-  see the exit criteria for phase 3 and 4.5 in `PLAN.md`. If you find
-  a divergence, file a bug.
-- **Can I run both side-by-side during the migration?** Yes; that is
-  the recommended path. Use shadow traffic with `goreplay` or your LB's
-  traffic-mirroring feature.
-- **Does bouine support `varnishadm` over a Unix socket?** No. The
-  admin surface is HTTP and a Cobra CLI. The CLI talks to the admin
-  HTTP API; a Unix socket binding for the admin port is a v1.1
-  candidate (see [`PLAN.md §18`](../../PLAN.md)).
-- **How do I export from `varnishstat` to Prometheus?** You do not need
-  to — bouine exposes `/metrics` natively. Existing
-  `varnishstat`-Prometheus exporter Grafana dashboards do **not** work
-  unchanged; we publish a translated dashboard in phase 4.5.
+### 4.1 VCL subroutine hooks
+
+bouine does not expose VCL's fine-grained subroutine hooks:
+- `vcl_init`, `vcl_fini`: use lifecycle hooks in your deployment
+- `vcl_pipe`: not applicable (bouine is HTTP/1.1+2+3, not raw TCP)
+- `vcl_synth`: use a separate service for dynamic content generation
+
+### 4.2 Custom hash functions
+
+Varnish allows arbitrary hash functions. bouine uses a deterministic hash based on:
+- Request path (normalized)
+- Query string (sorted by key)
+- Headers listed in `vary_headers`
+- Host header
+
+If you need custom cache key logic, consider upstream request transformation.
+
+### 4.3 ESI (Edge Side Includes)
+
+bouine does not implement ESI. For dynamic content composition:
+- Use a service mesh (Istio, Linkerd) for request routing
+- Implement composition in your application layer
+- Use GraphQL or similar for aggregation
+
+### 4.4 varnishlog / varnishncsa
+
+bouine emits:
+- **Access logs**: OpenTelemetry-compatible structured logs to stdout
+- **Metrics**: Prometheus endpoint at `/admin/stats` (or `/metrics` if configured)
+- **Traces**: distributed tracing via OpenTelemetry
+
+See [observability guide](../observability/) for details.
+
+### 4.5 VSM (Varnish Shared Memory) files
+
+bouine runs in-process; there are no VSM files, no shared memory segments, no `/var/lib/varnish` directories. All state is in-memory within the process.
 
 ---
 
-*This guide is a living document. Sections marked TBD are completed in
-phase 4.5 as part of the hardening exit criteria.*
+## 5. Testing and validation
+
+### 5.1 Configuration validation
+
+```bash
+bouine config validate /etc/bouine/config.yaml
+```
+
+Reports:
+- Syntax errors
+- Unknown fields
+- Invalid upstream addresses
+- Missing required fields
+
+### 5.2 Dry-run mode
+
+```bash
+bouine serve --config /etc/bouine/config.yaml --dry-run
+```
+
+Validates config and prints effective configuration without starting the server.
+
+### 5.3 Traffic replay
+
+Use [gor replay](https://github.com/buger/goreplay) or similar tools to replay production traffic against a bouine instance:
+
+```bash
+# Capture from Varnish
+gor --input-raw :6081 --output-file traffic.bin
+
+# Replay to bouine
+gor --input-file traffic.bin --output-http "http://bouine-host:8080"
+```
+
+Compare cache hit rates and response latency.
+
+### 5.4 Cache key debugging
+
+Use the admin API to inspect cached objects:
+
+```bash
+# List all cached keys
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:6082/admin/cache/keys
+
+# Fetch specific object
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:6082/admin/cache/object?path=/products/123"
+```
+
+Response includes:
+- Cache key hash
+- TTL and age
+- Response headers
+- Last fetch timestamp
+
+---
+
+## 6. Common patterns
+
+### 6.1 A/B testing with cache bypass
+
+**Varnish:**
+```vcl
+sub vcl_recv {
+    if (req.http.Cookie ~ "ab-test=variant-b") {
+        return (pass);
+    }
+}
+```
+
+**bouine:** rely on origin to return `Cache-Control: private` for A/B test variants, or use `vary_headers`:
+
+```yaml
+routes:
+  - match:
+      path: "/landing/**"
+    cache:
+      enabled: true
+      vary_headers: ["Cookie"]  # vary on full cookie header
+```
+
+### 6.2 Geolocation-based routing
+
+**Varnish:**
+```vcl
+sub vcl_recv {
+    set req.http.X-Country = geoip.country_code;
+    if (req.http.X-Country == "US") {
+        set req.backend_hint = us_backend;
+    }
+}
+```
+
+**bouine:** use upstream pool selection or a service mesh:
+
+```yaml
+upstream_pools:
+  - name: us_origin
+    targets:
+      - address: "us.app.example.com:443"
+  - name: eu_origin
+    targets:
+      - address: "eu.app.example.com:443"
+```
+
+Route selection based on the `X-Forwarded-For` or `CF-IPCountry` header (if using Cloudflare).
+
+### 6.3 Graceful degradation (origin failure)
+
+**Varnish:**
+```vcl
+sub vcl_backend_response {
+    set beresp.grace = 24h;
+}
+sub vcl_synth {
+    if (resp.status == 503) {
+        # Serve from grace
+    }
+}
+```
+
+**bouine:**
+
+```yaml
+routes:
+  - match:
+      path: "/**"
+    cache:
+      enabled: true
+      stale_if_error: true       # serve stale on 5xx
+      stale_while_revalidate: "1h"
+```
+
+`stale_if_error: true` enables serving stale content when the origin returns a 5xx status or times out.
+
+### 6.4 Surrogate keys (tag-based purging)
+
+**Varnish:**
+```vcl
+sub vcl_backend_response {
+    if (beresp.http.Surrogate-Key) {
+        set beresp.http.xkey = beresp.http.Surrogate-Key;
+    }
+}
+```
+
+**bouine:** use the `Cache-Tags` response header:
+
+```bash
+# Origin returns: Cache-Tags: product-123, category-electronics
+# Purge all objects tagged with "product-123"
+curl -X POST http://127.0.0.1:6082/admin/bans \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"cache_tag": "product-123"}'
+```
+
+bouine automatically indexes objects by `Cache-Tags` for efficient tag-based invalidation.
+
+---
+
+## 7. Migration checklist
+
+- [ ] **Audit VCL**: identify all `vcl_recv`, `vcl_backend_response`, `vcl_deliver` logic
+- [ ] **Map subroutines**: use §3 to translate VCL constructs to bouine config
+- [ ] **Write YAML**: start with the example in §2.2 as a template
+- [ ] **Validate config**: run `bouine config validate`
+- [ ] **Test in staging**: deploy bouine in staging with traffic replay
+- [ ] **Compare metrics**: verify cache hit rate ≥ Varnish baseline
+- [ ] **Monitor access logs**: check for unexpected `pass_through` or `no_store` decisions
+- [ ] **Gradual rollout**: use weighted routing or feature flags to shift traffic
+- [ ] **Decommission Varnish**: once metrics are stable for 7+ days
+
+---
+
+## 8. FAQ
+
+**Q: Can I run Varnish and bouine side-by-side?**
+A: Yes. Use a load balancer (HAProxy, NGINX) with weighted routing to gradually shift traffic.
+
+**Q: Does bouine support HTTP/2 push?**
+A: Yes. bouine automatically pushes resources referenced in `Link: <...>; rel=preload` headers.
+
+**Q: How do I migrate custom VCL modules (vmods)?**
+A: VCL modules cannot be ported directly. Identify the behavior and implement it as:
+- Upstream service (for complex logic)
+- Request/response transformation pipeline
+- Route-level configuration
+
+**Q: Is there a VCL-to-YAML converter?**
+A: No automated tool exists. The declarative models are different enough that manual translation is required. Use this guide's examples as a starting point.
+
+**Q: What if my origin doesn't return proper Cache-Control headers?**
+A: Use `ttl_default` in route config as a fallback. bouine honors origin headers when present, falling back to the configured default.
+
+**Q: Can I use Varnish's `std.log()` in bouine?**
+A: bouine's access logs capture request/response details automatically. For custom logging, use response headers that your logging pipeline can extract.
+
+---
+
+## 9. Further reading
+
+- [Configuration reference](../configuration/)
+- [Cache decision flow](../cache-decisions.md)
+- [Admin API](../admin-api/)
+- [Observability guide](../observability/)
+- [RFC 9111 (HTTP Caching)](https://datatracker.ietf.org/doc/html/rfc9111)

@@ -40,6 +40,8 @@ func TestEvaluate_Miss(t *testing.T) {
 }
 
 func TestEvaluate_BypassOnPost(t *testing.T) {
+	// POST goes through isInvalidating path in ServeHTTP, not Evaluate.
+	// Evaluate returns Bypass for all non-GET/HEAD methods.
 	r := httptest.NewRequest("POST", "/", nil)
 	d := Evaluate(r, nil, time.Now())
 	if d.Decision != Bypass {

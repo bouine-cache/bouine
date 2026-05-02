@@ -49,12 +49,22 @@ func ComputeAge(obj *api.Object, now time.Time) time.Duration {
 }
 
 // parseOriginAge parses the Age header from the response, handling
-// malformed values per RFC 9110 §5.6.1. Invalid or negative values
-// return 0. Values > 2^31 are treated as stale (RFC 9111 §5.1).
+// malformed values per RFC 9110 §5.6.1. Invalid, negative, or
+// non-integer values (e.g. floats like "7200.0") return 0.
+// Values > 2^31 are treated as stale (RFC 9111 §5.1).
 func parseOriginAge(header http.Header) time.Duration {
-	ageStr := header.Get("Age")
+	ageStr := strings.TrimSpace(header.Get("Age"))
 	if ageStr == "" {
 		return 0
+	}
+	// RFC 9111 §5.1: Age = delta-seconds = 1*DIGIT. Reject float values
+	// (e.g. "7200.0") because a decimal point makes the value non-conformant.
+	// Other non-digit suffixes (e.g. "7200;foo", "7200, 0") are tolerated
+	// via the normal parseIntNoAlloc stop-at-non-digit behaviour.
+	for i := 0; i < len(ageStr); i++ {
+		if ageStr[i] == '.' {
+			return 0
+		}
 	}
 	secs, ok := parseIntNoAlloc(ageStr)
 	if !ok || secs < 0 {

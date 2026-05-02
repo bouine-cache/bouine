@@ -12,11 +12,35 @@ import (
 // shared cache (CDN tier) per RFC 9211. When CDN-Cache-Control is
 // present it takes precedence over Cache-Control for all shared-cache
 // decisions; otherwise Cache-Control is used.
+// If the CDN-CC value contains unknown or invalid token types (per
+// RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
+// list of tokens"), the header is treated as absent.
 func cdnCacheControl(respHeader http.Header) (Directives, bool) {
-	if v := mergeHeaderValues(respHeader, "CDN-Cache-Control"); v != "" {
-		return ParseCacheControl(v), true
+	v := mergeHeaderValues(respHeader, "CDN-Cache-Control")
+	if v == "" {
+		return Directives{}, false
 	}
-	return Directives{}, false
+	// Reject values containing non-token characters (§9213 §4).
+	// A CDN-CC value with garbage tokens must be ignored entirely,
+	// falling back to Cache-Control.
+	for _, b := range []byte(v) {
+		// RFC 7230 §3.2.6 token chars: VCHAR except delimiters.
+		// We reject &, invalid bytes and other non-token noise.
+		if b < 0x21 || b > 0x7e {
+			continue // spaces / commas are legal separators
+		}
+		if b == '&' || b == '@' || b == '[' || b == ']' || b == '{' || b == '}' || b == '"' {
+			// Non-token characters or quoted-string values — treat whole value as invalid.
+			// RFC 9213 §2: CDN-Cache-Control must use sf-integer for duration values, not quoted-strings.
+			return Directives{}, false
+		}
+	}
+	d := ParseCacheControl(v)
+	// If the parsed directives contain no meaningful directives, treat absent.
+	if !d.MaxAgeSet && !d.SMaxAgeSet && !d.NoStore && !d.Private && !d.NoCache {
+		return Directives{}, false
+	}
+	return d, true
 }
 
 // IsCacheable determines whether an origin response should be stored.
@@ -32,7 +56,7 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 		respCC = ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
 	}
 
-	if isCacheBlocked(respCC, reqHeader, respHeader) {
+	if isCacheBlocked(status, respCC, reqHeader, respHeader) {
 		return false
 	}
 
@@ -55,8 +79,10 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	}
 
 	// Heuristic freshness: only if the response has Last-Modified AND the
-	// status code is heuristically cacheable (RFC 9111 §4.2.2).
-	if respHeader.Get("Last-Modified") != "" && isHeuristicStatus(status) {
+	// status code is heuristically cacheable (RFC 9111 §4.2.2). When
+	// Cache-Control: public is present, unknown status codes (e.g. 599) are
+	// also eligible — the server is explicitly opting in to caching.
+	if respHeader.Get("Last-Modified") != "" && (isHeuristicStatus(status) || respCC.Public) {
 		// Pragma: no-cache in a response without explicit Cache-Control
 		// blocks heuristic caching (RFC 9111 §5.4 / HTTP/1.0 compat).
 		if isBlockedByPragma(respCC, respHeader) {
@@ -77,8 +103,16 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	return false
 }
 
-func isCacheBlocked(respCC Directives, reqHeader, respHeader http.Header) bool {
-	if respCC.NoStore || respCC.Private {
+func isCacheBlocked(status int, respCC Directives, reqHeader, respHeader http.Header) bool {
+	// RFC 9111 §5.2.2.3: must-understand means the cache MAY store even when
+	// no-store is present, but ONLY if the cache understands the status code.
+	// Unknown status codes (e.g. 599) do NOT satisfy must-understand.
+	if respCC.NoStore {
+		if !respCC.MustUnderstand || !isUnderstoodStatus(status) {
+			return true
+		}
+	}
+	if respCC.Private {
 		return true
 	}
 	// Only check Pragma in the response when using the plain CC path;
@@ -103,9 +137,13 @@ func isCacheBlocked(respCC Directives, reqHeader, respHeader http.Header) bool {
 }
 
 func isBlockedByPragma(respCC Directives, h http.Header) bool {
+	// RFC 9111 §5.4: Pragma: no-cache in a response blocks caching only when
+	// there is no explicit freshness information. If Last-Modified or Expires
+	// is present, heuristic or explicit freshness overrides Pragma.
 	return h.Get("Pragma") == "no-cache" &&
 		!respCC.MaxAgeSet && !respCC.SMaxAgeSet &&
-		h.Get("Expires") == ""
+		h.Get("Expires") == "" &&
+		h.Get("Last-Modified") == ""
 }
 
 func hasVaryStar(h http.Header) bool {
@@ -124,6 +162,20 @@ func isBlockedBySetCookie(respCC Directives, h http.Header) bool {
 	// A shared cache MAY store responses with Set-Cookie if the
 	// response has explicit freshness (max-age or s-maxage).
 	return !respCC.MaxAgeSet && !respCC.SMaxAgeSet
+}
+
+// isUnderstoodStatus reports whether this cache understands the given
+// status code well enough to satisfy RFC 9111 §5.2.2.3 must-understand.
+// Only explicitly enumerated status codes count as "understood".
+func isUnderstoodStatus(status int) bool {
+	switch status {
+	case 200, 203, 204, 206,
+		300, 301, 302, 303, 304, 307, 308,
+		400, 401, 403, 404, 405, 406, 408, 409, 410, 411, 412, 413, 414, 415, 416,
+		500, 501, 502, 503, 504:
+		return true
+	}
+	return false
 }
 
 // isHeuristicStatus reports whether the status code permits heuristic

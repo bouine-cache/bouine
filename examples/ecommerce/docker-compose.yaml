@@ -1,0 +1,70 @@
+# docker-compose.yaml — E-commerce example stack
+#
+# Boots a 2-node bouine cluster with a mock origin that serves e-commerce
+# endpoints (/products/, /static/, /cart/, etc.) and demonstrates
+# surrogate-key invalidation via the admin API.
+#
+# Usage:
+#   docker compose up -d --build
+#   curl -i http://localhost:8081/products/widget  # MISS
+#   curl -i http://localhost:8081/products/widget  # HIT
+#   # Invalidate product catalog:
+#   curl -X POST http://localhost:9000/admin/bans \
+#     -H "Authorization: Bearer $BOUINE_ADMIN_TOKEN" \
+#     -d '{"surrogate_keys":["products/.*"]}'
+#   curl -i http://localhost:8081/products/widget  # MISS (banned)
+#
+# Port layout:
+#   origin:    18080
+#   bouine-1:  HTTP=18081  admin=19001
+#   bouine-2:  HTTP=18082  admin=19002
+#
+# Admin token: set BOUINE_ADMIN_TOKEN env var or use "dev-token" (from config).
+
+name: bouine-ecommerce
+
+services:
+  origin:
+    build:
+      context: ../../test/integration
+      dockerfile: origin/Dockerfile
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+    restart: "no"
+
+  bouine-1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      origin:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/etc/bouine/config.yaml:ro
+    ports:
+      - "18081:8080"
+      - "19001:9000"
+    environment:
+      - BOUINE_ADMIN_TOKEN=dev-token
+    restart: "no"
+
+  bouine-2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      origin:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/etc/bouine/config.yaml:ro
+    ports:
+      - "18082:8080"
+      - "19002:9000"
+    environment:
+      - BOUINE_ADMIN_TOKEN=dev-token
+    restart: "no"

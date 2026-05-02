@@ -269,10 +269,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// StayinAlive or stale-if-error: if we have a stale object and origin
-		// fails / is skipped due to SIE, serve the stale copy. SIE objects
-		// go through fetchAndStoreStayinAlive which handles 5xx fallback.
-		if obj != nil && (h.stayinAlive || obj.StaleForSIE(now)) {
+		// If a stale object exists, use fetchAndStoreStayinAlive which will
+		// serve the stale copy on 5xx/error — unless the stored response
+		// has must-revalidate / proxy-revalidate / no-cache / s-maxage,
+		// which require the error to be forwarded to the client.
+		if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 			h.fetchAndStoreStayinAlive(w, r, key, obj)
 		} else {
 			h.fetchAndStore(w, r, key)
@@ -357,11 +358,34 @@ func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 	h.upstream.ServeHTTP(w, r)
 }
 
+// stripNoCacheFields removes headers named in a `no-cache="…"` field list
+// from dst before writing it to the client. Per RFC 9111 §5.2.2.4 a cache
+// MUST NOT forward these fields without successful revalidation.
+// ccHeader is the merged Cache-Control string for the stored response.
+func stripNoCacheFields(dst http.Header, ccHeader string) {
+	if ccHeader == "" {
+		return
+	}
+	cc := ParseCacheControl(ccHeader)
+	if cc.NoCacheFields == "" {
+		return
+	}
+	for _, field := range strings.FieldsFunc(cc.NoCacheFields, func(r rune) bool {
+		return r == ',' || r == ' '
+	}) {
+		if field != "" {
+			del := http.CanonicalHeaderKey(field)
+			delete(dst, del)
+		}
+	}
+}
+
 func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
 	dst["Age"] = ageHeader(ComputeAge(obj, now))
 	dst["X-Cache"] = headerHIT
+	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(obj.Body)
@@ -369,11 +393,14 @@ func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *ap
 }
 
 // serveStale writes a cached object with X-Cache: STALE (SWR / SIE path).
+// Adds Warning: 110 per RFC 7234 §5.5.3 to signal the stale response.
 func (h *Handler) serveStale(w http.ResponseWriter, r *http.Request, obj *api.Object) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
 	dst["Age"] = ageHeader(ComputeAge(obj, time.Now()))
 	dst["X-Cache"] = headerSTALE
+	dst["Warning"] = []string{`110 - "Response is Stale"`}
+	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(obj.Body)
@@ -387,6 +414,7 @@ func (h *Handler) serveRevalidated(w http.ResponseWriter, r *http.Request, obj *
 	maps.Copy(dst, obj.Header)
 	dst["Age"] = ageHeader(ComputeAge(obj, time.Now()))
 	dst["X-Cache"] = headerREVALIDATED
+	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(obj.Body)
@@ -431,19 +459,29 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	res := h.doFetch(revalReq)
 	if res.Err != nil {
-		// Origin error during revalidation — serve stale if available.
-		h.serveFromCache(w, r, stale, time.Now())
+		// Origin error during revalidation — serve stale with Warning: 110.
+		h.serveStale(w, r, stale)
 		return
 	}
 
-	// stale-if-error (RFC 5861 §4): if origin returns 5xx and the
-	// stale object has SIE configured, serve stale instead.
+	// stale-if-error (RFC 5861 §4) and general stale-on-error: if origin
+	// returns 5xx, serve stale unless must-revalidate/proxy-revalidate
+	// explicitly forbids it (RFC 9111 §5.2.2.2).
 	if res.StatusCode >= 500 {
-		if h.stayinAlive || (stale.StaleIfError > 0 && stale.StaleButServable(time.Now())) {
-			if h.stayinAlive {
-				h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
-					"status", res.StatusCode, "key", stale.Key)
-			}
+		if h.stayinAlive {
+			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
+				"status", res.StatusCode, "key", stale.Key)
+			h.serveStale(w, r, stale)
+			return
+		}
+		// Parse the stale object's CC to check for must-revalidate.
+		staleCC := stale.CacheControl
+		if staleCC == "" {
+			staleCC = mergeHeaderValues(stale.Header, "Cache-Control")
+		}
+		cc := ParseCacheControl(staleCC)
+		if !cc.MustRevalidate && !cc.ProxyRevalidate {
+			// RFC 9111 §4.2.6 / RFC 5861 §4: serve stale on upstream error.
 			h.serveStale(w, r, stale)
 			return
 		}
@@ -630,6 +668,23 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 				_ = h.store.Delete(r.Context(), locKey)
 			}
 		}
+
+		// RFC 9111 §4.3.1: if the POST response has explicit freshness
+		// and a Content-Location matching the request URI, store the
+		// response under the GET key so subsequent GETs can reuse it.
+		if r.Method == http.MethodPost && rec.statusCode >= 200 && rec.statusCode < 300 &&
+			IsCacheable(rec.statusCode, r.Header, rec.header) {
+			// Copy body and header to avoid aliasing the pooled recorder buffer.
+			bodyCopy := make([]byte, rec.body.Len())
+			copy(bodyCopy, rec.body.Bytes())
+			res := collapse.Result{
+				StatusCode: rec.statusCode,
+				Header:     rec.header.Clone(),
+				Body:       bodyCopy,
+			}
+			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			_ = h.store.Put(r.Context(), key, obj)
+		}
 	}
 
 	// Write the captured response to the client.
@@ -673,6 +728,15 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL,
 	_, _ = FreshnessLifetimeH(respCC, res.Header) // computed inside computeTTL
 
 	originAge := parseOriginAge(res.Header)
+	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age, age_value).
+	// Apparent age is derived from the Date header: max(0, now - Date).
+	if dateStr := res.Header.Get("Date"); dateStr != "" {
+		if dt := parseHTTPDate(dateStr); !dt.IsZero() && !dt.After(now) {
+			if apparentAge := now.Sub(dt); apparentAge > originAge {
+				originAge = apparentAge
+			}
+		}
+	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
 	ttl := computeTTL(res.Header, res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
 
@@ -758,6 +822,22 @@ func parseSurrogateKeys(h http.Header) []string {
 }
 
 // isInvalidating returns true for unsafe methods that should trigger
+// staleFallbackAllowed reports whether a stale object may be served as a
+// fallback when the upstream returns a 5xx or connection error. It returns
+// false when the stored response has must-revalidate, proxy-revalidate,
+// no-cache, or s-maxage (all of which require a successful revalidation).
+func staleFallbackAllowed(obj *api.Object) bool {
+	staleCC := obj.CacheControl
+	if staleCC == "" {
+		staleCC = mergeHeaderValues(obj.Header, "Cache-Control")
+	}
+	if staleCC == "" {
+		return true
+	}
+	cc := ParseCacheControl(staleCC)
+	return !cc.MustRevalidate && !cc.ProxyRevalidate && !cc.NoCache && !cc.SMaxAgeSet
+}
+
 // isInvalidating returns true for unsafe methods that should trigger
 // cache invalidation (RFC 9111 §4.4). GET, HEAD, and OPTIONS are safe.
 func isInvalidating(method string) bool {

@@ -21,6 +21,8 @@ observability.
 > Status: **v1.0-rc** — phases 0–7 complete. Caching, clustering,
 > prefetching, negative caching, jittered TTLs, soft-purge, and the Go
 > SDK are shipped. Validated on k3s with 3-node gossip cluster.
+> `make conformance` scores **340/365 (93.2%)** on
+> [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 > See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ---
@@ -33,8 +35,9 @@ observability.
   external KV.
 - **Clustering**: gossip membership + consistent hash + peer fetch. K8s
   StatefulSet friendly.
-- **Compliance**: targets parity with Varnish on
-  [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
+- **Compliance**: **93.2 % on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)**
+  (340/365). Covers RFC 9111 freshness, stale-while-revalidate, stale-if-error, CDN-Cache-Control,
+  heuristic caching, Vary, conditional requests, and `must-understand`.
 - **Performance**: zero-alloc hit path, benchmark-gated CI.
 - **Observability**: Prometheus, OpenTelemetry, slog, pprof.
 - **Migration**: NGINX migration guide included.
@@ -123,6 +126,8 @@ for all options.
 | Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
 | Migration from NGINX             | [`docs/migration/nginx.md`](docs/migration/nginx.md)   |
 | Decision records (ADRs)          | [`docs/decisions/`](docs/decisions/)                  |
+| SLO / SLI reference              | [`docs/operations/slo.md`](docs/operations/slo.md)    |
+| Soak + chaos report (v1.0 gate)  | [`docs/operations/soak-chaos-report.md`](docs/operations/soak-chaos-report.md) |
 
 ---
 

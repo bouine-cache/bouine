@@ -489,8 +489,8 @@ func (s *ClusterStack) Dump(t *testing.T) {
 	}
 }
 
-// KillNode stops a single bouine container to simulate a node failure.
-// The node is removed from the compose stack; other nodes remain running.
+// KillNode stops a single bouine container to simulate a hard node failure.
+// The node is not removed from compose; call RestartNode to bring it back.
 func (s *ClusterStack) KillNode(t *testing.T, n int) {
 	t.Helper()
 	cmd := s.compose("stop", s.Nodes[n].Name)
@@ -498,6 +498,100 @@ func (s *ClusterStack) KillNode(t *testing.T, n int) {
 		t.Fatalf("stop %s: %v\n%s", s.Nodes[n].Name, err, string(out))
 	}
 	t.Logf("cluster: stopped %s", s.Nodes[n].Name)
+}
+
+// RestartNode brings a previously stopped node back up and waits for it to
+// pass its health check. Useful after KillNode or PauseNode.
+func (s *ClusterStack) RestartNode(t *testing.T, n int) {
+	t.Helper()
+	cmd := s.compose("start", s.Nodes[n].Name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("start %s: %v\n%s", s.Nodes[n].Name, err, string(out))
+	}
+	// Wait for the node to pass health.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(s.Nodes[n].HTTPAddr + "/healthz")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			t.Logf("cluster: %s healthy after restart", s.Nodes[n].Name)
+			return
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Logf("cluster: %s did not become healthy within 30s — continuing anyway", s.Nodes[n].Name)
+}
+
+// PauseNode suspends a bouine container's processes (SIGSTOP via Docker)
+// to simulate a partial network partition. The node is still reachable by
+// Docker networking but stops processing requests.
+// Call UnpauseNode to resume.
+func (s *ClusterStack) PauseNode(t *testing.T, n int) {
+	t.Helper()
+	cmd := s.compose("pause", s.Nodes[n].Name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pause %s: %v\n%s", s.Nodes[n].Name, err, string(out))
+	}
+	t.Logf("cluster: paused %s (partition simulation)", s.Nodes[n].Name)
+}
+
+// UnpauseNode resumes a paused bouine container (SIGCONT via Docker).
+func (s *ClusterStack) UnpauseNode(t *testing.T, n int) {
+	t.Helper()
+	cmd := s.compose("unpause", s.Nodes[n].Name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unpause %s: %v\n%s", s.Nodes[n].Name, err, string(out))
+	}
+	t.Logf("cluster: unpaused %s", s.Nodes[n].Name)
+}
+
+// FlapOrigin stops and restarts the origin container repeatedly to simulate
+// an origin flap. It performs n cycles of (stop, wait, start) with the
+// given interval between cycles.
+func (s *ClusterStack) FlapOrigin(t *testing.T, cycles int, interval time.Duration) {
+	t.Helper()
+	for i := range cycles {
+		cmd := s.compose("stop", "origin")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Logf("origin flap cycle %d stop: %v\n%s", i, err, string(out))
+		}
+		time.Sleep(interval)
+		cmd = s.compose("start", "origin")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Logf("origin flap cycle %d start: %v\n%s", i, err, string(out))
+		}
+		t.Logf("cluster: origin flap cycle %d/%d complete", i+1, cycles)
+	}
+}
+
+// ScaleOriginLatency injects artificial latency into the origin container
+// using tc-netem (requires Linux with iproute2 in the container).
+// Latency is in milliseconds. Pass 0 to clear the rule.
+// Returns an error (rather than fatalling) because tc may be unavailable;
+// callers should skip the test if this returns a non-nil error.
+func (s *ClusterStack) ScaleOriginLatency(latencyMs int) error {
+	var args []string
+	if latencyMs > 0 {
+		args = []string{
+			"exec", "origin",
+			"tc", "qdisc", "add", "dev", "eth0", "root",
+			"netem", "delay", fmt.Sprintf("%dms", latencyMs),
+		}
+	} else {
+		args = []string{
+			"exec", "origin",
+			"tc", "qdisc", "del", "dev", "eth0", "root",
+		}
+	}
+	cmd := s.compose(args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tc netem: %w\n%s", err, string(out))
+	}
+	return nil
 }
 
 // ConfigDir returns the path of the temporary directory containing per-node

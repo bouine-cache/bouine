@@ -4,8 +4,7 @@
 // is never bound on the data-plane port (see AGENTS.md §2).
 //
 // The admin server uses net/http.ServeMux — the same HTTP stack as the
-// data plane — so the entire daemon runs on two implementations:
-// net/http (H1+H2) and quic-go (H3). ADR-0006 documents the decision.
+// data plane. ADR-0006 documents the decision.
 package admin
 
 import (

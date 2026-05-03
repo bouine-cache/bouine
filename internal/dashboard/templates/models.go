@@ -264,7 +264,7 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 				{Key: "hot_max_bytes", Value: cfg.Storage.HotMaxBytes.String(), Kind: "num", Hint: "in-RAM SIEVE cache"},
 				{Key: "warm_dir", Value: fmt.Sprintf("%q", cfg.Storage.WarmDir), Kind: "str", Hint: "mmap segments path"},
 				{Key: "warm_max_bytes", Value: cfg.Storage.WarmMaxBytes.String(), Kind: "num", Hint: "max warm tier size"},
-				{Key: "eviction", Value: cfg.Storage.Eviction, Kind: "str", Hint: "sieve or w-tinylfu"},
+				{Key: "eviction", Value: cfg.Storage.Eviction, Kind: "str", Hint: "sieve"},
 			},
 		},
 	}

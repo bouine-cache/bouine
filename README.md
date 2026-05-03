@@ -29,7 +29,7 @@ observability.
 
 ## Highlights
 
-- **Protocols**: HTTP/1.1, HTTP/2, and HTTP/3 (QUIC) on the data plane.
+- **Protocols**: HTTP/1.1 and HTTP/2 on the data plane.
   `net/http` on a separate admin port for the operator surface.
 - **Embedded storage**: sharded in-RAM hot tier + mmap warm tier. No
   external KV.
@@ -138,7 +138,7 @@ The high-level Go module layout follows the layered architecture in
 
 ```
 /cmd/bouine                  Cobra entrypoint
-/internal/listener           L1 — HTTP/1, /2, /3, TLS, PROXY proto
+/internal/listener           L1 — HTTP/1, /2, TLS
 /internal/pipeline           L2 — normalization, ACL, collapsing
 /internal/cache              L4 — RFC 9111 state machine, Vary, conditionals
 /internal/storage            L3 — RAM tier, mmap tier, eviction, WAL

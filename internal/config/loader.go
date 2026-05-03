@@ -77,7 +77,7 @@ func (c *Config) Validate() error {
 	// At least one listener must be enabled. Admin is OK as a sole
 	// listener when no TLS is configured.
 	if c.Listen.HTTP == "" && c.Listen.HTTPS == "" &&
-		c.Listen.HTTP3 == "" && c.Listen.Admin == "" {
+		c.Listen.Admin == "" {
 		return errors.New("config: at least one listener must be configured")
 	}
 

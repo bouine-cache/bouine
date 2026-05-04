@@ -36,7 +36,7 @@ explicit deliverables, exit criteria, and the tests that gate moving forward.
 
 ### 1.2 Non-Goals
 - WAF / DDoS scrubbing (delegated to a sidecar or Layer-7 LB).
-- Generic L4 load-balancing (we are an L7 HTTP cache).
+- Generic L3 load-balancing (we are an L6 HTTP cache).
 - WebSockets as cached objects (passed through but never cached).
 - Becoming a drop-in VCL interpreter — we expose a richer config DSL instead.
 - **End-user authentication / authorization on the data plane** —
@@ -60,21 +60,19 @@ the wire.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ L9  AI Insights & Dashboard         (phase 6)                        │
+│ L8  AI Insights & Dashboard         (phase 6)                        │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L8  Observability         (metrics · traces · logs · pprof)          │
+│ L7  Observability         (metrics · traces · logs · pprof)          │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L7  Control Plane          admin API · purge · config · dashboard    │
+│ L6  Control Plane          admin API · purge · config · dashboard    │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L6  Cluster                gossip · hashring · peer fetch · digests  │
+│ L5  Cluster                gossip · hashring · peer fetch · digests  │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L5  Origin / Upstream      pool · health · hedge · circuit breaker   │
+│ L4  Origin / Upstream      pool · health · hedge · circuit breaker   │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L4  Cache Engine           RFC 9111 · Vary · revalidation · SWR      │
+│ L3  Cache Engine           RFC 9111 · Vary · revalidation · SWR      │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L3  Storage                hot (RAM) · warm (mmap) · eviction · WAL  │
-├──────────────────────────────────────────────────────────────────────┤
-│ L2  Request Pipeline       normalize · route · ACL · collapse        │
+│ L2  Storage                hot (RAM) · warm (mmap) · eviction · WAL  │
 ├──────────────────────────────────────────────────────────────────────┤
 │ L1  Server                 HTTP/1.1 · HTTP/2 · TLS · route            │
 └──────────────────────────────────────────────────────────────────────┘
@@ -101,16 +99,16 @@ dependencies for a surface that serves ≤ 10 RPS.
 ```
 /cmd/bouine                  Cobra entrypoint
 /internal/server             L1 — HTTP/1, /2, TLS, route matching
-/internal/cache              L4 — RFC 9111 state machine, Vary, conditionals
-/internal/storage            L3 — RAM tier, mmap tier, eviction, WAL
+/internal/cache              L3 — RFC 9111 state machine, Vary, conditionals
+/internal/storage            L2 — RAM tier, mmap tier, eviction, WAL
 /internal/storage/sieve      SIEVE eviction implementation
-/internal/origin             L5 — upstream pool, health, hedge, breaker
-/internal/cluster            L6 — memberlist gossip, consistent hash, peer fetch
-/internal/admin              L7 — net/http admin: purge, ban, config, dash
-/internal/observability      L8 — OTEL, Prom, slog, pprof
+/internal/origin             L4 — upstream pool, health, hedge, breaker
+/internal/cluster            L5 — memberlist gossip, consistent hash, peer fetch
+/internal/admin              L6 — net/http admin: purge, ban, config, dash
+/internal/observability      L7 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
-/internal/ai                 L9 — traffic analytics (phase 8)
-/web/dashboard               L9 — HTMX dashboard templates (phase 6)
+/internal/ai                 L8 — traffic analytics (phase 8)
+/web/dashboard               L8 — HTMX dashboard templates (phase 6)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
 /pkg/api                     shared types between SDK, admin server, dashboard
 /test/integration            docker-compose driven scenarios
@@ -151,7 +149,7 @@ doc-coverage check. Headline guarantees:
 
 ---
 
-## 3. Cache Engine (L4) — RFC 9111 details
+## 3. Cache Engine (L3) — RFC 9111 details
 
 The engine is implemented as a deterministic state machine driven by request
 and stored-response metadata. Its only inputs are an `http.Request`, the
@@ -262,7 +260,7 @@ harness so regressions are caught at the smallest scope.
 
 ---
 
-## 4. Storage (L3) — Embedded, Multi-Tier
+## 4. Storage (L2) — Embedded, Multi-Tier
 
 ### 4.1 Tiers
 - **L0 / Hot** — in-memory `map[uint64]*Entry` keyed by 64-bit xxhash of the
@@ -295,7 +293,7 @@ type Store interface {
 
 ---
 
-## 5. Clustering (L6)
+## 5. Clustering (L5)
 
 ### 5.1 Membership
 - `hashicorp/memberlist` for gossip; nodes publish a hash ring digest.
@@ -353,7 +351,7 @@ work during a rollout and break cleanly when they cannot.
 
 ---
 
-## 6. Upstream / Origin (L5)
+## 6. Upstream / Origin (L4)
 
 - Connection pool per upstream, keyed by host:port + TLS profile.
 - **Active health checks** — optional, configurable: HTTP probe, expected
@@ -390,21 +388,21 @@ migration story is short:
 
 ---
 
-## 7. Listeners (L1) & Pipeline (L2)
+## 7. Listeners (L1) & Pipeline (L1)
 
 - L1 owns sockets, TLS, and ALPN.
 - Each protocol exposes a `chan *http.Request` adapter; from there the
   pipeline is protocol-agnostic.
-- L2 pipeline stages (configurable, ordered):
+- L1 pipeline stages (configurable, ordered):
   1. URL & host normalization (lowercasing, percent-decoding).
   2. ACL / IP allow-list / geo block.
   3. Cache key construction (with `Vary` injection from previous lookups).
   4. Request collapsing latch acquisition.
-  5. Hand-off to L4.
+  5. Hand-off to L3.
 
 ---
 
-## 8. Control Plane (L7)
+## 8. Control Plane (L6)
 
 `net/http.ServeMux` app on a dedicated admin port. Endpoints:
 
@@ -515,7 +513,7 @@ routes:
 
 ---
 
-## 10. Observability (L8)
+## 10. Observability (L7)
 
 - **Metrics** — Prometheus, RED + USE for: requests, hits, misses, stale
   hits, revalidations, evictions, upstream latency p50/p95/p99, queue depth,
@@ -1291,7 +1289,7 @@ never competes with the data plane.
 | RFC 9111 edge cases drift | cache-tests in CI, blocks merge on regression. |
 | Cluster split-brain on purges | Monotonic purge tokens + anti-entropy reconciler. |
 | Benchmark noise | Use `benchstat`, run on a pinned self-hosted runner, require N=10 samples. |
-| AI features creep into the hot path | Hard architectural boundary: L9 only reads sampled telemetry, never writes to L3/L4. |
+| AI features creep into the hot path | Hard architectural boundary: L8 only reads sampled telemetry, never writes to L2/L3. |
 | VCL shim becomes a maintenance sink | Hard-cap supported subset (§17.4), fail loudly on unsupported constructs, never silently approximate. Deferred to post-v1.0 (§18). |
 | SDK and HTTP API drift apart | Single source of truth in `pkg/api`; contract tests run both surfaces against the same fixtures. |
 | Cache poisoning via unkeyed input | Default policy forbids implicit header keying; Vary cap; threat-model rows T06/T07/T09 wired to CI fuzz corpus. |
@@ -1329,7 +1327,7 @@ These were open questions during planning; locked in for v1.0.
      `synth`, `purge`, `fetch`.
    - `backend` and `director` declarations, mapped to bouine upstream
      pools and health-check config.
-   - `acl`, mapped to bouine ACL stage in L2.
+   - `acl`, mapped to bouine ACL stage in L1.
    Out of scope: inline C, `vmod_*` modules, custom storage backends.
    The shim emits a diff report at load time showing every VCL construct
    that was dropped or approximated, so operators can audit migrations.

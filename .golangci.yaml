@@ -111,7 +111,7 @@ linters:
             - golang.org/x/net
             - golang.org/x/sync
             - golang.org/x/sys
-        storage-L3:
+        storage-L2:
           list-mode: strict
           files: ["**/internal/storage/**"]
           allow:
@@ -121,7 +121,7 @@ linters:
             - github.com/thylong/bouine/pkg/api
             - github.com/cespare/xxhash/v2
             - golang.org/x/sys
-        cache-L4:
+        cache-L3:
           list-mode: strict
           files: ["**/internal/cache/**"]
           allow:
@@ -133,7 +133,7 @@ linters:
             - github.com/thylong/bouine/pkg/api
             - github.com/cespare/xxhash/v2
             - golang.org/x/sync
-        origin-L5:
+        origin-L4:
           list-mode: strict
           files: ["**/internal/origin/**"]
           allow:
@@ -142,7 +142,7 @@ linters:
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
             - golang.org/x/sync
-        cluster-L6:
+        cluster-L5:
           list-mode: strict
           files: ["**/internal/cluster/**"]
           allow:
@@ -157,7 +157,7 @@ linters:
             - github.com/cespare/xxhash/v2
             - github.com/prometheus/client_golang
             - golang.org/x/sync
-        admin-L7:
+        admin-L6:
           list-mode: strict
           files: ["**/internal/admin/**"]
           allow:
@@ -171,7 +171,7 @@ linters:
             - github.com/thylong/bouine/internal/buildinfo
             - github.com/thylong/bouine/pkg/api
             - github.com/prometheus/client_golang
-        observability-L8:
+        observability-L7:
           list-mode: strict
           files: ["**/internal/observability/**"]
           allow:
@@ -180,7 +180,7 @@ linters:
             - github.com/thylong/bouine/pkg/api
             - github.com/prometheus/client_golang
             - go.opentelemetry.io/otel
-        ai-L9:
+        ai-L8:
           list-mode: strict
           files: ["**/internal/ai/**"]
           allow:

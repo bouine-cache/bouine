@@ -334,7 +334,7 @@ Observability is a product feature, not an afterthought.
 - Never log + return — pick one. The boundary handler logs; lower layers
   return.
 - HTTP error mapping happens at one place per surface (data plane in
-  `internal/pipeline/errors.go`, admin in `internal/admin/errors.go`).
+  `internal/server/router.go`, admin in `internal/admin/errors.go`).
 - Stack traces only on `error` level. PII never appears in errors.
 
 ---

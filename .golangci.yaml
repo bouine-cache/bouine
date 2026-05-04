@@ -99,30 +99,18 @@ linters:
         # Layer-dependency matrix from AGENTS.md §3.1.
         # A package may only depend on packages in lower layers (or itself
         # and stdlib). The reference definition is lint/depguard.yaml.
-        listener-L1:
+        server:
           list-mode: strict
-          files: ["**/internal/listener/**"]
+          files: ["**/internal/server/**"]
           allow:
             - $gostd
-            - github.com/thylong/bouine/internal/listener
-            - github.com/thylong/bouine/internal/pipeline
+            - github.com/thylong/bouine/internal/server
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/internal/buildinfo
             - github.com/thylong/bouine/pkg/api
             - golang.org/x/net
             - golang.org/x/sync
             - golang.org/x/sys
-            - github.com/quic-go/quic-go
-        pipeline-L2:
-          list-mode: strict
-          files: ["**/internal/pipeline/**"]
-          allow:
-            - $gostd
-            - github.com/thylong/bouine/internal/pipeline
-            - github.com/thylong/bouine/internal/cache
-            - github.com/thylong/bouine/internal/origin
-            - github.com/thylong/bouine/internal/observability
-            - github.com/thylong/bouine/pkg/api
         storage-L3:
           list-mode: strict
           files: ["**/internal/storage/**"]
@@ -139,12 +127,12 @@ linters:
           allow:
             - $gostd
             - github.com/thylong/bouine/internal/cache
-            - github.com/thylong/bouine/internal/pipeline/collapse
             - github.com/thylong/bouine/internal/storage
             - github.com/thylong/bouine/internal/origin
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
             - github.com/cespare/xxhash/v2
+            - golang.org/x/sync
         origin-L5:
           list-mode: strict
           files: ["**/internal/origin/**"]

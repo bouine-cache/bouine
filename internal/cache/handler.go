@@ -28,8 +28,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/thylong/bouine/internal/observability/tracing"
-	"github.com/thylong/bouine/internal/pipeline/collapse"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 )
@@ -69,6 +70,14 @@ func ageHeader(d time.Duration) []string {
 	return []string{strconv.Itoa(secs)}
 }
 
+// fetchResult is the outcome of an origin fetch, shared across collapsed requests.
+type fetchResult struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+	Err        error
+}
+
 // recorderPool reuses responseRecorder instances on the miss/invalidation
 // paths to reduce allocations. The hit path never allocates a recorder.
 var recorderPool = sync.Pool{
@@ -99,7 +108,7 @@ func releaseRecorder(rec *responseRecorder) {
 type Handler struct {
 	upstream      http.Handler
 	store         storage.Store
-	collapse      *collapse.Group
+	flight        singleflight.Group
 	logger        *slog.Logger
 	negativeTTL   time.Duration
 	jitterPercent int
@@ -113,11 +122,6 @@ type Handler struct {
 	variantCounts map[api.Key]int
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
 	VaryCapHits interface{ Inc() }
-	// prefetcher, if non-nil, receives stored responses for Link: rel=preload
-	// warm-up scheduling. Nil-safe.
-	prefetcher interface {
-		OnResponse(ctx context.Context, reqHost string, header http.Header)
-	}
 	// ownerFn returns the peer that owns a cache key and whether the key
 	// is local to this node. Nil in single-node mode.
 	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
@@ -163,13 +167,6 @@ type HandlerConfig struct {
 	// the key is owned by a remote peer. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
-	// Prefetcher, if non-nil, receives every cacheable origin response so
-	// it can schedule background warm-up for Link: rel=preload URLs.
-	// It is called after the response has been stored, in a non-blocking
-	// best-effort fashion. Nil disables prefetch.
-	Prefetcher interface {
-		OnResponse(ctx context.Context, reqHost string, header http.Header)
-	}
 	// ReplicateFn, if non-nil, is called after a cacheable response is
 	// stored locally. Used in full cluster mode to broadcast the object
 	// to all peers via gossip. Nil in strong and eventual modes.
@@ -184,7 +181,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	return &Handler{
 		upstream:      cfg.Upstream,
 		store:         cfg.Store,
-		collapse:      collapse.NewGroup(),
 		logger:        cfg.Logger,
 		negativeTTL:   cfg.NegativeTTL,
 		jitterPercent: cfg.JitterPercent,
@@ -196,7 +192,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		VaryCapHits:   cfg.VaryCapHits,
 		ownerFn:       cfg.OwnerFn,
 		peerFetch:     cfg.PeerFetch,
-		prefetcher:    cfg.Prefetcher,
 		replicateFn:   cfg.ReplicateFn,
 	}
 }
@@ -235,11 +230,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ServeRange(w, r, disp.Object) {
 			return
 		}
-		h.serveFromCache(w, r, disp.Object, now)
-		// Lead 5 — SWR background refresh: if the object was served stale
-		// and it has a stale-while-revalidate window, kick off a background
-		// revalidation so the next request finds a fresh copy. The collapse
-		// group deduplicates concurrent triggers for the same key.
+		h.serveObject(w, r, disp.Object, now, cacheHit)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
 			h.triggerBgRevalidate(r, key, disp.Object)
 		}
@@ -255,7 +246,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
 					// Re-evaluate: the peer may have returned a stale object.
 					if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-						h.serveFromCache(w, r, peerObj, now)
+						h.serveObject(w, r, peerObj, now, cacheHit)
 						// Promote to local hot tier (best-effort; ignore error).
 						_ = h.store.Put(r.Context(), key, peerObj)
 						if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
@@ -380,11 +371,31 @@ func stripNoCacheFields(dst http.Header, ccHeader string) {
 	}
 }
 
-func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time) {
+// cacheResult selects the X-Cache header and optional Warning for served objects.
+type cacheResult int
+
+const (
+	cacheHit         cacheResult = iota
+	cacheStale                   // SWR / SIE path — adds Warning: 110
+	cacheRevalidated             // origin confirmed freshness via 304
+)
+
+// serveObject writes a cached object to the client with the appropriate
+// X-Cache header and Age. Stale responses also get Warning: 110 per
+// RFC 7234 §5.5.3.
+func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
 	dst["Age"] = ageHeader(ComputeAge(obj, now))
-	dst["X-Cache"] = headerHIT
+	switch result {
+	case cacheHit:
+		dst["X-Cache"] = headerHIT
+	case cacheStale:
+		dst["X-Cache"] = headerSTALE
+		dst["Warning"] = []string{`110 - "Response is Stale"`}
+	case cacheRevalidated:
+		dst["X-Cache"] = headerREVALIDATED
+	}
 	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
@@ -392,39 +403,17 @@ func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *ap
 	}
 }
 
-// serveStale writes a cached object with X-Cache: STALE (SWR / SIE path).
-// Adds Warning: 110 per RFC 7234 §5.5.3 to signal the stale response.
-func (h *Handler) serveStale(w http.ResponseWriter, r *http.Request, obj *api.Object) {
-	dst := w.Header()
-	maps.Copy(dst, obj.Header)
-	dst["Age"] = ageHeader(ComputeAge(obj, time.Now()))
-	dst["X-Cache"] = headerSTALE
-	dst["Warning"] = []string{`110 - "Response is Stale"`}
-	stripNoCacheFields(dst, obj.CacheControl)
-	w.WriteHeader(obj.StatusCode)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(obj.Body)
-	}
-}
-
-// serveRevalidated writes a refreshed cached object with X-Cache: REVALIDATED
-// (origin confirmed freshness via 304).
-func (h *Handler) serveRevalidated(w http.ResponseWriter, r *http.Request, obj *api.Object) {
-	dst := w.Header()
-	maps.Copy(dst, obj.Header)
-	dst["Age"] = ageHeader(ComputeAge(obj, time.Now()))
-	dst["X-Cache"] = headerREVALIDATED
-	stripNoCacheFields(dst, obj.CacheControl)
-	w.WriteHeader(obj.StatusCode)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(obj.Body)
-	}
+// collapsedFetch deduplicates concurrent origin fetches for the same key.
+func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
+	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(key), 36), func() (any, error) {
+		res := h.doFetch(r)
+		return res, nil
+	})
+	return v.(fetchResult)
 }
 
 func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.Key) {
-	res, _ := h.collapse.Do(key, func() collapse.Result {
-		return h.doFetch(r)
-	})
+	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
@@ -435,19 +424,17 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
 // serving the super-stale obj if the upstream is unavailable.
 func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
-	res, _ := h.collapse.Do(key, func() collapse.Result {
-		return h.doFetch(r)
-	})
+	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", key)
-		h.serveStale(w, r, stale)
+		h.serveObject(w, r, stale, time.Now(), cacheStale)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 			"status", res.StatusCode, "key", key)
-		h.serveStale(w, r, stale)
+		h.serveObject(w, r, stale, time.Now(), cacheStale)
 		return
 	}
 	h.writeAndMaybeStore(w, r, key, res)
@@ -459,8 +446,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	res := h.doFetch(revalReq)
 	if res.Err != nil {
-		// Origin error during revalidation — serve stale with Warning: 110.
-		h.serveStale(w, r, stale)
+		h.serveObject(w, r, stale, time.Now(), cacheStale)
 		return
 	}
 
@@ -471,7 +457,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		if h.stayinAlive {
 			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 				"status", res.StatusCode, "key", stale.Key)
-			h.serveStale(w, r, stale)
+			h.serveObject(w, r, stale, time.Now(), cacheStale)
 			return
 		}
 		// Parse the stale object's CC to check for must-revalidate.
@@ -481,8 +467,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		}
 		cc := ParseCacheControl(staleCC)
 		if !cc.MustRevalidate && !cc.ProxyRevalidate {
-			// RFC 9111 §4.2.6 / RFC 5861 §4: serve stale on upstream error.
-			h.serveStale(w, r, stale)
+			h.serveObject(w, r, stale, time.Now(), cacheStale)
 			return
 		}
 	}
@@ -509,7 +494,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 			refreshed.ETag = newETag
 		}
 		_ = h.store.Put(r.Context(), key, &refreshed)
-		h.serveRevalidated(w, r, &refreshed)
+		h.serveObject(w, r, &refreshed, time.Now(), cacheRevalidated)
 		return
 	}
 
@@ -542,9 +527,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	revalReq := r.Clone(ctx)
 	ConditionalHeaders(revalReq, stale)
 
-	res, _ := h.collapse.Do(key, func() collapse.Result {
-		return h.doFetch(revalReq)
-	})
+	res := h.collapsedFetch(revalReq, key)
 	if res.Err != nil {
 		return
 	}
@@ -577,7 +560,7 @@ func (h *Handler) writeAndMaybeStore(
 	w http.ResponseWriter,
 	r *http.Request,
 	_ api.Key,
-	res collapse.Result,
+	res fetchResult,
 ) {
 	dst := w.Header()
 	for k, vals := range res.Header {
@@ -629,11 +612,6 @@ func (h *Handler) writeAndMaybeStore(
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
 		}
-		// Notify the prefetcher so it can schedule background warm-up
-		// for any Link: rel=preload URLs in the stored response.
-		if h.prefetcher != nil {
-			h.prefetcher.OnResponse(r.Context(), r.Host, res.Header)
-		}
 		// Replication hook: in full cluster mode, broadcast the newly
 		// cached object to all peers via gossip. No-op in strong and
 		// eventual modes where replicateFn is nil.
@@ -677,7 +655,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 			// Copy body and header to avoid aliasing the pooled recorder buffer.
 			bodyCopy := make([]byte, rec.body.Len())
 			copy(bodyCopy, rec.body.Bytes())
-			res := collapse.Result{
+			res := fetchResult{
 				StatusCode: rec.statusCode,
 				Header:     rec.header.Clone(),
 				Body:       bodyCopy,
@@ -696,21 +674,21 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(rec.body.Bytes())
 }
 
-func (h *Handler) doFetch(r *http.Request) collapse.Result {
+func (h *Handler) doFetch(r *http.Request) fetchResult {
 	// L5 span: upstream origin pool layer.
 	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
 	defer span.End()
 	rec := acquireRecorder()
 	h.upstream.ServeHTTP(rec, r.WithContext(ctx))
 
-	return collapse.Result{
+	return fetchResult{
 		StatusCode: rec.statusCode,
 		Header:     rec.header,
 		Body:       rec.body.Bytes(),
 	}
 }
 
-func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL, defaultTTL, defaultSWR, defaultSIE time.Duration, jitterPct int) *api.Object {
+func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, defaultSWR, defaultSIE time.Duration, jitterPct int) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):

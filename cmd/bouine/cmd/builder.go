@@ -15,12 +15,10 @@ import (
 	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/accesslog"
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
-	"github.com/thylong/bouine/internal/pipeline"
-	"github.com/thylong/bouine/internal/prefetch"
+	"github.com/thylong/bouine/internal/server"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
@@ -50,7 +48,7 @@ func (e *engine) buildStore() (storage.Store, error) {
 // data-plane ports so that peer-to-peer RPCs are routable across pods. If POD_IP
 // is a hostname rather than a dotted IP, DNS lookup is retried up to five times
 // with back-off to tolerate slow container start order in Docker Compose.
-func (e *engine) buildCluster() (*cluster.Cluster, error) {
+func (e *engine) buildCluster(ctx context.Context) (*cluster.Cluster, error) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "bouine"
@@ -77,7 +75,7 @@ func (e *engine) buildCluster() (*cluster.Cluster, error) {
 			// DNS may not be ready yet in Docker Compose (other containers
 			// may still be starting). Retry a few times.
 			for i := range 5 {
-				addrs, err := net.DefaultResolver.LookupHost(context.Background(), podIP)
+				addrs, err := net.DefaultResolver.LookupHost(ctx, podIP)
 				if err == nil && len(addrs) > 0 {
 					resolvedIP = addrs[0]
 					break
@@ -128,18 +126,9 @@ func listenPort(addr, defaultPort string) string {
 //  1. DataPlaneMetrics.Middleware — Prometheus counters and histograms (L2).
 //  2. tracing.HTTPMiddleware       — OpenTelemetry span for the pipeline layer.
 //  3. accesslog.Middleware         — structured JSON access log entry per request.
-func (e *engine) buildHandler(
-	pools map[string]*origin.Pool,
-	store storage.Store,
-	dpMetrics *observability.DataPlaneMetrics,
-	clusterNode *cluster.Cluster,
-	peerFetcher *cluster.PeerFetcher,
-	broadcaster *cluster.Broadcaster,
-	pf *prefetch.Prefetcher,
-) http.Handler {
-	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher, broadcaster, pf)
-	metricsWrapped := dpMetrics.Middleware(router)
-	// L2 span: pipeline routing layer.
+func (e *engine) buildHandler(rs *runState) http.Handler {
+	router := e.buildRouter(rs)
+	metricsWrapped := rs.dpMetrics.Middleware(router)
 	tracedL2 := tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
 	return accesslog.Middleware(e.logger, tracedL2)
 }
@@ -179,10 +168,10 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 //   - In full mode, ReplicateFn is set so after every cacheable fill the object
 //     is broadcast to all peers via gossip.
 //   - In eventual mode neither is set; every node caches independently.
-func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher, broadcaster *cluster.Broadcaster, pf *prefetch.Prefetcher) *pipeline.Router {
-	router := pipeline.NewRouter(pipeline.RouterConfig{Logger: e.logger})
+func (e *engine) buildRouter(rs *runState) *server.Router {
+	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
-		p := pools[rc.Pool]
+		p := rs.pools[rc.Pool]
 		if p == nil {
 			continue
 		}
@@ -220,7 +209,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 		upstream := p.Handler(consecutive5xx, transport)
 		cfg := cache.HandlerConfig{
 			Upstream:      upstream,
-			Store:         store,
+			Store:         rs.store,
 			Logger:        e.logger,
 			NegativeTTL:   rc.Cache.NegativeTTL,
 			JitterPercent: rc.Cache.JitterPercent,
@@ -228,25 +217,19 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 			DefaultTTL:    rc.Cache.TTLDefault,
 			DefaultSWR:    rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:    rc.Cache.StaleIfError,
-			VaryCapHits:   dpMetrics.VaryCapHits,
-			Prefetcher:    pf,
+			VaryCapHits:   rs.dpMetrics.VaryCapHits,
 		}
-		// Wire cluster peer-fetch if enabled in strong mode.
-		// In eventual and full modes, every node caches locally — no
-		// peer fetch is needed, so ownerFn and PeerFetch stay nil.
-		if clusterNode != nil && peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
+		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
-				owner := clusterNode.Owner(key)
-				return owner, clusterNode.IsLocal(key)
+				owner := rs.clusterNode.Owner(key)
+				return owner, rs.clusterNode.IsLocal(key)
 			}
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
 		}
-		// Wire replication callback in full mode so the handler
-		// broadcasts cached objects to all peers after storing them.
-		if broadcaster != nil && e.cfg.Cluster.Mode == config.ClusterModeFull {
-			cfg.ReplicateFn = broadcaster.BroadcastReplicate
+		if rs.broadcaster != nil && e.cfg.Cluster.Mode == config.ClusterModeFull {
+			cfg.ReplicateFn = rs.broadcaster.BroadcastReplicate
 		}
 		cached := cache.NewHandler(cfg)
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, cached)

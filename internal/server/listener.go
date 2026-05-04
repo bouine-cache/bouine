@@ -1,10 +1,7 @@
-// Package listener is the L1 layer. It owns the data-plane network
-// sockets: HTTP/1.1 and HTTP/2 (via net/http TLS + ALPN).
-//
-// Each protocol gets its own *http.Server (or http3.Server) instance
-// (ADR-0004). All listeners share the same http.Handler — the L2
-// pipeline router.
-package listener
+// Package server is the data-plane front door. It owns HTTP/1.1 +
+// HTTP/2 listeners (TLS and cleartext) and the route-matching router
+// that dispatches requests to cache handlers.
+package server
 
 import (
 	"context"
@@ -19,19 +16,19 @@ import (
 	"github.com/thylong/bouine/internal/observability/tracing"
 )
 
-// Config controls a single listener.
-type Config struct {
+// ListenerConfig controls a single listener.
+type ListenerConfig struct {
 	Addr      string
 	Handler   http.Handler
 	Logger    *slog.Logger
 	TLSConfig *tls.Config
 }
 
-// Server wraps a net/http Server with lifecycle methods matching the
+// Listener wraps a net/http Server with lifecycle methods matching the
 // supervised-group contract. Each protocol has its own instance.
 //
 // Stable.
-type Server struct {
+type Listener struct {
 	inner    *http.Server
 	name     string
 	logger   *slog.Logger
@@ -39,18 +36,16 @@ type Server struct {
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
-// Uses the Go 1.24+ native Protocols API instead of the deprecated
-// golang.org/x/net/http2/h2c package.
 //
 // Stable.
-func NewHTTP(cfg Config) *Server {
+func NewHTTP(cfg ListenerConfig) *Listener {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 
 	var protos http.Protocols
 	protos.SetHTTP1(true)
-	protos.SetUnencryptedHTTP2(true) // h2c — cleartext HTTP/2 upgrade
+	protos.SetUnencryptedHTTP2(true)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -62,14 +57,13 @@ func NewHTTP(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Server{inner: srv, name: "http", logger: cfg.Logger}
+	return &Listener{inner: srv, name: "http", logger: cfg.Logger}
 }
 
-// NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener using the Go 1.24+
-// native Protocols API for ALPN negotiation ("h2", "http/1.1").
+// NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener.
 //
 // Stable.
-func NewHTTPS(cfg Config) *Server {
+func NewHTTPS(cfg ListenerConfig) *Listener {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -80,7 +74,7 @@ func NewHTTPS(cfg Config) *Server {
 
 	var protos http.Protocols
 	protos.SetHTTP1(true)
-	protos.SetHTTP2(true) // TLS ALPN negotiated HTTP/2
+	protos.SetHTTP2(true)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -93,15 +87,13 @@ func NewHTTPS(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Server{inner: srv, name: "https", logger: cfg.Logger}
+	return &Listener{inner: srv, name: "https", logger: cfg.Logger}
 }
 
-// Serve starts the listener. For plaintext it calls ListenAndServe;
-// for TLS it calls ListenAndServeTLS with empty cert/key paths because
-// the tls.Config already carries the certificates.
+// Serve starts the listener and blocks until ctx is cancelled.
 //
 // Stable.
-func (s *Server) Serve(ctx context.Context) error {
+func (s *Listener) Serve(ctx context.Context) error {
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
 	if err != nil {
@@ -135,11 +127,10 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // Name returns the protocol label ("http", "https").
-func (s *Server) Name() string { return s.name }
+func (s *Listener) Name() string { return s.name }
 
-// Addr returns the resolved listen address after Serve has been
-// called. Before Serve, returns the configured address.
-func (s *Server) Addr() string {
+// Addr returns the resolved listen address after Serve has been called.
+func (s *Listener) Addr() string {
 	if v := s.resolved.Load(); v != nil {
 		return v.(string)
 	}

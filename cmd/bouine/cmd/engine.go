@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,13 +17,12 @@ import (
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/dashboard"
 	"github.com/thylong/bouine/internal/dashboard/templates"
-	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
-	"github.com/thylong/bouine/internal/prefetch"
 	"github.com/thylong/bouine/internal/runtime/shutdown"
 	"github.com/thylong/bouine/internal/runtime/supervised"
+	"github.com/thylong/bouine/internal/server"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 	webdash "github.com/thylong/bouine/web/dashboard"
@@ -48,21 +46,67 @@ func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engi
 	}
 }
 
+// runState bundles subsystem references created during engine startup.
+// Passed to startAdmin and buildDashboard instead of 10+ positional args.
+type runState struct {
+	store        storage.Store
+	pools        map[string]*origin.Pool
+	dpMetrics    *observability.DataPlaneMetrics
+	rings        *observability.Rings
+	snapshotPath string
+	token        string
+
+	clusterNode *cluster.Cluster
+	peerFetcher *cluster.PeerFetcher
+	broadcaster *cluster.Broadcaster
+	peersFn     func() []api.PeerInfo
+
+	cfProp *cfPropagator
+	seq    *shutdown.Sequencer
+}
+
+// invalidationOps provides shared purge/ban/refresh closures used by
+// both the admin API and the dashboard, eliminating duplication.
+type invalidationOps struct {
+	PurgeFn   func(ctx context.Context, url string) error
+	BanFn     func(ctx context.Context, hostRegex, pathRegex string) (int, error)
+	RefreshFn func(ctx context.Context, url string) error
+}
+
 func (e *engine) run(ctx context.Context) error {
-	pools, err := e.buildPools()
+	rs, shutdownTracer, err := e.initSubsystems(ctx)
 	if err != nil {
 		return err
 	}
+	defer shutdownTracer()
 
+	handler := e.buildDataPlane(rs)
+
+	g := supervised.NewGroup(ctx, e.logger)
+	e.startBackgroundTasks(g, rs)    // rings snapshot, prefetch sitemap crawler, config watcher
+	e.startAdmin(g, ctx, rs)         // admin API, dashboard, peer-fetch handler
+	e.startListeners(g, handler)     // HTTP/HTTPS data-plane listeners
+	e.startHealthChecks(g, rs.pools) // active health probes per upstream pool
+	e.startClusterJoin(g, rs)        // gossip join with retry against seed peers
+	e.registerShutdownSteps(g, rs)   // ordered drain: readiness, store flush, cluster leave
+
+	return g.Wait()
+}
+
+// initSubsystems creates all subsystem instances and wires them together.
+// Returns the bundled state and a tracer shutdown func.
+func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) {
+	pools, err := e.buildPools()
+	if err != nil {
+		return nil, func() {}, err
+	}
 	store, err := e.buildStore()
 	if err != nil {
-		return err
+		return nil, func() {}, err
 	}
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 
-	// Resolve admin token before rings and dashboard so all share the same value.
-	// Initialise OTel exporter before any spans are created.
 	shutdownTracer, err := tracing.InitTracer(ctx, tracing.TracingConfig{
 		Endpoint:     e.cfg.Tracing.Endpoint,
 		ServiceName:  e.cfg.Tracing.ServiceName,
@@ -71,8 +115,33 @@ func (e *engine) run(ctx context.Context) error {
 	if err != nil {
 		e.logger.Warn("tracing init failed, continuing without traces", "error", err)
 	}
-	defer shutdownTracer()
 
+	token := e.resolveAdminToken()
+	rings, snapshotPath := e.initRings()
+	dpMetrics.Rings = rings
+
+	clusterNode, peerFetcher, broadcaster, peersFn := e.initCluster(ctx, store)
+
+	cfProp := e.initCloudflare(dpMetrics)
+
+	rs := &runState{
+		store:        store,
+		pools:        pools,
+		dpMetrics:    dpMetrics,
+		rings:        rings,
+		snapshotPath: snapshotPath,
+		token:        token,
+		clusterNode:  clusterNode,
+		peerFetcher:  peerFetcher,
+		broadcaster:  broadcaster,
+		peersFn:      peersFn,
+		cfProp:       cfProp,
+		seq:          shutdown.NewSequencer(e.logger),
+	}
+	return rs, shutdownTracer, nil
+}
+
+func (e *engine) resolveAdminToken() string {
 	token := e.cfg.Admin.Token
 	if token == "" {
 		tok := make([]byte, 16)
@@ -82,8 +151,10 @@ func (e *engine) run(ctx context.Context) error {
 			"token", token,
 			"hint", "set admin.token in config to silence this warning")
 	}
+	return token
+}
 
-	// Initialise ring buffers for dashboard time-series.
+func (e *engine) initRings() (*observability.Rings, string) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "bouine"
@@ -98,108 +169,68 @@ func (e *engine) run(ctx context.Context) error {
 			e.logger.Warn("rings snapshot load failed", "error", err)
 		}
 	}
-	dpMetrics.Rings = rings
+	return rings, snapshotPath
+}
 
-	// Build optional cluster before the data-plane handler so peer-fetch
-	// functions can be passed into each route's cache.Handler.
-	var peersFn func() []api.PeerInfo
-	var clusterNode *cluster.Cluster
-	var peerFetcher *cluster.PeerFetcher
-	var broadcaster *cluster.Broadcaster
-	if e.cfg.Cluster.Enabled && e.cfg.Listen.Cluster != "" {
-		clusterNode, err = e.buildCluster()
+func (e *engine) initCluster(
+	ctx context.Context,
+	store storage.Store,
+) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo) {
+	if !e.cfg.Cluster.Enabled || e.cfg.Listen.Cluster == "" {
+		return nil, nil, nil, nil
+	}
+
+	clusterNode, err := e.buildCluster(ctx)
+	if err != nil {
+		e.logger.Error("cluster init failed", "error", err)
+		return nil, nil, nil, nil
+	}
+
+	var clusterTLS *tls.Config
+	if e.cfg.Cluster.TLS.CABundle != "" {
+		clusterTLS, err = buildClusterTLSConfig(e.cfg.Cluster.TLS)
 		if err != nil {
-			return err
-		}
-		peersFn = clusterNode.Members
-		// Build cluster mTLS config when configured; falls back to plain
-		// HTTP when cluster TLS fields are empty (dev / single-node).
-		var clusterTLS *tls.Config
-		if e.cfg.Cluster.TLS.CABundle != "" {
-			var err error
-			clusterTLS, err = buildClusterTLSConfig(e.cfg.Cluster.TLS)
-			if err != nil {
-				return fmt.Errorf("cluster TLS: %w", err)
-			}
-		}
-		// Register cluster-level Prometheus metrics and set the mode gauge.
-		// Must happen BEFORE NewBroadcaster, which copies clusterNode.metrics.
-		clusterMetrics := cluster.RegisterMetrics(e.metrics.Registry)
-		clusterMetrics.SetMode(e.cfg.Cluster.Mode)
-		clusterNode.SetMetrics(clusterMetrics)
-
-		peerFetcher = cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry)
-		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
-
-		// Wire gossip invalidation handler for all cluster modes.
-		// In strong mode gossip is the backup path; in eventual/full
-		// modes it is the primary invalidation path.
-		clusterNode.SetInvalidator(cluster.Invalidator{
-			PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
-				return store.Delete(ctx, evt.Key)
-			},
-			BanFn: func(ctx context.Context, evt api.BanEvent) error {
-				_, err := store.Ban(ctx, evt.Predicate)
-				return err
-			},
-		})
-		// In full mode, also wire the replication handler so gossip
-		// received objects are stored locally.
-		if e.cfg.Cluster.Mode == config.ClusterModeFull {
-			clusterNode.SetReplicator(cluster.Replicator{
-				StoreObject: func(ctx context.Context, obj *api.Object) error {
-					return store.Put(ctx, obj.Key, obj)
-				},
-			})
-		}
-		// Emit startup warnings for mode-specific configuration that
-		// is silently ignored or has operational implications.
-		if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
-			e.logger.Warn("cluster.hop_limit is set but has no effect in non-strong mode; peer fetch is disabled",
-				"mode", e.cfg.Cluster.Mode, "hop_limit", e.cfg.Cluster.HopLimit)
-		}
-		if e.cfg.Cluster.Mode == config.ClusterModeFull {
-			e.logger.Warn("cluster.mode is 'full' — every node holds a copy of every cached object; memory usage scales linearly with cluster size")
+			e.logger.Error("cluster TLS failed", "error", err)
+			return nil, nil, nil, nil
 		}
 	}
 
-	// Build handler; prefetcher wraps it after construction to avoid the
-	// circular dependency (prefetcher needs handler, handler needs prefetcher).
-	// pf.Middleware(handler) intercepts MISS/REVALIDATED responses and calls
-	// OnResponse — no nil prefetcher pointer needed inside the handler.
-	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher, broadcaster, nil)
+	clusterMetrics := cluster.RegisterMetrics(e.metrics.Registry)
+	clusterMetrics.SetMode(e.cfg.Cluster.Mode)
+	clusterNode.SetMetrics(clusterMetrics)
 
-	// Prefetcher: warms the cache by following Link: rel=preload headers
-	// from stored origin responses and optionally crawling sitemaps.
-	// Uses Middleware() wrapping so Link warm-ups fire on every cache fill
-	// without requiring a pointer inside each route's cache.Handler.
-	pf := prefetch.New(prefetch.Config{
-		Handler:         handler,
-		MaxConcurrency:  32,
-		SitemapURLs:     e.cfg.Prefetch.SitemapURLs,
-		SitemapInterval: e.cfg.Prefetch.SitemapInterval,
-		Logger:          e.logger,
-	})
-	// Wrap the handler so every MISS/REVALIDATED response triggers prefetch.
-	handler = pf.Middleware(handler)
+	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry)
+	broadcaster := cluster.NewBroadcaster(clusterNode, nil, "")
 
-	// Config watcher — fsnotify + SIGHUP hot reload.
-	watcher := config.NewWatcher(config.WatcherConfig{
-		ConfigPath: e.configPath,
-		Logger:     e.logger,
-		OnConfig:   func(cfg *config.Config) { e.cfg = cfg },
+	clusterNode.SetInvalidator(cluster.Invalidator{
+		PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
+			return store.Delete(ctx, evt.Key)
+		},
+		BanFn: func(ctx context.Context, evt api.BanEvent) error {
+			_, err := store.Ban(ctx, evt.Predicate)
+			return err
+		},
 	})
+	if e.cfg.Cluster.Mode == config.ClusterModeFull {
+		clusterNode.SetReplicator(cluster.Replicator{
+			StoreObject: func(ctx context.Context, obj *api.Object) error {
+				return store.Put(ctx, obj.Key, obj)
+			},
+		})
+	}
 
-	g := supervised.NewGroup(ctx, e.logger)
-	g.Go("rings", func(rCtx context.Context) error {
-		rings.Start(rCtx, snapshotPath)
-		return nil
-	})
-	g.Go("prefetch", pf.Run)
-	g.Go("config-watcher", watcher.Run)
-	// Cloudflare invalidation propagation.
-	// API token falls back to CF_API_TOKEN env var so operators can inject
-	// it from a Kubernetes Secret without embedding it in the config file.
+	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
+		e.logger.Warn("cluster.hop_limit has no effect in non-strong mode",
+			"mode", e.cfg.Cluster.Mode, "hop_limit", e.cfg.Cluster.HopLimit)
+	}
+	if e.cfg.Cluster.Mode == config.ClusterModeFull {
+		e.logger.Warn("cluster.mode 'full': memory scales linearly with cluster size")
+	}
+
+	return clusterNode, peerFetcher, broadcaster, clusterNode.Members
+}
+
+func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics) *cfPropagator {
 	cfAPIToken := e.cfg.Cloudflare.APIToken
 	if cfAPIToken == "" {
 		cfAPIToken = os.Getenv("CF_API_TOKEN")
@@ -221,135 +252,136 @@ func (e *engine) run(ctx context.Context) error {
 				"propagate", e.cfg.Cloudflare.Propagate)
 		}
 	}
-	cfProp := buildCFPropagator(cfInvalidator, e.cfg.Cloudflare, dpMetrics, e.logger)
-
-	// Shutdown sequencer: controls the ordered drain/flush/leave sequence.
-	seq := shutdown.NewSequencer(e.logger)
-	e.startAdmin(g, ctx, seq, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher, cfProp)
-	e.startListeners(g, handler)
-	e.startHealthChecks(g, pools)
-
-	if clusterNode != nil {
-		if len(e.cfg.Cluster.Join) > 0 {
-			g.Go("cluster-join", func(joinCtx context.Context) error {
-				return e.joinWithRetry(joinCtx, clusterNode)
-			})
-		}
-	}
-
-	// Register ordered graceful-shutdown steps (PLAN.md §14.1).
-	// Steps execute when the context is cancelled (SIGTERM / OS signal).
-	// seq.Execute signals /readyz → 503 before draining so kube-proxy
-	// removes the pod from active Endpoints before connections are closed.
-	seq.AddStep("mark-not-ready", 2*time.Second, func(_ context.Context) error {
-		// IsReady() already returns false after Execute; this step gives
-		// kube-proxy ~1 s to propagate the readiness change.
-		time.Sleep(time.Second)
-		return nil
-	})
-	seq.AddStep("flush-store", 10*time.Second, func(ctx context.Context) error {
-		return store.Close(ctx)
-	})
-	if clusterNode != nil {
-		seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
-			return clusterNode.Leave(context.WithoutCancel(ctx))
-		})
-	}
-	// The sequencer runs inside its own goroutine so it does not block
-	// the supervised group from shutting down listeners concurrently.
-	g.Go("shutdown-sequencer", func(sqCtx context.Context) error {
-		<-sqCtx.Done()
-		seq.Execute(context.WithoutCancel(sqCtx))
-		return nil
-	})
-
-	return g.Wait()
+	return buildCFPropagator(cfInvalidator, e.cfg.Cloudflare, dpMetrics, e.logger)
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, seq *shutdown.Sequencer, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher, peerFetcher *cluster.PeerFetcher, cfProp *cfPropagator) {
+// buildDataPlane assembles the data-plane handler chain.
+func (e *engine) buildDataPlane(rs *runState) http.Handler {
+	return e.buildHandler(rs)
+}
+
+func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
+	g.Go("rings", func(rCtx context.Context) error {
+		rs.rings.Start(rCtx, rs.snapshotPath)
+		return nil
+	})
+}
+
+// buildInvalidationOps creates the shared purge/ban/refresh closures.
+func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalidationOps {
+	return invalidationOps{
+		PurgeFn: func(dCtx context.Context, urlStr string) error {
+			key := cache.BuildKeyFromURL(urlStr)
+			if err := rs.store.Delete(dCtx, key); err != nil {
+				return err
+			}
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastPurge(ctx, key, "")
+			}
+			rs.cfProp.PropagateForPurge(dCtx, urlStr)
+			return nil
+		},
+		BanFn: func(dCtx context.Context, hostRegex, pathRegex string) (int, error) {
+			expr := api.BanExpr{HostRegex: hostRegex, PathRegex: pathRegex}
+			n, err := rs.store.Ban(dCtx, expr)
+			if err != nil {
+				return n, err
+			}
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastBan(ctx, expr)
+			}
+			rs.cfProp.PropagateForBan(dCtx, expr)
+			return n, nil
+		},
+		RefreshFn: func(dCtx context.Context, urlStr string) error {
+			if err := rs.store.Delete(dCtx, cache.BuildKeyFromURL(urlStr)); err != nil {
+				return err
+			}
+			rs.cfProp.PropagateForRefresh(dCtx, urlStr)
+			return nil
+		},
+	}
+}
+
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runState) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
 	}
 
-	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode, watcher, cfProp)
+	ops := e.buildInvalidationOps(ctx, rs)
+	dashMux := e.buildDashboard(rs, addr, ops)
 
 	srv := admin.New(admin.Config{
 		Addr:        addr,
-		Token:       token,
+		Token:       rs.token,
 		Logger:      e.logger,
 		Metrics:     e.metrics,
-		PeersFn:     peersFn,
-		CFStatusFn:  cfProp.Status,
-		ReadyFn:     seq.IsReady,
-		OnPurged:    cfProp.PropagateForPurge,
-		OnRefreshed: cfProp.PropagateForRefresh,
+		PeersFn:     rs.peersFn,
+		CFStatusFn:  rs.cfProp.Status,
+		ReadyFn:     rs.seq.IsReady,
+		OnPurged:    rs.cfProp.PropagateForPurge,
+		OnRefreshed: rs.cfProp.PropagateForRefresh,
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {
-			cfProp.PropagateForBan(bCtx, expr)
+			rs.cfProp.PropagateForBan(bCtx, expr)
 		},
 		PurgeFn: func(key api.Key) error {
-			if err := store.Delete(ctx, key); err != nil {
+			if err := rs.store.Delete(ctx, key); err != nil {
 				return err
 			}
-			if broadcaster != nil {
-				broadcaster.BroadcastPurge(ctx, key, "")
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastPurge(ctx, key, "")
 			}
 			return nil
 		},
 		BanFn: func(expr api.BanExpr) (int, error) {
-			n, err := store.Ban(ctx, expr)
+			n, err := rs.store.Ban(ctx, expr)
 			if err != nil {
 				return n, err
 			}
-			if broadcaster != nil {
-				broadcaster.BroadcastBan(ctx, expr)
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastBan(ctx, expr)
 			}
 			return n, nil
 		},
 		RefreshFn: func(key api.Key) error {
-			return store.Delete(ctx, key)
+			return rs.store.Delete(ctx, key)
 		},
 		PeerPurgeFn: func(evt api.PurgeEvent) error {
-			return store.Delete(ctx, evt.Key)
+			return rs.store.Delete(ctx, evt.Key)
 		},
 		PeerBanFn: func(evt api.BanEvent) error {
-			_, err := store.Ban(ctx, evt.Predicate)
+			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
 		},
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(store),
-		PeerMetricsHandler: dashboard.PeerMetricsHandler(rings),
+		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store),
+		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:   dashMux,
 		FaviconHandler:     webdash.FaviconHandler(),
 	})
-	// Guard: only mount peer-fetch handler when running in cluster mode.
-	// (admin.Config.PeerFetchHandler is nil-safe; the server skips it)
-	_ = peerFetcher // suppress unused warning when cluster is disabled
+	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	g.Go("admin", srv.Serve)
 }
 
 // buildDashboard wires and returns the dashboard ServeMux.
-// clusterNode may be nil in single-node mode.
-func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string, clusterNode *cluster.Cluster, watcher *config.Watcher, cfProp *cfPropagator) *http.ServeMux {
+func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) *http.ServeMux {
 	dashMux := http.NewServeMux()
-	snapshotPath := ""
-	if e.cfg.Storage.WarmDir != "" {
-		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"
-	}
+
 	var ringFn func() []api.RingSegment
-	if clusterNode != nil {
-		ringFn = clusterNode.RingSegments
+	if rs.clusterNode != nil {
+		ringFn = rs.clusterNode.RingSegments
 	}
-	// Build cluster meta for the cluster page ring stats box.
+
 	clusterMeta := templates.ClusterMeta{
 		ProtocolVersion:  cluster.ClusterProtocolVersion,
 		GossipInterval:   "5s",
 		JoinRetryBudget:  "60s · 2s step",
 		PeerFetchTimeout: "500ms",
 	}
-	if clusterNode != nil {
-		clusterMeta.VirtualNodes = clusterNode.Config().VirtualNodes
-		clusterMeta.LoadFactor = clusterNode.Config().LoadFactor
-		clusterMeta.Mode = clusterNode.Mode()
+	if rs.clusterNode != nil {
+		clusterMeta.VirtualNodes = rs.clusterNode.Config().VirtualNodes
+		clusterMeta.LoadFactor = rs.clusterNode.Config().LoadFactor
+		clusterMeta.Mode = rs.clusterNode.Mode()
 	} else {
 		clusterMeta.Mode = "single-node"
 	}
@@ -358,50 +390,53 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 	}
 
 	_ = dashboard.New(dashboard.Config{
-		Rings:        rings,
-		PeersFn:      peersFn,
+		Rings:        rs.rings,
+		PeersFn:      rs.peersFn,
 		SelfAddr:     addr,
-		Token:        token,
+		Token:        rs.token,
 		Logger:       e.logger,
-		SnapshotPath: snapshotPath,
-		StoreFn:      store.Stats,
+		SnapshotPath: rs.snapshotPath,
+		StoreFn:      rs.store.Stats,
 		HotMaxBytes:  e.cfg.Storage.HotMaxBytes.Bytes(),
 		WarmMaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(),
 		Config:       e.cfg,
 		ConfigPath:   e.configPath,
 		StartTime:    e.startTime,
-		ReloadFn:     func(_ *config.Config) error { return watcher.Reload() },
-		RingFn:       ringFn,
-		ClusterMeta:  clusterMeta,
-		PurgeFn: func(dCtx context.Context, urlStr string) error {
-			key := cache.BuildKeyFromURL(urlStr)
-			if err := store.Delete(dCtx, key); err != nil {
-				return err
+		ReloadFn: func(_ *config.Config) error {
+			if e.configPath == "" {
+				return nil
 			}
-			if broadcaster != nil {
-				broadcaster.BroadcastPurge(ctx, key, "")
-			}
-			cfProp.PropagateForPurge(dCtx, urlStr)
-			return nil
-		},
-		BanFn: func(dCtx context.Context, hostRegex, pathRegex string) (int, error) {
-			expr := api.BanExpr{HostRegex: hostRegex, PathRegex: pathRegex}
-			n, err := store.Ban(dCtx, expr)
+			cfg, err := config.Load(e.configPath)
 			if err != nil {
-				return n, err
-			}
-			if broadcaster != nil {
-				broadcaster.BroadcastBan(ctx, expr)
-			}
-			cfProp.PropagateForBan(dCtx, expr)
-			return n, nil
-		},
-		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			if err := store.Delete(dCtx, cache.BuildKeyFromURL(urlStr)); err != nil {
 				return err
 			}
-			cfProp.PropagateForRefresh(dCtx, urlStr)
+			e.cfg = cfg
+			e.logger.Info("config reloaded", "path", e.configPath)
 			return nil
+		},
+		RingFn:      ringFn,
+		ClusterMeta: clusterMeta,
+		PurgeFn:     ops.PurgeFn,
+		BanFn:       ops.BanFn,
+		RefreshFn:   ops.RefreshFn,
+		PeerFetchStatsFn: func() templates.PeerFetchStats {
+			if rs.peerFetcher == nil {
+				return templates.PeerFetchStats{}
+			}
+			hits, misses, hopLimitHits, _, _ := rs.peerFetcher.PeerFetchStats()
+			return templates.PeerFetchStats{
+				Hits6h:       hits,
+				Misses6h:     misses,
+				HopLimitHits: hopLimitHits,
+			}
+		},
+		CFStatusFn: func() templates.CFStatusCard {
+			s := rs.cfProp.Status()
+			return templates.CFStatusCard{
+				Enabled: s.Enabled,
+				ZoneID:  s.ZoneID,
+				Async:   s.Async,
+			}
 		},
 	}, dashMux)
 	return dashMux
@@ -409,7 +444,7 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 	if e.cfg.Listen.HTTP != "" {
-		srv := listener.NewHTTP(listener.Config{
+		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:    e.cfg.Listen.HTTP,
 			Handler: handler,
 			Logger:  e.logger,
@@ -423,7 +458,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 			e.logger.Error("TLS config failed", "error", err)
 			return
 		}
-		srv := listener.NewHTTPS(listener.Config{
+		srv := server.NewHTTPS(server.ListenerConfig{
 			Addr:      e.cfg.Listen.HTTPS,
 			Handler:   handler,
 			Logger:    e.logger,
@@ -433,10 +468,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 	}
 }
 
-func (e *engine) startHealthChecks(
-	g *supervised.Group,
-	pools map[string]*origin.Pool,
-) {
+func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin.Pool) {
 	for _, pc := range e.cfg.UpstreamPools {
 		if pc.Health.Active.Path == "" {
 			continue
@@ -458,10 +490,36 @@ func (e *engine) startHealthChecks(
 	}
 }
 
+func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
+	if rs.clusterNode != nil && len(e.cfg.Cluster.Join) > 0 {
+		g.Go("cluster-join", func(joinCtx context.Context) error {
+			return e.joinWithRetry(joinCtx, rs.clusterNode)
+		})
+	}
+}
+
+func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
+	rs.seq.AddStep("mark-not-ready", 2*time.Second, func(_ context.Context) error {
+		time.Sleep(time.Second)
+		return nil
+	})
+	rs.seq.AddStep("flush-store", 10*time.Second, func(ctx context.Context) error {
+		return rs.store.Close(ctx)
+	})
+	if rs.clusterNode != nil {
+		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
+			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
+		})
+	}
+	g.Go("shutdown-sequencer", func(sqCtx context.Context) error {
+		<-sqCtx.Done()
+		rs.seq.Execute(context.WithoutCancel(sqCtx))
+		return nil
+	})
+}
+
 // joinWithRetry attempts to join the cluster, retrying every 2 seconds
-// for up to 60 seconds. Success is defined as having more than 1
-// member (i.e. at least one peer besides self). This avoids false
-// positives from self-join and partial memberlist.Join results.
+// for up to 60 seconds. Success requires Members() > 1.
 func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster) error {
 	seeds := e.cfg.Cluster.Join
 	ticker := time.NewTicker(2 * time.Second)

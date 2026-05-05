@@ -27,6 +27,7 @@ func getAuth(t *testing.T, s *Server, path string) (int, []byte) {
 // TestPurge_CallsOnPurged verifies that a successful purge calls the
 // OnPurged callback with the raw URL from the request body.
 func TestPurge_CallsOnPurged(t *testing.T) {
+	t.Parallel()
 	var gotURL string
 	s := New(Config{
 		Token:   "test",
@@ -53,6 +54,7 @@ func TestPurge_CallsOnPurged(t *testing.T) {
 // TestRefresh_CallsOnRefreshed verifies that a successful refresh calls the
 // OnRefreshed callback.
 func TestRefresh_CallsOnRefreshed(t *testing.T) {
+	t.Parallel()
 	var gotURL string
 	s := New(Config{
 		Token:     "test",
@@ -79,6 +81,7 @@ func TestRefresh_CallsOnRefreshed(t *testing.T) {
 // TestBan_CallsOnBanned verifies that a successful ban calls the OnBanned
 // callback with the decoded BanExpr.
 func TestBan_CallsOnBanned(t *testing.T) {
+	t.Parallel()
 	var gotExpr api.BanExpr
 	s := New(Config{
 		Token:  "test",
@@ -108,6 +111,7 @@ func TestBan_CallsOnBanned(t *testing.T) {
 // TestCloudflareStatus_Endpoint verifies that GET /v1/cloudflare/status returns
 // the status from CFStatusFn.
 func TestCloudflareStatus_Endpoint(t *testing.T) {
+	t.Parallel()
 	s := New(Config{
 		Token:  "test",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -143,6 +147,7 @@ func TestCloudflareStatus_Endpoint(t *testing.T) {
 // TestCloudflareStatus_Disabled verifies that the endpoint returns 404 when
 // CF is not configured (CFStatusFn is nil).
 func TestCloudflareStatus_Disabled(t *testing.T) {
+	t.Parallel()
 	s := New(Config{
 		Token:  "test",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -157,6 +162,7 @@ func TestCloudflareStatus_Disabled(t *testing.T) {
 // TestPurge_OnPurgedNotCalledOnError verifies that OnPurged is NOT called
 // when the purge fails.
 func TestPurge_OnPurgedNotCalledOnError(t *testing.T) {
+	t.Parallel()
 	var called atomic.Bool
 	s := New(Config{
 		Token:   "test",

@@ -23,6 +23,7 @@ func freshObj(ttl time.Duration) *api.Object {
 }
 
 func TestEvaluate_Hit(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Minute)
 	d := Evaluate(r, obj, time.Now())
@@ -32,6 +33,7 @@ func TestEvaluate_Hit(t *testing.T) {
 }
 
 func TestEvaluate_Miss(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	d := Evaluate(r, nil, time.Now())
 	if d.Decision != Miss {
@@ -40,6 +42,7 @@ func TestEvaluate_Miss(t *testing.T) {
 }
 
 func TestEvaluate_BypassOnPost(t *testing.T) {
+	t.Parallel()
 	// POST goes through isInvalidating path in ServeHTTP, not Evaluate.
 	// Evaluate returns Bypass for all non-GET/HEAD methods.
 	r := httptest.NewRequest("POST", "/", nil)
@@ -50,6 +53,7 @@ func TestEvaluate_BypassOnPost(t *testing.T) {
 }
 
 func TestEvaluate_BypassOnRequestNoStore(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Cache-Control", "no-store")
 	d := Evaluate(r, freshObj(time.Minute), time.Now())
@@ -59,6 +63,7 @@ func TestEvaluate_BypassOnRequestNoStore(t *testing.T) {
 }
 
 func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Minute)
 	obj.Header.Set("Cache-Control", "no-cache")
@@ -70,6 +75,7 @@ func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
 }
 
 func TestEvaluate_RevalidateOnRequestNoCache(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Cache-Control", "no-cache")
 	obj := freshObj(time.Minute)
@@ -80,6 +86,7 @@ func TestEvaluate_RevalidateOnRequestNoCache(t *testing.T) {
 }
 
 func TestEvaluate_StaleWithSWR(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // 1s past TTL
@@ -91,6 +98,7 @@ func TestEvaluate_StaleWithSWR(t *testing.T) {
 }
 
 func TestEvaluate_StaleWithSIE(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second)
@@ -106,6 +114,7 @@ func TestEvaluate_StaleWithSIE(t *testing.T) {
 }
 
 func TestEvaluate_StaleWithMaxStale(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Cache-Control", "max-stale=60")
 	obj := freshObj(time.Second)
@@ -117,6 +126,7 @@ func TestEvaluate_StaleWithMaxStale(t *testing.T) {
 }
 
 func TestEvaluate_MustRevalidate(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // stale
@@ -129,6 +139,7 @@ func TestEvaluate_MustRevalidate(t *testing.T) {
 }
 
 func TestEvaluate_RequestMaxAge(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Cache-Control", "max-age=0")
 	obj := freshObj(time.Minute)
@@ -140,6 +151,7 @@ func TestEvaluate_RequestMaxAge(t *testing.T) {
 }
 
 func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Cache-Control", "only-if-cached")
 	d := Evaluate(r, nil, time.Now())
@@ -149,6 +161,7 @@ func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
 }
 
 func TestConditionalHeaders(t *testing.T) {
+	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := &api.Object{
 		ETag:         `W/"xyz"`,

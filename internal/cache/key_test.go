@@ -7,6 +7,7 @@ import (
 )
 
 func TestBuildKey_Deterministic(t *testing.T) {
+	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/foo?b=2&a=1", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/foo?a=1&b=2", nil)
 	if BuildKey(r1) != BuildKey(r2) {
@@ -15,6 +16,7 @@ func TestBuildKey_Deterministic(t *testing.T) {
 }
 
 func TestBuildKey_HeadSharesGet(t *testing.T) {
+	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/x", nil)
 	r2 := httptest.NewRequest("HEAD", "http://example.com/x", nil)
 	if BuildKey(r1) != BuildKey(r2) {
@@ -23,6 +25,7 @@ func TestBuildKey_HeadSharesGet(t *testing.T) {
 }
 
 func TestBuildKey_DifferentPaths(t *testing.T) {
+	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/a", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/b", nil)
 	if BuildKey(r1) == BuildKey(r2) {
@@ -31,6 +34,7 @@ func TestBuildKey_DifferentPaths(t *testing.T) {
 }
 
 func TestBuildKey_SchemeMatters(t *testing.T) {
+	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	r2 := httptest.NewRequest("GET", "https://example.com/", nil)
 	if BuildKey(r1) == BuildKey(r2) {
@@ -39,6 +43,7 @@ func TestBuildKey_SchemeMatters(t *testing.T) {
 }
 
 func TestBuildKey_DefaultPortStripped(t *testing.T) {
+	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com:80/", nil)
 	if BuildKey(r1) != BuildKey(r2) {
@@ -47,6 +52,7 @@ func TestBuildKey_DefaultPortStripped(t *testing.T) {
 }
 
 func TestBuildKey_DuplicateSlashes(t *testing.T) {
+	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/a/b", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/a//b", nil)
 	if BuildKey(r1) != BuildKey(r2) {
@@ -55,6 +61,7 @@ func TestBuildKey_DuplicateSlashes(t *testing.T) {
 }
 
 func TestBuildKey_HostNormalization(t *testing.T) {
+	t.Parallel()
 	// Same host, different casing → same key.
 	r1 := httptest.NewRequest("GET", "http://Example.COM/a", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/a", nil)
@@ -70,6 +77,7 @@ func TestBuildKey_HostNormalization(t *testing.T) {
 }
 
 func TestParseCacheControl(t *testing.T) {
+	t.Parallel()
 	d := ParseCacheControl("max-age=300, public, stale-while-revalidate=60")
 	if !d.MaxAgeSet || d.MaxAge.Seconds() != 300 {
 		t.Errorf("max-age = %v", d.MaxAge)
@@ -83,6 +91,7 @@ func TestParseCacheControl(t *testing.T) {
 }
 
 func TestParseCacheControl_NoStore(t *testing.T) {
+	t.Parallel()
 	d := ParseCacheControl("no-store")
 	if !d.NoStore {
 		t.Error("expected no-store")
@@ -90,6 +99,7 @@ func TestParseCacheControl_NoStore(t *testing.T) {
 }
 
 func TestParseCacheControl_MaxStaleNoValue(t *testing.T) {
+	t.Parallel()
 	d := ParseCacheControl("max-stale")
 	if !d.MaxStaleSet {
 		t.Error("expected max-stale set")
@@ -100,6 +110,7 @@ func TestParseCacheControl_MaxStaleNoValue(t *testing.T) {
 }
 
 func TestIsCacheable_BasicPositive(t *testing.T) {
+	t.Parallel()
 	resp := http.Header{"Cache-Control": {"max-age=60"}}
 	if !IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("200 with max-age should be cacheable")
@@ -107,6 +118,7 @@ func TestIsCacheable_BasicPositive(t *testing.T) {
 }
 
 func TestIsCacheable_NoStore(t *testing.T) {
+	t.Parallel()
 	resp := http.Header{"Cache-Control": {"no-store"}}
 	if IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("no-store should not be cacheable")
@@ -114,6 +126,7 @@ func TestIsCacheable_NoStore(t *testing.T) {
 }
 
 func TestIsCacheable_Private(t *testing.T) {
+	t.Parallel()
 	resp := http.Header{"Cache-Control": {"private, max-age=60"}}
 	if IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("private should not be cacheable by shared cache")
@@ -121,6 +134,7 @@ func TestIsCacheable_Private(t *testing.T) {
 }
 
 func TestIsCacheable_SetCookie(t *testing.T) {
+	t.Parallel()
 	// Set-Cookie WITHOUT explicit freshness blocks caching.
 	resp := http.Header{
 		"Set-Cookie": {"sid=abc"},
@@ -139,6 +153,7 @@ func TestIsCacheable_SetCookie(t *testing.T) {
 }
 
 func TestIsCacheable_Authorization(t *testing.T) {
+	t.Parallel()
 	req := http.Header{"Authorization": {"Bearer tok"}}
 	resp := http.Header{"Cache-Control": {"max-age=60"}}
 	if IsCacheable(200, req, resp) {
@@ -152,6 +167,7 @@ func TestIsCacheable_Authorization(t *testing.T) {
 }
 
 func TestIsCacheable_HeuristicStatus(t *testing.T) {
+	t.Parallel()
 	// 301 with Last-Modified is heuristically cacheable.
 	resp := http.Header{"Last-Modified": {"Mon, 01 Jan 2024 00:00:00 GMT"}}
 	if !IsCacheable(301, http.Header{}, resp) {

@@ -94,6 +94,10 @@ const (
 // Cluster controls peer membership and fan-out. Phase 4+.
 type Cluster struct {
 	Enabled bool `yaml:"enabled"`
+	// NodeName overrides the hostname used for gossip membership. When
+	// empty, defaults to os.Hostname(). Required when running multiple
+	// nodes on the same host (e.g. integration tests).
+	NodeName string `yaml:"node_name"`
 	// Mode determines the cluster consistency model. Accepted values:
 	//   "strong"    — consistent hash ring, peer fetch on miss (default)
 	//   "eventual"  — local cache, gossip invalidation, no peer fetch

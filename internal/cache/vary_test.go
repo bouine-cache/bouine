@@ -10,6 +10,7 @@ import (
 )
 
 func TestVariantKey_NoVary(t *testing.T) {
+	t.Parallel()
 	primary := api.Key(100)
 	got := VariantKey(primary, "", nil)
 	if got != primary {
@@ -18,6 +19,7 @@ func TestVariantKey_NoVary(t *testing.T) {
 }
 
 func TestVariantKey_DifferentHeaders(t *testing.T) {
+	t.Parallel()
 	primary := api.Key(100)
 	h1 := http.Header{"Accept-Encoding": {"gzip"}}
 	h2 := http.Header{"Accept-Encoding": {"br"}}
@@ -32,6 +34,7 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 }
 
 func TestVariantKey_SameHeaders(t *testing.T) {
+	t.Parallel()
 	primary := api.Key(100)
 	h := http.Header{"Accept-Encoding": {"gzip"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h)
@@ -42,6 +45,7 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 }
 
 func TestVariantKey_VaryStar(t *testing.T) {
+	t.Parallel()
 	primary := api.Key(100)
 	h1 := http.Header{"Accept": {"text/html"}}
 	h2 := http.Header{"Accept": {"application/json"}}
@@ -53,6 +57,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 }
 
 func TestServeRange_SingleRange(t *testing.T) {
+	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
 		Header:     http.Header{"Content-Type": {"text/plain"}},
@@ -81,6 +86,7 @@ func TestServeRange_SingleRange(t *testing.T) {
 }
 
 func TestServeRange_SuffixRange(t *testing.T) {
+	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
 		Header:     http.Header{},
@@ -102,6 +108,7 @@ func TestServeRange_SuffixRange(t *testing.T) {
 }
 
 func TestServeRange_OpenEnded(t *testing.T) {
+	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
 		Header:     http.Header{},
@@ -123,6 +130,7 @@ func TestServeRange_OpenEnded(t *testing.T) {
 }
 
 func TestServeRange_Unsatisfiable(t *testing.T) {
+	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
 		Header:     http.Header{},
@@ -144,6 +152,7 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 }
 
 func TestServeRange_NoRangeHeader(t *testing.T) {
+	t.Parallel()
 	obj := &api.Object{Body: []byte("x"), BodySize: 1}
 	r := httptest.NewRequest("GET", "/", nil)
 	rr := httptest.NewRecorder()
@@ -155,6 +164,7 @@ func TestServeRange_NoRangeHeader(t *testing.T) {
 }
 
 func TestServeRange_MultiRange(t *testing.T) {
+	t.Parallel()
 	obj := &api.Object{Body: []byte("abcde"), BodySize: 5}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Range", "bytes=0-1, 3-4")
@@ -174,6 +184,7 @@ func TestServeRange_MultiRange(t *testing.T) {
 }
 
 func TestHandler_VaryAwareStorage(t *testing.T) {
+	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.Header().Set("Vary", "Accept-Encoding")
@@ -216,6 +227,7 @@ func TestHandler_VaryAwareStorage(t *testing.T) {
 }
 
 func TestHandler_RangeOnCachedObject(t *testing.T) {
+	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=60")
 		w.Header().Set("ETag", `"full"`)

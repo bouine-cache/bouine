@@ -6,12 +6,30 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/thylong/bouine/internal/testutil/tlsutil"
 )
+
+func waitForAddr(t *testing.T, l *Listener, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		addr := l.Addr()
+		if addr != "" && addr != l.Addr() || addr != "" {
+			conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("listener not ready after %v", timeout)
+}
 
 func echo200() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +39,7 @@ func echo200() http.Handler {
 }
 
 func TestHTTP_ListenAndServe(t *testing.T) {
+	t.Parallel()
 	srv := NewHTTP(ListenerConfig{
 		Addr:    "127.0.0.1:0",
 		Handler: echo200(),
@@ -31,15 +50,9 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
 
-	time.Sleep(200 * time.Millisecond)
+	waitForAddr(t, srv, 3*time.Second)
 
 	resp, err := http.Get("http://" + srv.Addr())
-	if err != nil {
-		// Addr may still be :0 before serve resolves; get from listener.
-		// Fall back to a short retry.
-		time.Sleep(300 * time.Millisecond)
-		resp, err = http.Get("http://" + srv.Addr())
-	}
 	if err != nil {
 		cancel()
 		t.Fatalf("GET: %v", err)
@@ -62,6 +75,7 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 }
 
 func TestHTTPS_ListenAndServe_H2(t *testing.T) {
+	t.Parallel()
 	tlsCfg := tlsutil.ServerConfig(t)
 
 	srv := NewHTTPS(ListenerConfig{
@@ -75,7 +89,7 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
 
-	time.Sleep(200 * time.Millisecond)
+	waitForAddr(t, srv, 3*time.Second)
 
 	clientTLS := &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // test
@@ -89,10 +103,6 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 
 	url := fmt.Sprintf("https://%s/", srv.Addr())
 	resp, err := client.Get(url)
-	if err != nil {
-		time.Sleep(300 * time.Millisecond)
-		resp, err = client.Get(url)
-	}
 	if err != nil {
 		cancel()
 		t.Fatalf("GET: %v", err)

@@ -9,6 +9,7 @@ import (
 )
 
 func TestHedgedTransport_FastResponse(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -36,11 +37,12 @@ func TestHedgedTransport_FastResponse(t *testing.T) {
 }
 
 func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := calls.Add(1)
 		if n == 1 {
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 		w.WriteHeader(200)
 	}))
@@ -60,17 +62,18 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	// Hedge should have fired.
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if calls.Load() < 2 {
 		t.Fatalf("calls = %d, want >= 2", calls.Load())
 	}
 }
 
 func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()

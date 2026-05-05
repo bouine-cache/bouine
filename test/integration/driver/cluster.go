@@ -1,240 +1,272 @@
 //go:build integration
 
+// Package driver boots bouine nodes in-process for integration tests.
+// No Docker required — each node is a goroutine running engine.run().
 package driver
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/thylong/bouine/cmd/bouine/cmd"
 )
 
 const (
-	// IntegrationToken is the admin bearer token used by all cluster
-	// integration tests. It is baked into the per-node config files.
 	IntegrationToken = "inttest-token"
+	CrossNodeHost    = "testhost:8080"
 
-	// CrossNodeHost is the Host header value used for cache-key-consistent
-	// requests across nodes. Must match the port in purge URLs for gossip
-	// invalidation to target the same keys on all nodes.
-	CrossNodeHost = "testhost:8080"
-
-	// External ports reachable from the test host.
-	// Layout per node: HTTP=1808N, Admin=1900N  (N = 1..3)
-	// Origin: 18080
-	OriginExtPort  = "18080"
-	Node1HTTPPort  = "18081"
-	Node2HTTPPort  = "18082"
-	Node3HTTPPort  = "18083"
-	Node1AdminPort = "19001"
-	Node2AdminPort = "19002"
-	Node3AdminPort = "19003"
-
-	// GossipConvergence is the max time to wait for gossip to propagate
-	// purge/ban events across the cluster. PushPullInterval is set to 5s
-	// (down from the memberlist default of 30s), so two push/pull rounds
-	// complete in < 15 s, leaving margin for processing.
-	GossipConvergence = 35 * time.Second
-	// ReplicationDeadline is the max time to wait for a full-mode
-	// replication event to be stored on a peer node.
-	ReplicationDeadline = 15 * time.Second
+	// GossipConvergence is the max time for gossip to propagate
+	// invalidations across the in-process cluster.
+	GossipConvergence   = 15 * time.Second
+	ReplicationDeadline = 10 * time.Second
 )
 
-// ClusterNode describes one bouine node reachable from the test host.
-//
-// Stable.
+// ClusterNode describes one bouine node.
 type ClusterNode struct {
-	// Name is the container service name ("bouine-1", "bouine-2", "bouine-3").
-	Name string
-	// HTTPAddr is the data-plane base URL ("http://127.0.0.1:18081").
-	HTTPAddr string
-	// AdminAddr is the admin API base URL ("http://127.0.0.1:19001").
+	Name      string
+	HTTPAddr  string
 	AdminAddr string
-	// Token is the admin bearer token.
-	Token string
+	Token     string
 }
 
-// ClusterStack holds a live 3-node bouine cluster plus origin.
-//
-// Stable.
+// ClusterStack holds a live in-process 3-node cluster + origin.
 type ClusterStack struct {
-	// Mode is the cluster consistency mode ("strong", "eventual", "full").
-	Mode string
-	// Nodes are the three bouine nodes; Nodes[0] = bouine-1, etc.
-	Nodes [3]ClusterNode
-	// OriginURL is the direct origin base URL ("http://127.0.0.1:18080").
+	Mode      string
+	Nodes     [3]ClusterNode
 	OriginURL string
 
-	t          *testing.T
-	configDir  string // tmpdir holding per-node config YAML files
-	projectDir string // path to test/integration/ (compose file location)
-	project    string // docker compose project name
+	origin  *httptest.Server
+	cancels [3]context.CancelFunc
+	errChs  [3]chan error
 }
 
 // ClusterOptions configures BootCluster.
 type ClusterOptions struct {
-	// Mode is the cluster consistency mode. One of "strong", "eventual", "full".
-	// Defaults to "strong" if empty.
-	Mode string
-	// NoAutoCleanup disables automatic teardown registration on t. The caller
-	// is responsible for calling stack.Down(). Used by TestMain-level setup.
+	Mode          string
 	NoAutoCleanup bool
 }
 
-// BootCluster starts a 3-node bouine cluster via Docker Compose and
-// returns a live ClusterStack. The caller must not call t.Cleanup manually;
-// BootCluster registers teardown automatically.
-//
-// If Docker Compose is not available the test is skipped.
+// freePort returns an available TCP port on localhost.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("freePort: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port
+}
+
+// BootCluster starts a 3-node in-process bouine cluster with an httptest origin.
 func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	t.Helper()
 	if opts.Mode == "" {
 		opts.Mode = "strong"
 	}
 
-	// Skip if docker compose is not available on this machine.
-	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
-		t.Skip("docker compose not available — skipping cluster integration test")
+	origin := startOrigin()
+
+	// Allocate ports for all nodes upfront so gossip seeds are known.
+	type nodePorts struct {
+		http, admin, gossip int
 	}
-
-	// Resolve the test/integration directory (docker-compose file lives there).
-	_, thisFile, _, _ := runtime.Caller(0)
-	integrationDir := filepath.Join(filepath.Dir(thisFile), "..")
-
-	// Write per-node config files to a temp directory.
-	configDir, err := os.MkdirTemp("", "bouine-inttest-*")
-	if err != nil {
-		t.Fatalf("create config tmpdir: %v", err)
-	}
-
-	for i := 1; i <= 3; i++ {
-		name := fmt.Sprintf("bouine-%d", i)
-		cfg := nodeConfig(opts.Mode)
-		path := filepath.Join(configDir, name+".yaml")
-		if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
-			t.Fatalf("write node config %s: %v", name, err)
+	ports := [3]nodePorts{}
+	for i := range ports {
+		ports[i] = nodePorts{
+			http:   freePort(t),
+			admin:  freePort(t),
+			gossip: freePort(t),
 		}
 	}
 
-	project := func() string {
-		b := make([]byte, 4)
-		_, _ = rand.Read(b)
-		return fmt.Sprintf("bouine-inttest-%s-%s", opts.Mode, hex.EncodeToString(b))
-	}()
+	// Build gossip seed list.
+	var seeds []string
+	for _, p := range ports {
+		seeds = append(seeds, fmt.Sprintf("127.0.0.1:%d", p.gossip))
+	}
+	seedList := `["` + strings.Join(seeds, `","`) + `"]`
 
 	s := &ClusterStack{
-		Mode: opts.Mode,
-		Nodes: [3]ClusterNode{
-			{Name: "bouine-1", HTTPAddr: "http://127.0.0.1:" + Node1HTTPPort, AdminAddr: "http://127.0.0.1:" + Node1AdminPort, Token: IntegrationToken},
-			{Name: "bouine-2", HTTPAddr: "http://127.0.0.1:" + Node2HTTPPort, AdminAddr: "http://127.0.0.1:" + Node2AdminPort, Token: IntegrationToken},
-			{Name: "bouine-3", HTTPAddr: "http://127.0.0.1:" + Node3HTTPPort, AdminAddr: "http://127.0.0.1:" + Node3AdminPort, Token: IntegrationToken},
-		},
-		OriginURL:  "http://127.0.0.1:" + OriginExtPort,
-		t:          t,
-		configDir:  configDir,
-		projectDir: integrationDir,
-		project:    project,
+		Mode:      opts.Mode,
+		OriginURL: origin.URL,
+		origin:    origin,
 	}
 
-	// Tear down any leftover stack from a previous interrupted run, then start fresh.
-	// Kill any leftover containers from previous test runs by scanning for
-	// any container that has "bouine-inttest" or "bouine-test" in its name.
-	// Use raw docker commands since we don't know the compose project names.
-	killCmd := exec.Command("sh", "-c",
-		"docker ps -q --filter name=bouine-inttest --filter name=bouine-test 2>/dev/null | xargs -r docker rm -f 2>/dev/null")
-	_ = killCmd.Run()
+	// Write configs and start each node.
+	configDir := t.TempDir()
+	for i := range 3 {
+		p := ports[i]
+		name := fmt.Sprintf("bouine-%d", i+1)
 
-	if !opts.NoAutoCleanup {
-		t.Cleanup(func() {
-			s.Dump(t)
-			s.composeDown(true)
-			_ = os.RemoveAll(configDir)
-		})
-	}
-
-	t.Logf("cluster: starting %s mode stack (project=%s)", opts.Mode, project)
-	upCmd := s.compose("up", "--build", "--detach")
-	if out, err := upCmd.CombinedOutput(); err != nil {
-		t.Logf("docker compose up output:\n%s", string(out))
-		// Try to get logs before fataling.
-		s.Dump(t)
-		t.Fatalf("cluster: docker compose up failed: %v", err)
-	}
-
-	// Poll health endpoints directly (belt-and-suspenders on top of compose --wait).
-	s.waitHealthy(t, 90*time.Second)
-	// In clustered mode, wait additionally for gossip membership to converge.
-	s.waitMembership(t, 30*time.Second, 3)
-
-	t.Logf("cluster: %s stack ready — nodes: %s %s %s",
-		opts.Mode,
-		s.Nodes[0].HTTPAddr, s.Nodes[1].HTTPAddr, s.Nodes[2].HTTPAddr)
-	return s
-}
-
-// nodeConfig renders the bouine YAML config for a cluster node.
-// All three nodes share the same config; POD_IP is injected via Docker
-// environment variable so each container advertises the right address.
-func nodeConfig(mode string) string {
-	return fmt.Sprintf(`listen:
-  http: ":8080"
-  admin: ":9000"
-  cluster: ":7000"
+		cfg := fmt.Sprintf(`listen:
+  http: "127.0.0.1:%d"
+  admin: "127.0.0.1:%d"
+  cluster: "127.0.0.1:%d"
 admin:
   token: %s
 storage:
   hot_max_bytes: 128MiB
 cluster:
   enabled: true
+  node_name: %s
   mode: %s
-  join:
-    - "bouine-1:7000"
-    - "bouine-2:7000"
-    - "bouine-3:7000"
+  join: %s
   hop_limit: 2
 upstream_pools:
   - name: origin
-    targets: ["origin:8080"]
+    targets: [%q]
 routes:
   - match: {}
     pool: origin
     cache:
       ttl_default: 60s
-`, IntegrationToken, mode)
+`, p.http, p.admin, p.gossip, IntegrationToken, name, opts.Mode, seedList,
+			origin.Listener.Addr().String())
+
+		cfgPath := filepath.Join(configDir, name+".yaml")
+		if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+			t.Fatalf("write config %s: %v", name, err)
+		}
+
+		s.Nodes[i] = ClusterNode{
+			Name:      name,
+			HTTPAddr:  fmt.Sprintf("http://127.0.0.1:%d", p.http),
+			AdminAddr: fmt.Sprintf("http://127.0.0.1:%d", p.admin),
+			Token:     IntegrationToken,
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cancels[i] = cancel
+		s.errChs[i] = make(chan error, 1)
+
+		root := cmd.Root()
+		root.SetArgs([]string{"serve", "--config", cfgPath, "--log-level", "warn"})
+		go func(ch chan error) {
+			ch <- root.ExecuteContext(ctx)
+		}(s.errChs[i])
+	}
+
+	if !opts.NoAutoCleanup {
+		t.Cleanup(func() { s.Down() })
+	}
+
+	// Wait for all nodes to be healthy.
+	s.waitHealthy(t, 30*time.Second)
+	s.waitMembership(t, 30*time.Second, 3)
+
+	t.Logf("cluster: %s stack ready — %s %s %s (origin: %s)",
+		opts.Mode, s.Nodes[0].HTTPAddr, s.Nodes[1].HTTPAddr, s.Nodes[2].HTTPAddr, origin.URL)
+	return s
 }
 
-// ---- ClusterStack helpers ------------------------------------------------
+func (s *ClusterStack) waitHealthy(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for _, node := range s.Nodes {
+		ep := node.AdminAddr + "/healthz"
+		for time.Now().Before(deadline) {
+			resp, err := http.Get(ep) //nolint:noctx
+			if err == nil && resp.StatusCode == 200 {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				break
+			}
+			if resp != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node %s did not become healthy within %s", node.Name, timeout)
+		}
+	}
+}
 
-// Get performs a GET request against the data-plane of node n with
-// an optional Host header override via query parameter (when requesting
-// from multiple nodes with a consistent key for cross-node cache tests).
-// It returns the response for inspection; the body is fully read and closed.
+func (s *ClusterStack) waitMembership(t *testing.T, timeout time.Duration, expected int) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ok := true
+		for i := range s.Nodes {
+			peers := s.Peers(t, i)
+			if len(peers) < expected {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("cluster did not reach %d members within %s", expected, timeout)
+}
+
+// Down stops all nodes and the origin.
+func (s *ClusterStack) Down() {
+	for i, cancel := range s.cancels {
+		if cancel != nil {
+			cancel()
+			select {
+			case <-s.errChs[i]:
+			case <-time.After(5 * time.Second):
+			}
+			s.cancels[i] = nil
+		}
+	}
+	if s.origin != nil {
+		s.origin.Close()
+		s.origin = nil
+	}
+}
+
+// ConfigDir returns an empty string (no temp config dir to expose).
+func (s *ClusterStack) ConfigDir() string { return "" }
+
+// Dump is a no-op for in-process nodes (logs go to stderr).
+func (s *ClusterStack) Dump(_ *testing.T) {}
+
+// KillNode cancels the context of node n, stopping it.
+func (s *ClusterStack) KillNode(t *testing.T, n int) {
+	t.Helper()
+	if s.cancels[n] != nil {
+		s.cancels[n]()
+		select {
+		case <-s.errChs[n]:
+		case <-time.After(5 * time.Second):
+		}
+		s.cancels[n] = nil
+		t.Logf("cluster: killed %s", s.Nodes[n].Name)
+	}
+}
+
+// Get performs a GET request against node n.
 func (s *ClusterStack) Get(t *testing.T, n int, path string) *http.Response {
 	t.Helper()
 	return s.GetWithHost(t, n, path, "")
 }
 
-// GetWithHost performs a GET with a specific Host header value. Use
-// this when you need identical cache keys across nodes (e.g. purge
-// propagation tests). Pass host="" to use the default (node's addr).
+// GetWithHost performs a GET with a specific Host header.
 func (s *ClusterStack) GetWithHost(t *testing.T, n int, path string, host string) *http.Response {
 	t.Helper()
 	url := s.Nodes[n].HTTPAddr + path
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
-		t.Fatalf("GET %s: new request: %v", url, err)
+		t.Fatalf("GET %s: %v", url, err)
 	}
 	if host != "" {
 		req.Host = host
@@ -248,7 +280,7 @@ func (s *ClusterStack) GetWithHost(t *testing.T, n int, path string, host string
 	return resp
 }
 
-// GetBody performs a GET request and returns both the response and body string.
+// GetBody performs a GET and returns both the response and body.
 func (s *ClusterStack) GetBody(t *testing.T, n int, path string) (*http.Response, string) {
 	t.Helper()
 	url := s.Nodes[n].HTTPAddr + path
@@ -257,26 +289,18 @@ func (s *ClusterStack) GetBody(t *testing.T, n int, path string) (*http.Response
 		t.Fatalf("GET %s: %v", url, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body %s: %v", url, err)
-	}
+	body, _ := io.ReadAll(resp.Body)
 	return resp, string(body)
 }
 
-// XCache returns the X-Cache header value from the last request to node n.
-func XCache(resp *http.Response) string {
-	return resp.Header.Get("X-Cache")
-}
-
-// Purge sends POST /v1/purge to node n for the given data-plane URL.
+// Purge sends POST /v1/purge to node n.
 func (s *ClusterStack) Purge(t *testing.T, n int, targetURL string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"url": targetURL})
 	s.adminPost(t, n, "/v1/purge", body)
 }
 
-// Ban sends POST /v1/ban to node n with the given host/path regex predicates.
+// Ban sends POST /v1/ban to node n.
 func (s *ClusterStack) Ban(t *testing.T, n int, hostRegex, pathRegex string) {
 	t.Helper()
 	payload := map[string]string{}
@@ -293,44 +317,25 @@ func (s *ClusterStack) Ban(t *testing.T, n int, hostRegex, pathRegex string) {
 func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + path
-	// Use a fresh client per request to avoid connection-reuse issues with
-	// shared connections that may be in a degraded state.
-	client := &http.Client{Timeout: 30 * time.Second}
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
-		}
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			t.Fatalf("POST %s: new request: %v", url, err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			t.Logf("POST %s attempt %d: %v (retrying)", url, attempt+1, err)
-			continue
-		}
-		b, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode, string(b))
-		}
-		return
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
 	}
-	t.Fatalf("POST %s: %v", url, lastErr)
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode, string(b))
+	}
 }
 
-// Peers returns the PeerInfo JSON array from node n's admin API.
+// Peers returns the cluster peers from node n's admin API.
 func (s *ClusterStack) Peers(t *testing.T, n int) []map[string]any {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + "/v1/cluster/peers"
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("peers: %v", err)
-	}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -338,20 +343,15 @@ func (s *ClusterStack) Peers(t *testing.T, n int) []map[string]any {
 	}
 	defer resp.Body.Close()
 	var peers []map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
-		t.Fatalf("peers decode: %v", err)
-	}
+	_ = json.NewDecoder(resp.Body).Decode(&peers)
 	return peers
 }
 
-// MetricValue reads the Prometheus counter or gauge named metric from node n.
-// It returns the sum of all label combinations that match the metric name prefix.
-// Returns 0 if the metric is not found or has no value.
+// MetricValue reads a Prometheus metric value from node n.
 func (s *ClusterStack) MetricValue(t *testing.T, n int, metric string) float64 {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + "/metrics"
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.Get(url) //nolint:noctx
 	if err != nil {
 		t.Fatalf("metrics GET: %v", err)
 	}
@@ -362,11 +362,9 @@ func (s *ClusterStack) MetricValue(t *testing.T, n int, metric string) float64 {
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Match lines that start with the metric name (with or without labels).
 		if !strings.HasPrefix(line, metric) {
 			continue
 		}
-		// Ensure it's the right metric (not a metric with a longer name).
 		rest := line[len(metric):]
 		if rest == "" || rest[0] == '{' || rest[0] == ' ' {
 			parts := strings.Fields(line)
@@ -379,8 +377,7 @@ func (s *ClusterStack) MetricValue(t *testing.T, n int, metric string) float64 {
 	return total
 }
 
-// RetryUntil polls f repeatedly until it returns true or the deadline passes.
-// It calls t.Fatal if the deadline expires before f returns true.
+// RetryUntil polls f until it returns true or deadline expires.
 func RetryUntil(t *testing.T, deadline time.Duration, interval time.Duration, f func() bool) {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -393,214 +390,7 @@ func RetryUntil(t *testing.T, deadline time.Duration, interval time.Duration, f 
 	t.Fatalf("condition not met within %s", deadline)
 }
 
-// ---- internal helpers ------------------------------------------------
-
-func (s *ClusterStack) compose(args ...string) *exec.Cmd {
-	composeFile := filepath.Join(s.projectDir, "docker-compose.cluster.yaml")
-	cmdArgs := append([]string{
-		"compose",
-		"-p", s.project,
-		"-f", composeFile,
-	}, args...)
-	cmd := exec.Command("docker", cmdArgs...)
-	cmd.Dir = s.projectDir
-	cmd.Env = append(os.Environ(), "BOUINE_CONFIG_DIR="+s.configDir)
-	return cmd
-}
-
-func (s *ClusterStack) composeDown(fatal bool) {
-	cmd := s.compose("down", "--volumes", "--remove-orphans", "--timeout", "15")
-	if out, err := cmd.CombinedOutput(); err != nil && fatal {
-		s.t.Logf("docker compose down: %v\n%s", err, string(out))
-	}
-}
-
-func (s *ClusterStack) waitHealthy(t *testing.T, timeout time.Duration) {
-	t.Helper()
-	endpoints := []string{
-		"http://127.0.0.1:" + Node1AdminPort + "/healthz",
-		"http://127.0.0.1:" + Node2AdminPort + "/healthz",
-		"http://127.0.0.1:" + Node3AdminPort + "/healthz",
-	}
-	deadline := time.Now().Add(timeout)
-	for _, ep := range endpoints {
-		for time.Now().Before(deadline) {
-			resp, err := http.Get(ep) //nolint:noctx
-			if err == nil && resp.StatusCode == 200 {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-				break
-			}
-			if resp != nil {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("cluster: node at %s did not become healthy within %s", ep, timeout)
-		}
-	}
-}
-
-func (s *ClusterStack) waitMembership(t *testing.T, timeout time.Duration, expectedPeers int) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		ok := true
-		for i := range s.Nodes {
-			func() {
-				url := s.Nodes[i].AdminAddr + "/v1/cluster/peers"
-				req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-				if err != nil {
-					ok = false
-					return
-				}
-				req.Header.Set("Authorization", "Bearer "+s.Nodes[i].Token)
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					ok = false
-					return
-				}
-				defer resp.Body.Close()
-				var peers []map[string]any
-				if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil || len(peers) < expectedPeers {
-					ok = false
-				}
-			}()
-		}
-		if ok {
-			return
-		}
-		time.Sleep(1 * time.Second)
-	}
-	t.Fatalf("cluster: did not reach %d members within %s", expectedPeers, timeout)
-}
-
-// Dump prints container logs for all cluster services to t.Log.
-func (s *ClusterStack) Dump(t *testing.T) {
-	t.Helper()
-	for _, svc := range []string{"origin", "bouine-1", "bouine-2", "bouine-3"} {
-		cmd := s.compose("logs", "--no-color", "--tail=50", svc)
-		out, _ := cmd.CombinedOutput()
-		if len(out) > 0 {
-			t.Logf("=== logs: %s ===\n%s", svc, string(out))
-		}
-	}
-}
-
-// KillNode stops a single bouine container to simulate a hard node failure.
-// The node is not removed from compose; call RestartNode to bring it back.
-func (s *ClusterStack) KillNode(t *testing.T, n int) {
-	t.Helper()
-	cmd := s.compose("stop", s.Nodes[n].Name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("stop %s: %v\n%s", s.Nodes[n].Name, err, string(out))
-	}
-	t.Logf("cluster: stopped %s", s.Nodes[n].Name)
-}
-
-// RestartNode brings a previously stopped node back up and waits for it to
-// pass its health check. Useful after KillNode or PauseNode.
-func (s *ClusterStack) RestartNode(t *testing.T, n int) {
-	t.Helper()
-	cmd := s.compose("start", s.Nodes[n].Name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("start %s: %v\n%s", s.Nodes[n].Name, err, string(out))
-	}
-	// Wait for the node to pass health.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(s.Nodes[n].HTTPAddr + "/healthz")
-		if err == nil && resp.StatusCode == http.StatusOK {
-			resp.Body.Close()
-			t.Logf("cluster: %s healthy after restart", s.Nodes[n].Name)
-			return
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	t.Logf("cluster: %s did not become healthy within 30s — continuing anyway", s.Nodes[n].Name)
-}
-
-// PauseNode suspends a bouine container's processes (SIGSTOP via Docker)
-// to simulate a partial network partition. The node is still reachable by
-// Docker networking but stops processing requests.
-// Call UnpauseNode to resume.
-func (s *ClusterStack) PauseNode(t *testing.T, n int) {
-	t.Helper()
-	cmd := s.compose("pause", s.Nodes[n].Name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("pause %s: %v\n%s", s.Nodes[n].Name, err, string(out))
-	}
-	t.Logf("cluster: paused %s (partition simulation)", s.Nodes[n].Name)
-}
-
-// UnpauseNode resumes a paused bouine container (SIGCONT via Docker).
-func (s *ClusterStack) UnpauseNode(t *testing.T, n int) {
-	t.Helper()
-	cmd := s.compose("unpause", s.Nodes[n].Name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("unpause %s: %v\n%s", s.Nodes[n].Name, err, string(out))
-	}
-	t.Logf("cluster: unpaused %s", s.Nodes[n].Name)
-}
-
-// FlapOrigin stops and restarts the origin container repeatedly to simulate
-// an origin flap. It performs n cycles of (stop, wait, start) with the
-// given interval between cycles.
-func (s *ClusterStack) FlapOrigin(t *testing.T, cycles int, interval time.Duration) {
-	t.Helper()
-	for i := range cycles {
-		cmd := s.compose("stop", "origin")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Logf("origin flap cycle %d stop: %v\n%s", i, err, string(out))
-		}
-		time.Sleep(interval)
-		cmd = s.compose("start", "origin")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Logf("origin flap cycle %d start: %v\n%s", i, err, string(out))
-		}
-		t.Logf("cluster: origin flap cycle %d/%d complete", i+1, cycles)
-	}
-}
-
-// ScaleOriginLatency injects artificial latency into the origin container
-// using tc-netem (requires Linux with iproute2 in the container).
-// Latency is in milliseconds. Pass 0 to clear the rule.
-// Returns an error (rather than fatalling) because tc may be unavailable;
-// callers should skip the test if this returns a non-nil error.
-func (s *ClusterStack) ScaleOriginLatency(latencyMs int) error {
-	var args []string
-	if latencyMs > 0 {
-		args = []string{
-			"exec", "origin",
-			"tc", "qdisc", "add", "dev", "eth0", "root",
-			"netem", "delay", fmt.Sprintf("%dms", latencyMs),
-		}
-	} else {
-		args = []string{
-			"exec", "origin",
-			"tc", "qdisc", "del", "dev", "eth0", "root",
-		}
-	}
-	cmd := s.compose(args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("tc netem: %w\n%s", err, string(out))
-	}
-	return nil
-}
-
-// ConfigDir returns the path of the temporary directory containing per-node
-// config files. The caller is responsible for removing it.
-func (s *ClusterStack) ConfigDir() string { return s.configDir }
-
-// Down tears down the cluster (docker compose down) without requiring a T.
-// Used by TestMain-level cleanup managed via NoAutoCleanup.
-func (s *ClusterStack) Down() {
-	cmd := s.compose("down", "--volumes", "--remove-orphans", "--timeout", "15")
-	_, _ = cmd.CombinedOutput()
+// XCache returns the X-Cache header value.
+func XCache(resp *http.Response) string {
+	return resp.Header.Get("X-Cache")
 }

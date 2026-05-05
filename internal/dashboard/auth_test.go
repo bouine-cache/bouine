@@ -9,6 +9,7 @@ import (
 )
 
 func TestSessionAuth_SignAndValidate(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("secret-token")
 
 	tok, err := sa.makeToken()
@@ -21,6 +22,7 @@ func TestSessionAuth_SignAndValidate(t *testing.T) {
 }
 
 func TestSessionAuth_ValidRejectsShort(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("secret-token")
 	if sa.valid("short") {
 		t.Error("short token should be invalid")
@@ -31,6 +33,7 @@ func TestSessionAuth_ValidRejectsShort(t *testing.T) {
 }
 
 func TestSessionAuth_ValidRejectsTamperedSig(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("secret-token")
 	tok, _ := sa.makeToken()
 	// Flip last character.
@@ -41,6 +44,7 @@ func TestSessionAuth_ValidRejectsTamperedSig(t *testing.T) {
 }
 
 func TestSessionAuth_DifferentKeyRejects(t *testing.T) {
+	t.Parallel()
 	sa1 := newSessionAuth("token-a")
 	sa2 := newSessionAuth("token-b")
 	tok, _ := sa1.makeToken()
@@ -50,6 +54,7 @@ func TestSessionAuth_DifferentKeyRejects(t *testing.T) {
 }
 
 func TestSessionAuth_LoginGet(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("my-token")
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
@@ -63,6 +68,7 @@ func TestSessionAuth_LoginGet(t *testing.T) {
 }
 
 func TestSessionAuth_LoginPostWrongToken(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("correct-token")
 	body := url.Values{"token": {"wrong"}}.Encode()
 	w := httptest.NewRecorder()
@@ -76,6 +82,7 @@ func TestSessionAuth_LoginPostWrongToken(t *testing.T) {
 }
 
 func TestSessionAuth_LoginPostCorrectToken(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("correct-token")
 	body := url.Values{"token": {"correct-token"}}.Encode()
 	w := httptest.NewRecorder()
@@ -93,6 +100,7 @@ func TestSessionAuth_LoginPostCorrectToken(t *testing.T) {
 }
 
 func TestSessionAuth_MiddlewareRedirectsWithoutCookie(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("tok")
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -106,6 +114,7 @@ func TestSessionAuth_MiddlewareRedirectsWithoutCookie(t *testing.T) {
 }
 
 func TestSessionAuth_MiddlewarePassesValidCookie(t *testing.T) {
+	t.Parallel()
 	sa := newSessionAuth("tok")
 	tok, err := sa.makeToken()
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,21 @@ import (
 
 	"github.com/thylong/bouine/internal/testutil/tlsutil"
 )
+
+// waitForPort polls until addr accepts TCP connections or the timeout expires.
+func waitForPort(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("port %s not ready after %v", addr, timeout)
+}
 
 func TestServeE2E_HTTPProxy(t *testing.T) {
 	// 1. Start an echo origin.
@@ -52,7 +68,7 @@ routes:
 	errCh := make(chan error, 1)
 	go func() { errCh <- root.ExecuteContext(ctx) }()
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// 4. Try to proxy. Since we used :0, we don't know the port — read
 	//    admin /healthz first to confirm the daemon is up, then proxy.
@@ -117,7 +133,7 @@ routes:
 	errCh := make(chan error, 1)
 	go func() { errCh <- root.ExecuteContext(ctx) }()
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Same limitation as HTTP test — :0 resolved address not exposed.
 	// Verify daemon starts and shuts down cleanly.
@@ -171,7 +187,8 @@ routes:
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- root.ExecuteContext(ctx) }()
-	time.Sleep(500 * time.Millisecond)
+
+	waitForPort(t, "127.0.0.1:18092", 3*time.Second)
 
 	// HTTP/1.1 proxy test.
 	resp, err := http.Get("http://127.0.0.1:18090/hello")
@@ -234,7 +251,7 @@ routes:
 		if err != nil {
 			t.Fatalf("serve: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("daemon did not shut down")
 	}
 }

@@ -51,6 +51,7 @@ func bigObj(key api.Key, bodySize int) *api.Object {
 }
 
 func TestTiered_HotOnly(t *testing.T) {
+	t.Parallel()
 	ts := tieredStore(t, false)
 	k := KeyHash([]byte("hot-only"))
 	o := bigObj(k, 100) // below threshold, hot only
@@ -68,6 +69,7 @@ func TestTiered_HotOnly(t *testing.T) {
 }
 
 func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
+	t.Parallel()
 	ts := tieredStore(t, true)
 	k := KeyHash([]byte("big-object"))
 	o := bigObj(k, 8192) // above 1024 threshold
@@ -96,6 +98,7 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 }
 
 func TestTiered_DeleteBothTiers(t *testing.T) {
+	t.Parallel()
 	ts := tieredStore(t, true)
 	k := KeyHash([]byte("del-both"))
 	o := bigObj(k, 2048) // above threshold
@@ -110,6 +113,7 @@ func TestTiered_DeleteBothTiers(t *testing.T) {
 }
 
 func TestTiered_WALReplay(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "index.wal")
 
@@ -144,6 +148,7 @@ func TestTiered_WALReplay(t *testing.T) {
 }
 
 func TestTiered_EphemeralMode(t *testing.T) {
+	t.Parallel()
 	ts := tieredStore(t, false)
 	k := KeyHash([]byte("ephemeral"))
 	_ = ts.Put(context.Background(), k, bigObj(k, 2048))
@@ -159,6 +164,7 @@ func TestTiered_EphemeralMode(t *testing.T) {
 // reopening the store with WAL replay restores the index so a Get
 // succeeds without a hot-tier entry.
 func TestTiered_WarmGet(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	warmDir := filepath.Join(dir, "warm")
 	walPath := filepath.Join(dir, "index.wal")

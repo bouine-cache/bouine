@@ -40,6 +40,7 @@ func pool(t *testing.T, targets ...string) *Pool {
 }
 
 func TestPool_RoundRobin(t *testing.T) {
+	t.Parallel()
 	s1 := echoServer(t)
 	defer s1.Close()
 	s2 := echoServer(t)
@@ -65,6 +66,7 @@ func TestPool_RoundRobin(t *testing.T) {
 }
 
 func TestPool_PassiveHealth(t *testing.T) {
+	t.Parallel()
 	bad := fivexxServer(t)
 	defer bad.Close()
 	good := echoServer(t)
@@ -106,6 +108,7 @@ func TestPool_PassiveHealth(t *testing.T) {
 }
 
 func TestPool_AllDown(t *testing.T) {
+	t.Parallel()
 	bad := fivexxServer(t)
 	defer bad.Close()
 
@@ -125,6 +128,7 @@ func TestPool_AllDown(t *testing.T) {
 }
 
 func TestPool_MarkHealthy(t *testing.T) {
+	t.Parallel()
 	bad := fivexxServer(t)
 	defer bad.Close()
 
@@ -145,6 +149,7 @@ func TestPool_MarkHealthy(t *testing.T) {
 }
 
 func TestPool_NoTargetsError(t *testing.T) {
+	t.Parallel()
 	_, err := NewPool(PoolConfig{Name: "empty", Targets: nil})
 	if err == nil || !strings.Contains(err.Error(), "no targets") {
 		t.Fatalf("expected no-targets error, got %v", err)
@@ -152,6 +157,7 @@ func TestPool_NoTargetsError(t *testing.T) {
 }
 
 func TestPool_ProxiesBody(t *testing.T) {
+	t.Parallel()
 	s := echoServer(t)
 	defer s.Close()
 

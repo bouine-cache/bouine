@@ -10,6 +10,7 @@ import (
 )
 
 func TestNewMetrics_Defaults(t *testing.T) {
+	t.Parallel()
 	m := NewMetrics()
 	if m.Registry == nil {
 		t.Fatal("registry nil")
@@ -24,6 +25,7 @@ func TestNewMetrics_Defaults(t *testing.T) {
 }
 
 func TestMetrics_Handler_ExposesRegisteredCollector(t *testing.T) {
+	t.Parallel()
 	m := NewMetrics()
 	counter := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "bouine_test_counter",

@@ -3,6 +3,7 @@ package sieve
 import "testing"
 
 func TestSieve_InsertAndAccess(t *testing.T) {
+	t.Parallel()
 	l := NewList[uint64]()
 	m := map[uint64]*Entry[uint64]{}
 
@@ -33,6 +34,7 @@ func TestSieve_InsertAndAccess(t *testing.T) {
 }
 
 func TestSieve_EvictsLeastRecent(t *testing.T) {
+	t.Parallel()
 	l := NewList[uint64]()
 	m := map[uint64]*Entry[uint64]{}
 
@@ -62,6 +64,7 @@ func TestSieve_EvictsLeastRecent(t *testing.T) {
 }
 
 func TestSieve_EvictAll(t *testing.T) {
+	t.Parallel()
 	l := NewList[uint64]()
 	m := map[uint64]*Entry[uint64]{}
 
@@ -94,6 +97,7 @@ func TestSieve_EvictAll(t *testing.T) {
 }
 
 func TestSieve_Remove(t *testing.T) {
+	t.Parallel()
 	l := NewList[uint64]()
 	m := map[uint64]*Entry[uint64]{}
 
@@ -124,6 +128,7 @@ func TestSieve_Remove(t *testing.T) {
 }
 
 func TestSieve_SecondChance(t *testing.T) {
+	t.Parallel()
 	l := NewList[uint64]()
 	m := map[uint64]*Entry[uint64]{}
 

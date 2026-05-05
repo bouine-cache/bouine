@@ -6,6 +6,7 @@ import (
 )
 
 func TestRequestContext_JSONRoundtrip(t *testing.T) {
+	t.Parallel()
 	rc := RequestContext{
 		RequestID:    "abc",
 		Method:       "GET",
@@ -30,6 +31,7 @@ func TestRequestContext_JSONRoundtrip(t *testing.T) {
 }
 
 func TestCacheResult_UnknownTolerated(t *testing.T) {
+	t.Parallel()
 	var rc RequestContext
 	if err := json.Unmarshal([]byte(`{"cache_result":"future_value"}`), &rc); err != nil {
 		t.Fatalf("unmarshal: %v", err)

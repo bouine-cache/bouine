@@ -10,6 +10,7 @@ import (
 )
 
 func TestCert_HasSANs(t *testing.T) {
+	t.Parallel()
 	c := Cert(t, "api.test")
 	if c.Leaf == nil {
 		t.Fatal("Leaf should be populated")
@@ -29,6 +30,7 @@ func TestCert_HasSANs(t *testing.T) {
 }
 
 func TestServerConfig_DefaultsSane(t *testing.T) {
+	t.Parallel()
 	cfg := ServerConfig(t)
 	if cfg.MinVersion < tls.VersionTLS12 {
 		t.Fatalf("MinVersion = %d, want >= TLS 1.2", cfg.MinVersion)
@@ -39,6 +41,7 @@ func TestServerConfig_DefaultsSane(t *testing.T) {
 }
 
 func TestWriteCertFiles_RoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	certPath, keyPath := WriteCertFiles(t, dir, "rt.test")
 

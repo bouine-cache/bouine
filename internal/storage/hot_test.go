@@ -23,6 +23,7 @@ func obj(key api.Key, bodySize int) *api.Object {
 }
 
 func TestHotStore_PutGet(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
 	k := KeyHash([]byte("test-key"))
@@ -47,6 +48,7 @@ func TestHotStore_PutGet(t *testing.T) {
 }
 
 func TestHotStore_Miss(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
 	got, err := s.Get(context.Background(), 999)
@@ -63,6 +65,7 @@ func TestHotStore_Miss(t *testing.T) {
 }
 
 func TestHotStore_Delete(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	k := KeyHash([]byte("del"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
@@ -75,6 +78,7 @@ func TestHotStore_Delete(t *testing.T) {
 }
 
 func TestHotStore_EvictsOnFull(t *testing.T) {
+	t.Parallel()
 	// 4 shards, 4096 bytes total = 1024 per shard.
 	s := NewHotStore(HotConfig{MaxBytes: 4096, NumShards: 4})
 
@@ -94,6 +98,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 }
 
 func TestHotStore_Replace(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	k := KeyHash([]byte("replace"))
 
@@ -114,6 +119,7 @@ func TestHotStore_Replace(t *testing.T) {
 }
 
 func TestHotStore_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 8})
 	var wg sync.WaitGroup
 
@@ -137,6 +143,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 }
 
 func TestHotStore_Stats(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
@@ -156,6 +163,7 @@ func TestHotStore_Stats(t *testing.T) {
 }
 
 func TestKeyHash_Deterministic(t *testing.T) {
+	t.Parallel()
 	a := KeyHash([]byte("hello"))
 	b := KeyHash([]byte("hello"))
 	if a != b {
@@ -168,6 +176,7 @@ func TestKeyHash_Deterministic(t *testing.T) {
 }
 
 func TestHotStore_SetWarm(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
 	k := KeyHash([]byte("warm-key"))
@@ -190,6 +199,7 @@ func TestHotStore_SetWarm(t *testing.T) {
 }
 
 func TestHotStore_EvictPreferWarm(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 4 << 10, NumShards: 1})
 	ctx := context.Background()
 
@@ -215,6 +225,7 @@ func TestHotStore_EvictPreferWarm(t *testing.T) {
 }
 
 func TestHotStore_EvictFallbackNoWarm(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
 	ctx := context.Background()
 
@@ -235,6 +246,7 @@ func TestHotStore_EvictFallbackNoWarm(t *testing.T) {
 }
 
 func TestHotStore_WarmCountConsistency(t *testing.T) {
+	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 

@@ -11,6 +11,7 @@ import (
 )
 
 func TestClient_Healthz(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.HealthStatus{Status: "ok"})
@@ -28,6 +29,7 @@ func TestClient_Healthz(t *testing.T) {
 }
 
 func TestClient_Version(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.VersionInfo{Version: "1.0.0", Commit: "abc", Date: "today"})
@@ -45,6 +47,7 @@ func TestClient_Version(t *testing.T) {
 }
 
 func TestClient_Purge(t *testing.T) {
+	t.Parallel()
 	var receivedURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -71,6 +74,7 @@ func TestClient_Purge(t *testing.T) {
 }
 
 func TestClient_Ban(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(BanResult{Status: "banned", Count: 5})
@@ -88,6 +92,7 @@ func TestClient_Ban(t *testing.T) {
 }
 
 func TestClient_Refresh(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(RefreshResult{Status: "refreshed"})
@@ -105,6 +110,7 @@ func TestClient_Refresh(t *testing.T) {
 }
 
 func TestClient_Reload(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ReloadResult{Status: "reload-requested"})
@@ -122,6 +128,7 @@ func TestClient_Reload(t *testing.T) {
 }
 
 func TestClient_WithToken(t *testing.T) {
+	t.Parallel()
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -141,6 +148,7 @@ func TestClient_WithToken(t *testing.T) {
 }
 
 func TestClient_ErrorResponse(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))

@@ -18,6 +18,7 @@ func tmpWAL(t *testing.T) (*Log, string) {
 }
 
 func TestAppendAndReplay(t *testing.T) {
+	t.Parallel()
 	l, path := tmpWAL(t)
 
 	entries := []Entry{
@@ -52,6 +53,7 @@ func TestAppendAndReplay(t *testing.T) {
 }
 
 func TestReplay_EmptyFile(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "empty.wal")
 	f, err := os.Create(path)
 	if err != nil {
@@ -70,6 +72,7 @@ func TestReplay_EmptyFile(t *testing.T) {
 }
 
 func TestReplay_MissingFile(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.wal")
 	err := Replay(path, func(_ Entry) error { return nil })
 	if err != nil {
@@ -78,6 +81,7 @@ func TestReplay_MissingFile(t *testing.T) {
 }
 
 func TestReplay_TruncatedRecord(t *testing.T) {
+	t.Parallel()
 	l, path := tmpWAL(t)
 	if err := l.Append(PutEntry(1, 0, 0)); err != nil {
 		t.Fatalf("append: %v", err)
@@ -104,6 +108,7 @@ func TestReplay_TruncatedRecord(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
+	t.Parallel()
 	l, path := tmpWAL(t)
 	for range 5 {
 		if err := l.Append(PutEntry(1, 0, 0)); err != nil {
@@ -125,6 +130,7 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestEntryHelpers(t *testing.T) {
+	t.Parallel()
 	p := PutEntry(42, 3, 1024)
 	if !p.IsPut() || p.IsDelete() {
 		t.Fatal("PutEntry flags wrong")

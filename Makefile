@@ -32,11 +32,11 @@ build: ## Build the bouine binary to ./bin/bouine.
 
 .PHONY: test
 test: ## Run unit tests with the race detector.
-	$(GO) test -race -count=1 -timeout=120s $(PKGS)
+	$(GO) test -race -count=1 -timeout=60s -parallel=8 $(PKGS)
 
 .PHONY: test-short
 test-short: ## Run unit tests with -short (used by pre-commit).
-	$(GO) test -race -count=1 -timeout=60s -short $(PKGS)
+	$(GO) test -race -count=1 -timeout=30s -short -parallel=8 $(PKGS)
 
 .PHONY: vet
 vet: ## Run go vet.
@@ -77,8 +77,7 @@ conformance-view: build ## Run conformance tests then open the comparison UI in 
 	bash test/cachetests/view.sh
 
 .PHONY: integration
-integration: testcerts ## Run docker-compose integration scenarios (phase 1+).
-	go test -race -count=1 -timeout=10m -tags=integration ./test/integration/...
+integration: integration-cluster ## Run all cluster integration tests (one mode per process to avoid prometheus registry collisions).
 
 .PHONY: integration-cluster
 integration-cluster: integration-cluster-strong integration-cluster-eventual integration-cluster-full ## Run all 3 cluster consistency mode tests sequentially.
@@ -86,19 +85,19 @@ integration-cluster: integration-cluster-strong integration-cluster-eventual int
 .PHONY: integration-cluster-strong
 integration-cluster-strong: ## Run strong-mode cluster integration tests.
 	@echo ">>> Cluster integration: STRONG mode"
-	go test -v -race -count=1 -timeout=15m -tags=integration \
+	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestStrong ./test/integration/...
 
 .PHONY: integration-cluster-eventual
 integration-cluster-eventual: ## Run eventual-mode cluster integration tests.
 	@echo ">>> Cluster integration: EVENTUAL mode"
-	go test -v -race -count=1 -timeout=15m -tags=integration \
+	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestEventual ./test/integration/...
 
 .PHONY: integration-cluster-full
 integration-cluster-full: ## Run full-replication cluster integration tests.
 	@echo ">>> Cluster integration: FULL mode"
-	go test -v -race -count=1 -timeout=15m -tags=integration \
+	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestFull ./test/integration/...
 
 .PHONY: chaos

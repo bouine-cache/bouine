@@ -8,6 +8,7 @@ import (
 )
 
 func TestNew_DefaultsToInfoJSON(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	log := New(Options{Output: &buf})
 
@@ -30,6 +31,7 @@ func TestNew_DefaultsToInfoJSON(t *testing.T) {
 }
 
 func TestNew_TextFormat(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	log := New(Options{Format: "text", Output: &buf})
 	log.Info("plain")
@@ -40,6 +42,7 @@ func TestNew_TextFormat(t *testing.T) {
 }
 
 func TestParseLevel(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, want string
 	}{

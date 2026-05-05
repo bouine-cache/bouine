@@ -37,6 +37,7 @@ func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop 
 }
 
 func TestPeerFetchHandler_Hit(t *testing.T) {
+	t.Parallel()
 	key := api.Key(42)
 	store := &stubStore{objects: map[api.Key]*api.Object{
 		key: {Key: key, StatusCode: 200, Body: []byte("cached")},
@@ -56,6 +57,7 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 }
 
 func TestPeerFetchHandler_Miss(t *testing.T) {
+	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}})
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 999}, 0)
 	if rr.Code != http.StatusNotFound {
@@ -64,6 +66,7 @@ func TestPeerFetchHandler_Miss(t *testing.T) {
 }
 
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
+	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{})
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 1}, MaxHops)
 	if rr.Code != http.StatusLoopDetected {
@@ -72,6 +75,7 @@ func TestPeerFetchHandler_HopLimit(t *testing.T) {
 }
 
 func TestPeerFetchHandler_WrongMethod(t *testing.T) {
+	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{})
 	rr := httptest.NewRecorder()
 	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerFetchPath, nil)
@@ -82,6 +86,7 @@ func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 }
 
 func TestPeerFetcher_HopLimitReached(t *testing.T) {
+	t.Parallel()
 	f := NewPeerFetcher(nil, nil)
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
 		api.PeerFetchRequest{Key: 1, Hops: MaxHops})

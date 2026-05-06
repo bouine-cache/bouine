@@ -101,9 +101,14 @@ integration-cluster-full: ## Run full-replication cluster integration tests.
 	    -run TestFull ./test/integration/...
 
 .PHONY: chaos
-chaos: ## Run chaos test scenarios (peer kill, origin flap, partition, slow origin, rolling restart). Requires Docker.
+chaos: ## Run chaos test scenarios in-process (one test per process to avoid registry collisions).
 	@echo ">>> Chaos test suite"
-	go test -v -race -count=1 -timeout=20m -tags=integration ./test/chaos/...
+	@for test in PeerKill OriginFlap PartialPartition SlowOrigin RollingRestart OriginDown ConcurrentPurgeUnderLoad NodeRejoinAfterLongPartition; do \
+		echo "  $$test"; \
+		go test -v -race -count=1 -timeout=5m -tags=integration -run "TestChaos_$$test" ./test/chaos/... || exit 1; \
+		sleep 3; \
+	done
+	@echo ">>> All chaos tests passed"
 
 .PHONY: soak
 soak: ## Run a 24-hour (default) soak against a live cluster. Override with DURATION_H=N RPS=N.

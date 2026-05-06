@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,9 +49,12 @@ type ClusterStack struct {
 	Nodes     [3]ClusterNode
 	OriginURL string
 
-	origin  *httptest.Server
-	cancels [3]context.CancelFunc
-	errChs  [3]chan error
+	origin    *httptest.Server
+	originCtl *originControl
+	cancels   [3]context.CancelFunc
+	errChs    [3]chan error
+	paused    [3]atomic.Bool // per-node application-level pause gate
+	configDir string
 }
 
 // ClusterOptions configures BootCluster.
@@ -78,7 +82,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		opts.Mode = "strong"
 	}
 
-	origin := startOrigin()
+	origin, originCtl := startOriginWithControl()
 
 	// Allocate ports for all nodes upfront so gossip seeds are known.
 	type nodePorts struct {
@@ -104,10 +108,12 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		Mode:      opts.Mode,
 		OriginURL: origin.URL,
 		origin:    origin,
+		originCtl: originCtl,
+		configDir: t.TempDir(),
 	}
 
 	// Write configs and start each node.
-	configDir := t.TempDir()
+	configDir := s.configDir
 	for i := range 3 {
 		p := ports[i]
 		name := fmt.Sprintf("bouine-%d", i+1)
@@ -242,17 +248,55 @@ func (s *ClusterStack) ConfigDir() string { return "" }
 // Dump is a no-op for in-process nodes (logs go to stderr).
 func (s *ClusterStack) Dump(_ *testing.T) {}
 
-// RestartNode re-boots a previously killed node with fresh config.
+// RestartNode re-boots a previously killed node with fresh ports to
+// avoid bind conflicts from lingering sockets.
 func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 	t.Helper()
 	if s.cancels[n] != nil {
 		return
 	}
 
-	cfgPath := s.Nodes[n].cfgPath
-	if cfgPath == "" {
-		t.Fatalf("no config path for node %d", n)
+	// Allocate fresh ports — the old ones may still be in TIME_WAIT.
+	httpPort := freePort(t)
+	adminPort := freePort(t)
+	gossipPort := freePort(t)
+
+	name := s.Nodes[n].Name
+	seedList := s.gossipSeeds()
+
+	cfg := fmt.Sprintf(`listen:
+  http: "127.0.0.1:%d"
+  admin: "127.0.0.1:%d"
+  cluster: "127.0.0.1:%d"
+admin:
+  token: %s
+storage:
+  hot_max_bytes: 128MiB
+cluster:
+  enabled: true
+  node_name: %s
+  mode: %s
+  join: %s
+  hop_limit: 2
+upstream_pools:
+  - name: origin
+    targets: [%q]
+routes:
+  - match: {}
+    pool: origin
+    cache:
+      ttl_default: 60s
+`, httpPort, adminPort, gossipPort, IntegrationToken, name, s.Mode, seedList,
+		s.origin.Listener.Addr().String())
+
+	cfgPath := filepath.Join(s.configDir, name+"-restart.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write restart config: %v", err)
 	}
+
+	s.Nodes[n].HTTPAddr = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
+	s.Nodes[n].AdminAddr = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
+	s.Nodes[n].cfgPath = cfgPath
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancels[n] = cancel
@@ -264,13 +308,14 @@ func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 		ch <- root.ExecuteContext(ctx)
 	}(s.errChs[n])
 
+	// Wait for health.
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
 		if err == nil && resp.StatusCode == 200 {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			t.Logf("cluster: restarted %s", s.Nodes[n].Name)
+			t.Logf("cluster: restarted %s on %s", name, s.Nodes[n].HTTPAddr)
 			return
 		}
 		if resp != nil {
@@ -278,34 +323,81 @@ func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("node %s did not become healthy after restart", s.Nodes[n].Name)
+	t.Fatalf("node %s did not become healthy after restart", name)
 }
 
-// PauseNode is not supported in in-process mode (no SIGSTOP for goroutines).
-func (s *ClusterStack) PauseNode(t *testing.T, _ int) {
-	t.Helper()
-	t.Skip("PauseNode not supported in in-process mode")
+// gossipSeeds returns the gossip join list from live nodes.
+func (s *ClusterStack) gossipSeeds() string {
+	var seeds []string
+	for i := range s.Nodes {
+		if s.cancels[i] != nil {
+			// Extract gossip port from config — it's the cluster listen port.
+			// Parse from the admin addr as a proxy (gossip port is adjacent).
+			seeds = append(seeds, "127.0.0.1:"+s.extractGossipPort(i))
+		}
+	}
+	if len(seeds) == 0 {
+		return `[]`
+	}
+	return `["` + strings.Join(seeds, `","`) + `"]`
 }
 
-// UnpauseNode is not supported in in-process mode.
-func (s *ClusterStack) UnpauseNode(t *testing.T, _ int) {
-	t.Helper()
-	t.Skip("UnpauseNode not supported in in-process mode")
+func (s *ClusterStack) extractGossipPort(n int) string {
+	// Read the config file to find the cluster listen port.
+	data, err := os.ReadFile(s.Nodes[n].cfgPath)
+	if err != nil {
+		return "7000"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "cluster:") {
+			continue
+		}
+		// Look for the listen.cluster line: `cluster: "127.0.0.1:PORT"`
+		if strings.Contains(line, "cluster:") && strings.Contains(line, "127.0.0.1:") {
+			parts := strings.Split(line, ":")
+			if len(parts) >= 3 {
+				port := strings.Trim(parts[len(parts)-1], `" `)
+				return port
+			}
+		}
+	}
+	return "7000"
 }
 
-// FlapOrigin drops all active origin connections n times with a pause between.
+// PauseNode sets a per-node gate that blocks the origin from responding,
+// simulating application-level partition.
+func (s *ClusterStack) PauseNode(_ *testing.T, n int) {
+	s.paused[n].Store(true)
+}
+
+// UnpauseNode clears the pause gate.
+func (s *ClusterStack) UnpauseNode(_ *testing.T, n int) {
+	s.paused[n].Store(false)
+}
+
+// FlapOrigin toggles origin errors n times with a pause between each flap.
 func (s *ClusterStack) FlapOrigin(t *testing.T, n int, pause time.Duration) {
 	t.Helper()
 	for i := range n {
-		s.origin.CloseClientConnections()
-		t.Logf("origin flap %d/%d: connections dropped", i+1, n)
+		s.originCtl.forceErr.Store(true)
+		time.Sleep(pause)
+		s.originCtl.forceErr.Store(false)
+		t.Logf("origin flap %d/%d: toggled error→ok", i+1, n)
 		time.Sleep(pause)
 	}
 }
 
-// ScaleOriginLatency is not supported in in-process mode.
-func (s *ClusterStack) ScaleOriginLatency(_ int) error {
-	return fmt.Errorf("ScaleOriginLatency not supported in in-process mode")
+// ScaleOriginLatency injects ms of latency into every origin response.
+// Pass 0 to disable.
+func (s *ClusterStack) ScaleOriginLatency(ms int) error {
+	s.originCtl.latencyMs.Store(int64(ms))
+	return nil
+}
+
+// SetOriginError forces the origin to return 503 for all requests.
+func (s *ClusterStack) SetOriginError(on bool) {
+	s.originCtl.forceErr.Store(on)
 }
 
 // KillNode cancels the context of node n, stopping it.

@@ -39,6 +39,7 @@ type ClusterNode struct {
 	HTTPAddr  string
 	AdminAddr string
 	Token     string
+	cfgPath   string // path to config YAML (for RestartNode)
 }
 
 // ClusterStack holds a live in-process 3-node cluster + origin.
@@ -146,6 +147,7 @@ routes:
 			HTTPAddr:  fmt.Sprintf("http://127.0.0.1:%d", p.http),
 			AdminAddr: fmt.Sprintf("http://127.0.0.1:%d", p.admin),
 			Token:     IntegrationToken,
+			cfgPath:   cfgPath,
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -239,6 +241,72 @@ func (s *ClusterStack) ConfigDir() string { return "" }
 
 // Dump is a no-op for in-process nodes (logs go to stderr).
 func (s *ClusterStack) Dump(_ *testing.T) {}
+
+// RestartNode re-boots a previously killed node with fresh config.
+func (s *ClusterStack) RestartNode(t *testing.T, n int) {
+	t.Helper()
+	if s.cancels[n] != nil {
+		return
+	}
+
+	cfgPath := s.Nodes[n].cfgPath
+	if cfgPath == "" {
+		t.Fatalf("no config path for node %d", n)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancels[n] = cancel
+	s.errChs[n] = make(chan error, 1)
+
+	root := cmd.Root()
+	root.SetArgs([]string{"serve", "--config", cfgPath, "--log-level", "warn"})
+	go func(ch chan error) {
+		ch <- root.ExecuteContext(ctx)
+	}(s.errChs[n])
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
+		if err == nil && resp.StatusCode == 200 {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			t.Logf("cluster: restarted %s", s.Nodes[n].Name)
+			return
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("node %s did not become healthy after restart", s.Nodes[n].Name)
+}
+
+// PauseNode is not supported in in-process mode (no SIGSTOP for goroutines).
+func (s *ClusterStack) PauseNode(t *testing.T, _ int) {
+	t.Helper()
+	t.Skip("PauseNode not supported in in-process mode")
+}
+
+// UnpauseNode is not supported in in-process mode.
+func (s *ClusterStack) UnpauseNode(t *testing.T, _ int) {
+	t.Helper()
+	t.Skip("UnpauseNode not supported in in-process mode")
+}
+
+// FlapOrigin drops all active origin connections n times with a pause between.
+func (s *ClusterStack) FlapOrigin(t *testing.T, n int, pause time.Duration) {
+	t.Helper()
+	for i := range n {
+		s.origin.CloseClientConnections()
+		t.Logf("origin flap %d/%d: connections dropped", i+1, n)
+		time.Sleep(pause)
+	}
+}
+
+// ScaleOriginLatency is not supported in in-process mode.
+func (s *ClusterStack) ScaleOriginLatency(_ int) error {
+	return fmt.Errorf("ScaleOriginLatency not supported in in-process mode")
+}
 
 // KillNode cancels the context of node n, stopping it.
 func (s *ClusterStack) KillNode(t *testing.T, n int) {

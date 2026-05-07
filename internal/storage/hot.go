@@ -30,6 +30,11 @@ type HotStore struct {
 	// the ban's CreatedAt are not subject to it (RFC 9111 §4.4 semantics).
 	bansMu     sync.Mutex
 	activeBans []activeBan
+	// banCount mirrors len(activeBans) for a lock-free fast path in
+	// matchesActiveBan. It is written only while holding bansMu but read
+	// without any lock on the hot Get path, so the global bansMu is never
+	// acquired on a cache hit in the common (no active bans) case.
+	banCount atomic.Int64
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
@@ -246,6 +251,7 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	}
 	h.bansMu.Lock()
 	h.activeBans = append(h.activeBans, activeBan{pred: pred, created: createdAt})
+	h.banCount.Store(int64(len(h.activeBans)))
 	h.bansMu.Unlock()
 	return total, nil
 }
@@ -302,7 +308,14 @@ func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
 // matchesActiveBan reports whether obj is subject to any active lazy ban.
 // Expired bans (where the ban's CreatedAt is far in the past and unlikely to
 // be relevant) are pruned to bound the list size.
+//
+// Fast path: when no bans are active (the steady-state case), a single
+// atomic load returns immediately without touching the global bansMu. This
+// keeps the hot Get path free of cross-shard lock contention.
 func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
+	if h.banCount.Load() == 0 {
+		return false
+	}
 	h.bansMu.Lock()
 	defer h.bansMu.Unlock()
 	if len(h.activeBans) == 0 {
@@ -317,6 +330,7 @@ func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
 		}
 	}
 	h.activeBans = live
+	h.banCount.Store(int64(len(live)))
 	for _, b := range live {
 		if obj.StoredAt.After(b.created) {
 			continue // object stored after ban — not subject to it

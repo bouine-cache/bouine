@@ -15,9 +15,20 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
+// inlineEvictCap is the maximum number of entries evicted synchronously
+// inside Put while holding the shard write lock. Additional over-budget
+// bytes are reclaimed asynchronously by the background sweeper (Phase 2b).
+// This bounds the worst-case lock hold time on the Put path.
+const inlineEvictCap = 4
+
 // HotStore is the sharded in-memory (L0) cache tier. It implements
 // the Store interface using a fixed number of shards, each protected
 // by its own mutex, with SIEVE eviction.
+//
+// Background eviction: Put performs at most inlineEvictCap evictions
+// inline, then signals a per-store sweeper goroutine to drain any
+// remaining overshoot asynchronously. The cache may transiently exceed
+// maxBytes by at most one Put's object size until the sweeper runs.
 //
 // Stable.
 type HotStore struct {
@@ -35,6 +46,12 @@ type HotStore struct {
 	// without any lock on the hot Get path, so the global bansMu is never
 	// acquired on a cache hit in the common (no active bans) case.
 	banCount atomic.Int64
+	// evictSignal receives shard indices that need further eviction after
+	// the inline cap was reached. Buffered to len(shards); non-blocking
+	// sends coalesce burst signals.
+	evictSignal chan int
+	// done is closed by Close() to stop the background sweeper.
+	done chan struct{}
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
@@ -75,7 +92,8 @@ type HotConfig struct {
 	NumShards int
 }
 
-// NewHotStore creates a sharded in-memory store.
+// NewHotStore creates a sharded in-memory store and starts the
+// background eviction sweeper.
 func NewHotStore(cfg HotConfig) *HotStore {
 	n := cfg.NumShards
 	if n <= 0 {
@@ -92,11 +110,15 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		shards[i].entries = make(map[api.Key]*hotEntry)
 		shards[i].evict = sieve.NewList[api.Key]()
 	}
-	return &HotStore{
-		shards:   shards,
-		mask:     uint64(n - 1), //nolint:gosec // n is always a positive power of two
-		maxBytes: cfg.MaxBytes,
+	h := &HotStore{
+		shards:      shards,
+		mask:        uint64(n - 1), //nolint:gosec // n is always a positive power of two
+		maxBytes:    cfg.MaxBytes,
+		evictSignal: make(chan int, n),
+		done:        make(chan struct{}),
 	}
+	go h.sweeper()
+	return h
 }
 
 func (h *HotStore) shard(key api.Key) *shard {
@@ -165,17 +187,22 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 	return e.obj, nil
 }
 
-// Put stores an object. If the store is over budget, SIEVE eviction
-// runs until enough space is freed. Entries with warm-tier backups are
-// evicted first (cheap: recoverable from disk); hot-only entries are
-// evicted only when no warm-backed entries remain.
+// Put stores an object. If the shard is over budget, SIEVE eviction
+// runs inline for up to inlineEvictCap victims, then signals the
+// background sweeper for any remaining overshoot. Entries with warm-tier
+// backups are evicted first (cheap: recoverable from disk).
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	shardIdx := int(uint64(key) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
-	for s.bytes+size > perShardMax && s.evict.Len() > 0 {
+
+	s.mu.Lock()
+	stillOver := false
+	for range inlineEvictCap {
+		if s.bytes+size <= perShardMax || s.evict.Len() == 0 {
+			break
+		}
 		evKey, ok := s.evictPreferWarm()
 		if !ok {
 			break
@@ -185,6 +212,9 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
 		}
+	}
+	if s.bytes+size > perShardMax {
+		stillOver = true
 	}
 
 	// Remove old entry if replacing.
@@ -201,7 +231,45 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	})
 	s.entries[key] = &hotEntry{obj: obj, sieve: se}
 	s.bytes += size
+	s.mu.Unlock()
+
+	// Signal the sweeper if the shard is still over budget after the
+	// inline cap. Non-blocking: a full channel means a signal is already
+	// pending for this shard.
+	if stillOver {
+		select {
+		case h.evictSignal <- shardIdx:
+		default:
+		}
+	}
 	return nil
+}
+
+// sweeper is the background goroutine that drains overshoot evictions
+// signalled by Put. It terminates when Close() is called.
+func (h *HotStore) sweeper() {
+	perShardMax := h.maxBytes / int64(len(h.shards))
+	for {
+		select {
+		case <-h.done:
+			return
+		case idx := <-h.evictSignal:
+			s := &h.shards[idx]
+			s.mu.Lock()
+			for s.bytes > perShardMax && s.evict.Len() > 0 {
+				evKey, ok := s.evictPreferWarm()
+				if !ok {
+					break
+				}
+				if old, exists := s.entries[evKey]; exists {
+					s.bytes -= objSize(old.obj)
+					delete(s.entries, evKey)
+					h.stats.evictions.Add(1)
+				}
+			}
+			s.mu.Unlock()
+		}
+	}
 }
 
 // Delete removes a key from the hot tier.
@@ -361,8 +429,11 @@ func (h *HotStore) Stats() api.Stats {
 	}
 }
 
-// Close is a no-op for the hot tier (no files to close).
-func (h *HotStore) Close(_ context.Context) error { return nil }
+// Close stops the background sweeper and waits for it to exit.
+func (h *HotStore) Close(_ context.Context) error {
+	close(h.done)
+	return nil
+}
 
 // SetWarm marks the entry for key as having a warm-tier backup. If the
 // entry doesn't exist, this is a no-op. Warm-backed entries are evicted

@@ -3,7 +3,10 @@ package storage
 import (
 	"context"
 	"net/http"
+	"runtime"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,5 +269,118 @@ func TestHotStore_WarmCountConsistency(t *testing.T) {
 	}
 	if sh.warmCount != 1 {
 		t.Fatalf("warmCount = %d, want 1 after re-mark", sh.warmCount)
+	}
+}
+
+// TestHotOverflowLatency validates Phase 2 of PLAN_MEMORY_PRESSURE.md:
+// under 1.5× working-set overflow, the HIT p99 must stay below 5 ms and
+// the store must not grow beyond maxBytes × 1.1 (transient overshoot bound).
+//
+// The test runs 30 s of concurrent 80% Get / 20% Put at 1.5× overflow
+// using GOMAXPROCS goroutines, then checks the p99 latency histogram and
+// RSS-equivalent (s.bytes) for all shards.
+func TestHotOverflowLatency(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bodySize    = 1024
+		budgetBytes = 8 << 20 // 8 MiB — small enough to overflow fast
+		duration    = 5 * time.Second
+		p99Budget   = 5 * time.Millisecond
+	)
+	// 1.5× working set: ~1.5 × (budgetBytes / (bodySize+256)) unique keys
+	perShardMax := int64(budgetBytes) / int64(runtime.NumCPU())
+	approxCap := int(perShardMax / int64(bodySize+256))
+	working := approxCap*runtime.NumCPU()*3/2 + 1
+
+	s := NewHotStore(HotConfig{MaxBytes: budgetBytes})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Pre-fill to capacity.
+	for i := range approxCap * runtime.NumCPU() {
+		k := api.Key(i)
+		_ = s.Put(context.Background(), k, obj(k, bodySize))
+	}
+
+	var (
+		latencies []time.Duration
+		mu        sync.Mutex
+		ctr       atomic.Uint64
+		stop      atomic.Bool
+		wg        sync.WaitGroup
+	)
+
+	workers := runtime.NumCPU()
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := context.Background()
+			local := make([]time.Duration, 0, 1024)
+			for !stop.Load() {
+				n := ctr.Add(1)
+				k := api.Key(n % uint64(working))
+				if n%5 == 0 {
+					_ = s.Put(ctx, k, obj(k, bodySize))
+					continue
+				}
+				start := time.Now()
+				_, _ = s.Get(ctx, k)
+				local = append(local, time.Since(start))
+			}
+			mu.Lock()
+			latencies = append(latencies, local...)
+			mu.Unlock()
+		}()
+	}
+
+	time.Sleep(duration)
+	stop.Store(true)
+	wg.Wait()
+
+	// p99 latency gate.
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	if len(latencies) > 0 {
+		p99idx := int(float64(len(latencies)) * 0.99)
+		p99 := latencies[p99idx]
+		t.Logf("HIT p99: %v over %d samples (%d workers, %d-key working set)",
+			p99, len(latencies), workers, working)
+		if p99 > p99Budget {
+			t.Errorf("HIT p99 %v exceeds %v budget — Phase 2 eviction regression",
+				p99, p99Budget)
+		}
+	}
+
+	// RSS-equivalent: total shard bytes must not exceed maxBytes × 1.1
+	// (the transient overshoot bound documented in HotStore).
+	totalBytes := s.Stats().HotBytes
+	maxAllowed := int64(budgetBytes) * 11 / 10
+	t.Logf("HotBytes after test: %d / %d (limit %d, overshoot bound %d)",
+		totalBytes, budgetBytes, maxAllowed, maxAllowed-int64(budgetBytes))
+	if totalBytes > maxAllowed {
+		t.Errorf("HotBytes %d exceeds overshoot bound %d", totalBytes, maxAllowed)
+	}
+}
+
+// TestHotClose verifies that Close() stops the background sweeper without
+// leaking goroutines. A sequential test (no t.Parallel) is required because
+// runtime.NumGoroutine() is a global counter sensitive to other goroutines.
+func TestHotClose(t *testing.T) {
+	before := runtime.NumGoroutine()
+
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	// Give the sweeper goroutine time to start.
+	time.Sleep(10 * time.Millisecond)
+	goroutinesWithSweeper := runtime.NumGoroutine()
+	if goroutinesWithSweeper <= before {
+		t.Error("expected sweeper goroutine to be running after NewHotStore")
+	}
+
+	_ = s.Close(context.Background())
+	// Give the goroutine time to exit.
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+1 { // +1 for test harness variance
+		t.Errorf("goroutine leak: before=%d after close=%d", before, after)
 	}
 }

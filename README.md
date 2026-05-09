@@ -9,7 +9,7 @@
   <a href="https://github.com/thylong/bouine/actions/workflows/release.yml"><img src="https://github.com/thylong/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <a href="https://github.com/thylong/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/thylong/bouine" alt="Latest Release"></a>
   <a href="https://hub.docker.com/r/thylong/bouine"><img src="https://img.shields.io/docker/v/thylong/bouine?label=docker" alt="Docker"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/thylong/bouine" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
 </p>
 
 `bouine` is a scalable, cloud native, HTTP reverse-proxy

@@ -87,7 +87,6 @@ jobs:
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.pem
-            dist/bouine-${{ github.ref_name }}.spdx.json
 
   docker:
     name: Docker Hub (multi-arch)

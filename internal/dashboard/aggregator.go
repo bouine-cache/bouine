@@ -92,7 +92,6 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 	summaries := make([]observability.MetricsSummary, 0, total)
 	peerResults := make([]PeerResult, 0, total)
 
-	deadline := time.After(a.timeout)
 	for collected := 0; collected < total; collected++ {
 		select {
 		case r := <-ch:
@@ -108,8 +107,6 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 				Stale:    stale,
 				Err:      r.err,
 			})
-		case <-deadline:
-			goto done
 		case <-ctx.Done():
 			goto done
 		}

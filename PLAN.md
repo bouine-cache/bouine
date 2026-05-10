@@ -64,7 +64,7 @@ the wire.
 ├──────────────────────────────────────────────────────────────────────┤
 │ L8  Observability         (metrics · traces · logs · pprof)          │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L7  Control Plane (Fiber)  admin API · purge · config · dashboard    │
+│ L7  Control Plane          admin API · purge · config · dashboard    │
 ├──────────────────────────────────────────────────────────────────────┤
 │ L6  Cluster                gossip · hashring · peer fetch · digests  │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -80,20 +80,24 @@ the wire.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.1 Where Fiber lives
-Fiber v3 wraps `fasthttp`, which does **not** speak HTTP/2 or HTTP/3 natively.
-We therefore split the surface area:
+### 2.1 HTTP stacks
 
-- **Data plane (proxy / cache)** — custom listeners stack:
-  - HTTP/1.1 + HTTP/2 over TLS via `net/http` (`http2.ConfigureServer`).
-  - HTTP/3 via `quic-go/http3`.
-  - Plaintext HTTP/2 (h2c) via `golang.org/x/net/http2/h2c` for in-mesh.
-- **Control plane (admin, dashboard, purge, health, metrics)** — `fiber/v3`
-  served on a separate listener/port. Fiber gives us a fast, ergonomic API for
-  the operator surface where HTTP/1.1 is fine.
+The daemon runs on exactly **two** HTTP implementations (ADR-0006):
 
-This decoupling is in line with the layered architecture: L1/L2 are the data
-plane, L7 is Fiber. Modules never cross layers except through interfaces.
+- `net/http` — for HTTP/1.1 + HTTP/2 (via `http2.ConfigureServer` +
+  ALPN). Serves both the **data plane** (proxy/cache) and the **control
+  plane** (admin API, metrics, pprof). Plaintext HTTP/2 (h2c) via
+  `golang.org/x/net/http2/h2c` is available for in-mesh traffic.
+- `quic-go/http3` — for HTTP/3 on the data plane only.
+
+Both share `http.Handler`. The control plane is a plain
+`*http.Server` on its own port, using `net/http.ServeMux` (Go 1.22+
+pattern routing). This keeps the entire handler chain, middleware, and
+test surface uniform.
+
+Fiber was used initially but dropped in phase 1 (ADR-0006) because it
+added a third HTTP stack (`valyala/fasthttp`) and 7 transitive
+dependencies for a surface that serves ≤ 10 RPS.
 
 ### 2.2 Module layout (Go)
 
@@ -106,7 +110,7 @@ plane, L7 is Fiber. Modules never cross layers except through interfaces.
 /internal/storage/sieve      SIEVE / W-TinyLFU implementations
 /internal/origin             L5 — upstream pool, health, hedge, breaker
 /internal/cluster            L6 — memberlist gossip, consistent hash, peer fetch
-/internal/admin              L7 — Fiber app: purge, ban, config, dash backend
+/internal/admin              L7 — net/http admin: purge, ban, config, dash
 /internal/observability      L8 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
 /internal/ai                 L9 — traffic analytics (phase 6)
@@ -406,9 +410,9 @@ migration story is short:
 
 ---
 
-## 8. Control Plane (L7, Fiber)
+## 8. Control Plane (L7)
 
-Fiber app on a dedicated admin port. Endpoints:
+`net/http.ServeMux` app on a dedicated admin port. Endpoints:
 
 - `POST /v1/purge`             — exact URL purge.
 - `POST /v1/ban`               — predicate ban (regex on host/path/header,
@@ -446,7 +450,7 @@ listen:
   http:   ":80"
   https:  ":443"
   http3:  ":443/udp"
-  admin:  ":9000"            # Fiber
+  admin:  ":9000"            # admin (net/http)
   cluster: ":8443"           # peer mTLS
 
 tls:
@@ -678,7 +682,7 @@ green in CI.
   `bouine version`), CI badge placeholders, license, contribution
   pointer to `AGENTS.md`.
 - Cobra skeleton, `bouine version` works.
-- Fiber admin app skeleton with `/healthz`.
+- net/http admin app skeleton with `/healthz`.
 - CI: build matrix, unit-test scaffold, lint, govulncheck, plus a first
   job running `pre-commit run --all-files` so bypassed local hooks still
   fail the build.
@@ -785,7 +789,7 @@ in phase 5 starts until this passes.
   - Vary header pruning.
   - Candidate prefetch URLs.
   - Surrogate-key strategies.
-- Dashboard (SvelteKit or React, embedded via `embed.FS` into Fiber):
+- Dashboard (SvelteKit or React, embedded via `embed.FS` into admin):
   - Live RED & USE charts.
   - Per-route hit/miss heatmaps.
   - "Suggestions" inbox with one-click apply (writes a config diff PR or
@@ -801,7 +805,7 @@ in phase 5 starts until this passes.
 
 | Risk | Mitigation |
 |---|---|
-| Fiber/fasthttp can't speak H2/H3 | Split data plane (net/http + quic-go) from control plane (Fiber). |
+| ~~Fiber/fasthttp can't speak H2/H3~~ | Resolved: Fiber dropped (ADR-0006). Admin runs on `net/http`, same as data plane. |
 | mmap on macOS dev machines behaves differently from Linux prod | CI matrix runs storage tests on linux/amd64, linux/arm64, darwin/arm64. |
 | RFC 9111 edge cases drift | cache-tests in CI, blocks merge on regression. |
 | Cluster split-brain on purges | Monotonic purge tokens + anti-entropy reconciler. |

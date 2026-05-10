@@ -1,28 +1,28 @@
 // Package admin is the L7 control plane. It serves the admin API,
 // health/readiness probes, metrics, and (in later phases) the
 // dashboard SPA. The admin surface MUST stay on its own listener; it
-// is never bound on the data-plane port (see AGENTS.md §2.2).
+// is never bound on the data-plane port (see AGENTS.md §2).
 //
-// In phase 0 only /healthz and /readyz are wired so that K8s probes
-// pass during early development. Purge, ban, refresh, config and the
-// dashboard land in phase 4 / 6.
+// The admin server uses net/http.ServeMux — the same HTTP stack as the
+// data plane — so the entire daemon runs on two implementations:
+// net/http (H1+H2) and quic-go (H3). ADR-0006 documents the decision.
 package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
-	"github.com/gofiber/fiber/v3/middleware/adaptor"
 
 	"github.com/thylong/bouine/internal/buildinfo"
 	"github.com/thylong/bouine/internal/observability"
 )
 
-// Config controls the admin Fiber app.
+// Config controls the admin server.
 //
 // Stable.
 type Config struct {
@@ -32,19 +32,21 @@ type Config struct {
 	// Logger is the structured logger. Required.
 	Logger *slog.Logger
 	// ReadyFn reports whether the server is ready to serve traffic.
-	// nil is treated as "always ready" (sensible default during phase 0).
+	// nil is treated as "always ready".
 	ReadyFn func() bool
 	// Metrics is the Prometheus registry. If non-nil, /metrics is
 	// mounted.
 	Metrics *observability.Metrics
 }
 
-// Server is the admin Fiber app wrapped with its lifecycle methods.
+// Server is the admin HTTP server with lifecycle methods matching the
+// supervised-group contract.
 //
 // Stable.
 type Server struct {
-	cfg Config
-	app *fiber.App
+	inner    *http.Server
+	cfg      Config
+	resolved atomic.Value // stores string
 }
 
 // New constructs the admin server. It does not start listening; call
@@ -59,81 +61,99 @@ func New(cfg Config) *Server {
 		cfg.Logger = slog.Default()
 	}
 
-	app := fiber.New(fiber.Config{
-		AppName: "bouine-admin",
-		// Strict admin contract: short read/write deadlines.
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
-	})
+	mux := http.NewServeMux()
+	s := &Server{
+		cfg: cfg,
+		inner: &http.Server{
+			Addr:              cfg.Addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       5 * time.Second,
+			WriteTimeout:      5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		},
+	}
 
-	s := &Server{cfg: cfg, app: app}
-	s.routes()
+	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.HandleFunc("GET /version", s.version)
+	if cfg.Metrics != nil {
+		mux.Handle("GET /metrics", cfg.Metrics.Handler())
+	}
+
 	return s
 }
 
-func (s *Server) routes() {
-	s.app.Get("/healthz", s.healthz)
-	s.app.Get("/readyz", s.readyz)
-	s.app.Get("/version", s.version)
-	if s.cfg.Metrics != nil {
-		s.app.Get("/metrics", adaptor.HTTPHandler(s.cfg.Metrics.Handler()))
-	}
+func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) healthz(c fiber.Ctx) error {
-	return c.JSON(fiber.Map{"status": "ok"})
-}
-
-func (s *Server) readyz(c fiber.Ctx) error {
+func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 	if s.cfg.ReadyFn != nil && !s.cfg.ReadyFn() {
-		return c.Status(http.StatusServiceUnavailable).
-			JSON(fiber.Map{"status": "not-ready"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not-ready"})
+		return
 	}
-	return c.JSON(fiber.Map{"status": "ready"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func (s *Server) version(c fiber.Ctx) error {
-	return c.JSON(fiber.Map{
+func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
 		"version": buildinfo.Version,
 		"commit":  buildinfo.Commit,
 		"date":    buildinfo.Date,
 	})
 }
 
-// App returns the underlying Fiber app for testing.
+// Handler returns the admin mux for testing with httptest.
 //
 // Unstable.
-func (s *Server) App() *fiber.App {
-	return s.app
+func (s *Server) Handler() http.Handler {
+	return s.inner.Handler
 }
 
-// Serve blocks until the server returns or ctx is cancelled. On context
-// cancellation a graceful shutdown is initiated.
+// Serve blocks until the server returns or ctx is cancelled. On
+// context cancellation a graceful shutdown is initiated.
 //
 // Stable.
 func (s *Server) Serve(ctx context.Context) error {
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
+	if err != nil {
+		return err
+	}
+	s.resolved.Store(ln.Addr().String())
+
+	s.cfg.Logger.Info("admin server listening",
+		"addr", s.resolved.Load().(string))
+
 	errCh := make(chan error, 1)
-	go func() {
-		s.cfg.Logger.Info("admin server listening", "addr", s.cfg.Addr)
-		errCh <- s.app.Listen(s.cfg.Addr, fiber.ListenConfig{
-			DisableStartupMessage: true,
-		})
-	}()
+	go func() { errCh <- s.inner.Serve(ln) }()
 
 	select {
 	case <-ctx.Done():
-		// Detach from the parent ctx (already cancelled) but bound the
-		// shutdown by a fresh timeout.
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		shutCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if err := s.app.ShutdownWithContext(shutdownCtx); err != nil {
-			return err
-		}
-		return nil
+		return s.inner.Shutdown(shutCtx)
 	case err := <-errCh:
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
+		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	}
+}
+
+// Addr returns the resolved listen address after Serve has been
+// called. Before Serve, returns the configured address.
+func (s *Server) Addr() string {
+	if v := s.resolved.Load(); v != nil {
+		return v.(string)
+	}
+	return s.inner.Addr
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
 }

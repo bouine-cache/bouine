@@ -117,7 +117,6 @@ rules:
       - github.com/thylong/bouine/internal/observability
       - github.com/thylong/bouine/internal/buildinfo
       - github.com/thylong/bouine/pkg/api
-      - github.com/gofiber/fiber/v3
       - github.com/prometheus/client_golang
 
   # L8 is a leaf — only stdlib and telemetry libs.

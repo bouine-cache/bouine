@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/thylong/bouine/internal/observability"
 )
 
 func newTestServer(t *testing.T, ready func() bool) *Server {
@@ -18,30 +21,18 @@ func newTestServer(t *testing.T, ready func() bool) *Server {
 	})
 }
 
-func get(t *testing.T, s *Server, path string) (status int, body []byte) {
+func get(t *testing.T, s *Server, path string) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
-	resp, err := s.App().Test(req)
-	if err != nil {
-		t.Fatalf("Test(%s): %v", path, err)
-	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			t.Errorf("close body: %v", cerr)
-		}
-	}()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	return resp.StatusCode, b
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	return rr.Code, rr.Body.Bytes()
 }
 
 func TestHealthz(t *testing.T) {
 	s := newTestServer(t, nil)
-
 	status, body := get(t, s, "/healthz")
-	if status != 200 {
+	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
 	var got map[string]string
@@ -56,7 +47,7 @@ func TestHealthz(t *testing.T) {
 func TestReadyz_Ready(t *testing.T) {
 	s := newTestServer(t, func() bool { return true })
 	status, _ := get(t, s, "/readyz")
-	if status != 200 {
+	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
 }
@@ -64,7 +55,7 @@ func TestReadyz_Ready(t *testing.T) {
 func TestReadyz_NotReady(t *testing.T) {
 	s := newTestServer(t, func() bool { return false })
 	status, _ := get(t, s, "/readyz")
-	if status != 503 {
+	if status != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", status)
 	}
 }
@@ -72,10 +63,25 @@ func TestReadyz_NotReady(t *testing.T) {
 func TestVersion(t *testing.T) {
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/version")
-	if status != 200 {
+	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
 	}
 	if !bytes.Contains(body, []byte("version")) {
 		t.Fatalf("missing version field: %s", body)
+	}
+}
+
+func TestMetrics_Mounted(t *testing.T) {
+	m := observability.NewMetrics()
+	s := New(Config{
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Metrics: m,
+	})
+	status, body := get(t, s, "/metrics")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !bytes.Contains(body, []byte("go_info")) {
+		t.Fatalf("expected go_info metric, got: %s", body[:min(len(body), 200)])
 	}
 }

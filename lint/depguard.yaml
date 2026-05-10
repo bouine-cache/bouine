@@ -1,8 +1,14 @@
 # bouine — Depguard layer-dependency matrix
 #
-# This file mirrors AGENTS.md §3.1. It is loaded by the golangci-lint
-# `depguard` linter via the `additional-config` field, and acts as the
-# build-time enforcement of the layered architecture.
+# This file is the human-readable reference for the layer matrix from
+# AGENTS.md §3.1. The CI-enforced rules live in `.golangci.yaml` under
+# `linters.settings.depguard`. The two files are kept in sync — a
+# violation surfaced here MUST also be surfaced by golangci-lint.
+#
+# CI tightens enforcement gradually as packages land in their phases.
+# Phase 0 ships lax + targeted denies (Fiber out of the data plane,
+# banned log libs). Phase 1+ enables the strict per-layer allow-lists
+# below as the corresponding packages gain real code.
 #
 # Layer numbering (lower = closer to the wire):
 #   L1  internal/listener
@@ -147,3 +153,42 @@ rules:
       - $gostd
       - github.com/thylong/bouine/pkg/api
       - github.com/thylong/bouine/pkg/bouineapi
+
+  # internal/config is a leaf. It defines the configuration tree;
+  # importing higher-layer packages would create a cycle.
+  config:
+    list-mode: strict
+    files: ["**/internal/config/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/config
+      - github.com/thylong/bouine/pkg/api
+      - gopkg.in/yaml.v3
+
+  # internal/runtime/* hosts process-wide primitives (supervised
+  # goroutine groups, signal handling). Leaf package.
+  runtime:
+    list-mode: strict
+    files: ["**/internal/runtime/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/runtime
+      - github.com/thylong/bouine/pkg/api
+      - golang.org/x/sync
+
+  # internal/testutil/* is for _test.go files only. It is also a leaf
+  # — never imported from production code paths.
+  testutil:
+    list-mode: strict
+    files: ["**/internal/testutil/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/testutil
+
+  # internal/buildinfo is link-time metadata — leaf.
+  buildinfo:
+    list-mode: strict
+    files: ["**/internal/buildinfo/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/buildinfo

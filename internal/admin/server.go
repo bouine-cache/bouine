@@ -119,36 +119,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.version)
-	if cfg.Metrics != nil {
-		mux.Handle("GET /metrics", cfg.Metrics.Handler())
-	}
-	if cfg.PeersFn != nil {
-		mux.HandleFunc("GET /v1/cluster/peers", s.clusterPeers)
-	}
-	if cfg.PurgeFn != nil {
-		mux.HandleFunc("POST /v1/purge", s.purge)
-	}
-	if cfg.BanFn != nil {
-		mux.HandleFunc("POST /v1/ban", s.ban)
-	}
-	if cfg.RefreshFn != nil {
-		mux.HandleFunc("POST /v1/refresh", s.refresh)
-	}
-	if cfg.PeerPurgeFn != nil {
-		mux.HandleFunc("POST /v1/peer/purge", s.peerPurge)
-	}
-	if cfg.PeerBanFn != nil {
-		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
-	}
-	if cfg.CFStatusFn != nil {
-		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
-	}
-	if cfg.PeerFetchHandler != nil {
-		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
-	}
-	if cfg.PeerMetricsHandler != nil {
-		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
-	}
+	s.mountOptionalRoutes(mux, cfg)
 	mux.HandleFunc("POST /v1/config/reload", s.configReload)
 
 	topHandler := s.authMiddleware(mux)
@@ -181,6 +152,41 @@ func New(cfg Config) *Server {
 	s.inner.Handler = topHandler
 
 	return s
+}
+
+// mountOptionalRoutes registers routes that are only enabled when the
+// corresponding config field is non-nil.
+func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
+	if cfg.Metrics != nil {
+		mux.Handle("GET /metrics", cfg.Metrics.Handler())
+	}
+	if cfg.PeersFn != nil {
+		mux.HandleFunc("GET /v1/cluster/peers", s.clusterPeers)
+	}
+	if cfg.PurgeFn != nil {
+		mux.HandleFunc("POST /v1/purge", s.purge)
+	}
+	if cfg.BanFn != nil {
+		mux.HandleFunc("POST /v1/ban", s.ban)
+	}
+	if cfg.RefreshFn != nil {
+		mux.HandleFunc("POST /v1/refresh", s.refresh)
+	}
+	if cfg.PeerPurgeFn != nil {
+		mux.HandleFunc("POST /v1/peer/purge", s.peerPurge)
+	}
+	if cfg.PeerBanFn != nil {
+		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
+	}
+	if cfg.CFStatusFn != nil {
+		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
+	}
+	if cfg.PeerFetchHandler != nil {
+		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
+	}
+	if cfg.PeerMetricsHandler != nil {
+		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
+	}
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {

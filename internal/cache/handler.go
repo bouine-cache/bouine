@@ -235,44 +235,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.triggerBgRevalidate(r, key, disp.Object)
 		}
 	case Miss:
-		// Cluster peer-fetch: if this node does not own the key, ask the
-		// owner before going to origin. The owner has a much higher hit
-		// rate for keys it owns (consistent hashing concentrates fills
-		// there). On a peer hit the object is stored locally for future
-		// requests on this node (L0 promotion).
-		// Falls through to origin on peer miss, peer error, or single-node.
-		if h.ownerFn != nil && h.peerFetch != nil {
-			if owner, isLocal := h.ownerFn(key); !isLocal {
-				if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
-					// Re-evaluate: the peer may have returned a stale object.
-					if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-						h.serveObject(w, r, peerObj, now, cacheHit)
-						// Promote to local hot tier (best-effort; ignore error).
-						_ = h.store.Put(r.Context(), key, peerObj)
-						if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
-							h.triggerBgRevalidate(r, key, peerObj)
-						}
-						return
-					}
-				} else if err != nil {
-					h.logger.Debug("peer fetch error, falling back to origin",
-						"peer", owner.Addr, "key", key, "error", err)
-				}
-			}
-		}
-		// If a stale object exists, use fetchAndStoreStayinAlive which will
-		// serve the stale copy on 5xx/error — unless the stored response
-		// has must-revalidate / proxy-revalidate / no-cache / s-maxage,
-		// which require the error to be forwarded to the client.
-		if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-			h.fetchAndStoreStayinAlive(w, r, key, obj)
-		} else {
-			h.fetchAndStore(w, r, key)
-		}
+		h.handleCacheMiss(w, r, key, obj, now)
 	case Revalidate:
 		h.revalidate(w, r, key, disp.Object)
 	case Bypass:
 		h.handleBypass(w, r)
+	}
+}
+
+// handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
+// falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
+// Cluster peer-fetch: if this node does not own the key, ask the owner before
+// going to origin. The owner has a much higher hit rate for keys it owns
+// (consistent hashing concentrates fills there). On a peer hit the object is
+// stored locally for future requests on this node (L0 promotion).
+func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key api.Key, obj *api.Object, now time.Time) {
+	if h.ownerFn != nil && h.peerFetch != nil {
+		if owner, isLocal := h.ownerFn(key); !isLocal {
+			if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
+				// Re-evaluate: the peer may have returned a stale object.
+				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
+					h.serveObject(w, r, peerObj, now, cacheHit)
+					// Promote to local hot tier (best-effort; ignore error).
+					_ = h.store.Put(r.Context(), key, peerObj)
+					if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
+						h.triggerBgRevalidate(r, key, peerObj)
+					}
+					return
+				}
+			} else if err != nil {
+				h.logger.Debug("peer fetch error, falling back to origin",
+					"peer", owner.Addr, "key", key, "error", err)
+			}
+		}
+	}
+	// If a stale object exists, use fetchAndStoreStayinAlive which will serve
+	// the stale copy on 5xx/error — unless the stored response has
+	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
+	// the error to be forwarded to the client.
+	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
+		h.fetchAndStoreStayinAlive(w, r, key, obj)
+	} else {
+		h.fetchAndStore(w, r, key)
 	}
 }
 

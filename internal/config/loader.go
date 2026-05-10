@@ -103,6 +103,15 @@ func (c *Config) Validate() error {
 	}
 
 	// Cluster mode validation.
+	if err := c.validateCluster(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateCluster checks and normalises cluster configuration.
+func (c *Config) validateCluster() error {
 	if c.Cluster.Enabled {
 		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
 		switch c.Cluster.Mode {
@@ -120,7 +129,6 @@ func (c *Config) Validate() error {
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong
 	}
-
 	return nil
 }
 

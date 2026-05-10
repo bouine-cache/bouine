@@ -194,6 +194,54 @@ func parseTimeRange(s string) (buckets int, label string) {
 
 // ── Page handlers ─────────────────────────────────────────────────────
 
+// overviewStats holds pre-computed windowed statistics for the overview page.
+type overviewStats struct {
+	totalReq, totalHit, totalErr, maxP99                                 int64
+	splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated int64
+	priorReq, priorHit, priorErr, priorP99                               int64
+	hitPct, errPct, priorHitPct, priorErrPct                             float64
+	reqPerSec, priorReqPerSec                                            float64
+}
+
+// buildOverviewStats computes the recent and prior windowed stats from the ring snapshot.
+func buildOverviewStats(snap []observability.RequestBucket, n int) overviewStats {
+	recent := min(6, n)
+	var s overviewStats
+	for _, b := range snap[n-recent:] {
+		s.totalReq += b.Requests
+		s.totalHit += b.Hits
+		s.totalErr += b.Errors
+		s.splitHits += b.Hits
+		s.splitMisses += b.Misses
+		s.splitStales += b.StaleHits
+		s.splitBypasses += b.Bypasses
+		s.splitRevalidated += b.Revalidated
+		if b.P99MS > s.maxP99 {
+			s.maxP99 = b.P99MS
+		}
+	}
+	priorStart := max(0, n-12)
+	for _, b := range snap[priorStart:max(priorStart, n-recent)] {
+		s.priorReq += b.Requests
+		s.priorHit += b.Hits
+		s.priorErr += b.Errors
+		if b.P99MS > s.priorP99 {
+			s.priorP99 = b.P99MS
+		}
+	}
+	if s.totalReq > 0 {
+		s.hitPct = float64(s.totalHit) / float64(s.totalReq) * 100
+		s.errPct = float64(s.totalErr) / float64(s.totalReq) * 100
+	}
+	if s.priorReq > 0 {
+		s.priorHitPct = float64(s.priorHit) / float64(s.priorReq) * 100
+		s.priorErrPct = float64(s.priorErr) / float64(s.priorReq) * 100
+	}
+	s.reqPerSec = float64(s.totalReq) / float64(max(1, recent)*10)
+	s.priorReqPerSec = float64(s.priorReq) / float64(max(1, recent)*10)
+	return s
+}
+
 func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	merged, peers := h.agg.Collect(r.Context())
 
@@ -218,48 +266,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		errData = []int64{0}
 	}
 
-	// Current 60s window.
-	recent := min(6, n)
-	var totalReq, totalHit, totalErr, maxP99 int64
-	var splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated int64
-	for _, b := range snap[n-recent:] {
-		totalReq += b.Requests
-		totalHit += b.Hits
-		totalErr += b.Errors
-		splitHits += b.Hits
-		splitMisses += b.Misses
-		splitStales += b.StaleHits
-		splitBypasses += b.Bypasses
-		splitRevalidated += b.Revalidated
-		if b.P99MS > maxP99 {
-			maxP99 = b.P99MS
-		}
-	}
-
-	// Prior 60s window for trend deltas.
-	priorStart := max(0, n-12)
-	var priorReq, priorHit, priorErr, priorP99 int64
-	for _, b := range snap[priorStart:max(priorStart, n-recent)] {
-		priorReq += b.Requests
-		priorHit += b.Hits
-		priorErr += b.Errors
-		if b.P99MS > priorP99 {
-			priorP99 = b.P99MS
-		}
-	}
-
-	var hitPct, errPct float64
-	if totalReq > 0 {
-		hitPct = float64(totalHit) / float64(totalReq) * 100
-		errPct = float64(totalErr) / float64(totalReq) * 100
-	}
-	var priorHitPct, priorErrPct float64
-	if priorReq > 0 {
-		priorHitPct = float64(priorHit) / float64(priorReq) * 100
-		priorErrPct = float64(priorErr) / float64(priorReq) * 100
-	}
-	reqPerSec := float64(totalReq) / float64(max(1, recent)*10)
-	priorReqPerSec := float64(priorReq) / float64(max(1, recent)*10)
+	st := buildOverviewStats(snap, n)
 
 	hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, evictions := h.storeStats()
 
@@ -287,17 +294,17 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	lprops := h.layoutProps("overview", "Overview", timeRange)
 	h.render(w, r, templates.Overview(templates.OverviewData{
 		LayoutProps: lprops,
-		ReqPerSec:   reqPerSec,
-		HitPct:      hitPct,
-		P99MS:       maxP99,
-		ErrPct:      errPct,
-		TrendReq:    templates.BuildTrend(reqPerSec, priorReqPerSec, true),
-		TrendHit:    templates.BuildTrend(hitPct, priorHitPct, true),
-		TrendLat:    templates.BuildTrend(float64(maxP99), float64(priorP99), false),
-		TrendErr:    templates.BuildTrend(errPct, priorErrPct, false),
+		ReqPerSec:   st.reqPerSec,
+		HitPct:      st.hitPct,
+		P99MS:       st.maxP99,
+		ErrPct:      st.errPct,
+		TrendReq:    templates.BuildTrend(st.reqPerSec, st.priorReqPerSec, true),
+		TrendHit:    templates.BuildTrend(st.hitPct, st.priorHitPct, true),
+		TrendLat:    templates.BuildTrend(float64(st.maxP99), float64(st.priorP99), false),
+		TrendErr:    templates.BuildTrend(st.errPct, st.priorErrPct, false),
 		CacheSplit: templates.CacheSplitData{
-			Hits: splitHits, Misses: splitMisses, Stales: splitStales,
-			Bypasses: splitBypasses, Revalidated: splitRevalidated,
+			Hits: st.splitHits, Misses: st.splitMisses, Stales: st.splitStales,
+			Bypasses: st.splitBypasses, Revalidated: st.splitRevalidated,
 		},
 		ChartLabels: labels,
 		ChartReqs:   reqData,

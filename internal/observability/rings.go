@@ -523,17 +523,9 @@ func (ri *Rings) Summary() MetricsSummary {
 //   - Counters: sum
 //   - Ratios: weighted average
 //   - Latency p99: max
-func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
-	if len(summaries) == 0 {
-		return MetricsSummary{}
-	}
-	merged := MetricsSummary{
-		NodeName:    "cluster",
-		CollectedAt: time.Now(),
-		RequestSnap: make([]RequestBucket, requestBuckets),
-		RouteStats:  nil,
-	}
-
+//
+// mergeRequestBuckets accumulates per-bucket counters from all summaries into merged.
+func mergeRequestBuckets(merged *MetricsSummary, summaries []MetricsSummary) {
 	for _, s := range summaries {
 		for i, b := range s.RequestSnap {
 			m := &merged.RequestSnap[i]
@@ -554,8 +546,10 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 			}
 		}
 	}
+}
 
-	// Merge route stats — sum counters, take max sparkline values.
+// mergeRouteStatsList sums counters and sparklines for each route across summaries.
+func mergeRouteStatsList(summaries []MetricsSummary) []RouteStat {
 	routeAgg := make(map[string]*RouteStat)
 	for _, s := range summaries {
 		for _, rs := range s.RouteStats {
@@ -578,14 +572,18 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 			}
 		}
 	}
+	out := make([]RouteStat, 0, len(routeAgg))
 	for _, a := range routeAgg {
 		if a.Requests > 0 {
 			a.HitPct = math.Round(float64(a.Hits)/float64(a.Requests)*1000) / 10
 		}
-		merged.RouteStats = append(merged.RouteStats, *a)
+		out = append(out, *a)
 	}
+	return out
+}
 
-	// Merge URL stats — sum counters across pods.
+// mergeURLStatsList sums counters for each URL across summaries.
+func mergeURLStatsList(summaries []MetricsSummary) []URLStat {
 	urlAgg := make(map[string]*URLStat)
 	for _, s := range summaries {
 		for _, us := range s.URLStats {
@@ -600,12 +598,34 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 			a.Misses += us.Misses
 		}
 	}
+	out := make([]URLStat, 0, len(urlAgg))
 	for _, a := range urlAgg {
 		if a.Requests > 0 {
 			a.HitPct = math.Round(float64(a.Hits)/float64(a.Requests)*1000) / 10
 		}
-		merged.URLStats = append(merged.URLStats, *a)
+		out = append(out, *a)
 	}
+	return out
+}
+
+// MergeSummaries combines per-node metric snapshots into a single cluster-wide
+// summary. Rules:
+//   - Counters: sum
+//   - Ratios: weighted average
+//   - Latency p99: max
+func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
+	if len(summaries) == 0 {
+		return MetricsSummary{}
+	}
+	merged := MetricsSummary{
+		NodeName:    "cluster",
+		CollectedAt: time.Now(),
+		RequestSnap: make([]RequestBucket, requestBuckets),
+		RouteStats:  nil,
+	}
+	mergeRequestBuckets(&merged, summaries)
+	merged.RouteStats = mergeRouteStatsList(summaries)
+	merged.URLStats = mergeURLStatsList(summaries)
 	return merged
 }
 

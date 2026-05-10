@@ -13,6 +13,19 @@ import (
 // present it takes precedence over Cache-Control for all shared-cache
 // decisions; otherwise Cache-Control is used.
 // If the CDN-CC value contains unknown or invalid token types (per
+// isCDNCCCharForbidden reports whether b is a character that is not allowed
+// in a CDN-Cache-Control value (non-token chars per RFC 9213 §2 / RFC 7230 §3.2.6).
+func isCDNCCCharForbidden(b byte) bool {
+	return b == '&' || b == '@' || b == '[' || b == ']' || b == '{' || b == '}' || b == '"'
+}
+
+// hasMeaningfulCDNCCDirective reports whether d contains at least one directive
+// that can influence caching behaviour. Values with no meaningful directives are
+// treated as absent (RFC 9211 §4).
+func hasMeaningfulCDNCCDirective(d Directives) bool {
+	return d.MaxAgeSet || d.SMaxAgeSet || d.NoStore || d.Private || d.NoCache
+}
+
 // RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
 // list of tokens"), the header is treated as absent.
 func cdnCacheControl(respHeader http.Header) (Directives, bool) {
@@ -29,7 +42,7 @@ func cdnCacheControl(respHeader http.Header) (Directives, bool) {
 		if b < 0x21 || b > 0x7e {
 			continue // spaces / commas are legal separators
 		}
-		if b == '&' || b == '@' || b == '[' || b == ']' || b == '{' || b == '}' || b == '"' {
+		if isCDNCCCharForbidden(b) {
 			// Non-token characters or quoted-string values — treat whole value as invalid.
 			// RFC 9213 §2: CDN-Cache-Control must use sf-integer for duration values, not quoted-strings.
 			return Directives{}, false
@@ -37,7 +50,7 @@ func cdnCacheControl(respHeader http.Header) (Directives, bool) {
 	}
 	d := ParseCacheControl(v)
 	// If the parsed directives contain no meaningful directives, treat absent.
-	if !d.MaxAgeSet && !d.SMaxAgeSet && !d.NoStore && !d.Private && !d.NoCache {
+	if !hasMeaningfulCDNCCDirective(d) {
 		return Directives{}, false
 	}
 	return d, true

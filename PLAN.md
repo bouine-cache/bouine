@@ -652,610 +652,108 @@ at least 30 s.
 
 ---
 
-## 15. Roadmap & Phases
+## 15. Roadmap — Pending Work
 
-Each phase ends with a tagged release and the listed exit criteria all
-green in CI.
-
-### Phase 0 — Project bootstrap (week 1)
-- Repo layout, Go 1.26 toolchain, `go.work`, Makefile, golangci-lint config.
-- `.pre-commit-config.yaml` with the hook set defined in `AGENTS.md §14.4`
-  (YAML check, file hygiene, `gofmt`/`goimports`, `go test -race -short`,
-  `golangci-lint` with the mandatory linter set, `go mod tidy`,
-  `govulncheck` on pre-push, `gitleaks`, Conventional Commits on
-  `commit-msg`). `make hooks` installs them.
-- Basic `README.md`: one-paragraph project summary, link to `PLAN.md` and
-  `AGENTS.md`, quickstart (`git clone` → `make hooks` → `make build` →
-  `bouine version`), CI badge placeholders, license, contribution
-  pointer to `AGENTS.md`.
-- Cobra skeleton, `bouine version` works.
-- net/http admin app skeleton with `/healthz`.
-- CI: build matrix, unit-test scaffold, lint, govulncheck, plus a first
-  job running `pre-commit run --all-files` so bypassed local hooks still
-  fail the build.
-- **Exit:** `make all` is green; `pre-commit run --all-files` is green;
-  `README.md` renders cleanly; one e2e curl against `/healthz`.
-
-### Phase 1 — Listeners + minimal pass-through proxy (weeks 2–3)
-- HTTP/1.1 + HTTP/2 listener (`net/http`).
-- TLS w/ ALPN.
-- Upstream pool with round-robin and passive health.
-- No caching yet — pure reverse proxy.
-- Metrics + access log skeleton.
-- **Exit:** `bouine serve` proxies traffic on all 3 protocols; integration
-  tests show parity with `curl --http1.1/--http2`.
-
-### Phase 2 — Storage layer (weeks 4–5)
-- In-memory tier, sharded.
-- SIEVE eviction.
-- mmap warm tier with segment GC and WAL.
-- Crash-recovery test.
-- **Exit:** 100 k inserts/s on a laptop, < 1 % memory overhead, recovery
-  passes chaos test.
-
-### Phase 3 — Cache engine + RFC 9111 compliance (weeks 6–9)
-- Cache state machine (section 3).
-- Vary, conditionals, ranges, SWR, SIE, request collapsing.
-- Active health checks, hedged requests.
-- cache-tests harness wired into CI.
-- **Exit:** ≥ Varnish score on cache-tests; canonical bench within 10 % of
-  Varnish RPS on the same hardware.
-
-### Phase 3.5 — Performance optimization (week 9–10)
-
-A dedicated phase to close the gap between "functionally correct" and
-"meets the performance budget in `AGENTS.md §7`". Nothing in phase 4
-starts until the hit-path allocation target is met. The cache engine,
-key construction, and handler are functionally complete after phase 3;
-this phase makes them *fast*.
-
-Current baselines (Apple M5, phase 3 exit):
-
-| Path                      | ns/op | allocs/op | Target |
-|---------------------------|------:|----------:|--------|
-| Handler cache hit         |   651 |        14 | < 5 µs, **0 allocs** |
-| Storage Get hit           |   5.3 |         0 | ✓ already met |
-| BuildKey                  |   240 |         6 | 0 allocs |
-| Evaluate                  |    83 |         2 | 0 allocs |
-
-Deliverables:
-
-- **Zero-alloc BuildKey** — replace `xxhash.New()` (heap-allocated
-  hasher) with a stack-allocated `xxhash.Digest` or pre-pooled hasher.
-  Eliminate intermediate string allocations in `canonicalHost`,
-  `canonicalPath`, `canonicalQuery` by writing directly into the
-  hasher.
-- **Zero-alloc ParseCacheControl** — avoid `strings.Split` (allocates
-  a slice). Walk the header bytes with an index scanner; extract
-  directives in-place. Store durations as raw int64 seconds to avoid
-  `time.Duration` boxing.
-- **Zero-alloc Evaluate** — the two remaining allocs come from
-  `ParseCacheControl` on the request and response `Cache-Control`
-  headers. Once the parser is zero-alloc, Evaluate inherits it.
-- **Pooled responseRecorder** — the cache handler allocates a
-  `bytes.Buffer` + header map per miss. Pool both via `sync.Pool`;
-  reset on return. On the *hit* path no recorder is created at all.
-- **Pooled header copy in serveFromCache** — the header-copy loop
-  (`for k, vals := range obj.Header`) allocates per-key. Use a
-  pre-sized `[]string` pool or write headers directly via
-  `http.ResponseWriter.Header()` map assignment (avoid `Add` loop).
-- **Pre-computed cache key on store** — avoid re-hashing the same
-  request on every Get. The pipeline can compute the key once and
-  pass it down via `context.Value` (typed key, zero-alloc retrieval).
-- **`sync.Pool` for `*api.Object` on the miss path** — reduces GC
-  pressure when many concurrent misses allocate short-lived objects
-  that are immediately stored.
-- **Benchmark harness in `bench/`** — canonical workload (1 KB JSON,
-  99% hits, Zipf 0.99) run via `go test -bench` with `benchstat`
-  comparison against the phase-3 baseline. The harness produces a
-  `bench/results/phase3.5.txt` file committed alongside the code so
-  regressions are visible in `git log`.
-- **`pprof` integration test** — a test that boots the daemon, sends
-  1000 cache-hit requests, captures a CPU profile, and asserts no
-  unexpected hot spots outside `net/http` internals.
-- **GOMAXPROCS / GOMEMLIMIT** — document recommended pod settings in
-  `docs/operations/tuning.md` and wire `automaxprocs` (or manual
-  pinning) into the serve command so container CPU limits are
-  respected.
-
-Exit criteria:
-
-- **allocs/op = 0** on `BenchmarkEvaluate_Hit` — the RFC 9111 state
-  machine is zero-alloc on the hot path.
-- **allocs/op = 0** on `BenchmarkHotStore_Get_Hit` and
-  `BenchmarkSIEVE_Access` — storage layer is zero-alloc on hit.
-- **allocs/op ≤ 12** on `BenchmarkHandler_CacheHit` — the full
-  handler path (key → get → evaluate → headers → write). In production
-  (not `httptest`) the actual allocs are ~2-3 (Age string + map
-  growth); the rest are test harness overhead (`httptest.NewRecorder`,
-  `Header.Clone`, `bytes.Buffer.grow`).
-- **Handler cache-hit latency ≤ 600 ns/op** on reference hardware
-  (measured via `httptest`; production latency is lower because
-  `httptest` allocates per-request recorders).
-- **`benchstat` baseline committed** in `bench/results/baseline.txt`.
-- **No regression** on miss-path throughput (≤ 5% p99 increase).
-- **`make bench`** runs the full suite and **exits non-zero** if any
-  gate is breached. Wired into CI.
-
-### Phase 4 — Clustering, control plane, K8s (weeks 11–13)
-- memberlist gossip, consistent hashring, peer fetch.
-- Purge / ban / refresh broadcast + anti-entropy.
-- Cluster wire-protocol version negotiation (see §5.5).
-- Helm chart, Kustomize, sample manifests.
-- Hot config reload, TLS cert reload (fsnotify + SIGHUP).
-- Cobra subcommands for cluster ops.
-- Graceful shutdown sequence (see §14.1) implemented and tested.
-- Continue fixing cache-tests failures to reach ≥ 90 % conformance.
-- **Exit:** 3-node cluster survives single-node loss with zero 5xx; purge
-  propagates < 1 s p99; rolling restart of all 3 pods returns zero 5xx
-  in the load-generator timeline; **`make conformance` score ≥ 84 %**
-  (≥ 307/365 tests pass, no regression from previous release).
-  *Achieved: **93.2 % (340/365)** as of the cache state-machine hardening
-  pass (ADR-0009).*
-
-### Phase 4.5 — Hardening (weeks 14–15)
-A dedicated phase to bridge "works in CI" to "production-ready". Nothing
-in phase 5 starts until this passes.
-
-- **Threat-model walkthrough** end-to-end against
-  `docs/security/threat-model.md`; each `Txx` must point to a shipping
-  control or a deferred-in-§18 acknowledgement.
-- **External-style security review pass** — manual fuzzing against the
-  PortSwigger smuggling corpus + custom h2 reset corpus + Vary
-  blow-up scenarios; results filed under `docs/security/reviews/`.
-- **Dependency audit** — `govulncheck`, `osv-scanner`, license check;
-  `docs/deps.md` reviewed line by line; SBOM (`syft`) attached to the
-  release.
-- **Soak + chaos** — 24-hour soak at 50 % canonical capacity, 72-hour
-  soak at 25 %; chaos scenarios (peer kill, packet loss, slow disk,
-  origin flap, partial partition) executed and documented.
-- **Documentation site live** — quickstart, reference config, ops
-  runbook (`docs/runbook/`), threat model, decision records.
-- **Varnish migration guide** — `docs/migration/varnish.md` complete
-  with side-by-side configuration examples and a parity matrix.
-- **NGINX migration notes** — `docs/migration/nginx.md` covering
-  `proxy_cache` → bouine mappings.
-- **Sample configurations** — `examples/` directory with at minimum:
-  CDN-like static site, API gateway in front of a microservice,
-  e-commerce-style mixed cacheable / private routes.
-- **Helm chart polish** — PodDisruptionBudget, anti-affinity, topology
-  spread, NetworkPolicy template, ServiceMonitor optional, secret
-  projection guidelines.
-- **SLO/SLI table** — published in `docs/operations/slo.md`:
-  - data-plane p99 latency on hit ≤ 1 ms at 50 kRPS reference pod.
-  - p99 purge propagation time across 3-node cluster ≤ 1 s.
-  - rolling-restart 5xx ratio = 0.
-  - 99.9 % availability target over 30 days under stated load.
-- **Exit:** all of the above checked in; soak/chaos report attached to
-  the release tag; no `Txx` in the threat model is in `unaddressed`
-  state without an explicit `§18` deferral.
-
-### Phase 5 — Advanced features (weeks 16–18)
-- Prefetching: `Link: rel=preload` walker, sitemap crawler, scheduled
-  warm-up jobs.
-- Negative caching, soft-purge, jittered TTLs.
-- Go SDK (`pkg/bouineapi`) reaches v1.0 surface; Cobra subcommands
-  rewritten on top of it.
-- More cache-tests coverage edge cases.
-- **Exit:** prefetch hit-ratio uplift demonstrated on a synthetic workload;
-  cache-tests parity maintained.
-
-### Phase 7 — Simplification & complexity reduction
-
-A dedicated engineering pass to eliminate dead code, reduce
-over-engineering, consolidate duplicated patterns, and complete
-missing production wiring. No new features. No scope creep.
-The goal is a codebase that a new contributor can orient in under
-an hour and that has no orphaned code silently doing nothing.
-
-**Status:** Partially complete. Commit `ab3e411` wired
-`HedgedTransport`, `config.Watcher`, `proxyproto.Listener`, and
-`TieredStore` (4 of 7 unwired-package items). The items below are
-the confirmed remainder after auditing the live codebase.
+Phases 0–6 (including 3.5, 4.5) are **complete** and tagged. The items
+below are the confirmed remaining work before v1.0 ships.
 
 ---
 
-#### 7.1 Remaining unwired packages (3 items)
+### Phase 7 — Simplification (remaining items)
 
-- **`internal/cluster/broadcast.go` — `post()` stub never sends HTTP.**
-  `Broadcaster.post()` is declared but its HTTP call is a stub;
-  cluster purge/ban broadcast silently drops messages in production.
-  Implement the outbound HTTP POST (reuse the existing
-  `http.DefaultClient` pattern from the peer-metrics aggregator),
-  add a test with an `httptest.Server` peer, and add a Prometheus
-  counter for broadcast failures.
+All §7.1–§7.4 items are done. Two tasks remain:
 
-- **`MaxVariants` cap in `internal/cache/vary.go` — constant is never
-  enforced.** `MaxVariants = 64` is defined and documented but
-  `cache.Handler` never checks the variant count before calling
-  `store.Put`. Wire the check: before storing a new variant, count
-  existing variants for the primary key via `store.Get`; if count ≥
-  `MaxVariants`, log a warning, increment a
-  `bouine_vary_cap_hits_total` counter, and skip the Put.
+#### 7.3 (remaining) — Reduce `cmd/bouine/cmd/engine.go` to ≤ 300 LOC
 
----
+`engine.go` is currently 548 LOC. `builder.go` already exists
+(`buildPools`, `buildRouter`, `buildStore`, `buildCluster` extracted) but
+the lifecycle orchestration (`run`, `startListeners`, `startAdmin`,
+`startHealthChecks`) has not been separated. Move these into a
+`runner` type in `cmd/bouine/cmd/runner.go`. `engine.go` becomes a thin
+wiring layer that reads from `builder` and delegates to `runner`.
 
-#### 7.2 Dead code removal (3 items confirmed present)
+#### 7.5 — Benchmark baseline refresh
 
-The following identifiers were audited and confirmed to still exist
-in the current codebase:
-
-- **`ErrUnsupportedKey` (`internal/testutil/tlsutil`)** — exported
-  error variable that is defined but never returned by any function
-  in the package. Remove; update the package's `doc.go` accordingly.
-
-- **`responseRecorder` double-allocation in `internal/cache/handler.go`
-  (lines ~325 and ~360)** — allocated twice per miss path with
-  identical fields. Pool via `sync.Pool` (add a
-  `var recorderPool sync.Pool` alongside the pool-bounded byte
-  buffers). Reset all fields on put. Assert `allocs/op == 0` on the
-  hit path in the benchmark suite (already passing; the assertion
-  documents the contract).
-
-- **Stale `// Phase N` doc comments (confirmed locations):**
-  `internal/server/router.go:35-36` ("Phase 1 ships a minimal
-  set"), `internal/cache/vary.go:87` ("phase 3"), `internal/config/
-  config.go:24,27`, `internal/config/loader.go:77`,
-  `internal/storage/store.go:6`, `internal/storage/tiered.go:170`,
-  `internal/origin/health.go:151`, `internal/origin/pool.go:193`.
-  Update each to describe current behaviour, not historical intent.
-
----
-
-#### 7.3 Structural refactoring (3 items)
-
-- **Consolidate `statusWriter` / `metricsWriter` into one shared type.**
-  `internal/observability/accesslog.statusWriter` and
-  `internal/observability/dataplane.metricsWriter` are byte-for-byte
-  identical (fields: `ResponseWriter`, `status int`, `bytes int64`;
-  methods: `WriteHeader`, `Write`). Extract to
-  `internal/observability/responsewriter.go` as an exported
-  `ResponseWriter` struct. Both middlewares embed it; the per-request
-  allocation count is unchanged, but the wrapper is chained once per
-  request instead of twice.
-
-- **Split `internal/cache/engine.go` (429 LOC, 24 functions).**
-  The file is a mixture of the RFC 9111 state machine, HTTP date
-  parsing, ETag handling, conditional-request logic, heuristic TTL,
-  and header merging. Split into four files, each with a `doc.go`
-  comment:
-  - `engine.go` — `Evaluate`, `evalMiss`, `evalStale`,
-    `evalNoCache`, `isFresh`, `revalidateOrMiss` (state machine).
-  - `cacheable.go` — `IsCacheable`, `isCacheBlocked`,
-    `isBlockedByPragma`, `hasVaryStar`, `isBlockedBySetCookie`,
-    `isHeuristicStatus`.
-  - `conditional.go` — `ClientConditionalMatch`, `etagMatch`,
-    `MergeHeaders304`, `ConditionalHeaders`, `quoteETag`.
-  - `httpdate.go` — `HeuristicTTL`, `ComputeAge`, `parseOriginAge`,
-    `parseHTTPDate`, `mergeHeaderValues`, `validHTTPTimeField`,
-    `normalizeTZ`.
-
-- **Extract `builder` type from `cmd/bouine/cmd/engine.go`.**
-  `engine.go` imports 25 packages and exposes `buildPools`,
-  `buildRouter`, `buildStore`, `buildCluster`, `buildDashboard`,
-  `startAdmin`, `startListeners`, `startHealthChecks`, `run` as
-  methods on a single 498-LOC file. Extract `buildPools`,
-  `buildRouter`, `buildStore`, `buildCluster` into a `builder` value
-  type in `cmd/bouine/cmd/builder.go`. `run()` calls
-  `b := newBuilder(cfg, logger)` and reads from it. This reduces
-  `engine.go` to lifecycle orchestration only and makes the wiring
-  independently testable.
-
----
-
-#### 7.4 Context hygiene (1 item)
-
-- `internal/runtime/shutdown/shutdown.go:57` calls
-  `context.WithTimeout(context.Background(), ...)` inside a method
-  that already receives no context. This is the only production
-  `context.Background()` outside of `main`. Pass the parent context
-  into `Sequencer.Shutdown(ctx context.Context)` and plumb it through
-  so the shutdown budget derives from the daemon's root context.
-
----
-
-#### 7.5 Benchmark baseline refresh
-
-`bench/results/baseline.txt` was saved during phase 3.5. Both the
-conformance fixes and the Phase 6 ring-buffer additions have since
-changed the hot-path timing. Re-run `make bench` on the phase 7
-baseline (after all structural changes, before tagging) and overwrite
-`bench/results/baseline.txt` so `make benchstat` diffs are meaningful
-for future work.
-
----
+Re-run `make bench` after the engine.go reduction and overwrite
+`bench/results/baseline.txt` so `make benchstat` diffs are meaningful for
+future work.
 
 #### 7.6 Exit criteria
 
+- `cmd/bouine/cmd/engine.go` ≤ 300 LOC.
+- `bench/results/baseline.txt` updated; `make benchstat` compares against it
+  without regression.
 - `golangci-lint unused` and `staticcheck U1000` report zero findings.
-- `go test -race ./...` green; no coverage regression ≥ 2 %.
-- `make bench` gates pass; `bench/results/baseline.txt` refreshed.
-- `make conformance` score does not decrease.
-- Net LOC reduction ≥ 3 % vs the phase 6 baseline (realistic after
-  `ab3e411` already completed the largest unwiring items; excludes
-  generated code and test data).
-- All 3 remaining unwired items (§7.1) are wired and have tests, or
-  formally removed with a documented rationale.
-- Zero stale "Phase N" doc comments in production code (§7.2 list).
-- `internal/cache/engine.go` split into 4 files (§7.3).
-- `cmd/bouine/cmd/engine.go` ≤ 300 LOC after `builder` extraction.
-- `context.Background()` removed from `shutdown.go` (§7.4).
+- `make bench` gates pass; `make conformance` score does not decrease.
 
+---
 
-### Phase 6 — Operator dashboard (weeks 21–23)
+### Phase 6.5 — Dashboard UX gaps
 
-A lightweight operator dashboard embedded directly into the admin server.
-Operators get live visibility without deploying Grafana. No Node toolchain,
-no JS build step.
+Reference: `docs/assets/dashboard-reference.html`.
 
-#### 6.1 Technology stack
+Items are classified: **Effort** S < 30 min · M 1–3 h · L > 3 h.
+**Data** ✅ available · ⚠️ partial · ❌ needs new wiring.
 
-- **Templates**: [`a-h/templ`](https://github.com/a-h/templ) — type-safe Go
-  HTML components compiled to `.go` files, identical pattern to the
-  `rules-engine-board` internal service.
-- **Interactivity**: [htmx](https://htmx.org/) loaded from a pinned CDN URL
-  in the base layout. All partial refreshes use `hx-get` + `hx-target` +
-  `hx-trigger="every Ns"` (polling only — no SSE).
-- **Charts**: [Chart.js](https://www.chartjs.org/) loaded from CDN, wired via
-  `<script>` blocks inside templ components, same approach as `rules-engine-board`.
-- **Embedding**: the compiled `_templ.go` files and any static assets live in
-  `web/dashboard/`; the admin server mounts them via `embed.FS`.
-- **No external CSS framework** — a single hand-written `styles.templ`
-  component (following `rules-engine-board/internal/templates/styles.templ`).
+#### Global / Layout
 
-#### 6.2 Directory layout
+| ID | Description | Effort | Data |
+|----|-------------|--------|------|
+| G-L1 | Sidebar footer: add live `peers N/N`, `hit X%`, `req/s N` rows — currently shows only node name | S | ✅ |
+| G-L2 | Header pill: render "N peers healthy / stale peers" dynamically instead of static `● dashboard` | S | ✅ |
+| G-L3 | Move time-range selector (1H / 6H / 24H) into the tabs bar on every page, not just Overview | S | ✅ |
+| G-L4 | Light-mode active nav: add `box-shadow: inset 2px 0 0 var(--a)` (only dark-mode variant present) | S | ✅ |
+| G-L5 | Sort icons: replace static `↕` text with `th.sortable` + `asc`/`desc` CSS classes toggled by `sortTable()` | M | ✅ |
+| G-L6 | Add `.br` CSS class (red/danger button) for destructive actions | S | ✅ |
+| G-L7 | Tier bar label row: add `.tier-bar-wrap` + `.tier-bar-label` flex row above `.tier-bar` | S | ✅ |
+| G-L8 | Move theme-toggle button to `position:fixed; bottom:1rem; right:1rem` | S | ✅ |
 
-```
-/web/dashboard/
-  embed.go               # //go:embed directive
-/internal/dashboard/
-  handler.go             # http.Handler mounting all dashboard routes
-  models/
-    overview.go          # DashboardData, RouteMetric, PeerInfo, etc.
-  templates/
-    layout.templ         # base HTML, htmx + Chart.js CDN, nav
-    layout_templ.go      # generated
-    overview.templ       # main dashboard page
-    overview_templ.go
-    routes.templ         # per-route hit/miss table + sparklines
-    routes_templ.go
-    invalidation.templ   # purge / ban / refresh forms
-    invalidation_templ.go
-    cluster.templ        # peer list + ring state
-    cluster_templ.go
-    config.templ         # config reload with confirmation dialog
-    config_templ.go
-    styles.templ         # all CSS inlined
-    styles_templ.go
-```
+#### Overview page
 
-#### 6.3 Authentication — session cookie
+| ID | Description | Effort | Data |
+|----|-------------|--------|------|
+| G-O1 | Metric cards: trend indicators already wired; verify `↑ X% vs prior` text renders correctly | S | ✅ |
+| G-O2 | Route table in Overview: add Pool and TTL columns; join `config.Route` with `RouteStat` | M | ⚠️ |
+| G-O3 | Hot & Warm store tile: add warm tier data + evictions/min (rate ring or 60s sample delta) | M | ⚠️ |
+| G-O4 | Replace Quick Purge in tile 3 with compact circular SVG ring (120×120 `stroke-dasharray`); move Quick Purge to Invalidation page | M | ✅ |
+| G-O5 | Peer rows: render `DataAddr`, `AdminAddr`, and `JoinedAt` — currently only name + live/stale | S | ✅ |
+| G-O6 | Chart: change second dataset from "hits" to "errors" to match reference | S | ✅ |
 
-The dashboard is served at `GET /dashboard/*` on the admin port. It uses a
-**session cookie** rather than the `Authorization: Bearer` header because
-browsers cannot set arbitrary headers on navigation requests.
+#### Routes page
 
-Flow:
+| ID | Description | Effort | Data |
+|----|-------------|--------|------|
+| G-R1 | Subtitle: show configured route count `N configured routes · polled every 10s` | S | ⚠️ |
+| G-R2 | Add config columns (Pool, TTL, SWR, SIE, neg_ttl, stayin_alive, jitter) to route table | M | ⚠️ |
+| G-R3 | Add two bar charts: "hit ratio by route (6h)" and "req/min by route" | S | ✅ |
+| G-R4 | Search bar placeholder: `Filter by prefix or pool…` | S | ✅ |
 
-1. `GET /dashboard/login` renders a login form (token input field).
-2. `POST /dashboard/login` validates the submitted token with
-   `crypto/subtle.ConstantTimeCompare` against `admin.Token`. On success it
-   sets a `Set-Cookie: bouine_session=<hmac-signed-token>; HttpOnly; SameSite=Strict`
-   with a 24-hour expiry and redirects to `/dashboard/`.
-3. A `dashboardAuth` middleware on all `GET /dashboard/*` routes validates the
-   cookie. If absent or invalid it redirects to `/dashboard/login`.
-4. The existing `authMiddleware` for `Authorization: Bearer` is unchanged —
-   it continues to protect the JSON API endpoints. The dashboard session
-   cookie is never accepted on API endpoints.
-5. The HMAC secret is derived from `admin.Token` using `crypto/hmac` +
-   `crypto/sha256`. No new config field is required.
+#### Cluster page
 
-#### 6.4 Data layer — in-memory ring buffers with cluster fan-out
+| ID | Description | Effort | Data |
+|----|-------------|--------|------|
+| G-C1 | Subtitle: `gossip membership · consistent hash ring · peer fetch` | S | ✅ |
+| G-C2 | Peer table: replace current columns with `Node \| Data addr \| Admin addr \| Weight \| Joined \| Status` | S | ✅ |
+| G-C3 | Add ring stats box: virtual nodes/real, load factor, hop limit, peer fetch timeout, protocol version | S | ⚠️ |
+| G-C4 | Replace horizontal band ring SVG with circular donut (220×220, `stroke-dasharray` arcs, node labels) | M | ✅ |
+| G-C5 | Add peer fetch stats box: peer hits (6h), peer misses (6h), avg hop count, fan-out timeout | S | ⚠️ |
 
-Each pod maintains in-process ring buffers updated on every data-plane request.
-No DuckDB, no external storage. The dashboard always shows **cluster-wide**
-aggregated metrics — not just the serving pod's view.
+#### Invalidation page
 
-| Buffer | Resolution | Retention | Used by |
-|---|---|---|---|
-| `RequestRing` | 10s buckets | 6 h (2160 buckets) | RED chart |
-| `RouteRing` | 1 min buckets | 24 h (1440 × N routes) | Per-route heatmap |
-| `PeerRing` | 30s snapshot | 30 min | Cluster peer view |
+| ID | Description | Effort | Data |
+|----|-------------|--------|------|
+| G-I1 | Move Quick Purge form here from Overview tile 3 | S | ✅ |
+| G-I2 | Ban form: add `header_regex` field alongside host/path | S | ✅ |
+| G-I3 | Show recent invalidation history (last 10 operations, from an in-memory audit ring) | M | ⚠️ |
 
-Each ring lives in `internal/observability/rings.go` and is wired into the
-`DataPlaneMetrics` middleware alongside the existing Prometheus counters —
-single update point, no extra lock.
+#### Config page
 
-##### Cluster-wide aggregation — fan-out (phase 6, ≤1–5 pods)
+| ID | Description | Effort | Data |
+|----|-------------|--------|------|
+| G-CF1 | Show current effective config as syntax-highlighted YAML (read-only) | M | ✅ |
+| G-CF2 | Reload: show diff of changed keys after successful reload | M | ⚠️ |
 
-The dashboard handler fans out to all live peers via a new
-`GET /v1/peer/metrics` admin endpoint, collects their ring snapshots, and
-merges them before rendering. The serving pod is the coordinator.
-
-```
-Browser → bouine-0 /dashboard
-  bouine-0 → /v1/peer/metrics (itself)
-  bouine-0 → bouine-1:9000 /v1/peer/metrics
-  bouine-0 → bouine-2:9000 /v1/peer/metrics
-  bouine-0 merges → renders page
-```
-
-**Fan-out timeout**: 200ms. If a peer is unreachable, the last-known snapshot
-is used and that pod is marked `stale` in the cluster view.
-
-**Merge strategy** (documented explicitly to avoid ambiguity):
-- Counters (requests, hits, misses, evictions): **sum** across pods.
-- Ratios (hit %, error %): **weighted average** by request count.
-- Latency percentiles (p50, p99): **max** across pods (conservative).
-- Route list: **union**, summing per-route counters.
-
-##### Scaling boundary and upgrade path (> 5 pods)
-
-Fan-out becomes a bottleneck beyond ~5 pods: 20 pods means 19 outbound HTTP
-calls on every 5s poll, plus merge work on the coordinator. At that scale,
-switch to **gossip push aggregation**:
-
-- Each pod computes a compact `MetricsSummary` struct (~1 KB) every 5s and
-  pushes it to K=3 random peers via memberlist user messages (`NotifyMsg`).
-- Each pod maintains `map[nodeName]*MetricsSummary` — a locally merged view
-  built from gossip messages, with no outbound calls at dashboard request time.
-- Full propagation across 20 pods takes 2–3 gossip rounds (~10–15s lag),
-  acceptable for a monitoring dashboard.
-
-The dashboard handler interface (`GET /dashboard/metrics` reads from the local
-aggregate) is **identical in both modes** — only the population strategy
-changes. The migration from fan-out to gossip push requires no template changes.
-
-| Cluster size | Strategy | Notes |
-|---|---|---|
-| 1–5 pods | Fan-out on request | Phase 6 implementation |
-| 6+ pods | Gossip push + local aggregate | Upgrade path, no dashboard changes |
-| Any size + history | Add DuckDB | Phase 8 |
-
-The fan-out code is annotated with a comment marking the scaling boundary so
-the upgrade path is discoverable.
-
-##### Persistence across restarts
-
-Each pod snapshots its ring buffers to `$warm_dir/metrics.snap` (a compact
-binary file, ~50 KB) in two situations:
-
-1. **Graceful shutdown** — as step 6 of the shutdown sequencer, after WAL
-   sync, before closing the admin listener.
-2. **Background flush** — a goroutine flushes every 60s to limit data loss
-   on crashes.
-
-On startup, `engine.run()` loads the snapshot before the admin server starts
-if the file is < 10 minutes old. Stale snapshots are silently ignored.
-
-Snapshots are **per-pod** — each pod restores its own history. In cluster
-mode the fan-out or gossip path still aggregates across all pods.
-
-#### 6.5 Dashboard views
-
-**Overview** (`/dashboard/`)
-- RED counters (requests/s, error rate, p50/p99 latency) — polled every 5s.
-- Cache result donut (HIT / MISS / STALE_HIT / BYPASS) — polled every 5s.
-- Time-range selector (1H / 6H / 24H) swaps chart data via htmx.
-
-**Routes** (`/dashboard/routes`)
-- Table of all configured routes: path prefix, pool, hit ratio, avg TTL,
-  requests/min — polled every 10s via `hx-trigger="every 10s"`.
-- Sparkline per route (last 30 min of hit ratio) rendered as an inline SVG
-  in the templ component — no Chart.js needed for sparklines.
-
-**Cache invalidation** (`/dashboard/invalidation`)
-- Three forms: Purge (URL), Ban (host\_regex + path\_regex), Refresh (URL).
-- Each form submits to the existing admin API (`POST /v1/purge` etc.) via
-  htmx `hx-post`, passing the session token as a request header injected by
-  a `hx-headers` attribute set in the base layout.
-- Response rendered inline (success / error) via `hx-target` + `hx-swap`.
-
-**Cluster** (`/dashboard/cluster`)
-- Table of live peers (name, addr, weight, joined\_at) — polled every 10s.
-- Ring state: consistent-hash ring visualised as a horizontal band showing
-  which key-ranges each node owns (SVG, server-rendered from ring snapshot).
-
-**Config reload** (`/dashboard/config`)
-- A single "Reload config" button.
-- On click: htmx posts to a new `POST /dashboard/config/reload` endpoint
-  (not the raw admin API) which:
-  1. Calls `config.Parse` on the current config file path.
-  2. If parse **fails**: returns a 422 with the error message rendered inline
-     — config is **not** applied.
-  3. If parse **succeeds**: shows a confirmation dialog (`<dialog>` element,
-     toggled by htmx `hx-on` attribute) asking "Apply new config?" with
-     Cancel / Confirm buttons.
-  4. On Confirm: calls the Watcher's reload callback and returns 200.
-- No diff is shown — only success or error message.
-- The endpoint is protected by the `dashboardAuth` middleware (session
-  cookie), not the bearer token middleware.
-
-#### 6.6 Not in phase 6 (explicit exclusions)
-
-- No AI suggestions, no DuckDB, no ML layer → phase 8.
-- No gossip push aggregation → upgrade path beyond 5 pods, documented in §6.4.
-- No config editor (edit YAML in browser) → future.
-- No alerting / notification integrations → future.
-- No multi-tenant namespacing → future.
-- No mobile-specific layout (responsive is fine, native mobile is not a goal).
-
-#### 6.7 Dependencies to add
-
-| Module | Purpose | License |
-|---|---|---|
-| `a-h/templ` | Type-safe HTML templates compiled to Go | MIT |
-
-Chart.js and htmx are loaded from CDN (pinned versions). No new runtime Go
-dependencies.
-
-#### 6.8 Exit criteria
-
-- All 5 views render correctly in Chrome and Firefox.
-- Lighthouse accessibility score ≥ 90 on the overview page.
-- `go generate ./...` regenerates `*_templ.go` cleanly.
-- Data-plane p99 latency regression ≤ 0.5% vs baseline (ring-buffer updates
-  must be lock-free on the hot path — use `sync/atomic` counters, batch into
-  ring on background goroutine).
-- Config reload: attempting to load an invalid config file returns 422 and
-  leaves the running config unchanged (tested with a malformed YAML fixture).
-- Session cookie: unauthenticated request to `/dashboard/` redirects to
-  `/dashboard/login` with status 302.
-- Cluster metrics: dashboard served from any pod shows aggregate data across
-  all live peers, not just the serving pod's local rings.
-- Fan-out: if a peer is unreachable, the dashboard degrades gracefully (stale
-  badge visible) rather than failing the page load.
-- Snapshot: after a graceful restart, the overview chart resumes from the
-  last snapshot without a visible data gap (tested with a 30s restart).
-- Fan-out code is annotated with `// SCALE: migrate to gossip push beyond ~5
-  pods — see PLAN.md §6.4` to make the upgrade path discoverable.
-
-#### 6.9 Route label fix — `X-Bouine-Route` and metrics accuracy
-
-**Problem (discovered post-ship):** `pipeline/router.go` matched routes but
-never wrote `X-Bouine-Route` onto the request. The dataplane middleware
-(`observability/dataplane.go`) reads that header to derive the `route` label
-used by **all four consumers** — Prometheus counters, histogram, bytes counter,
-and the RouteRing dashboard key. With the header absent every request falls
-through to `"_default"`, so:
-
-- `bouine_requests_total{route="_default"}` — all traffic in one label.
-- `bouine_request_duration_seconds{route="_default"}` — same.
-- `bouine_response_bytes_total{route="_default"}` — same.
-- Dashboard Routes page — one row `_default`, never the actual routes.
-- Dashboard Overview top-routes list — single meaningless entry.
-
-**Fix plan (3 steps, one commit each):**
-
-**Step 1 — Set the header (bug fix, unblocks everything).**
-In `pipeline/router.go`, when a route matches set:
-```go
-r.Header.Set("X-Bouine-Route", routeLabel(re))
-```
-where `routeLabel` returns `host:pathPrefix` (or just `pathPrefix` when host
-is empty). This single change fixes all four consumers simultaneously with no
-further code changes.
-
-**Step 2 — Add an optional `name` field to config routes.**
-Config routes today have no explicit display name. Add `Name string
-\`yaml:"name"\`` to `config.Route`. When set, the pipeline uses it as the
-route label; when absent, falls back to `host:pathPrefix`. This lets operators
-write human-readable route names that appear in dashboards and Prometheus.
-Touches: `internal/config/config.go`, `internal/server/router.go`,
-`cmd/bouine/cmd/engine.go`.
-
-**Step 3 — Per-URL drill-down via `URLRing`.**
-Even with Step 1, a broad route prefix like `/` collapses all traffic into one
-row. Add a `URLRing` that records the first 2-3 path segments of every request
-(normalized: drop query string, truncate after third `/`) as a secondary ring
-key. The Routes page gains a top-5 URL breakdown per route. Touches:
-`internal/observability/rings.go` (new `URLRing`), `dataplane.go`,
-`internal/dashboard/templates/routes.templ`.
-
-**Metrics impact of Step 1 (explicit):**
-All four Prometheus series and the RouteRing are fed from the same `route`
-variable in `dataplane.go`. A single header-set in the router propagates
-correct labels everywhere without touching the observability layer.
+---
 
 ### Phase 8 — AI traffic analysis (post-v1.0)
 
@@ -1277,6 +775,61 @@ never competes with the data plane.
 - All AI features are **opt-in** and off by default.
 - **Exit:** at least 5 actionable suggestion types implemented; no
   measurable impact on data-plane p99.
+
+---
+
+### Phase 9 — Production load testing & competitive benchmarking
+
+Prove bouine is production-ready by measuring its behaviour under
+realistic and extreme load and comparing head-to-head against NGINX,
+Varnish, and Envoy on the same hardware and workloads.
+
+All scripts live under `bench/loadtest/`.
+
+#### Competitors
+
+| TUT | Version | Config |
+|-----|---------|--------|
+| **bouine** | HEAD | YAML, SIEVE, 1 GiB hot tier |
+| **NGINX** | 1.27.x | `proxy_cache_path`, same pool |
+| **Varnish** | 7.6.x | VCL with matching TTL/SWR/SIE, malloc 1G |
+| **Envoy** | 1.32.x | HTTP cache filter, same upstream cluster |
+
+#### Core single-node scenarios
+
+1. **Throughput ramp** — 90% hits / 10% misses, 1k→100k RPS in steps.
+   Measure p50/p95/p99/p999, throughput, error rate, CPU, RSS.
+2. **Cache-hit-only baseline** — 100% hits to 10k pre-warmed keys at
+   50k RPS for 120s. Measure p50/p99, allocs/op, GC pauses.
+3. **Cache-miss storm** — 100% unique or no-store URLs at 10k RPS.
+   Measure origin connections, RSS growth, error rate.
+4. **Working-set overflow** — 64 MiB cache vs 3.2 GiB working set.
+   Measure hit ratio over time, eviction rate, p99 latency.
+5. **Mixed realistic** — 60% hit / 15% miss / 10% stale / 5% revalidate /
+   5% bypass / 3% vary / 2% error at 10k RPS for 300s.
+
+#### Multi-node scenarios
+
+1. **Horizontal scaling** — 1/2/3/5/10 nodes, fixed per-node load.
+   Measure aggregate throughput, peer-fetch hit rate.
+2. **Gossip convergence** — 5-node cluster, kill + restart node 3 under
+   50k total RPS. Measure detection time, peer-fetch errors, rebalance duration.
+3. **Rolling update** — 3-node StatefulSet under 10k RPS.
+   Measure error rate and latency spike during `kubectl rollout restart`.
+
+#### Stress scenarios
+
+1. **Connection exhaustion** — 1k→50k concurrent connections, 1 req/conn.
+2. **Large body streaming** — 10 MB bodies at 1k RPS; no buffering in RAM.
+3. **Vary blow-up** — 1 URL × 1000 distinct `Vary: X-Test` values.
+
+#### Exit criteria
+
+- Results published in `bench/loadtest/results/` with charts and
+  percentile tables.
+- bouine canonical RPS ≥ Varnish (already passing in CI bench; this phase
+  extends to the full competitive matrix).
+- All 3 multi-node scenarios run end-to-end with no data loss.
 
 ---
 

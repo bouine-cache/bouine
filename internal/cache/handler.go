@@ -20,6 +20,7 @@ package cache
 import (
 	"bytes"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,6 +28,12 @@ import (
 	"github.com/thylong/bouine/internal/pipeline/collapse"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
+)
+
+// Pre-allocated header values to avoid per-request slice literals.
+var (
+	headerHIT  = []string{"HIT"}
+	headerMISS = []string{"MISS"}
 )
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -104,14 +111,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *api.Object) {
-	for k, vals := range obj.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
+	dst := w.Header()
+	maps.Copy(dst, obj.Header)
 	age := ComputeAge(obj, time.Now())
-	w.Header().Set("Age", strconv.Itoa(int(age.Seconds())))
-	w.Header().Set("X-Cache", "HIT")
+	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
+	dst["X-Cache"] = headerHIT
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(obj.Body)
@@ -162,12 +166,11 @@ func (h *Handler) writeAndMaybeStore(
 	key api.Key,
 	res collapse.Result,
 ) {
+	dst := w.Header()
 	for k, vals := range res.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
+		dst[k] = vals
 	}
-	w.Header().Set("X-Cache", "MISS")
+	dst["X-Cache"] = headerMISS
 	w.WriteHeader(res.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(res.Body)

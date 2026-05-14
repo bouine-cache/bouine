@@ -63,7 +63,7 @@ it does not belong.
 
 These rules override autonomy. Break them and the change must be reverted.
 
-1. **Never violate the layer boundaries** defined in `PLAN.md §2`. A package
+1. **Never violate the layer boundaries** defined in `docs/architecture.md §2`. A package
    may only depend on packages in lower layers, through declared interfaces.
    A reverse import (e.g. `storage` importing `cache`) is a build error.
 2. **One HTTP stack only: `net/http`.** The admin
@@ -97,7 +97,7 @@ These rules override autonomy. Break them and the change must be reverted.
 ## 3. Layered Architecture Rules
 
 Layers are numbered L1 (closest to the wire) through L8 (AI / dashboard).
-See `PLAN.md §2`.
+See `docs/architecture.md §2`.
 
 ### 3.1 Allowed dependencies
 
@@ -249,7 +249,7 @@ L1 → L7, /pkg/api
   `http-tests/cache-tests` harness against a real `bouine` instance. CI
   publishes the score as a JSON badge and blocks regressions.
 - **Integration**: `test/integration` boots a 3-node bouine cluster + an
-  origin via `docker compose`. Scenarios listed in `PLAN.md §12.3`.
+  origin via `docker compose`. Scenarios listed in `docs/architecture.md §12`.
 - **Chaos**: kill a peer, drop packets, slow the disk. Lives under
   `test/chaos`, runs nightly, not on every PR.
 - **Benchmarks**: `bench/` runs on a pinned self-hosted runner with CPU
@@ -344,7 +344,7 @@ Observability is a product feature, not an afterthought.
   emitted by `bouine config schema` is the contract.
 - Config changes that break compatibility require a major version bump and
   a migration guide.
-- VCL shim supports the subset defined in `PLAN.md §17.4`. Unsupported
+- VCL shim supports the subset defined in `docs/architecture.md §16.4`. Unsupported
   constructs are reported, never silently ignored.
 - The Go SDK (`pkg/bouineapi`) follows semver. Wire types in `pkg/api` are
   additive — add fields, never remove or rename in the same major.
@@ -635,7 +635,7 @@ substitutes.
 - **Anti-entropy** — periodic reconciliation of cluster state to repair
   drift.
 - **VCL shim** — subset translator from Varnish Configuration Language to
-  the bouine config tree (see `PLAN.md §17.4`).
+  the bouine config tree (see `docs/architecture.md §16.4`).
 - **Hit-path budget** — performance envelope for the hit path
   (see §7).
 

@@ -11,32 +11,37 @@ import (
 type Decision int
 
 const (
-	// Hit — serve from cache, no origin contact.
+	// Hit means serve from cache, no origin contact.
 	Hit Decision = iota
-	// Miss — not in cache; fetch from origin.
+	// Miss means not in cache; fetch from origin.
 	Miss
-	// Revalidate — stale but revalidation possible (conditional req).
+	// Revalidate means stale; conditional fetch possible.
 	Revalidate
-	// StaleHit — serve stale (SWR/SIE window).
+	// StaleHit means serve stale (SWR/SIE window).
 	StaleHit
-	// Bypass — request or response directives forbid caching.
+	// Bypass means directives forbid caching.
 	Bypass
 )
 
 // Disposition describes what the caller should do after the Decision.
 type Disposition struct {
 	Decision Decision
-	Object   *api.Object // non-nil on Hit, StaleHit, Revalidate.
+	Object   *api.Object
 }
 
-// Evaluate runs the RFC 9111 state machine. It is pure — no I/O, no
-// side effects.
+// Evaluate runs the RFC 9111 state machine.
 func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return Disposition{Decision: Bypass}
 	}
 
 	reqCC := ParseCacheControl(r.Header.Get("Cache-Control"))
+
+	// Pragma: no-cache is equivalent to Cache-Control: no-cache
+	// for HTTP/1.0 compatibility (RFC 9111 §5.4).
+	if !reqCC.NoCache && r.Header.Get("Pragma") == "no-cache" {
+		reqCC.NoCache = true
+	}
 
 	if reqCC.NoStore {
 		return Disposition{Decision: Bypass}
@@ -110,31 +115,25 @@ func revalidateOrMiss(obj *api.Object) Disposition {
 }
 
 // IsCacheable determines whether an origin response should be stored.
-// Per RFC 9111 §3 and PLAN.md §3.4.
 func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 	respCC := ParseCacheControl(respHeader.Get("Cache-Control"))
 
-	// no-store → never cache.
 	if respCC.NoStore {
 		return false
 	}
-	// private → not cacheable by shared cache.
 	if respCC.Private {
 		return false
 	}
-	// Set-Cookie → not cacheable by default (PLAN.md §3.4).
 	if respHeader.Get("Set-Cookie") != "" {
 		return false
 	}
-	// Authorization + no public/must-revalidate/s-maxage → not
-	// cacheable (RFC 9111 §3.5).
 	if reqHeader.Get("Authorization") != "" {
 		if !respCC.Public && !respCC.MustRevalidate && !respCC.SMaxAgeSet {
 			return false
 		}
 	}
 
-	// Must have explicit freshness or heuristic freshness.
+	// Explicit freshness.
 	if respCC.MaxAgeSet || respCC.SMaxAgeSet {
 		return true
 	}
@@ -142,18 +141,71 @@ func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 		return true
 	}
 
-	// Heuristic freshness for selected status codes (RFC 9111 §4.2.2).
-	switch status {
-	case 200, 203, 204, 300, 301, 308, 404, 405, 410, 414, 501:
+	// Heuristic freshness: only if the response has Last-Modified
+	// AND the status code is heuristically cacheable (RFC 9111 §4.2.2).
+	if respHeader.Get("Last-Modified") != "" && isHeuristicStatus(status) {
 		return true
 	}
 
 	return false
 }
 
+func isHeuristicStatus(status int) bool {
+	switch status {
+	case 200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501:
+		return true
+	}
+	return false
+}
+
+// HeuristicTTL computes a heuristic freshness lifetime from
+// Last-Modified per RFC 9111 §4.2.2. Returns 0 if not applicable.
+// The standard heuristic is 10% of the age of the response since
+// Last-Modified.
+func HeuristicTTL(header http.Header, now time.Time) time.Duration {
+	lm := header.Get("Last-Modified")
+	if lm == "" {
+		return 0
+	}
+	lmTime, err := time.Parse(http.TimeFormat, lm)
+	if err != nil {
+		return 0
+	}
+	age := now.Sub(lmTime)
+	if age <= 0 {
+		return 0
+	}
+	return age / 10
+}
+
 // ComputeAge calculates the Age header value per RFC 9111 §4.2.3.
 func ComputeAge(obj *api.Object, now time.Time) time.Duration {
-	return now.Sub(obj.StoredAt)
+	age := now.Sub(obj.StoredAt)
+	// Also account for any Age header from the origin (upstream cache).
+	if existingAge := obj.Header.Get("Age"); existingAge != "" {
+		if secs, ok := parseIntNoAlloc(existingAge); ok {
+			age += time.Duration(secs) * time.Second
+		}
+	}
+	return age
+}
+
+// MergeHeaders304 merges headers from a 304 response into the stored
+// object per RFC 9111 §3.2. The 304 response's headers update the
+// stored response, except for content-specific headers.
+func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
+	// Headers that MUST NOT be updated from a 304 (content-specific).
+	skip := map[string]bool{
+		"Content-Length":    true,
+		"Content-Encoding":  true,
+		"Transfer-Encoding": true,
+	}
+	for k, vals := range resp304Header {
+		if skip[k] {
+			continue
+		}
+		stored.Header[k] = vals
+	}
 }
 
 // ConditionalHeaders sets If-None-Match and If-Modified-Since on a

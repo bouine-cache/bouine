@@ -174,26 +174,8 @@ func revalidateOrMiss(obj *api.Object) Disposition {
 func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 	respCC := ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
 
-	if respCC.NoStore {
+	if isCacheBlocked(respCC, reqHeader, respHeader) {
 		return false
-	}
-	if respCC.Private {
-		return false
-	}
-	// Vary: * means every request is unique — never store.
-	// Check for * anywhere in the Vary field list across all Vary headers.
-	for _, v := range respHeader.Values("Vary") {
-		if varyContainsStar(v) {
-			return false
-		}
-	}
-	if respHeader.Get("Set-Cookie") != "" {
-		return false
-	}
-	if reqHeader.Get("Authorization") != "" {
-		if !respCC.Public && !respCC.MustRevalidate && !respCC.SMaxAgeSet {
-			return false
-		}
 	}
 
 	// Explicit freshness.
@@ -211,6 +193,51 @@ func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 	}
 
 	return false
+}
+
+func isCacheBlocked(respCC Directives, reqHeader, respHeader http.Header) bool {
+	if respCC.NoStore || respCC.Private {
+		return true
+	}
+	if isBlockedByPragma(respCC, respHeader) {
+		return true
+	}
+	if hasVaryStar(respHeader) {
+		return true
+	}
+	if isBlockedBySetCookie(respCC, respHeader) {
+		return true
+	}
+	if reqHeader.Get("Authorization") != "" {
+		if !respCC.Public && !respCC.MustRevalidate && !respCC.SMaxAgeSet {
+			return true
+		}
+	}
+	return false
+}
+
+func isBlockedByPragma(respCC Directives, h http.Header) bool {
+	return h.Get("Pragma") == "no-cache" &&
+		!respCC.MaxAgeSet && !respCC.SMaxAgeSet &&
+		h.Get("Expires") == ""
+}
+
+func hasVaryStar(h http.Header) bool {
+	for _, v := range h.Values("Vary") {
+		if varyContainsStar(v) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBlockedBySetCookie(respCC Directives, h http.Header) bool {
+	if h.Get("Set-Cookie") == "" {
+		return false
+	}
+	// A shared cache MAY store responses with Set-Cookie if the
+	// response has explicit freshness (max-age or s-maxage).
+	return !respCC.MaxAgeSet && !respCC.SMaxAgeSet
 }
 
 func isHeuristicStatus(status int) bool {
@@ -312,16 +339,21 @@ func ConditionalHeaders(req *http.Request, obj *api.Object) {
 // parseHTTPDate tries multiple date formats used in HTTP headers
 // (RFC 1123, RFC 850, ANSI C asctime). Also handles case-insensitive
 // timezone (e.g., "gmt" → "GMT"). Returns zero time on failure.
-// Rejects dates with non-standard time fields (e.g., 1-digit hour).
+// Rejects dates with non-standard time fields (e.g., 1-digit hour)
+// or multiple consecutive spaces (malformed).
 func parseHTTPDate(s string) time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}
 	}
-	// Reject dates with non-standard time field widths. A valid
-	// RFC 1123 time portion is "HH:MM:SS" (8 chars). If the time
-	// portion has a 1-digit hour (like "0:00:00"), reject it.
 	if !validHTTPTimeField(s) {
+		return time.Time{}
+	}
+	// Reject RFC 1123/850-style dates with multiple consecutive spaces
+	// (malformed). ANSI C asctime has a legitimate "  " before
+	// single-digit days so only reject when a comma is present (RFC
+	// 1123/850 indicator).
+	if strings.Contains(s, ",") && strings.Contains(s, "  ") {
 		return time.Time{}
 	}
 	s = normalizeTZ(s)

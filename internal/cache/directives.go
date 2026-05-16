@@ -146,7 +146,12 @@ func applyDurDirective(d *Directives, key, val string) {
 }
 
 // parseDur parses seconds from a string without allocating.
+// Only sets the value if not already set (first directive wins for
+// duplicate directives per RFC 9111 §5.2).
 func parseDur(dur *time.Duration, set *bool, val string) {
+	if *set {
+		return // first value wins
+	}
 	n, ok := parseIntNoAlloc(val)
 	if ok {
 		*dur = time.Duration(n) * time.Second

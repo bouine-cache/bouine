@@ -20,6 +20,7 @@ import (
 
 	"github.com/thylong/bouine/internal/buildinfo"
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 // Config controls the admin server.
@@ -37,6 +38,9 @@ type Config struct {
 	// Metrics is the Prometheus registry. If non-nil, /metrics is
 	// mounted.
 	Metrics *observability.Metrics
+	// PeersFn, if non-nil, returns the list of live cluster peers for
+	// GET /v1/cluster/peers.
+	PeersFn func() []api.PeerInfo
 }
 
 // Server is the admin HTTP server with lifecycle methods matching the
@@ -80,6 +84,9 @@ func New(cfg Config) *Server {
 	if cfg.Metrics != nil {
 		mux.Handle("GET /metrics", cfg.Metrics.Handler())
 	}
+	if cfg.PeersFn != nil {
+		mux.HandleFunc("GET /v1/cluster/peers", s.clusterPeers)
+	}
 
 	return s
 }
@@ -109,6 +116,11 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 // Unstable.
 func (s *Server) Handler() http.Handler {
 	return s.inner.Handler
+}
+
+func (s *Server) clusterPeers(w http.ResponseWriter, _ *http.Request) {
+	peers := s.cfg.PeersFn()
+	writeJSON(w, http.StatusOK, peers)
 }
 
 // Serve blocks until the server returns or ctx is cancelled. On

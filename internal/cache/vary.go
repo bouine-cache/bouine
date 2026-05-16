@@ -2,6 +2,7 @@ package cache
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,18 +22,26 @@ type VaryConfig struct {
 // Used by the handler to enforce the Vary blow-up limit (PLAN.md §3).
 const MaxVariants = 64
 
+// varyContainsStar reports whether the Vary header value contains "*"
+// as one of its field names. "Vary: *, foo" and "Vary: foo, *" both
+// mean "every request is unique" (RFC 9110 §12.5.5).
+func varyContainsStar(vary string) bool {
+	for _, f := range strings.Split(vary, ",") {
+		if strings.TrimSpace(f) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
 // VariantKey computes a composite storage key from the primary key and
-// the Vary header. If the response has no Vary (or Vary: *), only the
-// primary key is used.
+// the Vary header. If the response has no Vary (or Vary contains *),
+// only the primary key is used.
 func VariantKey(primary api.Key, vary string, reqHeader http.Header) api.Key {
 	if vary == "" {
 		return primary
 	}
-	if vary == "*" {
-		// Vary: * means every request is unique — use a different key
-		// each time by hashing the full request headers. In practice
-		// this makes the object uncacheable by the Evaluate logic, but
-		// we handle it here defensively.
+	if varyContainsStar(vary) {
 		h := xxhash.New()
 		_, _ = h.WriteString("*")
 		for k, vals := range reqHeader {
@@ -46,14 +55,35 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header) api.Key {
 
 	h := xxhash.New()
 	fields := strings.Split(strings.ToLower(vary), ",")
+	for i, f := range fields {
+		fields[i] = strings.TrimSpace(f)
+	}
+	sort.Strings(fields)
 	for _, f := range fields {
-		f = strings.TrimSpace(f)
 		_, _ = h.WriteString(f)
 		_, _ = h.WriteString("=")
-		_, _ = h.WriteString(reqHeader.Get(f))
+		// Normalize header value: trim, lowercase, sort comma-separated
+		// tokens. This handles Accept-Language: "en, fr" vs "fr, en".
+		val := normalizeHeaderValue(reqHeader.Get(f))
+		_, _ = h.WriteString(val)
 		_, _ = h.WriteString(";")
 	}
 	return api.Key(uint64(primary) ^ h.Sum64())
+}
+
+// normalizeHeaderValue lowercases and sorts comma-separated tokens in
+// a header value so "en, FR" and "fr, en" produce the same key.
+func normalizeHeaderValue(v string) string {
+	v = strings.TrimSpace(v)
+	if !strings.Contains(v, ",") {
+		return strings.ToLower(v)
+	}
+	parts := strings.Split(v, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(strings.ToLower(p))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // ServeRange handles a Range request against a fully cached body. It

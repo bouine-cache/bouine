@@ -154,20 +154,24 @@ func parseDur(dur *time.Duration, set *bool, val string) {
 }
 
 // parseIntNoAlloc parses a non-negative decimal integer without
-// allocating (avoids strconv.ParseInt which may allocate error).
+// allocating. Tolerant: stops at the first non-digit character so
+// "100a" → 100 and "3600.0" → 3600 (RFC 9111 requires integers but
+// real-world servers send trailing garbage and decimals).
 func parseIntNoAlloc(s string) (int64, bool) {
 	if len(s) == 0 {
 		return 0, false
 	}
 	var n int64
+	found := false
 	for i := range len(s) {
 		c := s[i]
 		if c < '0' || c > '9' {
-			return 0, false
+			break
 		}
 		n = n*10 + int64(c-'0')
+		found = true
 	}
-	return n, true
+	return n, found
 }
 
 // eqFold is a case-insensitive ASCII comparison that avoids allocating
@@ -201,12 +205,14 @@ func FreshnessLifetime(respCC Directives, header func(string) string) (time.Dura
 		return respCC.MaxAge, true
 	}
 	if exp := header("Expires"); exp != "" {
-		expTime, err := time.Parse(time.RFC1123, exp)
-		if err != nil {
-			return 0, false
+		expTime := parseHTTPDate(exp)
+		if expTime.IsZero() {
+			// Invalid Expires → treat as already expired (RFC 9111 §5.3).
+			return 0, true
 		}
-		dateTime, err := time.Parse(time.RFC1123, header("Date"))
-		if err != nil {
+		dateStr := header("Date")
+		dateTime := parseHTTPDate(dateStr)
+		if dateTime.IsZero() {
 			return 0, false
 		}
 		return expTime.Sub(dateTime), true

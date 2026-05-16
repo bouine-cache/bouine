@@ -264,7 +264,7 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object 
 	// Parse all Cache-Control headers (may be multiple).
 	ccHeader := mergeHeaderValues(res.Header, "Cache-Control")
 	respCC := ParseCacheControl(ccHeader)
-	ttl, explicit := FreshnessLifetime(respCC, res.Header.Get)
+	ttl, explicit := FreshnessLifetimeH(respCC, res.Header)
 
 	// Heuristic freshness: if no explicit TTL, use 10% of age since
 	// Last-Modified (RFC 9111 §4.2.2).

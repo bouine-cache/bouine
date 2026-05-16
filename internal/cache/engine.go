@@ -36,7 +36,7 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 		return Disposition{Decision: Bypass}
 	}
 
-	reqCC := ParseCacheControl(r.Header.Get("Cache-Control"))
+	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, "Cache-Control"))
 
 	// Pragma: no-cache is equivalent to Cache-Control: no-cache
 	// for HTTP/1.0 compatibility (RFC 9111 §5.4).
@@ -51,7 +51,7 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 		return evalMiss(reqCC)
 	}
 
-	respCC := ParseCacheControl(obj.Header.Get("Cache-Control"))
+	respCC := ParseCacheControl(mergeHeaderValues(obj.Header, "Cache-Control"))
 
 	if d, ok := evalNoCache(reqCC, respCC, obj); ok {
 		return d
@@ -133,8 +133,9 @@ func evalNoCache(reqCC, respCC Directives, obj *api.Object) (Disposition, bool) 
 }
 
 func isFresh(obj *api.Object, reqCC Directives, now time.Time) bool {
-	age := now.Sub(obj.StoredAt)
-	fresh := obj.Fresh(now)
+	// Compute the response age including any origin Age header.
+	age := now.Sub(obj.StoredAt) + parseOriginAge(obj.Header)
+	fresh := age < obj.TTL
 
 	if reqCC.MaxAgeSet && age > reqCC.MaxAge {
 		fresh = false
@@ -150,7 +151,8 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 		return revalidateOrMiss(obj)
 	}
 	if reqCC.MaxStaleSet {
-		staleAge := now.Sub(obj.StoredAt) - obj.TTL
+		age := now.Sub(obj.StoredAt) + parseOriginAge(obj.Header)
+		staleAge := age - obj.TTL
 		if staleAge <= reqCC.MaxStale {
 			return Disposition{Decision: StaleHit, Object: obj}
 		}
@@ -170,7 +172,7 @@ func revalidateOrMiss(obj *api.Object) Disposition {
 
 // IsCacheable determines whether an origin response should be stored.
 func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
-	respCC := ParseCacheControl(respHeader.Get("Cache-Control"))
+	respCC := ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
 
 	if respCC.NoStore {
 		return false
@@ -241,12 +243,38 @@ func HeuristicTTL(header http.Header, now time.Time) time.Duration {
 func ComputeAge(obj *api.Object, now time.Time) time.Duration {
 	age := now.Sub(obj.StoredAt)
 	// Also account for any Age header from the origin (upstream cache).
-	if existingAge := obj.Header.Get("Age"); existingAge != "" {
-		if secs, ok := parseIntNoAlloc(existingAge); ok {
-			age += time.Duration(secs) * time.Second
-		}
-	}
+	age += parseOriginAge(obj.Header)
 	return age
+}
+
+// parseOriginAge parses the Age header from the response, handling
+// malformed values per RFC 9110 §5.6.1. Invalid or negative values
+// return 0. Values > 2^31 are treated as stale (RFC 9111 §5.1).
+func parseOriginAge(header http.Header) time.Duration {
+	ageStr := header.Get("Age")
+	if ageStr == "" {
+		return 0
+	}
+	secs, ok := parseIntNoAlloc(ageStr)
+	if !ok || secs < 0 {
+		return 0
+	}
+	// RFC 9111 §5.1: if Age > 2^31, treat as stale (very large).
+	if secs > 2147483648 {
+		return time.Duration(2147483648) * time.Second
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// mergeHeaderValues joins all values of a header name into a single
+// comma-separated string. HTTP allows multiple headers with the same
+// name; Cache-Control especially may appear as multiple lines.
+func mergeHeaderValues(header http.Header, name string) string { //nolint:unparam // intentionally general
+	vals := header.Values(name)
+	if len(vals) <= 1 {
+		return header.Get(name)
+	}
+	return strings.Join(vals, ", ")
 }
 
 // MergeHeaders304 merges headers from a 304 response into the stored

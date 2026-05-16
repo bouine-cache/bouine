@@ -7,7 +7,7 @@ import (
 
 // Key is the canonical cache key. It is a plain uint64 xxhash digest
 // of the normalized request attributes (scheme + host + path + query +
-// method + Vary headers). See PLAN.md §3.2.
+// method + Vary headers).
 //
 // Stable.
 type Key uint64

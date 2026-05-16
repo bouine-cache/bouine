@@ -1,5 +1,5 @@
-// Package shutdown implements the ordered graceful shutdown sequence
-// described in PLAN.md §14.1. Each step has a budget carved from the
+// Package shutdown implements the ordered graceful shutdown sequence.
+// Each step has a budget carved from the
 // total terminationGracePeriod.
 package shutdown
 

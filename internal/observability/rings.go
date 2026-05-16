@@ -23,7 +23,7 @@ const (
 	routeBuckets      = 24 * 60                         // 1440 = 24h, 1-min buckets
 	sparklinePoints   = 8                               // per-route sparkline width
 	opsLogCap         = 100                             // max ops-log entries
-	peerBucketSecs    = 30                              // per PLAN.md §6.4 PeerRing
+	peerBucketSecs    = 30                              // 30-second buckets for the peer health ring
 	peerBuckets       = 30 * 60 / peerBucketSecs        // 60 = 30 min
 )
 
@@ -332,7 +332,7 @@ type PeerBucket struct {
 
 // PeerRing is a sliding-window ring of peer health snapshots.
 // It records one sample per peer per 30s window and retains 30 minutes
-// of history (60 buckets per peer) per PLAN.md §6.4.
+// of history (60 buckets per peer).
 type PeerRing struct {
 	mu      sync.Mutex
 	buckets []PeerBucket
@@ -519,7 +519,7 @@ func (ri *Rings) Summary() MetricsSummary {
 }
 
 // MergeSummaries aggregates multiple MetricsSummary into one.
-// Merge strategy per PLAN.md §6.4:
+// Merge strategy:
 //   - Counters: sum
 //   - Ratios: weighted average
 //   - Latency p99: max

@@ -1,5 +1,5 @@
-// Package storage is the L3 layer. It implements the embedded,
-// multi-tier cache store described in PLAN.md §4.
+// Package storage is the L2 layer. It implements the embedded,
+// multi-tier cache store (sharded hot tier in RAM + mmap warm tier).
 //
 // The Store interface is consumed by the L4 cache engine; this package
 // provides the concrete implementation backed by a sharded hot tier
@@ -15,8 +15,8 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
-// Store is the cache storage interface consumed by the L4 cache
-// engine. See PLAN.md §4.4.
+// Store is the cache storage interface consumed by the cache
+// engine.
 //
 // Stable.
 type Store interface {

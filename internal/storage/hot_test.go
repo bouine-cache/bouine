@@ -272,9 +272,9 @@ func TestHotStore_WarmCountConsistency(t *testing.T) {
 	}
 }
 
-// TestHotOverflowLatency validates Phase 2 of PLAN_MEMORY_PRESSURE.md:
-// under 1.5× working-set overflow, the HIT p99 must stay below 5 ms and
-// the store must not grow beyond maxBytes × 1.1 (transient overshoot bound).
+// TestHotOverflowLatency validates that under 1.5× working-set overflow,
+// the HIT p99 stays below 5 ms and the store does not grow beyond
+// maxBytes × 1.1 (transient overshoot bound).
 //
 // The test runs 30 s of concurrent 80% Get / 20% Put at 1.5× overflow
 // using GOMAXPROCS goroutines, then checks the p99 latency histogram and

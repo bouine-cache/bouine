@@ -1,6 +1,7 @@
 //go:build integration
 
-// Package chaos_test covers chaos scenarios from PLAN.md §4.5.
+// Package chaos_test exercises the cluster under adverse conditions:
+// peer kill, origin flap, slow origin, rolling restart, and concurrent purge.
 // All tests run in-process — no Docker required.
 package chaos_test
 

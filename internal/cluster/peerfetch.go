@@ -20,12 +20,12 @@ const (
 	// PeerFetchPath is the HTTP path for peer cache lookups.
 	PeerFetchPath = "/v1/peer/fetch"
 	// MaxHops is the default maximum number of peers a single request
-	// may traverse before going to origin (PLAN.md §5.3, threat T36).
+	// may traverse before going to origin (threat T36).
 	MaxHops = 2
 	// BouineHopHeader carries the current hop count for loop detection.
 	BouineHopHeader = "Bouine-Hop"
 	// ClusterVersionHeader carries the cluster protocol version for
-	// negotiation during rolling upgrades (PLAN.md §5.5).
+	// negotiation during rolling upgrades.
 	ClusterVersionHeader = "X-Bouine-Cluster-Version"
 	// ClusterProtocolVersion is the current protocol version.
 	ClusterProtocolVersion = "1"

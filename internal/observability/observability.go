@@ -1,5 +1,4 @@
-// Package observability is the L8 layer in the bouine architecture
-// (see PLAN.md §2.2 and §10). It centralizes structured logging,
+// Package observability is the L7 layer. It centralizes structured logging,
 // Prometheus metrics, data-plane RED counters, and pprof wiring.
 // OTEL traces are planned.
 package observability

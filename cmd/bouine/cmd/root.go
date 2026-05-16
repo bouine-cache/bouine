@@ -13,7 +13,7 @@ func Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "bouine",
 		Short:         "bouine — a horizontally-scalable HTTP reverse-proxy cache",
-		Long:          "bouine is an observability-first HTTP/1.1+2+3 reverse-proxy cache designed for Kubernetes. See PLAN.md for the roadmap.",
+		Long:          "bouine is an observability-first HTTP/1.1+2 reverse-proxy cache designed for Kubernetes.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       buildinfo.Version,

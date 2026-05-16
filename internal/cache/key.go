@@ -32,7 +32,7 @@ func BuildKeyFromURL(rawURL string) api.Key {
 }
 
 // BuildKey constructs the canonical primary cache key from a request.
-// The key is deterministic and stable across nodes (PLAN.md §3.2).
+// The key is deterministic and stable across nodes.
 //
 // Zero-alloc: uses a stack buffer for the canonical string.
 func BuildKey(r *http.Request) api.Key {

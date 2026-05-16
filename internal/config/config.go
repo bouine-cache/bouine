@@ -3,7 +3,7 @@
 // settings (listeners, TLS, upstream pools, storage, cluster, routes).
 //
 // Additive changes only — removing or renaming a field requires a
-// major version bump (see PLAN.md §13).
+// major version bump.
 package config
 
 import "time"
@@ -135,7 +135,7 @@ type UpstreamPool struct {
 }
 
 // UpstreamTLS configures TLS to origin. insecure_skip_verify is
-// refused at startup in release builds (see PLAN.md §6.1).
+// refused at startup in release builds.
 type UpstreamTLS struct {
 	Enabled            bool     `yaml:"enabled"`
 	ServerName         string   `yaml:"server_name"`

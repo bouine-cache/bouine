@@ -7,6 +7,4 @@
 //   - Adding fields is a minor bump.
 //   - Removing or renaming a field requires a major bump.
 //   - Enums are open-ended: clients MUST tolerate unknown values.
-//
-// See PLAN.md §13 for the full compatibility policy.
 package api

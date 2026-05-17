@@ -23,12 +23,12 @@ services:
     volumes:
       - ./bouine-config.yaml:/etc/bouine/config.yaml:ro
     ports:
-      - "9000"     # admin
-      - "8080"     # http
-      - "8443"     # https / h2
-      - "8443/udp" # http3
+      - "9000"
+      - "8080"
     networks:
       - bouine-net
+    deploy:
+      replicas: 3
 
 networks:
   bouine-net:

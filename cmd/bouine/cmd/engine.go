@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 
@@ -85,10 +86,25 @@ func (e *engine) buildCluster() (*cluster.Cluster, error) {
 	if hostname == "" {
 		hostname = "bouine"
 	}
+
+	// In Kubernetes, POD_IP is injected via the Downward API.
+	// memberlist needs it as the advertise address so peers can
+	// reach this node by its real IP, not 0.0.0.0.
+	advertiseAddr := ""
+	if podIP := os.Getenv("POD_IP"); podIP != "" {
+		// Extract port from bind address.
+		_, port, _ := net.SplitHostPort(e.cfg.Listen.Cluster)
+		if port == "" {
+			port = "8443"
+		}
+		advertiseAddr = podIP + ":" + port
+	}
+
 	return cluster.New(cluster.Config{
-		NodeName: hostname,
-		BindAddr: e.cfg.Listen.Cluster,
-		Join:     e.cfg.Cluster.Join,
+		NodeName:      hostname,
+		BindAddr:      e.cfg.Listen.Cluster,
+		AdvertiseAddr: advertiseAddr,
+		Join:          e.cfg.Cluster.Join,
 		PeerInfo: api.PeerInfo{
 			Name:      hostname,
 			Addr:      e.cfg.Listen.Cluster,

@@ -15,6 +15,7 @@ import (
 	"github.com/thylong/bouine/internal/observability/accesslog"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/internal/pipeline"
+	"github.com/thylong/bouine/internal/runtime/shutdown"
 	"github.com/thylong/bouine/internal/runtime/supervised"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
@@ -60,7 +61,7 @@ func (e *engine) run(ctx context.Context) error {
 	}
 
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startAdmin(g, peersFn)
+	e.startAdmin(g, peersFn, store) //nolint:contextcheck // admin closures use TODO ctx
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -151,16 +152,27 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, peersFn func() []api.PeerInfo) {
+func (e *engine) startAdmin(g *supervised.Group, peersFn func() []api.PeerInfo, store storage.Store) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
 	}
+
+	// Build shutdown sequencer — IsReady wired to /readyz.
+	seq := shutdown.NewSequencer(e.logger)
+
 	srv := admin.New(admin.Config{
 		Addr:    addr,
 		Logger:  e.logger,
 		Metrics: e.metrics,
 		PeersFn: peersFn,
+		ReadyFn: seq.IsReady,
+		PurgeFn: func(key api.Key) error {
+			return store.Delete(context.TODO(), key) //nolint:contextcheck // admin-side
+		},
+		BanFn: func(expr api.BanExpr) (int, error) {
+			return store.Ban(context.TODO(), expr) //nolint:contextcheck // admin-side
+		},
 	})
 	g.Go("admin", srv.Serve)
 }

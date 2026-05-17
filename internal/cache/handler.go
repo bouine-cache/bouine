@@ -97,14 +97,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		// Client-side conditional: return 304 if client's validators match.
-		if ClientConditionalMatch(r, disp.Object) {
-			// 304 MUST include ETag if the full response would have (RFC 9110 §15.4.5).
-			if disp.Object.ETag != "" {
-				w.Header().Set("ETag", disp.Object.ETag)
-			}
-			w.Header().Set("X-Cache", "HIT")
-			w.WriteHeader(http.StatusNotModified)
+		if h.tryConditional304(w, r, disp.Object) {
 			return
 		}
 		if ServeRange(w, r, disp.Object) {
@@ -118,6 +111,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case Bypass:
 		h.handleBypass(w, r)
 	}
+}
+
+// tryConditional304 returns true and writes a 304 if the client's
+// conditional headers match the cached object. Used for both hit and
+// revalidate paths.
+func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj *api.Object) bool {
+	if !ClientConditionalMatch(r, obj) {
+		return false
+	}
+	if obj.ETag != "" {
+		w.Header().Set("ETag", obj.ETag)
+	}
+	w.Header().Set("X-Cache", "HIT")
+	w.WriteHeader(http.StatusNotModified)
+	return true
 }
 
 func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +171,15 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		// Origin error during revalidation — serve stale if available.
 		h.serveFromCache(w, r, stale)
 		return
+	}
+
+	// stale-if-error (RFC 5861 §4): if origin returns 5xx and the
+	// stale object has SIE configured, serve stale instead.
+	if res.StatusCode >= 500 && stale.StaleIfError > 0 {
+		if stale.StaleButServable(time.Now()) {
+			h.serveFromCache(w, r, stale)
+			return
+		}
 	}
 
 	if res.StatusCode == http.StatusNotModified {

@@ -3,36 +3,9 @@
 ## Setup
 
 ```bash
-# 1. Build and deploy
-docker build -t bouine:dev .
-kubectl -n bouine-test delete sts bouine 2>/dev/null
-helm upgrade --install bouine deploy/helm/bouine \
-  --namespace bouine-test --create-namespace \
-  --set image.repository=bouine --set image.tag=dev \
-  --set image.pullPolicy=Never --set replicaCount=3 \
-  --set config.listen.https="" --set config.listen.http3="" \
-  --set config.storage.hot_max_bytes=256MiB \
-  --set config.storage.warm_dir="" --set warmVolume.enabled=false \
-  --set topologySpreadConstraints="" \
-  --set config.cluster.enabled=true \
-  --set "config.upstream_pools[0].name=origin" \
-  --set "config.upstream_pools[0].targets[0]=origin.bouine-test.svc:8080" \
-  --set "config.routes[0].pool=origin"
+make test-k8s-setup
 
-# 2. Deploy the test origin (from test/integration/origin)
-kubectl -n bouine-test delete pod origin 2>/dev/null
-kubectl -n bouine-test delete svc origin 2>/dev/null
-kubectl -n bouine-test run origin --image=golang:1.26-alpine \
-  --overrides='{"spec":{"containers":[{"name":"origin","image":"golang:1.26-alpine","command":["go","run","./..."],"workingDir":"/src","ports":[{"containerPort":8080}],"volumeMounts":[{"name":"src","mountPath":"/src"}]}],"volumes":[{"name":"src","hostPath":{"path":"'$(pwd)'/test/integration/origin"}}]}}'
-kubectl -n bouine-test expose pod origin --port=8080
-
-# Or simpler — copy files into a running pod:
-kubectl -n bouine-test run origin --image=golang:1.26-alpine -- sleep 3600
-kubectl -n bouine-test cp test/integration/origin origin:/src
-kubectl -n bouine-test exec origin -- sh -c 'cd /src && go run . &'
-kubectl -n bouine-test expose pod origin --port=8080
-
-# 3. Port-forward
+# Port-forward to start testing
 kubectl -n bouine-test port-forward svc/bouine 8080:80 &
 ```
 
@@ -167,7 +140,6 @@ kubectl -n bouine-test get pods -w
 ## Cleanup
 
 ```bash
-helm uninstall bouine --namespace bouine-test
-kubectl delete namespace bouine-test
+make test-k8s-teardown
 kill %1 %2 2>/dev/null  # kill port-forwards
 ```

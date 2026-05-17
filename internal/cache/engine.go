@@ -331,12 +331,28 @@ func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
 // revalidation request from the stored object's validators.
 func ConditionalHeaders(req *http.Request, obj *api.Object) {
 	if obj.ETag != "" {
-		req.Header.Set("If-None-Match", obj.ETag)
+		// Ensure the ETag is properly quoted (RFC 9110 §8.8.3).
+		etag := quoteETag(obj.ETag)
+		req.Header.Set("If-None-Match", etag)
 	}
 	if !obj.LastModified.IsZero() {
 		req.Header.Set("If-Modified-Since",
 			obj.LastModified.UTC().Format(http.TimeFormat))
 	}
+}
+
+// quoteETag ensures an ETag value is properly quoted. Unquoted ETags
+// like "abcdef" become "\"abcdef\"". Weak ETags like W/"abcdef" are
+// left as-is. Already-quoted ETags are returned unchanged.
+func quoteETag(etag string) string {
+	if etag == "" {
+		return etag
+	}
+	// Already quoted (starts with " or W/).
+	if etag[0] == '"' || (len(etag) >= 2 && (etag[0] == 'W' || etag[0] == 'w') && etag[1] == '/') {
+		return etag
+	}
+	return "\"" + etag + "\""
 }
 
 // parseHTTPDate tries multiple date formats used in HTTP headers

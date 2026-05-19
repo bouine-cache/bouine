@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/adaptor"
 
 	"github.com/thylong/bouine/internal/buildinfo"
+	"github.com/thylong/bouine/internal/observability"
 )
 
 // Config controls the admin Fiber app.
@@ -32,6 +34,9 @@ type Config struct {
 	// ReadyFn reports whether the server is ready to serve traffic.
 	// nil is treated as "always ready" (sensible default during phase 0).
 	ReadyFn func() bool
+	// Metrics is the Prometheus registry. If non-nil, /metrics is
+	// mounted.
+	Metrics *observability.Metrics
 }
 
 // Server is the admin Fiber app wrapped with its lifecycle methods.
@@ -70,6 +75,9 @@ func (s *Server) routes() {
 	s.app.Get("/healthz", s.healthz)
 	s.app.Get("/readyz", s.readyz)
 	s.app.Get("/version", s.version)
+	if s.cfg.Metrics != nil {
+		s.app.Get("/metrics", adaptor.HTTPHandler(s.cfg.Metrics.Handler()))
+	}
 }
 
 func (s *Server) healthz(c fiber.Ctx) error {

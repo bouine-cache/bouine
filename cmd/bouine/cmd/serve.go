@@ -1,28 +1,30 @@
 package cmd
 
 import (
+	"fmt"
 	"os/signal"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
-	"github.com/thylong/bouine/internal/admin"
+	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/observability"
 )
 
 func newServeCmd() *cobra.Command {
 	var (
-		adminAddr string
-		logLevel  string
-		logFormat string
+		configPath string
+		logLevel   string
+		logFormat  string
 	)
 
 	c := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the bouine daemon",
-		Long: "serve starts the bouine daemon. In phase 0 only the admin " +
-			"listener (Fiber, /healthz, /readyz, /version) is wired. " +
-			"Data-plane listeners and the cache engine land in later phases.",
+		Long: "serve starts the bouine daemon. It boots every configured " +
+			"listener (HTTP/1.1, HTTP/2, admin), wires the pipeline " +
+			"router to the upstream pools, and blocks until " +
+			"SIGINT/SIGTERM.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(),
@@ -34,21 +36,33 @@ func newServeCmd() *cobra.Command {
 				Format: logFormat,
 			})
 
-			srv := admin.New(admin.Config{
-				Addr:   adminAddr,
-				Logger: logger,
-			})
+			cfg, err := loadConfig(configPath)
+			if err != nil {
+				return err
+			}
 
-			return srv.Serve(ctx)
+			return newEngine(cfg, logger).run(ctx)
 		},
 	}
 
-	c.Flags().StringVar(&adminAddr, "admin-addr", ":9000",
-		"address the admin Fiber app listens on")
+	c.Flags().StringVar(&configPath, "config", "",
+		"path to bouine config YAML file")
 	c.Flags().StringVar(&logLevel, "log-level", "info",
 		"log level (debug, info, warn, error)")
 	c.Flags().StringVar(&logFormat, "log-format", "json",
 		"log format (json, text)")
 
 	return c
+}
+
+func loadConfig(path string) (*config.Config, error) {
+	if path != "" {
+		cfg, err := config.Load(path)
+		if err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		return cfg, nil
+	}
+	d := config.Defaults()
+	return &d, nil
 }

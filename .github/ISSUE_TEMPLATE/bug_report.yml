@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a defect in bouine.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a bug.
+
+        **Do not use this template for security issues.** Follow
+        [`SECURITY.md`](https://github.com/thylong/bouine/blob/main/SECURITY.md)
+        instead.
+  - type: input
+    id: version
+    attributes:
+      label: bouine version
+      description: Output of `bouine version`. If running from source, include the commit SHA.
+      placeholder: "v0.x.y or commit abcdef"
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version` (only required if running from source).
+      placeholder: "go1.26.0 darwin/arm64"
+  - type: input
+    id: os
+    attributes:
+      label: Operating system / platform
+      placeholder: "Linux x86_64 / k8s 1.30 / Helm chart 0.1.2"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Minimal configuration
+      description: |
+        The smallest configuration that reproduces the issue. **Redact
+        secrets and real hostnames.** Use synthetic values.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Commands or `curl` invocations that trigger the bug.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include relevant log lines at `debug` level if available.
+    validations:
+      required: true
+  - type: textarea
+    id: cluster
+    attributes:
+      label: Cluster state (if applicable)
+      description: Output of `bouine cluster peers` from each node when clustering is involved.
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Stack traces, profiles (`pprof`), screenshots of dashboards, etc.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This is not a security issue. (Security issues go to SECURITY.md.)
+          required: true
+        - label: I redacted secrets, tokens, and production hostnames.
+          required: true

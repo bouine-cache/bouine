@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/thylong/bouine/security/advisories/new
+    about: Report a vulnerability privately via GitHub's advisory system. Do NOT open a public issue for security problems.
+  - name: Question or discussion
+    url: https://github.com/thylong/bouine/discussions
+    about: Ask a question or start a design discussion. Use this before filing a feature request if you are unsure.

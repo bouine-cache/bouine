@@ -1,0 +1,79 @@
+name: Feature request
+description: Propose a new feature or enhancement.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature. Before filing, please check:
+
+        - The current phase in [`PLAN.md`](https://github.com/thylong/bouine/blob/main/PLAN.md).
+          Features outside the current phase are normally deferred.
+        - The deferred-features list in
+          [`PLAN.md §18`](https://github.com/thylong/bouine/blob/main/PLAN.md#18-out-of-scope--future-roadmap-post-v10).
+          If your request is already there, comment on the related issue
+          instead of opening a new one.
+        - The threat model in
+          [`docs/security/threat-model.md`](https://github.com/thylong/bouine/blob/main/docs/security/threat-model.md)
+          if your feature has security implications.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve? Who has the problem? How often?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Sketch the design. If it touches multiple layers, identify them
+        (see [`AGENTS.md §3`](https://github.com/thylong/bouine/blob/main/AGENTS.md)).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider? Why are they worse?
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Roadmap phase
+      description: Which phase in `PLAN.md` does this belong to?
+      options:
+        - Phase 0 — bootstrap
+        - Phase 1 — listeners / proxy
+        - Phase 2 — storage
+        - Phase 3 — cache engine
+        - Phase 4 — clustering / K8s
+        - Phase 4.5 — hardening
+        - Phase 5 — advanced features
+        - Phase 6 — AI / dashboard
+        - Post-v1.0 (see §18)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact on performance / compliance / security
+      description: |
+        - Does it touch the hit path? If so, what is the alloc/op
+          impact?
+        - Does it change `cache-tests` behavior?
+        - Does it introduce or modify a `Txx` row in the threat model?
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This feature is on the roadmap or I am proposing to add it.
+          required: true

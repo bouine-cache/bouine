@@ -31,6 +31,10 @@ test/integration/.tls/
 # Benchmark outputs (current.txt is regenerated; baseline.txt is tracked)
 /bench/results/current.txt
 
+# Conformance harness (cloned at runtime, results regenerated)
+/test/cachetests/.cache-tests/
+/test/cachetests/results/
+
 # Generated artifacts
 /docs/_site/
 /web/dashboard/node_modules/

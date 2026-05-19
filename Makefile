@@ -69,8 +69,8 @@ benchstat: ## Compare current bench results against the committed baseline.
 	benchstat bench/results/baseline.txt bench/results/current.txt
 
 .PHONY: conformance
-conformance: ## Run the http-tests/cache-tests harness (phase 3+).
-	@echo "conformance: harness lands in phase 3"
+conformance: build ## Run the http-tests/cache-tests conformance harness.
+	bash test/cachetests/run.sh
 
 .PHONY: integration
 integration: testcerts ## Run docker-compose integration scenarios (phase 1+).

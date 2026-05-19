@@ -114,7 +114,7 @@ dependencies for a surface that serves ≤ 10 RPS.
 /internal/observability      L8 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
 /internal/ai                 L9 — traffic analytics (phase 6)
-/internal/vcl                VCL-compatible shim (parser → DSL lowering)
+/internal/vcl                VCL-compatible shim (deferred — see §18)
 /web/dashboard               L9 — frontend (phase 6)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
 /pkg/api                     shared types between SDK, admin server, dashboard
@@ -851,22 +851,7 @@ in phase 5 starts until this passes.
 - **Exit:** prefetch hit-ratio uplift demonstrated on a synthetic workload;
   cache-tests parity maintained.
 
-### Phase 5.5 — VCL-compatible shim (weeks 19–20)
-
-A dedicated phase to build and stabilize the VCL translation layer.
-Nothing in phase 6 starts until this ships.
-
-- VCL-compatible shim (subset defined in §17.4): parser, lowering to
-  native config, diff report, `bouine config translate --vcl`.
-- `bouine config validate --vcl file.vcl` CLI command.
-- Diff report emitted at load time showing every VCL construct that was
-  dropped or approximated.
-- Test suite covering representative Varnish VCL files from the docs.
-- **Exit:** sample Varnish VCL from the docs loads and serves traffic
-  with documented caveats; diff report is accurate and complete;
-  cache-tests score not regressed.
-
-### Phase 7 — Simplification & complexity reduction (week 25–26)
+### Phase 7 — Simplification & complexity reduction (week 19–20)
 
 A dedicated engineering pass to eliminate dead code, reduce
 over-engineering, consolidate duplicated patterns, and wire unwired
@@ -1003,7 +988,7 @@ packages may remain.
   outside `main`.
 - Zero stale "phase N" doc comments referencing shipped phases.
 
-### Phase 6 — AI traffic analysis & dashboard (weeks 21–25)
+### Phase 6 — AI traffic analysis & dashboard (weeks 21–24)
 - Streaming analyzer: ingest sampled access logs into an embedded DuckDB
   (or Parquet on disk) for ad-hoc queries.
 - Feature extraction: hit/miss patterns per route, TTL utilisation, top
@@ -1035,7 +1020,7 @@ packages may remain.
 | Cluster split-brain on purges | Monotonic purge tokens + anti-entropy reconciler. |
 | Benchmark noise | Use `benchstat`, run on a pinned self-hosted runner, require N=10 samples. |
 | AI features creep into the hot path | Hard architectural boundary: L9 only reads sampled telemetry, never writes to L3/L4. |
-| VCL shim becomes a maintenance sink | Hard-cap supported subset (§17.4, phase 5.5), fail loudly on unsupported constructs, never silently approximate. |
+| VCL shim becomes a maintenance sink | Hard-cap supported subset (§17.4), fail loudly on unsupported constructs, never silently approximate. Deferred to post-v1.0 (§18). |
 | SDK and HTTP API drift apart | Single source of truth in `pkg/api`; contract tests run both surfaces against the same fixtures. |
 | Cache poisoning via unkeyed input | Default policy forbids implicit header keying; Vary cap; threat-model rows T06/T07/T09 wired to CI fuzz corpus. |
 | HTTP request smuggling on the front door | Strict RFC 9112 parser, ambiguous-framing rejection, fuzz corpus seeded with public PortSwigger inputs. |
@@ -1062,7 +1047,7 @@ These were open questions during planning; locked in for v1.0.
 3. **HTTP/3 0-RTT is disabled by default** — even when HTTP/3 is enabled.
    Opt-in per route via `route.http3.allow_0rtt: true`; the engine still
    refuses 0-RTT for non-idempotent methods regardless of config.
-4. **VCL-compatible shim is in scope (phase 5.5)** — lives in `/internal/vcl`. It is a
+4. **VCL-compatible shim is deferred** — designed to live in `/internal/vcl`. It is a
    parser + lowering pass that translates a useful subset of VCL 4.1 into
    the native bouine config tree at load time. Supported surface area:
    - `sub vcl_recv`, `vcl_hash`, `vcl_backend_response`, `vcl_deliver`,
@@ -1158,6 +1143,11 @@ the canonical NGINX or not-too-VCL-heavy-Varnish use cases.
 17. **Surrogate keys** — `Surrogate-Key` response header indexed for
     ban was originally scoped for phase 5 but dropped. Operators use
     host/path/method predicate bans in v1.0. v1.1 candidate.
+18. **VCL-compatible shim** — parser + lowering pass translating a
+    subset of VCL 4.1 into the native bouine config tree. Originally
+    planned as phase 5.5 but deferred. The design is documented in
+    §17.4; `/internal/vcl` is reserved. v1.1+ candidate when Varnish
+    migration demand justifies the maintenance cost.
 
 When one of these graduates from "deferred" to "planned", it gets a
 phase entry in §15, a row in the threat model if security-relevant, and
@@ -1167,7 +1157,7 @@ its own ADR under `docs/decisions/`.
 
 ## 19. Definition of Done (v1.0)
 
-- All phases 0–7 (plus 3.5, 4.5, and 5.5) complete and tagged.
+- All phases 0–7 (plus 3.5 and 4.5) complete and tagged.
 - Hit-path allocs/op = 0 on the canonical benchmark (phase 3.5 gate).
 - cache-tests score ≥ Varnish on every category.
 - Canonical benchmark within 10 % of Varnish RPS, never regressing in CI.

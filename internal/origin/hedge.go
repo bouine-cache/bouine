@@ -1,0 +1,73 @@
+package origin
+
+import (
+	"context"
+	"net/http"
+	"time"
+)
+
+// HedgedTransport wraps an http.RoundTripper and fires a duplicate
+// request after a timeout. The first response wins; the loser is
+// cancelled. Only used for idempotent methods (GET, HEAD, OPTIONS).
+//
+// Stable.
+type HedgedTransport struct {
+	Inner   http.RoundTripper
+	Timeout time.Duration
+}
+
+type hedgeResult struct {
+	resp *http.Response
+	err  error
+}
+
+// RoundTrip fires the primary request immediately. If it does not
+// complete within h.Timeout, a duplicate is fired. The first to
+// return wins.
+func (h *HedgedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !isIdempotent(req.Method) || h.Timeout <= 0 {
+		return h.Inner.RoundTrip(req)
+	}
+
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+
+	ch := make(chan hedgeResult, 2)
+
+	fire := func() {
+		r := req.Clone(ctx)
+		resp, err := h.Inner.RoundTrip(r) //nolint:bodyclose // closed by drainLoser
+		ch <- hedgeResult{resp, err}
+	}
+
+	// Primary request.
+	go fire()
+
+	timer := time.NewTimer(h.Timeout)
+	defer timer.Stop()
+
+	select {
+	case res := <-ch:
+		return res.resp, res.err
+	case <-timer.C:
+		go fire()
+	}
+
+	res := <-ch
+	go drainLoser(ch)
+	return res.resp, res.err
+}
+
+func drainLoser(ch <-chan hedgeResult) {
+	for res := range ch {
+		if res.resp != nil {
+			_ = res.resp.Body.Close()
+		}
+	}
+}
+
+func isIdempotent(method string) bool {
+	return method == http.MethodGet ||
+		method == http.MethodHead ||
+		method == http.MethodOptions
+}

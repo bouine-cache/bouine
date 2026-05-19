@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"net/http"
 	"time"
 )
 
@@ -218,4 +219,34 @@ func FreshnessLifetime(respCC Directives, header func(string) string) (time.Dura
 		return expTime.Sub(dateTime), true
 	}
 	return 0, false
+}
+
+// FreshnessLifetimeH is like FreshnessLifetime but takes http.Header
+// directly so it can detect multiple Expires headers (which are
+// invalid per RFC 9110 §5.3).
+func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) {
+	if respCC.SMaxAgeSet {
+		return respCC.SMaxAge, true
+	}
+	if respCC.MaxAgeSet {
+		return respCC.MaxAge, true
+	}
+	expiresVals := h.Values("Expires")
+	if len(expiresVals) == 0 {
+		return 0, false
+	}
+	// Multiple Expires headers → invalid (RFC 9110 §5.3).
+	if len(expiresVals) > 1 {
+		return 0, true // treat as expired
+	}
+	expTime := parseHTTPDate(expiresVals[0])
+	if expTime.IsZero() {
+		return 0, true
+	}
+	dateStr := h.Get("Date")
+	dateTime := parseHTTPDate(dateStr)
+	if dateTime.IsZero() {
+		return 0, false
+	}
+	return expTime.Sub(dateTime), true
 }

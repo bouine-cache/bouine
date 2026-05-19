@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/buildinfo"
+	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
@@ -147,16 +148,7 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	key := api.Key(0)
-	// Compute key from URL using xxhash — simplified; full implementation
-	// would reuse cache.BuildKey with a synthetic request.
-	if req.URL != "" {
-		h := uint64(0)
-		for _, c := range req.URL {
-			h = h*31 + uint64(c) //nolint:gosec // hash, truncation intentional
-		}
-		key = api.Key(h)
-	}
+	key := cache.BuildKeyFromURL(req.URL)
 	if err := s.cfg.PurgeFn(key); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -190,14 +182,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	key := api.Key(0)
-	if req.URL != "" {
-		h := uint64(0)
-		for _, c := range req.URL {
-			h = h*31 + uint64(c) //nolint:gosec // hash, truncation intentional
-		}
-		key = api.Key(h)
-	}
+	key := cache.BuildKeyFromURL(req.URL)
 	if err := s.cfg.RefreshFn(key); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

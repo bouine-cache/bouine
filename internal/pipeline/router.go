@@ -1,15 +1,12 @@
 // Package pipeline is the L2 request pipeline. It sits between the
-// listener (L1) and the cache engine (L4). In phase 1, there is no
-// cache — the pipeline is a thin route matcher that delegates directly
-// to the upstream pool handler (L5).
+// listener (L1) and the cache engine (L4). The pipeline matches routes
+// and delegates to the cache handler (L4), which falls through to the
+// upstream pool handler (L5) on miss.
 //
 // Pipeline stages (configurable, ordered):
 //  1. URL & host normalization.
 //  2. Route matching (first-match wins).
-//  3. Delegate to the matched pool's reverse-proxy handler.
-//
-// ACL, request collapsing, and cache key construction land in later
-// phases.
+//  3. Delegate to the matched cache handler.
 package pipeline
 
 import (

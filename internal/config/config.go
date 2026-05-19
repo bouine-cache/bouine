@@ -2,20 +2,16 @@
 // configuration tree. It is the single source of truth for runtime
 // settings (listeners, TLS, upstream pools, storage, cluster, routes).
 //
-// Phase 1 ships the minimum surface area needed by listeners and the
-// upstream pool. Subsequent phases extend the schema; additive changes
-// only — removing or renaming a field requires a major version bump
-// (see PLAN.md §13).
-//
-// Hot reload is implemented in phase 4. Until then a config change
-// requires a restart.
+// Hot reload is supported via fsnotify + SIGHUP (see reload.go).
+// Additive changes only — removing or renaming a field requires a
+// major version bump (see PLAN.md §13).
 package config
 
 import "time"
 
 // Config is the root of the bouine configuration tree.
 //
-// Unstable until phase 1 ships.
+// Stable.
 type Config struct {
 	// Listen controls every network listener. Empty addresses disable
 	// the corresponding listener.

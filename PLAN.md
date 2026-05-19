@@ -857,6 +857,89 @@ in phase 5 starts until this passes.
   cache-tests parity maintained; sample Varnish VCL from the docs loads
   and serves traffic with documented caveats.
 
+### Phase 7 — Simplification & complexity reduction (week 23–24)
+
+A dedicated engineering pass to eliminate dead code, reduce
+over-engineering, consolidate duplicated patterns, and wire unwired
+but production-ready packages. No new features. No scope creep.
+The goal is a codebase that a new contributor can orient in under
+an hour.
+
+**Dead code removal:**
+
+- Remove `StreamBody` (`internal/origin/pool.go`) — speculative export
+  never called; reimplemented properly in phase 5 when streaming lands.
+- Remove `ErrUnsupportedKey` (`internal/testutil/tlsutil`) — exported
+  error var defined but never returned by any function.
+- Remove `VaryConfig` struct (`internal/cache/vary.go`) — defined for
+  future route-level Vary configuration but never consumed; the
+  `MaxVariants` constant is what callers need.
+- Enforce or remove `MaxVariants` — either wire the cap into the
+  cache handler (preferred) or remove it; a constant that is never
+  read is worse than no constant.
+- Remove `formatHex` (`internal/cache/key.go`) — custom hex formatter
+  that can be replaced with a single `strconv.FormatUint` call.
+
+**Unwired production code — wire or remove:**
+
+- `internal/storage/tiered.go` (`TieredStore`) — built for hot + warm
+  tier integration but the serve command uses `HotStore` directly.
+  Either wire `TieredStore` into `cmd/bouine/cmd/engine.go` (correct
+  choice — warm tier exists and is tested) or clearly defer with a
+  `//nolint:unused` marker and an issue reference.
+- `internal/origin/hedge.go` (`HedgedTransport`) — exists and is
+  tested but never plugged into the origin pool. Wire via pool config
+  when `pool.connect.hedge_timeout` is set.
+- `internal/listener/proxyproto` — parser exists and passes tests;
+  listeners never wrap connections with it. Wire into listener
+  construction when `listen.proxy_protocol: true`.
+- `internal/listener/h3.go` (`H3Server`) — compiled but never started
+  in `engine.startListeners`. Wire or gate behind a build tag until
+  the quic-go integration is confirmed stable in CI.
+
+**Structural de-duplication:**
+
+- Consolidate `statusWriter` (accesslog) and `metricsWriter`
+  (dataplane) into a single `responseWriter` that both middlewares
+  share. Two nearly-identical response-writer wrappers chained per
+  request adds hidden per-request overhead and maintenance surface.
+- `internal/cache/vary.go:ServeRange` — ~80 lines that partially
+  duplicate what `http.ServeContent` already does. Evaluate whether
+  delegating to stdlib (at the cost of reading the full body into
+  memory for the size calculation) is preferable, or keep the custom
+  implementation with a clear comment explaining why.
+
+**Over-engineering audits:**
+
+- `internal/cache/key.go:appendCanonicalQuery` — always allocates a
+  `url.Values` map even on requests without query strings. Add a
+  fast-path guard: if `u.RawQuery == ""` return early.
+- Re-run `golangci-lint unused` and `staticcheck U1000` after the
+  removals above; fix every finding.
+- Run `go tool cover` per package and remove test code that covers
+  deleted production paths.
+
+**Documentation cleanup:**
+
+- Audit all `// Stable.` / `// Unstable.` doc comments; promote
+  anything that has been stable across two phases.
+- Remove or update any doc comments that reference "Phase N" where
+  the phase has already shipped.
+- Ensure every `internal/*/doc.go` file accurately describes the
+  current state of the package, not the planned state.
+
+**Exit criteria:**
+
+- `golangci-lint unused` and `staticcheck U1000` report zero findings.
+- `go test -race ./...` still green; no coverage regression ≥ 2 %.
+- `make bench` gates still pass (no performance regression from
+  removals).
+- `make conformance` score does not decrease.
+- Net LOC reduction ≥ 5 % vs the phase 6 baseline (excluding
+  generated code and test data).
+- Every unwired package is either wired and tested end-to-end OR
+  removed. No orphaned packages remain.
+
 ### Phase 6 — AI traffic analysis & dashboard (weeks 19–23)
 - Streaming analyzer: ingest sampled access logs into an embedded DuckDB
   (or Parquet on disk) for ad-hoc queries.
@@ -1014,10 +1097,13 @@ its own ADR under `docs/decisions/`.
 
 ## 19. Definition of Done (v1.0)
 
-- All phases 0–5 (plus 3.5 and 4.5) complete and tagged.
+- All phases 0–7 (plus 3.5 and 4.5) complete and tagged.
 - Hit-path allocs/op = 0 on the canonical benchmark (phase 3.5 gate).
 - cache-tests score ≥ Varnish on every category.
 - Canonical benchmark within 10 % of Varnish RPS, never regressing in CI.
+- `golangci-lint unused` and `staticcheck U1000` zero findings (phase 7
+  gate).
+- No orphaned / unwired production packages.
 - Threat model (`docs/security/threat-model.md`) has zero `Txx` in
   `unaddressed` state without an explicit §18 deferral.
 - Helm chart published.

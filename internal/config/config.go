@@ -168,11 +168,18 @@ type RouteMatch struct {
 	PathPrefix string `yaml:"path_prefix"`
 }
 
-// RouteCache is the per-route cache policy. Phase 3+.
+// RouteCache is the per-route cache policy.
 type RouteCache struct {
+	Enabled              *bool         `yaml:"enabled"`
 	TTLDefault           time.Duration `yaml:"ttl_default"`
 	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate"`
 	StaleIfError         time.Duration `yaml:"stale_if_error"`
+	// NegativeTTL caches error responses (404, 405, 410, 501) for
+	// the configured duration. Zero disables negative caching.
+	NegativeTTL time.Duration `yaml:"negative_ttl"`
+	// JitterPercent adds a random ±N% to every TTL to prevent
+	// synchronized expiry stampedes. Range 0–50; 0 disables.
+	JitterPercent int `yaml:"jitter_percent"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

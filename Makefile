@@ -72,6 +72,10 @@ benchstat: ## Compare current bench results against the committed baseline.
 conformance: build ## Run the http-tests/cache-tests conformance harness.
 	bash test/cachetests/run.sh
 
+.PHONY: conformance-view
+conformance-view: build ## Run conformance tests then open the comparison UI in a browser.
+	bash test/cachetests/view.sh
+
 .PHONY: integration
 integration: testcerts ## Run docker-compose integration scenarios (phase 1+).
 	go test -race -count=1 -timeout=10m -tags=integration ./test/integration/...

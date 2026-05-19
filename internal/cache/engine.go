@@ -179,7 +179,8 @@ func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 		return false
 	}
 	// Vary: * means every request is unique — never store.
-	if respHeader.Get("Vary") == "*" {
+	// Check for * anywhere in the Vary field list, not just exact match.
+	if varyContainsStar(respHeader.Get("Vary")) {
 		return false
 	}
 	if respHeader.Get("Set-Cookie") != "" {
@@ -279,13 +280,22 @@ func ConditionalHeaders(req *http.Request, obj *api.Object) {
 }
 
 // parseHTTPDate tries multiple date formats used in HTTP headers
-// (RFC 1123, RFC 850, ANSI C asctime). Returns zero time on failure.
+// (RFC 1123, RFC 850, ANSI C asctime). Also handles case-insensitive
+// timezone (e.g., "gmt" → "GMT"). Returns zero time on failure.
 func parseHTTPDate(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	// Normalize common timezone case variants.
+	s = normalizeTZ(s)
+
 	formats := []string{
-		http.TimeFormat,                // RFC 1123: "Mon, 02 Jan 2006 15:04:05 GMT"
-		time.RFC850,                    // "Monday, 02-Jan-06 15:04:05 MST"
-		"Mon Jan  2 15:04:05 2006",     // ANSI C asctime
-		"Mon, 2 Jan 2006 15:04:05 GMT", // single-digit day variant
+		http.TimeFormat,                 // RFC 1123
+		time.RFC850,                     // "Monday, 02-Jan-06 15:04:05 MST"
+		"Mon Jan  2 15:04:05 2006",      // ANSI C asctime
+		"Mon, 2 Jan 2006 15:04:05 GMT",  // single-digit day
+		"Mon,  2 Jan 2006 15:04:05 GMT", // double-space before day
 	}
 	for _, fmt := range formats {
 		if t, err := time.Parse(fmt, s); err == nil {
@@ -293,4 +303,16 @@ func parseHTTPDate(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// normalizeTZ uppercases common timezone abbreviations at the end of
+// a date string so "gmt" and "Gmt" become "GMT".
+func normalizeTZ(s string) string {
+	if len(s) >= 3 {
+		tail := s[len(s)-3:]
+		if strings.EqualFold(tail, "gmt") {
+			s = s[:len(s)-3] + "GMT"
+		}
+	}
+	return s
 }

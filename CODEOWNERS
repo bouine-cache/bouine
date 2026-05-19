@@ -1,0 +1,28 @@
+# bouine — Code owners
+#
+# These owners are auto-requested for review on PRs that touch their
+# files. Until the project has a stable maintainer roster, all paths
+# default to the repo owner.
+
+* @thylong
+
+# Security-sensitive surface — additional review required.
+/docs/security/             @thylong
+/SECURITY.md                @thylong
+/internal/listener/         @thylong
+/internal/pipeline/         @thylong
+/internal/cluster/          @thylong
+/internal/admin/auth/       @thylong
+
+# Governance documents — changes require explicit sign-off.
+/PLAN.md                    @thylong
+/AGENTS.md                  @thylong
+/CONTRIBUTING.md            @thylong
+/LICENSE                    @thylong
+
+# CI and toolchain — affects every PR; review carefully.
+/.github/                   @thylong
+/Makefile                   @thylong
+/.golangci.yaml             @thylong
+/.pre-commit-config.yaml    @thylong
+/lint/                      @thylong

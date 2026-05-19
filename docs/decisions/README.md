@@ -1,0 +1,32 @@
+# Architecture Decision Records
+
+This directory holds the project's [Architecture Decision Records](https://adr.github.io/)
+in [MADR](https://adr.github.io/madr/) format.
+
+An ADR is **required** when a change:
+
+- Adds or removes a dependency on the allow-list.
+- Changes a protocol or wire format.
+- Changes the eviction algorithm or cache state machine in ways
+  observable to operators.
+- Changes the cluster protocol.
+- Touches the VCL shim's supported surface.
+- Adds or modifies a pre-commit hook.
+
+ADRs are immutable once accepted. To revisit a decision, write a new
+ADR that supersedes the old one and update the old one's `Status`
+field to `Superseded by ADR-NNNN`.
+
+## Process
+
+1. Copy `adr-template.md` to `NNNN-short-title.md`, where `NNNN` is the
+   next four-digit number.
+2. Fill in the sections.
+3. Open a PR. The ADR ships in the same PR as the change it documents.
+4. On merge, the ADR is permanent.
+
+## Index
+
+| Number | Title                                          | Status   |
+|--------|------------------------------------------------|----------|
+| 0001   | Record architecture decisions                  | Accepted |

@@ -66,8 +66,10 @@ These rules override autonomy. Break them and the change must be reverted.
 1. **Never violate the layer boundaries** defined in `PLAN.md §2`. A package
    may only depend on packages in lower layers, through declared interfaces.
    A reverse import (e.g. `storage` importing `cache`) is a build error.
-2. **Never put Fiber on the data plane.** Fiber is control-plane only.
-   Data-plane listeners use `net/http` + `quic-go`. No exceptions.
+2. **Two HTTP stacks only: `net/http` and `quic-go`.** The admin
+   surface uses `net/http.ServeMux` — never a third-party HTTP
+   framework. The data plane uses `net/http` (H1+H2) and
+   `quic-go/http3` (H3). See ADR-0006.
 3. **Never add a global variable** for mutable state. The daemon is a single
    `Engine` struct. Configuration, clocks, randomness, and metrics are
    injected.
@@ -163,9 +165,9 @@ L1 → L8, L2, /pkg/api
 - Vendor required? No — `go mod` only, but `go.sum` is sacred. CI runs
   `go mod tidy && git diff --exit-code`.
 - Banned by default: ORMs, runtime DI containers, log libraries that aren't
-  `slog`-compatible, HTTP servers other than `net/http`/`fiber`/`quic-go`,
+  `slog`-compatible, HTTP servers other than `net/http`/`quic-go`,
   any LGPL / AGPL code.
-- Pre-approved core: `gofiber/fiber/v3`, `quic-go/quic-go`,
+- Pre-approved core: `quic-go/quic-go`,
   `hashicorp/memberlist`, `cespare/xxhash/v2`, `klauspost/compress`,
   `prometheus/client_golang`, `go.opentelemetry.io/otel`, `spf13/cobra`,
   `stretchr/testify` (tests only), `golang.org/x/{net,sync,sys}`.
@@ -553,7 +555,7 @@ Before declaring a change ready:
 ## 18. Anti-Patterns & Common Mistakes
 
 - ❌ Putting cache logic inside an HTTP handler.
-- ❌ Importing `fiber` from a data-plane package.
+- ❌ Importing a third-party HTTP framework for admin endpoints.
 - ❌ Using `time.Now()` directly instead of an injected clock.
 - ❌ `panic` for control flow.
 - ❌ Logging a request body or `Authorization` header for "debugging".

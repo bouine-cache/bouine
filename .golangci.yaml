@@ -78,25 +78,17 @@ linters:
 
     depguard:
       rules:
-        # Layer-dependency matrix is enforced in lint/depguard.yaml; the
-        # baseline here keeps the data plane free of control-plane
-        # frameworks. AGENTS.md §3.1 is the authoritative source.
-        data-plane-no-fiber:
+        # Fiber was dropped in ADR-0006. Deny it everywhere so it
+        # cannot be reintroduced.
+        no-fiber:
           list-mode: lax
-          files:
-            - "**/internal/listener/**"
-            - "**/internal/pipeline/**"
-            - "**/internal/cache/**"
-            - "**/internal/storage/**"
-            - "**/internal/origin/**"
-            - "**/internal/cluster/**"
           deny:
             - pkg: "github.com/gofiber/fiber/v3"
-              desc: "Fiber is control-plane only (AGENTS.md §2.2)."
+              desc: "Fiber dropped (ADR-0006). Use net/http."
             - pkg: "github.com/gofiber/fiber/v2"
-              desc: "Fiber is control-plane only (AGENTS.md §2.2)."
+              desc: "Fiber dropped (ADR-0006). Use net/http."
             - pkg: "github.com/valyala/fasthttp"
-              desc: "fasthttp cannot serve H2/H3 on the data plane (AGENTS.md §2.2)."
+              desc: "fasthttp dropped with Fiber (ADR-0006)."
         no-banned-log-libs:
           list-mode: lax
           deny:

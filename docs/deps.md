@@ -22,6 +22,16 @@ aren't `slog`-compatible, HTTP servers other than
 |-------------------------------------------------|------------|--------------------------|--------|
 | `github.com/spf13/cobra`                        | Apache-2.0 | `cmd/bouine`             | CLI framework chosen in `PLAN.md`. |
 | `github.com/spf13/pflag`                        | BSD-3      | (transitive)             | Cobra dependency. |
+| `github.com/hashicorp/memberlist`               | MPL-2.0    | `internal/cluster`       | Gossip membership (ADR-0007). Pre-approved `AGENTS.md §5`. |
+| `github.com/hashicorp/go-msgpack/v2`            | MIT        | (transitive)             | memberlist serialisation. |
+| `github.com/hashicorp/go-sockaddr`              | MPL-2.0    | (transitive)             | memberlist network addressing. |
+| `github.com/hashicorp/go-metrics`               | MIT        | (transitive)             | memberlist telemetry. |
+| `github.com/hashicorp/errwrap`                  | MPL-2.0    | (transitive)             | memberlist error wrapping. |
+| `github.com/hashicorp/go-multierror`            | MPL-2.0    | (transitive)             | memberlist multi-error. |
+| `github.com/hashicorp/go-immutable-radix`       | MPL-2.0    | (transitive)             | memberlist internal. |
+| `github.com/hashicorp/golang-lru`               | MPL-2.0    | (transitive)             | memberlist internal LRU. |
+| `github.com/miekg/dns`                          | BSD-3      | (transitive)             | memberlist DNS lookup. |
+| `github.com/sean-/seed`                         | MIT        | (transitive)             | memberlist RNG seed. |
 | `github.com/quic-go/quic-go`                    | MIT        | `internal/listener`      | HTTP/3 listener (ADR-0002). |
 | `github.com/prometheus/client_golang`           | Apache-2.0 | `internal/observability` | Prometheus metrics + handler. Pre-approved in `AGENTS.md §5`. |
 | `github.com/prometheus/client_model`            | Apache-2.0 | (transitive)             | client_golang dependency. |

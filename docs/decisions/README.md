@@ -35,3 +35,4 @@ field to `Superseded by ADR-NNNN`.
 | 0004   | One *http.Server per listener                      | Accepted |
 | 0005   | Round-robin upstream selection via atomic counter  | Accepted |
 | 0006   | Drop Fiber, unify admin on net/http                | Accepted |
+| 0007   | Cluster design — memberlist gossip + consistent hash | Accepted |

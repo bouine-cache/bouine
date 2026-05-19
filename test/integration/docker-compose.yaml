@@ -1,0 +1,40 @@
+version: "3.9"
+
+# Skeleton compose file for bouine integration tests.
+#
+# Phase 1 fills in real services. Until then this file pins the network
+# topology so scenario authors aren't bikeshedding it.
+
+services:
+  origin:
+    image: golang:1.26-alpine
+    working_dir: /src
+    volumes:
+      - ./origin:/src:ro
+    command: ["go", "run", "./..."]
+    networks:
+      - bouine-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+  bouine:
+    build:
+      context: ../..
+      dockerfile: test/integration/bouine.Dockerfile
+    depends_on:
+      origin:
+        condition: service_healthy
+    ports:
+      - "9000"     # admin
+      - "8080"     # http
+      - "8443"     # https / h2
+      - "8443/udp" # http3
+    networks:
+      - bouine-net
+
+networks:
+  bouine-net:
+    driver: bridge

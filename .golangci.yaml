@@ -114,10 +114,25 @@ linters:
           - gocyclo
           - gosec
           - forbidigo
+          - errcheck
+          - noctx
       # main packages may exit and print.
       - path: "cmd/.*"
         linters:
           - forbidigo
+      # Operator scripts are CLI tools; same rules as cmd/.
+      - path: "scripts/.*"
+        linters:
+          - forbidigo
+      # Test-fixture origin server is not production code.
+      - path: "test/integration/.*"
+        linters:
+          - forbidigo
+          - errcheck
+          - gosec
+          - noctx
+          - funlen
+          - gocyclo
 
 issues:
   max-issues-per-linter: 0

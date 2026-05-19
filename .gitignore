@@ -26,6 +26,7 @@ go.work.sum
 /tmp/
 /.crush/
 HANDOFF.md
+test/integration/.tls/
 
 # Benchmark outputs (kept in PR descriptions, not the repo)
 /bench/results/

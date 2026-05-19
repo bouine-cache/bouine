@@ -23,6 +23,7 @@ func Root() *cobra.Command {
 
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newServeCmd())
+	root.AddCommand(newClusterCmd())
 	return root
 }
 

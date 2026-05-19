@@ -97,6 +97,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
+		// Client-side conditional: return 304 if client's validators match.
+		if ClientConditionalMatch(r, disp.Object) {
+			w.Header().Set("X-Cache", "HIT")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		if ServeRange(w, r, disp.Object) {
 			return
 		}
@@ -204,7 +210,35 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	getReq.Method = http.MethodGet
 	key := BuildKey(getReq)
 	_ = h.store.Delete(r.Context(), key)
-	h.upstream.ServeHTTP(w, r)
+
+	// Capture the upstream response to check for Content-Location and
+	// Location headers for related-URL invalidation (RFC 9111 §4.4).
+	rec := &responseRecorder{
+		header: make(http.Header),
+		body:   &bytes.Buffer{},
+	}
+	h.upstream.ServeHTTP(rec, r)
+
+	// Only invalidate related URLs on success (2xx).
+	if rec.statusCode >= 200 && rec.statusCode < 400 {
+		for _, hdr := range []string{"Content-Location", "Location"} {
+			if loc := rec.header.Get(hdr); loc != "" {
+				locReq := r.Clone(r.Context())
+				locReq.Method = http.MethodGet
+				locReq.URL.Path = loc
+				locKey := BuildKey(locReq)
+				_ = h.store.Delete(r.Context(), locKey)
+			}
+		}
+	}
+
+	// Write the captured response to the client.
+	dst := w.Header()
+	for k, vals := range rec.header {
+		dst[k] = vals
+	}
+	w.WriteHeader(rec.statusCode)
+	_, _ = w.Write(rec.body.Bytes())
 }
 
 func (h *Handler) doFetch(r *http.Request) collapse.Result {

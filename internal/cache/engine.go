@@ -2,6 +2,7 @@ package cache
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
@@ -63,9 +64,62 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 
 func evalMiss(reqCC Directives) Disposition {
 	if reqCC.OnlyIfCached {
+		// RFC 9111 §5.2.1.7: return 504 Gateway Timeout.
 		return Disposition{Decision: Bypass}
 	}
 	return Disposition{Decision: Miss}
+}
+
+// ClientConditionalMatch checks if a cached object satisfies the
+// client's conditional headers (If-None-Match / If-Modified-Since).
+// If it matches, the handler should return 304 instead of 200.
+func ClientConditionalMatch(r *http.Request, obj *api.Object) bool {
+	// If-None-Match takes precedence (RFC 9110 §13.1.2).
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		if obj.ETag != "" && etagMatch(inm, obj.ETag) {
+			return true
+		}
+		return false
+	}
+	// If-Modified-Since (RFC 9110 §13.1.3).
+	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+		imsTime := parseHTTPDate(ims)
+		if imsTime.IsZero() {
+			return false
+		}
+		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
+			return true
+		}
+		// Fall back to StoredAt if no Last-Modified.
+		if obj.LastModified.IsZero() && !obj.StoredAt.After(imsTime) {
+			return true
+		}
+	}
+	return false
+}
+
+// etagMatch checks if needle matches any ETag in the comma-separated
+// list (which may contain "*" or quoted tags). Weak comparison used
+// per RFC 9110 §8.8.3.2.
+func etagMatch(list, needle string) bool {
+	if list == "*" {
+		return true
+	}
+	// Normalize: strip W/ prefix for weak comparison.
+	norm := func(s string) string {
+		s = strings.TrimSpace(s)
+		if len(s) >= 2 && (s[0] == 'W' || s[0] == 'w') && s[1] == '/' {
+			s = s[2:]
+		}
+		return strings.Trim(s, "\"")
+	}
+	needleNorm := norm(needle)
+	for _, tag := range strings.Split(list, ",") {
+		if norm(tag) == needleNorm {
+			return true
+		}
+	}
+	return false
 }
 
 func evalNoCache(reqCC, respCC Directives, obj *api.Object) (Disposition, bool) {
@@ -122,6 +176,10 @@ func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 		return false
 	}
 	if respCC.Private {
+		return false
+	}
+	// Vary: * means every request is unique — never store.
+	if respHeader.Get("Vary") == "*" {
 		return false
 	}
 	if respHeader.Get("Set-Cookie") != "" {
@@ -218,4 +276,21 @@ func ConditionalHeaders(req *http.Request, obj *api.Object) {
 		req.Header.Set("If-Modified-Since",
 			obj.LastModified.UTC().Format(http.TimeFormat))
 	}
+}
+
+// parseHTTPDate tries multiple date formats used in HTTP headers
+// (RFC 1123, RFC 850, ANSI C asctime). Returns zero time on failure.
+func parseHTTPDate(s string) time.Time {
+	formats := []string{
+		http.TimeFormat,                // RFC 1123: "Mon, 02 Jan 2006 15:04:05 GMT"
+		time.RFC850,                    // "Monday, 02-Jan-06 15:04:05 MST"
+		"Mon Jan  2 15:04:05 2006",     // ANSI C asctime
+		"Mon, 2 Jan 2006 15:04:05 GMT", // single-digit day variant
+	}
+	for _, fmt := range formats {
+		if t, err := time.Parse(fmt, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }

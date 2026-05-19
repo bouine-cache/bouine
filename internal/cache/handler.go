@@ -145,12 +145,18 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	}
 
 	if res.StatusCode == http.StatusNotModified {
-		// Refresh the TTL on the existing object.
+		// Merge 304 headers into stored object (RFC 9111 §3.2).
 		refreshed := *stale
 		refreshed.StoredAt = time.Now()
-		respCC := ParseCacheControl(stale.Header.Get("Cache-Control"))
-		if ttl, ok := FreshnessLifetime(respCC, stale.Header.Get); ok {
+		MergeHeaders304(&refreshed, res.Header)
+		// Recompute TTL from the (possibly updated) headers.
+		newCC := ParseCacheControl(refreshed.Header.Get("Cache-Control"))
+		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 			refreshed.TTL = ttl
+		}
+		// Update ETag if the 304 provides a new one.
+		if newETag := res.Header.Get("ETag"); newETag != "" {
+			refreshed.ETag = newETag
 		}
 		_ = h.store.Put(r.Context(), key, &refreshed)
 		h.serveFromCache(w, r, &refreshed)
@@ -216,8 +222,15 @@ func (h *Handler) doFetch(r *http.Request) collapse.Result {
 }
 
 func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object {
+	now := time.Now()
 	respCC := ParseCacheControl(res.Header.Get("Cache-Control"))
-	ttl, _ := FreshnessLifetime(respCC, res.Header.Get)
+	ttl, explicit := FreshnessLifetime(respCC, res.Header.Get)
+
+	// Heuristic freshness: if no explicit TTL, use 10% of age since
+	// Last-Modified (RFC 9111 §4.2.2).
+	if !explicit {
+		ttl = HeuristicTTL(res.Header, now)
+	}
 
 	obj := &api.Object{
 		Key:        key,
@@ -225,7 +238,7 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object 
 		Header:     res.Header.Clone(),
 		Body:       res.Body,
 		BodySize:   int64(len(res.Body)),
-		StoredAt:   time.Now(),
+		StoredAt:   now,
 		TTL:        ttl,
 		ETag:       res.Header.Get("ETag"),
 	}

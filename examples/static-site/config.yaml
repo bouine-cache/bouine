@@ -1,0 +1,32 @@
+# CDN-like static site cache
+#
+# Long TTLs for immutable assets, heuristic for HTML.
+# Suitable for: static sites, documentation, marketing pages.
+
+listen:
+  http: ":80"
+  admin: ":9000"
+
+storage:
+  hot_max_bytes: 1GiB
+  eviction: sieve
+
+upstream_pools:
+  - name: origin
+    targets: [origin.default.svc:8080]
+    health:
+      active:
+        path: /healthz
+        interval: 10s
+        unhealthy_threshold: 3
+
+routes:
+  - match: { path_prefix: /assets/ }
+    pool: origin
+    cache:
+      ttl_default: 86400s     # 24h for static assets
+  - match: {}
+    pool: origin
+    cache:
+      ttl_default: 300s       # 5m for HTML
+      stale_while_revalidate: 60s

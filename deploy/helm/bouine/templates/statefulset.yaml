@@ -53,7 +53,7 @@ spec:
             {{- if .Values.extraEnv }}
             {{- toYaml .Values.extraEnv | nindent 12 }}
             {{- end }}
-            {{- if .Values.cloudflare.apiTokenSecretName }}
+            {{- if and .Values.cloudflare .Values.cloudflare.apiTokenSecretName }}
             - name: CF_API_TOKEN
               valueFrom:
                 secretKeyRef:

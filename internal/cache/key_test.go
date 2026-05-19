@@ -121,12 +121,20 @@ func TestIsCacheable_Private(t *testing.T) {
 }
 
 func TestIsCacheable_SetCookie(t *testing.T) {
+	// Set-Cookie WITHOUT explicit freshness blocks caching.
 	resp := http.Header{
+		"Set-Cookie": {"sid=abc"},
+	}
+	if IsCacheable(200, http.Header{}, resp) {
+		t.Fatal("Set-Cookie without max-age should block caching")
+	}
+	// Set-Cookie WITH explicit max-age is cacheable (shared cache behavior).
+	resp2 := http.Header{
 		"Cache-Control": {"max-age=60"},
 		"Set-Cookie":    {"sid=abc"},
 	}
-	if IsCacheable(200, http.Header{}, resp) {
-		t.Fatal("Set-Cookie should block caching by default")
+	if !IsCacheable(200, http.Header{}, resp2) {
+		t.Fatal("Set-Cookie with max-age should be cacheable")
 	}
 }
 

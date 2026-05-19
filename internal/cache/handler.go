@@ -116,8 +116,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case Revalidate:
 		h.revalidate(w, r, key, disp.Object)
 	case Bypass:
-		h.upstream.ServeHTTP(w, r)
+		h.handleBypass(w, r)
 	}
+}
+
+func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
+	// only-if-cached with no cached response → 504 Gateway Timeout
+	// (RFC 9111 §5.2.1.7).
+	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, "Cache-Control"))
+	if reqCC.OnlyIfCached {
+		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+		return
+	}
+	h.upstream.ServeHTTP(w, r)
 }
 
 func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *api.Object) {
@@ -187,6 +198,11 @@ func (h *Handler) writeAndMaybeStore(
 		dst[k] = vals
 	}
 	dst["X-Cache"] = headerMISS
+	// A proxy SHOULD add an Age header to responses it forwards,
+	// even on first fetch (Age: 0 + any origin Age).
+	if res.Header.Get("Age") == "" {
+		dst["Age"] = []string{"0"}
+	}
 	w.WriteHeader(res.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(res.Body)
@@ -209,22 +225,23 @@ func (h *Handler) writeAndMaybeStore(
 }
 
 func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
-	// Invalidation targets the GET key for this URL (RFC 9111 §4.4).
-	getReq := r.Clone(r.Context())
-	getReq.Method = http.MethodGet
-	key := BuildKey(getReq)
-	_ = h.store.Delete(r.Context(), key)
-
-	// Capture the upstream response to check for Content-Location and
-	// Location headers for related-URL invalidation (RFC 9111 §4.4).
+	// Capture the upstream response first — only invalidate on success
+	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
+	// indicates a server error).
 	rec := &responseRecorder{
 		header: make(http.Header),
 		body:   &bytes.Buffer{},
 	}
 	h.upstream.ServeHTTP(rec, r)
 
-	// Only invalidate related URLs on success (2xx).
+	// Only invalidate on 2xx/3xx success.
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
+		getReq := r.Clone(r.Context())
+		getReq.Method = http.MethodGet
+		key := BuildKey(getReq)
+		_ = h.store.Delete(r.Context(), key)
+
+		// Also evict Content-Location and Location URLs.
 		for _, hdr := range []string{"Content-Location", "Location"} {
 			if loc := rec.header.Get(hdr); loc != "" {
 				locReq := r.Clone(r.Context())
@@ -307,11 +324,13 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object 
 	return obj
 }
 
+// isInvalidating returns true for any unsafe method that should
+// trigger cache invalidation (RFC 9111 §4.4). Only GET, HEAD, and
+// OPTIONS are safe; everything else invalidates.
 func isInvalidating(method string) bool {
-	return method == http.MethodPost ||
-		method == http.MethodPut ||
-		method == http.MethodDelete ||
-		method == http.MethodPatch
+	return method != http.MethodGet &&
+		method != http.MethodHead &&
+		method != "OPTIONS"
 }
 
 // responseRecorder captures the upstream response in memory so we can

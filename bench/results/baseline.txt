@@ -2,62 +2,62 @@ goos: darwin
 goarch: arm64
 pkg: github.com/thylong/bouine/internal/cache
 cpu: Apple M5
-BenchmarkHandler_CacheHit-10     	 2132103	       549.1 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	 2233618	       537.8 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	 2221576	       539.7 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	 2232948	       538.8 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheHit-10     	 2231559	       538.1 ns/op	    2016 B/op	       9 allocs/op
-BenchmarkHandler_CacheMiss-10    	 1533927	       781.8 ns/op	    4680 B/op	      17 allocs/op
-BenchmarkHandler_CacheMiss-10    	 1535515	       780.7 ns/op	    4680 B/op	      17 allocs/op
-BenchmarkHandler_CacheMiss-10    	 1487287	       798.8 ns/op	    4680 B/op	      17 allocs/op
-BenchmarkHandler_CacheMiss-10    	 1544713	       777.4 ns/op	    4680 B/op	      17 allocs/op
-BenchmarkHandler_CacheMiss-10    	 1534096	       781.6 ns/op	    4680 B/op	      17 allocs/op
-BenchmarkBuildKey-10             	 5946906	       201.2 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	 5987104	       200.2 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	 5986099	       200.6 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	 5975128	       200.8 ns/op	     432 B/op	       4 allocs/op
-BenchmarkBuildKey-10             	 5964668	       201.5 ns/op	     432 B/op	       4 allocs/op
-BenchmarkEvaluate_Hit-10         	21499515	        55.11 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	21818280	        55.27 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	21786376	        55.06 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	21801780	        55.08 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEvaluate_Hit-10         	21797275	        55.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHandler_CacheHit-10     	 1868725	       630.2 ns/op	    2016 B/op	       9 allocs/op
+BenchmarkHandler_CacheHit-10     	 1935484	       625.1 ns/op	    2016 B/op	       9 allocs/op
+BenchmarkHandler_CacheHit-10     	 1928376	       624.2 ns/op	    2016 B/op	       9 allocs/op
+BenchmarkHandler_CacheHit-10     	 1899530	       628.4 ns/op	    2016 B/op	       9 allocs/op
+BenchmarkHandler_CacheHit-10     	 1924370	       625.9 ns/op	    2016 B/op	       9 allocs/op
+BenchmarkHandler_CacheMiss-10    	 1374753	       872.6 ns/op	    4712 B/op	      18 allocs/op
+BenchmarkHandler_CacheMiss-10    	 1330429	       894.4 ns/op	    4712 B/op	      18 allocs/op
+BenchmarkHandler_CacheMiss-10    	 1309006	       912.9 ns/op	    4712 B/op	      18 allocs/op
+BenchmarkHandler_CacheMiss-10    	 1325815	       900.1 ns/op	    4712 B/op	      18 allocs/op
+BenchmarkHandler_CacheMiss-10    	 1379343	       871.7 ns/op	    4712 B/op	      18 allocs/op
+BenchmarkBuildKey-10             	 5711601	       210.9 ns/op	     432 B/op	       4 allocs/op
+BenchmarkBuildKey-10             	 5743656	       210.3 ns/op	     432 B/op	       4 allocs/op
+BenchmarkBuildKey-10             	 5708757	       210.5 ns/op	     432 B/op	       4 allocs/op
+BenchmarkBuildKey-10             	 5694571	       210.2 ns/op	     432 B/op	       4 allocs/op
+BenchmarkBuildKey-10             	 5704627	       210.2 ns/op	     432 B/op	       4 allocs/op
+BenchmarkEvaluate_Hit-10         	11685546	        99.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	12084150	        99.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	12042892	       101.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	12086680	       100.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEvaluate_Hit-10         	11774416	       102.5 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/thylong/bouine/internal/cache	24.461s
+ok  	github.com/thylong/bouine/internal/cache	24.345s
 goos: darwin
 goarch: arm64
 pkg: github.com/thylong/bouine/internal/storage
 cpu: Apple M5
-BenchmarkHotStore_Get_Hit-10         	217652690	         5.415 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Hit-10         	225245112	         5.331 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Hit-10         	224644920	         5.344 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Hit-10         	224119524	         5.344 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Hit-10         	224325655	         5.349 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Miss-10        	270330673	         4.437 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Miss-10        	270337118	         4.437 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Miss-10        	270134061	         4.443 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Miss-10        	270041460	         4.444 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Get_Miss-10        	269792563	         4.445 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHotStore_Put-10             	 3552312	       329.2 ns/op	    1655 B/op	       6 allocs/op
-BenchmarkHotStore_Put-10             	 3421533	       329.3 ns/op	    1655 B/op	       6 allocs/op
-BenchmarkHotStore_Put-10             	 3161424	       343.5 ns/op	    1656 B/op	       6 allocs/op
-BenchmarkHotStore_Put-10             	 3465765	       331.6 ns/op	    1655 B/op	       6 allocs/op
-BenchmarkHotStore_Put-10             	 3364024	       335.3 ns/op	    1655 B/op	       6 allocs/op
-BenchmarkHotStore_Put_Eviction-10    	 5613315	       211.3 ns/op	    1137 B/op	       6 allocs/op
-BenchmarkHotStore_Put_Eviction-10    	 5671419	       211.5 ns/op	    1137 B/op	       6 allocs/op
-BenchmarkHotStore_Put_Eviction-10    	 5660496	       213.3 ns/op	    1137 B/op	       6 allocs/op
-BenchmarkHotStore_Put_Eviction-10    	 5702596	       213.5 ns/op	    1137 B/op	       6 allocs/op
-BenchmarkHotStore_Put_Eviction-10    	 5629863	       211.4 ns/op	    1137 B/op	       6 allocs/op
-BenchmarkSIEVE_Access-10             	223885296	         5.361 ns/op	       0 B/op	       0 allocs/op
-BenchmarkSIEVE_Access-10             	223994474	         5.358 ns/op	       0 B/op	       0 allocs/op
-BenchmarkSIEVE_Access-10             	223896121	         5.503 ns/op	       0 B/op	       0 allocs/op
-BenchmarkSIEVE_Access-10             	223908498	         5.360 ns/op	       0 B/op	       0 allocs/op
-BenchmarkSIEVE_Access-10             	223896243	         5.360 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	211883244	         5.496 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	223032020	         5.392 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	220376214	         5.418 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	222554473	         5.389 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Hit-10         	205604184	         5.596 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	265306748	         4.518 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	258704485	         4.571 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	265676553	         4.530 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	265785218	         4.521 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Get_Miss-10        	264863437	         4.526 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHotStore_Put-10             	 3264172	       364.4 ns/op	    1656 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3203149	       355.7 ns/op	    1656 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3109287	       364.9 ns/op	    1656 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3225360	       350.1 ns/op	    1656 B/op	       6 allocs/op
+BenchmarkHotStore_Put-10             	 3291662	       348.5 ns/op	    1655 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5443822	       218.8 ns/op	    1137 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5489593	       219.4 ns/op	    1138 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5322201	       222.1 ns/op	    1138 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5507686	       217.8 ns/op	    1137 B/op	       6 allocs/op
+BenchmarkHotStore_Put_Eviction-10    	 5522805	       225.0 ns/op	    1137 B/op	       6 allocs/op
+BenchmarkSIEVE_Access-10             	223360048	         5.381 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	223694584	         5.376 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	222780392	         5.376 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	222899917	         5.372 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIEVE_Access-10             	223799785	         5.371 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/thylong/bouine/internal/storage	33.269s
+ok  	github.com/thylong/bouine/internal/storage	33.385s
 PASS
-ok  	github.com/thylong/bouine/internal/storage/sieve	0.378s
+ok  	github.com/thylong/bouine/internal/storage/sieve	0.434s
 PASS
-ok  	github.com/thylong/bouine/internal/storage/wal	0.527s
+ok  	github.com/thylong/bouine/internal/storage/wal	0.577s
 PASS
-ok  	github.com/thylong/bouine/internal/storage/warm	0.339s
+ok  	github.com/thylong/bouine/internal/storage/warm	0.425s

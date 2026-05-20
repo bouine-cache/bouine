@@ -1,9 +1,6 @@
 // Package accesslog provides a structured access logger for the data
 // plane. Each request passing through the pipeline is logged as a
 // JSON slog record with the fields listed in PLAN.md §10.
-//
-// Phase 1 ships the logger; sampling (1:100 by default) lands in
-// phase 3 alongside the cache result field.
 package accesslog
 
 import (

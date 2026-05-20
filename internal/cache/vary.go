@@ -11,15 +11,9 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
-// VaryConfig controls per-route Vary behavior.
-type VaryConfig struct {
-	// MaxVariants caps the number of stored variants per primary key.
-	// Zero means the package default (64).
-	MaxVariants int
-}
-
 // MaxVariants is the default cap on stored variants per primary key.
-// Used by the handler to enforce the Vary blow-up limit (PLAN.md §3).
+// Enforced by the handler: a Put is skipped when the variant count for
+// a primary key exceeds this value, preventing Vary blow-up attacks.
 const MaxVariants = 64
 
 // varyContainsStar reports whether the Vary header value contains "*"

@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bouine.fullname" . }}
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: {{ .Values.service.httpsPort }}
+      targetPort: https
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.service.adminPort }}
+      targetPort: admin
+      protocol: TCP
+  selector:
+    {{- include "bouine.selectorLabels" . | nindent 4 }}
+---
+# Headless service for gossip peer discovery (StatefulSet DNS).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bouine.fullname" . }}-headless
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - name: cluster-tcp
+      port: {{ .Values.headlessService.clusterPort }}
+      targetPort: cluster
+      protocol: TCP
+    - name: cluster-udp
+      port: {{ .Values.headlessService.clusterPort }}
+      targetPort: cluster-udp
+      protocol: UDP
+  selector:
+    {{- include "bouine.selectorLabels" . | nindent 4 }}

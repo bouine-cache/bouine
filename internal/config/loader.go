@@ -112,7 +112,7 @@ func (c *Config) Validate() error {
 
 // UnmarshalYAML implements yaml.Unmarshaler for ByteSize. Accepted
 // forms: an integer (bytes) or a string suffixed with B/KB/KiB/MB/MiB/
-// GB/GiB/TB/TiB (case-insensitive).
+// GB/GiB/TB/TiB/Ko/Mo/Go/To (case-insensitive).
 func (b *ByteSize) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {
 	case yaml.ScalarNode:
@@ -143,15 +143,19 @@ var byteSizeUnits = map[string]float64{
 	"K":   1e3,
 	"KB":  1e3,
 	"KIB": 1 << 10,
+	"KO":  1e3,
 	"M":   1e6,
 	"MB":  1e6,
 	"MIB": 1 << 20,
+	"MO":  1e6,
 	"G":   1e9,
 	"GB":  1e9,
 	"GIB": 1 << 30,
+	"GO":  1e9,
 	"T":   1e12,
 	"TB":  1e12,
 	"TIB": 1 << 40,
+	"TO":  1e12,
 }
 
 func parseByteSize(s string) (int64, error) {

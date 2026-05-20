@@ -115,7 +115,7 @@ dependencies for a surface that serves ≤ 10 RPS.
 /internal/config             config loader, schema, hot reload
 /internal/ai                 L9 — traffic analytics (phase 6)
 /internal/vcl                VCL-compatible shim (deferred — see §18)
-/web/dashboard               L9 — frontend (phase 6)
+/web/dashboard               L9 — HTMX dashboard templates (phase 6)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
 /pkg/api                     shared types between SDK, admin server, dashboard
 /test/integration            docker-compose driven scenarios
@@ -473,11 +473,11 @@ tls:
   # sidecar like step-ca and project the cert into /etc/bouine/tls.
 
 storage:
-  hot_max_bytes:   2GiB
+  hot_max_bytes:   2Go
   warm_dir:        /var/lib/bouine     # encryption-at-rest delegated to the
                                        # cloud provider (EBS/PD/Azure Disk).
                                        # bouine never encrypts the warm tier.
-  warm_max_bytes:  50GiB
+  warm_max_bytes:  50Go
   eviction:        sieve     # or "w-tinylfu"
 
 cluster:
@@ -998,11 +998,13 @@ packages may remain.
   - Vary header pruning.
   - Candidate prefetch URLs.
   - Ban predicate strategies.
-- Dashboard (SvelteKit or React, embedded via `embed.FS` into admin):
-  - Live RED & USE charts.
+- Dashboard (HTMX + Go `html/template`, embedded via `embed.FS` into admin):
+  - Live RED & USE charts (htmx polling / SSE partial swaps).
   - Per-route hit/miss heatmaps.
   - "Suggestions" inbox with one-click apply (writes a config diff PR or
     pushes via the admin API).
+  - Zero JS build step — the dashboard is server-rendered HTML fragments
+    with htmx attributes; no Node toolchain required.
 - All AI features are **opt-in** and run in a separate goroutine pool with
   a strict CPU budget — never compete with the data plane.
 - **Exit:** at least 5 actionable suggestion types implemented; dashboard
@@ -1148,6 +1150,25 @@ the canonical NGINX or not-too-VCL-heavy-Varnish use cases.
     planned as phase 5.5 but deferred. The design is documented in
     §17.4; `/internal/vcl` is reserved. v1.1+ candidate when Varnish
     migration demand justifies the maintenance cost.
+19. **Multi-layer cache (cache-of-caches)** — deploy multiple bouine
+    tiers (e.g. edge → regional → origin-shield) where each layer is
+    an independent bouine instance or cluster. Requires: hierarchical
+    cache invalidation propagation (purge/ban forwarded from outer to
+    inner layers), parent-fetch protocol (inner layer acts as origin
+    for the outer), loop detection across tiers (`X-Bouine-Tier` +
+    hop budget), and per-layer TTL/SWR overrides so the edge can be
+    aggressive while the shield stays conservative. Also useful as a
+    circuit-breaker topology: the inner layer absorbs origin failures
+    while the outer continues serving stale. v1.2+ candidate.
+20. **Always-warm (pre-warm on eviction)** — when an object is evicted
+    from the hot tier (SIEVE/W-TinyLFU), instead of discarding it,
+    schedule an immediate background re-fetch from origin to keep the
+    entry warm. Controlled per route via `cache.always_warm: true`.
+    Guards: bounded re-fetch concurrency (shared with the prefetcher
+    semaphore), skip if origin returned 5xx on last attempt, honour
+    `Cache-Control: no-cache` / `no-store` from origin on re-fetch.
+    Useful for high-traffic routes where a cache miss is unacceptable
+    (e.g. homepage, product listing). v1.1+ candidate.
 
 When one of these graduates from "deferred" to "planned", it gets a
 phase entry in §15, a row in the threat model if security-relevant, and

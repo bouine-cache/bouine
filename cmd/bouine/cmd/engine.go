@@ -265,6 +265,30 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 		rs.rings.Start(rCtx, rs.snapshotPath)
 		return nil
 	})
+	// Poll hot-store stats every 15 s and update the Prometheus gauges.
+	// This keeps bouine_hot_store_bytes / _entries / _evictions_total current
+	// without adding per-request overhead.
+	g.Go("store-metrics", func(rCtx context.Context) error {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		var lastEvictions int64
+		for {
+			select {
+			case <-rCtx.Done():
+				return nil
+			case <-ticker.C:
+				s := rs.store.Stats()
+				rs.dpMetrics.HotStoreBytes.Set(float64(s.HotBytes))
+				rs.dpMetrics.HotStoreEntries.Set(float64(s.HotEntries))
+				// Counter: add the delta since last poll.
+				delta := s.Evictions - lastEvictions
+				if delta > 0 {
+					rs.dpMetrics.HotStoreEvictions.Add(float64(delta))
+					lastEvictions = s.Evictions
+				}
+			}
+		}
+	})
 }
 
 // buildInvalidationOps creates the shared purge/ban/refresh closures.

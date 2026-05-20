@@ -682,8 +682,12 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	// L5 span: upstream origin pool layer.
 	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
 	defer span.End()
+	// Propagate W3C TraceContext into the upstream request so the origin
+	// can participate in the distributed trace.
+	outReq := r.WithContext(ctx)
+	tracing.InjectHTTP(ctx, outReq)
 	rec := acquireRecorder()
-	h.upstream.ServeHTTP(rec, r.WithContext(ctx))
+	h.upstream.ServeHTTP(rec, outReq)
 
 	return fetchResult{
 		StatusCode: rec.statusCode,

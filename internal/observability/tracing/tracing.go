@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
@@ -57,6 +58,14 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 		trace.WithAttributes(attrs...),
 	)
 	return ctx, span
+}
+
+// InjectHTTP stamps the W3C TraceContext (traceparent / tracestate) and
+// Baggage headers into req so the upstream origin can continue the trace.
+// It is a no-op when no tracer is configured or the context has no active
+// span, so callers do not need to guard against unconfigured tracing.
+func InjectHTTP(ctx context.Context, req *http.Request) {
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 }
 
 // RecordError records err on span and sets the span status to Error.
@@ -106,6 +115,12 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 		)),
 	)
 	otel.SetTracerProvider(tp)
+	// Install W3C TraceContext + Baggage as the global propagator so that
+	// InjectHTTP can stamp outbound upstream requests with traceparent headers.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	return func() { //nolint:contextcheck
 		_ = tp.Shutdown(context.Background())

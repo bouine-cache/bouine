@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/thylong/bouine/internal/observability/responsewriter"
 )
@@ -21,6 +22,10 @@ type DataPlaneMetrics struct {
 	ResponseBytesOut *prometheus.CounterVec
 	VaryCapHits      prometheus.Counter // incremented when MaxVariants cap is hit
 	Rings            *Rings             // nil when dashboard is disabled
+	// Hot-tier storage gauges — updated on every Stats() poll by the engine.
+	HotStoreBytes     prometheus.Gauge
+	HotStoreEntries   prometheus.Gauge
+	HotStoreEvictions prometheus.Counter
 	// Cloudflare propagation counters.
 	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
 	CFPurgeDuration *prometheus.HistogramVec // labels: operation
@@ -37,10 +42,13 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Help:      "Total number of requests processed by the data plane.",
 		}, []string{"method", "status", "cache_result", "route"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: "bouine",
-			Name:      "request_duration_seconds",
-			Help:      "Histogram of request durations in seconds.",
-			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			Namespace:                       "bouine",
+			Name:                            "request_duration_seconds",
+			Help:                            "Histogram of request durations in seconds.",
+			Buckets:                         []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  100,
+			NativeHistogramMinResetDuration: 15 * time.Minute,
 		}, []string{"method", "status", "cache_result", "route"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
@@ -69,8 +77,24 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "cloudflare_purge_skipped_total",
 		Help:      "Invalidations not forwarded to Cloudflare (disabled or incompatible regex).",
 	}, []string{"reason"})
+	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_bytes",
+		Help:      "Current number of bytes used by the hot in-memory cache tier (body + per-entry overhead).",
+	})
+	m.HotStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_entries",
+		Help:      "Current number of objects stored in the hot in-memory cache tier.",
+	})
+	m.HotStoreEvictions = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_evictions_total",
+		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
+	})
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
-		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped)
+		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
+		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions)
 	return m
 }
 
@@ -109,7 +133,9 @@ func init() {
 
 // Middleware wraps an http.Handler and records RED metrics for every
 // request. It sits between the access-log middleware and the pipeline
-// router.
+// router. When a trace is active on the request context, the duration
+// histogram observation carries an exemplar with the trace_id so
+// Grafana can link high-latency buckets directly to a trace.
 func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -129,8 +155,23 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		cacheResult := normaliseCacheResult(w.Header().Get("X-Cache"))
 
 		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, route).Inc()
-		m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, route).
-			Observe(time.Since(start).Seconds())
+
+		// Attach an exemplar when a trace is active so Grafana can link
+		// high-latency histogram buckets directly to the matching trace.
+		dur := time.Since(start).Seconds()
+		obs := m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, route)
+		if span := trace.SpanFromContext(r.Context()); span.SpanContext().IsValid() {
+			if eo, ok := obs.(prometheus.ExemplarObserver); ok {
+				eo.ObserveWithExemplar(dur, prometheus.Labels{
+					"trace_id": span.SpanContext().TraceID().String(),
+				})
+			} else {
+				obs.Observe(dur)
+			}
+		} else {
+			obs.Observe(dur)
+		}
+
 		m.ResponseBytesOut.WithLabelValues(r.Method, route).
 			Add(float64(sw.Bytes))
 

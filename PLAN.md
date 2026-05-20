@@ -2,8 +2,8 @@
 
 `bouine` is a horizontally-scalable, observability-first HTTP reverse-proxy cache
 written in Go 1.26. It targets the same problem space as Varnish (RFC 9111 cache,
-ESI-style composition, fast purge, surrogate keys) but is designed from day one
-for Kubernetes, multi-instance clustering, and first-class metrics/traces/logs.
+fast purge, predicate-based bans) but is designed from day one for Kubernetes,
+multi-instance clustering, and first-class metrics/traces/logs.
 
 This document is the single source of truth for the roadmap. Each phase has
 explicit deliverables, exit criteria, and the tests that gate moving forward.
@@ -26,11 +26,11 @@ explicit deliverables, exit criteria, and the tests that gate moving forward.
 - **Fault tolerance** — active and passive upstream health checks, hedged
   requests, circuit breakers, request collapsing.
 - **Operator UX** — Cobra-based CLI, declarative YAML/HCL config, hot reload,
-  purge & ban APIs (URL, surrogate-key, regex, full).
+  purge & ban APIs (URL, regex, full).
 - **Observability built-in** — OpenTelemetry traces, Prometheus metrics, slog
   structured access logs, pprof.
 - **Advanced caching** — prefetching, stale-while-revalidate, stale-if-error,
-  request collapsing, ESI-lite, surrogate keys, Vary canonicalisation.
+  request collapsing, Vary canonicalisation.
 - **AI-assisted insights (later phase)** — traffic analysis daemon plus a
   client-facing dashboard suggesting cache-strategy improvements.
 
@@ -415,8 +415,7 @@ migration story is short:
 `net/http.ServeMux` app on a dedicated admin port. Endpoints:
 
 - `POST /v1/purge`             — exact URL purge.
-- `POST /v1/ban`               — predicate ban (regex on host/path/header,
-                                surrogate-key match).
+- `POST /v1/ban`               — predicate ban (regex on host/path/header).
 - `POST /v1/refresh`           — soft purge: mark stale, revalidate on next
                                 request.
 - `GET  /v1/config`            — current effective config.
@@ -845,19 +844,29 @@ in phase 5 starts until this passes.
 ### Phase 5 — Advanced features (weeks 16–18)
 - Prefetching: `Link: rel=preload` walker, sitemap crawler, scheduled
   warm-up jobs.
-- ESI-lite (`<esi:include>` only, no XSLT).
-- Surrogate keys (`Surrogate-Key` response header, indexed for ban).
 - Negative caching, soft-purge, jittered TTLs.
-- VCL-compatible shim (subset defined in §17.4): parser, lowering to
-  native config, diff report, `bouine config translate --vcl`.
 - Go SDK (`pkg/bouineapi`) reaches v1.0 surface; Cobra subcommands
   rewritten on top of it.
 - More cache-tests coverage edge cases.
 - **Exit:** prefetch hit-ratio uplift demonstrated on a synthetic workload;
-  cache-tests parity maintained; sample Varnish VCL from the docs loads
-  and serves traffic with documented caveats.
+  cache-tests parity maintained.
 
-### Phase 7 — Simplification & complexity reduction (week 23–24)
+### Phase 5.5 — VCL-compatible shim (weeks 19–20)
+
+A dedicated phase to build and stabilize the VCL translation layer.
+Nothing in phase 6 starts until this ships.
+
+- VCL-compatible shim (subset defined in §17.4): parser, lowering to
+  native config, diff report, `bouine config translate --vcl`.
+- `bouine config validate --vcl file.vcl` CLI command.
+- Diff report emitted at load time showing every VCL construct that was
+  dropped or approximated.
+- Test suite covering representative Varnish VCL files from the docs.
+- **Exit:** sample Varnish VCL from the docs loads and serves traffic
+  with documented caveats; diff report is accurate and complete;
+  cache-tests score not regressed.
+
+### Phase 7 — Simplification & complexity reduction (week 25–26)
 
 A dedicated engineering pass to eliminate dead code, reduce
 over-engineering, consolidate duplicated patterns, and wire unwired
@@ -994,7 +1003,7 @@ packages may remain.
   outside `main`.
 - Zero stale "phase N" doc comments referencing shipped phases.
 
-### Phase 6 — AI traffic analysis & dashboard (weeks 19–23)
+### Phase 6 — AI traffic analysis & dashboard (weeks 21–25)
 - Streaming analyzer: ingest sampled access logs into an embedded DuckDB
   (or Parquet on disk) for ad-hoc queries.
 - Feature extraction: hit/miss patterns per route, TTL utilisation, top
@@ -1003,7 +1012,7 @@ packages may remain.
   - TTL changes per route.
   - Vary header pruning.
   - Candidate prefetch URLs.
-  - Surrogate-key strategies.
+  - Ban predicate strategies.
 - Dashboard (SvelteKit or React, embedded via `embed.FS` into admin):
   - Live RED & USE charts.
   - Per-route hit/miss heatmaps.
@@ -1026,7 +1035,7 @@ packages may remain.
 | Cluster split-brain on purges | Monotonic purge tokens + anti-entropy reconciler. |
 | Benchmark noise | Use `benchstat`, run on a pinned self-hosted runner, require N=10 samples. |
 | AI features creep into the hot path | Hard architectural boundary: L9 only reads sampled telemetry, never writes to L3/L4. |
-| VCL shim becomes a maintenance sink | Hard-cap supported subset (§17.4), fail loudly on unsupported constructs, never silently approximate. |
+| VCL shim becomes a maintenance sink | Hard-cap supported subset (§17.4, phase 5.5), fail loudly on unsupported constructs, never silently approximate. |
 | SDK and HTTP API drift apart | Single source of truth in `pkg/api`; contract tests run both surfaces against the same fixtures. |
 | Cache poisoning via unkeyed input | Default policy forbids implicit header keying; Vary cap; threat-model rows T06/T07/T09 wired to CI fuzz corpus. |
 | HTTP request smuggling on the front door | Strict RFC 9112 parser, ambiguous-framing rejection, fuzz corpus seeded with public PortSwigger inputs. |
@@ -1053,7 +1062,7 @@ These were open questions during planning; locked in for v1.0.
 3. **HTTP/3 0-RTT is disabled by default** — even when HTTP/3 is enabled.
    Opt-in per route via `route.http3.allow_0rtt: true`; the engine still
    refuses 0-RTT for non-idempotent methods regardless of config.
-4. **VCL-compatible shim is in scope** — lives in `/internal/vcl`. It is a
+4. **VCL-compatible shim is in scope (phase 5.5)** — lives in `/internal/vcl`. It is a
    parser + lowering pass that translates a useful subset of VCL 4.1 into
    the native bouine config tree at load time. Supported surface area:
    - `sub vcl_recv`, `vcl_hash`, `vcl_backend_response`, `vcl_deliver`,
@@ -1126,9 +1135,9 @@ the canonical NGINX or not-too-VCL-heavy-Varnish use cases.
 9. **Pluggable storage backends** — v1.0 is RAM + mmap, embedded only.
    A plugin interface (e.g., NVMe-direct, Optane, object storage) may
    land later.
-10. **Backup / restore of ban list & surrogate-key map** — caches are
-    rebuildable; admin state is recoverable from the config + the
-    audit log. A dedicated snapshot/restore tool is a v1.1 candidate.
+10. **Backup / restore of ban list** — caches are rebuildable; admin
+    state is recoverable from the config + the audit log. A dedicated
+    snapshot/restore tool is a v1.1 candidate.
 11. **Emergency stale-mode** — serve stale beyond `stale-if-error` for
     explicitly allow-listed routes during an origin outage. v1.1
     candidate; today operators bump `stale-if-error` config and reload.
@@ -1142,6 +1151,13 @@ the canonical NGINX or not-too-VCL-heavy-Varnish use cases.
 15. **Federated multi-cluster** — gossip and consistent hash today are
     single-cluster. Cross-cluster federation (e.g., regional tiering)
     is a future feature.
+16. **ESI-lite** — `<esi:include>` support was originally scoped for
+    phase 5 but dropped to keep v1.0 focused. Most modern architectures
+    prefer edge-side composition at the CDN layer or client-side
+    includes. v1.1+ candidate if demand materializes.
+17. **Surrogate keys** — `Surrogate-Key` response header indexed for
+    ban was originally scoped for phase 5 but dropped. Operators use
+    host/path/method predicate bans in v1.0. v1.1 candidate.
 
 When one of these graduates from "deferred" to "planned", it gets a
 phase entry in §15, a row in the threat model if security-relevant, and
@@ -1151,7 +1167,7 @@ its own ADR under `docs/decisions/`.
 
 ## 19. Definition of Done (v1.0)
 
-- All phases 0–7 (plus 3.5 and 4.5) complete and tagged.
+- All phases 0–7 (plus 3.5, 4.5, and 5.5) complete and tagged.
 - Hit-path allocs/op = 0 on the canonical benchmark (phase 3.5 gate).
 - cache-tests score ≥ Varnish on every category.
 - Canonical benchmark within 10 % of Varnish RPS, never regressing in CI.

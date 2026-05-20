@@ -34,6 +34,15 @@ spec:
             - serve
             - --config=/etc/bouine/config.yaml
             - --log-format=json
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - name: http
               containerPort: 80

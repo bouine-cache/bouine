@@ -117,6 +117,44 @@ govulncheck: ## Run govulncheck.
 .PHONY: ci
 ci: vet lint test-short build hooks-run ## Run the CI gate locally (vet, lint, test, build, hooks).
 
+.PHONY: test-k8s-setup
+test-k8s-setup: build ## Build image and deploy bouine + test origin on Kubernetes.
+	docker build -t bouine:dev .
+	-kubectl create namespace bouine-test 2>/dev/null
+	-kubectl -n bouine-test delete pod origin 2>/dev/null
+	-kubectl -n bouine-test delete svc origin 2>/dev/null
+	kubectl -n bouine-test run origin --image=golang:1.26-alpine \
+		--overrides='{"spec":{"containers":[{"name":"origin","image":"golang:1.26-alpine","command":["go","run","./..."],"workingDir":"/src","ports":[{"containerPort":8080}],"volumeMounts":[{"name":"src","mountPath":"/src","readOnly":true}]}],"volumes":[{"name":"src","hostPath":{"path":"$(CURDIR)/test/integration/origin"}}]}}'
+	kubectl -n bouine-test expose pod origin --port=8080
+	kubectl -n bouine-test wait --for=condition=ready pod/origin --timeout=60s
+	helm upgrade --install bouine deploy/helm/bouine \
+		--namespace bouine-test \
+		--set image.repository=bouine \
+		--set image.tag=dev \
+		--set image.pullPolicy=Never \
+		--set replicaCount=3 \
+		--set config.listen.https="" \
+		--set config.listen.http3="" \
+		--set config.storage.hot_max_bytes=256MiB \
+		--set config.storage.warm_dir="" \
+		--set warmVolume.enabled=false \
+		--set topologySpreadConstraints="" \
+		--set config.cluster.enabled=true \
+		--set "config.upstream_pools[0].name=origin" \
+		--set "config.upstream_pools[0].targets[0]=origin.bouine-test.svc:8080" \
+		--set "config.routes[0].pool=origin"
+	kubectl -n bouine-test rollout status statefulset/bouine --timeout=120s
+	@echo ""
+	@echo ">>> bouine deployed. Run tests with:"
+	@echo ">>>   kubectl -n bouine-test port-forward svc/bouine 8080:80 &"
+	@echo ">>>   curl -sI http://localhost:8080/hit"
+	@echo ">>> See test/integration/TESTPLAN.md for all scenarios."
+
+.PHONY: test-k8s-teardown
+test-k8s-teardown: ## Remove bouine + test origin from Kubernetes.
+	-helm uninstall bouine --namespace bouine-test
+	-kubectl delete namespace bouine-test
+
 .PHONY: clean
 clean: ## Remove build artifacts.
 	rm -rf $(BIN_DIR) coverage.* cover.html

@@ -39,10 +39,12 @@ var (
 // Handler is the caching HTTP handler. It wraps an upstream
 // http.Handler (the origin pool) and a storage.Store.
 type Handler struct {
-	upstream http.Handler
-	store    storage.Store
-	collapse *collapse.Group
-	logger   *slog.Logger
+	upstream      http.Handler
+	store         storage.Store
+	collapse      *collapse.Group
+	logger        *slog.Logger
+	negativeTTL   time.Duration
+	jitterPercent int
 }
 
 // HandlerConfig configures a cache Handler.
@@ -50,6 +52,10 @@ type HandlerConfig struct {
 	Upstream http.Handler
 	Store    storage.Store
 	Logger   *slog.Logger
+	// NegativeTTL enables caching of 404/405/410/501 responses.
+	NegativeTTL time.Duration
+	// JitterPercent adds random ±N% to TTLs (0–50). 0 disables.
+	JitterPercent int
 }
 
 // NewHandler creates a caching handler.
@@ -58,10 +64,12 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		cfg.Logger = slog.Default()
 	}
 	return &Handler{
-		upstream: cfg.Upstream,
-		store:    cfg.Store,
-		collapse: collapse.NewGroup(),
-		logger:   cfg.Logger,
+		upstream:      cfg.Upstream,
+		store:         cfg.Store,
+		collapse:      collapse.NewGroup(),
+		logger:        cfg.Logger,
+		negativeTTL:   cfg.NegativeTTL,
+		jitterPercent: cfg.JitterPercent,
 	}
 }
 
@@ -225,17 +233,17 @@ func (h *Handler) writeAndMaybeStore(
 		_, _ = w.Write(res.Body)
 	}
 
-	if IsCacheable(res.StatusCode, r.Header, res.Header) {
+	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
 		storeKey := key
 		if vary := res.Header.Get("Vary"); vary != "" {
 			storeKey = VariantKey(BuildKey(r), vary, r.Header)
 		}
-		obj := buildObject(storeKey, r, res)
+		obj := buildObject(storeKey, r, res, h.negativeTTL, h.jitterPercent)
 		_ = h.store.Put(r.Context(), storeKey, obj)
 		// Also store a "primary" entry so Vary-aware lookup finds
 		// the Vary header on the first lookup.
 		if storeKey != key {
-			primaryObj := buildObject(key, r, res)
+			primaryObj := buildObject(key, r, res, h.negativeTTL, h.jitterPercent)
 			_ = h.store.Put(r.Context(), key, primaryObj)
 		}
 	}
@@ -293,7 +301,7 @@ func (h *Handler) doFetch(r *http.Request) collapse.Result {
 	}
 }
 
-func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object {
+func buildObject(key api.Key, r *http.Request, res collapse.Result, negativeTTL time.Duration, jitterPct int) *api.Object {
 	now := time.Now()
 	// Parse all Cache-Control headers (may be multiple).
 	ccHeader := mergeHeaderValues(res.Header, "Cache-Control")
@@ -305,6 +313,14 @@ func buildObject(key api.Key, r *http.Request, res collapse.Result) *api.Object 
 	if !explicit {
 		ttl = HeuristicTTL(res.Header, now)
 	}
+
+	// Negative caching: assign configured TTL for error statuses.
+	if !explicit && ttl == 0 && negativeTTL > 0 && IsNegativeCacheable(res.StatusCode) {
+		ttl = negativeTTL
+	}
+
+	// Jitter: randomize TTL to prevent synchronized expiry stampedes.
+	ttl = JitterTTL(ttl, jitterPct)
 
 	// Subtract the origin's Age header from TTL so that objects that
 	// arrive already partially aged are correctly marked as stale

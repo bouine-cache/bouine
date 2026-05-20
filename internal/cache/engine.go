@@ -175,7 +175,9 @@ func revalidateOrMiss(obj *api.Object) Disposition {
 }
 
 // IsCacheable determines whether an origin response should be stored.
-func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
+// negativeTTL enables negative caching for error statuses (404, 405,
+// 410, 501) when > 0.
+func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...time.Duration) bool {
 	respCC := ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
 
 	if isCacheBlocked(respCC, reqHeader, respHeader) {
@@ -193,6 +195,11 @@ func IsCacheable(status int, reqHeader, respHeader http.Header) bool {
 	// Heuristic freshness: only if the response has Last-Modified
 	// AND the status code is heuristically cacheable (RFC 9111 §4.2.2).
 	if respHeader.Get("Last-Modified") != "" && isHeuristicStatus(status) {
+		return true
+	}
+
+	// Negative caching: cache error responses with a configured TTL.
+	if len(negativeTTL) > 0 && negativeTTL[0] > 0 && IsNegativeCacheable(status) {
 		return true
 	}
 

@@ -90,9 +90,13 @@ func ClientConditionalMatch(r *http.Request, obj *api.Object) bool {
 		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
 			return true
 		}
-		// Fall back to StoredAt if no Last-Modified.
-		if obj.LastModified.IsZero() && !obj.StoredAt.After(imsTime) {
-			return true
+		// Fall back to Date header then StoredAt if no Last-Modified.
+		if obj.LastModified.IsZero() {
+			if d := obj.Header.Get("Date"); d != "" {
+				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -249,16 +253,15 @@ func isHeuristicStatus(status int) bool {
 }
 
 // HeuristicTTL computes a heuristic freshness lifetime from
-// Last-Modified per RFC 9111 §4.2.2. Returns 0 if not applicable.
-// The standard heuristic is 10% of the age of the response since
-// Last-Modified.
+// Last-Modified per RFC 9111 §4.2.2. The heuristic is 10% of
+// the time since Last-Modified. Returns 0 if not applicable.
 func HeuristicTTL(header http.Header, now time.Time) time.Duration {
 	lm := header.Get("Last-Modified")
 	if lm == "" {
 		return 0
 	}
-	lmTime, err := time.Parse(http.TimeFormat, lm)
-	if err != nil {
+	lmTime := parseHTTPDate(lm)
+	if lmTime.IsZero() {
 		return 0
 	}
 	age := now.Sub(lmTime)

@@ -53,13 +53,15 @@ resources:
     cpu: 2
     memory: 4Gi
 
-securityContext:
+podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65534
-  readOnlyRootFilesystem: true
-  allowPrivilegeEscalation: false
   seccompProfile:
     type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
   capabilities:
     drop: [ALL]
 

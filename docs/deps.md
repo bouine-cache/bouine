@@ -48,6 +48,7 @@ aren't `slog`-compatible, HTTP servers other than
 | `golang.org/x/sys`                              | BSD-3      | (transitive)             | Low-level syscalls. |
 | `golang.org/x/text`                             | BSD-3      | (transitive)             | Unicode handling. |
 | `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`   | YAML config parsing. Standard for Go config files. |
+| `github.com/fsnotify/fsnotify`                  | BSD-3      | `internal/config`        | Filesystem change notifications for config hot-reload. |
 
 > **Fiber removed in ADR-0006.** `gofiber/fiber/v3`, `gofiber/utils`,
 > `gofiber/schema`, `valyala/fasthttp`, `valyala/bytebufferpool`,

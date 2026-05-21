@@ -1,0 +1,17 @@
+apiVersion: v2
+name: bouine
+description: A horizontally-scalable HTTP reverse-proxy cache
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - cache
+  - reverse-proxy
+  - http
+  - varnish
+  - cdn
+home: https://github.com/thylong/bouine
+sources:
+  - https://github.com/thylong/bouine
+maintainers:
+  - name: thylong

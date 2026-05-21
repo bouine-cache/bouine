@@ -1,0 +1,98 @@
+# E-commerce reverse-proxy cache
+#
+# Mixed cacheability: product pages and images are cacheable with
+# surrogate-key invalidation on product updates. Cart, checkout, and
+# user-specific pages are private (Set-Cookie, Authorization).
+#
+# Suitable for: online stores, marketplaces, product catalogs.
+
+listen:
+  http: ":80"
+  admin: ":9000"
+  cluster: ":8443"
+
+storage:
+  hot_max_bytes: 2Go
+  warm_dir: /var/lib/bouine
+  warm_max_bytes: 50Go
+  eviction: sieve
+
+cluster:
+  enabled: true
+  replicas: 2
+  hop_limit: 2
+
+upstream_pools:
+  - name: storefront
+    targets:
+      - storefront.default.svc:8080
+    health:
+      active:
+        path: /healthz
+        interval: 5s
+        timeout: 2s
+        unhealthy_threshold: 3
+      passive:
+        consecutive_5xx: 5
+
+  - name: cart-api
+    targets:
+      - cart.default.svc:8080
+    health:
+      active:
+        path: /healthz
+        interval: 5s
+        timeout: 1s
+        unhealthy_threshold: 3
+
+routes:
+  # Static assets — long TTL, immutable content-hashed filenames.
+  - match: { path_prefix: /static/ }
+    pool: storefront
+    cache:
+      ttl_default: 604800s   # 7 days
+      stale_if_error: 1h
+
+  # Product images — cache aggressively, purge on catalog update.
+  - match: { path_prefix: /images/products/ }
+    pool: storefront
+    cache:
+      ttl_default: 86400s    # 24h
+      stale_while_revalidate: 120s
+      stale_if_error: 1h
+
+  # Product listing and detail pages — short TTL with SWR for
+  # perceived freshness. Vary on Accept-Encoding.
+  - match: { path_prefix: /products/ }
+    pool: storefront
+    cache:
+      ttl_default: 60s
+      stale_while_revalidate: 30s
+      stale_if_error: 5m
+
+  # Cart and checkout — never cache. These routes carry Set-Cookie
+  # and Authorization headers; bouine respects Cache-Control: private
+  # and no-store from the origin.
+  - match: { path_prefix: /cart/ }
+    pool: cart-api
+    cache:
+      enabled: false
+
+  - match: { path_prefix: /checkout/ }
+    pool: cart-api
+    cache:
+      enabled: false
+
+  # User account pages — private, not cached.
+  - match: { path_prefix: /account/ }
+    pool: storefront
+    cache:
+      enabled: false
+
+  # Homepage and category pages — moderate TTL.
+  - match: { path_prefix: / }
+    pool: storefront
+    cache:
+      ttl_default: 120s
+      stale_while_revalidate: 30s
+      stale_if_error: 5m

@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "bouine.fullname" . }}
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "bouine.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "bouine.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bouine.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bouine
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          args:
+            - serve
+            - --config=/etc/bouine/config.yaml
+            - --log-format=json
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
+            - name: admin
+              containerPort: 9000
+              protocol: TCP
+            - name: cluster
+              containerPort: 8443
+              protocol: TCP
+            - name: cluster-udp
+              containerPort: 8443
+              protocol: UDP
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/bouine
+              readOnly: true
+            {{- if .Values.warmVolume.enabled }}
+            - name: warm
+              mountPath: /var/lib/bouine
+            {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ add1 (.Values.readinessProbe.periodSeconds | default 5) }}"]
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "bouine.fullname" . }}-config
+  {{- if .Values.warmVolume.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: warm
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.warmVolume.storageClass }}
+        storageClassName: {{ .Values.warmVolume.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.warmVolume.size }}
+  {{- end }}

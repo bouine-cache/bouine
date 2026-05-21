@@ -1,22 +1,40 @@
-FROM golang:1.22 as builder
+# syntax=docker/dockerfile:1
 
-WORKDIR /usr/src/app
+# ---- Build stage ----
+# Cross-compile on the host architecture to avoid QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 
-# pre-copy/cache go.mod for pre-downloading dependencies and only redownloading
-# them in subsequent builds if they change.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+
+WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -o /go/bin/app ./cmd
-RUN mkdir /data && touch /data/logs.dat
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+    -ldflags "-s -w \
+      -X github.com/thylong/bouine/internal/buildinfo.Version=${VERSION} \
+      -X github.com/thylong/bouine/internal/buildinfo.Commit=${COMMIT} \
+      -X github.com/thylong/bouine/internal/buildinfo.Date=${DATE}" \
+    -o /bouine ./cmd/bouine
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# ---- Final stage ----
+FROM gcr.io/distroless/static-debian13:nonroot
 
-COPY --from=builder --chown=nonroot:nonroot /go/bin/app /
-COPY --from=builder --chown=nonroot:nonroot /data /data
+COPY --from=build /bouine /bouine
+COPY config/default.yaml /etc/bouine/config.yaml
 
-EXPOSE 8080/tcp
+USER nonroot:nonroot
 
-CMD ["/app", "start"]
+EXPOSE 80 443 443/udp 9000 8443
+
+ENTRYPOINT ["/bouine"]
+CMD ["serve", "--config", "/etc/bouine/config.yaml"]

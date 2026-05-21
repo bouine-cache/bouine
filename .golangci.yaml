@@ -1,37 +1,131 @@
-linters:
-  disable-all: true
-  enable:
-    - bodyclose
-    - dogsled
-    - gocyclo
-    - goconst
-    - govet
-    - ineffassign
-    - misspell
-    - nakedret
-    - rowserrcheck
-    - staticcheck
-    - stylecheck
-    - typecheck
-    - unconvert
-    - unparam
-    - unused
-    - whitespace
-    - godot
-    - gofmt
-    - gosimple
-    - revive
+version: "2"
 
-linters-settings:
-  godot:
-    scope: declarations
-  goimports:
-    local-prefixes: github.com/thylong/bouine
-  gofmt:
-    simplify: false
-  gocyclo:
-    min-complexity: 10
-  revive:
-    ignore-generated-header: true
-    severity: warning
-    confidence: 0.3
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/thylong/bouine
+
+linters:
+  default: none
+  enable:
+    # Mandated set from AGENTS.md §14.4
+    - govet
+    - staticcheck
+    - errcheck
+    - gosec
+    - bodyclose
+    - contextcheck
+    - noctx
+    - nilerr
+    - gocritic
+    - revive
+    - forbidigo
+    - gocyclo
+    - funlen
+    - depguard
+    - unparam
+    - ineffassign
+    - unused
+    - misspell
+
+  settings:
+    gocyclo:
+      min-complexity: 15
+
+    funlen:
+      lines: 80
+      statements: 50
+      ignore-comments: true
+
+    forbidigo:
+      forbid:
+        - pattern: '^fmt\.Print(|f|ln)$'
+          msg: "Use slog. fmt.Print is forbidden outside main (AGENTS.md §4)."
+        - pattern: '^panic$'
+          msg: "panic is forbidden outside main. Return a typed error (AGENTS.md §4)."
+        - pattern: '^os\.Exit$'
+          msg: "os.Exit is forbidden outside main (AGENTS.md §4)."
+
+    revive:
+      severity: warning
+      rules:
+        - name: var-naming
+        - name: exported
+        - name: indent-error-flow
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: errorf
+        - name: increment-decrement
+        - name: range
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unused-parameter
+          disabled: true
+        - name: unreachable-code
+
+    depguard:
+      rules:
+        # Fiber was dropped in ADR-0006. Deny it everywhere so it
+        # cannot be reintroduced.
+        no-fiber:
+          list-mode: lax
+          deny:
+            - pkg: "github.com/gofiber/fiber/v3"
+              desc: "Fiber dropped (ADR-0006). Use net/http."
+            - pkg: "github.com/gofiber/fiber/v2"
+              desc: "Fiber dropped (ADR-0006). Use net/http."
+            - pkg: "github.com/valyala/fasthttp"
+              desc: "fasthttp dropped with Fiber (ADR-0006)."
+        no-banned-log-libs:
+          list-mode: lax
+          deny:
+            - pkg: "github.com/sirupsen/logrus"
+              desc: "Use slog (AGENTS.md §5)."
+            - pkg: "go.uber.org/zap"
+              desc: "Use slog (AGENTS.md §5)."
+
+  exclusions:
+    rules:
+      # Test files relax some discipline; explicitly justified.
+      - path: "_test\\.go"
+        linters:
+          - funlen
+          - gocyclo
+          - gosec
+          - forbidigo
+          - errcheck
+          - noctx
+      # main packages may exit and print.
+      - path: "cmd/.*"
+        linters:
+          - forbidigo
+      # Operator scripts are CLI tools; same rules as cmd/.
+      - path: "scripts/.*"
+        linters:
+          - forbidigo
+      # Test-fixture origin server is not production code.
+      - path: "test/integration/.*"
+        linters:
+          - forbidigo
+          - errcheck
+          - gosec
+          - noctx
+          - funlen
+          - gocyclo
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

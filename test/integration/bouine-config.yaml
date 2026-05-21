@@ -1,0 +1,11 @@
+listen:
+  http: ":8080"
+  admin: ":9000"
+storage:
+  hot_max_bytes: 256Mo
+upstream_pools:
+  - name: origin
+    targets: ["origin:8080"]
+routes:
+  - match: {}
+    pool: origin

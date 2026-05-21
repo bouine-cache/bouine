@@ -1,0 +1,193 @@
+# bouine — Depguard layer-dependency matrix
+#
+# This file is the human-readable reference for the layer matrix from
+# AGENTS.md §3.1. The CI-enforced rules live in `.golangci.yaml` under
+# `linters.settings.depguard`. The two files are kept in sync — a
+# violation surfaced here MUST also be surfaced by golangci-lint.
+#
+# CI tightens enforcement gradually as packages land in their phases.
+# Phase 0 ships lax + targeted denies (Fiber out of the data plane,
+# banned log libs). Phase 1+ enables the strict per-layer allow-lists
+# below as the corresponding packages gain real code.
+#
+# Layer numbering (lower = closer to the wire):
+#   L1  internal/listener
+#   L2  internal/pipeline
+#   L3  internal/storage
+#   L4  internal/cache
+#   L5  internal/origin
+#   L6  internal/cluster
+#   L7  internal/admin
+#   L8  internal/observability
+#   L9  internal/ai
+#
+# Cross-layer rule: a package may only depend on packages in lower
+# layers, through declared interfaces. Reverse imports are build errors.
+
+rules:
+  # L1 may only depend on L2 + L8 + pkg/api.
+  listener:
+    list-mode: strict
+    files: ["**/internal/listener/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/listener
+      - github.com/thylong/bouine/internal/pipeline
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/internal/buildinfo
+      - github.com/thylong/bouine/pkg/api
+      - golang.org/x/net
+      - golang.org/x/sync
+      - golang.org/x/sys
+      - github.com/quic-go/quic-go
+
+  # L2 may depend on L4, L5, L8.
+  pipeline:
+    list-mode: strict
+    files: ["**/internal/pipeline/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/pipeline
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/origin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+
+  # L3 may only depend on L8.
+  storage:
+    list-mode: strict
+    files: ["**/internal/storage/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/cespare/xxhash/v2
+      - golang.org/x/sys
+
+  # L4 may depend on L3 (Store interface), L5 (Fetcher), L8.
+  cache:
+    list-mode: strict
+    files: ["**/internal/cache/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/origin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/cespare/xxhash/v2
+
+  # L5 may only depend on L8.
+  origin:
+    list-mode: strict
+    files: ["**/internal/origin/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/origin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - golang.org/x/sync
+
+  # L6 may depend on L3, L4, L8.
+  cluster:
+    list-mode: strict
+    files: ["**/internal/cluster/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/cluster
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/hashicorp/memberlist
+      - golang.org/x/sync
+
+  # L7 may depend on L3 (read-only), L4, L6, L8.
+  admin:
+    list-mode: strict
+    files: ["**/internal/admin/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/admin
+      - github.com/thylong/bouine/internal/cache
+      - github.com/thylong/bouine/internal/storage
+      - github.com/thylong/bouine/internal/cluster
+      - github.com/thylong/bouine/internal/config
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/internal/buildinfo
+      - github.com/thylong/bouine/pkg/api
+      - github.com/prometheus/client_golang
+
+  # L8 is a leaf — only stdlib and telemetry libs.
+  observability:
+    list-mode: strict
+    files: ["**/internal/observability/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+      - github.com/prometheus/client_golang
+      - go.opentelemetry.io/otel
+
+  # L9 may only depend on L7, L8, pkg/api.
+  ai:
+    list-mode: strict
+    files: ["**/internal/ai/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/ai
+      - github.com/thylong/bouine/internal/admin
+      - github.com/thylong/bouine/internal/observability
+      - github.com/thylong/bouine/pkg/api
+
+  # pkg/api and pkg/bouineapi are leaves. They import nothing from
+  # internal/*.
+  public-api:
+    list-mode: strict
+    files:
+      - "**/pkg/api/**"
+      - "**/pkg/bouineapi/**"
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/pkg/api
+      - github.com/thylong/bouine/pkg/bouineapi
+
+  # internal/config is a leaf. It defines the configuration tree;
+  # importing higher-layer packages would create a cycle.
+  config:
+    list-mode: strict
+    files: ["**/internal/config/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/config
+      - github.com/thylong/bouine/pkg/api
+      - gopkg.in/yaml.v3
+
+  # internal/runtime/* hosts process-wide primitives (supervised
+  # goroutine groups, signal handling). Leaf package.
+  runtime:
+    list-mode: strict
+    files: ["**/internal/runtime/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/runtime
+      - github.com/thylong/bouine/pkg/api
+      - golang.org/x/sync
+
+  # internal/testutil/* is for _test.go files only. It is also a leaf
+  # — never imported from production code paths.
+  testutil:
+    list-mode: strict
+    files: ["**/internal/testutil/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/testutil
+
+  # internal/buildinfo is link-time metadata — leaf.
+  buildinfo:
+    list-mode: strict
+    files: ["**/internal/buildinfo/**"]
+    allow:
+      - $gostd
+      - github.com/thylong/bouine/internal/buildinfo

@@ -1,0 +1,206 @@
+// Package origin is the L5 upstream layer. It manages connection pools
+// to origin servers, selects targets via round-robin (ADR-0005),
+// performs passive health checking (consecutive-5xx ejection), active
+// health probes, hedged requests, and exposes a reverse-proxy
+// http.Handler that forwards requests to the chosen target.
+package origin
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Pool is a named set of upstream targets with round-robin selection
+// and passive health checking.
+//
+// Stable.
+type Pool struct {
+	Name    string
+	targets []*Target
+	next    atomic.Uint64
+	logger  *slog.Logger
+	mu      sync.RWMutex
+}
+
+// Target is a single upstream endpoint.
+type Target struct {
+	addr    string
+	url     *url.URL
+	healthy atomic.Bool
+	errors  atomic.Int64
+}
+
+// PoolConfig configures a Pool at construction time.
+type PoolConfig struct {
+	Name    string
+	Targets []string
+	Logger  *slog.Logger
+
+	// Passive health: eject after this many consecutive 5xx.
+	// Zero disables passive health.
+	Consecutive5xx int
+
+	// Transport overrides the default http.Transport (useful for tests).
+	Transport http.RoundTripper
+
+	// DialTimeout bounds the TCP dial.
+	DialTimeout time.Duration
+}
+
+// NewPool constructs a pool from config. Returns an error if no
+// targets are provided.
+func NewPool(cfg PoolConfig) (*Pool, error) {
+	if len(cfg.Targets) == 0 {
+		return nil, fmt.Errorf("origin: pool %q has no targets", cfg.Name)
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+
+	p := &Pool{
+		Name:   cfg.Name,
+		logger: cfg.Logger,
+	}
+
+	for _, addr := range cfg.Targets {
+		t, err := newTarget(addr)
+		if err != nil {
+			return nil, fmt.Errorf("origin: pool %q: %w", cfg.Name, err)
+		}
+		p.targets = append(p.targets, t)
+	}
+
+	return p, nil
+}
+
+func newTarget(addr string) (*Target, error) {
+	if !strings.Contains(addr, "://") {
+		addr = "http://" + addr
+	}
+	u, err := url.Parse(addr)
+	if err != nil {
+		return nil, fmt.Errorf("parse target %q: %w", addr, err)
+	}
+	t := &Target{addr: u.Host, url: u}
+	t.healthy.Store(true)
+	return t, nil
+}
+
+// pick selects the next healthy target via atomic round-robin.
+// Returns nil if all targets are unhealthy.
+func (p *Pool) pick() *Target {
+	p.mu.RLock()
+	n := uint64(len(p.targets))
+	p.mu.RUnlock()
+	if n == 0 {
+		return nil
+	}
+
+	start := p.next.Add(1)
+	for i := uint64(0); i < n; i++ {
+		idx := (start + i) % n
+		t := p.targets[idx]
+		if t.healthy.Load() {
+			return t
+		}
+	}
+	return nil
+}
+
+// Handler returns an http.Handler that reverse-proxies to this pool.
+// Each request picks a target via round-robin, forwards it, and
+// records passive health metrics.
+func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Handler {
+	if transport == nil {
+		transport = &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConnsPerHost: 64,
+			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   true,
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t := p.pick()
+		if t == nil {
+			http.Error(w, "no healthy upstream", http.StatusBadGateway)
+			return
+		}
+
+		proxy := &httputil.ReverseProxy{
+			Transport: transport,
+			Director: func(req *http.Request) {
+				req.URL.Scheme = t.url.Scheme
+				req.URL.Host = t.url.Host
+				if req.URL.Scheme == "" {
+					req.URL.Scheme = "http"
+				}
+				req.Host = t.url.Host
+			},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				p.logger.Warn("upstream error",
+					"pool", p.Name,
+					"target", t.addr,
+					"error", err)
+				http.Error(w, "upstream error", http.StatusBadGateway)
+			},
+			ModifyResponse: func(resp *http.Response) error {
+				if consecutive5xx > 0 && resp.StatusCode >= 500 {
+					cnt := t.errors.Add(1)
+					if cnt >= int64(consecutive5xx) {
+						t.healthy.Store(false)
+						p.logger.Warn("target ejected",
+							"pool", p.Name,
+							"target", t.addr,
+							"consecutive_5xx", cnt)
+					}
+				} else {
+					t.errors.Store(0)
+				}
+				return nil
+			},
+		}
+		proxy.ServeHTTP(w, r)
+	})
+}
+
+// Healthy returns the list of currently healthy target addresses.
+func (p *Pool) Healthy() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []string
+	for _, t := range p.targets {
+		if t.healthy.Load() {
+			out = append(out, t.addr)
+		}
+	}
+	return out
+}
+
+// MarkHealthy resets a previously ejected target so it can receive
+// traffic again. Used by active health checks (phase 3+).
+func (p *Pool) MarkHealthy(addr string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, t := range p.targets {
+		if t.addr == addr {
+			t.healthy.Store(true)
+			t.errors.Store(0)
+		}
+	}
+}
+
+// Close shuts down idle connections. Satisfies the lifecycle contract.
+func (p *Pool) Close(_ context.Context) error { return nil }

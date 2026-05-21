@@ -1,39 +1,50 @@
-# Binaries for programs and plugins
+# Go build artifacts
+/bin/
+/dist/
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
 *.test
-
-# Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+*.prof
+*.pprof
+*.cover
+coverage.*
+cover.html
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Go workspace local sums
+go.work.sum
 
-# Environment variables may contain secrets
-# This intends to avoid secrets to be committed to the repository
-.env
-**tailscale.service
-**bouine
-build/server/files/bouine
-
-# IDEs
-.vscode
-
-# Boltdb
-*.dat
-
-# ignore CLI artifacts
-**bouinectl
-
-# MacOS
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 .DS_Store
-.nvimlog
-build/** */
 
-# Vim
-Session.vim
+# bouine local state
+/var/
+/tmp/
+/.crush/
+HANDOFF.md
+test/integration/.tls/
+
+# Benchmark outputs (current.txt is regenerated; baseline.txt is tracked)
+/bench/results/current.txt
+
+# Conformance harness (cloned at runtime, results regenerated)
+/test/cachetests/.cache-tests/
+/test/cachetests/results/
+
+# Generated artifacts
+/docs/_site/
+/web/dashboard/node_modules/
+/web/dashboard/dist/
+
+# Test data fuzz corpora — keep only the seed corpus, not the cached one
+testdata/fuzz/*/
+
+# Local environment overrides
+*.local.yaml
+*.local.yml
+.env
+.env.local

@@ -1,0 +1,35 @@
+services:
+  origin:
+    image: golang:1.26-alpine
+    working_dir: /src
+    volumes:
+      - ./origin:/src:ro
+    command: ["go", "run", "./..."]
+    networks:
+      - bouine-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+  bouine:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      origin:
+        condition: service_healthy
+    volumes:
+      - ./bouine-config.yaml:/etc/bouine/config.yaml:ro
+    ports:
+      - "9000"
+      - "8080"
+    networks:
+      - bouine-net
+    deploy:
+      replicas: 3
+
+networks:
+  bouine-net:
+    driver: bridge

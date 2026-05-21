@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bouine.fullname" . }}-config
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- $fullname := include "bouine.fullname" . }}
+    {{- $namespace := .Release.Namespace }}
+    {{- $replicas := int .Values.replicaCount }}
+    {{- $clusterPort := int .Values.headlessService.clusterPort }}
+    {{- /* Build cluster join list from StatefulSet pod DNS */ -}}
+    {{- $joinList := list }}
+    {{- range $i := until $replicas }}
+    {{- $joinList = append $joinList (printf "%s-%d.%s-headless.%s.svc.cluster.local:%d" $fullname $i $fullname $namespace $clusterPort) }}
+    {{- end }}
+    {{- $cfg := deepCopy .Values.config }}
+    {{- $_ := set $cfg.cluster "join" $joinList }}
+    {{- toYaml $cfg | nindent 4 }}

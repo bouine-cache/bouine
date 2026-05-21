@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "bouine.fullname" . }}
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "bouine.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Data-plane ports: allow from any source.
+    - ports:
+        - port: {{ .Values.service.httpPort }}
+          protocol: TCP
+        - port: {{ .Values.service.httpsPort }}
+          protocol: TCP
+    # Admin port: allow from same namespace only.
+    - from:
+        - podSelector: {}
+      ports:
+        - port: {{ .Values.service.adminPort }}
+          protocol: TCP
+    # Cluster gossip: allow from bouine pods only.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "bouine.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.headlessService.clusterPort }}
+          protocol: TCP
+        - port: {{ .Values.headlessService.clusterPort }}
+          protocol: UDP
+{{- end }}

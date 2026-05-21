@@ -1,0 +1,106 @@
+# Default values for the bouine Helm chart.
+
+replicaCount: 3
+
+image:
+  repository: ghcr.io/thylong/bouine
+  tag: ""  # defaults to appVersion
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+# bouine config. Rendered into a ConfigMap and mounted at /etc/bouine/.
+config:
+  listen:
+    http: ":80"
+    https: ":443"
+    admin: ":9000"
+    cluster: ":8443"
+  tls:
+    certs: []
+    # Provide via a Secret mounted at /etc/bouine/tls/.
+    # - cert_file: /etc/bouine/tls/tls.crt
+    #   key_file: /etc/bouine/tls/tls.key
+  storage:
+    hot_max_bytes: 2Go
+    warm_dir: /var/lib/bouine
+    warm_max_bytes: 50Go
+    eviction: sieve
+  cluster:
+    enabled: true
+    join: []  # populated from headless service DNS
+    replicas: 2
+    hop_limit: 2
+  upstream_pools: []
+  routes: []
+
+service:
+  type: ClusterIP
+  httpPort: 80
+  httpsPort: 443
+  adminPort: 9000
+
+headlessService:
+  # Headless service for gossip peer discovery.
+  clusterPort: 8443
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2
+    memory: 4Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+
+terminationGracePeriodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: admin
+  periodSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: admin
+  periodSeconds: 10
+  failureThreshold: 5
+
+# Volume for the warm tier.
+warmVolume:
+  enabled: true
+  size: 50Gi
+  storageClass: ""
+
+networkPolicy:
+  enabled: false
+
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 15s
+  scrapeTimeout: ""  # uses default

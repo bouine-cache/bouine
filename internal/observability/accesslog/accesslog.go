@@ -30,6 +30,7 @@ func Middleware(logger *slog.Logger, next http.Handler) http.Handler {
 			"bytes_out", sw.bytes,
 			"dur_ms", time.Since(start).Milliseconds(),
 			"remote", r.RemoteAddr,
+			"cache_status", sw.Header().Get("X-Cache"),
 		)
 	})
 }

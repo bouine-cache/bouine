@@ -8,7 +8,7 @@ This document maps NGINX `proxy_cache` directives to bouine config.
 
 | NGINX | bouine | Notes |
 |-------|--------|-------|
-| `proxy_cache_path /var/cache levels=1:2 keys_zone=zone:10m max_size=1g` | `storage.warm_dir: /var/lib/bouine`<br>`storage.warm_max_bytes: 1GiB`<br>`storage.hot_max_bytes: 10MiB` | bouine uses sharded RAM + mmap tiers instead of filesystem levels. |
+| `proxy_cache_path /var/cache levels=1:2 keys_zone=zone:10m max_size=1g` | `storage.warm_dir: /var/lib/bouine`<br>`storage.warm_max_bytes: 1Go`<br>`storage.hot_max_bytes: 10Mo` | bouine uses sharded RAM + mmap tiers instead of filesystem levels. |
 | `proxy_cache zone` | (automatic) | bouine has a single global store; no zone declaration needed. |
 | `proxy_cache_valid 200 60m` | `routes[].cache.ttl_default: 60m` | Per-route TTL override when origin sends no `Cache-Control`. |
 | `proxy_cache_valid 404 1m` | (automatic) | bouine uses heuristic freshness for 404 per RFC 9111. |
@@ -52,9 +52,9 @@ listen:
   http: ":80"
   admin: ":9000"
 storage:
-  hot_max_bytes: 10MiB
+  hot_max_bytes: 10Mo
   warm_dir: /var/lib/bouine
-  warm_max_bytes: 1GiB
+  warm_max_bytes: 1Go
 upstream_pools:
   - name: backend
     targets: [backend:8080]

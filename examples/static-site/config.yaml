@@ -8,7 +8,7 @@ listen:
   admin: ":9000"
 
 storage:
-  hot_max_bytes: 1GiB
+  hot_max_bytes: 1Go
   eviction: sieve
 
 upstream_pools:

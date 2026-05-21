@@ -1,19 +1,25 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage ----
-FROM golang:1.26-bookworm AS build
+# Cross-compile on the host architecture to avoid QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
 
-RUN CGO_ENABLED=0 go build -trimpath \
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
     -ldflags "-s -w \
       -X github.com/thylong/bouine/internal/buildinfo.Version=${VERSION} \
       -X github.com/thylong/bouine/internal/buildinfo.Commit=${COMMIT} \

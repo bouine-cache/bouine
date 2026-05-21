@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/thylong/bouine/internal/admin"
 	"github.com/thylong/bouine/internal/cache"
@@ -68,9 +69,9 @@ func (e *engine) run(ctx context.Context) error {
 
 	if clusterNode != nil {
 		if len(e.cfg.Cluster.Join) > 0 {
-			if _, jerr := clusterNode.Join(e.cfg.Cluster.Join); jerr != nil {
-				e.logger.Warn("cluster join failed", "error", jerr)
-			}
+			g.Go("cluster-join", func(joinCtx context.Context) error {
+				return e.joinWithRetry(joinCtx, clusterNode)
+			})
 		}
 		g.Go("cluster-leave", func(leaveCtx context.Context) error {
 			<-leaveCtx.Done()
@@ -254,5 +255,36 @@ func (e *engine) startHealthChecks(
 			ExpectedCodes:      pc.Health.Active.ExpectedStatusCodes,
 		}, e.logger)
 		g.Go("health-"+pc.Name, hc.Run)
+	}
+}
+
+// joinWithRetry attempts to join the cluster, retrying every 2 seconds
+// for up to 60 seconds. Success is defined as having more than 1
+// member (i.e. at least one peer besides self). This avoids false
+// positives from self-join and partial memberlist.Join results.
+func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster) error {
+	seeds := e.cfg.Cluster.Join
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	deadline := time.After(60 * time.Second)
+	for {
+		_, err := c.Join(seeds)
+		if err != nil {
+			e.logger.Debug("cluster join attempt failed, retrying", "error", err)
+		}
+		if len(c.Members()) > 1 {
+			e.logger.Info("cluster join succeeded", "members", len(c.Members()))
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-deadline:
+			e.logger.Warn("cluster join: gave up after 60s, running with local member only", "seeds", seeds)
+			return nil
+		case <-ticker.C:
+		}
 	}
 }

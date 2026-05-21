@@ -13,15 +13,17 @@ permissions:
 
 env:
   GO_VERSION: "1.26.3"
+  DOCKER_IMAGE: thylong/bouine
 
 jobs:
-  release:
-    name: release
+  binaries:
+    name: Build binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -33,21 +35,31 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          for os_arch in linux/amd64 linux/arm64 darwin/arm64; do
+          platforms=(
+            linux/amd64
+            linux/arm64
+            darwin/amd64
+            darwin/arm64
+            windows/amd64
+            windows/arm64
+          )
+          for os_arch in "${platforms[@]}"; do
             GOOS=${os_arch%/*}
             GOARCH=${os_arch#*/}
-            out="dist/bouine_${VERSION}_${GOOS}_${GOARCH}"
-            echo ">> building $out"
-            GOOS=$GOOS GOARCH=$GOARCH go build \
+            ext=""
+            [[ "$GOOS" == "windows" ]] && ext=".exe"
+            bin="bouine-${VERSION}-${GOOS}-${GOARCH}${ext}"
+            echo ">> building $bin"
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
               -trimpath \
               -ldflags "-s -w \
                 -X github.com/thylong/bouine/internal/buildinfo.Version=$VERSION \
                 -X github.com/thylong/bouine/internal/buildinfo.Commit=$GITHUB_SHA \
                 -X github.com/thylong/bouine/internal/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              -o "$out" ./cmd/bouine
-            (cd dist && tar -czf "$(basename "$out").tar.gz" "$(basename "$out")")
-            sha256sum "$out.tar.gz" >> dist/SHA256SUMS || shasum -a 256 "$out.tar.gz" >> dist/SHA256SUMS
+              -o "dist/${bin}" ./cmd/bouine
           done
+          cd dist
+          sha256sum bouine-* > SHA256SUMS
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
@@ -57,10 +69,9 @@ jobs:
           artifact-name: bouine-${{ github.ref_name }}.spdx.json
           output-file: dist/bouine-${{ github.ref_name }}.spdx.json
 
-      - name: Sign artifacts with cosign
+      - name: Sign checksums
         uses: sigstore/cosign-installer@v3
-      - name: Sign SHA256SUMS
-        run: |
+      - run: |
           cosign sign-blob --yes \
             --output-signature dist/SHA256SUMS.sig \
             --output-certificate dist/SHA256SUMS.pem \
@@ -76,8 +87,52 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            dist/*.tar.gz
+            dist/bouine-*
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.pem
             dist/bouine-${{ github.ref_name }}.spdx.json
+
+  docker:
+    name: Docker Hub (multi-arch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,10 @@
+# Minimal default configuration for containerized bouine.
+# Override by mounting your own config at /etc/bouine/config.yaml.
+
+listen:
+  http: ":80"
+  admin: ":9000"
+
+storage:
+  hot_max_bytes: 512Mo
+  eviction: sieve

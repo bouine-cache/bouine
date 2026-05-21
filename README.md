@@ -2,20 +2,21 @@
 
 `bouine` is a horizontally-scalable, observability-first HTTP reverse-proxy
 cache written in Go 1.26. It targets the same problem space as Varnish
-(RFC 9111 cache, ESI-style composition, fast purge, surrogate keys) but is
-designed from day one for Kubernetes, multi-instance clustering, and
-first-class metrics/traces/logs.
+(RFC 9111 cache, fast purge, predicate-based bans) but is designed from
+day one for Kubernetes, multi-instance clustering, and first-class
+metrics/traces/logs.
 
-> Status: **phase 0** — project bootstrap. The binary builds, runs, and
-> serves `/healthz`. Listeners, cache engine, storage, and clustering land
-> in later phases. See [`PLAN.md`](PLAN.md) for the roadmap.
+> Status: **v1.0-rc** — phases 0–7 complete. Caching, clustering,
+> prefetching, negative caching, jittered TTLs, soft-purge, and the Go
+> SDK are shipped. Validated on k3s with 3-node gossip cluster.
+> See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ---
 
 ## Highlights
 
 - **Protocols**: HTTP/1.1, HTTP/2, and HTTP/3 (QUIC) on the data plane.
-  Fiber on a separate admin port for the operator surface.
+  `net/http` on a separate admin port for the operator surface.
 - **Embedded storage**: sharded in-RAM hot tier + mmap warm tier. No
   external KV.
 - **Clustering**: gossip membership + consistent hash + peer fetch. K8s
@@ -24,7 +25,7 @@ first-class metrics/traces/logs.
   [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 - **Performance**: zero-alloc hit path, benchmark-gated CI.
 - **Observability**: Prometheus, OpenTelemetry, slog, pprof.
-- **Migration**: Varnish-compatible VCL shim and an NGINX cheat sheet.
+- **Migration**: NGINX migration guide included.
 
 ---
 
@@ -54,7 +55,7 @@ kill %1
 ## Kubernetes
 
 ```bash
-docker build -t bouine:dev .
+docker buildx build --platform linux/amd64 -t bouine:dev --load .
 
 helm install bouine deploy/helm/bouine \
   --namespace bouine --create-namespace \
@@ -83,7 +84,7 @@ for all options.
 | Threat model                     | [`docs/security/threat-model.md`](docs/security/threat-model.md) |
 | Contributing (humans)            | [`CONTRIBUTING.md`](CONTRIBUTING.md)                  |
 | Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
-| Migration from Varnish           | [`docs/migration/varnish.md`](docs/migration/varnish.md) |
+| Migration from NGINX             | [`docs/migration/nginx.md`](docs/migration/nginx.md)   |
 | Decision records (ADRs)          | [`docs/decisions/`](docs/decisions/)                  |
 
 ---
@@ -101,11 +102,12 @@ The high-level Go module layout follows the layered architecture in
 /internal/storage            L3 — RAM tier, mmap tier, eviction, WAL
 /internal/origin             L5 — upstream pool, health, hedge, breaker
 /internal/cluster            L6 — gossip, consistent hash, peer fetch
-/internal/admin              L7 — Fiber app: purge, ban, config, dash
+/internal/admin              L7 — net/http admin: purge, ban, config, dash
 /internal/observability      L8 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
+/internal/prefetch           prefetcher: Link preload + sitemap crawler
 /internal/ai                 L9 — traffic analytics (phase 6)
-/internal/vcl                VCL-compatible shim (parser → DSL lowering)
+/internal/vcl                VCL-compatible shim (deferred — see §18)
 /pkg/bouineapi               public Go SDK
 /pkg/api                     shared types between SDK, admin server, dashboard
 ```

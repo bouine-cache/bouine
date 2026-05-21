@@ -20,7 +20,11 @@ chart (see `deploy/helm/bouine/templates/statefulset.yaml`). The
 2. Storage tiers initialised (hot → warm).
 3. Admin server starts on `listen.admin` (default `:9000`).
 4. `/readyz` returns `200` once all listeners are bound.
-5. Cluster join (if `cluster.enabled`): memberlist contacts seed nodes.
+5. Cluster join (if `cluster.enabled`): memberlist contacts seed nodes
+   with retry (every 2s for up to 60s). Join succeeds once at least
+   one peer besides self is discovered. StatefulSet headless Service
+   must have `publishNotReadyAddresses: true` for DNS to resolve
+   during startup.
 6. Data-plane listeners start on `listen.http`, `listen.https`.
 7. Active health checks begin for all upstream pools.
 

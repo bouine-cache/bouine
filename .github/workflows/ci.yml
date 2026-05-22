@@ -27,7 +27,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
       - name: Install pre-commit
@@ -57,7 +57,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
           args: --timeout=5m
@@ -104,7 +104,7 @@ jobs:
           cache: true
       - name: build
         run: make build
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: bouine-${{ github.sha }}
           path: bin/bouine
@@ -141,7 +141,7 @@ jobs:
         run: make conformance
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: cache-tests-results-${{ github.sha }}
           path: test/cachetests/results/

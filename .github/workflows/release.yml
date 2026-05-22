@@ -78,11 +78,6 @@ jobs:
             --output-certificate dist/SHA256SUMS.pem \
             dist/SHA256SUMS
 
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: dist/*
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:

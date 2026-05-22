@@ -165,11 +165,12 @@ release: ## Create a GitHub release (usage: make release TAG=v0.1.0).
 	@command -v gh >/dev/null || { echo "gh CLI is required: https://cli.github.com"; exit 1; }
 	@printf "Release description (one line): "; \
 	read -r DESC; \
+	REPO=$$(gh repo view --json nameWithOwner -q .nameWithOwner); \
 	PREV=$$(git describe --tags --abbrev=0 2>/dev/null || echo ""); \
 	if [ -n "$$PREV" ]; then \
-		COMMITS=$$(git log --format='- %s' $$PREV..HEAD --no-merges); \
+		COMMITS=$$(git log --format='- %s ([%h](https://github.com/'"$$REPO"'/commit/%H))' $$PREV..HEAD --no-merges); \
 	else \
-		COMMITS=$$(git log --format='- %s' --no-merges); \
+		COMMITS=$$(git log --format='- %s ([%h](https://github.com/'"$$REPO"'/commit/%H))' --no-merges); \
 	fi; \
 	NOTES=$$(printf "%s\n\n### Changes\n\n%s" "$$DESC" "$$COMMITS"); \
 	gh release create $(TAG) --target main \

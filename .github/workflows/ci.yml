@@ -104,7 +104,7 @@ jobs:
           cache: true
       - name: build
         run: make build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: bouine-${{ github.sha }}
           path: bin/bouine
@@ -141,7 +141,7 @@ jobs:
         run: make conformance
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cache-tests-results-${{ github.sha }}
           path: test/cachetests/results/

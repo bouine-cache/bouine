@@ -51,4 +51,7 @@ testdata/fuzz/*/
 .env
 .env.local
 
+# Local-only plan — followed but never committed or pushed
+/docs/plans/open-sourcing.md
+
 /origin

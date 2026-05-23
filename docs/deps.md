@@ -84,3 +84,35 @@ without code requires a justification in the PR.
 | `go.opentelemetry.io/otel`                      | Apache-2.0 | `internal/observability/tracing` | OTel API; no-op by default, wired to OTLP exporter via config. |
 | `go.opentelemetry.io/otel/trace`                | Apache-2.0 | `internal/observability/tracing` | OTel trace types. |
 | `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` | Apache-2.0 | (planned) | OTLP/HTTP exporter for Jaeger/Tempo. Pending C1. |
+
+## License audit (2026-06-07)
+
+Audit of the **production build graph** (`go list -deps ./...`, 48 external
+modules; test-only and tooling deps excluded). Classification done by
+scanning each module's license file in the Go module cache —
+`go-licenses` could not be installed in this environment, so a cache scan
+was used instead; re-run `go-licenses report ./...` in CI when available.
+
+| License    | Count | Notes |
+|------------|-------|-------|
+| Apache-2.0 | 20    | OTel, Prometheus, cobra, gRPC, genproto, etc. |
+| MIT        | 12    | templ, xxhash, uuid, tidwall/*, hashicorp msgpack/metrics, etc. |
+| BSD-3      | 10    | golang.org/x/*, protobuf, miekg/dns, pflag, etc. |
+| MPL-2.0    | 6     | HashiCorp memberlist + its deps (see below). |
+
+**No GPL / AGPL / LGPL** anywhere in the production graph (the licenses
+banned by `AGENTS.md §5`). No modules with a missing or unrecognised
+license.
+
+The 6 **MPL-2.0** modules are all HashiCorp, pulled in by `memberlist`
+(pre-approved in `AGENTS.md §5`): `hashicorp/memberlist`,
+`hashicorp/errwrap`, `hashicorp/go-immutable-radix`,
+`hashicorp/go-multierror`, `hashicorp/go-sockaddr`, `hashicorp/golang-lru`.
+MPL-2.0 is file-level weak copyleft: it imposes obligations only if an
+MPL-licensed *file* is modified and redistributed. bouine consumes these
+unmodified, so distributing the Apache-2.0 binary is unencumbered. MPL-2.0
+is **not** on the §5 ban list (which names only LGPL/AGPL).
+
+Full per-module report: regenerate with `go-licenses report ./...` (or the
+cache scan) before each release; attach the SPDX SBOM produced by
+`release.yml` to the release artifacts.

@@ -1,0 +1,25 @@
+# gitleaks configuration for bouine.
+#
+# Extends the upstream default ruleset and records vetted false positives so
+# full-history scans (`gitleaks detect --log-opts=--all`) and the pre-commit
+# hook stay clean. Every allowlist entry MUST cite why it is safe.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vetted false positives (no real secrets)."
+
+# 2022-era file (build/client/files/grafana/grafana.ini), removed long ago.
+# The match is the well-known upstream Grafana *default* secret_key shipped
+# in Grafana's stock sample.ini, and it is commented out (`;secret_key = ...`).
+# Not a real credential.
+commits = [
+  "a48d67234ea863ed87f871e8215d66f1c88f46ff",
+]
+paths = [
+  '''build/client/files/grafana/grafana\.ini''',
+]
+regexes = [
+  '''SW2YcwTIb9zpOOhoPsMm''',
+]

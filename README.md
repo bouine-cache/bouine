@@ -62,6 +62,31 @@ curl -sf http://127.0.0.1:9000/healthz
 kill %1
 ```
 
+### Admin authentication
+
+All write endpoints on the admin port require a bearer token.
+Set it in your config:
+
+```yaml
+admin:
+  token: your-secret-token
+```
+
+If no token is configured, bouine generates a random one at startup
+and logs it as a `WARN`. Retrieve it with:
+
+```bash
+make admin-token CONFIG=path/to/config.yaml  # from config file
+# or from logs if auto-generated:
+./bin/bouine serve ... 2>&1 | grep 'admin token'
+```
+
+Use it in CLI commands with `--token`:
+
+```bash
+bouine purge https://example.com/page --token your-secret-token
+```
+
 ---
 
 ## Kubernetes

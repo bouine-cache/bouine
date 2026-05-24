@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudflare/cloudflare-go/v2/cache"
-	"github.com/cloudflare/cloudflare-go/v2/option"
+	"github.com/cloudflare/cloudflare-go/v4/cache"
+	"github.com/cloudflare/cloudflare-go/v4/option"
 
 	cf "github.com/thylong/bouine/internal/cloudflare"
 )

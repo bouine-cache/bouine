@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	cfsdk "github.com/cloudflare/cloudflare-go/v2"
+	cfsdk "github.com/cloudflare/cloudflare-go/v4"
 )
 
 const (

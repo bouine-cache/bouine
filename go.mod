@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/a-h/templ v0.3.1020
 	github.com/cespare/xxhash/v2 v2.3.0
-	github.com/cloudflare/cloudflare-go/v2 v2.4.0
+	github.com/cloudflare/cloudflare-go/v4 v4.6.0
 	github.com/hashicorp/memberlist v0.5.4
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.10.2

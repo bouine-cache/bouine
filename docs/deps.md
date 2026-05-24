@@ -84,6 +84,7 @@ without code requires a justification in the PR.
 | `go.opentelemetry.io/otel`                      | Apache-2.0 | `internal/observability/tracing` | OTel API; no-op by default, wired to OTLP exporter via config. |
 | `go.opentelemetry.io/otel/trace`                | Apache-2.0 | `internal/observability/tracing` | OTel trace types. |
 | `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` | Apache-2.0 | (planned) | OTLP/HTTP exporter for Jaeger/Tempo. Pending C1. |
+| `github.com/cloudflare/cloudflare-go/v4`        | Apache-2.0 | `internal/cloudflare`          | Cloudflare Cache API (purge) propagation. Schema-generated SDK; migrated v2 → v4 (2026-06-07) to stay on a maintained major. Surface used: `NewClient`, `option`, `cache.Purge`. |
 
 ## License audit (2026-06-07)
 

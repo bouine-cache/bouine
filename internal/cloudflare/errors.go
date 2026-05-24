@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	cfsdk "github.com/cloudflare/cloudflare-go/v2"
+	cfsdk "github.com/cloudflare/cloudflare-go/v4"
 )
 
 // Error type constants for metric / span label classification.

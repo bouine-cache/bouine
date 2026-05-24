@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
 	"net"
 	"net/http"
@@ -50,6 +52,18 @@ func (e *engine) run(ctx context.Context) error {
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 	handler := e.buildHandler(pools, store, dpMetrics)
 
+	// Resolve admin token once here so both the broadcaster and the
+	// admin server use the same value.
+	token := e.cfg.Admin.Token
+	if token == "" {
+		tok := make([]byte, 16)
+		_, _ = rand.Read(tok)
+		token = hex.EncodeToString(tok)
+		e.logger.Warn("admin token not configured — using auto-generated token",
+			"token", token,
+			"hint", "set admin.token in config to silence this warning")
+	}
+
 	// Build optional cluster — must happen before admin so the
 	// /v1/cluster/peers endpoint can reference the Members function.
 	var peersFn func() []api.PeerInfo
@@ -61,11 +75,11 @@ func (e *engine) run(ctx context.Context) error {
 			return err
 		}
 		peersFn = clusterNode.Members
-		broadcaster = cluster.NewBroadcaster(clusterNode, nil)
+		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
 	}
 
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startAdmin(g, ctx, peersFn, store, broadcaster)
+	e.startAdmin(g, ctx, peersFn, store, broadcaster, token)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -174,7 +188,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -185,6 +199,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 
 	srv := admin.New(admin.Config{
 		Addr:    addr,
+		Token:   token,
 		Logger:  e.logger,
 		Metrics: e.metrics,
 		PeersFn: peersFn,

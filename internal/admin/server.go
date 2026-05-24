@@ -10,6 +10,7 @@ package admin
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -46,6 +47,9 @@ type Config struct {
 	PurgeFn func(key api.Key) error
 	// BanFn, if non-nil, handles ban requests.
 	BanFn func(expr api.BanExpr) (int, error)
+	// Token is the bearer token required on all write endpoints.
+	// If empty, the server refuses to start (engine generates one).
+	Token string
 	// RefreshFn, if non-nil, handles soft-purge (refresh) requests.
 	RefreshFn func(key api.Key) error
 	// PeerPurgeFn, if non-nil, handles incoming purge broadcasts from
@@ -82,13 +86,13 @@ func New(cfg Config) *Server {
 		cfg: cfg,
 		inner: &http.Server{
 			Addr:              cfg.Addr,
-			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       5 * time.Second,
 			WriteTimeout:      5 * time.Second,
 			IdleTimeout:       30 * time.Second,
 		},
 	}
+	s.inner.Handler = s.authMiddleware(mux)
 
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
@@ -266,6 +270,34 @@ func (s *Server) peerBan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "banned"})
+}
+
+// authMiddleware enforces bearer token authentication on all write
+// (non-GET) requests. Safe read-only endpoints used by K8s probes
+// and monitoring are always allowed without a token.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	// Paths exempt from auth (K8s probes, Prometheus scrape).
+	exempt := map[string]bool{
+		"/healthz":          true,
+		"/readyz":           true,
+		"/metrics":          true,
+		"/version":          true,
+		"/v1/cluster/peers": true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if exempt[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+		want := "Bearer " + s.cfg.Token
+		got := r.Header.Get("Authorization")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="bouine-admin"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

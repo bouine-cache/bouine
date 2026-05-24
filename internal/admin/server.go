@@ -48,6 +48,11 @@ type Config struct {
 	BanFn func(expr api.BanExpr) (int, error)
 	// RefreshFn, if non-nil, handles soft-purge (refresh) requests.
 	RefreshFn func(key api.Key) error
+	// PeerPurgeFn, if non-nil, handles incoming purge broadcasts from
+	// peer nodes. The key has already been determined by the sender.
+	PeerPurgeFn func(evt api.PurgeEvent) error
+	// PeerBanFn, if non-nil, handles incoming ban broadcasts from peers.
+	PeerBanFn func(evt api.BanEvent) error
 }
 
 // Server is the admin HTTP server with lifecycle methods matching the
@@ -102,6 +107,12 @@ func New(cfg Config) *Server {
 	}
 	if cfg.RefreshFn != nil {
 		mux.HandleFunc("POST /v1/refresh", s.refresh)
+	}
+	if cfg.PeerPurgeFn != nil {
+		mux.HandleFunc("POST /v1/peer/purge", s.peerPurge)
+	}
+	if cfg.PeerBanFn != nil {
+		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
 	}
 	mux.HandleFunc("POST /v1/config/reload", s.configReload)
 
@@ -229,6 +240,32 @@ func (s *Server) Addr() string {
 		return v.(string)
 	}
 	return s.inner.Addr
+}
+
+func (s *Server) peerPurge(w http.ResponseWriter, r *http.Request) {
+	var evt api.PurgeEvent
+	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.cfg.PeerPurgeFn(evt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
+}
+
+func (s *Server) peerBan(w http.ResponseWriter, r *http.Request) {
+	var evt api.BanEvent
+	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.cfg.PeerBanFn(evt); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "banned"})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

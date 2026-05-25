@@ -137,6 +137,29 @@ html[data-theme="dark"] .pd{box-shadow:0 0 5px var(--g)}
 /* config */
 .code-block{background:var(--bg);border:1px solid var(--b);border-radius:6px;padding:.75rem;font-family:'JetBrains Mono',monospace;font-size:.7rem;line-height:1.7;color:var(--t);overflow:auto;max-height:280px;margin-bottom:.7rem}
 .code-key{color:var(--a)}.code-val{color:var(--y)}.code-str{color:var(--g)}.code-cm{color:var(--m)}
+/* Config viewer */
+.cfg-section{border:1px solid var(--b);border-radius:7px;margin-bottom:.5rem;overflow:hidden}
+.cfg-section-hd{display:flex;align-items:center;gap:.5rem;padding:.45rem .7rem;background:rgba(139,92,246,.06);font-family:'JetBrains Mono',monospace;font-size:.72rem;font-weight:700;color:var(--a);border-bottom:1px solid var(--b)}
+.cfg-section-icon{font-size:.8rem;opacity:.7}
+.cfg-badge{font-size:.6rem;font-weight:600;padding:.1rem .4rem;border-radius:4px;background:rgba(139,92,246,.12);color:var(--m);margin-left:auto}
+.cfg-badge-g{background:rgba(52,211,153,.1);color:var(--g)}
+.cfg-badge-y{background:rgba(251,191,36,.1);color:var(--y)}
+.cfg-grid{padding:.35rem .7rem}
+.cfg-grid-dense{padding:.2rem .7rem}
+.cfg-row{display:grid;grid-template-columns:160px 12px auto 1fr;align-items:baseline;gap:0;padding:.18rem 0;border-bottom:1px solid rgba(139,92,246,.04);font-size:.72rem}
+.cfg-row:last-child{border:none}
+.cfg-key{font-family:'JetBrains Mono',monospace;color:var(--a);font-size:.7rem}
+.cfg-sep{color:var(--m);font-family:'JetBrains Mono',monospace;font-size:.7rem;padding:0 .15rem}
+.cfg-str{font-family:'JetBrains Mono',monospace;color:var(--g);font-size:.7rem}
+.cfg-num{font-family:'JetBrains Mono',monospace;color:var(--y);font-size:.7rem}
+.cfg-bool{font-family:'JetBrains Mono',monospace;font-size:.7rem;font-weight:700}
+.cfg-bool-t{color:var(--g)}.cfg-bool-f{color:var(--r)}
+.cfg-hint{font-size:.63rem;color:var(--m);padding-left:.6rem;font-style:italic;opacity:.8}
+.cfg-route{padding:.3rem .7rem;border-bottom:1px solid var(--b)}
+.cfg-route:last-of-type{border:none}
+.cfg-route-hd{display:flex;align-items:center;gap:.5rem;margin-bottom:.15rem}
+.cfg-route-path{font-family:'JetBrains Mono',monospace;font-size:.7rem;font-weight:700;color:var(--a)}
+.cfg-route-pool{font-size:.65rem;color:var(--m);font-family:'JetBrains Mono',monospace}
 /* confirm dialog */
 .confirm-box{display:none;background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.3);border-radius:8px;padding:.85rem;margin-top:.6rem}
 .confirm-box.show{display:block}
@@ -424,35 +447,65 @@ html[data-theme="dark"] .pd{box-shadow:0 0 5px var(--g)}
   <div class="body" id="pg-config">
     <div class="pg-hd"><div><h2>Config reload</h2><div class="sub">validate · confirm · apply — running config is never altered by parse errors</div></div></div>
     <div class="r2">
-      <div class="bc">
-        <div class="bc-t">Current config (read-only)</div>
-        <div class="code-block">
-<span class="code-cm"># /etc/bouine/config.yaml</span>
-<span class="code-key">listen</span>:
-  <span class="code-key">http</span>: <span class="code-str">":80"</span>
-  <span class="code-key">admin</span>: <span class="code-str">":9000"</span>
-  <span class="code-key">cluster</span>: <span class="code-str">":8443"</span>
-
-<span class="code-key">storage</span>:
-  <span class="code-key">hot_max_bytes</span>: <span class="code-val">2Go</span>
-  <span class="code-key">warm_dir</span>: <span class="code-str">"/var/lib/bouine"</span>
-  <span class="code-key">warm_max_bytes</span>: <span class="code-val">50Go</span>
-  <span class="code-key">eviction</span>: <span class="code-str">sieve</span>
-
-<span class="code-key">cluster</span>:
-  <span class="code-key">enabled</span>: <span class="code-val">true</span>
-  <span class="code-key">replicas</span>: <span class="code-val">2</span>
-  <span class="code-key">hop_limit</span>: <span class="code-val">2</span>
-
-<span class="code-key">routes</span>:
-  - <span class="code-key">match</span>: { <span class="code-key">path_prefix</span>: <span class="code-str">/products/</span> }
-    <span class="code-key">pool</span>: <span class="code-str">storefront</span>
-    <span class="code-key">cache</span>:
-      <span class="code-key">ttl_default</span>: <span class="code-val">60s</span>
-      <span class="code-key">stale_while_revalidate</span>: <span class="code-val">5s</span>
-      <span class="code-key">jitter_percent</span>: <span class="code-val">10</span>
+      <div class="bc" style="overflow:auto">
+        <div class="bc-t" style="display:flex;justify-content:space-between;align-items:center">
+          Current config (read-only)
+          <span style="font-size:.6rem;color:var(--m);font-family:'JetBrains Mono',monospace">/etc/bouine/config.yaml · reloaded 2h ago</span>
         </div>
-        <div style="font-size:.68rem;color:var(--m)">Last reloaded: <span style="font-family:'JetBrains Mono',monospace;color:var(--a)">2h ago</span></div>
+
+        <!-- listen -->
+        <div class="cfg-section">
+          <div class="cfg-section-hd"><span class="cfg-section-icon">⟁</span>listen <span class="cfg-badge">listeners</span></div>
+          <div class="cfg-grid">
+            <div class="cfg-row"><span class="cfg-key">http</span><span class="cfg-sep">:</span><span class="cfg-str">":80"</span><span class="cfg-hint">HTTP/1.1 + h2c data plane</span></div>
+            <div class="cfg-row"><span class="cfg-key">admin</span><span class="cfg-sep">:</span><span class="cfg-str">":9000"</span><span class="cfg-hint">admin API · metrics · health</span></div>
+            <div class="cfg-row"><span class="cfg-key">cluster</span><span class="cfg-sep">:</span><span class="cfg-str">":8443"</span><span class="cfg-hint">gossip · peer fetch mTLS</span></div>
+          </div>
+        </div>
+
+        <!-- storage -->
+        <div class="cfg-section">
+          <div class="cfg-section-hd"><span class="cfg-section-icon">◫</span>storage <span class="cfg-badge cfg-badge-y">hot + warm tiers</span></div>
+          <div class="cfg-grid">
+            <div class="cfg-row"><span class="cfg-key">hot_max_bytes</span><span class="cfg-sep">:</span><span class="cfg-num">2Go</span><span class="cfg-hint">in-RAM SIEVE cache</span></div>
+            <div class="cfg-row"><span class="cfg-key">warm_dir</span><span class="cfg-sep">:</span><span class="cfg-str">"/var/lib/bouine"</span><span class="cfg-hint">mmap segments path</span></div>
+            <div class="cfg-row"><span class="cfg-key">warm_max_bytes</span><span class="cfg-sep">:</span><span class="cfg-num">50Go</span><span class="cfg-hint">max warm tier size</span></div>
+            <div class="cfg-row"><span class="cfg-key">eviction</span><span class="cfg-sep">:</span><span class="cfg-str">sieve</span><span class="cfg-hint">or w-tinylfu</span></div>
+          </div>
+        </div>
+
+        <!-- cluster -->
+        <div class="cfg-section">
+          <div class="cfg-section-hd"><span class="cfg-section-icon">◎</span>cluster <span class="cfg-badge cfg-badge-g">enabled</span></div>
+          <div class="cfg-grid">
+            <div class="cfg-row"><span class="cfg-key">enabled</span><span class="cfg-sep">:</span><span class="cfg-bool cfg-bool-t">true</span><span class="cfg-hint">gossip membership active</span></div>
+            <div class="cfg-row"><span class="cfg-key">replicas</span><span class="cfg-sep">:</span><span class="cfg-num">2</span><span class="cfg-hint">write replication factor</span></div>
+            <div class="cfg-row"><span class="cfg-key">hop_limit</span><span class="cfg-sep">:</span><span class="cfg-num">2</span><span class="cfg-hint">max peer-fetch hops</span></div>
+          </div>
+        </div>
+
+        <!-- routes -->
+        <div class="cfg-section" style="margin-bottom:0">
+          <div class="cfg-section-hd"><span class="cfg-section-icon">⬡</span>routes <span class="cfg-badge">5 configured</span></div>
+          <div class="cfg-route">
+            <div class="cfg-route-hd"><span class="cfg-route-path">/products/</span><span class="cfg-route-pool">→ storefront</span></div>
+            <div class="cfg-grid cfg-grid-dense">
+              <div class="cfg-row"><span class="cfg-key">ttl_default</span><span class="cfg-sep">:</span><span class="cfg-num">60s</span></div>
+              <div class="cfg-row"><span class="cfg-key">stale_while_revalidate</span><span class="cfg-sep">:</span><span class="cfg-num">5s</span></div>
+              <div class="cfg-row"><span class="cfg-key">jitter_percent</span><span class="cfg-sep">:</span><span class="cfg-num">10</span></div>
+            </div>
+          </div>
+          <div class="cfg-route">
+            <div class="cfg-route-hd"><span class="cfg-route-path">/api/v1/</span><span class="cfg-route-pool">→ api</span></div>
+            <div class="cfg-grid cfg-grid-dense">
+              <div class="cfg-row"><span class="cfg-key">ttl_default</span><span class="cfg-sep">:</span><span class="cfg-num">10s</span></div>
+              <div class="cfg-row"><span class="cfg-key">stayin_alive</span><span class="cfg-sep">:</span><span class="cfg-bool cfg-bool-t">true</span></div>
+              <div class="cfg-row"><span class="cfg-key">jitter_percent</span><span class="cfg-sep">:</span><span class="cfg-num">20</span></div>
+            </div>
+          </div>
+          <div style="font-size:.65rem;color:var(--m);padding:.3rem .4rem">+ 3 more routes · click Routes to see all</div>
+        </div>
+
       </div>
       <div class="bc">
         <div class="bc-t">Reload config</div>

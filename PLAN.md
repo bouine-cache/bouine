@@ -113,7 +113,7 @@ dependencies for a surface that serves ≤ 10 RPS.
 /internal/admin              L7 — net/http admin: purge, ban, config, dash
 /internal/observability      L8 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
-/internal/ai                 L9 — traffic analytics (phase 6)
+/internal/ai                 L9 — traffic analytics (phase 6.5)
 /internal/vcl                VCL-compatible shim (deferred — see §18)
 /web/dashboard               L9 — HTMX dashboard templates (phase 6)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
@@ -988,7 +988,28 @@ packages may remain.
   outside `main`.
 - Zero stale "phase N" doc comments referencing shipped phases.
 
-### Phase 6 — AI traffic analysis & dashboard (weeks 21–24)
+### Phase 6 — Operator dashboard (weeks 21–23)
+
+A lightweight, zero-JS-build dashboard embedded directly into the admin
+server. Operators get live visibility without deploying Grafana.
+
+- Dashboard (HTMX + Go `html/template`, embedded via `embed.FS` into admin):
+  - Live RED & USE charts (htmx polling / SSE partial swaps).
+  - Per-route hit/miss heatmaps.
+  - Cache invalidation UI (purge, ban, refresh via the admin API).
+  - Cluster peer view with ring state.
+  - Zero JS build step — server-rendered HTML fragments with htmx
+    attributes; no Node toolchain required.
+- All dashboard features are **opt-in** (gated by `dashboard.enabled`).
+- **Exit:** dashboard renders correctly; passes Lighthouse a11y ≥ 90;
+  no measurable impact on data-plane p99.
+
+### Phase 6.5 — AI traffic analysis (weeks 24–27)
+
+A streaming traffic analytics layer and ML-assisted suggestion engine,
+running in a separate goroutine pool with a strict CPU budget so it
+never competes with the data plane.
+
 - Streaming analyzer: ingest sampled access logs into an embedded DuckDB
   (or Parquet on disk) for ad-hoc queries.
 - Feature extraction: hit/miss patterns per route, TTL utilisation, top
@@ -998,17 +1019,11 @@ packages may remain.
   - Vary header pruning.
   - Candidate prefetch URLs.
   - Ban predicate strategies.
-- Dashboard (HTMX + Go `html/template`, embedded via `embed.FS` into admin):
-  - Live RED & USE charts (htmx polling / SSE partial swaps).
-  - Per-route hit/miss heatmaps.
-  - "Suggestions" inbox with one-click apply (writes a config diff PR or
-    pushes via the admin API).
-  - Zero JS build step — the dashboard is server-rendered HTML fragments
-    with htmx attributes; no Node toolchain required.
-- All AI features are **opt-in** and run in a separate goroutine pool with
-  a strict CPU budget — never compete with the data plane.
-- **Exit:** at least 5 actionable suggestion types implemented; dashboard
-  passes Lighthouse a11y ≥ 90; no measurable impact on data-plane p99.
+- "Suggestions" inbox in the dashboard with one-click apply (writes a
+  config diff or pushes via the admin API).
+- All AI features are **opt-in** and off by default.
+- **Exit:** at least 5 actionable suggestion types implemented; no
+  measurable impact on data-plane p99.
 
 ---
 
@@ -1178,7 +1193,7 @@ its own ADR under `docs/decisions/`.
 
 ## 19. Definition of Done (v1.0)
 
-- All phases 0–7 (plus 3.5 and 4.5) complete and tagged.
+- All phases 0–7 (plus 3.5, 4.5, 6, and 6.5) complete and tagged.
 - Hit-path allocs/op = 0 on the canonical benchmark (phase 3.5 gate).
 - cache-tests score ≥ Varnish on every category.
 - Canonical benchmark within 10 % of Varnish RPS, never regressing in CI.

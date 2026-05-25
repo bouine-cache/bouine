@@ -89,7 +89,8 @@ review.
 - [ ] Tests added or updated; coverage not reduced.
 - [ ] If you touched the hot path: zero-alloc benchmark proves it.
 - [ ] If you touched cache logic: `cache-tests` score not regressed.
-- [ ] If you touched config: JSON schema regenerated (`make schema`).
+- [ ] If you touched config: `config.Validate` updated and the new field
+      documented in the config reference.
 - [ ] If you touched a public API: SDK types updated, semver impact
       noted in the PR description.
 - [ ] If you touched a threat row: `docs/security/threat-model.md`

@@ -5,8 +5,11 @@
 // provides the concrete implementation backed by a sharded hot tier
 // (RAM) and an optional warm tier (mmap segments).
 //
-// The hot tier uses SIEVE eviction. The warm tier (mmap
-// segments, WAL, compaction) is stubbed.
+// The hot tier uses SIEVE eviction with a lock-free ban check on the Get
+// path and a background sweeper for eviction. The warm tier persists
+// objects to mmap-backed segments with a write-ahead index log and
+// background tombstone compaction (see internal/storage/warm and
+// internal/storage/wal). Warm is optional: omit it for ephemeral mode.
 package storage
 
 import (

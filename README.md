@@ -18,12 +18,13 @@ cache written in Go. It targets the same problem space as Varnish
 day one for Kubernetes, multi-instance clustering, and first-class
 observability.
 
-> Status: **v1.0-rc** — phases 0–7 complete. Caching, clustering,
-> prefetching, negative caching, jittered TTLs, soft-purge, and the Go
-> SDK are shipped. Validated on k3s with 3-node gossip cluster.
+> Status: **v1.0-rc** — core caching, clustering, negative caching,
+> jittered TTLs, soft-purge, and the Go SDK are shipped. Validated on k3s
+> with 3-node gossip cluster.
 > `make conformance` scores **340/365 (93.2%)** on
 > [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
-> See [`PLAN.md`](PLAN.md) for the roadmap.
+> See [`PLAN.md`](PLAN.md) for the roadmap (prefetching, HTTP/3, VCL shim,
+> and AI insights are deferred — not yet implemented).
 
 ---
 
@@ -137,20 +138,20 @@ The high-level Go module layout follows the layered architecture in
 [`PLAN.md §2.2`](PLAN.md). Lower numbers are closer to the wire.
 
 ```
-/cmd/bouine                  Cobra entrypoint
-/internal/server             L1 — HTTP/1, /2, TLS, route matching
-/internal/cache              L3 — RFC 9111 state machine, Vary, conditionals
-/internal/storage            L2 — RAM tier, mmap tier, eviction, WAL
-/internal/origin             L4 — upstream pool, health, hedge, breaker
-/internal/cluster            L5 — gossip, consistent hash, peer fetch
-/internal/admin              L6 — net/http admin: purge, ban, config, dash
-/internal/observability      L7 — OTEL, Prom, slog, pprof
+/cmd/bouine                  Cobra entrypoint + subcommands
+/internal/server             L1 — HTTP/1.1, /2, TLS, route matching
+/internal/storage            L2 — sharded RAM hot tier, mmap warm tier, WAL, SIEVE
+/internal/cache              L3 — RFC 9111 state machine, Vary, conditionals, negative cache
+/internal/origin             L4 — upstream pool, health, hedge, circuit breaker
+/internal/cluster            L5 — gossip, consistent hash, peer fetch, broadcast
+/internal/admin              L6 — net/http admin: purge, ban, refresh, config reload
+/internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
+/internal/observability      L7 — Prometheus, OpenTelemetry, slog, pprof
+/internal/cloudflare         Cloudflare Cache API invalidation propagation
 /internal/config             config loader, schema, hot reload
-/internal/prefetch           prefetcher: Link preload + sitemap crawler
-/internal/ai                 L8 — traffic analytics (phase 6)
-/internal/vcl                VCL-compatible shim (deferred — see §18)
+/internal/runtime            supervised goroutines, graceful shutdown sequencer
 /pkg/bouineapi               public Go SDK
-/pkg/api                     shared types between SDK, admin server, dashboard
+/pkg/api                     shared wire types (SDK, admin server, dashboard)
 ```
 
 ---

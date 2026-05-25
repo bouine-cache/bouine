@@ -42,6 +42,16 @@ test-short: ## Run unit tests with -short (used by pre-commit).
 lint: ## Run golangci-lint.
 	golangci-lint run
 
+.PHONY: vet
+vet: ## Run go vet across all packages.
+	$(GO) vet ./...
+
+.PHONY: integration
+integration: test-integration-cluster ## Alias: run the cluster integration suite.
+
+.PHONY: chaos
+chaos: test-chaos ## Alias: run the chaos scenarios.
+
 
 .PHONY: bench
 bench: ## Run the benchmark suite and compare against the committed baseline.

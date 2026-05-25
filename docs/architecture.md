@@ -98,17 +98,23 @@ surface that serves ≤ 10 RPS.
 /internal/storage/sieve      SIEVE eviction implementation
 /internal/origin             L4 — upstream pool, health, hedge, breaker
 /internal/cluster            L5 — memberlist gossip, consistent hash, peer fetch
-/internal/admin              L6 — net/http admin: purge, ban, config, dash
+/internal/admin              L6 — net/http admin: purge, ban, refresh, config
+/internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
 /internal/observability      L7 — OTEL, Prom, slog, pprof
+/internal/cloudflare         Cloudflare Cache API invalidation propagation
 /internal/config             config loader, schema, hot reload
-/internal/ai                 L8 — traffic analytics (phase 8)
-/web/dashboard               L8 — HTMX dashboard templates
+/internal/runtime            supervised goroutines, graceful shutdown
+/web/dashboard               embedded dashboard assets (embed.FS)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
 /pkg/api                     shared types between SDK, admin server, dashboard
 /test/integration            in-process 3-node cluster scenarios + chaos
 /test/cachetests             http-tests/cache-tests harness
 /bench                       benchmark suite + nightly comparison
 ```
+
+> L8 (AI insights, `/internal/ai`) is a **design target, not yet
+> implemented** — see the roadmap backlog in `PLAN.md`. The same applies to
+> prefetching and the VCL shim listed under Goals above.
 
 ### 2.3 Cross-cutting principles
 

@@ -340,8 +340,9 @@ Observability is a product feature, not an afterthought.
 
 ## 13. Configuration & Compatibility
 
-- YAML config schema lives in `internal/config/schema.go`. JSON Schema
-  emitted by `bouine config schema` is the contract.
+- The config schema lives in `internal/config/config.go` (struct tags) and
+  is validated by `config.Validate` in `internal/config/loader.go`. There is
+  no JSON-Schema emitter; the Go structs are the contract.
 - Config changes that break compatibility require a major version bump and
   a migration guide.
 - VCL shim supports the subset defined in `docs/architecture.md §16.4`. Unsupported
@@ -360,19 +361,24 @@ Observability is a product feature, not an afterthought.
 ```
 make build           # binary to ./bin/bouine
 make test            # go test -race ./...
+make test-short      # go test -race -short ./... (pre-commit)
 make lint            # golangci-lint run
 make vet             # go vet ./...
-make fuzz            # short fuzz pass on registered targets
-make bench           # bench harness, writes bench/results/
-make benchstat       # compare HEAD to main
+make bench           # bench harness, writes bench/results/, diffs baseline
 make conformance     # run http-tests/cache-tests, write report
-make integration     # docker compose up; run scenarios
-make ci              # all of the above in the order CI uses
-make docs            # build docs site (phase 4+)
-make schema          # regenerate JSON schema and SDK types
+make integration     # cluster integration suite (alias: test-integration-cluster)
+make chaos           # chaos scenarios (alias: test-chaos)
+make soak            # long-running soak against a live cluster
+make govulncheck     # govulncheck ./...
+make ci              # lint + test-short + build + hooks-run (CI gate)
 make templ           # go generate ./internal/dashboard/templates/ (requires templ CLI)
 make hooks           # install pre-commit hooks into .git/hooks
 ```
+
+> There is no JSON-schema generator or in-repo docs-site build: config is
+> validated in Go (`config.Validate`), and the documentation site lives in
+> the separate `bouine-documentation` repo. Do not reference `make schema`
+> or `make docs`.
 
 ### 14.2 CI pipeline (stages)
 
@@ -556,7 +562,7 @@ Before declaring a change ready:
 - [ ] If cache logic: `cache-tests` score not regressed.
 - [ ] If dashboard templates changed: `go generate ./internal/dashboard/templates/`
   committed alongside `_templ.go` files.
-- [ ] If config: JSON schema regenerated.
+- [ ] If config: `config.Validate` updated and the new field documented.
 - [ ] If public API: SDK types updated, semver impact noted.
 - [ ] Godoc + changelog entry.
 - [ ] ADR added if architectural.

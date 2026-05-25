@@ -191,7 +191,7 @@ mk();
 </script>
 
 <!-- WebGL noise canvas — same shader as the documentation homepage -->
-<div id="bouine-tint" style="position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 80% 70% at 50% 30%,rgba(139,92,246,.12) 0%,transparent 65%)"></div>
+<div id="bouine-tint" style="position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 80% 70% at 50% 30%,rgba(139,92,246,.28) 0%,transparent 65%)"></div>
 <canvas id="bouine-noise" style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0"></canvas>
 <script>
 (function(){
@@ -227,8 +227,8 @@ mk();
   var last=0;
   function updateBlend(){
     var dark=document.documentElement.getAttribute('data-theme')!=='light';
-    c.style.mixBlendMode=dark?'overlay':'multiply';
-    c.style.opacity=dark?'0.30':'0.08';
+    c.style.mixBlendMode='overlay';
+    c.style.opacity=dark?'0.55':'0.20';
   }
   function resize(){c.width=innerWidth;c.height=innerHeight;gl.viewport(0,0,c.width,c.height);}
   function frame(tm){

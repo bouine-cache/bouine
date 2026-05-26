@@ -17,12 +17,13 @@ templ Routes(d RoutesData) {
 			<input class="search-bar" placeholder="Filter…" oninput="filterTable(this,'route-tbl')"/>
 		</div>
 		<div
-			class="tc"
+			id="routes-data"
 			hx-get="/dashboard/routes"
 			hx-trigger="every 10s"
 			hx-swap="outerHTML"
-			hx-select=".tc"
+			hx-select="#routes-data"
 		>
+		<div class="tc">
 			<div class="th">
 				<span class="tl">Routes</span>
 				<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">
@@ -111,6 +112,7 @@ templ Routes(d RoutesData) {
 				</table>
 			</div>
 		}
+		</div><!-- /routes-data -->
 	}
 }
 

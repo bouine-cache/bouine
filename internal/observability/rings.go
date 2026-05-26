@@ -1,0 +1,413 @@
+// Package observability — rings.go
+// In-memory ring buffers for the dashboard data layer.
+// Hot path: only atomic.Add calls. Rings are updated by a background
+// goroutine every 10s from live atomic accumulators.
+package observability
+
+import (
+	"encoding/gob"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// ── Constants ────────────────────────────────────────────────────────
+
+const (
+	requestBucketSecs = 10                              // 10-second buckets
+	requestBuckets    = 6 * 60 * 60 / requestBucketSecs // 2160 = 6h
+	routeBuckets      = 24 * 60                         // 1440 = 24h, 1-min buckets
+)
+
+// ── Request ring ─────────────────────────────────────────────────────
+
+// RequestBucket holds aggregated counters for one time window.
+type RequestBucket struct {
+	Requests  int64
+	Hits      int64
+	Misses    int64
+	StaleHits int64
+	Errors    int64
+	DurSumMs  int64 // sum of request durations in ms (for avg)
+	DurN      int64 // number of samples with duration
+	P99MS     int64 // running max latency ms (approximation)
+	Timestamp int64 // unix seconds of window start
+}
+
+// RequestRing is a circular buffer of requestBuckets.
+// The live* fields are updated by the data-plane hot path via
+// atomic.Add and flushed into the ring every requestBucketSecs.
+type RequestRing struct {
+	mu      sync.RWMutex
+	buckets [requestBuckets]RequestBucket
+	head    int // next write position
+
+	// live accumulators — updated atomically on the hot path
+	liveRequests  atomic.Int64
+	liveHits      atomic.Int64
+	liveMisses    atomic.Int64
+	liveStaleHits atomic.Int64
+	liveErrors    atomic.Int64
+	liveDurSumMs  atomic.Int64
+	liveDurN      atomic.Int64
+	liveP99MS     atomic.Int64 // max duration seen since last flush
+}
+
+// RecordRequest is called on the hot path for every completed request.
+// Zero allocations — only atomic adds.
+func (r *RequestRing) RecordRequest(hit, miss, stale bool, statusCode int, durMs int64) {
+	r.liveRequests.Add(1)
+	if hit {
+		r.liveHits.Add(1)
+	}
+	if miss {
+		r.liveMisses.Add(1)
+	}
+	if stale {
+		r.liveStaleHits.Add(1)
+	}
+	if statusCode >= 500 {
+		r.liveErrors.Add(1)
+	}
+	r.liveDurSumMs.Add(durMs)
+	r.liveDurN.Add(1)
+	// Update max via CAS loop.
+	for {
+		old := r.liveP99MS.Load()
+		if durMs <= old {
+			break
+		}
+		if r.liveP99MS.CompareAndSwap(old, durMs) {
+			break
+		}
+	}
+}
+
+// Flush drains the live accumulators into the next ring bucket.
+// Called by the background goroutine every requestBucketSecs.
+func (r *RequestRing) Flush(now time.Time) {
+	b := RequestBucket{
+		Requests:  r.liveRequests.Swap(0),
+		Hits:      r.liveHits.Swap(0),
+		Misses:    r.liveMisses.Swap(0),
+		StaleHits: r.liveStaleHits.Swap(0),
+		Errors:    r.liveErrors.Swap(0),
+		DurSumMs:  r.liveDurSumMs.Swap(0),
+		DurN:      r.liveDurN.Swap(0),
+		P99MS:     r.liveP99MS.Swap(0),
+		Timestamp: now.Unix(),
+	}
+	r.mu.Lock()
+	r.buckets[r.head] = b
+	r.head = (r.head + 1) % requestBuckets
+	r.mu.Unlock()
+}
+
+// Snapshot returns up to n most-recent buckets, oldest first.
+func (r *RequestRing) Snapshot(n int) []RequestBucket {
+	if n > requestBuckets {
+		n = requestBuckets
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]RequestBucket, n)
+	head := r.head
+	for i := 0; i < n; i++ {
+		idx := (head - n + i + requestBuckets) % requestBuckets
+		out[i] = r.buckets[idx]
+	}
+	return out
+}
+
+// ── Route ring ───────────────────────────────────────────────────────
+
+// RouteBucket holds per-route aggregated counters for one minute.
+type RouteBucket struct {
+	Route     string
+	Requests  int64
+	Hits      int64
+	Misses    int64
+	Timestamp int64
+}
+
+// RouteRing holds per-route 1-minute buckets for the last 24h.
+type RouteRing struct {
+	mu      sync.RWMutex
+	buckets []RouteBucket // grows as routes are discovered
+	// live per-route accumulators
+	liveRoutes sync.Map // string → *routeCounters
+}
+
+type routeCounters struct {
+	requests atomic.Int64
+	hits     atomic.Int64
+	misses   atomic.Int64
+}
+
+// RecordRoute is called on the hot path.
+func (r *RouteRing) RecordRoute(route string, hit, miss bool) {
+	v, _ := r.liveRoutes.LoadOrStore(route, &routeCounters{})
+	c := v.(*routeCounters)
+	c.requests.Add(1)
+	if hit {
+		c.hits.Add(1)
+	}
+	if miss {
+		c.misses.Add(1)
+	}
+}
+
+// Flush drains live per-route counters into the ring.
+func (r *RouteRing) Flush(now time.Time) {
+	ts := now.Unix()
+	r.liveRoutes.Range(func(k, v any) bool {
+		route := k.(string)
+		c := v.(*routeCounters)
+		b := RouteBucket{
+			Route:     route,
+			Requests:  c.requests.Swap(0),
+			Hits:      c.hits.Swap(0),
+			Misses:    c.misses.Swap(0),
+			Timestamp: ts,
+		}
+		r.mu.Lock()
+		r.buckets = append(r.buckets, b)
+		// Trim to 24h × routes.
+		if len(r.buckets) > routeBuckets*20 {
+			r.buckets = r.buckets[len(r.buckets)-routeBuckets*20:]
+		}
+		r.mu.Unlock()
+		return true
+	})
+}
+
+// RouteStats returns the latest aggregated stats per route over windowBuckets.
+func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	agg := make(map[string]*RouteStat)
+	cutoff := len(r.buckets) - windowBuckets*20
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	for _, b := range r.buckets[cutoff:] {
+		s, ok := agg[b.Route]
+		if !ok {
+			s = &RouteStat{Route: b.Route}
+			agg[b.Route] = s
+		}
+		s.Requests += b.Requests
+		s.Hits += b.Hits
+		s.Misses += b.Misses
+	}
+	out := make([]RouteStat, 0, len(agg))
+	for _, s := range agg {
+		if s.Requests > 0 {
+			s.HitPct = math.Round(float64(s.Hits)/float64(s.Requests)*1000) / 10
+		}
+		out = append(out, *s)
+	}
+	return out
+}
+
+// RouteStat is the aggregated view of one route over a time window.
+type RouteStat struct {
+	Route    string
+	Requests int64
+	Hits     int64
+	Misses   int64
+	HitPct   float64 // 0-100
+}
+
+// ── Rings manager ────────────────────────────────────────────────────
+
+// Rings holds all ring buffers and their background flush goroutine.
+type Rings struct {
+	Request  *RequestRing
+	Route    *RouteRing
+	NodeName string
+}
+
+// NewRings creates initialised ring buffers.
+func NewRings(nodeName string) *Rings {
+	return &Rings{
+		Request:  &RequestRing{},
+		Route:    &RouteRing{},
+		NodeName: nodeName,
+	}
+}
+
+// Start launches the background flush goroutine. Blocks until ctx is done.
+func (ri *Rings) Start(ctx interface{ Done() <-chan struct{} }, snapshotPath string) {
+	reqTicker := time.NewTicker(requestBucketSecs * time.Second)
+	snapTicker := time.NewTicker(60 * time.Second)
+	defer reqTicker.Stop()
+	defer snapTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if snapshotPath != "" {
+				_ = ri.Save(snapshotPath)
+			}
+			return
+		case now := <-reqTicker.C:
+			ri.Request.Flush(now)
+			ri.Route.Flush(now)
+		case <-snapTicker.C:
+			if snapshotPath != "" {
+				_ = ri.Save(snapshotPath)
+			}
+		}
+	}
+}
+
+// ── Snapshot (persistence) ───────────────────────────────────────────
+
+// ringSnapshot is the gob-serialisable form of all rings.
+type ringSnapshot struct {
+	SavedAt      time.Time
+	RequestHead  int
+	RequestBucts [requestBuckets]RequestBucket
+	RouteBucts   []RouteBucket
+}
+
+// Save serialises rings to a file. Called on graceful shutdown and every 60s.
+func (ri *Rings) Save(path string) error {
+	ri.Request.mu.RLock()
+	snap := ringSnapshot{
+		SavedAt:      time.Now(),
+		RequestHead:  ri.Request.head,
+		RequestBucts: ri.Request.buckets,
+	}
+	ri.Request.mu.RUnlock()
+	ri.Route.mu.RLock()
+	snap.RouteBucts = make([]RouteBucket, len(ri.Route.buckets))
+	copy(snap.RouteBucts, ri.Route.buckets)
+	ri.Route.mu.RUnlock()
+
+	f, err := os.CreateTemp(filepath.Dir(path), ".metrics-snap-*")
+	if err != nil {
+		return fmt.Errorf("rings save: %w", err)
+	}
+	if err := gob.NewEncoder(f).Encode(snap); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return fmt.Errorf("rings save encode: %w", err)
+	}
+	_ = f.Close()
+	return os.Rename(f.Name(), path)
+}
+
+// Load restores rings from a snapshot file if it is < 10 minutes old.
+func (ri *Rings) Load(path string) error {
+	f, err := os.Open(path) //nolint:gosec // path is derived from operator-configured WarmDir, not user input
+	if err != nil {
+		return nil // file absent — not an error
+	}
+	defer func() { _ = f.Close() }()
+
+	var snap ringSnapshot
+	if err := gob.NewDecoder(f).Decode(&snap); err != nil {
+		return fmt.Errorf("rings load decode: %w", err)
+	}
+	if time.Since(snap.SavedAt) > 10*time.Minute {
+		return nil // stale — ignore
+	}
+
+	ri.Request.mu.Lock()
+	ri.Request.buckets = snap.RequestBucts
+	ri.Request.head = snap.RequestHead
+	ri.Request.mu.Unlock()
+
+	ri.Route.mu.Lock()
+	ri.Route.buckets = snap.RouteBucts
+	ri.Route.mu.Unlock()
+	return nil
+}
+
+// ── Cluster summary ──────────────────────────────────────────────────
+
+// MetricsSummary is the compact struct returned by /v1/peer/metrics
+// and used for fan-out aggregation.
+type MetricsSummary struct {
+	NodeName    string
+	CollectedAt time.Time
+	// Last requestBuckets buckets
+	RequestSnap []RequestBucket
+	// Per-route stats over last 30 min
+	RouteStats []RouteStat
+}
+
+// Summary builds a MetricsSummary from the local rings.
+func (ri *Rings) Summary() MetricsSummary {
+	return MetricsSummary{
+		NodeName:    ri.NodeName,
+		CollectedAt: time.Now(),
+		RequestSnap: ri.Request.Snapshot(requestBuckets),
+		RouteStats:  ri.Route.RouteStats(30),
+	}
+}
+
+// MergeSummaries aggregates multiple MetricsSummary into one.
+// Merge strategy per PLAN.md §6.4:
+//   - Counters: sum
+//   - Ratios: weighted average
+//   - Latency p99: max
+func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
+	if len(summaries) == 0 {
+		return MetricsSummary{}
+	}
+	merged := MetricsSummary{
+		NodeName:    "cluster",
+		CollectedAt: time.Now(),
+		RequestSnap: make([]RequestBucket, requestBuckets),
+		RouteStats:  nil,
+	}
+
+	// Align by recency: find the latest timestamp in the first summary
+	// and sum buckets at the same relative offset from all summaries.
+	for _, s := range summaries {
+		for i, b := range s.RequestSnap {
+			m := &merged.RequestSnap[i]
+			m.Requests += b.Requests
+			m.Hits += b.Hits
+			m.Misses += b.Misses
+			m.StaleHits += b.StaleHits
+			m.Errors += b.Errors
+			m.DurSumMs += b.DurSumMs
+			m.DurN += b.DurN
+			if b.P99MS > m.P99MS {
+				m.P99MS = b.P99MS
+			}
+			if b.Timestamp > m.Timestamp {
+				m.Timestamp = b.Timestamp
+			}
+		}
+	}
+
+	// Merge route stats.
+	routeAgg := make(map[string]*RouteStat)
+	for _, s := range summaries {
+		for _, rs := range s.RouteStats {
+			a, ok := routeAgg[rs.Route]
+			if !ok {
+				a = &RouteStat{Route: rs.Route}
+				routeAgg[rs.Route] = a
+			}
+			a.Requests += rs.Requests
+			a.Hits += rs.Hits
+			a.Misses += rs.Misses
+		}
+	}
+	for _, a := range routeAgg {
+		if a.Requests > 0 {
+			a.HitPct = math.Round(float64(a.Hits)/float64(a.Requests)*1000) / 10
+		}
+		merged.RouteStats = append(merged.RouteStats, *a)
+	}
+	return merged
+}

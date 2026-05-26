@@ -76,7 +76,7 @@ templ Invalidation(d InvalidationData) {
 				</div>
 			</div>
 		</div>
-		<div class="tc" hx-get="/dashboard/invalidation" hx-trigger="every 15s" hx-swap="outerHTML" hx-select=".tc">
+		<div class="tc" hx-get="/dashboard/invalidation" hx-trigger="every 15s, refreshOpsLog from:body" hx-swap="outerHTML" hx-select=".tc">
 			<div class="th">
 				<span class="tl">Ops log</span>
 				<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">

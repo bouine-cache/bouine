@@ -249,6 +249,7 @@ script overviewChartScript(
 	var cReqEl=document.getElementById('c-req');
 	var cSplitEl=document.getElementById('c-split');
 	if(!cReqEl||!cSplitEl)return;
+	requestAnimationFrame(function(){
 	[cReqEl,cSplitEl].forEach(function(c){
 		c.removeAttribute('height');c.removeAttribute('width');
 		c.style.position='absolute';c.style.top='0';c.style.left='0';
@@ -263,5 +264,6 @@ script overviewChartScript(
 		type:'doughnut',
 		data:{labels:['HIT','MISS','STALE','BYP','REVAL'],datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]},
 		options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:5}}},cutout:'70%'}
+	});
 	});
 }

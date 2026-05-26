@@ -985,8 +985,8 @@ func overviewChartScript(
 	splitRevalidated int64,
 ) templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_overviewChartScript_b881`,
-		Function: `function __templ_overviewChartScript_b881(labels, reqs, errs, splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated, ){var d=document.documentElement.getAttribute('data-theme')!=='light';
+		Name: `__templ_overviewChartScript_cd2a`,
+		Function: `function __templ_overviewChartScript_cd2a(labels, reqs, errs, splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated, ){var d=document.documentElement.getAttribute('data-theme')!=='light';
 	var gc={color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'};
 	var tc={color:d?'#6050a0':'#9ca3af',font:{size:9}};
 	try{if(window._cReq)window._cReq.destroy();}catch(e){}
@@ -994,6 +994,7 @@ func overviewChartScript(
 	var cReqEl=document.getElementById('c-req');
 	var cSplitEl=document.getElementById('c-split');
 	if(!cReqEl||!cSplitEl)return;
+	requestAnimationFrame(function(){
 	[cReqEl,cSplitEl].forEach(function(c){
 		c.removeAttribute('height');c.removeAttribute('width');
 		c.style.position='absolute';c.style.top='0';c.style.left='0';
@@ -1009,9 +1010,10 @@ func overviewChartScript(
 		data:{labels:['HIT','MISS','STALE','BYP','REVAL'],datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]},
 		options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:5}}},cutout:'70%'}
 	});
+	});
 }`,
-		Call:       templ.SafeScript(`__templ_overviewChartScript_b881`, labels, reqs, errs, splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated),
-		CallInline: templ.SafeScriptInline(`__templ_overviewChartScript_b881`, labels, reqs, errs, splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated),
+		Call:       templ.SafeScript(`__templ_overviewChartScript_cd2a`, labels, reqs, errs, splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated),
+		CallInline: templ.SafeScriptInline(`__templ_overviewChartScript_cd2a`, labels, reqs, errs, splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated),
 	}
 }
 

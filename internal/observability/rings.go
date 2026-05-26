@@ -386,6 +386,7 @@ func (r *PeerRing) PeerHealth() map[string]float64 {
 type Rings struct {
 	Request  *RequestRing
 	Route    *RouteRing
+	URL      *URLRing
 	OpsLog   *OpsLogRing
 	Peer     *PeerRing
 	NodeName string
@@ -396,6 +397,7 @@ func NewRings(nodeName string) *Rings {
 	return &Rings{
 		Request:  &RequestRing{},
 		Route:    &RouteRing{},
+		URL:      &URLRing{},
 		OpsLog:   &OpsLogRing{},
 		Peer:     &PeerRing{},
 		NodeName: nodeName,
@@ -501,6 +503,8 @@ type MetricsSummary struct {
 	RequestSnap []RequestBucket
 	// Per-route stats over last 30 min
 	RouteStats []RouteStat
+	// Per-URL-prefix stats (top-N by request count)
+	URLStats []URLStat
 }
 
 // Summary builds a MetricsSummary from the local rings.
@@ -510,6 +514,7 @@ func (ri *Rings) Summary() MetricsSummary {
 		CollectedAt: time.Now(),
 		RequestSnap: ri.Request.Snapshot(requestBuckets),
 		RouteStats:  ri.Route.RouteStats(30),
+		URLStats:    ri.URL.URLStats(),
 	}
 }
 
@@ -579,5 +584,139 @@ func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 		}
 		merged.RouteStats = append(merged.RouteStats, *a)
 	}
+
+	// Merge URL stats — sum counters across pods.
+	urlAgg := make(map[string]*URLStat)
+	for _, s := range summaries {
+		for _, us := range s.URLStats {
+			a, ok := urlAgg[us.URL]
+			if !ok {
+				cp := us
+				urlAgg[us.URL] = &cp
+				continue
+			}
+			a.Requests += us.Requests
+			a.Hits += us.Hits
+			a.Misses += us.Misses
+		}
+	}
+	for _, a := range urlAgg {
+		if a.Requests > 0 {
+			a.HitPct = math.Round(float64(a.Hits)/float64(a.Requests)*1000) / 10
+		}
+		merged.URLStats = append(merged.URLStats, *a)
+	}
 	return merged
+}
+
+// ── URL ring ──────────────────────────────────────────────────────────
+
+const (
+	urlRingCap    = 512 // max distinct URL prefixes tracked
+	urlSuffixSegs = 3   // number of path segments kept as the key
+)
+
+// URLStat is the per-URL-prefix cache result summary.
+type URLStat struct {
+	URL      string
+	Route    string
+	Requests int64
+	Hits     int64
+	Misses   int64
+	HitPct   float64
+}
+
+// urlCounters holds live atomic accumulators for one URL prefix.
+type urlCounters struct {
+	route    string
+	requests atomic.Int64
+	hits     atomic.Int64
+	misses   atomic.Int64
+}
+
+// URLRing tracks per-URL-prefix hit/miss counters using a fixed-capacity
+// sync.Map. When the cap is reached new URLs are silently dropped.
+// Zero allocations on the hot path for known URLs (Load fast-path).
+type URLRing struct {
+	entries sync.Map // urlKey → *urlCounters
+	size    atomic.Int64
+}
+
+// urlKey returns a stable cache key from a URL path: the first
+// urlSuffixSegs non-empty path segments joined with "/", e.g.
+// "/api/v1/users/123?foo=bar" → "/api/v1/users".
+func urlKey(path string) string {
+	if path == "" || path == "/" {
+		return "/"
+	}
+	segs := 0
+	end := 0
+	for i := 1; i < len(path); i++ {
+		if path[i] == '?' || path[i] == '#' {
+			end = i
+			break
+		}
+		if path[i] == '/' {
+			segs++
+			if segs == urlSuffixSegs {
+				end = i
+				break
+			}
+		}
+	}
+	if end == 0 {
+		end = len(path)
+	}
+	return path[:end]
+}
+
+// RecordURL is called on the hot path. Zero allocs for known URLs.
+func (r *URLRing) RecordURL(path, route, xCache string) {
+	key := urlKey(path)
+	v, ok := r.entries.Load(key)
+	if !ok {
+		if r.size.Load() >= urlRingCap {
+			return // cap reached, silently drop
+		}
+		nc := &urlCounters{route: route}
+		v, ok = r.entries.LoadOrStore(key, nc)
+		if !ok {
+			r.size.Add(1)
+			v = nc
+		}
+	}
+	c := v.(*urlCounters)
+	c.requests.Add(1)
+	switch xCache {
+	case "HIT":
+		c.hits.Add(1)
+	case "MISS":
+		c.misses.Add(1)
+	}
+}
+
+// URLStats returns a snapshot of all tracked URLs sorted by request count.
+func (r *URLRing) URLStats() []URLStat {
+	out := make([]URLStat, 0, 64)
+	r.entries.Range(func(k, v any) bool {
+		c := v.(*urlCounters)
+		reqs := c.requests.Load()
+		if reqs == 0 {
+			return true
+		}
+		hits := c.hits.Load()
+		stat := URLStat{
+			URL:      k.(string),
+			Route:    c.route,
+			Requests: reqs,
+			Hits:     hits,
+			Misses:   c.misses.Load(),
+		}
+		if reqs > 0 {
+			stat.HitPct = math.Round(float64(hits)/float64(reqs)*1000) / 10
+		}
+		out = append(out, stat)
+		return true
+	})
+	return out
 }

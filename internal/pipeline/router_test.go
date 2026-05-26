@@ -15,8 +15,8 @@ func ok200(body string) http.Handler {
 
 func TestRouter_FirstMatchWins(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("", "/a", ok200("first"))
-	rt.AddRoute("", "/a", ok200("second"))
+	rt.AddRoute("", "/a", "", ok200("first"))
+	rt.AddRoute("", "/a", "", ok200("second"))
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/a/b", nil))
@@ -27,8 +27,8 @@ func TestRouter_FirstMatchWins(t *testing.T) {
 
 func TestRouter_HostMatch(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("api.example.com", "", ok200("api"))
-	rt.AddRoute("", "", ok200("default"))
+	rt.AddRoute("api.example.com", "", "", ok200("api"))
+	rt.AddRoute("", "", "", ok200("default"))
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
@@ -41,7 +41,7 @@ func TestRouter_HostMatch(t *testing.T) {
 
 func TestRouter_HostWithPort(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("api.example.com", "", ok200("api"))
+	rt.AddRoute("api.example.com", "", "", ok200("api"))
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
@@ -54,7 +54,7 @@ func TestRouter_HostWithPort(t *testing.T) {
 
 func TestRouter_NoRoute(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("only.com", "", ok200("x"))
+	rt.AddRoute("only.com", "", "", ok200("x"))
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
@@ -67,8 +67,8 @@ func TestRouter_NoRoute(t *testing.T) {
 
 func TestRouter_PathPrefix(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("", "/api/", ok200("api"))
-	rt.AddRoute("", "/", ok200("root"))
+	rt.AddRoute("", "/api/", "", ok200("api"))
+	rt.AddRoute("", "/", "", ok200("root"))
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/foo", nil))
@@ -85,7 +85,7 @@ func TestRouter_PathPrefix(t *testing.T) {
 
 func TestRouter_CatchAll(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
-	rt.AddRoute("", "", ok200("all"))
+	rt.AddRoute("", "", "", ok200("all"))
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/anything", nil))

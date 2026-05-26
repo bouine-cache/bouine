@@ -107,6 +107,13 @@ func sortRouteStats(stats []observability.RouteStat) []observability.RouteStat {
 	return stats
 }
 
+func sortURLStats(stats []observability.URLStat) []observability.URLStat {
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].Requests > stats[j].Requests
+	})
+	return stats
+}
+
 func toPeerResults(in []PeerResult) []templates.PeerResult {
 	out := make([]templates.PeerResult, len(in))
 	for i, p := range in {
@@ -217,6 +224,7 @@ func (h *Handler) routes(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, templates.Routes(templates.RoutesData{
 		LayoutProps: templates.LayoutProps{Page: "routes", PageTitle: "Routes", NodeName: h.nodeName()},
 		RouteStats:  sortRouteStats(merged.RouteStats),
+		URLStats:    sortURLStats(merged.URLStats),
 	}))
 }
 

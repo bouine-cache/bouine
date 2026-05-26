@@ -66,6 +66,7 @@ func (o OverviewData) HotFillPct() float64 {
 type RoutesData struct {
 	LayoutProps
 	RouteStats []observability.RouteStat
+	URLStats   []observability.URLStat
 }
 
 // ClusterData is the view model for the cluster page.

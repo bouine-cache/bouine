@@ -153,6 +153,9 @@ type ConnectPolicy struct {
 
 // Route declares a host/path match and its per-request behaviour.
 type Route struct {
+	// Name is the human-readable route label used in Prometheus metrics and
+	// the operator dashboard. Defaults to host:path_prefix when empty.
+	Name     string        `yaml:"name"`
 	Match    RouteMatch    `yaml:"match"`
 	Pool     string        `yaml:"pool"`
 	Cache    RouteCache    `yaml:"cache"`

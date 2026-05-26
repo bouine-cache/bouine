@@ -128,16 +128,22 @@ func (e *engine) buildCluster() (*cluster.Cluster, error) {
 	}
 
 	// In Kubernetes, POD_IP is injected via the Downward API.
-	// memberlist needs it as the advertise address so peers can
-	// reach this node by its real IP, not 0.0.0.0.
+	// Use it to make all advertised addresses routable by peers.
+	// Without this, PeerInfo fields contain bind addresses like ":9000"
+	// which are not reachable from other pods.
 	advertiseAddr := ""
+	peerInfo := api.PeerInfo{
+		Name:      hostname,
+		Addr:      e.cfg.Listen.Cluster,
+		AdminAddr: e.cfg.Listen.Admin,
+		DataAddr:  e.cfg.Listen.HTTP,
+		Weight:    1.0,
+	}
 	if podIP := os.Getenv("POD_IP"); podIP != "" {
-		// Extract port from bind address.
-		_, port, _ := net.SplitHostPort(e.cfg.Listen.Cluster)
-		if port == "" {
-			port = "8443"
-		}
-		advertiseAddr = podIP + ":" + port
+		advertiseAddr = podIP + ":" + listenPort(e.cfg.Listen.Cluster, "8443")
+		peerInfo.Addr = advertiseAddr
+		peerInfo.AdminAddr = podIP + ":" + listenPort(e.cfg.Listen.Admin, "9000")
+		peerInfo.DataAddr = podIP + ":" + listenPort(e.cfg.Listen.HTTP, "80")
 	}
 
 	return cluster.New(cluster.Config{
@@ -145,15 +151,22 @@ func (e *engine) buildCluster() (*cluster.Cluster, error) {
 		BindAddr:      e.cfg.Listen.Cluster,
 		AdvertiseAddr: advertiseAddr,
 		Join:          e.cfg.Cluster.Join,
-		PeerInfo: api.PeerInfo{
-			Name:      hostname,
-			Addr:      e.cfg.Listen.Cluster,
-			AdminAddr: e.cfg.Listen.Admin,
-			DataAddr:  e.cfg.Listen.HTTP,
-			Weight:    1.0,
-		},
-		Logger: e.logger,
+		PeerInfo:      peerInfo,
+		Logger:        e.logger,
 	})
+}
+
+// listenPort extracts the port number from a ":port" bind address,
+// falling back to defaultPort when the address is empty or unparseable.
+func listenPort(addr, defaultPort string) string {
+	if addr == "" {
+		return defaultPort
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return defaultPort
+	}
+	return port
 }
 
 func (e *engine) buildHandler(

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"time"
 
@@ -352,6 +354,18 @@ func (h *Handler) apiBan(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		hostRegex, pathRegex = req.HostRegex, req.PathRegex
 	}
+	if hostRegex == "" && pathRegex == "" {
+		h.apiError(w, "provide at least one of host regex or path regex")
+		return
+	}
+	if msg := validateRegex("host regex", hostRegex); msg != "" {
+		h.apiError(w, msg)
+		return
+	}
+	if msg := validateRegex("path regex", pathRegex); msg != "" {
+		h.apiError(w, msg)
+		return
+	}
 	n, err := h.cfg.BanFn(r.Context(), hostRegex, pathRegex)
 	arg := hostRegex + " " + pathRegex
 	if err != nil {
@@ -369,24 +383,24 @@ func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
-	url := r.FormValue("url")
-	if url == "" {
+	rawURL := r.FormValue("url")
+	if rawURL == "" {
 		var req struct {
 			URL string `json:"url"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		url = req.URL
+		rawURL = req.URL
 	}
-	if url == "" {
-		h.apiError(w, "missing url")
+	if msg := validateCacheURL(rawURL); msg != "" {
+		h.apiError(w, msg)
 		return
 	}
-	if err := h.cfg.RefreshFn(r.Context(), url); err != nil {
-		h.cfg.Rings.OpsLog.Record("refresh", url, err.Error())
+	if err := h.cfg.RefreshFn(r.Context(), rawURL); err != nil {
+		h.cfg.Rings.OpsLog.Record("refresh", rawURL, err.Error())
 		h.apiError(w, err.Error())
 		return
 	}
-	h.cfg.Rings.OpsLog.Record("refresh", url, "ok")
+	h.cfg.Rings.OpsLog.Record("refresh", rawURL, "ok")
 	h.apiOK(w, "refreshed")
 }
 
@@ -394,6 +408,39 @@ func (h *Handler) apiOK(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("HX-Trigger", "refreshOpsLog")
 	_, _ = fmt.Fprintf(w, `<span class="flash-ok">✓ %s</span>`, msg)
+}
+
+// ── Input validation ─────────────────────────────────────────────────
+
+// validateCacheURL returns a human-readable error if rawURL is not a
+// valid absolute HTTP/HTTPS URL that could match a cached object.
+func validateCacheURL(rawURL string) string {
+	if rawURL == "" {
+		return "URL is required"
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Sprintf("invalid URL: %s", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "URL must begin with http:// or https://"
+	}
+	if u.Host == "" {
+		return "URL must include a host, e.g. https://example.com/path"
+	}
+	return ""
+}
+
+// validateRegex returns a human-readable error if s is not a valid RE2
+// regular expression, or empty string when s is empty (field is optional).
+func validateRegex(fieldName, s string) string {
+	if s == "" {
+		return ""
+	}
+	if _, err := regexp.Compile(s); err != nil {
+		return fmt.Sprintf("%s is not a valid regex — %s", fieldName, err)
+	}
+	return ""
 }
 
 func (h *Handler) apiError(w http.ResponseWriter, msg string) {

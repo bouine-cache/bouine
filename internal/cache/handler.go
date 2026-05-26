@@ -32,8 +32,11 @@ import (
 
 // Pre-allocated header values to avoid per-request slice literals.
 var (
-	headerHIT  = []string{"HIT"}
-	headerMISS = []string{"MISS"}
+	headerHIT         = []string{"HIT"}
+	headerMISS        = []string{"MISS"}
+	headerSTALE       = []string{"STALE"}
+	headerBYPASS      = []string{"BYPASS"}
+	headerREVALIDATED = []string{"REVALIDATED"}
 )
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -157,6 +160,7 @@ func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		return
 	}
+	w.Header()["X-Cache"] = headerBYPASS
 	h.upstream.ServeHTTP(w, r)
 }
 
@@ -166,6 +170,33 @@ func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *ap
 	age := ComputeAge(obj, time.Now())
 	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
 	dst["X-Cache"] = headerHIT
+	w.WriteHeader(obj.StatusCode)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(obj.Body)
+	}
+}
+
+// serveStale writes a cached object with X-Cache: STALE (SWR / SIE path).
+func (h *Handler) serveStale(w http.ResponseWriter, r *http.Request, obj *api.Object) {
+	dst := w.Header()
+	maps.Copy(dst, obj.Header)
+	age := ComputeAge(obj, time.Now())
+	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
+	dst["X-Cache"] = headerSTALE
+	w.WriteHeader(obj.StatusCode)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(obj.Body)
+	}
+}
+
+// serveRevalidated writes a refreshed cached object with X-Cache: REVALIDATED
+// (origin confirmed freshness via 304).
+func (h *Handler) serveRevalidated(w http.ResponseWriter, r *http.Request, obj *api.Object) {
+	dst := w.Header()
+	maps.Copy(dst, obj.Header)
+	age := ComputeAge(obj, time.Now())
+	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
+	dst["X-Cache"] = headerREVALIDATED
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(obj.Body)
@@ -192,13 +223,13 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", key)
-		h.serveFromCache(w, r, stale)
+		h.serveStale(w, r, stale)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 			"status", res.StatusCode, "key", key)
-		h.serveFromCache(w, r, stale)
+		h.serveStale(w, r, stale)
 		return
 	}
 	h.writeAndMaybeStore(w, r, key, res)
@@ -223,7 +254,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 				h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 					"status", res.StatusCode, "key", stale.Key)
 			}
-			h.serveFromCache(w, r, stale)
+			h.serveStale(w, r, stale)
 			return
 		}
 	}
@@ -243,7 +274,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 			refreshed.ETag = newETag
 		}
 		_ = h.store.Put(r.Context(), key, &refreshed)
-		h.serveFromCache(w, r, &refreshed)
+		h.serveRevalidated(w, r, &refreshed)
 		return
 	}
 

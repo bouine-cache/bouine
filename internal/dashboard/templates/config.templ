@@ -1,0 +1,55 @@
+package templates
+
+// Config renders the config-reload view with validate-first confirmation.
+templ Config(d ConfigData) {
+	@Layout(d.LayoutProps) {
+		<div class="pg-hd">
+			<div>
+				<h2>Config reload</h2>
+				<div class="sub">validate → confirm → apply</div>
+			</div>
+		</div>
+		<div class="r2">
+			<div class="bc">
+				<div class="bc-t">Runtime state</div>
+				<div class="stat-row">
+					<span class="stat-k">node</span>
+					<span class="stat-v">{ d.NodeName }</span>
+				</div>
+				<div class="stat-row">
+					<span class="stat-k">snapshot path</span>
+					<span class="stat-v" style="font-size:.65rem">
+						if d.SnapshotPath != "" {
+							{ d.SnapshotPath }
+						} else {
+							disabled
+						}
+					</span>
+				</div>
+				if d.Flash != "" {
+					<div class="flash-ok" style="margin-top:.75rem">{ d.Flash }</div>
+				}
+			</div>
+			<div class="bc">
+				<div class="bc-t">Reload config</div>
+				<div style="font-size:.74rem;color:var(--m);line-height:1.7;margin-bottom:.85rem">
+					Reads config from disk, validates fully, and only applies on success.
+					The running configuration is <strong style="color:var(--t)">never affected</strong> by parse errors.
+				</div>
+				<div id="reload-section">
+					<button
+						class="btn bp"
+						style="width:100%"
+						hx-post="/dashboard/config/reload"
+						hx-target="#reload-section"
+						hx-swap="innerHTML"
+					>↻ Reload config</button>
+				</div>
+				<div style="font-size:.68rem;color:var(--m);margin-top:.5rem">
+					Hot-reloadable: routes, pools, TTLs, TLS certs.<br/>
+					Not reloadable: listen addresses, storage, cluster settings.
+				</div>
+			</div>
+		</div>
+	}
+}

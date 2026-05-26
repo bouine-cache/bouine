@@ -215,24 +215,8 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 		addr = ":9000"
 	}
 
-	// Build shutdown sequencer — IsReady wired to /readyz.
 	seq := shutdown.NewSequencer(e.logger)
-
-	// Build dashboard handler and peer-metrics handler.
-	dashMux := http.NewServeMux()
-	snapshotPath := ""
-	if e.cfg.Storage.WarmDir != "" {
-		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"
-	}
-	dashHandler := dashboard.New(dashboard.Config{
-		Rings:        rings,
-		PeersFn:      peersFn,
-		SelfAddr:     addr,
-		Token:        token,
-		Logger:       e.logger,
-		SnapshotPath: snapshotPath,
-	}, dashMux)
-	_ = dashHandler // registered via dashMux
+	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr)
 
 	srv := admin.New(admin.Config{
 		Addr:    addr,
@@ -271,6 +255,50 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 		DashboardHandler:   dashMux,
 	})
 	g.Go("admin", srv.Serve)
+}
+
+// buildDashboard wires and returns the dashboard ServeMux.
+func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string) *http.ServeMux {
+	dashMux := http.NewServeMux()
+	snapshotPath := ""
+	if e.cfg.Storage.WarmDir != "" {
+		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"
+	}
+	_ = dashboard.New(dashboard.Config{
+		Rings:        rings,
+		PeersFn:      peersFn,
+		SelfAddr:     addr,
+		Token:        token,
+		Logger:       e.logger,
+		SnapshotPath: snapshotPath,
+		StoreFn:      store.Stats,
+		HotMaxBytes:  e.cfg.Storage.HotMaxBytes.Bytes(),
+		PurgeFn: func(dCtx context.Context, urlStr string) error {
+			key := cache.BuildKeyFromURL(urlStr)
+			if err := store.Delete(dCtx, key); err != nil {
+				return err
+			}
+			if broadcaster != nil {
+				broadcaster.BroadcastPurge(ctx, key, "")
+			}
+			return nil
+		},
+		BanFn: func(dCtx context.Context, hostRegex, pathRegex string) (int, error) {
+			expr := api.BanExpr{HostRegex: hostRegex, PathRegex: pathRegex}
+			n, err := store.Ban(dCtx, expr)
+			if err != nil {
+				return n, err
+			}
+			if broadcaster != nil {
+				broadcaster.BroadcastBan(ctx, expr)
+			}
+			return n, nil
+		},
+		RefreshFn: func(dCtx context.Context, urlStr string) error {
+			return store.Delete(dCtx, cache.BuildKeyFromURL(urlStr))
+		},
+	}, dashMux)
+	return dashMux
 }
 
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {

@@ -1,0 +1,85 @@
+package templates
+
+import "strconv"
+
+// Cluster renders the peer health table with fan-out aggregated metrics.
+templ Cluster(d ClusterData) {
+	@Layout(d.LayoutProps) {
+		<div class="pg-hd">
+			<div>
+				<h2>Cluster peers</h2>
+				<div class="sub">fan-out aggregated · 200ms timeout · stale = last-known data</div>
+			</div>
+		</div>
+		<div
+			class="tc"
+			style="margin-bottom:.7rem"
+			hx-get="/dashboard/cluster"
+			hx-trigger="every 10s"
+			hx-swap="outerHTML"
+			hx-select=".tc"
+		>
+			<div class="th">
+				<span class="tl">Live peers</span>
+				<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">
+					{ strconv.Itoa(len(d.PeerResults)) } nodes
+				</span>
+			</div>
+			<table>
+				<thead>
+					<tr>
+						<th>Node</th>
+						<th>Status</th>
+						<th>Routes (30min)</th>
+						<th>Total req</th>
+						<th>Hit %</th>
+					</tr>
+				</thead>
+				<tbody>
+					if len(d.PeerResults) == 0 {
+						<tr>
+							<td colspan="5" style="color:var(--m);padding:1rem;text-align:center">
+								Single-node mode
+							</td>
+						</tr>
+					}
+					for _, peer := range d.PeerResults {
+						<tr>
+							<td>{ peer.NodeName }</td>
+							<td>
+								if peer.Stale {
+									<span class="lz y">stale</span>
+								} else {
+									<span class="lz g">live</span>
+								}
+							</td>
+							<td>{ strconv.Itoa(len(peer.Summary.RouteStats)) }</td>
+							<td>{ strconv.FormatInt(peerTotalReqs(peer), 10) }</td>
+							<td>{ FmtHitPct(peerHitPct(peer)) }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+func peerTotalReqs(p PeerResult) int64 {
+	var total int64
+	for _, b := range p.Summary.RequestSnap {
+		total += b.Requests
+	}
+	return total
+}
+
+func peerHitPct(p PeerResult) float64 {
+	var reqs, hits int64
+	for _, b := range p.Summary.RequestSnap {
+		reqs += b.Requests
+		hits += b.Hits
+	}
+	if reqs == 0 {
+		return 0
+	}
+	return float64(hits) / float64(reqs) * 100
+}

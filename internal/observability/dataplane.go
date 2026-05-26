@@ -70,13 +70,10 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		// Update ring buffers for the dashboard (if enabled).
 		if m.Rings != nil {
 			xCache := w.Header().Get("X-Cache")
-			hit := xCache == "HIT"
-			miss := xCache == "MISS"
-			stale := xCache == "STALE"
 			durMs := time.Since(start).Milliseconds()
-			m.Rings.Request.RecordRequest(hit, miss, stale, sw.status, durMs)
+			m.Rings.Request.RecordRequest(xCache, sw.status, durMs)
 			if route != "_default" {
-				m.Rings.Route.RecordRoute(route, hit, miss)
+				m.Rings.Route.RecordRoute(route, xCache)
 			}
 		}
 	})

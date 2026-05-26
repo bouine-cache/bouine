@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/thylong/bouine/internal/observability"
@@ -15,6 +16,8 @@ import (
 )
 
 // Aggregator fetches metrics from all cluster peers and merges them.
+// It caches the last successful summary per peer so that stale entries
+// still contribute data when a peer is temporarily unreachable.
 type Aggregator struct {
 	rings    *observability.Rings
 	peersFn  func() []api.PeerInfo
@@ -22,6 +25,9 @@ type Aggregator struct {
 	token    string
 	timeout  time.Duration
 	logger   *slog.Logger
+
+	mu        sync.Mutex
+	lastKnown map[string]observability.MetricsSummary // peer name → last successful summary
 }
 
 // NewAggregator creates an Aggregator.
@@ -30,12 +36,13 @@ func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, se
 		logger = slog.Default()
 	}
 	return &Aggregator{
-		rings:    rings,
-		peersFn:  peersFn,
-		selfAddr: selfAddr,
-		token:    token,
-		timeout:  200 * time.Millisecond,
-		logger:   logger,
+		rings:     rings,
+		peersFn:   peersFn,
+		selfAddr:  selfAddr,
+		token:     token,
+		timeout:   200 * time.Millisecond,
+		logger:    logger,
+		lastKnown: make(map[string]observability.MetricsSummary),
 	}
 }
 
@@ -48,6 +55,9 @@ type PeerResult struct {
 }
 
 // Collect fans out to all live peers and returns the merged summary.
+// Unreachable peers are marked stale; their last-known summary is used
+// if available.
+//
 // SCALE: migrate to gossip push aggregation beyond ~5 pods — see PLAN.md §6.4
 func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary, []PeerResult) {
 	peers := []api.PeerInfo{}
@@ -55,17 +65,16 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 		peers = a.peersFn()
 	}
 
-	type result struct {
-		peer    api.PeerInfo
-		summary observability.MetricsSummary
-		err     error
+	nonSelf := 0
+	for _, p := range peers {
+		if p.AdminAddr != a.selfAddr && p.Name != a.rings.NodeName {
+			nonSelf++
+		}
 	}
+	total := nonSelf + 1
 
-	ch := make(chan result, len(peers)+1)
-
-	// Always include self.
-	selfSum := a.rings.Summary()
-	ch <- result{summary: selfSum}
+	ch := make(chan fetchResult, total)
+	ch <- fetchResult{summary: a.rings.Summary()}
 
 	for _, p := range peers {
 		if p.AdminAddr == a.selfAddr || p.Name == a.rings.NodeName {
@@ -73,38 +82,30 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 		}
 		go func(peer api.PeerInfo) {
 			sum, err := a.fetchPeer(ctx, peer)
-			ch <- result{peer: peer, summary: sum, err: err}
+			ch <- fetchResult{peer: peer, summary: sum, err: err}
 		}(p)
 	}
-
-	// Count distinct non-self peers actually dispatched to.
-	nonSelf := 0
-	for _, p := range peers {
-		if p.AdminAddr != a.selfAddr && p.Name != a.rings.NodeName {
-			nonSelf++
-		}
-	}
-	total := nonSelf + 1 // self + non-self peers
 
 	summaries := make([]observability.MetricsSummary, 0, total)
 	peerResults := make([]PeerResult, 0, total)
 
 	deadline := time.After(a.timeout)
-	collected := 0
-	for collected < total {
+	for collected := 0; collected < total; collected++ {
 		select {
 		case r := <-ch:
-			summaries = append(summaries, r.summary)
-			stale := r.err != nil
+			sum, stale := a.resolveResult(r)
+			summaries = append(summaries, sum)
+			nodeName := sum.NodeName
+			if nodeName == "" {
+				nodeName = r.peer.Name
+			}
 			peerResults = append(peerResults, PeerResult{
-				NodeName: r.summary.NodeName,
-				Summary:  r.summary,
+				NodeName: nodeName,
+				Summary:  sum,
 				Stale:    stale,
 				Err:      r.err,
 			})
-			collected++
 		case <-deadline:
-			// Timeout — proceed with what we have.
 			goto done
 		case <-ctx.Done():
 			goto done
@@ -115,6 +116,35 @@ done:
 		return peerResults[i].NodeName < peerResults[j].NodeName
 	})
 	return observability.MergeSummaries(summaries), peerResults
+}
+
+type fetchResult struct {
+	peer    api.PeerInfo
+	summary observability.MetricsSummary
+	err     error
+}
+
+// resolveResult returns the summary to use and whether the peer is stale.
+// On error it falls back to the last-known cached summary.
+// On success it updates the last-known cache.
+func (a *Aggregator) resolveResult(r fetchResult) (observability.MetricsSummary, bool) {
+	if r.err == nil {
+		if r.peer.Name != "" {
+			a.mu.Lock()
+			a.lastKnown[r.peer.Name] = r.summary
+			a.mu.Unlock()
+		}
+		return r.summary, false
+	}
+	if r.peer.Name != "" {
+		a.mu.Lock()
+		lk, ok := a.lastKnown[r.peer.Name]
+		a.mu.Unlock()
+		if ok {
+			return lk, true
+		}
+	}
+	return r.summary, true
 }
 
 func (a *Aggregator) fetchPeer(ctx context.Context, peer api.PeerInfo) (observability.MetricsSummary, error) {

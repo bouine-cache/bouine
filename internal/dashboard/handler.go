@@ -109,8 +109,8 @@ func (h *Handler) sidebarProps(_ string) (reqs float64, hitPct float64, peerCoun
 	peerCount, live = 1, 1
 	if h.cfg.PeersFn != nil {
 		peers := h.cfg.PeersFn()
-		peerCount = len(peers) + 1 // +1 self
-		live = peerCount           // optimistic; stale known from agg cache
+		peerCount = len(peers) // Members() already includes self
+		live = peerCount       // optimistic; stale known from agg cache
 	}
 	if h.cfg.Rings == nil {
 		return 0, 0, peerCount, live

@@ -312,22 +312,27 @@ func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "purge not configured")
 		return
 	}
-	var req struct {
-		URL string `json:"url"`
+	// ParseForm first: htmx sends application/x-www-form-urlencoded.
+	// json.Decode is a fallback for direct API callers.
+	_ = r.ParseForm()
+	url := r.FormValue("url")
+	if url == "" {
+		var req struct {
+			URL string `json:"url"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		url = req.URL
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
-		req.URL = r.FormValue("url")
-	}
-	if req.URL == "" {
+	if url == "" {
 		h.apiError(w, "missing url")
 		return
 	}
-	if err := h.cfg.PurgeFn(r.Context(), req.URL); err != nil {
-		h.cfg.Rings.OpsLog.Record("purge", req.URL, err.Error())
+	if err := h.cfg.PurgeFn(r.Context(), url); err != nil {
+		h.cfg.Rings.OpsLog.Record("purge", url, err.Error())
 		h.apiError(w, err.Error())
 		return
 	}
-	h.cfg.Rings.OpsLog.Record("purge", req.URL, "ok")
+	h.cfg.Rings.OpsLog.Record("purge", url, "ok")
 	h.apiOK(w, "purged")
 }
 
@@ -336,16 +341,19 @@ func (h *Handler) apiBan(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "ban not configured")
 		return
 	}
-	var req struct {
-		HostRegex string `json:"host_regex"`
-		PathRegex string `json:"path_regex"`
+	_ = r.ParseForm()
+	hostRegex := r.FormValue("host_regex")
+	pathRegex := r.FormValue("path_regex")
+	if hostRegex == "" && pathRegex == "" {
+		var req struct {
+			HostRegex string `json:"host_regex"`
+			PathRegex string `json:"path_regex"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		hostRegex, pathRegex = req.HostRegex, req.PathRegex
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		req.HostRegex = r.FormValue("host_regex")
-		req.PathRegex = r.FormValue("path_regex")
-	}
-	n, err := h.cfg.BanFn(r.Context(), req.HostRegex, req.PathRegex)
-	arg := req.HostRegex + " " + req.PathRegex
+	n, err := h.cfg.BanFn(r.Context(), hostRegex, pathRegex)
+	arg := hostRegex + " " + pathRegex
 	if err != nil {
 		h.cfg.Rings.OpsLog.Record("ban", arg, err.Error())
 		h.apiError(w, err.Error())
@@ -360,22 +368,25 @@ func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "refresh not configured")
 		return
 	}
-	var req struct {
-		URL string `json:"url"`
+	_ = r.ParseForm()
+	url := r.FormValue("url")
+	if url == "" {
+		var req struct {
+			URL string `json:"url"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		url = req.URL
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
-		req.URL = r.FormValue("url")
-	}
-	if req.URL == "" {
+	if url == "" {
 		h.apiError(w, "missing url")
 		return
 	}
-	if err := h.cfg.RefreshFn(r.Context(), req.URL); err != nil {
-		h.cfg.Rings.OpsLog.Record("refresh", req.URL, err.Error())
+	if err := h.cfg.RefreshFn(r.Context(), url); err != nil {
+		h.cfg.Rings.OpsLog.Record("refresh", url, err.Error())
 		h.apiError(w, err.Error())
 		return
 	}
-	h.cfg.Rings.OpsLog.Record("refresh", req.URL, "ok")
+	h.cfg.Rings.OpsLog.Record("refresh", url, "ok")
 	h.apiOK(w, "refreshed")
 }
 

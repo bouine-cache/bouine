@@ -25,6 +25,7 @@ import (
 	"github.com/thylong/bouine/internal/runtime/supervised"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
+	webdash "github.com/thylong/bouine/web/dashboard"
 )
 
 type engine struct {
@@ -271,6 +272,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 		},
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rings),
 		DashboardHandler:   dashMux,
+		FaviconHandler:     webdash.FaviconHandler(),
 	})
 	g.Go("admin", srv.Serve)
 }

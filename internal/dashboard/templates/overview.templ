@@ -249,6 +249,7 @@ script overviewChartScript(
 	var cReqEl=document.getElementById('c-req');
 	var cSplitEl=document.getElementById('c-split');
 	if(!cReqEl||!cSplitEl)return;
+	[cReqEl,cSplitEl].forEach(function(c){c.removeAttribute('height');c.removeAttribute('width');c.style.height='';c.style.width='';});
 	window._cReq=new Chart(cReqEl,{type:'line',data:{labels:labels,datasets:[
 		{label:'req/s',data:reqs,borderColor:d?'#c4b5fd':'#5b21b6',backgroundColor:d?'rgba(196,181,253,.07)':'rgba(91,33,182,.05)',fill:true,tension:.4,pointRadius:0,borderWidth:1.5},
 		{label:'errors',data:errs,borderColor:d?'#fb7185':'#e11d48',backgroundColor:'transparent',tension:.4,pointRadius:0,borderWidth:1},

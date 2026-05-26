@@ -306,7 +306,7 @@ func Routes(d RoutesData) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "</tbody></table></div><div class=\"r2\" style=\"margin-bottom:.5rem;flex-shrink:0\"><div class=\"cc\"><div class=\"ct\">hit ratio by route (")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "</tbody></table></div><div class=\"r2\" style=\"height:200px;margin-bottom:.5rem;flex-shrink:0\"><div class=\"cc\"><div class=\"ct\">hit ratio by route (")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

@@ -23,6 +23,8 @@ const (
 	routeBuckets      = 24 * 60                         // 1440 = 24h, 1-min buckets
 	sparklinePoints   = 8                               // per-route sparkline width
 	opsLogCap         = 100                             // max ops-log entries
+	peerBucketSecs    = 30                              // per PLAN.md §6.4 PeerRing
+	peerBuckets       = 30 * 60 / peerBucketSecs        // 60 = 30 min
 )
 
 // ── Request ring ─────────────────────────────────────────────────────
@@ -165,7 +167,10 @@ type routeCounters struct {
 // RecordRoute is called on the hot path.
 // xCache is the X-Cache header value; "HIT" increments hits, "MISS" misses.
 func (r *RouteRing) RecordRoute(route, xCache string) {
-	v, _ := r.liveRoutes.LoadOrStore(route, &routeCounters{})
+	v, ok := r.liveRoutes.Load(route)
+	if !ok {
+		v, _ = r.liveRoutes.LoadOrStore(route, &routeCounters{})
+	}
 	c := v.(*routeCounters)
 	c.requests.Add(1)
 	switch xCache {
@@ -316,6 +321,65 @@ func (r *OpsLogRing) Snapshot(n int) []OpsLogEntry {
 	return out
 }
 
+// ── Peer ring ─────────────────────────────────────────────────────────
+
+// PeerBucket records whether a peer was reachable in a 30s window.
+type PeerBucket struct {
+	Timestamp int64
+	NodeName  string
+	Reachable bool
+}
+
+// PeerRing is a sliding-window ring of peer health snapshots.
+// It records one sample per peer per 30s window and retains 30 minutes
+// of history (60 buckets per peer) per PLAN.md §6.4.
+type PeerRing struct {
+	mu      sync.Mutex
+	buckets []PeerBucket
+}
+
+// Record appends a health sample; old samples beyond peerBuckets are pruned.
+func (r *PeerRing) Record(nodeName string, reachable bool) {
+	b := PeerBucket{
+		Timestamp: time.Now().Truncate(peerBucketSecs * time.Second).Unix(),
+		NodeName:  nodeName,
+		Reachable: reachable,
+	}
+	cutoff := b.Timestamp - int64(peerBuckets*peerBucketSecs)
+	r.mu.Lock()
+	r.buckets = append(r.buckets, b)
+	start := 0
+	for start < len(r.buckets) && r.buckets[start].Timestamp < cutoff {
+		start++
+	}
+	if start > 0 {
+		r.buckets = r.buckets[start:]
+	}
+	r.mu.Unlock()
+}
+
+// PeerHealth returns the uptime percentage (0-100) per node over the
+// retention window. Nodes not seen are absent from the map.
+func (r *PeerRing) PeerHealth() map[string]float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	total := make(map[string]int, 4)
+	reach := make(map[string]int, 4)
+	for _, b := range r.buckets {
+		total[b.NodeName]++
+		if b.Reachable {
+			reach[b.NodeName]++
+		}
+	}
+	out := make(map[string]float64, len(total))
+	for name, t := range total {
+		if t > 0 {
+			out[name] = float64(reach[name]) / float64(t) * 100
+		}
+	}
+	return out
+}
+
 // ── Rings manager ────────────────────────────────────────────────────
 
 // Rings holds all ring buffers and their background flush goroutine.
@@ -323,6 +387,7 @@ type Rings struct {
 	Request  *RequestRing
 	Route    *RouteRing
 	OpsLog   *OpsLogRing
+	Peer     *PeerRing
 	NodeName string
 }
 
@@ -332,6 +397,7 @@ func NewRings(nodeName string) *Rings {
 		Request:  &RequestRing{},
 		Route:    &RouteRing{},
 		OpsLog:   &OpsLogRing{},
+		Peer:     &PeerRing{},
 		NodeName: nodeName,
 	}
 }

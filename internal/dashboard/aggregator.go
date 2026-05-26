@@ -112,10 +112,23 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 		}
 	}
 done:
+	a.recordPeerHealth(peerResults)
 	sort.Slice(peerResults, func(i, j int) bool {
 		return peerResults[i].NodeName < peerResults[j].NodeName
 	})
 	return observability.MergeSummaries(summaries), peerResults
+}
+
+// recordPeerHealth samples each remote peer result into the PeerRing.
+func (a *Aggregator) recordPeerHealth(results []PeerResult) {
+	if a.rings == nil {
+		return
+	}
+	for _, pr := range results {
+		if pr.NodeName != "" && pr.NodeName != a.rings.NodeName {
+			a.rings.Peer.Record(pr.NodeName, !pr.Stale)
+		}
+	}
 }
 
 type fetchResult struct {

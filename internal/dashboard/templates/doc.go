@@ -4,4 +4,10 @@
 // templ CLI.
 //
 // Data models consumed by the components are defined in models.go.
+//
+// To regenerate after editing a .templ file:
+//
+//	templ generate
+//
+//go:generate templ generate
 package templates

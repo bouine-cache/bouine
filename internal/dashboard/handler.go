@@ -11,6 +11,7 @@ import (
 
 	"github.com/a-h/templ"
 
+	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/dashboard/templates"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
@@ -24,15 +25,23 @@ type Config struct {
 	Token        string
 	Logger       *slog.Logger
 	SnapshotPath string
-	// StoreFn, if non-nil, is called to fetch hot/warm tier stats for the
-	// overview hot-tier utilisation card.
+	// StoreFn, if non-nil, is called to fetch hot/warm tier stats.
 	StoreFn     func() api.Stats
 	HotMaxBytes int64
-	// Invalidation proxies — called by /dashboard/api/* endpoints so the
-	// bearer token never appears in HTML.
+	// Invalidation proxies — called by /dashboard/api/* so bearer token
+	// never appears in HTML (RFC §6.3 / PLAN.md §6.5).
 	PurgeFn   func(ctx context.Context, urlStr string) error
 	BanFn     func(ctx context.Context, hostRegex, pathRegex string) (int, error)
 	RefreshFn func(ctx context.Context, urlStr string) error
+	// ConfigPath is the absolute path to the YAML config file.
+	// Required for the config-reload validate→confirm→apply flow.
+	ConfigPath string
+	// ReloadFn, if non-nil, is called after operator confirmation to apply
+	// a validated config. Receives the already-parsed *config.Config.
+	ReloadFn func(*config.Config) error
+	// RingFn, if non-nil, returns the consistent-hash ring ownership for
+	// the cluster SVG visualization.
+	RingFn func() []api.RingSegment
 }
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
@@ -65,7 +74,6 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 	protected.HandleFunc("GET /dashboard/invalidation", h.invalidation)
 	protected.HandleFunc("GET /dashboard/config", h.config)
 	protected.HandleFunc("POST /dashboard/config/reload", h.configReload)
-	// Proxy endpoints — session cookie auth, token never exposed in HTML.
 	protected.HandleFunc("POST /dashboard/api/purge", h.apiPurge)
 	protected.HandleFunc("POST /dashboard/api/ban", h.apiBan)
 	protected.HandleFunc("POST /dashboard/api/refresh", h.apiRefresh)
@@ -97,7 +105,6 @@ func sortRouteStats(stats []observability.RouteStat) []observability.RouteStat {
 	return stats
 }
 
-// toPeerResults converts aggregator PeerResults to template PeerResults.
 func toPeerResults(in []PeerResult) []templates.PeerResult {
 	out := make([]templates.PeerResult, len(in))
 	for i, p := range in {
@@ -110,12 +117,25 @@ func toPeerResults(in []PeerResult) []templates.PeerResult {
 	return out
 }
 
+// parseTimeRange maps the query-param string to a request-bucket count.
+// 1h = 360 buckets, 6h = 2160 (all), 24h = 2160 (capped at ring size).
+func parseTimeRange(s string) (buckets int, label string) {
+	switch s {
+	case "1h":
+		return 360, "1h"
+	case "24h":
+		return 2160, "24h"
+	default:
+		return 2160, "6h"
+	}
+}
+
 // ── Page handlers ─────────────────────────────────────────────────────
 
 func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	merged, peers := h.agg.Collect(r.Context())
 
-	const chartBuckets = 36
+	chartBuckets, timeRange := parseTimeRange(r.URL.Query().Get("range"))
 	snap := merged.RequestSnap
 	n := len(snap)
 	start := max(0, n-chartBuckets)
@@ -156,7 +176,6 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	reqPerSec := float64(totalReq) / float64(max(1, recentBuckets)*10)
 
-	// Hot-tier stats (optional).
 	var hotBytes, hotEntries int64
 	if h.cfg.StoreFn != nil {
 		st := h.cfg.StoreFn()
@@ -171,6 +190,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 
 	h.render(w, r, templates.Overview(templates.OverviewData{
 		LayoutProps: templates.LayoutProps{Page: "overview", PageTitle: "Overview", NodeName: h.nodeName()},
+		TimeRange:   timeRange,
 		ReqPerSec:   reqPerSec,
 		HitPct:      hitPct,
 		P99MS:       maxP99,
@@ -200,9 +220,22 @@ func (h *Handler) routes(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 	_, peers := h.agg.Collect(r.Context())
+
+	var peerHealth map[string]float64
+	if h.cfg.Rings != nil {
+		peerHealth = h.cfg.Rings.Peer.PeerHealth()
+	}
+
+	var ringSegs []api.RingSegment
+	if h.cfg.RingFn != nil {
+		ringSegs = h.cfg.RingFn()
+	}
+
 	h.render(w, r, templates.Cluster(templates.ClusterData{
 		LayoutProps: templates.LayoutProps{Page: "cluster", PageTitle: "Cluster", NodeName: h.nodeName()},
 		PeerResults: toPeerResults(peers),
+		PeerHealth:  peerHealth,
+		RingSegs:    ringSegs,
 	}))
 }
 
@@ -224,12 +257,31 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
+// configReload implements the validate → confirm → apply flow per §6.5:
+//  1. POST without confirm: parse config file; 422 on error, confirm dialog on success.
+//  2. POST with confirm=1: re-parse and apply via ReloadFn; 422 on error.
 func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
-	confirmed := r.FormValue("confirm") == "1"
 	w.Header().Set("Content-Type", "text/html")
+
+	if h.cfg.ConfigPath == "" {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = fmt.Fprint(w, `<div class="flash-err">✗ Config path not configured (set admin.config_path)</div>`)
+		return
+	}
+
+	// Step 1 and 2 both parse the file — validate first, apply on confirm.
+	parsed, err := config.Load(h.cfg.ConfigPath)
+	if err != nil {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = fmt.Fprintf(w, `<div class="flash-err">✗ Config parse error: %s</div>`, err.Error())
+		return
+	}
+
+	confirmed := r.FormValue("confirm") == "1"
 	if !confirmed {
+		// Valid — show confirmation dialog.
 		_, _ = fmt.Fprint(w, `<div id="reload-confirm" class="confirm-box show">
-  <p>Config file validated successfully. Apply new configuration?</p>
+  <p>Config validated successfully. Apply new configuration?</p>
   <form hx-post="/dashboard/config/reload" hx-target="#reload-section" hx-swap="outerHTML">
     <input type="hidden" name="confirm" value="1"/>
     <div style="display:flex;gap:.5rem;margin-top:.75rem">
@@ -240,13 +292,20 @@ func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
 </div>`)
 		return
 	}
+
+	// Step 2 — apply.
+	if h.cfg.ReloadFn != nil {
+		if err := h.cfg.ReloadFn(parsed); err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = fmt.Fprintf(w, `<div id="reload-section"><div class="flash-err">✗ Config apply failed: %s</div></div>`, err.Error())
+			return
+		}
+	}
 	_, _ = fmt.Fprintf(w, `<div id="reload-section"><div class="flash-ok">✓ Config reloaded at %s</div></div>`,
 		time.Now().Format("15:04:05"))
 }
 
 // ── Proxy handlers ────────────────────────────────────────────────────
-// These handlers sit behind the session-cookie middleware so the bearer
-// token never needs to be embedded in HTML.
 
 func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.PurgeFn == nil {

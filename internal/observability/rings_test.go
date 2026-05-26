@@ -258,3 +258,52 @@ func TestMergeSummaries_Empty(t *testing.T) {
 		t.Errorf("expected empty NodeName, got %q", m.NodeName)
 	}
 }
+
+// TestRequestRing_RecordRequestZeroAllocs asserts the hot-path constraint
+// from AGENTS.md §7 and exit criterion §6.8: zero allocations per call.
+func TestRequestRing_RecordRequestZeroAllocs(t *testing.T) {
+	r := &RequestRing{}
+	// Warm up once so no lazy initialisation skews the count.
+	r.RecordRequest("HIT", 200, 1)
+	allocs := testing.AllocsPerRun(200, func() {
+		r.RecordRequest("HIT", 200, 5)
+	})
+	if allocs != 0 {
+		t.Errorf("RecordRequest: want 0 allocs/op on hot path, got %v", allocs)
+	}
+}
+
+// TestRouteRing_RecordRouteZeroAllocs asserts zero allocations for the
+// steady-state path (route already known).
+func TestRouteRing_RecordRouteZeroAllocs(t *testing.T) {
+	r := &RouteRing{}
+	r.RecordRoute("/api/v1", "HIT") // seed so LoadOrStore hits fast path
+	allocs := testing.AllocsPerRun(200, func() {
+		r.RecordRoute("/api/v1", "HIT")
+	})
+	if allocs != 0 {
+		t.Errorf("RecordRoute: want 0 allocs/op on hot path, got %v", allocs)
+	}
+}
+
+// BenchmarkRequestRing_RecordRequest measures hot-path throughput and
+// is used by the CI bench gate (see Makefile bench target).
+func BenchmarkRequestRing_RecordRequest(b *testing.B) {
+	r := &RequestRing{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		r.RecordRequest("HIT", 200, 5)
+	}
+}
+
+// BenchmarkRouteRing_RecordRoute measures steady-state route recording.
+func BenchmarkRouteRing_RecordRoute(b *testing.B) {
+	r := &RouteRing{}
+	r.RecordRoute("/api", "HIT") // seed
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		r.RecordRoute("/api", "HIT")
+	}
+}

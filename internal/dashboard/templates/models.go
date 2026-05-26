@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 // LayoutProps contains the fields required by every page to render the
@@ -32,6 +33,7 @@ func (c CacheSplitData) Total() int64 {
 // OverviewData is the view model for the overview page.
 type OverviewData struct {
 	LayoutProps
+	TimeRange   string // "1h" | "6h" | "24h"
 	ReqPerSec   float64
 	HitPct      float64
 	P99MS       int64
@@ -70,6 +72,8 @@ type RoutesData struct {
 type ClusterData struct {
 	LayoutProps
 	PeerResults []PeerResult
+	PeerHealth  map[string]float64 // uptime % over last 30min
+	RingSegs    []api.RingSegment  // consistent-hash ring band
 }
 
 // InvalidationData is the view model for the invalidation page.

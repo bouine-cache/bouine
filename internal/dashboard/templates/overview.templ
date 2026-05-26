@@ -6,42 +6,50 @@ import "fmt"
 // cluster peers summary, top routes, and the hot-tier utilisation card.
 templ Overview(d OverviewData) {
 	@Layout(d.LayoutProps) {
-		<div
-			class="r4"
-			hx-get="/dashboard/"
-			hx-trigger="every 5s"
-			hx-swap="outerHTML"
-			hx-select=".r4"
-		>
-			<div class="mc">
-				<div class="mk">Requests / s</div>
-				<div class="mv">{ FmtReqS(d.ReqPerSec) }</div>
-				<div class="md">last 60s</div>
+		<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;flex-shrink:0">
+			<div
+				class="r4"
+				style="flex:1;margin-bottom:0"
+				hx-get={ "/dashboard/?range=" + d.TimeRange }
+				hx-trigger="every 5s"
+				hx-swap="outerHTML"
+				hx-select=".r4"
+			>
+				<div class="mc">
+					<div class="mk">Requests / s</div>
+					<div class="mv">{ FmtReqS(d.ReqPerSec) }</div>
+					<div class="md">last 60s</div>
+				</div>
+				<div class="mc">
+					<div class="mk">Hit ratio</div>
+					<div class="mv">{ FmtHitPct(d.HitPct) }</div>
+					<div class="md">last 60s</div>
+				</div>
+				<div class="mc">
+					<div class="mk">p99 latency</div>
+					<div class="mv">{ FmtLatMs(d.P99MS) }</div>
+					<div class="md">last 60s</div>
+				</div>
+				<div class="mc">
+					<div class="mk">Error rate</div>
+					<div class="mv">{ FmtHitPct(d.ErrPct) }</div>
+					<div class="md">last 60s</div>
+				</div>
 			</div>
-			<div class="mc">
-				<div class="mk">Hit ratio</div>
-				<div class="mv">{ FmtHitPct(d.HitPct) }</div>
-				<div class="md">last 60s</div>
-			</div>
-			<div class="mc">
-				<div class="mk">p99 latency</div>
-				<div class="mv">{ FmtLatMs(d.P99MS) }</div>
-				<div class="md">last 60s</div>
-			</div>
-			<div class="mc">
-				<div class="mk">Error rate</div>
-				<div class="mv">{ FmtHitPct(d.ErrPct) }</div>
-				<div class="md">last 60s</div>
+			<div style="display:flex;gap:.3rem;margin-left:.6rem;flex-shrink:0" role="group" aria-label="Time range selector">
+				@rangeBtn("1h", d.TimeRange)
+				@rangeBtn("6h", d.TimeRange)
+				@rangeBtn("24h", d.TimeRange)
 			</div>
 		</div>
 		<div class="r21">
 			<div class="cc">
-				<div class="ct">throughput (last 6 min)</div>
-				<div class="ch"><canvas id="c-req"></canvas></div>
+				<div class="ct">throughput ({ d.TimeRange })</div>
+				<div class="ch"><canvas id="c-req" aria-label="Throughput time series chart"></canvas></div>
 			</div>
 			<div class="cc">
-				<div class="ct">cache split</div>
-				<div class="ch"><canvas id="c-split"></canvas></div>
+				<div class="ct">cache split (last 60s)</div>
+				<div class="ch"><canvas id="c-split" aria-label="Cache result breakdown chart"></canvas></div>
 			</div>
 		</div>
 		<div class="r3">
@@ -62,11 +70,16 @@ templ Overview(d OverviewData) {
 								}
 							</div>
 						</div>
-						<span class={ "pd", templ.KV("pd-stale", peer.Stale) }></span>
+						<span class={ "pd", templ.KV("pd-stale", peer.Stale) } aria-hidden="true"></span>
 					</div>
 				}
 			</div>
-			<div class="bc" hx-get="/dashboard/" hx-trigger="every 10s" hx-swap="outerHTML" hx-select=".r3 .bc:nth-child(2)">
+			<div class="bc"
+				hx-get={ "/dashboard/?range=" + d.TimeRange }
+				hx-trigger="every 10s"
+				hx-swap="outerHTML"
+				hx-select=".r3 .bc:nth-child(2)"
+			>
 				<div class="bc-t">Top routes</div>
 				if len(d.RouteStats) == 0 {
 					<div style="font-size:.7rem;color:var(--m)">No data yet</div>
@@ -88,22 +101,30 @@ templ Overview(d OverviewData) {
 				<div style="font-size:.72rem;color:var(--t);margin-bottom:.3rem">
 					{ fmt.Sprintf("%d entries", d.HotEntries) }
 				</div>
-				<div class="tier-bar">
+				<div class="tier-bar"
+					role="progressbar"
+					aria-label="Hot-tier utilisation"
+					aria-valuenow={ fmt.Sprintf("%.0f", d.HotFillPct()) }
+					aria-valuemin="0"
+					aria-valuemax="100"
+				>
 					<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.HotFillPct()) }></div>
 				</div>
 				<div style="margin-top:.85rem">
 					<div class="bc-t">Quick purge</div>
 					<div class="fgroup" style="margin-top:.45rem">
+						<label for="qp-url" style="font-size:.62rem;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--m);display:block;margin-bottom:.3rem">URL</label>
 						<div class="frow" hx-target="#qp-result" hx-swap="innerHTML">
-							<input class="finput" id="qp-url" placeholder="https://example.com/path"/>
+							<input class="finput" id="qp-url" name="url" placeholder="https://example.com/path" aria-label="URL to purge"/>
 							<button
 								class="btn bp"
 								hx-post="/dashboard/api/purge"
 								hx-vals="js:{&quot;url&quot;: document.getElementById('qp-url').value}"
+								aria-label="Purge URL from cache"
 							>Purge</button>
 						</div>
 					</div>
-					<div id="qp-result" style="font-size:.7rem;color:var(--m)"></div>
+					<div id="qp-result" style="font-size:.7rem;color:var(--m)" aria-live="polite"></div>
 				</div>
 			</div>
 		</div>
@@ -111,6 +132,31 @@ templ Overview(d OverviewData) {
 			d.CacheSplit.Hits, d.CacheSplit.Misses, d.CacheSplit.Stales,
 			d.CacheSplit.Bypasses, d.CacheSplit.Revalidated)
 	}
+}
+
+// rangeBtn renders one time-range selector anchor styled as a button.
+templ rangeBtn(label, active string) {
+	<a
+		href={ templ.SafeURL("/dashboard/?range=" + label) }
+		style={ rangeBtnStyle(label == active) }
+		aria-label={ label + " time range" }
+		aria-pressed={ boolStr(label == active) }
+	>{ label }</a>
+}
+
+func rangeBtnStyle(isActive bool) string {
+	base := "padding:.18rem .5rem;border:1px solid var(--b);background:transparent;font-size:.68rem;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;text-decoration:none;"
+	if isActive {
+		return base + "border-color:var(--a2);color:var(--a);"
+	}
+	return base + "color:var(--m);"
+}
+
+func boolStr(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
 
 script overviewChartScript(
@@ -133,10 +179,7 @@ script overviewChartScript(
 	var splitColors=d?['#c4b5fd','#6050a0','#fbbf24','#fb7185','#34d399']:['#5b21b6','#a78bfa','#b45309','#e11d48','#059669'];
 	new Chart(document.getElementById('c-split'),{
 		type:'doughnut',
-		data:{
-			labels:['HIT','MISS','STALE','BYPASS','REVALIDATED'],
-			datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]
-		},
+		data:{labels:['HIT','MISS','STALE','BYPASS','REVALIDATED'],datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]},
 		options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:5}}},cutout:'65%'}
 	});
 }

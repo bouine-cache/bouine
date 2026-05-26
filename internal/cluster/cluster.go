@@ -352,3 +352,8 @@ func (r *ring) segments() []api.RingSegment {
 	})
 	return out
 }
+
+// Config returns the cluster configuration, useful for dashboard metadata.
+func (c *Cluster) Config() Config {
+	return c.cfg
+}

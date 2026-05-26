@@ -15,6 +15,7 @@ import (
 	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/dashboard"
+	"github.com/thylong/bouine/internal/dashboard/templates"
 	"github.com/thylong/bouine/internal/listener"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/accesslog"
@@ -29,6 +30,7 @@ import (
 type engine struct {
 	cfg        *config.Config
 	configPath string
+	startTime  time.Time
 	logger     *slog.Logger
 	metrics    *observability.Metrics
 }
@@ -37,6 +39,7 @@ func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engi
 	return &engine{
 		cfg:        cfg,
 		configPath: configPath,
+		startTime:  time.Now(),
 		logger:     logger,
 		metrics:    observability.NewMetrics(),
 	}
@@ -284,6 +287,21 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 	if clusterNode != nil {
 		ringFn = clusterNode.RingSegments
 	}
+	// Build cluster meta for the cluster page ring stats box.
+	clusterMeta := templates.ClusterMeta{
+		ProtocolVersion:  cluster.ClusterProtocolVersion,
+		GossipInterval:   "5s",
+		JoinRetryBudget:  "60s · 2s step",
+		PeerFetchTimeout: "500ms",
+	}
+	if clusterNode != nil {
+		clusterMeta.VirtualNodes = clusterNode.Config().VirtualNodes
+		clusterMeta.LoadFactor = clusterNode.Config().LoadFactor
+	}
+	if e.cfg.Cluster.HopLimit > 0 {
+		clusterMeta.HopLimit = e.cfg.Cluster.HopLimit
+	}
+
 	_ = dashboard.New(dashboard.Config{
 		Rings:        rings,
 		PeersFn:      peersFn,
@@ -293,9 +311,13 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 		SnapshotPath: snapshotPath,
 		StoreFn:      store.Stats,
 		HotMaxBytes:  e.cfg.Storage.HotMaxBytes.Bytes(),
+		WarmMaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(),
+		Config:       e.cfg,
 		ConfigPath:   e.configPath,
+		StartTime:    e.startTime,
 		ReloadFn:     func(_ *config.Config) error { return nil }, // hot-reload in future phase
 		RingFn:       ringFn,
+		ClusterMeta:  clusterMeta,
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
 			key := cache.BuildKeyFromURL(urlStr)
 			if err := store.Delete(dCtx, key); err != nil {

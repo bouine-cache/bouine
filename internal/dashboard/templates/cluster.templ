@@ -8,146 +8,131 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
-// ringColors cycles through purple-spectrum colours per ring node.
-var ringColors = []string{
-	"#c4b5fd", "#8b5cf6", "#6d28d9", "#34d399", "#fb7185", "#fbbf24", "#60a5fa",
-}
-
-// Cluster renders the peer health table, uptime indicators, and the
-// consistent-hash ring ownership SVG.
+// Cluster renders the peer health table, ring stats, circular ring SVG, and peer fetch stats.
 templ Cluster(d ClusterData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
 			<div>
-				<h2>Cluster peers</h2>
-				<div class="sub">fan-out aggregated · 200ms timeout · stale = last-known data</div>
+				<h2>Cluster</h2>
+				<div class="sub">gossip membership · consistent hash ring · peer fetch</div>
 			</div>
 		</div>
-		if len(d.RingSegs) > 0 {
-			<div class="bc" style="margin-bottom:.6rem">
-				<div class="bc-t">Key-space distribution</div>
-				@ringBand(d.RingSegs)
-				<div style="display:flex;flex-wrap:wrap;gap:.35rem .75rem;margin-top:.5rem">
-					for i, seg := range d.RingSegs {
-						<span style={ fmt.Sprintf("font-size:.65rem;font-family:'JetBrains Mono',monospace;color:%s", ringColors[i % len(ringColors)]) }>
-							■ { seg.NodeName } { fmt.Sprintf("%.1f%%", seg.Frac*100) }
-						</span>
-					}
+		<div class="r21" style="margin-bottom:.6rem">
+			<div class="bc">
+				<div class="bc-t">Peer nodes</div>
+				<table hx-get="/dashboard/cluster" hx-trigger="every 10s" hx-swap="outerHTML" hx-select=".r21">
+					<thead>
+						<tr>
+							<th scope="col">Node</th>
+							<th scope="col">Data addr</th>
+							<th scope="col">Admin addr</th>
+							<th scope="col">Weight</th>
+							<th scope="col">Joined</th>
+							<th scope="col">Status</th>
+						</tr>
+					</thead>
+					<tbody>
+						if len(d.PeerResults) == 0 {
+							<tr><td colspan="6" style="color:var(--m);padding:1rem;text-align:center">Single-node mode</td></tr>
+						}
+						for _, peer := range d.PeerResults {
+							<tr>
+								<td>{ peer.NodeName }</td>
+								<td style="color:var(--m)">{ FmtAddrPort(peer.DataAddr) }</td>
+								<td style="color:var(--m)">{ FmtAddrPort(peer.AdminAddr) }</td>
+								<td>{ fmt.Sprintf("%.1f", peer.Weight) }</td>
+								<td style="color:var(--m)">{ TimeAgo(peer.JoinedAt) }</td>
+								<td>
+									if peer.Stale {
+										<span class="lz y">stale</span>
+									} else {
+										<span class="lz g">online</span>
+									}
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+			<div class="bc">
+				<div class="bc-t">Ring stats</div>
+				<div class="stat-row"><span class="stat-k">virtual nodes / real</span><span class="stat-v">{ strconv.Itoa(d.Meta.VirtualNodes) }</span></div>
+				<div class="stat-row"><span class="stat-k">load factor</span><span class="stat-v">{ fmt.Sprintf("%.2f", d.Meta.LoadFactor) }</span></div>
+				<div class="stat-row"><span class="stat-k">hop limit</span><span class="stat-v">{ strconv.Itoa(d.Meta.HopLimit) }</span></div>
+				<div class="stat-row"><span class="stat-k">peer fetch timeout</span><span class="stat-v">{ d.Meta.PeerFetchTimeout }</span></div>
+				<div class="stat-row"><span class="stat-k">protocol version</span><span class="stat-v">{ d.Meta.ProtocolVersion }</span></div>
+				<div class="stat-row"><span class="stat-k">gossip interval</span><span class="stat-v">{ d.Meta.GossipInterval }</span></div>
+				<div class="stat-row"><span class="stat-k">join retry budget</span><span class="stat-v">{ d.Meta.JoinRetryBudget }</span></div>
+			</div>
+		</div>
+		<div class="r2">
+			<div class="bc">
+				<div class="bc-t">Consistent hash ring — key ownership</div>
+				if len(d.RingSegs) == 0 {
+					<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Single-node · ring not populated</div>
+				} else {
+					@largeRingSVG(d.RingSegs)
+				}
+			</div>
+			<div class="bc">
+				<div class="bc-t">Peer fetch stats</div>
+				<div class="stat-row"><span class="stat-k">peer hits (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Hits6h, 10) }</span></div>
+				<div class="stat-row"><span class="stat-k">peer misses (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Misses6h, 10) }</span></div>
+				<div class="stat-row">
+					<span class="stat-k">avg peer latency</span>
+					<span class="stat-v">
+						if d.FetchStats.AvgLatMs > 0 {
+							{ fmt.Sprintf("%.2fms", d.FetchStats.AvgLatMs) }
+						} else {
+							—
+						}
+					</span>
+				</div>
+				<div class="stat-row"><span class="stat-k">hop limit hits</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HopLimitHits, 10) }</span></div>
+				<div class="stat-row" style="margin-top:.5rem">
+					<span class="stat-k">uptime avg 30m</span>
+					<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
 				</div>
 			</div>
-		}
-		<div
-			class="tc"
-			style="margin-bottom:.7rem"
-			hx-get="/dashboard/cluster"
-			hx-trigger="every 10s"
-			hx-swap="outerHTML"
-			hx-select=".tc"
-		>
-			<div class="th">
-				<span class="tl">Live peers</span>
-				<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">
-					{ strconv.Itoa(len(d.PeerResults)) } nodes
-				</span>
-			</div>
-			<table>
-				<thead>
-					<tr>
-						<th scope="col">Node</th>
-						<th scope="col">Status</th>
-						<th scope="col">Uptime 30m</th>
-						<th scope="col">Routes</th>
-						<th scope="col">Total req</th>
-						<th scope="col">Hit %</th>
-					</tr>
-				</thead>
-				<tbody>
-					if len(d.PeerResults) == 0 {
-						<tr>
-							<td colspan="6" style="color:var(--m);padding:1rem;text-align:center">
-								Single-node mode
-							</td>
-						</tr>
-					}
-					for _, peer := range d.PeerResults {
-						<tr>
-							<td>{ peer.NodeName }</td>
-							<td>
-								if peer.Stale {
-									<span class="lz y">stale</span>
-								} else {
-									<span class="lz g">live</span>
-								}
-							</td>
-							<td>{ formatUptime(d.PeerHealth[peer.NodeName]) }</td>
-							<td>{ strconv.Itoa(len(peer.Summary.RouteStats)) }</td>
-							<td>{ strconv.FormatInt(peerTotalReqs(peer), 10) }</td>
-							<td>{ FmtHitPct(peerHitPct(peer)) }</td>
-						</tr>
-					}
-				</tbody>
-			</table>
 		</div>
 	}
 }
 
-// ringBand renders the consistent-hash ring as a proportional horizontal SVG
-// band. Each node's colour-coded segment is proportional to its Frac.
-templ ringBand(segs []api.RingSegment) {
-	<svg
-		viewBox="0 0 600 28"
-		xmlns="http://www.w3.org/2000/svg"
-		style="width:100%;height:28px;border-radius:5px;overflow:hidden;display:block"
-		role="img"
-		aria-label="Consistent-hash ring ownership"
-	>
-		for i, seg := range segs {
-			<rect
-				x={ fmt.Sprintf("%.3f", ringSegX(segs, i)) }
-				y="0"
-				width={ fmt.Sprintf("%.3f", seg.Frac*600) }
-				height="28"
-				fill={ ringColors[i % len(ringColors)] }
-				opacity="0.85"
-			>
-				<title>{ seg.NodeName } ({ fmt.Sprintf("%.1f%%", seg.Frac*100) })</title>
-			</rect>
-		}
-	</svg>
+templ largeRingSVG(segs []api.RingSegment) {
+	<div style="display:flex;flex-direction:column;align-items:center;gap:.6rem;padding:.5rem 0">
+		<svg width="220" height="220" viewBox="0 0 220 220" role="img" aria-label="Consistent hash ring key ownership">
+			<g transform="translate(110,110)">
+				<circle r="80" fill="none" stroke="var(--b)" stroke-width="22"/>
+				for _, arc := range BuildRingArcs(segs, 80) {
+					<circle r="80" fill="none" stroke={ arc.Color } stroke-width="22" stroke-dasharray={ arc.DashArray } stroke-dashoffset={ arc.DashOffset } opacity=".8">
+						<title>{ arc.NodeName } — { arc.PctLabel }</title>
+					</circle>
+				}
+				for _, arc := range BuildRingArcs(segs, 80) {
+					<text x={ fmt.Sprintf("%.1f", arc.LabelX) } y={ fmt.Sprintf("%.1f", arc.LabelY) } text-anchor="middle" fill={ arc.Color } font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">{ arc.NodeName }</text>
+					<text x={ fmt.Sprintf("%.1f", arc.LabelX2) } y={ fmt.Sprintf("%.1f", arc.LabelY2) } text-anchor="middle" fill="var(--m)" font-size="9" font-family="JetBrains Mono,monospace">{ arc.PctLabel } · { approxVnodes(arc.PctLabel) } vnodes</text>
+				}
+				<circle r="16" fill="var(--card)" stroke="var(--b)" stroke-width="1"/>
+				<text x="0" y="4" text-anchor="middle" fill="var(--m)" font-size="8" font-family="JetBrains Mono,monospace">ring</text>
+			</g>
+		</svg>
+	</div>
 }
 
-// ringSegX computes the cumulative x offset of segment i.
-func ringSegX(segs []api.RingSegment, idx int) float64 {
-	var x float64
-	for i := range idx {
-		x += segs[i].Frac * 600
-	}
-	return math.Round(x*1000) / 1000
+func approxVnodes(pctLabel string) string {
+	var frac float64
+	_, _ = fmt.Sscanf(pctLabel, "%f%%", &frac)
+	n := int(math.Round(frac / 100 * 256))
+	return strconv.Itoa(n)
 }
 
-func formatUptime(pct float64) string {
-	if pct == 0 {
+func peerHealthSummary(health map[string]float64) string {
+	if len(health) == 0 {
 		return "—"
 	}
-	return fmt.Sprintf("%.0f%%", pct)
-}
-
-func peerTotalReqs(p PeerResult) int64 {
-	var total int64
-	for _, b := range p.Summary.RequestSnap {
-		total += b.Requests
+	var total float64
+	for _, v := range health {
+		total += v
 	}
-	return total
-}
-
-func peerHitPct(p PeerResult) float64 {
-	var reqs, hits int64
-	for _, b := range p.Summary.RequestSnap {
-		reqs += b.Requests
-		hits += b.Hits
-	}
-	if reqs == 0 {
-		return 0
-	}
-	return float64(hits) / float64(reqs) * 100
+	return fmt.Sprintf("%.0f%%", total/float64(len(health)))
 }

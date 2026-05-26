@@ -5,89 +5,105 @@ import (
 	"strconv"
 )
 
-// Routes renders the per-route performance table with sparklines,
-// followed by a per-URL drill-down showing the top-N cached paths.
+// Routes renders the per-route performance table with config columns and charts.
 templ Routes(d RoutesData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
 			<div>
-				<h2>Route performance</h2>
-				<div class="sub">cluster-wide aggregated · polled every 10s</div>
+				<h2>Routes</h2>
+				<div class="sub">
+					{ strconv.Itoa(d.RouteCount) } configured routes · polled every 10s
+				</div>
 			</div>
-			<input class="search-bar" placeholder="Filter…" oninput="filterTable(this,'route-tbl')"/>
+			<input class="search-bar" placeholder="Filter by prefix or pool…" oninput="filterTable(this,'route-tbl')" aria-label="Filter routes"/>
 		</div>
-		<div
-			id="routes-data"
-			hx-get="/dashboard/routes"
+		<div id="routes-data"
+			hx-get={ pageHref("routes", d.TimeRange) }
 			hx-trigger="every 10s"
 			hx-swap="outerHTML"
 			hx-select="#routes-data"
 		>
-		<div class="tc">
-			<div class="th">
-				<span class="tl">Routes</span>
-				<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">
-					{ strconv.Itoa(len(d.RouteStats)) } routes
-				</span>
-			</div>
+		<div class="tc" style="margin-bottom:.5rem">
 			<table id="route-tbl">
 				<thead>
 					<tr>
-						<th onclick="sortTable('route-tbl',0,this)" scope="col">Route ↕</th>
-						<th onclick="sortTable('route-tbl',1,this)" scope="col">Trend</th>
-						<th onclick="sortTable('route-tbl',2,this)" scope="col">Requests ↕</th>
-						<th onclick="sortTable('route-tbl',3,this)" scope="col">Hits ↕</th>
-						<th onclick="sortTable('route-tbl',4,this)" scope="col">Hit % ↕</th>
+						<th class="sortable" onclick="sortTable('route-tbl',0,this)">Route<span class="sort-icon"></span></th>
+						<th class="sortable" onclick="sortTable('route-tbl',1,this)">Pool<span class="sort-icon"></span></th>
+						<th class="sortable desc" onclick="sortTable('route-tbl',2,this)">Hit %<span class="sort-icon"></span></th>
+						<th class="sortable" onclick="sortTable('route-tbl',3,this)">Req/min<span class="sort-icon"></span></th>
+						<th class="sortable" onclick="sortTable('route-tbl',4,this)">TTL<span class="sort-icon"></span></th>
+						<th>SWR</th>
+						<th>SIE</th>
+						<th>neg_ttl</th>
+						<th>stayin_alive</th>
+						<th>jitter</th>
+						<th>Trend</th>
 					</tr>
 				</thead>
 				<tbody>
-					if len(d.RouteStats) == 0 {
-						<tr>
-							<td colspan="5" style="color:var(--m);text-align:center;padding:1rem">
-								No data yet — traffic will populate this table.
-							</td>
-						</tr>
+					if len(d.RouteRows) == 0 {
+						<tr><td colspan="11" style="color:var(--m);text-align:center;padding:1rem">No data yet</td></tr>
 					}
-					for _, rs := range d.RouteStats {
+					for _, r := range d.RouteRows {
 						<tr>
-							<td>{ rs.Route }</td>
-							<td>@sparkline(rs.Sparkline)</td>
-							<td data-val={ strconv.FormatInt(rs.Requests, 10) }>
-								{ strconv.FormatInt(rs.Requests, 10) }
-							</td>
-							<td data-val={ strconv.FormatInt(rs.Hits, 10) }>
-								{ strconv.FormatInt(rs.Hits, 10) }
-							</td>
-							<td data-val={ fmt.Sprintf("%.1f", rs.HitPct) }>
-								if rs.HitPct >= 80 {
-									<span class="lz g">{ FmtHitPct(rs.HitPct) }</span>
-								} else if rs.HitPct >= 50 {
-									<span class="lz y">{ FmtHitPct(rs.HitPct) }</span>
+							<td>{ r.Name }</td>
+							<td style="color:var(--m)">{ r.Pool }</td>
+							<td data-val={ fmt.Sprintf("%.1f", r.HitPct) }>
+								if r.IsBypass {
+									<span class="lz d">bypass</span>
+								} else if r.HitPct >= 80 {
+									<span class="lz g">{ FmtHitPct(r.HitPct) }</span>
+								} else if r.HitPct >= 50 {
+									<span class="lz y">{ FmtHitPct(r.HitPct) }</span>
 								} else {
-									<span class="lz r">{ FmtHitPct(rs.HitPct) }</span>
+									<span class="lz r">{ FmtHitPct(r.HitPct) }</span>
 								}
 							</td>
+							<td data-val={ strconv.FormatInt(r.Requests, 10) }>{ strconv.FormatInt(r.Requests, 10) }</td>
+							<td>{ r.TTL }</td>
+							<td>{ r.SWR }</td>
+							<td>{ r.SIE }</td>
+							<td>{ r.NegTTL }</td>
+							<td>
+								if r.StayinAlive {
+									<span class="lz g">true</span>
+								} else {
+									<span class="lz d">false</span>
+								}
+							</td>
+							<td>{ r.Jitter }</td>
+							<td>@sparkline(r.Sparkline)</td>
 						</tr>
 					}
 				</tbody>
 			</table>
 		</div>
+		<div class="r2" style="margin-bottom:.5rem;flex-shrink:0">
+			<div class="cc">
+				<div class="ct">hit ratio by route ({ d.TimeRange })</div>
+				<div class="ch"><canvas id="c-routes-hit" aria-label="Hit ratio by route"></canvas></div>
+			</div>
+			<div class="cc">
+				<div class="ct">req/min by route</div>
+				<div class="ch"><canvas id="c-routes-req" aria-label="Requests per minute by route"></canvas></div>
+			</div>
+		</div>
 		if len(d.URLStats) > 0 {
-			<div class="tc" style="margin-top:.5rem">
+			<div class="tc">
 				<div class="th">
 					<span class="tl">URL drill-down</span>
 					<span style="font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace">
-						{ strconv.Itoa(len(d.URLStats)) } paths · top 3 path segments
+						{ strconv.Itoa(len(d.URLStats)) } paths · top 3 segments
 					</span>
 				</div>
 				<table id="url-tbl">
 					<thead>
 						<tr>
-							<th onclick="sortTable('url-tbl',0,this)" scope="col">Path ↕</th>
-							<th onclick="sortTable('url-tbl',1,this)" scope="col">Route ↕</th>
-							<th onclick="sortTable('url-tbl',2,this)" scope="col">Requests ↕</th>
-							<th onclick="sortTable('url-tbl',3,this)" scope="col">Hits ↕</th>
-							<th onclick="sortTable('url-tbl',4,this)" scope="col">Hit % ↕</th>
+							<th class="sortable" onclick="sortTable('url-tbl',0,this)">Path<span class="sort-icon"></span></th>
+							<th class="sortable" onclick="sortTable('url-tbl',1,this)">Route<span class="sort-icon"></span></th>
+							<th class="sortable" onclick="sortTable('url-tbl',2,this)">Requests<span class="sort-icon"></span></th>
+							<th class="sortable" onclick="sortTable('url-tbl',3,this)">Hits<span class="sort-icon"></span></th>
+							<th class="sortable desc" onclick="sortTable('url-tbl',4,this)">Hit %<span class="sort-icon"></span></th>
 						</tr>
 					</thead>
 					<tbody>
@@ -112,8 +128,42 @@ templ Routes(d RoutesData) {
 				</table>
 			</div>
 		}
-		</div><!-- /routes-data -->
+		</div>
+		@routeChartsScript(routeNames(d.RouteRows), routeHits(d.RouteRows), routeReqs(d.RouteRows))
 	}
+}
+
+script routeChartsScript(routes []string, hits []float64, reqs []int64) {
+	var d=document.documentElement.getAttribute('data-theme')!=='light';
+	var colors=d?['#c4b5fd','#8b5cf6','#6d28d9','#a78bfa','#6050a0']:['#5b21b6','#7c3aed','#a78bfa','#4c1d95','#8b7ab8'];
+	if(window._cRHit){window._cRHit.destroy();}
+	if(window._cRReq){window._cRReq.destroy();}
+	window._cRHit=new Chart(document.getElementById('c-routes-hit'),{type:'bar',data:{labels:routes,datasets:[{data:hits,backgroundColor:colors,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}},y:{max:100,grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}}}});
+	window._cRReq=new Chart(document.getElementById('c-routes-req'),{type:'bar',data:{labels:routes,datasets:[{data:reqs,backgroundColor:colors,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}},y:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}}}});
+}
+
+func routeNames(rows []RouteRow) []string {
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.Name)
+	}
+	return names
+}
+
+func routeHits(rows []RouteRow) []float64 {
+	vals := make([]float64, 0, len(rows))
+	for _, r := range rows {
+		vals = append(vals, r.HitPct)
+	}
+	return vals
+}
+
+func routeReqs(rows []RouteRow) []int64 {
+	vals := make([]int64, 0, len(rows))
+	for _, r := range rows {
+		vals = append(vals, r.Requests)
+	}
+	return vals
 }
 
 // sparkline renders a small bar chart from a slice of per-minute counts.

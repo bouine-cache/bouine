@@ -27,23 +27,25 @@ type Config struct {
 	Token        string
 	Logger       *slog.Logger
 	SnapshotPath string
-	// StoreFn, if non-nil, is called to fetch hot/warm tier stats.
-	StoreFn     func() api.Stats
-	HotMaxBytes int64
-	// Invalidation proxies — called by /dashboard/api/* so bearer token
-	// never appears in HTML (RFC §6.3 / PLAN.md §6.5).
+	// Storage stats.
+	StoreFn      func() api.Stats
+	HotMaxBytes  int64
+	WarmMaxBytes int64
+	// Invalidation proxies (bearer token never in HTML).
 	PurgeFn   func(ctx context.Context, urlStr string) error
 	BanFn     func(ctx context.Context, hostRegex, pathRegex string) (int, error)
 	RefreshFn func(ctx context.Context, urlStr string) error
-	// ConfigPath is the absolute path to the YAML config file.
-	// Required for the config-reload validate→confirm→apply flow.
+	// Config viewer + reload.
+	Config     *config.Config
 	ConfigPath string
-	// ReloadFn, if non-nil, is called after operator confirmation to apply
-	// a validated config. Receives the already-parsed *config.Config.
-	ReloadFn func(*config.Config) error
-	// RingFn, if non-nil, returns the consistent-hash ring ownership for
-	// the cluster SVG visualization.
+	StartTime  time.Time
+	ReloadFn   func(*config.Config) error
+	// Cluster metadata for the cluster page ring stats box.
+	ClusterMeta templates.ClusterMeta
+	// RingFn returns consistent-hash ring ownership segments.
 	RingFn func() []api.RingSegment
+	// PeerFetchStatsFn returns live peer fetch telemetry (M7).
+	PeerFetchStatsFn func() templates.PeerFetchStats
 }
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
@@ -58,17 +60,18 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.StartTime.IsZero() {
+		cfg.StartTime = time.Now()
+	}
 	h := &Handler{
 		cfg:  cfg,
 		auth: newSessionAuth(cfg.Token),
 		agg:  NewAggregator(cfg.Rings, cfg.PeersFn, cfg.SelfAddr, cfg.Token, cfg.Logger),
 	}
 
-	// Login (unprotected).
 	mux.HandleFunc("GET /dashboard/login", h.auth.LoginHandler)
 	mux.HandleFunc("POST /dashboard/login", h.auth.LoginHandler)
 
-	// All other dashboard routes require the session cookie.
 	protected := http.NewServeMux()
 	protected.HandleFunc("GET /dashboard/", h.overview)
 	protected.HandleFunc("GET /dashboard/routes", h.routes)
@@ -100,6 +103,59 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, c templ.Compone
 	}
 }
 
+// sidebarProps computes live sidebar stats from the local rings (no fan-out,
+// so it never adds latency to page renders).
+func (h *Handler) sidebarProps(_ string) (reqs float64, hitPct float64, peerCount, live int) {
+	peerCount, live = 1, 1
+	if h.cfg.PeersFn != nil {
+		peers := h.cfg.PeersFn()
+		peerCount = len(peers) + 1 // +1 self
+		live = peerCount           // optimistic; stale known from agg cache
+	}
+	if h.cfg.Rings == nil {
+		return 0, 0, peerCount, live
+	}
+	snap := h.cfg.Rings.Request.Snapshot(6) // last 60s
+	var totalReq, totalHit int64
+	for _, b := range snap {
+		totalReq += b.Requests
+		totalHit += b.Hits
+	}
+	reqs = float64(totalReq) / 60.0
+	if totalReq > 0 {
+		hitPct = float64(totalHit) / float64(totalReq) * 100
+	}
+	return
+}
+
+func (h *Handler) layoutProps(page, title, timeRange string) templates.LayoutProps {
+	reqs, hitPct, peerCount, live := h.sidebarProps(timeRange)
+	return templates.LayoutProps{
+		Page:          page,
+		PageTitle:     title,
+		NodeName:      h.nodeName(),
+		TimeRange:     timeRange,
+		PeerCount:     peerCount,
+		LivePeers:     live,
+		SidebarReqS:   reqs,
+		SidebarHitPct: hitPct,
+	}
+}
+
+func (h *Handler) storeStats() (hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, evictions int64) {
+	if h.cfg.StoreFn != nil {
+		st := h.cfg.StoreFn()
+		hotBytes = st.HotBytes
+		hotEntries = st.HotEntries
+		warmBytes = st.WarmBytes
+		warmEntries = st.WarmEntries
+		evictions = st.Evictions
+	}
+	hotMax = h.cfg.HotMaxBytes
+	warmMax = h.cfg.WarmMaxBytes
+	return
+}
+
 func sortRouteStats(stats []observability.RouteStat) []observability.RouteStat {
 	sort.Slice(stats, func(i, j int) bool {
 		return stats[i].Requests > stats[j].Requests
@@ -114,20 +170,6 @@ func sortURLStats(stats []observability.URLStat) []observability.URLStat {
 	return stats
 }
 
-func toPeerResults(in []PeerResult) []templates.PeerResult {
-	out := make([]templates.PeerResult, len(in))
-	for i, p := range in {
-		out[i] = templates.PeerResult{
-			NodeName: p.NodeName,
-			Summary:  p.Summary,
-			Stale:    p.Stale,
-		}
-	}
-	return out
-}
-
-// parseTimeRange maps the query-param string to a request-bucket count.
-// 1h = 360 buckets, 6h = 2160 (all), 24h = 2160 (capped at ring size).
 func parseTimeRange(s string) (buckets int, label string) {
 	switch s {
 	case "1h":
@@ -149,23 +191,24 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	n := len(snap)
 	start := max(0, n-chartBuckets)
 	labels := make([]string, 0, chartBuckets)
-	reqs := make([]int64, 0, chartBuckets)
-	hits := make([]int64, 0, chartBuckets)
+	reqData := make([]int64, 0, chartBuckets)
+	errData := make([]int64, 0, chartBuckets)
 	for _, b := range snap[start:] {
 		labels = append(labels, time.Unix(b.Timestamp, 0).Format("15:04:05"))
-		reqs = append(reqs, b.Requests)
-		hits = append(hits, b.Hits)
+		reqData = append(reqData, b.Requests)
+		errData = append(errData, b.Errors)
 	}
-	if len(reqs) == 0 {
+	if len(reqData) == 0 {
 		labels = []string{"—"}
-		reqs = []int64{0}
-		hits = []int64{0}
+		reqData = []int64{0}
+		errData = []int64{0}
 	}
 
+	// Current 60s window.
+	recent := min(6, n)
 	var totalReq, totalHit, totalErr, maxP99 int64
 	var splitHits, splitMisses, splitStales, splitBypasses, splitRevalidated int64
-	recentBuckets := min(6, n)
-	for _, b := range snap[n-recentBuckets:] {
+	for _, b := range snap[n-recent:] {
 		totalReq += b.Requests
 		totalHit += b.Hits
 		totalErr += b.Errors
@@ -178,58 +221,138 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 			maxP99 = b.P99MS
 		}
 	}
+
+	// Prior 60s window for trend deltas.
+	priorStart := max(0, n-12)
+	var priorReq, priorHit, priorErr, priorP99 int64
+	for _, b := range snap[priorStart:max(priorStart, n-recent)] {
+		priorReq += b.Requests
+		priorHit += b.Hits
+		priorErr += b.Errors
+		if b.P99MS > priorP99 {
+			priorP99 = b.P99MS
+		}
+	}
+
 	var hitPct, errPct float64
 	if totalReq > 0 {
 		hitPct = float64(totalHit) / float64(totalReq) * 100
 		errPct = float64(totalErr) / float64(totalReq) * 100
 	}
-	reqPerSec := float64(totalReq) / float64(max(1, recentBuckets)*10)
+	var priorHitPct, priorErrPct float64
+	if priorReq > 0 {
+		priorHitPct = float64(priorHit) / float64(priorReq) * 100
+		priorErrPct = float64(priorErr) / float64(priorReq) * 100
+	}
+	reqPerSec := float64(totalReq) / float64(max(1, recent)*10)
+	priorReqPerSec := float64(priorReq) / float64(max(1, recent)*10)
 
-	var hotBytes, hotEntries int64
-	if h.cfg.StoreFn != nil {
-		st := h.cfg.StoreFn()
-		hotBytes = st.HotBytes
-		hotEntries = st.HotEntries
+	hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, evictions := h.storeStats()
+
+	var routeRows []templates.RouteRow
+	if h.cfg.Config != nil {
+		routeRows = templates.BuildRouteRows(h.cfg.Config.Routes, sortRouteStats(merged.RouteStats))
+	} else {
+		for _, rs := range sortRouteStats(merged.RouteStats) {
+			if len(routeRows) >= 5 {
+				break
+			}
+			routeRows = append(routeRows, templates.RouteRow{
+				Name: rs.Route, Pool: "—", TTL: "—", SWR: "—", SIE: "—", NegTTL: "—", Jitter: "—",
+				Requests: rs.Requests, Hits: rs.Hits, Misses: rs.Misses,
+				HitPct: rs.HitPct, Sparkline: rs.Sparkline,
+			})
+		}
 	}
 
-	top5 := sortRouteStats(merged.RouteStats)
-	if len(top5) > 5 {
-		top5 = top5[:5]
+	var ringSegs []api.RingSegment
+	if h.cfg.RingFn != nil {
+		ringSegs = h.cfg.RingFn()
 	}
 
+	lprops := h.layoutProps("overview", "Overview", timeRange)
 	h.render(w, r, templates.Overview(templates.OverviewData{
-		LayoutProps: templates.LayoutProps{Page: "overview", PageTitle: "Overview", NodeName: h.nodeName()},
-		TimeRange:   timeRange,
+		LayoutProps: lprops,
 		ReqPerSec:   reqPerSec,
 		HitPct:      hitPct,
 		P99MS:       maxP99,
 		ErrPct:      errPct,
+		TrendReq:    templates.BuildTrend(reqPerSec, priorReqPerSec, true),
+		TrendHit:    templates.BuildTrend(hitPct, priorHitPct, true),
+		TrendLat:    templates.BuildTrend(float64(maxP99), float64(priorP99), false),
+		TrendErr:    templates.BuildTrend(errPct, priorErrPct, false),
 		CacheSplit: templates.CacheSplitData{
 			Hits: splitHits, Misses: splitMisses, Stales: splitStales,
 			Bypasses: splitBypasses, Revalidated: splitRevalidated,
 		},
 		ChartLabels: labels,
-		ChartReqs:   reqs,
-		ChartHits:   hits,
-		RouteStats:  top5,
-		PeerResults: toPeerResults(peers),
-		HotBytes:    hotBytes,
-		HotMaxBytes: h.cfg.HotMaxBytes,
-		HotEntries:  hotEntries,
+		ChartReqs:   reqData,
+		ChartErrs:   errData,
+		RouteRows:   routeRows,
+		PeerResults: toPeerResultsEnriched(peers, h.cfg.PeersFn),
+		HotBytes:    hotBytes, HotMaxBytes: hotMax, HotEntries: hotEntries,
+		WarmBytes: warmBytes, WarmMaxBytes: warmMax, WarmEntries: warmEntries,
+		Evictions: evictions,
+		RingSegs:  ringSegs,
 	}))
+}
+
+// toPeerResultsEnriched joins PeerResult with PeerInfo (for DataAddr/AdminAddr/Weight/JoinedAt).
+func toPeerResultsEnriched(in []PeerResult, peersFn func() []api.PeerInfo) []templates.PeerResult {
+	// Build name → PeerInfo map
+	infoMap := map[string]api.PeerInfo{}
+	if peersFn != nil {
+		for _, p := range peersFn() {
+			infoMap[p.Name] = p
+		}
+	}
+	out := make([]templates.PeerResult, len(in))
+	for i, p := range in {
+		pi := infoMap[p.NodeName]
+		out[i] = templates.PeerResult{
+			NodeName:  p.NodeName,
+			DataAddr:  pi.DataAddr,
+			AdminAddr: pi.AdminAddr,
+			Weight:    pi.Weight,
+			JoinedAt:  pi.JoinedAt,
+			Summary:   p.Summary,
+			Stale:     p.Stale,
+		}
+	}
+	return out
 }
 
 func (h *Handler) routes(w http.ResponseWriter, r *http.Request) {
 	merged, _ := h.agg.Collect(r.Context())
+	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+
+	var routeRows []templates.RouteRow
+	routeCount := 0
+	if h.cfg.Config != nil {
+		routeCount = len(h.cfg.Config.Routes)
+		routeRows = templates.BuildRouteRows(h.cfg.Config.Routes, sortRouteStats(merged.RouteStats))
+	} else {
+		for _, rs := range sortRouteStats(merged.RouteStats) {
+			routeRows = append(routeRows, templates.RouteRow{
+				Name: rs.Route, Pool: "—", TTL: "—", SWR: "—", SIE: "—", NegTTL: "—", Jitter: "—",
+				Requests: rs.Requests, Hits: rs.Hits, Misses: rs.Misses,
+				HitPct: rs.HitPct, Sparkline: rs.Sparkline,
+			})
+		}
+		routeCount = len(routeRows)
+	}
+
 	h.render(w, r, templates.Routes(templates.RoutesData{
-		LayoutProps: templates.LayoutProps{Page: "routes", PageTitle: "Routes", NodeName: h.nodeName()},
-		RouteStats:  sortRouteStats(merged.RouteStats),
+		LayoutProps: h.layoutProps("routes", "Routes", timeRange),
+		RouteCount:  routeCount,
+		RouteRows:   routeRows,
 		URLStats:    sortURLStats(merged.URLStats),
 	}))
 }
 
 func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 	_, peers := h.agg.Collect(r.Context())
+	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
 
 	var peerHealth map[string]float64
 	if h.cfg.Rings != nil {
@@ -241,45 +364,53 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 		ringSegs = h.cfg.RingFn()
 	}
 
+	var fetchStats templates.PeerFetchStats
+	if h.cfg.PeerFetchStatsFn != nil {
+		fetchStats = h.cfg.PeerFetchStatsFn()
+	}
+
 	h.render(w, r, templates.Cluster(templates.ClusterData{
-		LayoutProps: templates.LayoutProps{Page: "cluster", PageTitle: "Cluster", NodeName: h.nodeName()},
-		PeerResults: toPeerResults(peers),
+		LayoutProps: h.layoutProps("cluster", "Cluster", timeRange),
+		PeerResults: toPeerResultsEnriched(peers, h.cfg.PeersFn),
 		PeerHealth:  peerHealth,
 		RingSegs:    ringSegs,
+		Meta:        h.cfg.ClusterMeta,
+		FetchStats:  fetchStats,
 	}))
 }
 
 func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {
+	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
 	var opsLog []observability.OpsLogEntry
 	if h.cfg.Rings != nil {
 		opsLog = h.cfg.Rings.OpsLog.Snapshot(20)
 	}
 	h.render(w, r, templates.Invalidation(templates.InvalidationData{
-		LayoutProps: templates.LayoutProps{Page: "invalidation", PageTitle: "Invalidation", NodeName: h.nodeName()},
+		LayoutProps: h.layoutProps("invalidation", "Invalidation", timeRange),
 		OpsLog:      opsLog,
 	}))
 }
 
 func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
+	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+	uptime := templates.FmtUptime(time.Since(h.cfg.StartTime))
 	h.render(w, r, templates.Config(templates.ConfigData{
-		LayoutProps:  templates.LayoutProps{Page: "config", PageTitle: "Config", NodeName: h.nodeName()},
+		LayoutProps:  h.layoutProps("config", "Config", timeRange),
+		ConfigPath:   h.cfg.ConfigPath,
 		SnapshotPath: h.cfg.SnapshotPath,
+		Uptime:       uptime,
+		Sections:     templates.BuildConfigSections(h.cfg.Config),
 	}))
 }
 
-// configReload implements the validate → confirm → apply flow per §6.5:
-//  1. POST without confirm: parse config file; 422 on error, confirm dialog on success.
-//  2. POST with confirm=1: re-parse and apply via ReloadFn; 422 on error.
 func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 
 	if h.cfg.ConfigPath == "" {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = fmt.Fprint(w, `<div class="flash-err">✗ Config path not configured (set admin.config_path)</div>`)
+		_, _ = fmt.Fprint(w, `<div class="flash-err">✗ Config path not configured</div>`)
 		return
 	}
 
-	// Step 1 and 2 both parse the file — validate first, apply on confirm.
 	parsed, err := config.Load(h.cfg.ConfigPath)
 	if err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -289,7 +420,6 @@ func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
 
 	confirmed := r.FormValue("confirm") == "1"
 	if !confirmed {
-		// Valid — show confirmation dialog.
 		_, _ = fmt.Fprint(w, `<div id="reload-confirm" class="confirm-box show">
   <p>Config validated successfully. Apply new configuration?</p>
   <form hx-post="/dashboard/config/reload" hx-target="#reload-section" hx-swap="outerHTML">
@@ -303,11 +433,10 @@ func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2 — apply.
 	if h.cfg.ReloadFn != nil {
 		if err := h.cfg.ReloadFn(parsed); err != nil {
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = fmt.Fprintf(w, `<div id="reload-section"><div class="flash-err">✗ Config apply failed: %s</div></div>`, err.Error())
+			_, _ = fmt.Fprintf(w, `<div id="reload-section"><div class="flash-err">✗ Apply failed: %s</div></div>`, err.Error())
 			return
 		}
 	}
@@ -416,10 +545,13 @@ func (h *Handler) apiOK(w http.ResponseWriter, msg string) {
 	_, _ = fmt.Fprintf(w, `<span class="flash-ok">✓ %s</span>`, msg)
 }
 
-// ── Input validation ─────────────────────────────────────────────────
+func (h *Handler) apiError(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html")
+	_, _ = fmt.Fprintf(w, `<span class="flash-err">✗ %s</span>`, msg)
+}
 
-// validateCacheURL returns a human-readable error if rawURL is not a
-// valid absolute HTTP/HTTPS URL that could match a cached object.
+// ── Input validation ──────────────────────────────────────────────────
+
 func validateCacheURL(rawURL string) string {
 	if rawURL == "" {
 		return "URL is required"
@@ -437,8 +569,6 @@ func validateCacheURL(rawURL string) string {
 	return ""
 }
 
-// validateRegex returns a human-readable error if s is not a valid RE2
-// regular expression, or empty string when s is empty (field is optional).
 func validateRegex(fieldName, s string) string {
 	if s == "" {
 		return ""
@@ -447,11 +577,4 @@ func validateRegex(fieldName, s string) string {
 		return fmt.Sprintf("%s is not a valid regex — %s", fieldName, err)
 	}
 	return ""
-}
-
-func (h *Handler) apiError(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "text/html")
-	// Return 200 so htmx swaps the error fragment into the target element.
-	// htmx silently discards 4xx/5xx responses by default and never updates the DOM.
-	_, _ = fmt.Fprintf(w, `<span class="flash-err">✗ %s</span>`, msg)
 }

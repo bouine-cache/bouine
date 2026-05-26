@@ -8,11 +8,9 @@ package templates
 import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
-import (
-	"time"
-)
+import "time"
 
-// Invalidation renders the cache invalidation forms and the ops-log audit table.
+// Invalidation renders the cache invalidation forms and the recent invalidations history.
 func Invalidation(d InvalidationData) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -46,112 +44,103 @@ func Invalidation(d InvalidationData) templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"pg-hd\"><div><h2>Cache invalidation</h2><div class=\"sub\">purge · ban · refresh — broadcast to all cluster peers</div></div></div><div class=\"r3\" style=\"margin-bottom:.6rem\"><div class=\"bc\"><div class=\"bc-t\">Purge — exact URL</div><div class=\"fgroup\"><label>URL</label><div class=\"frow\"><input class=\"finput\" id=\"purge-url\" placeholder=\"https://example.com/products/42\"> <button class=\"btn bp\" hx-post=\"/dashboard/api/purge\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('purge-url').value}\" hx-target=\"#purge-resp\" hx-swap=\"innerHTML\">Purge</button></div></div><div id=\"purge-resp\" style=\"font-size:.7rem;color:var(--m)\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Removes exact cache key. In cluster, forwarded to key owner. All Vary variants purged.</div></div><div class=\"bc\"><div class=\"bc-t\">Ban — predicate</div><div class=\"fgroup\"><label>Host regex</label> <input class=\"finput\" id=\"ban-host\" placeholder=\"example\\.com\"></div><div class=\"fgroup\"><label>Path regex</label> <input class=\"finput\" id=\"ban-path\" placeholder=\"^/api/v1/\"></div><button class=\"btn by\" hx-post=\"/dashboard/api/ban\" hx-vals=\"js:{&quot;host_regex&quot;:document.getElementById('ban-host').value,&quot;path_regex&quot;:document.getElementById('ban-path').value}\" hx-target=\"#ban-resp\" hx-swap=\"innerHTML\">Issue ban</button><div id=\"ban-resp\" style=\"font-size:.7rem;color:var(--m);margin-top:.4rem\"></div></div><div class=\"bc\"><div class=\"bc-t\">Refresh — soft-purge</div><div class=\"fgroup\"><label>URL</label><div class=\"frow\"><input class=\"finput\" id=\"refresh-url\" placeholder=\"https://example.com/page\"> <button class=\"btn bg2\" hx-post=\"/dashboard/api/refresh\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('refresh-url').value}\" hx-target=\"#refresh-resp\" hx-swap=\"innerHTML\">Refresh</button></div></div><div id=\"refresh-resp\" style=\"font-size:.7rem;color:var(--m)\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Marks stale. Next request revalidates with <code style=\"font-family:'JetBrains Mono',monospace;font-size:.68rem\">If-None-Match</code>. If origin returns 304, cached body reused.</div></div></div><div class=\"tc\" hx-get=\"/dashboard/invalidation\" hx-trigger=\"every 15s, refreshOpsLog from:body\" hx-swap=\"outerHTML\" hx-select=\".tc\"><div class=\"th\"><span class=\"tl\">Ops log</span> <span style=\"font-size:.62rem;color:var(--m);font-family:'JetBrains Mono',monospace\">last 20 operations</span></div><table id=\"ops-tbl\"><thead><tr><th>Time</th><th>Op</th><th>Argument</th><th>Result</th></tr></thead> <tbody>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"pg-hd\"><div><h2>Invalidation</h2><div class=\"sub\">purge · ban · refresh — broadcast to all cluster peers</div></div></div><div class=\"r3\" style=\"margin-bottom:.6rem\"><div class=\"bc\"><div class=\"bc-t\">Purge — exact URL</div><div class=\"fgroup\"><label for=\"purge-url\">URL</label><div class=\"frow\"><input class=\"finput\" id=\"purge-url\" name=\"url\" placeholder=\"https://example.com/products/42\" aria-label=\"URL to purge\"> <button class=\"btn bp\" hx-post=\"/dashboard/api/purge\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('purge-url').value}\" hx-target=\"#purge-resp\" hx-swap=\"innerHTML\" aria-label=\"Purge URL\">Purge</button></div></div><div id=\"purge-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Removes the exact cache key. In a cluster, forwarded to the key's owner node. Vary variants are all purged.</div></div><div class=\"bc\"><div class=\"bc-t\">Ban — predicate</div><div class=\"fgroup\"><label for=\"ban-host\">Host regex</label><input class=\"finput\" id=\"ban-host\" placeholder=\"example\\.com\"></div><div class=\"fgroup\"><label for=\"ban-path\">Path regex</label><input class=\"finput\" id=\"ban-path\" placeholder=\"^/api/v1/\"></div><button class=\"btn by\" hx-post=\"/dashboard/api/ban\" hx-vals=\"js:{&quot;host_regex&quot;:document.getElementById('ban-host').value,&quot;path_regex&quot;:document.getElementById('ban-path').value}\" hx-target=\"#ban-resp\" hx-swap=\"innerHTML\">Issue ban</button><div id=\"ban-resp\" style=\"font-size:.7rem;color:var(--m);margin-top:.4rem\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.6rem\">Lazy predicate — entries are checked on next lookup. Broadcast to all peers.</div></div><div class=\"bc\"><div class=\"bc-t\">Refresh — soft-purge</div><div class=\"fgroup\"><label for=\"refresh-url\">URL</label><div class=\"frow\"><input class=\"finput\" id=\"refresh-url\" name=\"url\" placeholder=\"https://example.com/page\" aria-label=\"URL to refresh\"> <button class=\"btn bg2\" hx-post=\"/dashboard/api/refresh\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('refresh-url').value}\" hx-target=\"#refresh-resp\" hx-swap=\"innerHTML\">Refresh</button></div></div><div id=\"refresh-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Marks entry stale. Next request revalidates with origin using <code style=\"font-family:'JetBrains Mono',monospace;font-size:.68rem\">If-None-Match</code>. If origin returns 304, cached body reused.</div></div></div><!-- Recent invalidations history --> <div class=\"bc\" hx-get=\"/dashboard/invalidation\" hx-trigger=\"every 15s, refreshOpsLog from:body\" hx-swap=\"outerHTML\" hx-select=\".bc:last-of-type\"><div class=\"bc-t\">Recent invalidations</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if len(d.OpsLog) == 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<tr><td colspan=\"4\" style=\"color:var(--m);text-align:center;padding:1rem\">No invalidation operations yet.</td></tr>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<div style=\"font-size:.72rem;color:var(--m);padding:.25rem 0\">No invalidation operations yet.</div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
 			for _, e := range d.OpsLog {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<tr><td style=\"color:var(--m);font-size:.68rem\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<div class=\"hist-item\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				var templ_7745c5c3_Var3 string
-				templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(TimeAgo(time.Unix(e.Timestamp, 0)))
-				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 106, Col: 44}
-				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
+				var templ_7745c5c3_Var3 = []any{"hist-type", HistTypeClass(e.Op)}
+				templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var3...)
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</td><td>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<span class=\"")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				var templ_7745c5c3_Var4 = []any{OpsLogOpClass(e.Op)}
-				templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var4...)
+				var templ_7745c5c3_Var4 string
+				templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.ResolveAttributeValue(templ.CSSClasses(templ_7745c5c3_Var3).String())
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 1, Col: 0}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var4)
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<span class=\"")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var5 string
-				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(templ.CSSClasses(templ_7745c5c3_Var4).String())
+				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(e.Op)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 1, Col: 0}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 61, Col: 60}
 				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</span> <span class=\"hist-url\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var6 string
-				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(e.Op)
+				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(e.Arg)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 108, Col: 53}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 62, Col: 35}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</span></td><td style=\"font-family:'JetBrains Mono',monospace;font-size:.68rem;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</span> <span class=\"hist-time\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				var templ_7745c5c3_Var7 string
-				templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(e.Arg)
-				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 110, Col: 15}
+				if e.Result != "ok" {
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<span style=\"color:var(--r)\">✗</span>")
+					if templ_7745c5c3_Err != nil {
+						return templ_7745c5c3_Err
+					}
+					var templ_7745c5c3_Var7 string
+					templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(" ")
+					if templ_7745c5c3_Err != nil {
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 65, Col: 51}
+					}
+					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
+					if templ_7745c5c3_Err != nil {
+						return templ_7745c5c3_Err
+					}
+					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, " ")
+					if templ_7745c5c3_Err != nil {
+						return templ_7745c5c3_Err
+					}
 				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
+				var templ_7745c5c3_Var8 string
+				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(TimeAgo(time.Unix(e.Timestamp, 0)))
+				if templ_7745c5c3_Err != nil {
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 67, Col: 42}
+				}
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</td><td>")
-				if templ_7745c5c3_Err != nil {
-					return templ_7745c5c3_Err
-				}
-				if e.Result == "ok" {
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<span style=\"color:var(--g);font-size:.7rem\">✓ ok</span>")
-					if templ_7745c5c3_Err != nil {
-						return templ_7745c5c3_Err
-					}
-				} else {
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "<span style=\"color:var(--r);font-size:.7rem\">✗ ")
-					if templ_7745c5c3_Err != nil {
-						return templ_7745c5c3_Err
-					}
-					var templ_7745c5c3_Var8 string
-					templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(e.Result)
-					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `invalidation.templ`, Line: 116, Col: 65}
-					}
-					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
-					if templ_7745c5c3_Err != nil {
-						return templ_7745c5c3_Err
-					}
-					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "</span>")
-					if templ_7745c5c3_Err != nil {
-						return templ_7745c5c3_Err
-					}
-				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</td></tr>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</span></div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "</tbody></table></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}

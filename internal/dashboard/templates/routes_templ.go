@@ -522,21 +522,30 @@ func Routes(d RoutesData) templ.Component {
 
 func routeChartsScript(routes []string, hits []float64, reqs []int64) templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_routeChartsScript_2243`,
-		Function: `function __templ_routeChartsScript_2243(routes, hits, reqs){var d=document.documentElement.getAttribute('data-theme')!=='light';
+		Name: `__templ_routeChartsScript_0881`,
+		Function: `function __templ_routeChartsScript_0881(routes, hits, reqs){var d=document.documentElement.getAttribute('data-theme')!=='light';
 	var colors=d?['#c4b5fd','#8b5cf6','#6d28d9','#a78bfa','#6050a0']:['#5b21b6','#7c3aed','#a78bfa','#4c1d95','#8b7ab8'];
 	try{if(window._cRHit)window._cRHit.destroy();}catch(e){}
 	try{if(window._cRReq)window._cRReq.destroy();}catch(e){}
 	var cHitEl=document.getElementById('c-routes-hit');
 	var cReqEl=document.getElementById('c-routes-req');
 	if(!cHitEl||!cReqEl)return;
-	// Reset stale height/width attributes so Chart.js re-measures from CSS.
-	[cHitEl,cReqEl].forEach(function(c){c.removeAttribute('height');c.removeAttribute('width');c.style.height='';c.style.width='';});
-	window._cRHit=new Chart(cHitEl,{type:'bar',data:{labels:routes,datasets:[{data:hits,backgroundColor:colors,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}},y:{max:100,grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}}}});
-	window._cRReq=new Chart(cReqEl,{type:'bar',data:{labels:routes,datasets:[{data:reqs,backgroundColor:colors,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}},y:{grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}}}});
+	// Fix explicit canvas px size before Chart.js touches them.
+	// responsive:false + manual sizing prevents the ResizeObserver feedback
+	// loop that caused the canvas to grow on every htmx swap.
+	var chartH=120;
+	[cHitEl,cReqEl].forEach(function(c){
+		c.width=c.parentElement?c.parentElement.clientWidth:400;
+		c.height=chartH;
+		c.style.width='100%';c.style.height=chartH+'px';
+	});
+	var baseOpts={responsive:false,maintainAspectRatio:false,plugins:{legend:{display:false}}};
+	var axOpts=function(yMax){return{x:{grid:{display:false},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}},y:{max:yMax||undefined,grid:{color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'},ticks:{color:d?'#6050a0':'#9ca3af',font:{size:9}}}};};
+	window._cRHit=new Chart(cHitEl,{type:'bar',data:{labels:routes,datasets:[{data:hits,backgroundColor:colors,borderRadius:4}]},options:Object.assign({},baseOpts,{scales:axOpts(100)})});
+	window._cRReq=new Chart(cReqEl,{type:'bar',data:{labels:routes,datasets:[{data:reqs,backgroundColor:colors,borderRadius:4}]},options:Object.assign({},baseOpts,{scales:axOpts()})});
 }`,
-		Call:       templ.SafeScript(`__templ_routeChartsScript_2243`, routes, hits, reqs),
-		CallInline: templ.SafeScriptInline(`__templ_routeChartsScript_2243`, routes, hits, reqs),
+		Call:       templ.SafeScript(`__templ_routeChartsScript_0881`, routes, hits, reqs),
+		CallInline: templ.SafeScriptInline(`__templ_routeChartsScript_0881`, routes, hits, reqs),
 	}
 }
 
@@ -598,7 +607,7 @@ func sparkline(vals []int64) templ.Component {
 			var templ_7745c5c3_Var31 string
 			templ_7745c5c3_Var31, templ_7745c5c3_Err = templruntime.SanitizeStyleAttributeValues(sparkBarStyle(v, maxVal(vals)))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `routes.templ`, Line: 178, Col: 47}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `routes.templ`, Line: 187, Col: 47}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var31))
 			if templ_7745c5c3_Err != nil {

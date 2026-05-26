@@ -94,6 +94,10 @@ docs: ## Build the documentation site (phase 4+).
 schema: ## Regenerate the JSON schema and SDK types (phase 3+).
 	@echo "schema: generator lands in phase 3"
 
+.PHONY: templ
+templ: ## Regenerate dashboard _templ.go files from *.templ sources.
+	go generate ./internal/dashboard/templates/
+
 .PHONY: hooks
 hooks: ## Install pre-commit hooks (commit + commit-msg + pre-push).
 	@command -v pre-commit >/dev/null || { \

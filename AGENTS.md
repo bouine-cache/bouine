@@ -138,6 +138,13 @@ L1 → L8, L2, /pkg/api
 - **Toolchain pinned** in `go.mod` (`go 1.26.X`). Never bump unilaterally.
 - **Formatting**: `gofmt -s` and `goimports`. Lines wrap at 100 columns
   except generated code.
+- **templ**: dashboard HTML lives in `internal/dashboard/templates/*.templ`.
+  After editing any `.templ` file run `go generate ./internal/dashboard/templates/`
+  (or `templ generate`). Commit both the `.templ` source and the generated
+  `_templ.go` file. Never edit `_templ.go` by hand — it is overwritten on
+  the next `go generate`. The `templ` binary (v0.3.x) must be on `PATH`;
+  install once with `go install github.com/a-h/templ/cmd/templ@latest` or
+  download the release binary from GitHub.
 - **Linters**: `golangci-lint` with `govet`, `staticcheck`, `errcheck`,
   `gocritic`, `revive`, `bodyclose`, `contextcheck`, `noctx`, `nilerr`,
   `forbidigo` (banning `fmt.Println`, `panic`, `os.Exit` outside `main`),
@@ -367,6 +374,7 @@ make integration     # docker compose up; run scenarios
 make ci              # all of the above in the order CI uses
 make docs            # build docs site (phase 4+)
 make schema          # regenerate JSON schema and SDK types
+make templ           # go generate ./internal/dashboard/templates/ (requires templ CLI)
 make hooks           # install pre-commit hooks into .git/hooks
 ```
 
@@ -543,6 +551,8 @@ Before declaring a change ready:
 - [ ] Tests added/updated; coverage not reduced.
 - [ ] If hot path: zero-alloc benchmark proves it.
 - [ ] If cache logic: `cache-tests` score not regressed.
+- [ ] If dashboard templates changed: `go generate ./internal/dashboard/templates/`
+  committed alongside `_templ.go` files.
 - [ ] If config: JSON schema regenerated.
 - [ ] If public API: SDK types updated, semver impact noted.
 - [ ] Godoc + changelog entry.

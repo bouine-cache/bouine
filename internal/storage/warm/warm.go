@@ -64,6 +64,12 @@ type Segment struct {
 	maxBytes int64
 }
 
+// warmLoc is the in-memory index entry for a warm-tier object.
+type warmLoc struct {
+	segID  int
+	offset int64
+}
+
 // Store is the warm-tier disk store.
 type Store struct {
 	dir      string
@@ -73,6 +79,8 @@ type Store struct {
 	segs     []*Segment
 	nextID   atomic.Int32
 	stats    warmStats
+	idxMu    sync.RWMutex
+	index    map[uint64]warmLoc
 }
 
 type warmStats struct {
@@ -103,6 +111,7 @@ func NewStore(cfg Config) (*Store, error) {
 		dir:      cfg.Dir,
 		maxBytes: cfg.MaxBytes,
 		segMax:   cfg.SegMax,
+		index:    make(map[uint64]warmLoc),
 	}
 	if err := s.openExisting(); err != nil {
 		return nil, err
@@ -160,10 +169,14 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	s.stats.entries.Add(1)
 	s.stats.bytes.Add(recSize)
 
+	s.idxMu.Lock()
+	s.index[key] = warmLoc{segID: seg.ID, offset: off}
+	s.idxMu.Unlock()
+
 	return seg.ID, off, nil
 }
 
-// Delete writes a tombstone for the key.
+// Delete writes a tombstone for the key and removes it from the index.
 func (s *Store) Delete(key uint64) error {
 	seg, err := s.activeSeg()
 	if err != nil {
@@ -177,7 +190,47 @@ func (s *Store) Delete(key uint64) error {
 	}
 	recSize := int64(headerLen + footerLen)
 	seg.size += recSize
+
+	s.idxMu.Lock()
+	delete(s.index, key)
+	s.idxMu.Unlock()
 	return nil
+}
+
+// Get returns the raw body bytes stored for key, or nil if the key
+// is not in the warm tier.
+func (s *Store) Get(key uint64) ([]byte, error) {
+	s.idxMu.RLock()
+	loc, ok := s.index[key]
+	s.idxMu.RUnlock()
+	if !ok {
+		return nil, nil
+	}
+	rec, err := s.ReadRecord(loc.segID, loc.offset)
+	if err != nil {
+		return nil, err
+	}
+	if rec.IsTomb {
+		return nil, nil
+	}
+	return rec.Body, nil
+}
+
+// SetIndex adds or replaces an index entry. Called during WAL replay
+// on startup to rebuild the index from persisted write history.
+func (s *Store) SetIndex(key uint64, segID int, offset int64) {
+	s.idxMu.Lock()
+	s.index[key] = warmLoc{segID: segID, offset: offset}
+	s.idxMu.Unlock()
+}
+
+// DelIndex removes a key from the index. Called during WAL replay for
+// delete entries so keys deleted before the last checkpoint are not
+// served from the warm tier.
+func (s *Store) DelIndex(key uint64) {
+	s.idxMu.Lock()
+	delete(s.index, key)
+	s.idxMu.Unlock()
 }
 
 // ReadRecord reads a record at the given offset in the given segment.

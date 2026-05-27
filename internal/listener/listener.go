@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+
+	"github.com/thylong/bouine/internal/listener/proxyproto"
 )
 
 // Config controls a single listener.
@@ -27,6 +29,10 @@ type Config struct {
 	Handler   http.Handler
 	Logger    *slog.Logger
 	TLSConfig *tls.Config
+	// ProxyProtocol enables PROXY protocol v1/v2 header parsing. The
+	// header is consumed before TLS so the real client IP is visible
+	// in RemoteAddr and access logs.
+	ProxyProtocol bool
 }
 
 // Server wraps a net/http Server with lifecycle methods matching the
@@ -34,10 +40,11 @@ type Config struct {
 //
 // Stable.
 type Server struct {
-	inner    *http.Server
-	name     string
-	logger   *slog.Logger
-	resolved atomic.Value // stores string
+	inner         *http.Server
+	name          string
+	logger        *slog.Logger
+	resolved      atomic.Value // stores string
+	proxyProtocol bool
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 listener. It also supports h2c
@@ -59,7 +66,7 @@ func NewHTTP(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Server{inner: srv, name: "http", logger: cfg.Logger}
+	return &Server{inner: srv, name: "http", logger: cfg.Logger, proxyProtocol: cfg.ProxyProtocol}
 }
 
 // NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener. ALPN negotiation
@@ -88,7 +95,7 @@ func NewHTTPS(cfg Config) *Server {
 	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
 		cfg.Logger.Error("h2 configure failed", "error", err)
 	}
-	return &Server{inner: srv, name: "https", logger: cfg.Logger}
+	return &Server{inner: srv, name: "https", logger: cfg.Logger, proxyProtocol: cfg.ProxyProtocol}
 }
 
 // Serve starts the listener. For plaintext it calls ListenAndServe;
@@ -108,6 +115,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		"name", s.name,
 		"addr", s.resolved.Load().(string))
 
+	// Wrap with PROXY protocol before TLS so headers are parsed from
+	// the raw TCP stream, not the encrypted payload.
+	if s.proxyProtocol {
+		ln = proxyproto.NewListener(ln)
+	}
 	if s.inner.TLSConfig != nil {
 		ln = tls.NewListener(ln, s.inner.TLSConfig)
 	}

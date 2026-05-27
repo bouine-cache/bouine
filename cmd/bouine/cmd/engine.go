@@ -24,6 +24,7 @@ import (
 	"github.com/thylong/bouine/internal/runtime/shutdown"
 	"github.com/thylong/bouine/internal/runtime/supervised"
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
 	webdash "github.com/thylong/bouine/web/dashboard"
 )
@@ -52,9 +53,10 @@ func (e *engine) run(ctx context.Context) error {
 		return err
 	}
 
-	store := storage.NewHotStore(storage.HotConfig{
-		MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes(),
-	})
+	store, err := e.buildStore()
+	if err != nil {
+		return err
+	}
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 
@@ -101,12 +103,20 @@ func (e *engine) run(ctx context.Context) error {
 		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
 	}
 
+	// Config watcher — fsnotify + SIGHUP hot reload.
+	watcher := config.NewWatcher(config.WatcherConfig{
+		ConfigPath: e.configPath,
+		Logger:     e.logger,
+		OnConfig:   func(cfg *config.Config) { e.cfg = cfg },
+	})
+
 	g := supervised.NewGroup(ctx, e.logger)
 	g.Go("rings", func(rCtx context.Context) error {
 		rings.Start(rCtx, snapshotPath)
 		return nil
 	})
-	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode)
+	g.Go("config-watcher", watcher.Run)
+	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode, watcher)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -123,6 +133,24 @@ func (e *engine) run(ctx context.Context) error {
 	}
 
 	return g.Wait()
+}
+
+// buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is
+// configured, or a plain HotStore for ephemeral/dev deployments.
+func (e *engine) buildStore() (storage.Store, error) {
+	hotCfg := storage.HotConfig{MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes()}
+	if e.cfg.Storage.WarmDir == "" {
+		return storage.NewHotStore(hotCfg), nil
+	}
+	return storage.NewTieredStore(storage.TieredConfig{
+		Hot: hotCfg,
+		Warm: &warm.Config{
+			Dir:      e.cfg.Storage.WarmDir,
+			MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(),
+		},
+		WALDir: e.cfg.Storage.WarmDir + "/bouine.wal",
+		Logger: e.logger,
+	})
 }
 
 func (e *engine) buildCluster() (*cluster.Cluster, error) {
@@ -208,13 +236,37 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 			continue
 		}
 		consecutive5xx := 0
+		var transport http.RoundTripper
 		for _, pc := range e.cfg.UpstreamPools {
-			if pc.Name == rc.Pool {
-				consecutive5xx = pc.Health.Passive.Consecutive5xx
-				break
+			if pc.Name != rc.Pool {
+				continue
 			}
+			consecutive5xx = pc.Health.Passive.Consecutive5xx
+			dialTimeout := pc.Connect.Timeout
+			if dialTimeout <= 0 {
+				dialTimeout = 10 * time.Second
+			}
+			keepAlive := pc.Connect.KeepAlive
+			if keepAlive <= 0 {
+				keepAlive = 30 * time.Second
+			}
+			base := &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   dialTimeout,
+					KeepAlive: keepAlive,
+				}).DialContext,
+				MaxIdleConnsPerHost: 64,
+				IdleConnTimeout:     90 * time.Second,
+				ForceAttemptHTTP2:   true,
+			}
+			if pc.Connect.HedgeTimeout > 0 {
+				transport = &origin.HedgedTransport{Inner: base, Timeout: pc.Connect.HedgeTimeout}
+			} else {
+				transport = base
+			}
+			break
 		}
-		upstream := p.Handler(consecutive5xx, nil)
+		upstream := p.Handler(consecutive5xx, transport)
 		cached := cache.NewHandler(cache.HandlerConfig{
 			Upstream:      upstream,
 			Store:         store,
@@ -228,14 +280,14 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store)
 	return router
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
 	}
 
 	seq := shutdown.NewSequencer(e.logger)
-	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode)
+	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode, watcher)
 
 	srv := admin.New(admin.Config{
 		Addr:    addr,
@@ -279,7 +331,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 
 // buildDashboard wires and returns the dashboard ServeMux.
 // clusterNode may be nil in single-node mode.
-func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string, clusterNode *cluster.Cluster) *http.ServeMux {
+func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string, clusterNode *cluster.Cluster, watcher *config.Watcher) *http.ServeMux {
 	dashMux := http.NewServeMux()
 	snapshotPath := ""
 	if e.cfg.Storage.WarmDir != "" {
@@ -317,7 +369,7 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 		Config:       e.cfg,
 		ConfigPath:   e.configPath,
 		StartTime:    e.startTime,
-		ReloadFn:     func(_ *config.Config) error { return nil }, // hot-reload in future phase
+		ReloadFn:     func(_ *config.Config) error { return watcher.Reload() },
 		RingFn:       ringFn,
 		ClusterMeta:  clusterMeta,
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
@@ -351,9 +403,10 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 	if e.cfg.Listen.HTTP != "" {
 		srv := listener.NewHTTP(listener.Config{
-			Addr:    e.cfg.Listen.HTTP,
-			Handler: handler,
-			Logger:  e.logger,
+			Addr:          e.cfg.Listen.HTTP,
+			Handler:       handler,
+			Logger:        e.logger,
+			ProxyProtocol: e.cfg.Listen.ProxyProtocol,
 		})
 		g.Go("listener-http", srv.Serve)
 	}
@@ -365,10 +418,11 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 			return
 		}
 		srv := listener.NewHTTPS(listener.Config{
-			Addr:      e.cfg.Listen.HTTPS,
-			Handler:   handler,
-			Logger:    e.logger,
-			TLSConfig: tlsCfg,
+			Addr:          e.cfg.Listen.HTTPS,
+			Handler:       handler,
+			Logger:        e.logger,
+			TLSConfig:     tlsCfg,
+			ProxyProtocol: e.cfg.Listen.ProxyProtocol,
 		})
 		g.Go("listener-https", srv.Serve)
 

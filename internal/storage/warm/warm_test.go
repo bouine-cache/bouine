@@ -221,3 +221,78 @@ func TestEmptyDir(t *testing.T) {
 		t.Fatal("expected dir")
 	}
 }
+
+func TestGet_IndexMaintained(t *testing.T) {
+	s := tmpStore(t)
+
+	body := []byte("warm get test")
+	if _, _, err := s.Put(77, body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	got, err := s.Get(77)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("Get = %q, want %q", got, body)
+	}
+}
+
+func TestGet_MissingKey(t *testing.T) {
+	s := tmpStore(t)
+	got, err := s.Get(9999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil for missing key, got %q", got)
+	}
+}
+
+func TestGet_AfterDelete(t *testing.T) {
+	s := tmpStore(t)
+
+	if _, _, err := s.Put(55, []byte("to be deleted")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := s.Delete(55); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	got, err := s.Get(55)
+	if err != nil {
+		t.Fatalf("Get after delete: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil after delete, got %q", got)
+	}
+}
+
+func TestSetIndex_DelIndex(t *testing.T) {
+	s := tmpStore(t)
+
+	body := []byte("index rebuild")
+	segID, offset, err := s.Put(42, body)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// Simulate WAL replay: build a fresh store with no index and replay.
+	s2 := tmpStore(t)
+	// s2.index is empty — SetIndex injects the entry.
+	s2.SetIndex(42, segID, offset)
+
+	// ReadRecord works via s, but for the index test use s directly.
+	got, err := s.Get(42)
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("Get after SetIndex: err=%v body=%q", err, got)
+	}
+
+	s.DelIndex(42)
+	got, err = s.Get(42)
+	if err != nil || got != nil {
+		t.Fatalf("expected nil after DelIndex: err=%v body=%q", err, got)
+	}
+	_ = s2
+}

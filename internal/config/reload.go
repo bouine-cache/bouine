@@ -120,19 +120,28 @@ func (w *Watcher) handleFileChange(path string) {
 }
 
 func (w *Watcher) reloadConfig() {
+	_ = w.Reload()
+}
+
+// Reload parses the config file and, if valid, calls the OnConfig
+// callback. It is safe to call concurrently with the fsnotify/SIGHUP
+// loop. Returns the parse error so callers (e.g. the dashboard) can
+// surface it to the operator.
+func (w *Watcher) Reload() error {
 	if w.configPath == "" || w.onConfig == nil {
-		return
+		return nil
 	}
 	cfg, err := Load(w.configPath)
 	if err != nil {
 		w.logger.Error("config reload failed", "error", err)
-		return
+		return err
 	}
 	w.mu.Lock()
 	w.cfg = cfg
 	w.mu.Unlock()
 	w.onConfig(cfg)
 	w.logger.Info("config reloaded", "path", w.configPath)
+	return nil
 }
 
 func (w *Watcher) reloadTLS() {

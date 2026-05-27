@@ -223,6 +223,7 @@ type ConfigData struct {
 	LastReload   string // "2h ago · success" or ""
 	Uptime       string // "3d 14h 22m"
 	Sections     []ConfigSection
+	RawJSON      string // pretty-printed JSON of the running config
 }
 
 // BuildConfigSections converts a *config.Config into structured viewer sections.

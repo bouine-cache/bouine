@@ -2,7 +2,9 @@ package templates
 
 import "fmt"
 
-// Config renders the config-reload view with the structured running-config viewer.
+// Config renders the config-reload view. The left panel has a Structured /
+// JSON toggle so operators can switch between the visual section view and
+// a raw pretty-printed JSON of the running config.
 templ Config(d ConfigData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
@@ -10,10 +12,26 @@ templ Config(d ConfigData) {
 				<h2>Config reload</h2>
 				<div class="sub">validate · confirm · apply — running config is never altered by parse errors</div>
 			</div>
+			<div class="tg" role="group" aria-label="Config view mode">
+				<a
+					id="cfg-btn-structured"
+					class="tb active"
+					aria-pressed="true"
+					style="cursor:pointer"
+					onclick="cfgToggle('structured')"
+				>Structured</a>
+				<a
+					id="cfg-btn-json"
+					class="tb"
+					aria-pressed="false"
+					style="cursor:pointer"
+					onclick="cfgToggle('json')"
+				>JSON</a>
+			</div>
 		</div>
 		<div class="r2">
-			<!-- left: running config viewer -->
-			<div class="bc" style="overflow:auto">
+			<!-- left: running config viewer (two overlapping views) -->
+			<div class="bc" style="overflow:auto;position:relative">
 				<div class="bc-t" style="display:flex;justify-content:space-between;align-items:center">
 					Current config (read-only)
 					if d.ConfigPath != "" {
@@ -25,55 +43,66 @@ templ Config(d ConfigData) {
 						</span>
 					}
 				</div>
-				if len(d.Sections) == 0 {
-					<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
-				}
-				for _, sec := range d.Sections {
-					<div class="cfg-section">
-						<div class="cfg-section-hd">
-							<span class="cfg-section-icon">{ sec.Icon }</span>
-							{ sec.Title }
-							if sec.Badge != "" {
-								<span class={ "cfg-badge", cfgBadgeClass(sec.BadgeKind) }>{ sec.Badge }</span>
-							}
-						</div>
-						if len(sec.Rows) > 0 {
-							<div class="cfg-grid">
-								for _, row := range sec.Rows {
-									<div class="cfg-row">
-										<span class="cfg-key">{ row.Key }</span>
-										<span class="cfg-sep">:</span>
-										<span class={ cfgValClass(row.Kind) }>{ row.Value }</span>
-										if row.Hint != "" {
-											<span class="cfg-hint">{ row.Hint }</span>
-										}
-									</div>
+				<!-- Structured view -->
+				<div id="cfg-view-structured">
+					if len(d.Sections) == 0 {
+						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
+					}
+					for _, sec := range d.Sections {
+						<div class="cfg-section">
+							<div class="cfg-section-hd">
+								<span class="cfg-section-icon">{ sec.Icon }</span>
+								{ sec.Title }
+								if sec.Badge != "" {
+									<span class={ "cfg-badge", cfgBadgeClass(sec.BadgeKind) }>{ sec.Badge }</span>
 								}
 							</div>
-						}
-						if len(sec.Routes) > 0 {
-							for _, rc := range sec.Routes {
-								<div class="cfg-route">
-									<div class="cfg-route-hd">
-										<span class="cfg-route-path">{ rc.PathPrefix }</span>
-										<span class="cfg-route-pool">→ { rc.Pool }</span>
-									</div>
-									if len(rc.Rows) > 0 {
-										<div class="cfg-grid cfg-grid-dense">
-											for _, row := range rc.Rows {
-												<div class="cfg-row">
-													<span class="cfg-key">{ row.Key }</span>
-													<span class="cfg-sep">:</span>
-													<span class={ cfgValClass(row.Kind) }>{ row.Value }</span>
-												</div>
+							if len(sec.Rows) > 0 {
+								<div class="cfg-grid">
+									for _, row := range sec.Rows {
+										<div class="cfg-row">
+											<span class="cfg-key">{ row.Key }</span>
+											<span class="cfg-sep">:</span>
+											<span class={ cfgValClass(row.Kind) }>{ row.Value }</span>
+											if row.Hint != "" {
+												<span class="cfg-hint">{ row.Hint }</span>
 											}
 										</div>
 									}
 								</div>
 							}
-						}
-					</div>
-				}
+							if len(sec.Routes) > 0 {
+								for _, rc := range sec.Routes {
+									<div class="cfg-route">
+										<div class="cfg-route-hd">
+											<span class="cfg-route-path">{ rc.PathPrefix }</span>
+											<span class="cfg-route-pool">→ { rc.Pool }</span>
+										</div>
+										if len(rc.Rows) > 0 {
+											<div class="cfg-grid cfg-grid-dense">
+												for _, row := range rc.Rows {
+													<div class="cfg-row">
+														<span class="cfg-key">{ row.Key }</span>
+														<span class="cfg-sep">:</span>
+														<span class={ cfgValClass(row.Kind) }>{ row.Value }</span>
+													</div>
+												}
+											</div>
+										}
+									</div>
+								}
+							}
+						</div>
+					}
+				</div>
+				<!-- JSON view (hidden by default) -->
+				<div id="cfg-view-json" style="display:none">
+					if d.RawJSON != "" {
+						<pre style="font-family:'JetBrains Mono',monospace;font-size:.72rem;line-height:1.7;color:var(--t);white-space:pre-wrap;word-break:break-all;margin:0;padding:.25rem 0">{ d.RawJSON }</pre>
+					} else {
+						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
+					}
+				</div>
 			</div>
 			<!-- right: reload action -->
 			<div class="bc">
@@ -126,7 +155,29 @@ templ Config(d ConfigData) {
 				</div>
 			</div>
 		</div>
+		@cfgToggleScript()
 	}
+}
+
+script cfgToggleScript() {
+	window.cfgToggle = function(mode) {
+		var s = document.getElementById('cfg-view-structured');
+		var j = document.getElementById('cfg-view-json');
+		var bs = document.getElementById('cfg-btn-structured');
+		var bj = document.getElementById('cfg-btn-json');
+		if (!s || !j) return;
+		if (mode === 'json') {
+			s.style.display = 'none';
+			j.style.display = '';
+			bs.classList.remove('active'); bs.setAttribute('aria-pressed','false');
+			bj.classList.add('active');    bj.setAttribute('aria-pressed','true');
+		} else {
+			j.style.display = 'none';
+			s.style.display = '';
+			bj.classList.remove('active'); bj.setAttribute('aria-pressed','false');
+			bs.classList.add('active');    bs.setAttribute('aria-pressed','true');
+		}
+	};
 }
 
 func cfgBadgeClass(kind string) string {

@@ -46,15 +46,16 @@ func (s *Sequencer) IsReady() bool {
 	return s.ready.Load()
 }
 
-// Execute runs all steps in order. Each step gets its own context
-// with its budget as the deadline. Errors are logged but don't stop
-// subsequent steps.
-func (s *Sequencer) Execute() {
+// Execute runs all steps in order, carving each step's budget from
+// the provided parent context. Errors are logged but don't stop
+// subsequent steps. Pass the daemon's root context so step budgets
+// are bounded by both the step limit and the overall shutdown deadline.
+func (s *Sequencer) Execute(ctx context.Context) {
 	s.ready.Store(false)
 	s.logger.Info("shutdown: starting", "steps", len(s.steps))
 
 	for _, st := range s.steps {
-		ctx, cancel := context.WithTimeout(context.Background(), st.budget)
+		ctx, cancel := context.WithTimeout(ctx, st.budget)
 		s.logger.Info("shutdown: step starting", "name", st.name, "budget", st.budget)
 
 		if err := st.fn(ctx); err != nil {

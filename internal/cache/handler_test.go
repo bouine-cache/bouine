@@ -2,8 +2,10 @@ package cache
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -248,3 +250,48 @@ func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
 		t.Fatalf("body = %q, want cached", rr.Body.String())
 	}
 }
+
+// TestMaxVariants_CapIsEnforced verifies that once MaxVariants distinct
+// Vary variants are stored for a primary key, subsequent variants are
+// silently dropped and VaryCapHits is incremented.
+func TestMaxVariants_CapIsEnforced(t *testing.T) {
+	hitCount := 0
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Vary", "X-Test-Variant")
+		_, _ = w.Write([]byte("body"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:    orig,
+		Store:       store,
+		Logger:      slog.Default(),
+		VaryCapHits: counterFunc(func() { hitCount++ }),
+	})
+
+	// Fill exactly MaxVariants distinct variants.
+	for i := range MaxVariants {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://example.com/vary", nil)
+		req.Header.Set("X-Test-Variant", strconv.Itoa(i))
+		h.ServeHTTP(rr, req)
+	}
+	if hitCount != 0 {
+		t.Fatalf("expected 0 cap hits before limit, got %d", hitCount)
+	}
+
+	// One more should trip the cap.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	req.Header.Set("X-Test-Variant", "overflow")
+	h.ServeHTTP(rr, req)
+	if hitCount != 1 {
+		t.Fatalf("expected 1 cap hit, got %d", hitCount)
+	}
+}
+
+type counterFunc func()
+
+func (f counterFunc) Inc() { f() }

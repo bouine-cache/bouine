@@ -190,7 +190,7 @@ func (p *Pool) Healthy() []string {
 }
 
 // MarkHealthy resets a previously ejected target so it can receive
-// traffic again. Used by active health checks (phase 3+).
+// traffic again. Called by the active health checker.
 func (p *Pool) MarkHealthy(addr string) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

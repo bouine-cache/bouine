@@ -32,8 +32,8 @@ type routeEntry struct {
 	handler    http.Handler
 }
 
-// Metrics are the data-plane counters exposed by the pipeline. Phase 1
-// ships a minimal set; the full RED counters land in phase 3.
+// Metrics are the data-plane counters exposed by the pipeline.
+// Includes RED (rate, errors, duration) counters.
 type Metrics struct {
 	// RequestsTotal is incremented for every request entering the
 	// pipeline. nil-safe (no-op if nil).

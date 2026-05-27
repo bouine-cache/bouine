@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/thylong/bouine/internal/observability/responsewriter"
 )
 
 // DataPlaneMetrics holds the RED counters for the data-plane pipeline.
@@ -17,7 +19,8 @@ type DataPlaneMetrics struct {
 	RequestsTotal    *prometheus.CounterVec
 	RequestDuration  *prometheus.HistogramVec
 	ResponseBytesOut *prometheus.CounterVec
-	Rings            *Rings // nil when dashboard is disabled
+	VaryCapHits      prometheus.Counter // incremented when MaxVariants cap is hit
+	Rings            *Rings             // nil when dashboard is disabled
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -40,8 +43,13 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Name:      "response_bytes_total",
 			Help:      "Total bytes written in responses.",
 		}, []string{"method", "route"}),
+		VaryCapHits: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "vary_cap_hits_total",
+			Help:      "Number of Vary variant storage attempts rejected because MaxVariants was exceeded.",
+		}),
 	}
-	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut)
+	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits)
 	return m
 }
 
@@ -51,11 +59,11 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := &metricsWriter{ResponseWriter: w, status: 200}
+		sw := responsewriter.New(w)
 
 		next.ServeHTTP(sw, r)
 
-		status := strconv.Itoa(sw.status)
+		status := strconv.Itoa(sw.Status)
 		route := r.Header.Get("X-Bouine-Route")
 		if route == "" {
 			route = "_default"
@@ -65,13 +73,13 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		m.RequestDuration.WithLabelValues(r.Method, status, route).
 			Observe(time.Since(start).Seconds())
 		m.ResponseBytesOut.WithLabelValues(r.Method, route).
-			Add(float64(sw.bytes))
+			Add(float64(sw.Bytes))
 
 		// Update ring buffers for the dashboard (if enabled).
 		if m.Rings != nil {
 			xCache := w.Header().Get("X-Cache")
 			durMs := time.Since(start).Milliseconds()
-			m.Rings.Request.RecordRequest(xCache, sw.status, durMs)
+			m.Rings.Request.RecordRequest(xCache, sw.Status, durMs)
 			if route != "_default" {
 				m.Rings.Route.RecordRoute(route, xCache)
 			}

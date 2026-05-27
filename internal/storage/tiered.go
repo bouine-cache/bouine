@@ -167,7 +167,7 @@ func (t *TieredStore) Delete(ctx context.Context, key api.Key) error {
 	return nil
 }
 
-// Ban delegates to the hot tier. Warm-tier lazy bans land in phase 4.
+// Ban delegates to the hot tier. Warm-tier lazy bans are deferred.
 func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 	return t.hot.Ban(ctx, expr)
 }

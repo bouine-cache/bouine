@@ -84,7 +84,7 @@ func normalizeHeaderValue(v string) string {
 // parses the Range header, validates it, and writes a 206 Partial
 // Content response with the appropriate Content-Range header.
 //
-// Only single-range requests are supported in phase 3; multi-range
+// Only single-range requests are supported; multi-range
 // (multipart/byteranges) is deferred.
 //
 // Returns true if the range was served, false if the caller should

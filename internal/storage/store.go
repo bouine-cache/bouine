@@ -3,9 +3,9 @@
 //
 // The Store interface is consumed by the L4 cache engine; this package
 // provides the concrete implementation backed by a sharded hot tier
-// (RAM) and an optional warm tier (mmap, phase 2 follow-up).
+// (RAM) and an optional warm tier (mmap segments).
 //
-// Phase 2 ships the hot tier + SIEVE eviction. The warm tier (mmap
+// The hot tier uses SIEVE eviction. The warm tier (mmap
 // segments, WAL, compaction) is stubbed.
 package storage
 

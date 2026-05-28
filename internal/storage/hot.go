@@ -25,7 +25,7 @@ type HotStore struct {
 }
 
 type shard struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	entries map[api.Key]*hotEntry
 	evict   *sieve.List[api.Key]
 	bytes   int64
@@ -81,10 +81,35 @@ func (h *HotStore) shard(key api.Key) *shard {
 
 // Get looks up a key in the hot tier. Returns nil, nil on miss (not
 // an error — a miss is a normal control-flow outcome).
+//
+// Fast path (visited bit already set): acquires only a read lock,
+// avoiding write-lock contention under concurrent read-heavy workloads.
+// Slow path (visited=false, i.e. first access after eviction hand sweep):
+// upgrades to a write lock to set the bit.
 func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 	s := h.shard(key)
-	s.mu.Lock()
+
+	// Fast path: read lock. If the entry exists and its visited bit is
+	// already set, no write is needed — just return the object.
+	s.mu.RLock()
 	e := s.entries[key]
+	if e != nil && e.sieve.Visited() {
+		obj := e.obj
+		s.mu.RUnlock()
+		h.stats.hits.Add(1)
+		return obj, nil
+	}
+	s.mu.RUnlock()
+
+	if e == nil {
+		h.stats.misses.Add(1)
+		return nil, nil
+	}
+
+	// Slow path: visited bit is false. Upgrade to write lock, re-check
+	// (entry may have been evicted between RUnlock and Lock), then set it.
+	s.mu.Lock()
+	e = s.entries[key]
 	if e != nil {
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
@@ -108,8 +133,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Evict until we have room.
 	perShardMax := h.maxBytes / int64(len(h.shards))
 	for s.bytes+size > perShardMax && s.evict.Len() > 0 {
 		evKey, ok := s.evict.Evict()
@@ -162,10 +185,10 @@ func (h *HotStore) Stats() api.Stats {
 	var hotEntries, hotBytes int64
 	for i := range h.shards {
 		s := &h.shards[i]
-		s.mu.Lock()
+		s.mu.RLock()
 		hotEntries += int64(len(s.entries))
 		hotBytes += s.bytes
-		s.mu.Unlock()
+		s.mu.RUnlock()
 	}
 	return api.Stats{
 		HotEntries: hotEntries,

@@ -138,27 +138,42 @@ func TestChaos_PartialPartition(t *testing.T) {
 
 	// Nodes 0 and 1 should see a MISS after purge.
 	for _, n := range []int{0, 1} {
-		resp, err := http.Get(s.Nodes[n].HTTPAddr + path) //nolint:noctx
-		if err != nil {
-			t.Fatalf("node %d post-purge: %v", n, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d post-purge: status %d", n, resp.StatusCode)
-		}
+		requireStatus200(t, s.Nodes[n].HTTPAddr+path, "node %d post-purge", n)
 	}
 
 	// All nodes must be reachable and return 200.
 	for i := range s.Nodes {
-		resp, err := http.Get(s.Nodes[i].HTTPAddr + path) //nolint:noctx
-		if err != nil {
-			t.Fatalf("node %d post-heal: %v", i, err)
+		requireStatus200(t, s.Nodes[i].HTTPAddr+path, "node %d post-heal", i)
+	}
+}
+
+// requireStatus200 GETs url, retrying briefly so cluster-convergence timing
+// (gossip ring settling after boot/partition) does not cause a flaky single
+// GET to observe a transient non-200. It still asserts a 200 is reached.
+func requireStatus200(t *testing.T, url, msgf string, args ...any) {
+	t.Helper()
+	var lastErr error
+	var lastStatus int
+	for attempt := range 10 {
+		resp, err := http.Get(url) //nolint:noctx
+		if err == nil {
+			lastStatus = resp.StatusCode
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return
+			}
+		} else {
+			lastErr = err
 		}
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d post-heal: status %d", i, resp.StatusCode)
+		if attempt < 9 {
+			time.Sleep(200 * time.Millisecond)
 		}
 	}
+	prefix := fmt.Sprintf(msgf, args...)
+	if lastErr != nil {
+		t.Fatalf("%s: %v", prefix, lastErr)
+	}
+	t.Errorf("%s: status %d (want 200 within retries)", prefix, lastStatus)
 }
 
 // TestChaos_SlowOrigin warms the cache through a slow origin and

@@ -23,6 +23,7 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,27 @@ var (
 	headerBYPASS      = []string{"BYPASS"}
 	headerREVALIDATED = []string{"REVALIDATED"}
 )
+
+// ageHeaderCache is a pre-allocated table of Age header values for
+// 0–599 seconds. Covers fresh objects with TTLs up to 10 minutes and
+// avoids strconv.Itoa + []string allocation on every cache hit.
+var ageHeaderCache [600][]string
+
+func init() {
+	for i := range ageHeaderCache {
+		ageHeaderCache[i] = []string{strconv.Itoa(i)}
+	}
+}
+
+// ageHeader returns a pre-allocated []string for use as an Age header
+// value. Falls back to a fresh allocation only for ages ≥ 600s.
+func ageHeader(d time.Duration) []string {
+	secs := int(d.Seconds())
+	if uint(secs) < uint(len(ageHeaderCache)) {
+		return ageHeaderCache[secs]
+	}
+	return []string{strconv.Itoa(secs)}
+}
 
 // recorderPool reuses responseRecorder instances on the miss/invalidation
 // paths to reduce allocations. The hit path never allocates a recorder.
@@ -125,8 +147,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fast-path: skip key computation and store lookup entirely for
+	// requests whose Cache-Control: no-store directive guarantees we
+	// will never serve from — or store into — the cache.
+	if reqHasNoStore(r) {
+		h.handleBypass(w, r)
+		return
+	}
+
+	// Take a single timestamp; thread it through Evaluate and serve
+	// functions to avoid a second time.Now() syscall per hit.
+	now := time.Now()
 	key, obj := h.lookup(r)
-	disp := Evaluate(r, obj, time.Now())
+	disp := Evaluate(r, obj, now)
 
 	switch disp.Decision {
 	case Hit, StaleHit:
@@ -136,7 +169,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ServeRange(w, r, disp.Object) {
 			return
 		}
-		h.serveFromCache(w, r, disp.Object)
+		h.serveFromCache(w, r, disp.Object, now)
 	case Miss:
 		// StayinAlive: if we have a super-stale object and origin fails,
 		// serve it rather than returning 502.
@@ -150,6 +183,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case Bypass:
 		h.handleBypass(w, r)
 	}
+}
+
+// reqHasNoStore returns true when the request's Cache-Control header
+// contains the no-store directive (RFC 9111 §5.2.1.5), meaning neither
+// a cache lookup nor storage is applicable. Uses a token scan to avoid
+// a full ParseCacheControl allocation.
+func reqHasNoStore(r *http.Request) bool {
+	cc := r.Header.Get("Cache-Control")
+	if cc == "" {
+		return false
+	}
+	for cc != "" {
+		var tok string
+		if i := strings.IndexByte(cc, ','); i >= 0 {
+			tok, cc = cc[:i], cc[i+1:]
+		} else {
+			tok, cc = cc, ""
+		}
+		tok = strings.TrimSpace(tok)
+		if strings.EqualFold(tok, "no-store") {
+			return true
+		}
+	}
+	return false
 }
 
 // lookup resolves the cache key and stored object for r, accounting
@@ -201,11 +258,10 @@ func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 	h.upstream.ServeHTTP(w, r)
 }
 
-func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *api.Object) {
+func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
-	age := ComputeAge(obj, time.Now())
-	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
+	dst["Age"] = ageHeader(ComputeAge(obj, now))
 	dst["X-Cache"] = headerHIT
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
@@ -217,8 +273,7 @@ func (h *Handler) serveFromCache(w http.ResponseWriter, r *http.Request, obj *ap
 func (h *Handler) serveStale(w http.ResponseWriter, r *http.Request, obj *api.Object) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
-	age := ComputeAge(obj, time.Now())
-	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
+	dst["Age"] = ageHeader(ComputeAge(obj, time.Now()))
 	dst["X-Cache"] = headerSTALE
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
@@ -231,8 +286,7 @@ func (h *Handler) serveStale(w http.ResponseWriter, r *http.Request, obj *api.Ob
 func (h *Handler) serveRevalidated(w http.ResponseWriter, r *http.Request, obj *api.Object) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
-	age := ComputeAge(obj, time.Now())
-	dst["Age"] = []string{strconv.Itoa(int(age.Seconds()))}
+	dst["Age"] = ageHeader(ComputeAge(obj, time.Now()))
 	dst["X-Cache"] = headerREVALIDATED
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
@@ -279,7 +333,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	res := h.doFetch(revalReq)
 	if res.Err != nil {
 		// Origin error during revalidation — serve stale if available.
-		h.serveFromCache(w, r, stale)
+		h.serveFromCache(w, r, stale, time.Now())
 		return
 	}
 

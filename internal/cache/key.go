@@ -116,15 +116,75 @@ func appendCanonicalPath(buf []byte, n int, u *url.URL) int {
 }
 
 func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
-	if u.RawQuery == "" {
+	raw := u.RawQuery
+	if raw == "" {
 		return n
 	}
-	// Parse + sort. This allocates (url.Values map) but only when
-	// there's a query string — most cache-hit requests re-use the
-	// same key from a previous miss where the alloc already happened.
-	// True zero-alloc query sorting requires a custom parser; deferred
-	// to a follow-up if profiling shows this matters on the hit path
-	// (it won't — Get doesn't call BuildKey again).
+
+	// Fast path: for ≤8 simple ASCII params (no percent-encoding) use a
+	// stack-allocated pair array and an insertion sort to avoid the
+	// url.Values map + keys slice allocations from the slow path.
+	type kvPair struct{ k, v string }
+	var stackPairs [8]kvPair
+	np := 0
+	simple := true
+
+	for s := raw; s != ""; {
+		var seg string
+		if i := strings.IndexByte(s, '&'); i >= 0 {
+			seg, s = s[:i], s[i+1:]
+		} else {
+			seg, s = s, ""
+		}
+		k, v, _ := strings.Cut(seg, "=")
+		if strings.IndexByte(k, '%') >= 0 || strings.IndexByte(v, '%') >= 0 {
+			simple = false
+			break
+		}
+		if np >= len(stackPairs) {
+			simple = false
+			break
+		}
+		stackPairs[np] = kvPair{k, v}
+		np++
+	}
+
+	if !simple {
+		return appendCanonicalQuerySlow(buf, n, u)
+	}
+
+	// Insertion sort by key (fast for ≤8 elements, zero alloc).
+	pairs := stackPairs[:np]
+	for i := 1; i < len(pairs); i++ {
+		for j := i; j > 0 && pairs[j].k < pairs[j-1].k; j-- {
+			pairs[j], pairs[j-1] = pairs[j-1], pairs[j]
+		}
+	}
+
+	first := true
+	for _, p := range pairs {
+		if !first {
+			if n < len(buf) {
+				buf[n] = '&'
+				n++
+			}
+		}
+		first = false
+		n += copy(buf[n:], p.k)
+		if n < len(buf) {
+			buf[n] = '='
+			n++
+		}
+		n += copy(buf[n:], p.v)
+	}
+	return n
+}
+
+// appendCanonicalQuerySlow handles query strings with percent-encoded
+// characters or more than 8 parameters. Allocates via url.Values.
+func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL) int {
+	// Parse + sort. Allocates url.Values map and a keys slice, but only
+	// for complex or long query strings (≥9 params or percent-encoded).
 	params := u.Query()
 	keys := make([]string, 0, len(params))
 	for k := range params {

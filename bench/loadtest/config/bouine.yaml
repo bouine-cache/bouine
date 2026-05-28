@@ -1,0 +1,27 @@
+listen:
+  http: ":8080"
+  admin: ":9000"
+
+admin:
+  token: "loadtest-token"
+
+storage:
+  hot_max_bytes: "1Go"
+  eviction: sieve
+
+upstream_pools:
+  - name: origin
+    targets:
+      - "origin:8080"
+    health:
+      passive:
+        consecutive_5xx: 10
+
+routes:
+  - name: "default"
+    match:
+      path_prefix: "/"
+    pool: origin
+    cache:
+      negative_ttl: "5s"
+      jitter_percent: 5

@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: bouine
+    static_configs:
+      - targets: ['bouine:9000']
+    metrics_path: /metrics
+  - job_name: envoy
+    static_configs:
+      - targets: ['envoy:9901']
+    metrics_path: /stats/prometheus

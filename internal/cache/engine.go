@@ -40,7 +40,19 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 		return Disposition{Decision: Bypass}
 	}
 
-	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, "Cache-Control"))
+	// Lead 2 fast-path: most API / browser requests carry no Cache-Control
+	// header. A direct map lookup avoids ParseCacheControl + string parsing
+	// entirely. The empty Directives{} is safe — all fields default to
+	// "absent" (false / zero), which is the correct interpretation of a
+	// missing Cache-Control header per RFC 9111 §5.2.
+	var reqCC Directives
+	if rawCC, hasCCReq := r.Header["Cache-Control"]; hasCCReq {
+		reqCC = ParseCacheControl(rawCC[0])
+		if len(rawCC) > 1 {
+			// Rare: multiple Cache-Control headers. Re-parse merged value.
+			reqCC = ParseCacheControl(mergeHeaderValues(r.Header, "Cache-Control"))
+		}
+	}
 
 	// Pragma: no-cache is equivalent to Cache-Control: no-cache
 	// for HTTP/1.0 compatibility (RFC 9111 §5.4).
@@ -55,7 +67,16 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 		return evalMiss(reqCC)
 	}
 
-	respCC := ParseCacheControl(mergeHeaderValues(obj.Header, "Cache-Control"))
+	// Lead 1: use pre-parsed CacheControl field instead of re-reading the
+	// header map on every hit. CacheControl is set once by buildObject at
+	// cache-fill time. Fall back to header lookup only when the field is
+	// empty (warm-tier load, test fixtures, or objects built before the
+	// field was introduced).
+	ccStr := obj.CacheControl
+	if ccStr == "" {
+		ccStr = mergeHeaderValues(obj.Header, "Cache-Control")
+	}
+	respCC := ParseCacheControl(ccStr)
 
 	if d, ok := evalNoCache(reqCC, respCC, obj); ok {
 		return d
@@ -85,8 +106,14 @@ func evalNoCache(reqCC, respCC Directives, obj *api.Object) (Disposition, bool) 
 }
 
 func isFresh(obj *api.Object, reqCC Directives, now time.Time) bool {
-	// Compute the response age including any origin Age header.
-	age := now.Sub(obj.StoredAt) + parseOriginAge(obj.Header)
+	// Lead 3: use pre-stored OriginAge instead of re-parsing the Age header
+	// on every freshness check. Falls back to header parsing when the field
+	// is zero (warm-tier objects or legacy builds).
+	originAge := obj.OriginAge
+	if originAge == 0 {
+		originAge = parseOriginAge(obj.Header)
+	}
+	age := now.Sub(obj.StoredAt) + originAge
 	fresh := age < obj.TTL
 
 	if reqCC.MaxAgeSet && age > reqCC.MaxAge {
@@ -103,7 +130,14 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 		return revalidateOrMiss(obj)
 	}
 	if reqCC.MaxStaleSet {
-		age := now.Sub(obj.StoredAt) + parseOriginAge(obj.Header)
+		// Lead 3: reuse OriginAge already computed in isFresh (re-compute
+		// here since isFresh is a separate function; cost is negligible for
+		// the stale path which is less frequent than the hit path).
+		originAge := obj.OriginAge
+		if originAge == 0 {
+			originAge = parseOriginAge(obj.Header)
+		}
+		age := now.Sub(obj.StoredAt) + originAge
 		staleAge := age - obj.TTL
 		if staleAge <= reqCC.MaxStale {
 			return Disposition{Decision: StaleHit, Object: obj}

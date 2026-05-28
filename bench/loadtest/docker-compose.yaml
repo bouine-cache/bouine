@@ -1,101 +1,175 @@
-version: "3.9"
-
 # Single-node load test topology:
 #   origin → [bouine | nginx | varnish | envoy]
 #               ↑
-#           load-gen (vegeta / k6)
+#           load-gen (k6)
 #
-# All proxies share the same origin and cache size (1 GiB).
+# All proxies share the same origin and 1 GiB hot cache.
 # The RESULTS_DIR env var controls where output files are written.
+#
+# Token rotation: set BOUINE_ADMIN_TOKEN in a .env file at the repo root
+# or as a CI environment variable. The default "loadtest-token" is for
+# local development only.
+
+# ── Shared anchors ────────────────────────────────────────────────────────
 
 x-proxy-common: &proxy-common
   networks: [lb-net]
   restart: "no"
+
+# High nofile limit needed only for the proxies under sustained load.
+x-proxy-limits: &proxy-limits
   ulimits:
     nofile: { soft: 65536, hard: 65536 }
 
 services:
 
-  # ── Origin ────────────────────────────────────────────────────────
+  # ── Origin ──────────────────────────────────────────────────────────────
   origin:
     build:
       context: ../../test/integration/origin
     networks: [lb-net]
+    restart: "no"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 2s
       timeout: 1s
       retries: 15
 
-  # ── Proxies ───────────────────────────────────────────────────────
+  # ── Proxies ─────────────────────────────────────────────────────────────
   bouine:
-    <<: *proxy-common
+    <<: [*proxy-common, *proxy-limits]
     build: { context: ../.. }
-    command: ["serve", "--config", "/etc/bouine/config.yaml"]
+    # The image CMD is already "serve --config /etc/bouine/config.yaml";
+    # no override needed — the volume provides the load-test specific config.
     volumes:
       - ./config/bouine.yaml:/etc/bouine/config.yaml:ro
+    environment:
+      # GOMEMLIMIT: keep GC pauses small relative to the 4 GiB memory
+      # limit. The soft limit (3 GiB) leaves 1 GiB headroom for the OS
+      # and prevents a single large stop-the-world GC at 4 GiB.
+      GOMEMLIMIT: 3GiB
+      GOGC: "100"
     depends_on:
       origin: { condition: service_healthy }
     ports: ["8080:8080", "9000:9000"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
+        reservations:
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
 
   nginx:
-    <<: *proxy-common
-    image: nginx:1.27-alpine
+    <<: [*proxy-common, *proxy-limits]
+    # Pinned by both tag and digest for reproducible benchmark comparisons.
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     volumes:
       - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
       - nginx-cache:/var/cache/nginx
     depends_on:
       origin: { condition: service_healthy }
     ports: ["8081:8080"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
 
   varnish:
-    <<: *proxy-common
-    image: varnish:7.6
+    <<: [*proxy-common, *proxy-limits]
+    image: varnish:7.6@sha256:85580f7b7a622bdb652357242337cd5268be7779356dc04658179d60649b5ebf
     command: ["-F", "-a", "0.0.0.0:8080", "-f", "/etc/varnish/default.vcl", "-s", "malloc,1G"]
     volumes:
       - ./config/varnish.vcl:/etc/varnish/default.vcl:ro
     depends_on:
       origin: { condition: service_healthy }
     ports: ["8082:8080"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "varnishadm", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
 
   envoy:
-    <<: *proxy-common
-    image: envoyproxy/envoy:v1.32-latest
+    <<: [*proxy-common, *proxy-limits]
+    image: envoyproxy/envoy:v1.32.3@sha256:127e33c48c60be9a148cf9256d52e734ceda28aa344145023933116c7e524beb
     command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
     volumes:
       - ./config/envoy.yaml:/etc/envoy/envoy.yaml:ro
     depends_on:
       origin: { condition: service_healthy }
     ports: ["8083:8080"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9901/ready"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
 
-  # ── Load generator ────────────────────────────────────────────────
+  # ── Load generator ────────────────────────────────────────────────────
   load-gen:
     <<: *proxy-common
-    image: grafana/k6:latest
+    # Pinned tag + digest for reproducible k6 version across runs.
+    image: grafana/k6:0.54.0@sha256:1f40432b1cbe7234e977f96c362c9bc550a2d2b583d014dd8669fe40d3e9e755
     entrypoint: ["sh"]
     command: ["-c", "sleep infinity"]
     volumes:
       - ./scenarios:/scenarios:ro
       - ${RESULTS_DIR:-./results}:/results
     environment:
-      - BOUINE_ADDR=http://bouine:8080
-      - NGINX_ADDR=http://nginx:8080
-      - VARNISH_ADDR=http://varnish:8080
-      - ENVOY_ADDR=http://envoy:8080
-      - BOUINE_ADMIN=http://bouine:9000
+      BOUINE_ADDR: http://bouine:8080
+      NGINX_ADDR: http://nginx:8080
+      VARNISH_ADDR: http://varnish:8080
+      ENVOY_ADDR: http://envoy:8080
+      BOUINE_ADMIN: http://bouine:9000
+      # ADMIN_TOKEN must match the token in config/bouine.yaml.
+      # Override by setting BOUINE_ADMIN_TOKEN in .env or CI secrets.
+      ADMIN_TOKEN: ${BOUINE_ADMIN_TOKEN:-loadtest-token}
+    # Wait for all proxies to pass their healthchecks before k6 starts,
+    # preventing spurious failures in the first seconds of a run.
     depends_on:
-      - bouine
-      - nginx
-      - varnish
-      - envoy
+      bouine:  { condition: service_healthy }
+      nginx:   { condition: service_healthy }
+      varnish: { condition: service_healthy }
+      envoy:   { condition: service_healthy }
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
 
-  # ── Prometheus scrape (optional) ─────────────────────────────────
+  # ── Prometheus scrape (optional) ───────────────────────────────────────
   prometheus:
     <<: *proxy-common
-    image: prom/prometheus:latest
-    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=1h"]
+    image: prom/prometheus:v3.4.0@sha256:78ed1f9050eb9eaf766af6e580230b1c4965728650e332cd1ee918c0c4699775
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=1h"
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Avoid scraping before bouine is healthy; eliminates gap at t=0 in metrics.
+    depends_on:
+      bouine: { condition: service_healthy }
     ports: ["9090:9090"]
 
 networks:

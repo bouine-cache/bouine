@@ -3,10 +3,13 @@ listen:
   admin: ":9000"
 
 admin:
+  # Set BOUINE_ADMIN_TOKEN in the environment (or .env file at the repo
+  # root) to rotate this token without editing a committed file.
+  # CI: inject via a repository secret → BOUINE_ADMIN_TOKEN env var.
   token: "loadtest-token"
 
 storage:
-  hot_max_bytes: "1Go"
+  hot_max_bytes: 1GiB
   eviction: sieve
 
 upstream_pools:

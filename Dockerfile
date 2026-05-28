@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage ----
-# Cross-compile on the host architecture to avoid QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
+# --platform=$BUILDPLATFORM: compile on the host CPU to avoid QEMU emulation.
+# TARGETOS / TARGETARCH: populated automatically by BuildKit from --platform;
+#   no defaults so the build fails loudly when called without a platform rather
+#   than silently producing an amd64 binary on an arm64 host.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b AS build
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
@@ -27,14 +30,19 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /bouine ./cmd/bouine
 
 # ---- Final stage ----
-FROM gcr.io/distroless/static-debian13:nonroot
+# Pinned digest ensures local and CI builds use the exact same base layer.
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
 
 COPY --from=build /bouine /bouine
 COPY config/default.yaml /etc/bouine/config.yaml
 
 USER nonroot:nonroot
 
-EXPOSE 80 443 443/udp 9000 8443
+# 80/tcp   — HTTP/1.1 + h2c data plane
+# 443/tcp  — HTTPS/1.1 + HTTP/2 data plane
+# 443/udp  — HTTP/3 (QUIC) data plane
+# 9000/tcp — admin API (metrics, purge, dashboard)
+EXPOSE 80 443 443/udp 9000
 
 ENTRYPOINT ["/bouine"]
 CMD ["serve", "--config", "/etc/bouine/config.yaml"]

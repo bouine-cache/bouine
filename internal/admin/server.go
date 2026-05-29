@@ -57,6 +57,17 @@ type Config struct {
 	PeerPurgeFn func(evt api.PurgeEvent) error
 	// PeerBanFn, if non-nil, handles incoming ban broadcasts from peers.
 	PeerBanFn func(evt api.BanEvent) error
+	// CFStatusFn, if non-nil, returns a snapshot of the Cloudflare
+	// integration state for GET /v1/cloudflare/status.
+	CFStatusFn func() CloudflareStatus
+	// OnPurged, if non-nil, is called after a successful purge with the raw
+	// URL. Used for downstream CDN propagation (e.g. Cloudflare).
+	OnPurged func(ctx context.Context, url string)
+	// OnRefreshed, if non-nil, is called after a successful soft-purge with
+	// the raw URL.
+	OnRefreshed func(ctx context.Context, url string)
+	// OnBanned, if non-nil, is called after a successful ban.
+	OnBanned func(ctx context.Context, expr api.BanExpr)
 	// PeerFetchHandler, if non-nil, serves peer cache-lookup requests
 	// from other cluster nodes. Mounted at POST /v1/peer/fetch (no auth
 	// required — callers are trusted cluster peers on the internal
@@ -128,6 +139,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.PeerBanFn != nil {
 		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
+	}
+	if cfg.CFStatusFn != nil {
+		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
 	}
 	if cfg.PeerFetchHandler != nil {
 		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
@@ -214,6 +228,9 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if s.cfg.OnPurged != nil {
+		s.cfg.OnPurged(r.Context(), req.URL)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
 }
 
@@ -227,6 +244,9 @@ func (s *Server) ban(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if s.cfg.OnBanned != nil {
+		s.cfg.OnBanned(r.Context(), expr)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "banned", "count": count})
 }
@@ -247,6 +267,9 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	if err := s.cfg.RefreshFn(key); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if s.cfg.OnRefreshed != nil {
+		s.cfg.OnRefreshed(r.Context(), req.URL)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "refreshed"})
 }
@@ -369,4 +392,23 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// CloudflareStatus is returned by GET /v1/cloudflare/status.
+type CloudflareStatus struct {
+	// Enabled reports whether CF propagation is configured.
+	Enabled bool `json:"enabled"`
+	// ZoneID is the configured zone (non-secret).
+	ZoneID string `json:"zone_id,omitempty"`
+	// Async is the configured propagation mode.
+	Async bool `json:"async"`
+	// LastError is the most recent propagation error, or null if none.
+	LastError *string `json:"last_error"`
+	// LastSuccessAt is the most recent successful propagation timestamp (RFC 3339).
+	LastSuccessAt *string `json:"last_success_at"`
+}
+
+func (s *Server) cloudflareStatus(w http.ResponseWriter, _ *http.Request) {
+	status := s.cfg.CFStatusFn()
+	writeJSON(w, http.StatusOK, status)
 }

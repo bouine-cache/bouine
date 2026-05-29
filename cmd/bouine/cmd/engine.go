@@ -13,6 +13,7 @@ import (
 
 	"github.com/thylong/bouine/internal/admin"
 	"github.com/thylong/bouine/internal/cache"
+	bouinecf "github.com/thylong/bouine/internal/cloudflare"
 	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/dashboard"
@@ -159,9 +160,35 @@ func (e *engine) run(ctx context.Context) error {
 	})
 	g.Go("prefetch", pf.Run)
 	g.Go("config-watcher", watcher.Run)
+	// Cloudflare invalidation propagation.
+	// API token falls back to CF_API_TOKEN env var so operators can inject
+	// it from a Kubernetes Secret without embedding it in the config file.
+	cfAPIToken := e.cfg.Cloudflare.APIToken
+	if cfAPIToken == "" {
+		cfAPIToken = os.Getenv("CF_API_TOKEN")
+	}
+	var cfInvalidator bouinecf.Invalidator
+	if e.cfg.Cloudflare.ZoneID != "" && cfAPIToken != "" {
+		cfClient, cfErr := bouinecf.New(bouinecf.Config{
+			ZoneID:   e.cfg.Cloudflare.ZoneID,
+			APIToken: cfAPIToken,
+			Timeout:  e.cfg.Cloudflare.Timeout,
+		})
+		if cfErr != nil {
+			e.logger.Warn("cloudflare init failed — propagation disabled", "error", cfErr)
+		} else {
+			cfInvalidator = cfClient
+			e.logger.Info("cloudflare invalidation enabled",
+				"zone", cfClient.ZoneID(),
+				"async", e.cfg.Cloudflare.IsAsync(),
+				"propagate", e.cfg.Cloudflare.Propagate)
+		}
+	}
+	cfProp := buildCFPropagator(cfInvalidator, e.cfg.Cloudflare, dpMetrics, e.logger)
+
 	// Shutdown sequencer: controls the ordered drain/flush/leave sequence.
 	seq := shutdown.NewSequencer(e.logger)
-	e.startAdmin(g, ctx, seq, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher)
+	e.startAdmin(g, ctx, seq, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher, cfProp)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -202,21 +229,27 @@ func (e *engine) run(ctx context.Context) error {
 	return g.Wait()
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, seq *shutdown.Sequencer, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher, peerFetcher *cluster.PeerFetcher) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, seq *shutdown.Sequencer, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher, peerFetcher *cluster.PeerFetcher, cfProp *cfPropagator) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
 	}
 
-	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode, watcher)
+	dashMux := e.buildDashboard(ctx, peersFn, store, broadcaster, token, rings, addr, clusterNode, watcher, cfProp)
 
 	srv := admin.New(admin.Config{
-		Addr:    addr,
-		Token:   token,
-		Logger:  e.logger,
-		Metrics: e.metrics,
-		PeersFn: peersFn,
-		ReadyFn: seq.IsReady,
+		Addr:        addr,
+		Token:       token,
+		Logger:      e.logger,
+		Metrics:     e.metrics,
+		PeersFn:     peersFn,
+		CFStatusFn:  cfProp.Status,
+		ReadyFn:     seq.IsReady,
+		OnPurged:    cfProp.PropagateForPurge,
+		OnRefreshed: cfProp.PropagateForRefresh,
+		OnBanned: func(bCtx context.Context, expr api.BanExpr) {
+			cfProp.PropagateForBan(bCtx, expr)
+		},
 		PurgeFn: func(key api.Key) error {
 			if err := store.Delete(ctx, key); err != nil {
 				return err
@@ -235,6 +268,9 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, seq *shutd
 				broadcaster.BroadcastBan(ctx, expr)
 			}
 			return n, nil
+		},
+		RefreshFn: func(key api.Key) error {
+			return store.Delete(ctx, key)
 		},
 		PeerPurgeFn: func(evt api.PurgeEvent) error {
 			return store.Delete(ctx, evt.Key)
@@ -256,7 +292,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, seq *shutd
 
 // buildDashboard wires and returns the dashboard ServeMux.
 // clusterNode may be nil in single-node mode.
-func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string, clusterNode *cluster.Cluster, watcher *config.Watcher) *http.ServeMux {
+func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, addr string, clusterNode *cluster.Cluster, watcher *config.Watcher, cfProp *cfPropagator) *http.ServeMux {
 	dashMux := http.NewServeMux()
 	snapshotPath := ""
 	if e.cfg.Storage.WarmDir != "" {
@@ -305,6 +341,7 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 			if broadcaster != nil {
 				broadcaster.BroadcastPurge(ctx, key, "")
 			}
+			cfProp.PropagateForPurge(dCtx, urlStr)
 			return nil
 		},
 		BanFn: func(dCtx context.Context, hostRegex, pathRegex string) (int, error) {
@@ -316,10 +353,15 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 			if broadcaster != nil {
 				broadcaster.BroadcastBan(ctx, expr)
 			}
+			cfProp.PropagateForBan(dCtx, expr)
 			return n, nil
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			return store.Delete(dCtx, cache.BuildKeyFromURL(urlStr))
+			if err := store.Delete(dCtx, cache.BuildKeyFromURL(urlStr)); err != nil {
+				return err
+			}
+			cfProp.PropagateForRefresh(dCtx, urlStr)
+			return nil
 		},
 	}, dashMux)
 	return dashMux

@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/a-h/templ v0.3.1020
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/cloudflare/cloudflare-go/v2 v2.4.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hashicorp/memberlist v0.5.4
 	github.com/prometheus/client_golang v1.23.2
@@ -44,6 +45,10 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/tidwall/gjson v1.14.4 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect

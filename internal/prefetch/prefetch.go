@@ -219,3 +219,18 @@ func (d *discardWriter) Header() http.Header { return d.header }
 func (d *discardWriter) WriteHeader(code int) { d.status = code }
 
 func (d *discardWriter) Write(b []byte) (int, error) { return len(b), nil }
+
+// Middleware returns an http.Handler that calls p.OnResponse for every
+// response that carries an X-Cache: MISS or X-Cache: REVALIDATED header
+// (i.e., responses that were just stored). This decouples the prefetcher
+// from the cache handler's internal struct so the handler can be built
+// before the prefetcher is created without a circular dependency.
+func (p *Prefetcher) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		xc := w.Header().Get("X-Cache")
+		if xc == "MISS" || xc == "REVALIDATED" {
+			p.OnResponse(r.Context(), r.Host, w.Header())
+		}
+	})
+}

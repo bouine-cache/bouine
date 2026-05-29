@@ -82,7 +82,7 @@ func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 }
 
 func TestPeerFetcher_HopLimitReached(t *testing.T) {
-	f := NewPeerFetcher(nil)
+	f := NewPeerFetcher(nil, nil)
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
 		api.PeerFetchRequest{Key: 1, Hops: MaxHops})
 	if err != nil {

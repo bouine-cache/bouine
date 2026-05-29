@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -81,56 +82,77 @@ func normalizeHeaderValue(v string) string {
 }
 
 // ServeRange handles a Range request against a fully cached body. It
-// parses the Range header, validates it, and writes a 206 Partial
-// Content response with the appropriate Content-Range header.
-//
-// Only single-range requests are supported; multi-range
-// (multipart/byteranges) is deferred.
-//
-// Returns true if the range was served, false if the caller should
-// serve the full body instead (malformed range, unsatisfiable, etc).
+// parses the Range header, validates it, and writes a 206 Partial Content
+// response. Both single-range and multi-range (multipart/byteranges) are
+// supported. Returns true if a range response was written.
 func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object) bool {
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
 		return false
 	}
-
-	// Only support "bytes=start-end" form.
 	if !strings.HasPrefix(rangeHeader, "bytes=") {
 		return false
 	}
 	spec := strings.TrimPrefix(rangeHeader, "bytes=")
+	specs := strings.Split(spec, ",")
 
-	// Reject multi-range.
-	if strings.Contains(spec, ",") {
-		return false
+	// Normalise: validate and resolve all ranges first.
+	type resolvedRange struct{ start, end int64 }
+	ranges := make([]resolvedRange, 0, len(specs))
+	for _, s := range specs {
+		start, end, ok := parseRange(strings.TrimSpace(s), obj.BodySize)
+		if !ok {
+			w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(obj.BodySize, 10))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return true
+		}
+		ranges = append(ranges, resolvedRange{start, end})
 	}
 
-	start, end, ok := parseRange(spec, obj.BodySize)
-	if !ok {
-		// 416 Range Not Satisfiable.
-		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(obj.BodySize, 10))
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return true
-	}
-
-	// Write response headers from stored object.
+	// Copy stored response headers (skip Content-Length; we replace it).
 	for k, vals := range obj.Header {
+		if strings.EqualFold(k, "Content-Length") {
+			continue
+		}
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
 	}
-	length := end - start + 1
-	w.Header().Set("Content-Range",
-		"bytes "+strconv.FormatInt(start, 10)+"-"+
-			strconv.FormatInt(end, 10)+"/"+
-			strconv.FormatInt(obj.BodySize, 10))
-	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-	w.WriteHeader(http.StatusPartialContent)
 
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(obj.Body[start : end+1])
+	if len(ranges) == 1 {
+		// Single-range: standard 206.
+		ra := ranges[0]
+		length := ra.end - ra.start + 1
+		w.Header().Set("Content-Range",
+			"bytes "+strconv.FormatInt(ra.start, 10)+"-"+
+				strconv.FormatInt(ra.end, 10)+"/"+
+				strconv.FormatInt(obj.BodySize, 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(obj.Body[ra.start : ra.end+1])
+		}
+		return true
 	}
+
+	// Multi-range: multipart/byteranges (RFC 7233 §4.1).
+	boundary := "bouine-range-" + strconv.FormatUint(uint64(obj.Key), 16)
+	contentType := "multipart/byteranges; boundary=" + boundary
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusPartialContent)
+	if r.Method == http.MethodHead {
+		return true
+	}
+	ct := obj.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	for _, ra := range ranges {
+		_, _ = fmt.Fprintf(w, "\r\n--%s\r\nContent-Type: %s\r\nContent-Range: bytes %d-%d/%d\r\n\r\n",
+			boundary, ct, ra.start, ra.end, obj.BodySize)
+		_, _ = w.Write(obj.Body[ra.start : ra.end+1])
+	}
+	_, _ = fmt.Fprintf(w, "\r\n--%s--\r\n", boundary)
 	return true
 }
 

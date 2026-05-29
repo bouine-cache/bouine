@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
 
 	"github.com/thylong/bouine/internal/config"
 )
@@ -39,4 +41,39 @@ func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 		MinVersion:   uint16(minVer),
 		NextProtos:   cfg.TLS.ALPN,
 	}, nil
+}
+
+// buildClusterTLSConfig builds a *tls.Config from ClusterTLS settings for
+// mTLS between bouine peers.
+func buildClusterTLSConfig(cfg config.ClusterTLS) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load cluster client cert: %w", err)
+	}
+	pool, err := loadCertPool(cfg.CABundle)
+	if err != nil {
+		return nil, fmt.Errorf("load cluster CA: %w", err)
+	}
+	return &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		RootCAs:            pool,
+		ClientCAs:          pool,
+		ClientAuth:         tls.RequireAndVerifyClientCert,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+	}, nil
+}
+
+// loadCertPool reads PEM-encoded CA certificates from path and returns a
+// *x509.CertPool.
+func loadCertPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path) //nolint:gosec // configured path
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no valid PEM certificates found in %s", path)
+	}
+	return pool, nil
 }

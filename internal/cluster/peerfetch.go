@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -41,6 +43,11 @@ type PeerFetcher struct {
 	latSumMs     atomic.Int64
 	latN         atomic.Int64
 	hopLimitHits atomic.Int64
+	// Prometheus counters — registered if a non-nil registry is passed.
+	pHits     prometheus.Counter
+	pMisses   prometheus.Counter
+	pHopLimit prometheus.Counter
+	pDuration prometheus.Observer
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -50,17 +57,40 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 
 // NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
 // mTLS credentials. If nil a plain HTTP client is used (test-only).
-func NewPeerFetcher(tlsCfg *tls.Config) *PeerFetcher {
+// reg, if non-nil, receives Prometheus metric registration.
+func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher {
 	transport := &http.Transport{
 		ForceAttemptHTTP2: true,
 		TLSClientConfig:   tlsCfg,
 	}
-	return &PeerFetcher{
+	f := &PeerFetcher{
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   peerFetchTimeout,
 		},
 	}
+	if reg != nil {
+		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine", Name: "peer_fetch_hits_total",
+			Help: "Cache objects served from a cluster peer (L0 promotion).",
+		})
+		f.pMisses = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine", Name: "peer_fetch_misses_total",
+			Help: "Peer-fetch RPCs that returned a miss; fell through to origin.",
+		})
+		f.pHopLimit = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine", Name: "peer_fetch_hop_limit_hits_total",
+			Help: "Peer-fetch attempts aborted because MaxHops was reached.",
+		})
+		dur := prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "bouine", Name: "peer_fetch_duration_seconds",
+			Help:    "Round-trip time for successful peer-fetch RPCs.",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+		})
+		f.pDuration = dur
+		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur)
+	}
+	return f
 }
 
 // Fetch asks a peer for a cached object. Returns nil, nil on a cache
@@ -68,6 +98,9 @@ func NewPeerFetcher(tlsCfg *tls.Config) *PeerFetcher {
 func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
 	if req.Hops >= MaxHops {
 		f.hopLimitHits.Add(1)
+		if f.pHopLimit != nil {
+			f.pHopLimit.Inc()
+		}
 		return nil, nil // hop limit reached — go to origin
 	}
 	req.Hops++
@@ -111,12 +144,21 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	_ = start // latency measured from RPC call
 	if !fetchResp.Hit {
 		f.misses.Add(1)
+		if f.pMisses != nil {
+			f.pMisses.Inc()
+		}
 		return nil, nil
 	}
 	f.hits.Add(1)
+	if f.pHits != nil {
+		f.pHits.Inc()
+	}
 	latMs := time.Since(start).Milliseconds()
 	f.latSumMs.Add(latMs)
 	f.latN.Add(1)
+	if f.pDuration != nil {
+		f.pDuration.Observe(float64(latMs) / 1000)
+	}
 	return fetchResp.Object, nil
 }
 

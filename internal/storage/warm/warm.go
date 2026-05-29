@@ -450,3 +450,103 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 	}
 	return nil
 }
+
+// CompactionThreshold is the fraction of dead/tombstoned bytes that triggers
+// compaction. Default 0.3 (compact when ≥30% of stored bytes are stale).
+const CompactionThreshold = 0.3
+
+// NeedsCompaction reports whether the store has enough waste to warrant a
+// compaction pass.
+func (s *Store) NeedsCompaction() bool {
+	entries, total := s.Stats()
+	if total == 0 || entries == 0 {
+		return false
+	}
+	// Estimate dead bytes as (total disk bytes) minus (live entry sizes).
+	// A rough proxy: if live entries are < 70% of total segment capacity,
+	// compaction is beneficial.
+	diskBytes := int64(0)
+	s.mu.RLock()
+	for _, seg := range s.segs {
+		seg.mu.Lock()
+		diskBytes += seg.size
+		seg.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	if diskBytes == 0 {
+		return false
+	}
+	liveFraction := float64(total) / float64(diskBytes)
+	return liveFraction < (1 - CompactionThreshold)
+}
+
+// Compact rewrites all live records to a fresh segment, dropping tombstones
+// and overwritten keys. The old segments are deleted after a successful
+// compaction.
+func (s *Store) Compact() error {
+	// Collect all live records (Scan already locks internally).
+	type liveEntry struct {
+		key  uint64
+		body []byte
+	}
+	var live []liveEntry
+	_ = s.Scan(func(r Record) error {
+		if r.IsTomb {
+			return nil
+		}
+		cp := make([]byte, len(r.Body))
+		copy(cp, r.Body)
+		live = append(live, liveEntry{key: r.Key, body: cp})
+		return nil
+	})
+	if len(live) == 0 {
+		return nil
+	}
+
+	dir := s.dir
+	compactDir := dir + ".compact"
+	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: s.maxBytes, SegMax: s.segMax})
+	if err != nil {
+		return fmt.Errorf("compact: create temp store: %w", err)
+	}
+	for _, e := range live {
+		segID, offset, wErr := tmp.Put(e.key, e.body)
+		if wErr != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("compact: write: %w", wErr)
+		}
+		tmp.SetIndex(e.key, segID, offset)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("compact: close temp: %w", err)
+	}
+
+	// Swap: old → old.bak, compact → live.
+	_ = os.RemoveAll(dir + ".bak")
+	if err := os.Rename(dir, dir+".bak"); err != nil {
+		return fmt.Errorf("compact: rename old: %w", err)
+	}
+	if err := os.Rename(compactDir, dir); err != nil {
+		_ = os.Rename(dir+".bak", dir)
+		return fmt.Errorf("compact: rename new: %w", err)
+	}
+	_ = os.RemoveAll(dir + ".bak")
+
+	// Re-open the compacted store and swap internals.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fresh, err := NewStore(Config{Dir: dir, MaxBytes: s.maxBytes, SegMax: s.segMax})
+	if err != nil {
+		return fmt.Errorf("compact: reopen: %w", err)
+	}
+	for _, seg := range s.segs {
+		_ = seg.f.Close()
+	}
+	s.segs = fresh.segs
+	s.idxMu.Lock()
+	s.index = fresh.index
+	s.idxMu.Unlock()
+	s.stats.entries.Store(fresh.stats.entries.Load())
+	s.stats.bytes.Store(fresh.stats.bytes.Load())
+	return nil
+}

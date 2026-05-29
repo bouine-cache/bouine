@@ -37,6 +37,9 @@ type Config struct {
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin"`
 
+	// Tracing configures OpenTelemetry span export. Empty endpoint = no-op.
+	Tracing TracingConfig `yaml:"tracing"`
+
 	// Prefetch configures background cache warming via Link: rel=preload
 	// headers and optional sitemap crawling (Phase 5).
 	Prefetch PrefetchConfig `yaml:"prefetch"`
@@ -104,6 +107,21 @@ type Cluster struct {
 	Join     []string `yaml:"join"`
 	Replicas int      `yaml:"replicas"`
 	HopLimit int      `yaml:"hop_limit"`
+	// TLS configures mTLS for peer-to-peer cluster communication.
+	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
+	// certificates. Leave empty for plain HTTP (dev / single-node use).
+	TLS ClusterTLS `yaml:"tls"`
+}
+
+// ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.
+type ClusterTLS struct {
+	// CABundle is the path to the CA certificate that signed all cluster
+	// peer certificates. Required when TLS is enabled.
+	CABundle string `yaml:"ca_bundle"`
+	// CertFile is the path to this node's client certificate.
+	CertFile string `yaml:"cert_file"`
+	// KeyFile is the path to this node's private key.
+	KeyFile string `yaml:"key_file"`
 }
 
 // UpstreamPool is a named set of origin targets with a shared TLS
@@ -222,6 +240,15 @@ type RouteHTTP3 struct {
 
 // Experimental holds unstable opt-in feature flags. Empty by default.
 type Experimental struct{}
+
+// TracingConfig configures OTel trace export.
+type TracingConfig struct {
+	// Endpoint is the OTLP/HTTP collector, e.g. "http://otel-collector:4318".
+	// Empty disables tracing (no-op).
+	Endpoint     string  `yaml:"endpoint"`
+	ServiceName  string  `yaml:"service_name"`
+	SamplingRate float64 `yaml:"sampling_rate"`
+}
 
 // PrefetchConfig controls background cache warming (Phase 5).
 type PrefetchConfig struct {

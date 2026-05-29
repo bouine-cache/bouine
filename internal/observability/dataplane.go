@@ -31,13 +31,13 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Namespace: "bouine",
 			Name:      "requests_total",
 			Help:      "Total number of requests processed by the data plane.",
-		}, []string{"method", "status", "route"}),
+		}, []string{"method", "status", "cache_result", "route"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "bouine",
 			Name:      "request_duration_seconds",
 			Help:      "Histogram of request durations in seconds.",
 			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-		}, []string{"method", "status", "route"}),
+		}, []string{"method", "status", "cache_result", "route"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "response_bytes_total",
@@ -104,9 +104,11 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		if route == "" {
 			route = "_default"
 		}
+		// cache_result: normalise X-Cache to HIT/MISS/STALE/REVALIDATED/BYPASS.
+		cacheResult := normaliseCacheResult(w.Header().Get("X-Cache"))
 
-		m.RequestsTotal.WithLabelValues(r.Method, status, route).Inc()
-		m.RequestDuration.WithLabelValues(r.Method, status, route).
+		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, route).Inc()
+		m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, route).
 			Observe(time.Since(start).Seconds())
 		m.ResponseBytesOut.WithLabelValues(r.Method, route).
 			Add(float64(sw.Bytes))
@@ -127,6 +129,19 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 // sampleCounter tracks requests for 1:100 access-log sampling.
 // Using atomic so the counter is lock-free.
 var sampleCounter atomic.Uint64
+
+// normaliseCacheResult maps X-Cache header values to a stable Prometheus
+// label. Unknown values are kept as-is (forward-compatible).
+func normaliseCacheResult(xCache string) string {
+	switch xCache {
+	case "HIT", "MISS", "STALE", "REVALIDATED", "BYPASS":
+		return xCache
+	case "":
+		return "MISS"
+	default:
+		return xCache
+	}
+}
 
 // ShouldLogAccess reports whether this request should be written to
 // the access log. Only 200-OK responses are sampled at 1:100; all

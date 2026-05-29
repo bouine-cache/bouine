@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/thylong/bouine/internal/storage/wal"
 	"github.com/thylong/bouine/internal/storage/warm"
@@ -69,6 +70,24 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		ts.warm = w
 	}
 
+	// Background compaction: check every 30 minutes and compact if the
+	// warm tier has accumulated significant tombstone/dead byte waste.
+	if ts.warm != nil {
+		go func() {
+			ticker := time.NewTicker(30 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				if ts.warm.NeedsCompaction() {
+					if err := ts.warm.Compact(); err != nil {
+						cfg.Logger.Warn("warm tier compaction failed", "error", err)
+					} else {
+						cfg.Logger.Info("warm tier compaction complete")
+					}
+				}
+			}
+		}()
+	}
+
 	if cfg.WALDir != "" {
 		l, err := wal.Open(cfg.WALDir)
 		if err != nil {
@@ -122,6 +141,22 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 	var loaded api.Object
 	if jsonErr := json.Unmarshal(body, &loaded); jsonErr != nil {
 		return nil, jsonErr
+	}
+	// Re-derive transient fields not serialised to disk (tagged json:"-").
+	// These fields exist purely for hit-path performance; recalculating them
+	// once on warm-tier load restores the fast path for subsequent hits.
+	if cc := loaded.Header.Get("Cache-Control"); cc != "" {
+		loaded.CacheControl = cc
+	}
+	if age := loaded.Header.Get("Age"); age != "" {
+		var secs int64
+		for _, b := range []byte(age) {
+			if b < '0' || b > '9' {
+				break
+			}
+			secs = secs*10 + int64(b-'0')
+		}
+		loaded.OriginAge = time.Duration(secs) * time.Second
 	}
 	// Promote to hot tier (best-effort: ignore error).
 	_ = t.hot.Put(ctx, key, &loaded)

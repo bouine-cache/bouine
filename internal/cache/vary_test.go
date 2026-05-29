@@ -3,6 +3,7 @@ package cache
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/thylong/bouine/pkg/api"
@@ -153,15 +154,22 @@ func TestServeRange_NoRangeHeader(t *testing.T) {
 	}
 }
 
-func TestServeRange_MultiRangeRejected(t *testing.T) {
+func TestServeRange_MultiRange(t *testing.T) {
 	obj := &api.Object{Body: []byte("abcde"), BodySize: 5}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Range", "bytes=0-1, 3-4")
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj)
-	if ok {
-		t.Fatal("multi-range should be rejected in phase 3")
+	if !ok {
+		t.Fatal("multi-range should be served as multipart/byteranges")
+	}
+	if rr.Code != 206 {
+		t.Fatalf("expected 206, got %d", rr.Code)
+	}
+	ct := rr.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "multipart/byteranges") {
+		t.Fatalf("expected multipart/byteranges Content-Type, got %q", ct)
 	}
 }
 

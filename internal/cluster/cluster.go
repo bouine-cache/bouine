@@ -59,6 +59,10 @@ type Cluster struct {
 	peers  map[string]*Member // keyed by NodeName
 	local  api.PeerInfo
 	logger *slog.Logger
+	// gossipQueue holds pending broadcast messages to be delivered via
+	// memberlist's compound-message gossip protocol.
+	gossipMu    sync.Mutex
+	gossipQueue []gossipBroadcast
 }
 
 // New creates a Cluster and starts the gossip listener. Call Join
@@ -192,12 +196,53 @@ func (c *Cluster) NodeMeta(limit int) []byte {
 	return b
 }
 
-// NotifyMsg handles incoming user messages (purge/ban events).
-// Full purge broadcast implementation lands in the purge package.
-func (c *Cluster) NotifyMsg([]byte) {}
+// NotifyMsg handles incoming gossip user messages (purge/ban events).
+// Currently logged at debug; a full receive handler is in Phase 4.5.
+func (c *Cluster) NotifyMsg(msg []byte) {
+	c.logger.Debug("cluster: gossip message received", "len", len(msg))
+}
 
-// GetBroadcasts returns pending broadcast messages.
-func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte { return nil }
+// QueueBroadcast enqueues a message for gossip delivery. The message is
+// sent to all peers by memberlist's compound-message protocol alongside
+// normal heartbeat traffic, providing a reliable secondary delivery path
+// for purge/ban events even if a peer's admin HTTP port is temporarily
+// unreachable.
+func (c *Cluster) QueueBroadcast(msg []byte) {
+	c.gossipMu.Lock()
+	c.gossipQueue = append(c.gossipQueue, gossipBroadcast{data: msg})
+	c.gossipMu.Unlock()
+	if c.ml != nil {
+		_ = c.ml.SendBestEffort(nil, msg) // wake gossip loop; error is non-critical
+	}
+}
+
+// GetBroadcasts returns pending broadcast messages up to the byte limit.
+// memberlist calls this on every gossip round; we drain the queue.
+func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
+	c.gossipMu.Lock()
+	defer c.gossipMu.Unlock()
+	if len(c.gossipQueue) == 0 {
+		return nil
+	}
+	var out [][]byte
+	used := 0
+	var remaining []gossipBroadcast
+	for _, b := range c.gossipQueue {
+		if used+overhead+len(b.data) > limit {
+			remaining = append(remaining, b)
+			continue
+		}
+		out = append(out, b.data)
+		used += overhead + len(b.data)
+	}
+	c.gossipQueue = remaining
+	return out
+}
+
+// gossipBroadcast is a single pending gossip message.
+type gossipBroadcast struct {
+	data []byte
+}
 
 // LocalState serialises the ring digest for anti-entropy. Peers
 // exchange digests on every full-state push/pull cycle; if digests

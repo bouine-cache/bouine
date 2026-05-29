@@ -93,9 +93,13 @@ func TestEvaluate_StaleWithSIE(t *testing.T) {
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second)
 	obj.StaleIfError = 5 * time.Minute
+	obj.ETag = `"abc"` // must have validator for Revalidate path
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != StaleHit {
-		t.Fatalf("expected StaleHit in SIE window, got %d", d.Decision)
+	// RFC 5861 §4: stale-if-error requires the cache to attempt
+	// revalidation first; only serve stale if origin returns an error.
+	// Unlike SWR, SIE must NOT short-circuit to StaleHit.
+	if d.Decision != Revalidate {
+		t.Fatalf("expected Revalidate (SIE must attempt origin first), got %d", d.Decision)
 	}
 }
 

@@ -76,17 +76,32 @@ func (o *Object) Fresh(now time.Time) bool {
 }
 
 // StaleButServable reports whether the object is stale but within the
-// SWR or SIE window relative to now.
+// SWR or SIE window relative to now. Use StaleForSWR / StaleForSIE for
+// semantically correct separate checks.
 func (o *Object) StaleButServable(now time.Time) bool {
-	if o.Fresh(now) {
+	return o.StaleForSWR(now) || o.StaleForSIE(now)
+}
+
+// StaleForSWR reports whether the object is stale but within the
+// stale-while-revalidate window. The cache MAY serve the stale object
+// immediately and refresh in the background (RFC 5861 §3).
+func (o *Object) StaleForSWR(now time.Time) bool {
+	if o.Fresh(now) || o.StaleWhileRevalidate == 0 {
 		return false
 	}
 	expiry := o.StoredAt.Add(o.TTL)
-	maxGrace := o.StaleWhileRevalidate
-	if o.StaleIfError > maxGrace {
-		maxGrace = o.StaleIfError
+	return now.Before(expiry.Add(o.StaleWhileRevalidate))
+}
+
+// StaleForSIE reports whether the object is stale but within the
+// stale-if-error window. The cache MUST attempt revalidation first and
+// only serve the stale object when the origin returns an error (RFC 5861 §4).
+func (o *Object) StaleForSIE(now time.Time) bool {
+	if o.Fresh(now) || o.StaleIfError == 0 {
+		return false
 	}
-	return now.Before(expiry.Add(maxGrace))
+	expiry := o.StoredAt.Add(o.TTL)
+	return now.Before(expiry.Add(o.StaleIfError))
 }
 
 // BanExpr is a predicate for lazy ban-list matching. The storage layer

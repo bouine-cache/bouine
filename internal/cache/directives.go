@@ -202,8 +202,22 @@ func eqFold(a, b string) bool {
 }
 
 // FreshnessLifetime computes the freshness lifetime of a response
-// per RFC 9111 §4.2.1.
+// per RFC 9111 §4.2.1. When CDN-Cache-Control is present it takes
+// precedence over Cache-Control for shared-cache TTL decisions
+// (RFC 9211).
 func FreshnessLifetime(respCC Directives, header func(string) string) (time.Duration, bool) {
+	// CDN-Cache-Control takes precedence when present.
+	if cdnCC := header("CDN-Cache-Control"); cdnCC != "" {
+		cdnD := ParseCacheControl(cdnCC)
+		if cdnD.MaxAgeSet {
+			return cdnD.MaxAge, true
+		}
+		if cdnD.NoStore || cdnD.Private {
+			return 0, true // blocked by CDN directive
+		}
+		// CDN-CC present but no TTL directive — treat as expired.
+		return 0, true
+	}
 	if respCC.SMaxAgeSet {
 		return respCC.SMaxAge, true
 	}
@@ -213,8 +227,9 @@ func FreshnessLifetime(respCC Directives, header func(string) string) (time.Dura
 	if exp := header("Expires"); exp != "" {
 		expTime := parseHTTPDate(exp)
 		if expTime.IsZero() {
-			// Invalid Expires → treat as already expired (RFC 9111 §5.3).
-			return 0, true
+			// Invalid Expires → treat as no freshness information,
+			// not as explicitly expired, so heuristic can still apply.
+			return 0, false
 		}
 		dateStr := header("Date")
 		dateTime := parseHTTPDate(dateStr)
@@ -228,8 +243,19 @@ func FreshnessLifetime(respCC Directives, header func(string) string) (time.Dura
 
 // FreshnessLifetimeH is like FreshnessLifetime but takes http.Header
 // directly so it can detect multiple Expires headers (which are
-// invalid per RFC 9110 §5.3).
+// invalid per RFC 9110 §5.3) and read CDN-Cache-Control.
 func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) {
+	// CDN-Cache-Control takes precedence when present (RFC 9211).
+	if cdnCC := mergeHeaderValues(h, "CDN-Cache-Control"); cdnCC != "" {
+		cdnD := ParseCacheControl(cdnCC)
+		if cdnD.MaxAgeSet {
+			return cdnD.MaxAge, true
+		}
+		if cdnD.NoStore || cdnD.Private {
+			return 0, true
+		}
+		return 0, true
+	}
 	if respCC.SMaxAgeSet {
 		return respCC.SMaxAge, true
 	}
@@ -242,11 +268,13 @@ func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) 
 	}
 	// Multiple Expires headers → invalid (RFC 9110 §5.3).
 	if len(expiresVals) > 1 {
-		return 0, true // treat as expired
+		return 0, false // treat as no freshness info, allow heuristic
 	}
 	expTime := parseHTTPDate(expiresVals[0])
 	if expTime.IsZero() {
-		return 0, true
+		// Syntactically invalid Expires → treat as no freshness info
+		// (RFC 9111 §4.2.1: don't use invalid Expires in calculations).
+		return 0, false
 	}
 	dateStr := h.Get("Date")
 	dateTime := parseHTTPDate(dateStr)

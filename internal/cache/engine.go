@@ -130,9 +130,6 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 		return revalidateOrMiss(obj)
 	}
 	if reqCC.MaxStaleSet {
-		// Lead 3: reuse OriginAge already computed in isFresh (re-compute
-		// here since isFresh is a separate function; cost is negligible for
-		// the stale path which is less frequent than the hit path).
 		originAge := obj.OriginAge
 		if originAge == 0 {
 			originAge = parseOriginAge(obj.Header)
@@ -143,8 +140,17 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 			return Disposition{Decision: StaleHit, Object: obj}
 		}
 	}
-	if obj.StaleButServable(now) {
+	// stale-while-revalidate (RFC 5861 §3): serve stale immediately,
+	// background revalidation triggered by the Hit/StaleHit handler.
+	if obj.StaleForSWR(now) {
 		return Disposition{Decision: StaleHit, Object: obj}
+	}
+	// stale-if-error (RFC 5861 §4): object is within SIE window, but we
+	// MUST attempt revalidation first; the handler serves stale only if
+	// origin returns an error. Return Revalidate so the request goes to
+	// origin; the revalidate path checks for 5xx and falls back to stale.
+	if obj.StaleForSIE(now) {
+		return revalidateOrMiss(obj)
 	}
 	return revalidateOrMiss(obj)
 }

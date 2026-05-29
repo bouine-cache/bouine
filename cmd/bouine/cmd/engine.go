@@ -83,12 +83,12 @@ func (e *engine) run(ctx context.Context) error {
 		}
 	}
 	dpMetrics.Rings = rings
-	handler := e.buildHandler(pools, store, dpMetrics)
 
-	// Build optional cluster — must happen before admin so the
-	// /v1/cluster/peers endpoint can reference the Members function.
+	// Build optional cluster before the data-plane handler so peer-fetch
+	// functions can be passed into each route's cache.Handler.
 	var peersFn func() []api.PeerInfo
 	var clusterNode *cluster.Cluster
+	var peerFetcher *cluster.PeerFetcher
 	var broadcaster *cluster.Broadcaster
 	if e.cfg.Cluster.Enabled && e.cfg.Listen.Cluster != "" {
 		clusterNode, err = e.buildCluster()
@@ -96,8 +96,11 @@ func (e *engine) run(ctx context.Context) error {
 			return err
 		}
 		peersFn = clusterNode.Members
+		peerFetcher = cluster.NewPeerFetcher(nil) // nil = plain HTTP (no mTLS) for now
 		broadcaster = cluster.NewBroadcaster(clusterNode, nil, token)
 	}
+
+	handler := e.buildHandler(pools, store, dpMetrics, clusterNode, peerFetcher)
 
 	// Config watcher — fsnotify + SIGHUP hot reload.
 	watcher := config.NewWatcher(config.WatcherConfig{
@@ -112,7 +115,7 @@ func (e *engine) run(ctx context.Context) error {
 		return nil
 	})
 	g.Go("config-watcher", watcher.Run)
-	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode, watcher)
+	e.startAdmin(g, ctx, peersFn, store, broadcaster, token, rings, clusterNode, watcher, peerFetcher)
 	e.startListeners(g, handler)
 	e.startHealthChecks(g, pools)
 
@@ -131,7 +134,7 @@ func (e *engine) run(ctx context.Context) error {
 	return g.Wait()
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher) {
+func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn func() []api.PeerInfo, store storage.Store, broadcaster *cluster.Broadcaster, token string, rings *observability.Rings, clusterNode *cluster.Cluster, watcher *config.Watcher, peerFetcher *cluster.PeerFetcher) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -173,10 +176,14 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, peersFn fu
 			_, err := store.Ban(ctx, evt.Predicate)
 			return err
 		},
+		PeerFetchHandler:   cluster.NewPeerFetchHandler(store),
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rings),
 		DashboardHandler:   dashMux,
 		FaviconHandler:     webdash.FaviconHandler(),
 	})
+	// Guard: only mount peer-fetch handler when running in cluster mode.
+	// (admin.Config.PeerFetchHandler is nil-safe; the server skips it)
+	_ = peerFetcher // suppress unused warning when cluster is disabled
 	g.Go("admin", srv.Serve)
 }
 

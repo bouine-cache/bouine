@@ -109,6 +109,12 @@ type Handler struct {
 	variantCounts map[api.Key]int
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
 	VaryCapHits interface{ Inc() }
+	// ownerFn returns the peer that owns a cache key and whether the key
+	// is local to this node. Nil in single-node mode.
+	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	// peerFetch asks a peer for a cached object. Returns nil, nil on
+	// peer miss; errors fall through to origin. Nil in single-node mode.
+	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
 }
 
 // HandlerConfig configures a cache Handler.
@@ -126,6 +132,14 @@ type HandlerConfig struct {
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
+	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
+	// peer that owns a cache key and whether the key is local. When nil,
+	// the handler operates in single-node mode: every miss goes to origin.
+	OwnerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
+	// the key is owned by a remote peer. Returns nil, nil on peer miss;
+	// errors are treated as misses (origin fallback, logged at debug).
+	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
 }
 
 // NewHandler creates a caching handler.
@@ -143,6 +157,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		stayinAlive:   cfg.StayinAlive,
 		variantCounts: make(map[api.Key]int),
 		VaryCapHits:   cfg.VaryCapHits,
+		ownerFn:       cfg.OwnerFn,
+		peerFetch:     cfg.PeerFetch,
 	}
 }
 
@@ -184,6 +200,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.triggerBgRevalidate(r, key, disp.Object)
 		}
 	case Miss:
+		// Cluster peer-fetch: if this node does not own the key, ask the
+		// owner before going to origin. The owner has a much higher hit
+		// rate for keys it owns (consistent hashing concentrates fills
+		// there). On a peer hit the object is stored locally for future
+		// requests on this node (L0 promotion).
+		// Falls through to origin on peer miss, peer error, or single-node.
+		if h.ownerFn != nil && h.peerFetch != nil {
+			if owner, isLocal := h.ownerFn(key); !isLocal {
+				if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
+					// Re-evaluate: the peer may have returned a stale object.
+					if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
+						h.serveFromCache(w, r, peerObj, now)
+						// Promote to local hot tier (best-effort; ignore error).
+						_ = h.store.Put(r.Context(), key, peerObj)
+						if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
+							h.triggerBgRevalidate(r, key, peerObj)
+						}
+						return
+					}
+				} else if err != nil {
+					h.logger.Debug("peer fetch error, falling back to origin",
+						"peer", owner.Addr, "key", key, "error", err)
+				}
+			}
+		}
 		// StayinAlive: if we have a super-stale object and origin fails,
 		// serve it rather than returning 502.
 		if h.stayinAlive && obj != nil {

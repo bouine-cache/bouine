@@ -6,6 +6,7 @@ package cmd
 // startAdmin, startListeners, etc.) remains in engine.go.
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"os"
@@ -92,8 +93,10 @@ func (e *engine) buildHandler(
 	pools map[string]*origin.Pool,
 	store storage.Store,
 	dpMetrics *observability.DataPlaneMetrics,
+	clusterNode *cluster.Cluster,
+	peerFetcher *cluster.PeerFetcher,
 ) http.Handler {
-	router := e.buildRouter(pools, store, dpMetrics)
+	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher)
 	metricsWrapped := dpMetrics.Middleware(router)
 	return accesslog.Middleware(e.logger, metricsWrapped)
 }
@@ -115,7 +118,7 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 	return pools, nil
 }
 
-func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics) *pipeline.Router {
+func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher) *pipeline.Router {
 	router := pipeline.NewRouter(pipeline.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
 		p := pools[rc.Pool]
@@ -154,7 +157,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 			break
 		}
 		upstream := p.Handler(consecutive5xx, transport)
-		cached := cache.NewHandler(cache.HandlerConfig{
+		cfg := cache.HandlerConfig{
 			Upstream:      upstream,
 			Store:         store,
 			Logger:        e.logger,
@@ -162,7 +165,20 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 			JitterPercent: rc.Cache.JitterPercent,
 			StayinAlive:   rc.Cache.StayinAlive,
 			VaryCapHits:   dpMetrics.VaryCapHits,
-		})
+		}
+		// Wire cluster peer-fetch if enabled. Layer rule: builder.go is L8
+		// and may import both L4 (cache) and L6 (cluster); the cache Handler
+		// never imports cluster directly.
+		if clusterNode != nil && peerFetcher != nil {
+			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
+				owner := clusterNode.Owner(key)
+				return owner, clusterNode.IsLocal(key)
+			}
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
+				return peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			}
+		}
+		cached := cache.NewHandler(cfg)
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, cached)
 	}
 	return router

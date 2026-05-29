@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/listener/proxyproto"
+	"github.com/thylong/bouine/internal/observability/tracing"
 )
 
 // Config controls a single listener.
@@ -60,7 +61,7 @@ func NewHTTP(cfg Config) *Server {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           cfg.Handler,
+		Handler:           tracing.HTTPMiddleware("bouine.listener.http", cfg.Handler),
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -90,7 +91,7 @@ func NewHTTPS(cfg Config) *Server {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           cfg.Handler,
+		Handler:           tracing.HTTPMiddleware("bouine.listener.https", cfg.Handler),
 		TLSConfig:         cfg.TLSConfig,
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,

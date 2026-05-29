@@ -37,6 +37,10 @@ type Config struct {
 	// Admin controls the admin API security settings.
 	Admin AdminConfig `yaml:"admin"`
 
+	// Prefetch configures background cache warming via Link: rel=preload
+	// headers and optional sitemap crawling (Phase 5).
+	Prefetch PrefetchConfig `yaml:"prefetch"`
+
 	// Experimental holds opt-in feature flags that have not graduated
 	// to the stable schema.
 	Experimental Experimental `yaml:"experimental"`
@@ -218,6 +222,14 @@ type RouteHTTP3 struct {
 
 // Experimental holds unstable opt-in feature flags. Empty by default.
 type Experimental struct{}
+
+// PrefetchConfig controls background cache warming (Phase 5).
+type PrefetchConfig struct {
+	// SitemapURLs is a list of sitemap XML URLs to crawl periodically.
+	SitemapURLs []string `yaml:"sitemap_urls"`
+	// SitemapInterval is the crawl interval. Zero disables sitemap crawling.
+	SitemapInterval time.Duration `yaml:"sitemap_interval"`
+}
 
 // AdminConfig controls admin API security.
 type AdminConfig struct {

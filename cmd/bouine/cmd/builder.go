@@ -19,6 +19,7 @@ import (
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/internal/pipeline"
+	"github.com/thylong/bouine/internal/prefetch"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
@@ -96,8 +97,9 @@ func (e *engine) buildHandler(
 	dpMetrics *observability.DataPlaneMetrics,
 	clusterNode *cluster.Cluster,
 	peerFetcher *cluster.PeerFetcher,
+	pf *prefetch.Prefetcher,
 ) http.Handler {
-	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher)
+	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher, pf)
 	metricsWrapped := dpMetrics.Middleware(router)
 	// L2 span: pipeline routing layer.
 	tracedL2 := tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
@@ -121,7 +123,7 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 	return pools, nil
 }
 
-func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher) *pipeline.Router {
+func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher, pf *prefetch.Prefetcher) *pipeline.Router {
 	router := pipeline.NewRouter(pipeline.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
 		p := pools[rc.Pool]
@@ -168,6 +170,7 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 			JitterPercent: rc.Cache.JitterPercent,
 			StayinAlive:   rc.Cache.StayinAlive,
 			VaryCapHits:   dpMetrics.VaryCapHits,
+			Prefetcher:    pf,
 		}
 		// Wire cluster peer-fetch if enabled. Layer rule: builder.go is L8
 		// and may import both L4 (cache) and L6 (cluster); the cache Handler

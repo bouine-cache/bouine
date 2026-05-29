@@ -110,6 +110,11 @@ type Handler struct {
 	variantCounts map[api.Key]int
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
 	VaryCapHits interface{ Inc() }
+	// prefetcher, if non-nil, receives stored responses for Link: rel=preload
+	// warm-up scheduling. Nil-safe.
+	prefetcher interface {
+		OnResponse(ctx context.Context, reqHost string, header http.Header)
+	}
 	// ownerFn returns the peer that owns a cache key and whether the key
 	// is local to this node. Nil in single-node mode.
 	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
@@ -141,6 +146,13 @@ type HandlerConfig struct {
 	// the key is owned by a remote peer. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	// Prefetcher, if non-nil, receives every cacheable origin response so
+	// it can schedule background warm-up for Link: rel=preload URLs.
+	// It is called after the response has been stored, in a non-blocking
+	// best-effort fashion. Nil disables prefetch.
+	Prefetcher interface {
+		OnResponse(ctx context.Context, reqHost string, header http.Header)
+	}
 }
 
 // NewHandler creates a caching handler.
@@ -160,6 +172,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		VaryCapHits:   cfg.VaryCapHits,
 		ownerFn:       cfg.OwnerFn,
 		peerFetch:     cfg.PeerFetch,
+		prefetcher:    cfg.Prefetcher,
 	}
 }
 
@@ -552,6 +565,11 @@ func (h *Handler) writeAndMaybeStore(
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.jitterPercent)
 			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
+		}
+		// Notify the prefetcher so it can schedule background warm-up
+		// for any Link: rel=preload URLs in the stored response.
+		if h.prefetcher != nil {
+			h.prefetcher.OnResponse(r.Context(), r.Host, res.Header)
 		}
 	}
 }

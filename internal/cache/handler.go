@@ -538,7 +538,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 func (h *Handler) writeAndMaybeStore(
 	w http.ResponseWriter,
 	r *http.Request,
-	key api.Key,
+	_ api.Key,
 	res collapse.Result,
 ) {
 	dst := w.Header()

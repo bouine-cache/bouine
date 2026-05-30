@@ -220,9 +220,9 @@ func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 }
 
 // minimalCluster builds a Cluster with no memberlist for unit testing.
-func minimalCluster(_ *testing.T, nodeName string) *Cluster {
+func minimalCluster(_ *testing.T, _ string) *Cluster {
 	return &Cluster{
-		cfg:    Config{NodeName: nodeName, Mode: "strong"},
+		cfg:    Config{NodeName: "node-0", Mode: "strong"},
 		peers:  make(map[string]*Member),
 		ring:   newRing(256),
 		logger: nil,

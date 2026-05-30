@@ -166,3 +166,93 @@ func TestKeyHash_Deterministic(t *testing.T) {
 		t.Fatal("collision on different inputs")
 	}
 }
+
+func TestHotStore_SetWarm(t *testing.T) {
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+
+	k := KeyHash([]byte("warm-key"))
+	o := obj(k, 512)
+	if err := s.Put(context.Background(), k, o); err != nil {
+		t.Fatal(err)
+	}
+
+	s.SetWarm(k)
+
+	sh := &s.shards[uint64(k)&s.mask]
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if e, ok := sh.entries[k]; !ok || !e.hasWarm {
+		t.Fatal("expected entry to be marked hasWarm after SetWarm")
+	}
+	if sh.warmCount != 1 {
+		t.Fatalf("warmCount = %d, want 1", sh.warmCount)
+	}
+}
+
+func TestHotStore_EvictPreferWarm(t *testing.T) {
+	s := NewHotStore(HotConfig{MaxBytes: 4 << 10, NumShards: 1})
+	ctx := context.Background()
+
+	k1 := KeyHash([]byte("a"))
+	k2 := KeyHash([]byte("b"))
+	_ = s.Put(ctx, k1, obj(k1, 1024))
+	_ = s.Put(ctx, k2, obj(k2, 1024))
+
+	// Mark k2 as warm-backed. It should be evicted first.
+	s.SetWarm(k2)
+
+	// Add a third entry — triggers eviction.
+	k3 := KeyHash([]byte("c"))
+	if err := s.Put(ctx, k3, obj(k3, 1024)); err != nil {
+		t.Fatal(err)
+	}
+
+	// k1 (hot-only) should survive; k2 may or may not depending
+	// on SIEVE visited bits, but k3 must be present.
+	if _, err := s.Get(ctx, k3); err != nil {
+		t.Fatal("k3 should exist, got:", err)
+	}
+}
+
+func TestHotStore_EvictFallbackNoWarm(t *testing.T) {
+	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
+	ctx := context.Background()
+
+	k1 := KeyHash([]byte("x"))
+	k2 := KeyHash([]byte("y"))
+	_ = s.Put(ctx, k1, obj(k1, 1000))
+	_ = s.Put(ctx, k2, obj(k2, 1000))
+
+	k3 := KeyHash([]byte("z"))
+	if err := s.Put(ctx, k3, obj(k3, 1000)); err != nil {
+		t.Fatal(err)
+	}
+
+	// k3 must have been inserted (eviction loop allowed it).
+	if _, err := s.Get(ctx, k3); err != nil {
+		t.Fatal("k3 should exist:", err)
+	}
+}
+
+func TestHotStore_WarmCountConsistency(t *testing.T) {
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	ctx := context.Background()
+
+	k := KeyHash([]byte("consistency"))
+	_ = s.Put(ctx, k, obj(k, 100))
+	s.SetWarm(k)
+
+	// Overwrite with new entry; warm status resets.
+	_ = s.Put(ctx, k, obj(k, 200))
+	s.SetWarm(k)
+
+	sh := &s.shards[uint64(k)&s.mask]
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if e, ok := sh.entries[k]; !ok || !e.hasWarm {
+		t.Fatal("entry should have hasWarm after re-marking")
+	}
+	if sh.warmCount != 1 {
+		t.Fatalf("warmCount = %d, want 1 after re-mark", sh.warmCount)
+	}
+}

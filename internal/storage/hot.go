@@ -39,15 +39,20 @@ type activeBan struct {
 }
 
 type shard struct {
-	mu      sync.RWMutex
-	entries map[api.Key]*hotEntry
-	evict   *sieve.List[api.Key]
-	bytes   int64
+	mu        sync.RWMutex
+	entries   map[api.Key]*hotEntry
+	evict     *sieve.List[api.Key]
+	bytes     int64
+	warmCount int64 // entries with warm backup (cheap to evict)
 }
 
 type hotEntry struct {
 	obj   *api.Object
 	sieve *sieve.Entry[api.Key]
+	// hasWarm is true when the object also exists in the warm tier.
+	// Eviction prefers these entries because they can be recovered
+	// from disk.
+	hasWarm bool
 }
 
 type hotStats struct {
@@ -156,7 +161,9 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 }
 
 // Put stores an object. If the store is over budget, SIEVE eviction
-// runs until enough space is freed.
+// runs until enough space is freed. Entries with warm-tier backups are
+// evicted first (cheap: recoverable from disk); hot-only entries are
+// evicted only when no warm-backed entries remain.
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
@@ -164,7 +171,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	defer s.mu.Unlock()
 	perShardMax := h.maxBytes / int64(len(h.shards))
 	for s.bytes+size > perShardMax && s.evict.Len() > 0 {
-		evKey, ok := s.evict.Evict()
+		evKey, ok := s.evictPreferWarm()
 		if !ok {
 			break
 		}
@@ -179,6 +186,9 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	if old, exists := s.entries[key]; exists {
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.sieve)
+		if old.hasWarm {
+			s.warmCount--
+		}
 	}
 
 	se, _ := s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
@@ -339,6 +349,50 @@ func (h *HotStore) Stats() api.Stats {
 
 // Close is a no-op for the hot tier (no files to close).
 func (h *HotStore) Close(_ context.Context) error { return nil }
+
+// SetWarm marks the entry for key as having a warm-tier backup. If the
+// entry doesn't exist, this is a no-op. Warm-backed entries are evicted
+// first under memory pressure.
+func (h *HotStore) SetWarm(key api.Key) {
+	s := h.shard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[key]; ok && !e.hasWarm {
+		e.hasWarm = true
+		s.warmCount++
+	}
+}
+
+// evictPreferWarm selects and removes an entry from the SIEVE list,
+// preferring entries with warm-tier backups. It tries up to maxSkips
+// SIEVE evictions, deferring hot-only entries back into the list.
+// If no warm-backed entries are found, falls back to standard eviction.
+const maxEvictSkips = 4
+
+func (s *shard) evictPreferWarm() (key api.Key, ok bool) {
+	if s.warmCount == 0 {
+		return s.evict.Evict()
+	}
+	for range maxEvictSkips {
+		k, ok := s.evict.Evict()
+		if !ok {
+			return k, false
+		}
+		if he, exists := s.entries[k]; exists {
+			if he.hasWarm {
+				s.warmCount--
+				return k, true
+			}
+			// Hot-only entry: put it back at the head (deferred).
+			se, _ := s.evict.Access(k, func(ek api.Key) *sieve.Entry[api.Key] {
+				return nil
+			})
+			he.sieve = se
+		}
+	}
+	// Fall back to standard eviction after skips exhausted.
+	return s.evict.Evict()
+}
 
 // KeyHash computes the canonical cache key from a byte slice.
 func KeyHash(b []byte) api.Key {

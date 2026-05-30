@@ -179,6 +179,9 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		if err != nil {
 			return err
 		}
+		// Mark the hot entry as having a warm backup so eviction
+		// can prefer it under memory pressure.
+		t.hot.SetWarm(key)
 		if t.wal != nil {
 			return t.wal.Append(wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
 		}

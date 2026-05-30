@@ -191,6 +191,39 @@ templ Overview(d OverviewData) {
 					@compactRingSVG(d.RingSegs)
 				}
 			</div>
+			if d.CFStatus != nil {
+				<div class="bc">
+					<div class="bc-t">Cloudflare CDN</div>
+					if !d.CFStatus.Enabled {
+						<div style="font-size:.72rem;color:var(--m)">Not configured</div>
+					} else {
+						<div class="stat-row">
+							<span class="stat-k">zone</span>
+							<span class="stat-v" style="font-family:monospace;font-size:.72rem">{ d.CFStatus.ZoneID }</span>
+						</div>
+						<div class="stat-row">
+							<span class="stat-k">mode</span>
+							if d.CFStatus.Async {
+								<span class="stat-v good">async</span>
+							} else {
+								<span class="stat-v bad">sync</span>
+							}
+						</div>
+						if d.CFStatus.LastError != "" {
+							<div class="stat-row">
+								<span class="stat-k">last error</span>
+								<span class="stat-v bad" style="font-size:.68rem">{ d.CFStatus.LastError }</span>
+							</div>
+						}
+						if d.CFStatus.LastSuccessAt != "" {
+							<div class="stat-row">
+								<span class="stat-k">last success</span>
+								<span class="stat-v" style="font-size:.68rem">{ d.CFStatus.LastSuccessAt }</span>
+							</div>
+						}
+					}
+				</div>
+			}
 		</div>
 		@overviewChartScript(d.ChartLabels, d.ChartReqs, d.ChartErrs,
 			d.CacheSplit.Hits, d.CacheSplit.Misses, d.CacheSplit.Stales,

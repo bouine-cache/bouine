@@ -82,6 +82,18 @@ type OverviewData struct {
 	Evictions    int64
 	// Ring for the compact circular SVG on the overview bottom row.
 	RingSegs []api.RingSegment
+	// Cloudflare propagation status (nil when CF not configured).
+	CFStatus *CFStatusCard
+}
+
+// CFStatusCard is the view model for the Cloudflare status card on the
+// overview page.
+type CFStatusCard struct {
+	Enabled       bool
+	ZoneID        string
+	Async         bool
+	LastError     string // empty when no error
+	LastSuccessAt string // RFC 3339 or empty
 }
 
 // HotFillPct returns the hot-tier fill percentage (0–100), clamped.

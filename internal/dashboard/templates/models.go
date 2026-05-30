@@ -84,6 +84,10 @@ type OverviewData struct {
 	RingSegs []api.RingSegment
 	// Cloudflare propagation status (nil when CF not configured).
 	CFStatus *CFStatusCard
+	// ClusterMode is the active cluster consistency model:
+	// "strong", "eventual", "full", or "single-node" when cluster is disabled.
+	// Used to conditionally render ring SVG vs. mode info on overview.
+	ClusterMode string
 }
 
 // CFStatusCard is the view model for the Cloudflare status card on the
@@ -156,6 +160,7 @@ type ClusterMeta struct {
 	ProtocolVersion  string
 	GossipInterval   string
 	JoinRetryBudget  string
+	Mode             string // "strong" | "eventual" | "full" | "single-node"
 }
 
 // PeerFetchStats holds aggregated peer fetch telemetry for the cluster page.
@@ -268,14 +273,16 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 	clusterBadge := "disabled"
 	if cfg.Cluster.Enabled {
 		clusterBadgeKind = "g"
-		clusterBadge = "enabled"
+		clusterBadge = cfg.Cluster.Mode
 	}
+	modeHint := "strong: ring-sharded · eventual: local cache, gossip invalidation · full: full replication"
 	sections = append(sections, ConfigSection{
 		Icon: "◎", Title: "cluster", Badge: clusterBadge, BadgeKind: clusterBadgeKind,
 		Rows: []ConfigRow{
 			{Key: "enabled", Value: fmt.Sprintf("%v", cfg.Cluster.Enabled), Kind: boolKind(cfg.Cluster.Enabled), Hint: "gossip membership"},
+			{Key: "mode", Value: cfg.Cluster.Mode, Kind: "str", Hint: modeHint},
 			{Key: "replicas", Value: fmt.Sprintf("%d", cfg.Cluster.Replicas), Kind: "num", Hint: "write replication factor"},
-			{Key: "hop_limit", Value: fmt.Sprintf("%d", cfg.Cluster.HopLimit), Kind: "num", Hint: "max peer-fetch hops"},
+			{Key: "hop_limit", Value: fmt.Sprintf("%d", cfg.Cluster.HopLimit), Kind: "num", Hint: "max peer-fetch hops (strong only)"},
 		},
 	})
 
@@ -598,6 +605,20 @@ func boolStr(v bool) string {
 // ringDotStyle returns the inline style for a ring legend colored dot.
 func ringDotStyle(i int) string {
 	return "background:" + RingColors[i%len(RingColors)]
+}
+
+// modeLabel returns a human-readable label for the cluster mode.
+func modeLabel(mode string) string {
+	switch mode {
+	case "strong":
+		return "strong"
+	case "eventual":
+		return "eventual"
+	case "full":
+		return "full"
+	default:
+		return "single-node"
+	}
 }
 
 // FmtAddrPort strips the scheme and returns host:port from a listen address.

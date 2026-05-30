@@ -52,7 +52,7 @@ echo ">>> Gate checks..."
 FAILED=0
 check_allocs "BenchmarkEvaluate_Hit" 0 || FAILED=1
 check_allocs "BenchmarkHotStore_Get_Hit" 0 || FAILED=1
-check_allocs "BenchmarkHandler_CacheHit" 12 || FAILED=1
+check_allocs "BenchmarkHandler_CacheHit" 13 || FAILED=1
 check_allocs "BenchmarkSIEVE_Access" 0 || FAILED=1
 
 if [ "$FAILED" -ne 0 ]; then

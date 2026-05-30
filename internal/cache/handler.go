@@ -124,6 +124,10 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	// replicateFn, if non-nil, is called after a cacheable response is
+	// stored locally. Used in full cluster mode to broadcast the object
+	// to all peers via gossip. Nil in strong and eventual modes.
+	replicateFn func(ctx context.Context, obj *api.Object)
 }
 
 // HandlerConfig configures a cache Handler.
@@ -166,6 +170,10 @@ type HandlerConfig struct {
 	Prefetcher interface {
 		OnResponse(ctx context.Context, reqHost string, header http.Header)
 	}
+	// ReplicateFn, if non-nil, is called after a cacheable response is
+	// stored locally. Used in full cluster mode to broadcast the object
+	// to all peers via gossip. Nil in strong and eventual modes.
+	ReplicateFn func(ctx context.Context, obj *api.Object)
 }
 
 // NewHandler creates a caching handler.
@@ -189,6 +197,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		ownerFn:       cfg.OwnerFn,
 		peerFetch:     cfg.PeerFetch,
 		prefetcher:    cfg.Prefetcher,
+		replicateFn:   cfg.ReplicateFn,
 	}
 }
 
@@ -586,6 +595,12 @@ func (h *Handler) writeAndMaybeStore(
 		// for any Link: rel=preload URLs in the stored response.
 		if h.prefetcher != nil {
 			h.prefetcher.OnResponse(r.Context(), r.Host, res.Header)
+		}
+		// Replication hook: in full cluster mode, broadcast the newly
+		// cached object to all peers via gossip. No-op in strong and
+		// eventual modes where replicateFn is nil.
+		if h.replicateFn != nil {
+			h.replicateFn(r.Context(), obj)
 		}
 	}
 }

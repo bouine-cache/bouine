@@ -49,10 +49,23 @@ type RingSegment struct {
 	Frac float64 `json:"frac"`
 }
 
+// Gossip event type constants. Every gossip message carries a "type" field
+// that identifies the payload structure. This is the primary discriminator
+// used by NotifyMsg to dispatch events — the previous heuristic (Method != ""
+// / Key != 0 / Predicate != {}) was fragile and would silently break if
+// overlapping fields were added.
+const (
+	GossipTypePurge       = "purge"
+	GossipTypeBan         = "ban"
+	GossipTypeReplication = "replication"
+)
+
 // PurgeEvent is broadcast when a key is explicitly invalidated.
 //
 // Stable.
 type PurgeEvent struct {
+	// Type identifies this as a purge event in the gossip protocol.
+	Type string `json:"type"`
 	// Key is the primary cache key to invalidate.
 	Key Key `json:"key"`
 	// VaryKey, if non-empty, targets only the variant.
@@ -69,6 +82,8 @@ type PurgeEvent struct {
 //
 // Stable.
 type BanEvent struct {
+	// Type identifies this as a ban event in the gossip protocol.
+	Type string `json:"type"`
 	// Predicate is the ban expression.
 	Predicate BanExpr `json:"predicate"`
 	// Issuer is the node name that originated the ban.
@@ -99,4 +114,27 @@ type PeerFetchResponse struct {
 	Hit bool `json:"hit"`
 	// Object is non-nil when Hit is true.
 	Object *Object `json:"object,omitempty"`
+}
+
+// ReplicationEvent is broadcast when a node stores a cacheable response
+// in full replication mode. Peers store the enclosed object in their
+// local hot tier without making their own origin request.
+//
+// The Method field acts as a discriminator for gossip deserialisation:
+// PurgeEvent has Key != 0 but no Method; BanEvent has non-empty
+// Predicate but no Method. Deserialisers try ReplicationEvent first
+// (Method != ""), then PurgeEvent (Key != 0), then BanEvent.
+type ReplicationEvent struct {
+	// Type identifies this as a replication event in the gossip protocol.
+	Type string `json:"type"`
+	// Method is the HTTP method of the original request ("GET" or "HEAD").
+	Method string `json:"method"`
+	// Object is the full cached response to be stored locally.
+	Object *Object `json:"object,omitempty"`
+	// Issuer is the node name that cached the response.
+	Issuer string `json:"issuer"`
+	// IssuedAt is the wall-clock time the response was stored.
+	IssuedAt time.Time `json:"issued_at"`
+	// Seq is the monotonic sequence number from the issuer.
+	Seq uint64 `json:"seq"`
 }

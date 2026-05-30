@@ -14,6 +14,7 @@ import (
 
 	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/cluster"
+	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/accesslog"
 	"github.com/thylong/bouine/internal/observability/tracing"
@@ -62,10 +63,32 @@ func (e *engine) buildCluster() (*cluster.Cluster, error) {
 		Weight:    1.0,
 	}
 	if podIP := os.Getenv("POD_IP"); podIP != "" {
-		advertiseAddr = podIP + ":" + listenPort(e.cfg.Listen.Cluster, "8443")
+		// Resolve hostname to IP if needed. memberlist requires a routable IP
+		// for AdvertiseAddr (hostnames are rejected). Docker Compose service
+		// names are valid DNS names but memberlist won't accept them directly.
+		resolvedIP := podIP
+		if net.ParseIP(podIP) == nil {
+			// DNS may not be ready yet in Docker Compose (other containers
+			// may still be starting). Retry a few times.
+			for i := range 5 {
+				addrs, err := net.DefaultResolver.LookupHost(context.Background(), podIP)
+				if err == nil && len(addrs) > 0 {
+					resolvedIP = addrs[0]
+					break
+				}
+				if i < 4 {
+					time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+				}
+			}
+			if resolvedIP == podIP {
+				e.logger.Warn("cluster: could not resolve POD_IP hostname after retries, using as-is",
+					"pod_ip", podIP)
+			}
+		}
+		advertiseAddr = resolvedIP + ":" + listenPort(e.cfg.Listen.Cluster, "8443")
 		peerInfo.Addr = advertiseAddr
-		peerInfo.AdminAddr = podIP + ":" + listenPort(e.cfg.Listen.Admin, "9000")
-		peerInfo.DataAddr = podIP + ":" + listenPort(e.cfg.Listen.HTTP, "80")
+		peerInfo.AdminAddr = resolvedIP + ":" + listenPort(e.cfg.Listen.Admin, "9000")
+		peerInfo.DataAddr = resolvedIP + ":" + listenPort(e.cfg.Listen.HTTP, "80")
 	}
 
 	return cluster.New(cluster.Config{
@@ -75,6 +98,7 @@ func (e *engine) buildCluster() (*cluster.Cluster, error) {
 		Join:          e.cfg.Cluster.Join,
 		PeerInfo:      peerInfo,
 		Logger:        e.logger,
+		Mode:          e.cfg.Cluster.Mode,
 	})
 }
 
@@ -97,9 +121,10 @@ func (e *engine) buildHandler(
 	dpMetrics *observability.DataPlaneMetrics,
 	clusterNode *cluster.Cluster,
 	peerFetcher *cluster.PeerFetcher,
+	broadcaster *cluster.Broadcaster,
 	pf *prefetch.Prefetcher,
 ) http.Handler {
-	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher, pf)
+	router := e.buildRouter(pools, store, dpMetrics, clusterNode, peerFetcher, broadcaster, pf)
 	metricsWrapped := dpMetrics.Middleware(router)
 	// L2 span: pipeline routing layer.
 	tracedL2 := tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
@@ -123,7 +148,7 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 	return pools, nil
 }
 
-func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher, pf *prefetch.Prefetcher) *pipeline.Router {
+func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher, broadcaster *cluster.Broadcaster, pf *prefetch.Prefetcher) *pipeline.Router {
 	router := pipeline.NewRouter(pipeline.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
 		p := pools[rc.Pool]
@@ -175,10 +200,10 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 			VaryCapHits:   dpMetrics.VaryCapHits,
 			Prefetcher:    pf,
 		}
-		// Wire cluster peer-fetch if enabled. Layer rule: builder.go is L8
-		// and may import both L4 (cache) and L6 (cluster); the cache Handler
-		// never imports cluster directly.
-		if clusterNode != nil && peerFetcher != nil {
+		// Wire cluster peer-fetch if enabled in strong mode.
+		// In eventual and full modes, every node caches locally — no
+		// peer fetch is needed, so ownerFn and PeerFetch stay nil.
+		if clusterNode != nil && peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
 				owner := clusterNode.Owner(key)
 				return owner, clusterNode.IsLocal(key)
@@ -186,6 +211,11 @@ func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store,
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
+		}
+		// Wire replication callback in full mode so the handler
+		// broadcasts cached objects to all peers after storing them.
+		if broadcaster != nil && e.cfg.Cluster.Mode == config.ClusterModeFull {
+			cfg.ReplicateFn = broadcaster.BroadcastReplicate
 		}
 		cached := cache.NewHandler(cfg)
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, cached)

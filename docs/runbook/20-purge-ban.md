@@ -180,11 +180,45 @@ full miss.
 ## Cluster propagation
 
 In a clustered deployment, invalidation commands are forwarded to the
-appropriate peer(s):
+appropriate peer(s). The propagation mechanism depends on the cluster mode:
 
-- **Purge**: forwarded to the key's owner node (consistent-hash ring).
-- **Ban**: broadcast to all peers so every node applies the predicate.
+### `strong` mode (default)
+
+- **Purge**: forwarded to the key's owner node (consistent-hash ring),
+  then broadcast via gossip as a secondary path.
+- **Ban**: broadcast to all peers via HTTP fan-out, then gossiped.
 - **Refresh**: forwarded to the key's owner node.
+- Convergence: ~1 s. If a peer is temporarily unreachable, gossip
+  ensures eventual delivery.
+
+### `eventual` mode
+
+- **Purge/Ban**: broadcast via gossip only. No HTTP fan-out.
+- Convergence: ~1–5 s (gossip interval dependent). Stale reads are
+  possible during the convergence window.
+- Each node caches independently; no key sharding, no peer fetch on miss.
+
+### `full` mode
+
+- **Purge/Ban**: same as `eventual` — gossip only.
+- **Replication**: when a node stores a new cacheable response, it
+  broadcasts the full object to all peers via gossip. Every node holds
+  a copy of every cached object.
+- Convergence: ~1–5 s for invalidation, ~1 s for replication.
+- Memory cost: N× the working set (where N is the cluster size).
 
 The admin API on any node accepts invalidation requests and handles
-routing internally.
+routing internally regardless of cluster mode.
+
+---
+
+## Cluster metrics
+
+| Metric | Description | Mode |
+|--------|-------------|------|
+| `bouine_cluster_mode_info` | Constant gauge with mode label (strong/eventual/full) | all |
+| `bouine_cluster_invalidations_http_total{type="purge\|ban"}` | HTTP fan-out invalidations | strong |
+| `bouine_cluster_invalidations_gossip_total{type="purge\|ban"}` | Gossip invalidation events received | all |
+| `bouine_cluster_replications_sent_total` | Cached objects broadcast to peers | full |
+| `bouine_cluster_replications_received_total` | Replicated objects stored locally | full |
+| `bouine_cluster_replication_bytes_total{direction="sent\|received"}` | Approximate byte size of replicated objects | full |

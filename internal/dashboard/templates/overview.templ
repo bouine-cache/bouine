@@ -184,11 +184,24 @@ templ Overview(d OverviewData) {
 				</div>
 			</div>
 			<div class="bc">
-				<div class="bc-t">Consistent hash ring</div>
-				if len(d.RingSegs) == 0 {
-					<div style="font-size:.72rem;color:var(--m);line-height:1.6">Single-node · no ring data</div>
+				if d.ClusterMode == "strong" {
+					<div class="bc-t">Consistent hash ring</div>
+					if len(d.RingSegs) == 0 {
+						<div style="font-size:.72rem;color:var(--m)">Single-node · no ring data</div>
+					} else {
+						@compactRingSVG(d.RingSegs)
+					}
 				} else {
-					@compactRingSVG(d.RingSegs)
+					<div class="bc-t">Cluster mode</div>
+					<div style="font-size:.72rem;color:var(--m);line-height:1.6">
+						if d.ClusterMode == "eventual" {
+							Eventual — local cache, gossip invalidation, no peer fetch
+						} else if d.ClusterMode == "full" {
+							Full replication — every node holds a copy, gossip everything
+						} else {
+							{ d.ClusterMode }
+						}
+					</div>
 				}
 			</div>
 			if d.CFStatus != nil {

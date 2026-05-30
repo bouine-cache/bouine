@@ -106,10 +106,123 @@ func TestBroadcaster_SkipsSelf(t *testing.T) {
 	}
 }
 
+func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
+	httpCalled := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		httpCalled++
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "eventual"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastPurge(context.Background(), api.Key(99), "/v")
+
+	if httpCalled != 0 {
+		t.Fatalf("eventual mode should not POST to peers, got %d HTTP calls", httpCalled)
+	}
+}
+
+func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
+	httpCalled := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		httpCalled++
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "strong"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastPurge(context.Background(), api.Key(7), "")
+
+	if httpCalled != 1 {
+		t.Fatalf("strong mode should POST to peer, got %d HTTP calls", httpCalled)
+	}
+}
+
+func TestBroadcastReplicate_Full_EnqueuesGossip(t *testing.T) {
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "full"
+
+	b := NewBroadcaster(c, nil)
+	obj := &api.Object{Key: api.Key(42)}
+	b.BroadcastReplicate(context.Background(), obj)
+
+	// Verify the gossip queue has a replication event.
+	c.gossipMu.Lock()
+	msgs := len(c.gossipQueue)
+	c.gossipMu.Unlock()
+	if msgs != 1 {
+		t.Fatalf("expected 1 gossip message, got %d", msgs)
+	}
+}
+
+func TestBroadcastReplicate_Eventual_Noop(t *testing.T) {
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "eventual"
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastReplicate(context.Background(), &api.Object{Key: api.Key(42)})
+
+	c.gossipMu.Lock()
+	msgs := len(c.gossipQueue)
+	c.gossipMu.Unlock()
+	if msgs != 0 {
+		t.Fatalf("eventual mode should not replicate, got %d gossip messages", msgs)
+	}
+}
+
+func TestBroadcastReplicate_Strong_Noop(t *testing.T) {
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "strong"
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastReplicate(context.Background(), &api.Object{Key: api.Key(42)})
+
+	c.gossipMu.Lock()
+	msgs := len(c.gossipQueue)
+	c.gossipMu.Unlock()
+	if msgs != 0 {
+		t.Fatalf("strong mode should not replicate, got %d gossip messages", msgs)
+	}
+}
+
+func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
+	httpCalled := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		httpCalled++
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "eventual"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastBan(context.Background(), api.BanExpr{HostRegex: "test\\.com"})
+
+	if httpCalled != 0 {
+		t.Fatalf("eventual mode should not POST bans, got %d HTTP calls", httpCalled)
+	}
+}
+
 // minimalCluster builds a Cluster with no memberlist for unit testing.
 func minimalCluster(_ *testing.T, nodeName string) *Cluster {
 	return &Cluster{
-		cfg:    Config{NodeName: nodeName},
+		cfg:    Config{NodeName: nodeName, Mode: "strong"},
 		peers:  make(map[string]*Member),
 		ring:   newRing(256),
 		logger: nil,

@@ -14,7 +14,15 @@ templ Cluster(d ClusterData) {
 		<div class="pg-hd">
 			<div>
 				<h2>Cluster</h2>
-				<div class="sub">gossip membership · consistent hash ring · peer fetch</div>
+				if d.Meta.Mode == "strong" {
+					<div class="sub">gossip membership · consistent hash ring · peer fetch</div>
+				} else if d.Meta.Mode == "eventual" {
+					<div class="sub">gossip membership · local cache · gossip invalidation</div>
+				} else if d.Meta.Mode == "full" {
+					<div class="sub">gossip membership · full replication · gossip invalidation</div>
+				} else {
+					<div class="sub">gossip membership</div>
+				}
 			</div>
 		</div>
 		<div id="cluster-r21" class="r21" style="margin-bottom:.6rem"
@@ -60,45 +68,88 @@ templ Cluster(d ClusterData) {
 				</table>
 			</div>
 			<div class="bc">
-				<div class="bc-t">Ring stats</div>
-				<div class="stat-row"><span class="stat-k" title="Number of virtual nodes placed on the ring per real node. More virtual nodes → more uniform key-space distribution.">virtual nodes / real</span><span class="stat-v">{ strconv.Itoa(d.Meta.VirtualNodes) }</span></div>
-				<div class="stat-row"><span class="stat-k" title="Maximum allowed load imbalance between nodes relative to the average. 1.25 means a node can hold up to 25% more keys than perfect balance before the ring rebalances.">load factor</span><span class="stat-v">{ fmt.Sprintf("%.2f", d.Meta.LoadFactor) }</span></div>
-				<div class="stat-row"><span class="stat-k" title="Maximum number of peer-fetch hops a single request can make before bouine falls through to the origin. Prevents infinite loops in multi-node clusters.">hop limit</span><span class="stat-v">{ strconv.Itoa(d.Meta.HopLimit) }</span></div>
-				<div class="stat-row"><span class="stat-k" title="Maximum time to wait for a cache lookup response from a peer node before giving up and going to origin.">peer fetch timeout</span><span class="stat-v">{ d.Meta.PeerFetchTimeout }</span></div>
+				<div class="bc-t">Cluster stats</div>
+				<div class="stat-row"><span class="stat-k" title="Cluster consistency model. strong: ring-sharded keys with peer fetch. eventual: local cache, gossip invalidation. full: full replication, gossip everything.">mode</span><span class="stat-v">{ modeLabel(d.Meta.Mode) }</span></div>
+				if d.Meta.Mode == "strong" {
+					<div class="stat-row"><span class="stat-k" title="Number of virtual nodes placed on the ring per real node. More virtual nodes → more uniform key-space distribution.">virtual nodes / real</span><span class="stat-v">{ strconv.Itoa(d.Meta.VirtualNodes) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Maximum allowed load imbalance between nodes relative to the average. 1.25 means a node can hold up to 25% more keys than perfect balance before the ring rebalances.">load factor</span><span class="stat-v">{ fmt.Sprintf("%.2f", d.Meta.LoadFactor) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Maximum number of peer-fetch hops a single request can make before bouine falls through to the origin. Prevents infinite loops in multi-node clusters.">hop limit</span><span class="stat-v">{ strconv.Itoa(d.Meta.HopLimit) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Maximum time to wait for a cache lookup response from a peer node before giving up and going to origin.">peer fetch timeout</span><span class="stat-v">{ d.Meta.PeerFetchTimeout }</span></div>
+				} else if d.Meta.Mode == "eventual" {
+					<div class="stat-row"><span class="stat-k" title="Replication strategy. None: each node only caches what it fetches from origin.">replication</span><span class="stat-v">none</span></div>
+				} else if d.Meta.Mode == "full" {
+					<div class="stat-row"><span class="stat-k" title="Replication strategy. Every cached object is gossiped to all peers.">replication</span><span class="stat-v">full</span></div>
+				}
 				<div class="stat-row"><span class="stat-k" title="Internal cluster wire protocol version. Both endpoints must be within a N/N-1 compatibility window for peer fetch and broadcast to work.">protocol version</span><span class="stat-v">{ d.Meta.ProtocolVersion }</span></div>
 				<div class="stat-row"><span class="stat-k" title="How often memberlist gossip rounds occur. Controls how quickly membership changes (joins, leaves, failures) propagate to all nodes.">gossip interval</span><span class="stat-v">{ d.Meta.GossipInterval }</span></div>
 				<div class="stat-row"><span class="stat-k" title="Total time bouine keeps retrying cluster joins on startup before accepting single-node mode. Retries every 2s within this window.">join retry budget</span><span class="stat-v">{ d.Meta.JoinRetryBudget }</span></div>
 			</div>
 		</div>
 		<div class="r2">
-			<div class="bc">
-				<div class="bc-t">Consistent hash ring — key ownership</div>
-				if len(d.RingSegs) == 0 {
-					<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Single-node · ring not populated</div>
-				} else {
-					@largeRingSVG(d.RingSegs)
-				}
-			</div>
-			<div class="bc">
-				<div class="bc-t">Peer fetch stats</div>
-				<div class="stat-row"><span class="stat-k" title="Cache hits served from a peer node over the last 6 hours. The requesting pod found the key in another pod's hot tier instead of fetching from origin.">peer hits (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Hits6h, 10) }</span></div>
-				<div class="stat-row"><span class="stat-k" title="Peer fetch attempts that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.">peer misses (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Misses6h, 10) }</span></div>
-				<div class="stat-row">
-					<span class="stat-k" title="Average round-trip time for peer-to-peer cache lookup RPCs. High values indicate network congestion or overloaded peers.">avg peer latency</span>
-					<span class="stat-v">
-						if d.FetchStats.AvgLatMs > 0 {
-							{ fmt.Sprintf("%.2fms", d.FetchStats.AvgLatMs) }
-						} else {
-							—
-						}
-					</span>
+			if d.Meta.Mode == "strong" {
+				<div class="bc">
+					<div class="bc-t">Consistent hash ring — key ownership</div>
+					if len(d.RingSegs) == 0 {
+						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Single-node · ring not populated</div>
+					} else {
+						@largeRingSVG(d.RingSegs)
+					}
 				</div>
-				<div class="stat-row"><span class="stat-k" title="Number of requests that reached the hop limit and went straight to origin. A non-zero value may indicate a routing misconfiguration or ring imbalance.">hop limit hits</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HopLimitHits, 10) }</span></div>
-				<div class="stat-row" style="margin-top:.5rem">
-					<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable. Computed from 30-second health samples.">uptime avg 30m</span>
-					<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
+				<div class="bc">
+					<div class="bc-t">Peer fetch stats</div>
+					<div class="stat-row"><span class="stat-k" title="Cache hits served from a peer node over the last 6 hours. The requesting pod found the key in another pod's hot tier instead of fetching from origin.">peer hits (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Hits6h, 10) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Peer fetch attempts that did not find the key in the target pod's cache (the target pod also had a miss). The request then fell through to origin.">peer misses (6h)</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.Misses6h, 10) }</span></div>
+					<div class="stat-row">
+						<span class="stat-k" title="Average round-trip time for peer-to-peer cache lookup RPCs. High values indicate network congestion or overloaded peers.">avg peer latency</span>
+						<span class="stat-v">
+							if d.FetchStats.AvgLatMs > 0 {
+								{ fmt.Sprintf("%.2fms", d.FetchStats.AvgLatMs) }
+							} else {
+								—
+							}
+						</span>
+					</div>
+					<div class="stat-row"><span class="stat-k" title="Number of requests that reached the hop limit and went straight to origin. A non-zero value may indicate a routing misconfiguration or ring imbalance.">hop limit hits</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HopLimitHits, 10) }</span></div>
+					<div class="stat-row" style="margin-top:.5rem">
+						<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable. Computed from 30-second health samples.">uptime avg 30m</span>
+						<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
+					</div>
 				</div>
-			</div>
+			} else if d.Meta.Mode == "eventual" {
+				<div class="bc">
+					<div class="bc-t">Eventual consistency mode</div>
+					<div style="font-size:.72rem;color:var(--m);padding:.5rem 0;line-height:1.6">
+						Each node caches independently. No key sharding. Invalidation
+						propagates via gossip (eventual consistency, ~1–5 s convergence).
+						No replication — nodes only cache what they fetch from origin.
+					</div>
+				</div>
+				<div class="bc">
+					<div class="bc-t">Gossip stats</div>
+					<div class="stat-row"><span class="stat-k" title="Total gossip invalidation events (purges + bans) received from peers.">invalidations received</span><span class="stat-v">—</span></div>
+					<div class="stat-row" style="margin-top:.5rem">
+						<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable.">uptime avg 30m</span>
+						<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
+					</div>
+				</div>
+			} else if d.Meta.Mode == "full" {
+				<div class="bc">
+					<div class="bc-t">Full replication mode</div>
+					<div style="font-size:.72rem;color:var(--m);padding:.5rem 0;line-height:1.6">
+						Every node holds a copy of every cached object. Maximum hit rate
+						at N× memory cost. Invalidation + replication via gossip.
+					</div>
+				</div>
+				<div class="bc">
+					<div class="bc-t">Replication stats</div>
+					<div class="stat-row"><span class="stat-k" title="Number of cache objects replicated to this node from peers.">replications received</span><span class="stat-v">—</span></div>
+					<div class="stat-row"><span class="stat-k" title="Total gossip invalidation events (purges + bans) received from peers.">invalidations received</span><span class="stat-v">—</span></div>
+					<div class="stat-row" style="margin-top:.5rem">
+						<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable.">uptime avg 30m</span>
+						<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
+					</div>
+				</div>
+			}
 		</div>
 	}
 }

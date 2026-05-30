@@ -306,9 +306,10 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		PeerResults: toPeerResultsEnriched(peers, h.cfg.PeersFn),
 		HotBytes:    hotBytes, HotMaxBytes: hotMax, HotEntries: hotEntries,
 		WarmBytes: warmBytes, WarmMaxBytes: warmMax, WarmEntries: warmEntries,
-		Evictions: evictions,
-		RingSegs:  ringSegs,
-		CFStatus:  h.cfStatusCard(),
+		Evictions:   evictions,
+		RingSegs:    ringSegs,
+		ClusterMode: h.cfg.ClusterMeta.Mode,
+		CFStatus:    h.cfStatusCard(),
 	}))
 }
 

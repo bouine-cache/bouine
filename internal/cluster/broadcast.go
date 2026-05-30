@@ -11,10 +11,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/pkg/api"
 )
 
-// Broadcaster fans out purge and ban events to all cluster peers.
+// Broadcaster fans out purge, ban, and replication events to all
+// cluster peers. In strong mode it uses HTTP fan-out for
+// invalidations; in eventual and full modes it uses gossip only.
 //
 // Stable.
 type Broadcaster struct {
@@ -23,6 +26,8 @@ type Broadcaster struct {
 	seq     atomic.Uint64
 	logger  *slog.Logger
 	token   string
+	mode    string // ClusterModeStrong | ClusterModeEventual | ClusterModeFull
+	metrics *Metrics
 }
 
 // NewBroadcaster creates a broadcaster for the given cluster.
@@ -41,15 +46,18 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		fetcher: fetcher,
 		logger:  logger,
 		token:   tok,
+		mode:    c.Mode(),
+		metrics: c.metrics,
 	}
 }
 
 // BroadcastPurge sends a purge event for key to all live peers.
-// It is fire-and-forget for each peer (failures are logged, not
-// returned). Purges to unreachable peers are tolerated — the
-// anti-entropy reconciler will catch up.
+// In strong mode it posts to each peer's admin API and also enqueues
+// via gossip for redundant delivery. In eventual and full modes it
+// sends via gossip only (no HTTP fan-out).
 func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey string) {
 	evt := api.PurgeEvent{
+		Type:     api.GossipTypePurge,
 		Key:      key,
 		VaryKey:  varyKey,
 		Issuer:   b.cluster.cfg.NodeName,
@@ -57,57 +65,110 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 		Seq:      b.seq.Add(1),
 	}
 
-	peers := b.cluster.Members()
-	var wg sync.WaitGroup
-	for _, p := range peers {
-		if p.Name == b.cluster.cfg.NodeName {
-			continue
-		}
-		wg.Add(1)
-		go func(peer api.PeerInfo) {
-			defer wg.Done()
-			if err := b.sendPurge(ctx, peer, evt); err != nil {
-				b.logger.Warn("purge broadcast failed",
-					"peer", peer.Name,
-					"key", evt.Key,
-					"error", err)
+	if b.mode == config.ClusterModeStrong || b.mode == config.ClusterModeFull {
+		peers := b.cluster.Members()
+		var wg sync.WaitGroup
+		for _, p := range peers {
+			if p.Name == b.cluster.cfg.NodeName {
+				continue
 			}
-		}(p)
+			wg.Add(1)
+			go func(peer api.PeerInfo) {
+				defer wg.Done()
+				defer func() {
+					if v := recover(); v != nil {
+						b.logger.Error("purge broadcast panicked",
+							"peer", peer.Name,
+							"panic", v)
+					}
+				}()
+				if err := b.sendPurge(ctx, peer, evt); err != nil {
+					b.logger.Warn("purge broadcast failed",
+						"peer", peer.Name,
+						"key", evt.Key,
+						"error", err)
+				} else {
+					b.metrics.IncHTTPInvalidation("purge")
+				}
+			}(p)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
-	// Also queue via gossip for redundant delivery to temporarily
-	// unreachable peers (idempotent: duplicate delivery is safe).
-	if body, err := json.Marshal(api.PurgeEvent{Key: key, VaryKey: varyKey}); err == nil {
+
+	// All modes: enqueue via gossip. In strong mode this is redundant
+	// delivery (peer admin may be temporarily unreachable). In eventual
+	// and full modes this is the sole delivery path for invalidations.
+	if body, err := json.Marshal(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
 }
 
 // BroadcastBan sends a ban predicate to all live peers.
+// In strong mode it posts to each peer's admin API. In eventual and
+// full modes it sends via gossip only.
 func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	evt := api.BanEvent{
+		Type:      api.GossipTypeBan,
 		Predicate: expr,
 		Issuer:    b.cluster.cfg.NodeName,
 		IssuedAt:  time.Now(),
 		Seq:       b.seq.Add(1),
 	}
 
-	peers := b.cluster.Members()
-	var wg sync.WaitGroup
-	for _, p := range peers {
-		if p.Name == b.cluster.cfg.NodeName {
-			continue
-		}
-		wg.Add(1)
-		go func(peer api.PeerInfo) {
-			defer wg.Done()
-			if err := b.sendBan(ctx, peer, evt); err != nil {
-				b.logger.Warn("ban broadcast failed",
-					"peer", peer.Name,
-					"error", err)
+	if b.mode == config.ClusterModeStrong || b.mode == config.ClusterModeFull {
+		peers := b.cluster.Members()
+		var wg sync.WaitGroup
+		for _, p := range peers {
+			if p.Name == b.cluster.cfg.NodeName {
+				continue
 			}
-		}(p)
+			wg.Add(1)
+			go func(peer api.PeerInfo) {
+				defer wg.Done()
+				defer func() {
+					if v := recover(); v != nil {
+						b.logger.Error("ban broadcast panicked",
+							"peer", peer.Name,
+							"panic", v)
+					}
+				}()
+				if err := b.sendBan(ctx, peer, evt); err != nil {
+					b.logger.Warn("ban broadcast failed",
+						"peer", peer.Name,
+						"error", err)
+				} else {
+					b.metrics.IncHTTPInvalidation("ban")
+				}
+			}(p)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
+
+	// All modes: enqueue via gossip.
+	if body, err := json.Marshal(evt); err == nil {
+		b.cluster.QueueBroadcast(body)
+	}
+}
+
+// BroadcastReplicate sends a full cached object to all peers via gossip.
+// Only used in full mode. In other modes this is a no-op.
+func (b *Broadcaster) BroadcastReplicate(_ context.Context, obj *api.Object) {
+	if b.mode != config.ClusterModeFull {
+		return
+	}
+	evt := api.ReplicationEvent{
+		Type:     api.GossipTypeReplication,
+		Method:   "GET",
+		Object:   obj,
+		Issuer:   b.cluster.cfg.NodeName,
+		IssuedAt: time.Now(),
+		Seq:      b.seq.Add(1),
+	}
+	if body, err := json.Marshal(evt); err == nil {
+		b.cluster.QueueBroadcast(body)
+		b.metrics.IncReplicationSent()
+		b.metrics.AddReplicationBytes("sent", float64(len(body)))
+	}
 }
 
 func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.PurgeEvent) error {

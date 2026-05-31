@@ -48,24 +48,14 @@ type Config struct {
 	// Prefetch configures background cache warming via Link: rel=preload
 	// headers and optional sitemap crawling (Phase 5).
 	Prefetch PrefetchConfig `yaml:"prefetch"`
-
-	// Experimental holds opt-in feature flags that have not graduated
-	// to the stable schema.
-	Experimental Experimental `yaml:"experimental"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.
 type Listen struct {
 	HTTP    string `yaml:"http"`
 	HTTPS   string `yaml:"https"`
-	HTTP3   string `yaml:"http3"`
 	Admin   string `yaml:"admin"`
 	Cluster string `yaml:"cluster"`
-	// ProxyProtocol enables PROXY protocol v1/v2 parsing on the HTTP and
-	// HTTPS listeners. Required when bouine sits behind an L4 load-balancer
-	// (e.g. AWS NLB, HAProxy) that prepends a PROXY header so the real
-	// client IP is visible in access logs and the request's RemoteAddr.
-	ProxyProtocol bool `yaml:"proxy_protocol"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are
@@ -76,7 +66,6 @@ type TLS struct {
 	MinVersion   string    `yaml:"min_version"`
 	OCSPStapling string    `yaml:"ocsp_stapling"`
 	Reload       TLSReload `yaml:"reload"`
-	HTTP3        TLSHTTP3  `yaml:"http3"`
 }
 
 // TLSCert is a single cert/key pair plus its SNI matches.
@@ -92,18 +81,12 @@ type TLSReload struct {
 	SIGHUP   bool `yaml:"sighup"`
 }
 
-// TLSHTTP3 carries HTTP/3 specific knobs. 0-RTT is always off by
-// default; per-route opt-in lives on Route.
-type TLSHTTP3 struct {
-	Enable0RTT bool `yaml:"enable_0rtt"`
-}
-
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
 	HotMaxBytes  ByteSize `yaml:"hot_max_bytes"`
 	WarmDir      string   `yaml:"warm_dir"`
 	WarmMaxBytes ByteSize `yaml:"warm_max_bytes"`
-	Eviction     string   `yaml:"eviction"` // "sieve" or "w-tinylfu"
+	Eviction     string   `yaml:"eviction"` // "sieve"
 }
 
 // Cluster consistency modes. The mode controls how cache keys are
@@ -217,7 +200,6 @@ type Route struct {
 	Cache    RouteCache    `yaml:"cache"`
 	Request  RouteRequest  `yaml:"request"`
 	Response RouteResponse `yaml:"response"`
-	HTTP3    RouteHTTP3    `yaml:"http3"`
 }
 
 // RouteMatch is the predicate for selecting a route.
@@ -256,15 +238,6 @@ type RouteResponse struct {
 	HeaderSet    map[string]string `yaml:"header_set"`
 	HeaderRemove []string          `yaml:"header_remove"`
 }
-
-// RouteHTTP3 carries per-route HTTP/3 toggles. 0-RTT is off unless
-// explicitly enabled here AND globally allowed.
-type RouteHTTP3 struct {
-	Allow0RTT bool `yaml:"allow_0rtt"`
-}
-
-// Experimental holds unstable opt-in feature flags. Empty by default.
-type Experimental struct{}
 
 // CloudflareConfig configures Cloudflare Cache API invalidation propagation.
 type CloudflareConfig struct {

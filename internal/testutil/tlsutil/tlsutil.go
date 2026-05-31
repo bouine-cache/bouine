@@ -5,7 +5,7 @@
 // Two flavours of helper:
 //
 //   - In-process: Cert and ServerConfig return live tls structures
-//     ready to plug into httptest.NewUnstartedServer or quic-go.
+//     ready to plug into httptest.NewUnstartedServer.
 //   - On-disk: WriteCertFiles writes PEM files to a directory, used
 //     when an integration test execs the bouine binary which loads
 //     certs from disk.
@@ -83,14 +83,14 @@ func Cert(t *testing.T, hosts ...string) tls.Certificate {
 }
 
 // ServerConfig returns a *tls.Config suitable for an httptest TLS
-// server or a quic-go listener.
+// server.
 func ServerConfig(t *testing.T, hosts ...string) *tls.Config {
 	t.Helper()
 	cert := Cert(t, hosts...)
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"h3", "h2", "http/1.1"},
+		NextProtos:   []string{"h2", "http/1.1"},
 	}
 }
 

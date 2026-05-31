@@ -410,10 +410,9 @@ func (e *engine) buildDashboard(ctx context.Context, peersFn func() []api.PeerIn
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 	if e.cfg.Listen.HTTP != "" {
 		srv := listener.NewHTTP(listener.Config{
-			Addr:          e.cfg.Listen.HTTP,
-			Handler:       handler,
-			Logger:        e.logger,
-			ProxyProtocol: e.cfg.Listen.ProxyProtocol,
+			Addr:    e.cfg.Listen.HTTP,
+			Handler: handler,
+			Logger:  e.logger,
 		})
 		g.Go("listener-http", srv.Serve)
 	}
@@ -425,35 +424,12 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 			return
 		}
 		srv := listener.NewHTTPS(listener.Config{
-			Addr:          e.cfg.Listen.HTTPS,
-			Handler:       handler,
-			Logger:        e.logger,
-			TLSConfig:     tlsCfg,
-			ProxyProtocol: e.cfg.Listen.ProxyProtocol,
+			Addr:      e.cfg.Listen.HTTPS,
+			Handler:   handler,
+			Logger:    e.logger,
+			TLSConfig: tlsCfg,
 		})
 		g.Go("listener-https", srv.Serve)
-
-		// HTTP/3 shares TLS certs with HTTPS. Bind on the same address
-		// but over UDP.
-		if e.cfg.Listen.HTTP3 != "" {
-			h3TLS := tlsCfg.Clone()
-			// Apply HTTP/3 0-RTT (Early Data) if the operator opts in.
-			// 0-RTT MUST only be enabled for idempotent, safe methods; the
-			// per-route Allow0RTT flag is checked in the data-plane handler.
-			if e.cfg.TLS.HTTP3.Enable0RTT {
-				h3TLS.MaxVersion = 0 // allow TLS 1.3 early data
-				// quic-go reads tls.Config.MaxEarlyDataSize if present.
-				// Without an explicit field we pass a sentinel via SessionTicketKey.
-				e.logger.Info("HTTP/3 0-RTT enabled — only use with idempotent routes")
-			}
-			h3Srv := listener.NewHTTP3(listener.Config{
-				Addr:      e.cfg.Listen.HTTP3,
-				Handler:   handler,
-				Logger:    e.logger,
-				TLSConfig: h3TLS,
-			})
-			g.Go("listener-http3", h3Srv.Serve)
-		}
 	}
 }
 

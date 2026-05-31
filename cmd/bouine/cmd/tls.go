@@ -10,8 +10,6 @@ import (
 )
 
 // buildTLSConfig translates the config.TLS section into a *tls.Config.
-// Phase 1 supports a single cert; multi-SNI cert selection (PLAN.md §9)
-// lands in phase 4.
 func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 	if len(cfg.TLS.Certs) == 0 {
 		return nil, fmt.Errorf("tls: no certs configured; HTTPS requires at least one cert+key")

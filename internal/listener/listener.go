@@ -1,6 +1,5 @@
 // Package listener is the L1 layer. It owns the data-plane network
-// sockets: HTTP/1.1, HTTP/2 (via net/http TLS + ALPN), HTTP/3 (via
-// quic-go), and optional PROXY-protocol parsing.
+// sockets: HTTP/1.1 and HTTP/2 (via net/http TLS + ALPN).
 //
 // Each protocol gets its own *http.Server (or http3.Server) instance
 // (ADR-0004). All listeners share the same http.Handler — the L2
@@ -17,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thylong/bouine/internal/listener/proxyproto"
 	"github.com/thylong/bouine/internal/observability/tracing"
 )
 
@@ -27,10 +25,6 @@ type Config struct {
 	Handler   http.Handler
 	Logger    *slog.Logger
 	TLSConfig *tls.Config
-	// ProxyProtocol enables PROXY protocol v1/v2 header parsing. The
-	// header is consumed before TLS so the real client IP is visible
-	// in RemoteAddr and access logs.
-	ProxyProtocol bool
 }
 
 // Server wraps a net/http Server with lifecycle methods matching the
@@ -38,11 +32,10 @@ type Config struct {
 //
 // Stable.
 type Server struct {
-	inner         *http.Server
-	name          string
-	logger        *slog.Logger
-	resolved      atomic.Value // stores string
-	proxyProtocol bool
+	inner    *http.Server
+	name     string
+	logger   *slog.Logger
+	resolved atomic.Value // stores string
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
@@ -69,7 +62,7 @@ func NewHTTP(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Server{inner: srv, name: "http", logger: cfg.Logger, proxyProtocol: cfg.ProxyProtocol}
+	return &Server{inner: srv, name: "http", logger: cfg.Logger}
 }
 
 // NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener using the Go 1.24+
@@ -100,7 +93,7 @@ func NewHTTPS(cfg Config) *Server {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Server{inner: srv, name: "https", logger: cfg.Logger, proxyProtocol: cfg.ProxyProtocol}
+	return &Server{inner: srv, name: "https", logger: cfg.Logger}
 }
 
 // Serve starts the listener. For plaintext it calls ListenAndServe;
@@ -120,11 +113,6 @@ func (s *Server) Serve(ctx context.Context) error {
 		"name", s.name,
 		"addr", s.resolved.Load().(string))
 
-	// Wrap with PROXY protocol before TLS so headers are parsed from
-	// the raw TCP stream, not the encrypted payload.
-	if s.proxyProtocol {
-		ln = proxyproto.NewListener(ln)
-	}
 	if s.inner.TLSConfig != nil {
 		ln = tls.NewListener(ln, s.inner.TLSConfig)
 	}

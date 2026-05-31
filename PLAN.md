@@ -13,8 +13,8 @@ explicit deliverables, exit criteria, and the tests that gate moving forward.
 ## 1. Goals & Non-Goals
 
 ### 1.1 Goals
-- **Protocol coverage** — terminate HTTP/1.1, HTTP/2 and HTTP/3 (QUIC), with
-  TLS, ALPN, 0-RTT (opt-in), and HTTP upgrade.
+- **Protocol coverage** — terminate HTTP/1.1 and HTTP/2, with
+  TLS, ALPN, and HTTP upgrade.
 - **RFC 9111 compliance** — score at least on par with Varnish on
   [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 - **Embedded storage** — no external KV (Redis, Memcached, etcd…). Hot tier in
@@ -76,21 +76,18 @@ the wire.
 ├──────────────────────────────────────────────────────────────────────┤
 │ L2  Request Pipeline       normalize · route · ACL · collapse        │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L1  Listeners              HTTP/1.1 · HTTP/2 · HTTP/3 · TLS · PROXY  │
+│ L1  Listeners              HTTP/1.1 · HTTP/2 · TLS                    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.1 HTTP stacks
 
-The daemon runs on exactly **two** HTTP implementations (ADR-0006):
+The daemon runs on a **single** HTTP implementation (ADR-0006):
 
 - `net/http` — for HTTP/1.1 + HTTP/2 (via `http2.ConfigureServer` +
   ALPN). Serves both the **data plane** (proxy/cache) and the **control
   plane** (admin API, metrics, pprof). Plaintext HTTP/2 (h2c) via
-  `golang.org/x/net/http2/h2c` is available for in-mesh traffic.
-- `quic-go/http3` — for HTTP/3 on the data plane only.
-
-Both share `http.Handler`. The control plane is a plain
+  `golang.org/x/net/http2/h2c` is available for in-mesh traffic. The control plane is a plain
 `*http.Server` on its own port, using `net/http.ServeMux` (Go 1.22+
 pattern routing). This keeps the entire handler chain, middleware, and
 test surface uniform.
@@ -103,18 +100,17 @@ dependencies for a surface that serves ≤ 10 RPS.
 
 ```
 /cmd/bouine                  Cobra entrypoint
-/internal/listener           L1 — HTTP/1, /2, /3, TLS, PROXY proto
+/internal/listener           L1 — HTTP/1, /2, TLS
 /internal/pipeline           L2 — normalization, ACL, collapsing
 /internal/cache              L4 — RFC 9111 state machine, Vary, conditionals
 /internal/storage            L3 — RAM tier, mmap tier, eviction, WAL
-/internal/storage/sieve      SIEVE / W-TinyLFU implementations
+/internal/storage/sieve      SIEVE eviction implementation
 /internal/origin             L5 — upstream pool, health, hedge, breaker
 /internal/cluster            L6 — memberlist gossip, consistent hash, peer fetch
 /internal/admin              L7 — net/http admin: purge, ban, config, dash
 /internal/observability      L8 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
 /internal/ai                 L9 — traffic analytics (phase 8)
-/internal/vcl                VCL-compatible shim (deferred — see §18)
 /web/dashboard               L9 — HTMX dashboard templates (phase 6)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
 /pkg/api                     shared types between SDK, admin server, dashboard
@@ -141,7 +137,7 @@ doc-coverage check. Headline guarantees:
 
 - **TB1 — Internet ↔ data plane**: TLS terminates here. Strict RFC 9112
   parser blocks request smuggling (T05). Header / URL / body caps are
-  always enforced (T37). HTTP/2 + HTTP/3 reset-flood mitigations are on
+  always enforced (T37). HTTP/2 reset-flood mitigations are on
   by default (T10).
 - **TB3 — bouine ↔ origin**: TLS verified by default; mTLS, custom CA
   bundles, optional SPKI pinning, server-name override — all configured
@@ -201,7 +197,7 @@ The primary key is built from, in this order:
 
 1. **Scheme** — lowercased (`http` / `https`).
 2. **Host** — lowercased, IDN → punycode, default port stripped
-   (`:80` for http, `:443` for https, `:443` for h3).
+   (`:80` for http, `:443` for https).
 3. **Path** — percent-decoded then re-encoded canonically, collapsed
    duplicate slashes, no fragment.
 4. **Query** — parameters sorted lexicographically; default policy keeps
@@ -237,7 +233,7 @@ to keep variant count bounded.
     oracles, threat T25).
 - bouine never compresses an origin response that came uncompressed if
   the origin explicitly set `Cache-Control: no-transform`.
-- HTTP/2 HPACK and HTTP/3 QPACK never index `Authorization`, `Cookie`,
+- HTTP/2 HPACK never indexes `Authorization`, `Cookie`,
   `Set-Cookie` (RFC 7541 §7.1.3).
 
 ### 3.4 Cookie & authorization policy
@@ -274,12 +270,12 @@ harness so regressions are caught at the smallest scope.
   canonical cache key; sharded N=runtime.NumCPU() ways to avoid contention.
 - **L1 / Warm** — append-only segmented mmap files (à la Varnish "file"
   storage), 64 MiB segments, garbage collected by tombstone compaction.
-- **Spillover policy** — admission via W-TinyLFU; small objects pinned in
+- **Spillover policy** — small objects pinned in
   L0, large/cold objects demoted to L1.
 
 ### 4.2 Eviction
 - Primary: **SIEVE** (simple, near-LRU-K performance, O(1) per op).
-- Optional: **W-TinyLFU** (better hit-ratio under skew; enabled by config).
+
 - Tombstones for in-flight invalidations to avoid races with revalidation.
 
 ### 4.3 Durability
@@ -387,8 +383,7 @@ migration story is short:
   test builds so it can't ship to production accidentally.
 - `tls.client_cert` / `tls.client_key` — mTLS to origin.
 - `tls.min_version` — default `1.2`; recommended `1.3`.
-- `tls.alpn` — default `[h2, http/1.1]`. HTTP/3 to origin is out of
-  scope in v1.0 (most origins don't speak it).
+- `tls.alpn` — default `[h2, http/1.1]`.
 - `tls.pinned_spki_sha256` — optional list of base64-encoded SHA-256
   fingerprints of the origin's SubjectPublicKeyInfo. Any match passes
   verification; empty list disables pinning.
@@ -398,7 +393,7 @@ migration story is short:
 
 ## 7. Listeners (L1) & Pipeline (L2)
 
-- L1 owns sockets, TLS, ALPN, QUIC, optional PROXY-proto v2.
+- L1 owns sockets, TLS, and ALPN.
 - Each protocol exposes a `chan *http.Request` adapter; from there the
   pipeline is protocol-agnostic.
 - L2 pipeline stages (configurable, ordered):
@@ -448,7 +443,6 @@ noted. Validated by a JSON-schema generated from struct tags.
 listen:
   http:   ":80"
   https:  ":443"
-  http3:  ":443/udp"
   admin:  ":9000"            # admin (net/http)
   cluster: ":8443"           # peer mTLS
 
@@ -467,8 +461,6 @@ tls:
   reload:
     fsnotify: true             # reload on file change
     sighup:   true             # reload on SIGHUP
-  http3:
-    enable_0rtt: false         # always off by default; opt-in per route only
   # ACME / cert issuance is out of scope in v1.0 — use cert-manager or a
   # sidecar like step-ca and project the cert into /etc/bouine/tls.
 
@@ -478,7 +470,7 @@ storage:
                                        # cloud provider (EBS/PD/Azure Disk).
                                        # bouine never encrypts the warm tier.
   warm_max_bytes:  20Go
-  eviction:        sieve     # or "w-tinylfu"
+  eviction:        sieve
 
 cluster:
   enabled:    true
@@ -588,7 +580,7 @@ All subcommands honor `--server`, `--token`, and `--insecure`.
   - **canonical** — 1 KB JSON, 99 % hits, 1 % misses, Zipf 0.99.
   - **large** — 1 MB, 80/20 hit ratio.
   - **purge-storm** — 100 RPS purges + 50 kRPS traffic.
-  - **TLS** — both ECDSA and RSA, h2 and h3.
+  - **TLS** — both ECDSA and RSA, h2.
 - Hard gates:
   - ≤ 2 % p99 regression on canonical RPS.
   - ≤ 5 % memory regression.
@@ -608,11 +600,10 @@ All subcommands honor `--server`, `--token`, and `--insecure`.
 - xxhash64 for cache keys.
 - Pre-sized maps; never grow on hot path.
 - `sync.Pool` for header maps and 4 KiB IO buffers.
-- `io_uring` (`gvisor.dev/gvisor/pkg/buffer` or `iouring-go`) optional on
-  Linux for the warm-tier writer.
+
 - Goroutine budget per request: 1 reader + 1 writer max, no per-stage
   spawn.
-- TLS session tickets / 0-RTT (opt-in, GET only) for HTTP/3.
+- TLS session tickets for reduced handshake latency.
 - Body streaming — bodies never fully buffered in memory unless < 64 KiB.
 - Background compaction on a separate goroutine pool with rate-limit.
 
@@ -642,7 +633,7 @@ order, each step bounded by a fraction of `terminationGracePeriodSeconds`
      `Connection: close` on the next response.
    - HTTP/2: send `GOAWAY` with `last_stream_id`; refuse new streams,
      finish in-flight.
-   - HTTP/3: send `GOAWAY` frame; refuse new streams; let QUIC idle out.
+
 3. **t+~1s — leave the cluster.** Gossip a `Leaving` membership update.
    Peers stop routing new requests to us within one gossip cycle.
 4. **t+~1s — drain in-flight requests.** Bounded by the per-request
@@ -690,17 +681,16 @@ green in CI.
 
 ### Phase 1 — Listeners + minimal pass-through proxy (weeks 2–3)
 - HTTP/1.1 + HTTP/2 listener (`net/http`).
-- HTTP/3 listener (`quic-go`).
-- TLS w/ ALPN, optional PROXY-proto v2.
+- TLS w/ ALPN.
 - Upstream pool with round-robin and passive health.
 - No caching yet — pure reverse proxy.
 - Metrics + access log skeleton.
 - **Exit:** `bouine serve` proxies traffic on all 3 protocols; integration
-  tests show parity with `curl --http1.1/--http2/--http3`.
+  tests show parity with `curl --http1.1/--http2`.
 
 ### Phase 2 — Storage layer (weeks 4–5)
 - In-memory tier, sharded.
-- SIEVE eviction; W-TinyLFU behind a feature flag.
+- SIEVE eviction.
 - mmap warm tier with segment GC and WAL.
 - Crash-recovery test.
 - **Exit:** 100 k inserts/s on a laptop, < 1 % memory overhead, recovery
@@ -814,7 +804,7 @@ in phase 5 starts until this passes.
   `docs/security/threat-model.md`; each `Txx` must point to a shipping
   control or a deferred-in-§18 acknowledgement.
 - **External-style security review pass** — manual fuzzing against the
-  PortSwigger smuggling corpus + custom h2/h3 reset corpus + Vary
+  PortSwigger smuggling corpus + custom h2 reset corpus + Vary
   blow-up scenarios; results filed under `docs/security/reviews/`.
 - **Dependency audit** — `govulncheck`, `osv-scanner`, license check;
   `docs/deps.md` reviewed line by line; SBOM (`syft`) attached to the
@@ -869,13 +859,6 @@ the confirmed remainder after auditing the live codebase.
 ---
 
 #### 7.1 Remaining unwired packages (3 items)
-
-- **`internal/listener/h3.go` — HTTP/3 integration test missing.**
-  `engine.startListeners` references `H3Server` and it compiles, but
-  there is no CI test that actually makes an HTTP/3 request through
-  a running server. Add an integration scenario in
-  `test/integration/` that dials via QUIC and confirms a 200 is
-  returned through the H3 path.
 
 - **`internal/cluster/broadcast.go` — `post()` stub never sends HTTP.**
   `Broadcaster.post()` is declared but its HTTP call is a stub;
@@ -1000,7 +983,7 @@ for future work.
 - `internal/cache/engine.go` split into 4 files (§7.3).
 - `cmd/bouine/cmd/engine.go` ≤ 300 LOC after `builder` extraction.
 - `context.Background()` removed from `shutdown.go` (§7.4).
-- HTTP/3 integration test green in CI.
+
 
 ### Phase 6 — Operator dashboard (weeks 21–23)
 
@@ -1304,7 +1287,7 @@ never competes with the data plane.
 
 | Risk | Mitigation |
 |---|---|
-| ~~Fiber/fasthttp can't speak H2/H3~~ | Resolved: Fiber dropped (ADR-0006). Admin runs on `net/http`, same as data plane. |
+| ~~Fiber/fasthttp can't speak H2~~ | Resolved: Fiber dropped (ADR-0006). Admin runs on `net/http`, same as data plane. |
 | mmap on macOS dev machines behaves differently from Linux prod | CI matrix runs storage tests on linux/amd64, linux/arm64, darwin/arm64. |
 | RFC 9111 edge cases drift | cache-tests in CI, blocks merge on regression. |
 | Cluster split-brain on purges | Monotonic purge tokens + anti-entropy reconciler. |
@@ -1334,9 +1317,8 @@ These were open questions during planning; locked in for v1.0.
    segments to disk. Operators are expected to back `warm_dir` with an
    encrypted volume from the cloud provider (EBS/PD/Azure Disk LUKS/SSE).
    This keeps the storage engine simple and avoids key-management surface.
-3. **HTTP/3 0-RTT is disabled by default** — even when HTTP/3 is enabled.
-   Opt-in per route via `route.http3.allow_0rtt: true`; the engine still
-   refuses 0-RTT for non-idempotent methods regardless of config.
+3. **HTTP/3 is not supported** — deferred to post-v1.0 pending demand
+   (see §18).
 4. **VCL-compatible shim is deferred** — designed to live in `/internal/vcl`. It is a
    parser + lowering pass that translates a useful subset of VCL 4.1 into
    the native bouine config tree at load time. Supported surface area:
@@ -1374,7 +1356,7 @@ These were open questions during planning; locked in for v1.0.
    version on every frame; N/N-1 compatibility window so a single
    release supports the rolling-upgrade transition. See §5.5.
 10. **Graceful shutdown is a fixed sequence** — fail readiness, stop
-    accepting new connections (with H2/H3 `GOAWAY`), leave the cluster,
+    accepting new connections (with H2 `GOAWAY`), leave the cluster,
     drain, flush hinted handoff, checkpoint warm tier, close admin and
     cluster listeners last. See §14.1.
 
@@ -1405,8 +1387,9 @@ the canonical NGINX or not-too-VCL-heavy-Varnish use cases.
 5. **Forward-proxy mode** — v1.0 is a reverse cache only.
 6. **gRPC caching** — passthrough only in v1.0.
 7. **WebSocket caching** — never (passthrough only).
-8. **HTTP/3 to origin** — most origins don't speak it; deferred until
-   demand materializes.
+8. **HTTP/3** — both client-facing and origin-facing HTTP/3 are
+   deferred until demand materializes. The `quic-go` dependency was
+   removed to reduce binary size and complexity.
 9. **Pluggable storage backends** — v1.0 is RAM + mmap, embedded only.
    A plugin interface (e.g., NVMe-direct, Optane, object storage) may
    land later.
@@ -1449,7 +1432,7 @@ the canonical NGINX or not-too-VCL-heavy-Varnish use cases.
     circuit-breaker topology: the inner layer absorbs origin failures
     while the outer continues serving stale. v1.2+ candidate.
 20. **Always-warm (pre-warm on eviction)** — when an object is evicted
-    from the hot tier (SIEVE/W-TinyLFU), instead of discarding it,
+    from the hot tier (SIEVE), instead of discarding it,
     schedule an immediate background re-fetch from origin to keep the
     entry warm. Controlled per route via `cache.always_warm: true`.
     Guards: bounded re-fetch concurrency (shared with the prefetcher

@@ -14,7 +14,7 @@ import "testing"
 // Stack is the running test stack (origin + bouine + driver). It is
 // returned from Boot.
 type Stack struct {
-	// AdminAddr is the URL of the admin Fiber listener.
+	// AdminAddr is the URL of the admin listener.
 	AdminAddr string
 	// HTTPAddr is the URL of the plaintext HTTP/1.1 + h2c listener
 	// (empty if disabled).
@@ -22,9 +22,6 @@ type Stack struct {
 	// HTTPSAddr is the URL of the TLS HTTP/1.1 + H2 listener (empty if
 	// disabled).
 	HTTPSAddr string
-	// HTTP3Addr is the UDP "host:port" of the QUIC listener (empty if
-	// disabled).
-	HTTP3Addr string
 	// OriginAddr is the URL of the echo origin.
 	OriginAddr string
 }
@@ -32,10 +29,9 @@ type Stack struct {
 // Options configures Boot. The zero value uses sensible defaults for
 // phase-1 listener tests.
 type Options struct {
-	// EnableHTTP, EnableHTTPS, EnableHTTP3 toggle individual listeners.
+	// EnableHTTP, EnableHTTPS toggle individual listeners.
 	EnableHTTP  bool
 	EnableHTTPS bool
-	EnableHTTP3 bool
 	// ConfigOverlay is YAML that is merged on top of the default test
 	// config before the daemon is started. Empty is fine.
 	ConfigOverlay string

@@ -22,9 +22,3 @@ func TestHTTP2_ProxyParity(t *testing.T) {
 	_ = s
 	// Phase 1: same as HTTP/1.1 but over TLS with ALPN h2.
 }
-
-func TestHTTP3_ProxyParity(t *testing.T) {
-	s := driver.Boot(t, driver.Options{EnableHTTP3: true})
-	_ = s
-	// Phase 1: drive HTTP/3 via quic-go's http3.RoundTripper.
-}

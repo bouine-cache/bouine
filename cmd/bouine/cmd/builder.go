@@ -44,6 +44,12 @@ func (e *engine) buildStore() (storage.Store, error) {
 	})
 }
 
+// buildCluster initialises the gossip cluster node from the Listen and Cluster
+// config sections. When POD_IP is set (Kubernetes Downward API), it resolves the
+// IP and builds fully-qualified advertise addresses for the cluster, admin, and
+// data-plane ports so that peer-to-peer RPCs are routable across pods. If POD_IP
+// is a hostname rather than a dotted IP, DNS lookup is retried up to five times
+// with back-off to tolerate slow container start order in Docker Compose.
 func (e *engine) buildCluster() (*cluster.Cluster, error) {
 	hostname, _ := os.Hostname()
 	if hostname == "" {
@@ -115,6 +121,13 @@ func listenPort(addr, defaultPort string) string {
 	return port
 }
 
+// buildHandler assembles the full L1–L8 data-plane stack for a single HTTP
+// listener. It delegates per-route cache and origin wiring to buildRouter, then
+// wraps the result with three middleware layers in order:
+//
+//  1. DataPlaneMetrics.Middleware — Prometheus counters and histograms (L2).
+//  2. tracing.HTTPMiddleware       — OpenTelemetry span for the pipeline layer.
+//  3. accesslog.Middleware         — structured JSON access log entry per request.
 func (e *engine) buildHandler(
 	pools map[string]*origin.Pool,
 	store storage.Store,
@@ -131,6 +144,10 @@ func (e *engine) buildHandler(
 	return accesslog.Middleware(e.logger, tracedL2)
 }
 
+// buildPools constructs one origin.Pool per upstream_pools entry in the config.
+// Each pool holds the target addresses and passive health state for a named
+// upstream. Pools are keyed by name and passed to buildRouter so each route can
+// reference its upstream by the name declared in config.
 func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 	pools := make(map[string]*origin.Pool, len(e.cfg.UpstreamPools))
 	for _, pc := range e.cfg.UpstreamPools {
@@ -148,6 +165,20 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 	return pools, nil
 }
 
+// buildRouter constructs the pipeline.Router by iterating over the route table
+// and wiring each route to its upstream pool and cache handler. For every route
+// it resolves connection settings (dial timeout, keep-alive, optional hedge
+// transport) from the matching upstream pool config, then builds a
+// cache.Handler that owns the RFC 9111 state machine for that route.
+//
+// Cluster extensions are wired here rather than in cache.Handler so that the
+// handler itself stays cluster-agnostic:
+//
+//   - In strong mode, OwnerFn and PeerFetch are set so on a MISS the handler
+//     can route the request to the consistent-hash owner node.
+//   - In full mode, ReplicateFn is set so after every cacheable fill the object
+//     is broadcast to all peers via gossip.
+//   - In eventual mode neither is set; every node caches independently.
 func (e *engine) buildRouter(pools map[string]*origin.Pool, store storage.Store, dpMetrics *observability.DataPlaneMetrics, clusterNode *cluster.Cluster, peerFetcher *cluster.PeerFetcher, broadcaster *cluster.Broadcaster, pf *prefetch.Prefetcher) *pipeline.Router {
 	router := pipeline.NewRouter(pipeline.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {

@@ -29,6 +29,10 @@ type Metrics struct {
 	// ReplicationBytes tracks the approximate byte size of replicated
 	// objects sent or received via gossip.
 	ReplicationBytes *prometheus.CounterVec
+	// BroadcastFailures counts HTTP fan-out failures by type (purge, ban),
+	// labelled by reason (dial, timeout, 5xx). Non-zero indicates peers
+	// may have missed an invalidation; gossip provides redundant delivery.
+	BroadcastFailures *prometheus.CounterVec
 }
 
 // RegisterMetrics creates and registers the cluster metrics on
@@ -68,6 +72,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_replication_bytes_total",
 			Help:      "Approximate byte size of replicated objects sent or received via gossip.",
 		}, []string{"direction"}),
+		BroadcastFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_broadcast_failures_total",
+			Help:      "HTTP fan-out failures by invalidation type and reason. Gossip provides redundant delivery.",
+		}, []string{"type", "reason"}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -76,6 +85,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.ReplicationsSent,
 		m.ReplicationsReceived,
 		m.ReplicationBytes,
+		m.BroadcastFailures,
 	)
 	return m
 }
@@ -136,4 +146,14 @@ func (m *Metrics) AddReplicationBytes(direction string, bytes float64) {
 		return
 	}
 	m.ReplicationBytes.WithLabelValues(direction).Add(bytes)
+}
+
+// IncBroadcastFailure increments the broadcast-failure counter for
+// the given invalidation type ("purge" or "ban") and reason ("dial",
+// "timeout", "5xx", "marshal").
+func (m *Metrics) IncBroadcastFailure(typ, reason string) {
+	if m == nil || m.BroadcastFailures == nil {
+		return
+	}
+	m.BroadcastFailures.WithLabelValues(typ, reason).Inc()
 }

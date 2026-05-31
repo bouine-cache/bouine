@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,6 +89,7 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 						"peer", peer.Name,
 						"key", evt.Key,
 						"error", err)
+					b.metrics.IncBroadcastFailure("purge", broadcastFailureReason(err))
 				} else {
 					b.metrics.IncHTTPInvalidation("purge")
 				}
@@ -136,6 +139,7 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 					b.logger.Warn("ban broadcast failed",
 						"peer", peer.Name,
 						"error", err)
+					b.metrics.IncBroadcastFailure("ban", broadcastFailureReason(err))
 				} else {
 					b.metrics.IncHTTPInvalidation("ban")
 				}
@@ -177,6 +181,19 @@ func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.
 
 func (b *Broadcaster) sendBan(ctx context.Context, peer api.PeerInfo, evt api.BanEvent) error {
 	return b.post(ctx, peer.AdminAddr, "/v1/peer/ban", evt)
+}
+
+// broadcastFailureReason maps a broadcast HTTP error to a short label
+// for use as a Prometheus dimension.
+func broadcastFailureReason(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Timeout() {
+			return "timeout"
+		}
+		return "dial"
+	}
+	return "5xx"
 }
 
 func (b *Broadcaster) post(ctx context.Context, addr, path string, body any) error {

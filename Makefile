@@ -101,6 +101,16 @@ integration-cluster-full: ## Run full-replication cluster integration tests.
 	go test -v -race -count=1 -timeout=15m -tags=integration \
 	    -run TestFull ./test/integration/...
 
+.PHONY: chaos
+chaos: ## Run chaos test scenarios (peer kill, origin flap, partition, slow origin, rolling restart). Requires Docker.
+	@echo ">>> Chaos test suite"
+	go test -v -race -count=1 -timeout=20m -tags=integration ./test/chaos/...
+
+.PHONY: soak
+soak: ## Run a 24-hour (default) soak against a live cluster. Override with DURATION_H=N RPS=N.
+	@echo ">>> Soak test ($(DURATION_H)h @ $(RPS) rps)"
+	@test/chaos/soak.sh
+
 .PHONY: testcerts
 testcerts: ## Generate ephemeral TLS certificates for integration tests.
 	@mkdir -p test/integration/.tls

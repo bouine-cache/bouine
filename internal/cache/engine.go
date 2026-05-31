@@ -129,13 +129,15 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 	if respCC.MustRevalidate || respCC.ProxyRevalidate {
 		return revalidateOrMiss(obj)
 	}
+	originAge := obj.OriginAge
+	if originAge == 0 {
+		originAge = parseOriginAge(obj.Header)
+	}
 	if reqCC.MaxStaleSet {
-		originAge := obj.OriginAge
-		if originAge == 0 {
-			originAge = parseOriginAge(obj.Header)
-		}
 		age := now.Sub(obj.StoredAt) + originAge
-		staleAge := age - obj.TTL
+		// RFC 9111 §5.2.1.2: stale age = current_age - freshness_lifetime.
+		// freshness_lifetime = TTL + originAge (TTL = freshness_lifetime - originAge).
+		staleAge := age - (obj.TTL + originAge)
 		if staleAge <= reqCC.MaxStale {
 			return Disposition{Decision: StaleHit, Object: obj}
 		}
@@ -151,6 +153,14 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 	// origin; the revalidate path checks for 5xx and falls back to stale.
 	if obj.StaleForSIE(now) {
 		return revalidateOrMiss(obj)
+	}
+	// Heuristic freshness (RFC 9111 §4.2.2): when the response has no explicit
+	// freshness directives at all (no max-age, s-maxage, or Expires header),
+	// the object was cached purely heuristically via Last-Modified/10%.
+	// Without must-revalidate, a cache MAY serve it stale rather than always
+	// revalidating on every miss.
+	if !respCC.MaxAgeSet && !respCC.SMaxAgeSet && obj.Header.Get("Expires") == "" {
+		return Disposition{Decision: StaleHit, Object: obj}
 	}
 	return revalidateOrMiss(obj)
 }

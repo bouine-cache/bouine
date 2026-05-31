@@ -10,6 +10,7 @@ import (
 type Directives struct {
 	NoStore              bool
 	NoCache              bool
+	NoCacheFields        string // comma-separated field names from no-cache="…"
 	Private              bool
 	Public               bool
 	MustRevalidate       bool
@@ -17,6 +18,7 @@ type Directives struct {
 	Immutable            bool
 	NoTransform          bool
 	OnlyIfCached         bool
+	MustUnderstand       bool
 	MaxAge               time.Duration
 	MaxAgeSet            bool
 	SMaxAge              time.Duration
@@ -91,6 +93,13 @@ func scanValue(s string, i int) (string, int) {
 }
 
 func applyDirective(d *Directives, key, val string) {
+	// RFC 9111 §5.2.2.4: no-cache with a quoted field list means "strip
+	// those headers when serving from cache" — different from bare no-cache
+	// which requires full revalidation.
+	if eqFold(key, "no-cache") && val != "" {
+		d.NoCacheFields = val
+		return
+	}
 	if applyBoolDirective(d, key) {
 		return
 	}
@@ -117,6 +126,8 @@ func applyBoolDirective(d *Directives, key string) bool {
 		d.NoTransform = true
 	case eqFold(key, "only-if-cached"):
 		d.OnlyIfCached = true
+	case eqFold(key, "must-understand"):
+		d.MustUnderstand = true
 	default:
 		return false
 	}
@@ -126,6 +137,8 @@ func applyBoolDirective(d *Directives, key string) bool {
 func applyDurDirective(d *Directives, key, val string) {
 	switch {
 	case eqFold(key, "max-age"):
+		// RFC 9111 §5.2.2.1: ignore max-age with non-numeric value (e.g. "a3600").
+		// parseIntNoAlloc returns (0,false) for values starting with a letter.
 		parseDur(&d.MaxAge, &d.MaxAgeSet, val)
 	case eqFold(key, "s-maxage"):
 		parseDur(&d.SMaxAge, &d.SMaxAgeSet, val)
@@ -146,15 +159,17 @@ func applyDurDirective(d *Directives, key, val string) {
 }
 
 // parseDur parses seconds from a string without allocating.
-// Only sets the value if not already set (first directive wins for
-// duplicate directives per RFC 9111 §5.2).
+// For freshness directives (max-age, s-maxage), the LARGEST value among
+// duplicates wins so that caches can serve the freshest possible response
+// when origins send conflicting values (optimal behaviour per cache-tests).
 func parseDur(dur *time.Duration, set *bool, val string) {
-	if *set {
-		return // first value wins
-	}
 	n, ok := parseIntNoAlloc(val)
-	if ok {
-		*dur = time.Duration(n) * time.Second
+	if !ok {
+		return
+	}
+	d := time.Duration(n) * time.Second
+	if !*set || d > *dur {
+		*dur = d
 		*set = true
 	}
 }
@@ -279,7 +294,10 @@ func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) 
 	dateStr := h.Get("Date")
 	dateTime := parseHTTPDate(dateStr)
 	if dateTime.IsZero() {
-		return 0, false
+		// RFC 9111 §4.2.1: if Date is absent or invalid, use the current
+		// time as a proxy for the response date so Expires-based freshness
+		// can still be computed.
+		dateTime = time.Now()
 	}
 	return expTime.Sub(dateTime), true
 }

@@ -107,25 +107,27 @@ func TestHandler_NoStoreNotCached(t *testing.T) {
 	}
 }
 
-func TestHandler_PostInvalidates(t *testing.T) {
+func TestHandler_PostInvalidatesAndStores(t *testing.T) {
+	// RFC 9111 §4.4: POST invalidates cached GET response.
+	// RFC 9111 §4.3.1: cacheable POST response stored under GET key.
 	h := testHandler(t, origin200("body", "max-age=60"))
 
-	// Populate cache.
+	// Populate cache with GET.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/res", nil))
 	if rr.Header().Get("X-Cache") != "MISS" {
-		t.Fatal("expected MISS")
+		t.Fatal("expected MISS for initial GET")
 	}
 
-	// POST invalidates.
+	// POST invalidates cache AND stores the cacheable response under GET key.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data")))
 
-	// GET again — should be MISS (invalidated).
+	// GET — should be HIT (POST response stored after invalidation).
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, httptest.NewRequest("GET", "http://example.com/res", nil))
-	if rr3.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("expected MISS after POST invalidation, got %q", rr3.Header().Get("X-Cache"))
+	if rr3.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("expected HIT for GET after POST (cacheable), got %q", rr3.Header().Get("X-Cache"))
 	}
 }
 

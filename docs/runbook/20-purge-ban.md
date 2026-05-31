@@ -148,8 +148,13 @@ curl -X POST http://127.0.0.1:9000/v1/refresh \
 | Bulk invalidation by pattern      | **Ban**    |
 
 Refresh is gentler: if the origin is slow or down, the stale response
-is still served (with `stale-if-error` if configured). Purge forces a
-full miss.
+is still served (stale-on-error fallback is always active for responses
+without `must-revalidate`; explicit `stale-if-error` windows extend it
+further). Purge forces a full miss.
+
+> **Note**: When bouine serves a stale response it adds
+> `Warning: 110 - "Response is Stale"` to the reply (RFC 7234 §5.5.3).
+> Downstream clients and load balancers may log or act on this header.
 
 ---
 
@@ -161,6 +166,7 @@ full miss.
 | `bouine_ban_total`                    | Total ban operations.                |
 | `bouine_ban_list_size`                | Current active ban predicates.       |
 | `bouine_cache_result_total{result="miss_purged"}` | Requests that hit a purged/banned entry. |
+| `bouine_cache_result_total{result="stale"}` | Stale serves (SWR, SIE, or error fallback). |
 
 ### Alerts
 
@@ -173,6 +179,22 @@ full miss.
     severity: warning
   annotations:
     summary: "Elevated purge rate on {{ $labels.instance }}"
+
+# Alert if stale serves climb above baseline (possible origin outage)
+- alert: HighStaleServeRate
+  expr: |
+    rate(bouine_cache_result_total{result="stale"}[5m])
+    /
+    rate(bouine_cache_result_total[5m]) > 0.10
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Stale serve ratio > 10 % on {{ $labels.instance }}"
+    description: |
+      Bouine is serving stale responses at an elevated rate. Possible causes:
+      origin is returning 5xx, SWR window is large, or heuristic freshness
+      objects have gone stale. Check X-Cache: STALE responses and upstream health.
 ```
 
 ---

@@ -139,15 +139,15 @@ The high-level Go module layout follows the layered architecture in
 ```
 /cmd/bouine                  Cobra entrypoint
 /internal/server             L1 — HTTP/1, /2, TLS, route matching
-/internal/cache              L4 — RFC 9111 state machine, Vary, conditionals
-/internal/storage            L3 — RAM tier, mmap tier, eviction, WAL
-/internal/origin             L5 — upstream pool, health, hedge, breaker
-/internal/cluster            L6 — gossip, consistent hash, peer fetch
-/internal/admin              L7 — net/http admin: purge, ban, config, dash
-/internal/observability      L8 — OTEL, Prom, slog, pprof
+/internal/cache              L3 — RFC 9111 state machine, Vary, conditionals
+/internal/storage            L2 — RAM tier, mmap tier, eviction, WAL
+/internal/origin             L4 — upstream pool, health, hedge, breaker
+/internal/cluster            L5 — gossip, consistent hash, peer fetch
+/internal/admin              L6 — net/http admin: purge, ban, config, dash
+/internal/observability      L7 — OTEL, Prom, slog, pprof
 /internal/config             config loader, schema, hot reload
 /internal/prefetch           prefetcher: Link preload + sitemap crawler
-/internal/ai                 L9 — traffic analytics (phase 6)
+/internal/ai                 L8 — traffic analytics (phase 6)
 /internal/vcl                VCL-compatible shim (deferred — see §18)
 /pkg/bouineapi               public Go SDK
 /pkg/api                     shared types between SDK, admin server, dashboard

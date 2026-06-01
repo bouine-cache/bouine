@@ -96,21 +96,20 @@ These rules override autonomy. Break them and the change must be reverted.
 
 ## 3. Layered Architecture Rules
 
-Layers are numbered L1 (closest to the wire) through L9 (AI / dashboard).
+Layers are numbered L1 (closest to the wire) through L8 (AI / dashboard).
 See `PLAN.md §2`.
 
 ### 3.1 Allowed dependencies
 
 ```
-L9 → L8, L7, /pkg/api
-L8 → /pkg/api, third-party telemetry libs only
-L7 → L8, L6, L4, L3 (read-only), /pkg/api
-L6 → L8, L4, L3, /pkg/api
-L5 → L8, /pkg/api
-L4 → L8, L3, L5, /pkg/api
-L3 → L8, /pkg/api
-L2 → L8, L4, L5, /pkg/api
-L1 → L8, L2, /pkg/api
+L8 → L7, L6, /pkg/api
+L7 → /pkg/api, third-party telemetry libs only
+L6 → L7, L5, L3, L2 (read-only), /pkg/api
+L5 → L7, L3, L2, /pkg/api
+L4 → L7, /pkg/api
+L3 → L7, L2, L4, /pkg/api
+L2 → L7, /pkg/api
+L1 → L7, /pkg/api
 ```
 
 - `pkg/api` and `pkg/bouineapi` are leaves; they import nothing from
@@ -494,7 +493,7 @@ When more than one agent is working concurrently:
    merges + notes.
 6. **Conflict resolution**: the agent that landed the interface owns
    conflicts on that interface. The data-plane on-call rule applies:
-   regressions to L1–L4 take priority over any other work.
+   regressions to L1–L3 take priority over any other work.
 7. **Single source of truth**: `PLAN.md` for *what*, `AGENTS.md` for
    *how*, `docs/decisions/` for *why*. If they disagree, escalate to the
    user — don't pick.
@@ -523,7 +522,7 @@ For every task an agent starts, execute this loop. No shortcuts.
    - Add tests as you go, not at the end.
 4. **Verify**
    - `make lint test` minimum.
-   - If touching L1–L6: `make bench` and compare to `main`.
+   - If touching L1–L5: `make bench` and compare to `main`.
    - If touching `cache`: `make conformance`.
    - If touching cluster: `make integration`.
 5. **Document**

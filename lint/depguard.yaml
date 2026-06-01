@@ -12,20 +12,20 @@
 #
 # Layer numbering (lower = closer to the wire):
 #   L1  internal/listener
-#   L2  internal/pipeline
-#   L3  internal/storage
-#   L4  internal/cache
-#   L5  internal/origin
-#   L6  internal/cluster
-#   L7  internal/admin
-#   L8  internal/observability
-#   L9  internal/ai
+#   L1  internal/pipeline
+#   L2  internal/storage
+#   L3  internal/cache
+#   L4  internal/origin
+#   L5  internal/cluster
+#   L6  internal/admin
+#   L7  internal/observability
+#   L8  internal/ai
 #
 # Cross-layer rule: a package may only depend on packages in lower
 # layers, through declared interfaces. Reverse imports are build errors.
 
 rules:
-  # Server (merged L1+L2) may depend on L8 + pkg/api.
+  # Server (merged L1+L1) may depend on L7 + pkg/api.
   server:
     list-mode: strict
     files: ["**/internal/server/**"]
@@ -39,7 +39,7 @@ rules:
       - golang.org/x/sync
       - golang.org/x/sys
 
-  # L3 may only depend on L8.
+  # L2 may only depend on L7.
   storage:
     list-mode: strict
     files: ["**/internal/storage/**"]
@@ -51,7 +51,7 @@ rules:
       - github.com/cespare/xxhash/v2
       - golang.org/x/sys
 
-  # L4 may depend on L3 (Store interface), L5 (Fetcher), L8.
+  # L3 may depend on L2 (Store interface), L4 (Fetcher), L7.
   cache:
     list-mode: strict
     files: ["**/internal/cache/**"]
@@ -65,7 +65,7 @@ rules:
       - github.com/cespare/xxhash/v2
       - golang.org/x/sync
 
-  # L5 may only depend on L8.
+  # L4 may only depend on L7.
   origin:
     list-mode: strict
     files: ["**/internal/origin/**"]
@@ -76,7 +76,7 @@ rules:
       - github.com/thylong/bouine/pkg/api
       - golang.org/x/sync
 
-  # L6 may depend on L3, L4, L8.
+  # L5 may depend on L2, L3, L7.
   cluster:
     list-mode: strict
     files: ["**/internal/cluster/**"]
@@ -90,7 +90,7 @@ rules:
       - github.com/hashicorp/memberlist
       - golang.org/x/sync
 
-  # L7 may depend on L3 (read-only), L4, L6, L8.
+  # L6 may depend on L2 (read-only), L3, L5, L7.
   admin:
     list-mode: strict
     files: ["**/internal/admin/**"]
@@ -106,7 +106,7 @@ rules:
       - github.com/thylong/bouine/pkg/api
       - github.com/prometheus/client_golang
 
-  # L8 is a leaf — only stdlib and telemetry libs.
+  # L7 is a leaf — only stdlib and telemetry libs.
   observability:
     list-mode: strict
     files: ["**/internal/observability/**"]
@@ -117,7 +117,7 @@ rules:
       - github.com/prometheus/client_golang
       - go.opentelemetry.io/otel
 
-  # L9 may only depend on L7, L8, pkg/api.
+  # L8 may only depend on L6, L7, pkg/api.
   ai:
     list-mode: strict
     files: ["**/internal/ai/**"]

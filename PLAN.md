@@ -76,7 +76,7 @@ the wire.
 ├──────────────────────────────────────────────────────────────────────┤
 │ L2  Request Pipeline       normalize · route · ACL · collapse        │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L1  Listeners              HTTP/1.1 · HTTP/2 · TLS                    │
+│ L1  Server                 HTTP/1.1 · HTTP/2 · TLS · route            │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -100,8 +100,7 @@ dependencies for a surface that serves ≤ 10 RPS.
 
 ```
 /cmd/bouine                  Cobra entrypoint
-/internal/listener           L1 — HTTP/1, /2, TLS
-/internal/pipeline           L2 — normalization, ACL, collapsing
+/internal/server             L1 — HTTP/1, /2, TLS, route matching
 /internal/cache              L4 — RFC 9111 state machine, Vary, conditionals
 /internal/storage            L3 — RAM tier, mmap tier, eviction, WAL
 /internal/storage/sieve      SIEVE eviction implementation
@@ -896,7 +895,7 @@ in the current codebase:
   documents the contract).
 
 - **Stale `// Phase N` doc comments (confirmed locations):**
-  `internal/pipeline/router.go:35-36` ("Phase 1 ships a minimal
+  `internal/server/router.go:35-36` ("Phase 1 ships a minimal
   set"), `internal/cache/vary.go:87` ("phase 3"), `internal/config/
   config.go:24,27`, `internal/config/loader.go:77`,
   `internal/storage/store.go:6`, `internal/storage/tiered.go:170`,
@@ -1244,7 +1243,7 @@ Config routes today have no explicit display name. Add `Name string
 \`yaml:"name"\`` to `config.Route`. When set, the pipeline uses it as the
 route label; when absent, falls back to `host:pathPrefix`. This lets operators
 write human-readable route names that appear in dashboards and Prometheus.
-Touches: `internal/config/config.go`, `internal/pipeline/router.go`,
+Touches: `internal/config/config.go`, `internal/server/router.go`,
 `cmd/bouine/cmd/engine.go`.
 
 **Step 3 — Per-URL drill-down via `URLRing`.**

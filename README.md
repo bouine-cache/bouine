@@ -138,8 +138,7 @@ The high-level Go module layout follows the layered architecture in
 
 ```
 /cmd/bouine                  Cobra entrypoint
-/internal/listener           L1 — HTTP/1, /2, TLS
-/internal/pipeline           L2 — normalization, ACL, collapsing
+/internal/server             L1 — HTTP/1, /2, TLS, route matching
 /internal/cache              L4 — RFC 9111 state machine, Vary, conditionals
 /internal/storage            L3 — RAM tier, mmap tier, eviction, WAL
 /internal/origin             L5 — upstream pool, health, hedge, breaker

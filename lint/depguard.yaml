@@ -25,33 +25,19 @@
 # layers, through declared interfaces. Reverse imports are build errors.
 
 rules:
-  # L1 may only depend on L2 + L8 + pkg/api.
-  listener:
+  # Server (merged L1+L2) may depend on L8 + pkg/api.
+  server:
     list-mode: strict
-    files: ["**/internal/listener/**"]
+    files: ["**/internal/server/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/listener
-      - github.com/thylong/bouine/internal/pipeline
+      - github.com/thylong/bouine/internal/server
       - github.com/thylong/bouine/internal/observability
       - github.com/thylong/bouine/internal/buildinfo
       - github.com/thylong/bouine/pkg/api
       - golang.org/x/net
       - golang.org/x/sync
       - golang.org/x/sys
-      - github.com/quic-go/quic-go
-
-  # L2 may depend on L4, L5, L8.
-  pipeline:
-    list-mode: strict
-    files: ["**/internal/pipeline/**"]
-    allow:
-      - $gostd
-      - github.com/thylong/bouine/internal/pipeline
-      - github.com/thylong/bouine/internal/cache
-      - github.com/thylong/bouine/internal/origin
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
 
   # L3 may only depend on L8.
   storage:
@@ -77,6 +63,7 @@ rules:
       - github.com/thylong/bouine/internal/observability
       - github.com/thylong/bouine/pkg/api
       - github.com/cespare/xxhash/v2
+      - golang.org/x/sync
 
   # L5 may only depend on L8.
   origin:

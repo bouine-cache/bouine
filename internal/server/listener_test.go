@@ -1,4 +1,4 @@
-package listener
+package server
 
 import (
 	"context"
@@ -21,7 +21,7 @@ func echo200() http.Handler {
 }
 
 func TestHTTP_ListenAndServe(t *testing.T) {
-	srv := NewHTTP(Config{
+	srv := NewHTTP(ListenerConfig{
 		Addr:    "127.0.0.1:0",
 		Handler: echo200(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -64,7 +64,7 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	tlsCfg := tlsutil.ServerConfig(t)
 
-	srv := NewHTTPS(Config{
+	srv := NewHTTPS(ListenerConfig{
 		Addr:      "127.0.0.1:0",
 		Handler:   echo200(),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -2,7 +2,6 @@
 // configuration tree. It is the single source of truth for runtime
 // settings (listeners, TLS, upstream pools, storage, cluster, routes).
 //
-// Hot reload is supported via fsnotify + SIGHUP (see reload.go).
 // Additive changes only — removing or renaming a field requires a
 // major version bump (see PLAN.md §13).
 package config
@@ -44,10 +43,6 @@ type Config struct {
 
 	// Tracing configures OpenTelemetry span export. Empty endpoint = no-op.
 	Tracing TracingConfig `yaml:"tracing"`
-
-	// Prefetch configures background cache warming via Link: rel=preload
-	// headers and optional sitemap crawling (Phase 5).
-	Prefetch PrefetchConfig `yaml:"prefetch"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.
@@ -65,7 +60,6 @@ type TLS struct {
 	ALPN         []string  `yaml:"alpn"`
 	MinVersion   string    `yaml:"min_version"`
 	OCSPStapling string    `yaml:"ocsp_stapling"`
-	Reload       TLSReload `yaml:"reload"`
 }
 
 // TLSCert is a single cert/key pair plus its SNI matches.
@@ -73,12 +67,6 @@ type TLSCert struct {
 	CertFile string   `yaml:"cert_file"`
 	KeyFile  string   `yaml:"key_file"`
 	SNI      []string `yaml:"sni"`
-}
-
-// TLSReload toggles automatic reload sources.
-type TLSReload struct {
-	FSNotify bool `yaml:"fsnotify"`
-	SIGHUP   bool `yaml:"sighup"`
 }
 
 // Storage controls embedded hot + warm tiers. Phase 2+.
@@ -285,14 +273,6 @@ type TracingConfig struct {
 	Endpoint     string  `yaml:"endpoint"`
 	ServiceName  string  `yaml:"service_name"`
 	SamplingRate float64 `yaml:"sampling_rate"`
-}
-
-// PrefetchConfig controls background cache warming (Phase 5).
-type PrefetchConfig struct {
-	// SitemapURLs is a list of sitemap XML URLs to crawl periodically.
-	SitemapURLs []string `yaml:"sitemap_urls"`
-	// SitemapInterval is the crawl interval. Zero disables sitemap crawling.
-	SitemapInterval time.Duration `yaml:"sitemap_interval"`
 }
 
 // AdminConfig controls admin API security.

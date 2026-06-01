@@ -22,10 +22,6 @@ func Defaults() Config {
 		TLS: TLS{
 			ALPN:       []string{"h2", "http/1.1"},
 			MinVersion: "1.2",
-			Reload: TLSReload{
-				FSNotify: true,
-				SIGHUP:   true,
-			},
 		},
 		Cluster: Cluster{
 			Mode:     ClusterModeStrong,

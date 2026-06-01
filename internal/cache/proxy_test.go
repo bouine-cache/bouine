@@ -9,6 +9,7 @@ import (
 )
 
 func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {
+	t.Parallel()
 	var gotMethod, gotPath, gotBody string
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
@@ -41,6 +42,7 @@ func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {
 }
 
 func TestHandler_GETAfterPUTConfigSetup(t *testing.T) {
+	t.Parallel()
 	// Simulates the cache-tests pattern: PUT /config/uuid then GET /test/uuid.
 	var configuredBody string
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

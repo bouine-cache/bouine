@@ -49,7 +49,10 @@ func (e *engine) buildStore() (storage.Store, error) {
 // is a hostname rather than a dotted IP, DNS lookup is retried up to five times
 // with back-off to tolerate slow container start order in Docker Compose.
 func (e *engine) buildCluster(ctx context.Context) (*cluster.Cluster, error) {
-	hostname, _ := os.Hostname()
+	hostname := e.cfg.Cluster.NodeName
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
 	if hostname == "" {
 		hostname = "bouine"
 	}

@@ -31,6 +31,7 @@ func get(t *testing.T, s *Server, path string) (int, []byte) {
 }
 
 func TestHealthz(t *testing.T) {
+	t.Parallel()
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/healthz")
 	if status != http.StatusOK {
@@ -46,6 +47,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyz_Ready(t *testing.T) {
+	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, _ := get(t, s, "/readyz")
 	if status != http.StatusOK {
@@ -54,6 +56,7 @@ func TestReadyz_Ready(t *testing.T) {
 }
 
 func TestReadyz_NotReady(t *testing.T) {
+	t.Parallel()
 	s := newTestServer(t, func() bool { return false })
 	status, _ := get(t, s, "/readyz")
 	if status != http.StatusServiceUnavailable {
@@ -62,6 +65,7 @@ func TestReadyz_NotReady(t *testing.T) {
 }
 
 func TestVersion(t *testing.T) {
+	t.Parallel()
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/version")
 	if status != http.StatusOK {
@@ -73,6 +77,7 @@ func TestVersion(t *testing.T) {
 }
 
 func TestMetrics_Mounted(t *testing.T) {
+	t.Parallel()
 	m := observability.NewMetrics()
 	s := New(Config{
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -88,6 +93,7 @@ func TestMetrics_Mounted(t *testing.T) {
 }
 
 func TestAuth_WriteRequiresToken(t *testing.T) {
+	t.Parallel()
 	s := New(Config{
 		Token:   "secret",
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -128,6 +134,7 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 }
 
 func TestAuth_ReadEndpointsExempt(t *testing.T) {
+	t.Parallel()
 	s := New(Config{
 		Token:  "secret",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

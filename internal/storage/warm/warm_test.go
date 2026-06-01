@@ -22,6 +22,7 @@ func tmpStore(t *testing.T) *Store {
 }
 
 func TestPutAndRead(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	body := []byte("hello warm tier")
@@ -46,6 +47,7 @@ func TestPutAndRead(t *testing.T) {
 }
 
 func TestTombstone(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	_, _, err := s.Put(99, []byte("data"))
@@ -76,6 +78,7 @@ func TestTombstone(t *testing.T) {
 }
 
 func TestSegmentRollover(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 	bigBody := make([]byte, 512*1024) // 512 KiB
 
@@ -96,6 +99,7 @@ func TestSegmentRollover(t *testing.T) {
 }
 
 func TestCRCCorruption(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	body := []byte("integrity check")
@@ -130,6 +134,7 @@ func TestCRCCorruption(t *testing.T) {
 }
 
 func TestScan_MultipleRecords(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	for i := range 10 {
@@ -153,6 +158,7 @@ func TestScan_MultipleRecords(t *testing.T) {
 }
 
 func TestOpenExisting(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s1, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	if err != nil {
@@ -182,6 +188,7 @@ func TestOpenExisting(t *testing.T) {
 }
 
 func TestStats(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 	for i := range 5 {
 		if _, _, err := s.Put(uint64(i), make([]byte, 100)); err != nil {
@@ -198,6 +205,7 @@ func TestStats(t *testing.T) {
 }
 
 func TestNonexistentSegment(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 	_, err := s.ReadRecord(9999, 0)
 	if err == nil {
@@ -206,6 +214,7 @@ func TestNonexistentSegment(t *testing.T) {
 }
 
 func TestEmptyDir(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "sub")
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20})
 	if err != nil {
@@ -223,6 +232,7 @@ func TestEmptyDir(t *testing.T) {
 }
 
 func TestGet_IndexMaintained(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	body := []byte("warm get test")
@@ -240,6 +250,7 @@ func TestGet_IndexMaintained(t *testing.T) {
 }
 
 func TestGet_MissingKey(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 	got, err := s.Get(9999)
 	if err != nil {
@@ -251,6 +262,7 @@ func TestGet_MissingKey(t *testing.T) {
 }
 
 func TestGet_AfterDelete(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	if _, _, err := s.Put(55, []byte("to be deleted")); err != nil {
@@ -270,6 +282,7 @@ func TestGet_AfterDelete(t *testing.T) {
 }
 
 func TestSetIndex_DelIndex(t *testing.T) {
+	t.Parallel()
 	s := tmpStore(t)
 
 	body := []byte("index rebuild")

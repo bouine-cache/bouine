@@ -7,6 +7,7 @@ import (
 )
 
 func TestRequestRing_RecordAndFlush(t *testing.T) {
+	t.Parallel()
 	r := &RequestRing{}
 
 	r.RecordRequest("HIT", 200, 5)
@@ -41,6 +42,7 @@ func TestRequestRing_RecordAndFlush(t *testing.T) {
 }
 
 func TestRequestRing_AllCategories(t *testing.T) {
+	t.Parallel()
 	r := &RequestRing{}
 	r.RecordRequest("HIT", 200, 1)
 	r.RecordRequest("MISS", 200, 1)
@@ -59,6 +61,7 @@ func TestRequestRing_AllCategories(t *testing.T) {
 }
 
 func TestRequestRing_SnapshotOrder(t *testing.T) {
+	t.Parallel()
 	r := &RequestRing{}
 	base := time.Now().Truncate(10 * time.Second)
 
@@ -80,6 +83,7 @@ func TestRequestRing_SnapshotOrder(t *testing.T) {
 }
 
 func TestRequestRing_SnapshotWraparound(t *testing.T) {
+	t.Parallel()
 	r := &RequestRing{}
 	now := time.Now()
 	for i := range requestBuckets + 10 {
@@ -93,6 +97,7 @@ func TestRequestRing_SnapshotWraparound(t *testing.T) {
 }
 
 func TestRouteRing_RecordAndFlush(t *testing.T) {
+	t.Parallel()
 	r := &RouteRing{}
 	r.RecordRoute("/api/v1", "HIT")
 	r.RecordRoute("/api/v1", "HIT")
@@ -127,6 +132,7 @@ func TestRouteRing_RecordAndFlush(t *testing.T) {
 }
 
 func TestRouteRing_Sparkline(t *testing.T) {
+	t.Parallel()
 	r := &RouteRing{}
 	now := time.Now()
 	for i := range 10 {
@@ -145,6 +151,7 @@ func TestRouteRing_Sparkline(t *testing.T) {
 }
 
 func TestOpsLogRing_RecordAndSnapshot(t *testing.T) {
+	t.Parallel()
 	r := &OpsLogRing{}
 	r.Record("purge", "https://example.com/foo", "ok")
 	r.Record("ban", "^/api/", "ok")
@@ -162,6 +169,7 @@ func TestOpsLogRing_RecordAndSnapshot(t *testing.T) {
 }
 
 func TestOpsLogRing_Wraparound(t *testing.T) {
+	t.Parallel()
 	r := &OpsLogRing{}
 	for range opsLogCap + 5 {
 		r.Record("purge", "url", "ok")
@@ -173,6 +181,7 @@ func TestOpsLogRing_Wraparound(t *testing.T) {
 }
 
 func TestRings_SaveLoad(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "metrics.snap")
 
@@ -210,6 +219,7 @@ func TestRings_SaveLoad(t *testing.T) {
 }
 
 func TestRings_LoadMissingFile(t *testing.T) {
+	t.Parallel()
 	ri := NewRings("node-x")
 	if err := ri.Load("/tmp/bouine-nonexistent-snap-12345.snap"); err != nil {
 		t.Errorf("expected nil error for missing file, got %v", err)
@@ -217,6 +227,7 @@ func TestRings_LoadMissingFile(t *testing.T) {
 }
 
 func TestMergeSummaries(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	a := MetricsSummary{
 		NodeName:    "a",
@@ -253,6 +264,7 @@ func TestMergeSummaries(t *testing.T) {
 }
 
 func TestMergeSummaries_Empty(t *testing.T) {
+	t.Parallel()
 	m := MergeSummaries(nil)
 	if m.NodeName != "" {
 		t.Errorf("expected empty NodeName, got %q", m.NodeName)

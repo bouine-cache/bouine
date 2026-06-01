@@ -11,6 +11,7 @@ import (
 )
 
 func TestActiveHealth_RecoversTarget(t *testing.T) {
+	t.Parallel()
 	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
@@ -27,13 +28,13 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 
 	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
 		Path:               "/",
-		Interval:           50 * time.Millisecond,
+		Interval:           10 * time.Millisecond,
 		Timeout:            1 * time.Second,
 		UnhealthyThreshold: 3,
 		ExpectedCodes:      []int{200},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	_ = hc.Run(ctx)
@@ -44,6 +45,7 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 }
 
 func TestActiveHealth_EjectsUnhealthy(t *testing.T) {
+	t.Parallel()
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(500)
 	}))
@@ -53,13 +55,13 @@ func TestActiveHealth_EjectsUnhealthy(t *testing.T) {
 
 	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
 		Path:               "/",
-		Interval:           50 * time.Millisecond,
+		Interval:           10 * time.Millisecond,
 		Timeout:            1 * time.Second,
 		UnhealthyThreshold: 2,
 		ExpectedCodes:      []int{200},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	_ = hc.Run(ctx)

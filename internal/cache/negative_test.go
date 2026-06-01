@@ -9,6 +9,7 @@ import (
 )
 
 func TestIsNegativeCacheable(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status int
 		want   bool
@@ -30,6 +31,7 @@ func TestIsNegativeCacheable(t *testing.T) {
 }
 
 func TestJitterTTL(t *testing.T) {
+	t.Parallel()
 	ttl := 100 * time.Second
 
 	t.Run("zero_pct_returns_original", func(t *testing.T) {
@@ -70,6 +72,7 @@ func TestJitterTTL(t *testing.T) {
 }
 
 func TestSoftPurge(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	obj := &api.Object{
 		StatusCode: 200,

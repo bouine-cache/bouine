@@ -14,6 +14,7 @@ import (
 )
 
 func TestBroadcaster_BroadcastPurge(t *testing.T) {
+	t.Parallel()
 	var received []api.PurgeEvent
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/peer/purge" {
@@ -46,6 +47,7 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 }
 
 func TestBroadcaster_BroadcastBan(t *testing.T) {
+	t.Parallel()
 	var received []api.BanEvent
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/peer/ban" {
@@ -81,6 +83,7 @@ func TestBroadcaster_BroadcastBan(t *testing.T) {
 }
 
 func TestBroadcaster_SkipsSelf(t *testing.T) {
+	t.Parallel()
 	called := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called++
@@ -109,6 +112,7 @@ func TestBroadcaster_SkipsSelf(t *testing.T) {
 }
 
 func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
+	t.Parallel()
 	httpCalled := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		httpCalled++
@@ -131,6 +135,7 @@ func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
 }
 
 func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
+	t.Parallel()
 	httpCalled := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		httpCalled++
@@ -153,6 +158,7 @@ func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 }
 
 func TestBroadcastReplicate_Full_EnqueuesGossip(t *testing.T) {
+	t.Parallel()
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "full"
 
@@ -170,6 +176,7 @@ func TestBroadcastReplicate_Full_EnqueuesGossip(t *testing.T) {
 }
 
 func TestBroadcastReplicate_Eventual_Noop(t *testing.T) {
+	t.Parallel()
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "eventual"
 
@@ -185,6 +192,7 @@ func TestBroadcastReplicate_Eventual_Noop(t *testing.T) {
 }
 
 func TestBroadcastReplicate_Strong_Noop(t *testing.T) {
+	t.Parallel()
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "strong"
 
@@ -200,6 +208,7 @@ func TestBroadcastReplicate_Strong_Noop(t *testing.T) {
 }
 
 func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
+	t.Parallel()
 	httpCalled := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		httpCalled++
@@ -222,6 +231,7 @@ func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 }
 
 func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
+	t.Parallel()
 	// Start a server that returns 500 to force a failure.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -260,6 +270,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 }
 
 func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
+	t.Parallel()
 	// Use an unreachable address to get a dial error.
 	c := minimalCluster(t, "node-0")
 	reg := prometheus.NewRegistry()

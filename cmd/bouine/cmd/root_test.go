@@ -7,6 +7,7 @@ import (
 )
 
 func TestVersionCmdRuns(t *testing.T) {
+	t.Parallel()
 	root := Root()
 	var stdout bytes.Buffer
 	root.SetOut(&stdout)
@@ -22,6 +23,7 @@ func TestVersionCmdRuns(t *testing.T) {
 }
 
 func TestRootHasExpectedCommands(t *testing.T) {
+	t.Parallel()
 	want := map[string]bool{
 		"version": false,
 		"serve":   false,

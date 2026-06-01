@@ -8,6 +8,7 @@ import (
 )
 
 func TestDefaults_AdminListenerEnabled(t *testing.T) {
+	t.Parallel()
 	d := Defaults()
 	if d.Listen.Admin == "" {
 		t.Fatal("admin listener should be enabled by default")
@@ -15,6 +16,7 @@ func TestDefaults_AdminListenerEnabled(t *testing.T) {
 }
 
 func TestParse_EmptyYieldsDefaults(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse(nil)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -25,6 +27,7 @@ func TestParse_EmptyYieldsDefaults(t *testing.T) {
 }
 
 func TestParse_RejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
 	_, err := Parse([]byte("nonsensical_field: 1\n"))
 	if err == nil {
 		t.Fatal("expected error on unknown key")
@@ -32,6 +35,7 @@ func TestParse_RejectsUnknownKeys(t *testing.T) {
 }
 
 func TestParse_RejectsDuplicatePool(t *testing.T) {
+	t.Parallel()
 	yamlSrc := `
 upstream_pools:
   - name: app
@@ -46,6 +50,7 @@ upstream_pools:
 }
 
 func TestParse_RejectsUnknownPoolInRoute(t *testing.T) {
+	t.Parallel()
 	yamlSrc := `
 upstream_pools:
   - name: app
@@ -61,6 +66,7 @@ routes:
 }
 
 func TestParse_HappyPath(t *testing.T) {
+	t.Parallel()
 	yamlSrc := `
 listen:
   http:  ":80"
@@ -101,6 +107,7 @@ routes:
 }
 
 func TestLoad_FromDisk(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
 	if err := os.WriteFile(path, []byte("listen:\n  admin: ':9001'\n"), 0o600); err != nil {
@@ -116,6 +123,7 @@ func TestLoad_FromDisk(t *testing.T) {
 }
 
 func TestByteSize_Forms(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want int64
@@ -151,6 +159,7 @@ func TestByteSize_Forms(t *testing.T) {
 }
 
 func TestClusterMode_DefaultIsStrong(t *testing.T) {
+	t.Parallel()
 	cfg := Defaults()
 	if cfg.Cluster.Mode != ClusterModeStrong {
 		t.Fatalf("default cluster mode = %q, want %q", cfg.Cluster.Mode, ClusterModeStrong)
@@ -158,6 +167,7 @@ func TestClusterMode_DefaultIsStrong(t *testing.T) {
 }
 
 func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
+	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -168,6 +178,7 @@ func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 }
 
 func TestClusterMode_ValidModes(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual, ClusterModeFull} {
 		cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: mode}}
 		if err := cfg.Validate(); err != nil {
@@ -180,6 +191,7 @@ func TestClusterMode_ValidModes(t *testing.T) {
 }
 
 func TestClusterMode_InvalidValue(t *testing.T) {
+	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: "invalid"}}
 	err := cfg.Validate()
 	if err == nil {
@@ -191,6 +203,7 @@ func TestClusterMode_InvalidValue(t *testing.T) {
 }
 
 func TestClusterMode_NonStrongRequiresEnabled(t *testing.T) {
+	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: false, Mode: ClusterModeEventual}}
 	err := cfg.Validate()
 	if err == nil {
@@ -202,6 +215,7 @@ func TestClusterMode_NonStrongRequiresEnabled(t *testing.T) {
 }
 
 func TestClusterMode_StrongWithoutEnabled(t *testing.T) {
+	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: false, Mode: ClusterModeStrong}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("strong mode without enabled should be valid: %v", err)

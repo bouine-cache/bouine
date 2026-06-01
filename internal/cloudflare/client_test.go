@@ -33,6 +33,7 @@ func (f *fakePurger) Purge(_ context.Context, params cache.CachePurgeParams, _ .
 }
 
 func TestClient_PurgeURLs_Success(t *testing.T) {
+	t.Parallel()
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
@@ -45,6 +46,7 @@ func TestClient_PurgeURLs_Success(t *testing.T) {
 }
 
 func TestClient_PurgeTags_Success(t *testing.T) {
+	t.Parallel()
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
@@ -57,6 +59,7 @@ func TestClient_PurgeTags_Success(t *testing.T) {
 }
 
 func TestClient_NilSafe(t *testing.T) {
+	t.Parallel()
 	var c *cf.Client
 	if err := c.PurgeURLs(context.Background(), []string{"https://x.com/"}); err != nil {
 		t.Fatalf("nil client PurgeURLs should no-op, got %v", err)
@@ -67,6 +70,7 @@ func TestClient_NilSafe(t *testing.T) {
 }
 
 func TestClient_EmptySlice_NoOp(t *testing.T) {
+	t.Parallel()
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
@@ -79,6 +83,7 @@ func TestClient_EmptySlice_NoOp(t *testing.T) {
 }
 
 func TestClient_NetworkError_NoRetry(t *testing.T) {
+	t.Parallel()
 	purger := &fakePurger{errors: []error{errors.New("network down"), nil}}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
@@ -93,6 +98,7 @@ func TestClient_NetworkError_NoRetry(t *testing.T) {
 }
 
 func TestNew_MissingZone(t *testing.T) {
+	t.Parallel()
 	_, err := cf.New(cf.Config{ZoneID: "", APIToken: "tok"})
 	if err == nil {
 		t.Fatal("expected error for missing zone_id")
@@ -100,6 +106,7 @@ func TestNew_MissingZone(t *testing.T) {
 }
 
 func TestNew_MissingToken(t *testing.T) {
+	t.Parallel()
 	_, err := cf.New(cf.Config{ZoneID: "zone1", APIToken: ""})
 	if err == nil {
 		t.Fatal("expected error for missing api_token")
@@ -107,6 +114,7 @@ func TestNew_MissingToken(t *testing.T) {
 }
 
 func TestRetry_RateLimit(t *testing.T) {
+	t.Parallel()
 	// Simulate two 429s followed by success.
 	resp429 := &http.Response{Header: http.Header{"Retry-After": {"0"}}}
 	_ = resp429 // only used for parseRetryAfter; fakePurger error doesn't carry response
@@ -130,6 +138,7 @@ func TestRetry_RateLimit(t *testing.T) {
 }
 
 func TestRetry_500_ThenSuccess(t *testing.T) {
+	t.Parallel()
 	purger := &fakePurger{
 		errors: []error{
 			&fakeAPIError{status: 500},

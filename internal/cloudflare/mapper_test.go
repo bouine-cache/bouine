@@ -8,6 +8,7 @@ import (
 )
 
 func TestMapURL(t *testing.T) {
+	t.Parallel()
 	r := cf.MapURL("https://example.com/page")
 	if len(r.URLs) != 1 || r.Skipped {
 		t.Fatalf("unexpected: %+v", r)
@@ -15,6 +16,7 @@ func TestMapURL(t *testing.T) {
 }
 
 func TestMapURL_Empty(t *testing.T) {
+	t.Parallel()
 	r := cf.MapURL("")
 	if !r.Skipped {
 		t.Fatal("empty URL should be skipped")
@@ -22,6 +24,7 @@ func TestMapURL_Empty(t *testing.T) {
 }
 
 func TestMapSurrogateKey(t *testing.T) {
+	t.Parallel()
 	r := cf.MapSurrogateKey("product-456")
 	if len(r.Tags) != 1 || r.Tags[0] != "product-456" {
 		t.Fatalf("unexpected: %+v", r)
@@ -29,6 +32,7 @@ func TestMapSurrogateKey(t *testing.T) {
 }
 
 func TestMapPathRegex_PlainPrefix(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"^/api/v1/", "/api/v1/"},
 		{"/products/", "/products/"},
@@ -46,6 +50,7 @@ func TestMapPathRegex_PlainPrefix(t *testing.T) {
 }
 
 func TestMapPathRegex_Metacharacters(t *testing.T) {
+	t.Parallel()
 	cases := []string{"^/api/[a-z]+", "^/api/.*", "/api/(v1|v2)"}
 	for _, tc := range cases {
 		r := cf.MapPathRegex(tc)
@@ -59,6 +64,7 @@ func TestMapPathRegex_Metacharacters(t *testing.T) {
 }
 
 func TestMapHostRegex_Literal(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{`example\.com`, "example.com"},
 		{"example.com", "example.com"},
@@ -76,6 +82,7 @@ func TestMapHostRegex_Literal(t *testing.T) {
 }
 
 func TestMapHostRegex_Metacharacters(t *testing.T) {
+	t.Parallel()
 	cases := []string{".*\\.example\\.com", "(api|www)\\.example\\.com"}
 	for _, tc := range cases {
 		r := cf.MapHostRegex(tc)
@@ -86,6 +93,7 @@ func TestMapHostRegex_Metacharacters(t *testing.T) {
 }
 
 func TestMergeResults(t *testing.T) {
+	t.Parallel()
 	a := cf.MapURL("https://a.com/")
 	b := cf.MapSurrogateKey("tag-1")
 	c := cf.MapPathRegex("^/api/")

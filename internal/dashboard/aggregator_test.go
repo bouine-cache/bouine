@@ -20,6 +20,7 @@ func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *httptest.Se
 }
 
 func TestAggregator_CollectSingleNode(t *testing.T) {
+	t.Parallel()
 	rings := observability.NewRings("self")
 	rings.Request.RecordRequest("HIT", 200, 5)
 	rings.Request.Flush(time.Now())
@@ -40,6 +41,7 @@ func TestAggregator_CollectSingleNode(t *testing.T) {
 }
 
 func TestAggregator_CollectWithPeer(t *testing.T) {
+	t.Parallel()
 	peerSnap := make([]observability.RequestBucket, 2160)
 	peerSnap[0] = observability.RequestBucket{Requests: 50, Hits: 40}
 	peerSum := observability.MetricsSummary{
@@ -87,9 +89,9 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 }
 
 func TestAggregator_PeerTimeout(t *testing.T) {
-	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(5 * time.Second)
-		w.WriteHeader(http.StatusOK)
+	t.Parallel()
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
 	}))
 	defer slowSrv.Close()
 
@@ -114,6 +116,7 @@ func TestAggregator_PeerTimeout(t *testing.T) {
 }
 
 func TestAggregator_LastKnownOnStale(t *testing.T) {
+	t.Parallel()
 	rings := observability.NewRings("self")
 
 	// First call with a live peer that gives data.
@@ -164,6 +167,7 @@ func TestAggregator_LastKnownOnStale(t *testing.T) {
 }
 
 func TestPeerMetricsHandler(t *testing.T) {
+	t.Parallel()
 	rings := observability.NewRings("node-x")
 	rings.Request.RecordRequest("HIT", 200, 7)
 	rings.Request.Flush(time.Now())

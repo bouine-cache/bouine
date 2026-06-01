@@ -16,6 +16,7 @@ func quietLogger() *slog.Logger {
 }
 
 func TestGroup_HappyPath(t *testing.T) {
+	t.Parallel()
 	g := NewGroup(context.Background(), quietLogger())
 
 	var ran atomic.Int32
@@ -31,6 +32,7 @@ func TestGroup_HappyPath(t *testing.T) {
 }
 
 func TestGroup_FirstErrorCancelsSiblings(t *testing.T) {
+	t.Parallel()
 	g := NewGroup(context.Background(), quietLogger())
 
 	first := errors.New("boom")
@@ -56,6 +58,7 @@ func TestGroup_FirstErrorCancelsSiblings(t *testing.T) {
 }
 
 func TestGroup_RecoversFromPanic(t *testing.T) {
+	t.Parallel()
 	g := NewGroup(context.Background(), quietLogger())
 	g.Go("kaboom", func(_ context.Context) error { panic("nope") })
 
@@ -66,6 +69,7 @@ func TestGroup_RecoversFromPanic(t *testing.T) {
 }
 
 func TestGroup_NilLoggerAllowed(t *testing.T) {
+	t.Parallel()
 	g := NewGroup(context.Background(), nil)
 	g.Go("ok", func(_ context.Context) error { return nil })
 	if err := g.Wait(); err != nil {

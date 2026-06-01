@@ -26,6 +26,7 @@ func defaultConfig(t *testing.T, name, addr string) Config {
 }
 
 func TestRing_AddGet(t *testing.T) {
+	t.Parallel()
 	r := newRing(256)
 	r.add("alpha", 256)
 	r.add("beta", 256)
@@ -46,6 +47,7 @@ func TestRing_AddGet(t *testing.T) {
 }
 
 func TestRing_RemoveRedistributes(t *testing.T) {
+	t.Parallel()
 	r := newRing(64)
 	r.add("a", 64)
 	r.add("b", 64)
@@ -64,6 +66,7 @@ func TestRing_RemoveRedistributes(t *testing.T) {
 }
 
 func TestRing_Digest_Changes(t *testing.T) {
+	t.Parallel()
 	r := newRing(16)
 	r.add("node1", 16)
 	d1 := r.digest()
@@ -80,6 +83,7 @@ func TestRing_Digest_Changes(t *testing.T) {
 }
 
 func TestRing_SingleNode(t *testing.T) {
+	t.Parallel()
 	r := newRing(64)
 	r.add("only", 64)
 	for i := range 10 {
@@ -90,6 +94,7 @@ func TestRing_SingleNode(t *testing.T) {
 }
 
 func TestCluster_LocalMode(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {
@@ -111,6 +116,7 @@ func TestCluster_LocalMode(t *testing.T) {
 }
 
 func TestCluster_TwoNodeJoin(t *testing.T) {
+	t.Parallel()
 	c1, err := New(defaultConfig(t, "node1", "127.0.0.1:17900"))
 	if err != nil {
 		t.Fatalf("c1: %v", err)
@@ -138,6 +144,7 @@ func TestCluster_TwoNodeJoin(t *testing.T) {
 }
 
 func TestNotifyMsg_PurgeEvent(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {
@@ -163,6 +170,7 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 }
 
 func TestNotifyMsg_BanEvent(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {
@@ -188,6 +196,7 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 }
 
 func TestNotifyMsg_ReplicationEvent(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {
@@ -213,6 +222,7 @@ func TestNotifyMsg_ReplicationEvent(t *testing.T) {
 }
 
 func TestNotifyMsg_ReplicationTakesPrecedenceOverPurge(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {
@@ -249,6 +259,7 @@ func TestNotifyMsg_ReplicationTakesPrecedenceOverPurge(t *testing.T) {
 }
 
 func TestNotifyMsg_MalformedPayload(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {
@@ -264,6 +275,7 @@ func TestNotifyMsg_MalformedPayload(t *testing.T) {
 }
 
 func TestNotifyMsg_WhenNoCallbacks(t *testing.T) {
+	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	if err != nil {

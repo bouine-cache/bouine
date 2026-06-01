@@ -39,6 +39,7 @@ func testHandler(t *testing.T, upstream http.Handler) *Handler {
 }
 
 func TestHandler_MissThenHit(t *testing.T) {
+	t.Parallel()
 	var originCalls int
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		originCalls++
@@ -87,6 +88,7 @@ func TestHandler_MissThenHit(t *testing.T) {
 }
 
 func TestHandler_NoStoreNotCached(t *testing.T) {
+	t.Parallel()
 	var calls int
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
@@ -108,6 +110,7 @@ func TestHandler_NoStoreNotCached(t *testing.T) {
 }
 
 func TestHandler_PostInvalidatesAndStores(t *testing.T) {
+	t.Parallel()
 	// RFC 9111 §4.4: POST invalidates cached GET response.
 	// RFC 9111 §4.3.1: cacheable POST response stored under GET key.
 	h := testHandler(t, origin200("body", "max-age=60"))
@@ -132,6 +135,7 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 }
 
 func TestHandler_BypassOnRequestNoStore(t *testing.T) {
+	t.Parallel()
 	h := testHandler(t, origin200("body", "max-age=60"))
 
 	// Populate cache.
@@ -149,6 +153,7 @@ func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 }
 
 func TestHandler_HeadServedFromCache(t *testing.T) {
+	t.Parallel()
 	h := testHandler(t, origin200("full-body", "max-age=60"))
 
 	// Populate with GET.
@@ -183,6 +188,7 @@ func testHandlerStayinAlive(t *testing.T, upstream http.Handler) *Handler {
 }
 
 func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
@@ -223,6 +229,7 @@ func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
 }
 
 func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
@@ -260,6 +267,7 @@ func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
 // Vary variants are stored for a primary key, subsequent variants are
 // silently dropped and VaryCapHits is incremented.
 func TestMaxVariants_CapIsEnforced(t *testing.T) {
+	t.Parallel()
 	hitCount := 0
 
 	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -302,6 +310,7 @@ type counterFunc func()
 func (f counterFunc) Inc() { f() }
 
 func TestHandler_EventualNoPeerFetch(t *testing.T) {
+	t.Parallel()
 	// In eventual mode, ownerFn and peerFetch are nil. A miss goes
 	// straight to origin without attempting peer fetch.
 	originCalls := 0
@@ -340,6 +349,7 @@ func TestHandler_EventualNoPeerFetch(t *testing.T) {
 }
 
 func TestHandler_FullReplicationHook(t *testing.T) {
+	t.Parallel()
 	// In full mode, ReplicateFn is called after a cacheable response
 	// is stored. This verifies the hook fires and receives the object.
 	var replicated atomic.Int32
@@ -373,6 +383,7 @@ func TestHandler_FullReplicationHook(t *testing.T) {
 }
 
 func TestHandler_FullReplicationHookNotCalledOnBypass(t *testing.T) {
+	t.Parallel()
 	// Non-cacheable responses (e.g. 200 with no Cache-Control) should
 	// NOT trigger the replication hook.
 	var replicated atomic.Int32

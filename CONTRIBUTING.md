@@ -13,9 +13,11 @@ contributors.
 
 ## Quick links
 
-- Roadmap and architecture: [`PLAN.md`](PLAN.md)
+- Roadmap: [`PLAN.md`](PLAN.md)
+- Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Working agreement (binding for all contributors): [`AGENTS.md`](AGENTS.md)
 - Security policy and reporting: [`SECURITY.md`](SECURITY.md)
+- Code of Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - Threat model: [`docs/security/threat-model.md`](docs/security/threat-model.md)
 - Decision records: [`docs/decisions/`](docs/decisions/)
 
@@ -203,3 +205,12 @@ Use the issue templates under `.github/ISSUE_TEMPLATE/`. Include:
 
 By contributing, you agree that your contributions are licensed under
 the [Apache License 2.0](LICENSE).
+This is an **inbound = outbound** model: you license your contribution
+under the same terms the project distributes. No separate CLA (Contributor
+License Agreement) or DCO (Developer Certificate of Origin) sign-off is
+required — the act of submitting a PR under this file is the agreement.
+
+Source files in this repository do **not** carry per-file license headers.
+The project-level LICENSE file is sufficient; contributors are not expected
+to add headers to their files. If a third-party file is imported, its own
+license applies.

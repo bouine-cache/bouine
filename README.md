@@ -118,14 +118,22 @@ for all options.
 
 ## Documentation
 
+📖 **Full documentation: [bouine.thylong.com](https://bouine.thylong.com)**
+(getting started, configuration, operations, guides). The in-repo docs
+below are the canonical source the site is built from.
+
 | Topic                            | Where                                                 |
 |----------------------------------|--------------------------------------------------------|
-| Roadmap, architecture, phases    | [`PLAN.md`](PLAN.md)                                  |
+| Roadmap & phases                 | [`PLAN.md`](PLAN.md)                                  |
+| Architecture reference           | [`docs/architecture.md`](docs/architecture.md)        |
 | Working agreement (binding)      | [`AGENTS.md`](AGENTS.md)                              |
 | Threat model                     | [`docs/security/threat-model.md`](docs/security/threat-model.md) |
 | Contributing (humans)            | [`CONTRIBUTING.md`](CONTRIBUTING.md)                  |
+| Code of Conduct                  | [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)            |
 | Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
+| Changelog                        | [`CHANGELOG.md`](CHANGELOG.md)                        |
 | Migration from NGINX             | [`docs/migration/nginx.md`](docs/migration/nginx.md)   |
+| Migration from Varnish           | [`docs/migration/varnish.md`](docs/migration/varnish.md) |
 | Decision records (ADRs)          | [`docs/decisions/`](docs/decisions/)                  |
 | SLO / SLI reference              | [`docs/operations/slo.md`](docs/operations/slo.md)    |
 | Soak + chaos report (v1.0 gate)  | [`docs/operations/soak-chaos-report.md`](docs/operations/soak-chaos-report.md) |

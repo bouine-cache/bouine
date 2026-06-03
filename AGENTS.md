@@ -521,10 +521,17 @@ For every task an agent starts, execute this loop. No shortcuts.
    - Follow patterns from neighboring code.
    - Add tests as you go, not at the end.
 4. **Verify**
-   - `make lint test` minimum.
-   - If touching L1–L5: `make bench` and compare to `main`.
+   - **All of the following must pass before a task is considered complete:**
+     - `make lint` — golangci-lint with the full linter set (§14.4).
+     - `make test` — unit tests with `-race` and `-parallel=8`.
+     - `make integration` — in-process 3-node cluster tests for all
+       consistency modes (strong, eventual, full).
+     - `make chaos` — chaos scenarios (peer kill, origin flap, slow
+       origin, rolling restart, origin down, concurrent purge, rejoin).
+   - Additionally, if touching L1–L4: `make bench` and compare to `main`.
    - If touching `cache`: `make conformance`.
-   - If touching cluster: `make integration`.
+   - A task with any failing gate is not done — fix or explain why
+     the failure is unrelated before reporting completion.
 5. **Document**
    - Update godoc.
    - Update `docs/runbook` and `docs/decisions` when warranted.

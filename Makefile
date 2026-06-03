@@ -38,34 +38,16 @@ test: ## Run unit tests with the race detector.
 test-short: ## Run unit tests with -short (used by pre-commit).
 	$(GO) test -race -count=1 -timeout=30s -short -parallel=8 $(PKGS)
 
-.PHONY: vet
-vet: ## Run go vet.
-	$(GO) vet $(PKGS)
-
 .PHONY: lint
 lint: ## Run golangci-lint.
 	golangci-lint run
 
-.PHONY: lint-fix
-lint-fix: ## Run golangci-lint with --fix.
-	golangci-lint run --fix
-
-.PHONY: tidy
-tidy: ## go mod tidy.
-	$(GO) mod tidy
-
-.PHONY: fuzz
-fuzz: ## Run a short fuzz pass on registered targets (phase 1+).
-	@echo "fuzz: no fuzz targets registered yet (phase 0)"
 
 .PHONY: bench
-bench: ## Run the benchmark suite with gate checks.
+bench: ## Run the benchmark suite and compare against the committed baseline.
 	bash bench/run.sh
-
-.PHONY: benchstat
-benchstat: ## Compare current bench results against the committed baseline.
 	@command -v benchstat >/dev/null || $(GO) install golang.org/x/perf/cmd/benchstat@latest
-	@test -f bench/results/baseline.txt || { echo "no baseline — run 'make bench' first and copy current.txt to baseline.txt"; exit 1; }
+	@test -f bench/results/baseline.txt || { echo "no baseline — copy bench/results/current.txt to bench/results/baseline.txt first"; exit 1; }
 	benchstat bench/results/baseline.txt bench/results/current.txt
 
 .PHONY: conformance
@@ -76,32 +58,29 @@ conformance: build ## Run the http-tests/cache-tests conformance harness.
 conformance-view: build ## Run conformance tests then open the comparison UI in a browser.
 	bash test/cachetests/view.sh
 
-.PHONY: integration
-integration: integration-cluster ## Run all cluster integration tests (one mode per process to avoid prometheus registry collisions).
+.PHONY: test-integration-cluster
+test-integration-cluster: test-integration-cluster-strong test-integration-cluster-eventual test-integration-cluster-full ## Run all 3 cluster consistency mode tests sequentially.
 
-.PHONY: integration-cluster
-integration-cluster: integration-cluster-strong integration-cluster-eventual integration-cluster-full ## Run all 3 cluster consistency mode tests sequentially.
-
-.PHONY: integration-cluster-strong
-integration-cluster-strong: ## Run strong-mode cluster integration tests.
+.PHONY: test-integration-cluster-strong
+test-integration-cluster-strong: ## Run strong-mode cluster integration tests.
 	@echo ">>> Cluster integration: STRONG mode"
 	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestStrong ./test/integration/...
 
-.PHONY: integration-cluster-eventual
-integration-cluster-eventual: ## Run eventual-mode cluster integration tests.
+.PHONY: test-integration-cluster-eventual
+test-integration-cluster-eventual: ## Run eventual-mode cluster integration tests.
 	@echo ">>> Cluster integration: EVENTUAL mode"
 	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestEventual ./test/integration/...
 
-.PHONY: integration-cluster-full
-integration-cluster-full: ## Run full-replication cluster integration tests.
+.PHONY: test-integration-cluster-full
+test-integration-cluster-full: ## Run full-replication cluster integration tests.
 	@echo ">>> Cluster integration: FULL mode"
 	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestFull ./test/integration/...
 
-.PHONY: chaos
-chaos: ## Run chaos test scenarios in-process (one test per process to avoid registry collisions).
+.PHONY: test-chaos
+test-chaos: ## Run chaos test scenarios in-process (one test per process to avoid registry collisions).
 	@echo ">>> Chaos test suite"
 	@for test in PeerKill OriginFlap PartialPartition SlowOrigin RollingRestart OriginDown ConcurrentPurgeUnderLoad NodeRejoinAfterLongPartition; do \
 		echo "  $$test"; \
@@ -120,14 +99,6 @@ testcerts: ## Generate ephemeral TLS certificates for integration tests.
 	@mkdir -p test/integration/.tls
 	@$(GO) run ./scripts/gen-testcerts -out test/integration/.tls
 	@echo "test certs written to test/integration/.tls"
-
-.PHONY: docs
-docs: ## Build the documentation site (phase 4+).
-	@echo "docs: site harness lands in phase 4.5"
-
-.PHONY: schema
-schema: ## Regenerate the JSON schema and SDK types (phase 3+).
-	@echo "schema: generator lands in phase 3"
 
 .PHONY: templ
 templ: ## Regenerate dashboard _templ.go files from *.templ sources.
@@ -154,7 +125,7 @@ govulncheck: ## Run govulncheck.
 	govulncheck $(PKGS)
 
 .PHONY: ci
-ci: vet lint test-short build hooks-run ## Run the CI gate locally (vet, lint, test, build, hooks).
+ci: lint test-short build hooks-run ## Run the CI gate locally (lint, test, build, hooks).
 
 .PHONY: test-k8s-setup
 test-k8s-setup: build ## Build images and deploy bouine + test origin on Kubernetes.
@@ -236,8 +207,35 @@ loadtest-setup: build ## Build all TUT images + origin for load testing.
 	@echo "Pull NGINX/Varnish/Envoy base images:"
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml pull nginx varnish envoy 2>/dev/null || true
 
-.PHONY: loadtest-single
-loadtest-single: loadtest-setup ## Run §3.1–§3.6 single-node scenarios (all 4 TUTs).
+.PHONY: loadtest-cluster
+loadtest-cluster: ## Run cluster and stress scenarios (requires K8s).
+	@mkdir -p $(RESULTS_DIR)
+	@for scenario in 4.1_cluster_scaling 4.2_gossip_convergence 4.3_peer_fetch_pressure \
+	                  4.4_hedging 4.5_rolling_update \
+	                  5.1_connection_exhaustion 5.2_large_body 5.3_slow_origin \
+	                  5.4_request_collapsing 5.5_purge_broadcast; do \
+		echo "--- Running $$scenario ---"; \
+		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
+	done
+
+.PHONY: loadtest-dashboard
+loadtest-dashboard: ## Run dashboard-under-load scenarios.
+	@mkdir -p $(RESULTS_DIR)
+	@for scenario in 5.6a_dashboard_polling 5.6b_fanout_saturation \
+	                  5.6c_dashboard_invalidation 5.6d_config_reload; do \
+		echo "--- Running $$scenario ---"; \
+		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
+	done
+	@echo "Note: the 6h ring test must be run manually:"
+	@echo "  RING_TEST_DURATION=6h bash $(LOADTEST_DIR)/scenarios/5.6e_ring_memory_pressure/run.sh"
+
+.PHONY: loadtest-clean
+loadtest-clean: ## Remove load-test result files and charts.
+	rm -rf $(RESULTS_DIR)
+	@echo "Load test results cleaned."
+
+.PHONY: loadtest
+loadtest: loadtest-setup ## Run single-node scenarios and generate report.
 	@mkdir -p $(RESULTS_DIR)
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
 	@echo "Waiting for services to be healthy..."
@@ -249,31 +247,6 @@ loadtest-single: loadtest-setup ## Run §3.1–§3.6 single-node scenarios (all 
 			bash /scenarios/$$scenario/run.sh; \
 	done
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml down
-
-.PHONY: loadtest-cluster
-loadtest-cluster: ## Run §4.1–§4.5 cluster + §5.1–§5.5 stress scenarios (requires K8s).
-	@mkdir -p $(RESULTS_DIR)
-	@for scenario in 4.1_cluster_scaling 4.2_gossip_convergence 4.3_peer_fetch_pressure \
-	                  4.4_hedging 4.5_rolling_update \
-	                  5.1_connection_exhaustion 5.2_large_body 5.3_slow_origin \
-	                  5.4_request_collapsing 5.5_purge_broadcast; do \
-		echo "--- Running $$scenario ---"; \
-		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
-	done
-
-.PHONY: loadtest-dashboard
-loadtest-dashboard: ## Run §5.6a–e dashboard-under-load scenarios.
-	@mkdir -p $(RESULTS_DIR)
-	@for scenario in 5.6a_dashboard_polling 5.6b_fanout_saturation \
-	                  5.6c_dashboard_invalidation 5.6d_config_reload; do \
-		echo "--- Running $$scenario ---"; \
-		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
-	done
-	@echo "Note: §5.6e (6h ring test) must be run manually:"
-	@echo "  RING_TEST_DURATION=6h bash $(LOADTEST_DIR)/scenarios/5.6e_ring_memory_pressure/run.sh"
-
-.PHONY: loadtest-report
-loadtest-report: ## Generate SVG charts + REPORT.md from existing result files.
 	@command -v $(PYTHON) >/dev/null || { echo "python3 is required"; exit 1; }
 	@$(PYTHON) -c "import plotly, kaleido" 2>/dev/null || \
 		$(PYTHON) -m pip install -q plotly kaleido
@@ -287,14 +260,6 @@ loadtest-report: ## Generate SVG charts + REPORT.md from existing result files.
 		--output REPORT.md
 	@echo "Report: $(LOADTEST_DIR)/REPORT.md"
 	@echo "Charts: $(CHARTS_DIR)/"
-
-.PHONY: loadtest-clean
-loadtest-clean: ## Remove load-test result files and charts.
-	rm -rf $(RESULTS_DIR)
-	@echo "Load test results cleaned."
-
-.PHONY: loadtest
-loadtest: loadtest-single loadtest-report ## Run all single-node scenarios and generate report.
 
 .PHONY: release
 release: ## Create a GitHub release (usage: make release TAG=v0.1.0).

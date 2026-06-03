@@ -39,6 +39,8 @@ test/integration/.tls/
 /docs/_site/
 /web/dashboard/node_modules/
 /web/dashboard/dist/
+/package-lock.json
+/package.json
 
 # Test data fuzz corpora — keep only the seed corpus, not the cached one
 testdata/fuzz/*/

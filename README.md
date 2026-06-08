@@ -12,11 +12,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
 </p>
 
-`bouine` is a scalable, cloud native, HTTP reverse-proxy
-cache written in Go. It targets the same problem space as Varnish
-(RFC 9111 cache, fast purge, predicate-based bans) but is designed from
-day one for Kubernetes, multi-instance clustering, and first-class
-observability.
+`bouine` is a cloud-native HTTP reverse-proxy cache in Go — RFC 9111
+compliant, zero-alloc hit path, gossip clustering, no external K/V store.
+It targets the same problem space as a classic HTTP cache (RFC 9111 cache,
+fast purge, predicate-based bans) but is designed from day one for
+Kubernetes, multi-instance clustering, and first-class observability.
 
 > Status: **v1.0-rc** — core caching, clustering, negative caching,
 > jittered TTLs, soft-purge, and the Go SDK are shipped. Validated on k3s

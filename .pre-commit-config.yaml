@@ -117,3 +117,17 @@ repos:
           - perf
           - build
           - ci
+
+  # ---------------------------------------------------------------------
+  # Block AI-assistant trailers and internal-plan artifact names from
+  # entering commit messages (history was scrubbed of these; keep it clean).
+  # ---------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: no-assistant-or-plan-trailers
+        name: block Crush trailers and internal-plan tokens in commit messages
+        entry: >-
+          bash -c 'if grep -qiE "Generated with Crush|Assisted-by: *Crush|PLAN_MEMORY_PRESSURE|PLAN_LOADTEST|PLAN_UX" "$1"; then
+          echo "commit message contains a forbidden AI-assistant trailer or internal-plan token"; exit 1; fi' --
+        language: system
+        stages: [commit-msg]

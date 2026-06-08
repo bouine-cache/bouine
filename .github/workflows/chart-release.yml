@@ -1,0 +1,56 @@
+name: Chart Release
+
+# Packages the Helm chart in deploy/helm/bouine and publishes it to a
+# GitHub Pages Helm repository (https://thylong.github.io/bouine), which
+# Artifact Hub indexes. Runs automatically on every release tag so the
+# chart version tracks the app release (Chart.yaml `version` must be bumped
+# alongside `appVersion` before tagging — chart-releaser skips versions it
+# has already published).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  release-chart:
+    name: Package and publish chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: deploy/helm
+        env:
+          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Artifact Hub repository metadata
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          git worktree add "$tmp" gh-pages
+          cp deploy/helm/artifacthub-repo.yml "$tmp/artifacthub-repo.yml"
+          git -C "$tmp" add artifacthub-repo.yml
+          if ! git -C "$tmp" diff --cached --quiet; then
+            git -C "$tmp" commit -m "ci: sync Artifact Hub repository metadata"
+            git -C "$tmp" push origin gh-pages
+          fi
+          git worktree remove "$tmp"

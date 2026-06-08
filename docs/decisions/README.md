@@ -38,3 +38,4 @@ field to `Superseded by ADR-NNNN`.
 | 0007   | Cluster design — memberlist gossip + consistent hash | Accepted |
 | 0008   | Cluster mode: local cache + gossip invalidation      | Accepted |
 | 0009   | Cache state-machine hardening (RFC 9111 conformance) | Accepted |
+| 0010   | Helm chart lint in pre-commit and pre-push hooks     | Accepted |

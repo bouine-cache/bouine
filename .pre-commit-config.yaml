@@ -92,6 +92,19 @@ repos:
         stages: [pre-push]
 
   # ---------------------------------------------------------------------
+  # Helm: lint the chart on both commit and push when chart files change.
+  # ---------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: helm-lint
+        name: helm lint (deploy/helm/bouine)
+        entry: helm lint deploy/helm/bouine
+        language: system
+        files: ^deploy/helm/bouine/
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
+
+  # ---------------------------------------------------------------------
   # Secret scan.
   # ---------------------------------------------------------------------
   - repo: https://github.com/gitleaks/gitleaks

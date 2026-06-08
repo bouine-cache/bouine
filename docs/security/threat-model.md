@@ -1,8 +1,13 @@
 # bouine — Threat Model
 
-> Status: **living document**. Last reviewed: phase 0.
-> Scope: bouine v1.0 (phases 0–5 of `PLAN.md`). Phase 6 (AI / dashboard) is
-> covered in a dedicated subsection but most controls inherit from v1.0.
+> Status: **living document**. Last reviewed: **phase 5 (2026-06-08)** — see
+> [`reviews/phase5-threat-walkthrough.md`](reviews/phase5-threat-walkthrough.md)
+> for the current, code-verified status of every row. That review supersedes
+> the per-row "mitigation" prose below where they disagree; in particular,
+> controls for not-yet-shipped features (HTTP/3, ESI, prefetch, VCL shim, AI)
+> are explicit deferrals, not active controls.
+> Scope: bouine v1.0. Phase 8 (AI / dashboard) is covered in a dedicated
+> subsection but most controls inherit from v1.0.
 > Owners: maintainers listed in `CODEOWNERS`.
 > Methodology: **STRIDE** plus CDN/HTTP-cache–specific threat classes
 > drawn from OWASP, RFC 9110/9111/9112 errata, and public Varnish/NGINX

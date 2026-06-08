@@ -118,6 +118,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -133,3 +134,13 @@ jobs:
             DATE=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Scan released image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library

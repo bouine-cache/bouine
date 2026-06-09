@@ -1,7 +1,7 @@
 name: Chart Release
 
 # Packages the Helm chart in deploy/helm/bouine and publishes it to a
-# GitHub Pages Helm repository (https://thylong.github.io/bouine), which
+# GitHub Pages Helm repository (https://charts.thylong.com), which
 # Artifact Hub indexes. Runs automatically on every release tag so the
 # chart version tracks the app release (Chart.yaml `version` must be bumped
 # alongside `appVersion` before tagging — chart-releaser skips versions it

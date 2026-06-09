@@ -1,7 +1,7 @@
 # Artifact Hub repository metadata.
 #
 # This file is published to the root of the gh-pages Helm repository
-# (https://thylong.github.io/bouine) by the chart-release workflow, where
+# (https://charts.thylong.com) by the chart-release workflow, where
 # Artifact Hub reads it to verify ownership of the repo.
 #
 # After adding the repository on https://artifacthub.io, paste the

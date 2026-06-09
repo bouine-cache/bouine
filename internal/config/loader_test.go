@@ -259,3 +259,35 @@ func TestValidate_TTLOverride_NegativeRejected(t *testing.T) {
 		t.Fatalf("expected ttl_override validation error, got %v", err)
 	}
 }
+
+func TestValidate_StripPrefix_MustStartWithSlash(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Request: RouteRequest{StripPrefix: "no-slash"}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "strip_prefix") {
+		t.Fatalf("expected strip_prefix validation error, got %v", err)
+	}
+}
+
+func TestParse_StripPrefix_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { path_prefix: /api/v1 }
+    pool: app
+    request:
+      strip_prefix: /api/v1
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Routes[0].Request.StripPrefix != "/api/v1" {
+		t.Errorf("StripPrefix = %q, want /api/v1", cfg.Routes[0].Request.StripPrefix)
+	}
+}

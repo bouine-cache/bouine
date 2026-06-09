@@ -247,6 +247,11 @@ type RouteCache struct {
 type RouteRequest struct {
 	HeaderSet    map[string]string `yaml:"header_set"`
 	HeaderRemove []string          `yaml:"header_remove"`
+	// StripPrefix removes this path prefix from the request URL before
+	// forwarding to the upstream. The cache key uses the original path
+	// so different routes with the same stripped path don't collide.
+	// Must start with "/" when non-empty.
+	StripPrefix string `yaml:"strip_prefix"`
 }
 
 // RouteResponse is the per-route response-side header rewrite block.

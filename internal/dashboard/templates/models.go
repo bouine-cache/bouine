@@ -296,6 +296,9 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		if rc.Cache.NegativeTTL > 0 {
 			rows = append(rows, ConfigRow{Key: "negative_ttl", Value: rc.Cache.NegativeTTL.String(), Kind: "dur"})
 		}
+		if rc.Cache.TTLOverride > 0 {
+			rows = append(rows, ConfigRow{Key: "ttl_override", Value: rc.Cache.TTLOverride.String(), Kind: "dur"})
+		}
 		if rc.Cache.StaleWhileRevalidate > 0 {
 			rows = append(rows, ConfigRow{Key: "stale_while_revalidate", Value: rc.Cache.StaleWhileRevalidate.String(), Kind: "dur"})
 		}

@@ -100,6 +100,12 @@ func (c *Config) Validate() error {
 		if _, ok := seen[r.Pool]; !ok {
 			return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
 		}
+		if r.Cache.TTLOverride < 0 {
+			return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, r.Cache.TTLOverride)
+		}
+		if r.Cache.JitterPercent < 0 || r.Cache.JitterPercent > 50 {
+			return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, r.Cache.JitterPercent)
+		}
 	}
 
 	// Cluster mode validation.

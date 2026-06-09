@@ -229,6 +229,18 @@ type RouteCache struct {
 	// the stored object so subsequent cache HITs do not replay cookies
 	// intended for the first client.
 	AllowSetCookie *bool `yaml:"allow_set_cookie"`
+	// TTLOverride, when > 0, forces bouine's internal cache TTL to this
+	// value regardless of the upstream's Cache-Control/Expires headers.
+	// The upstream's response headers are forwarded to downstream clients
+	// unaltered — TTLOverride only changes how long bouine keeps the
+	// object before revalidating. This lets operators decouple bouine's
+	// storage lifetime from the TTL that a downstream CDN (e.g.
+	// Cloudflare) should observe.
+	// RFC 9111 boolean directives (no-store, private, no-cache,
+	// must-revalidate, proxy-revalidate) are always respected; TTLOverride
+	// only replaces the numeric freshness lifetime.
+	// Zero (default) = honour the upstream's freshness headers.
+	TTLOverride time.Duration `yaml:"ttl_override"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

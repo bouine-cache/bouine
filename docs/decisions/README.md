@@ -39,4 +39,5 @@ field to `Superseded by ADR-NNNN`.
 | 0008   | Cluster mode: local cache + gossip invalidation      | Accepted |
 | 0009   | Cache state-machine hardening (RFC 9111 conformance) | Accepted |
 | 0010   | Helm chart lint in pre-commit and pre-push hooks     | Accepted |
+| 0011   | Per-route TTL override decoupled from upstream Cache-Control | Accepted |
 | 0012   | Block caching of Set-Cookie responses by default     | Accepted |

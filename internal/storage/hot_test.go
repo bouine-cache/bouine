@@ -369,16 +369,28 @@ func TestHotClose(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
-	// Give the sweeper goroutine time to start.
-	time.Sleep(10 * time.Millisecond)
-	goroutinesWithSweeper := runtime.NumGoroutine()
+	// Poll for the sweeper goroutine to start — 10 ms sleeps are
+	// unreliable on 2-core CI runners.
+	var goroutinesWithSweeper int
+	for range 50 {
+		goroutinesWithSweeper = runtime.NumGoroutine()
+		if goroutinesWithSweeper > before {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if goroutinesWithSweeper <= before {
 		t.Error("expected sweeper goroutine to be running after NewHotStore")
 	}
 
 	_ = s.Close(context.Background())
-	// Give the goroutine time to exit.
-	time.Sleep(50 * time.Millisecond)
+	// Poll for the goroutine to exit.
+	for range 50 {
+		if runtime.NumGoroutine() <= before+1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	after := runtime.NumGoroutine()
 	if after > before+1 { // +1 for test harness variance
 		t.Errorf("goroutine leak: before=%d after close=%d", before, after)

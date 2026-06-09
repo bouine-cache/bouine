@@ -136,7 +136,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan released image (Trivy)
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}
           format: table

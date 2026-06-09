@@ -292,28 +292,7 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		if label == "" {
 			label = rc.Match.PathPrefix
 		}
-		var rows []ConfigRow
-		if rc.Cache.NegativeTTL > 0 {
-			rows = append(rows, ConfigRow{Key: "negative_ttl", Value: rc.Cache.NegativeTTL.String(), Kind: "dur"})
-		}
-		if rc.Cache.TTLOverride > 0 {
-			rows = append(rows, ConfigRow{Key: "ttl_override", Value: rc.Cache.TTLOverride.String(), Kind: "dur"})
-		}
-		if rc.Cache.StaleWhileRevalidate > 0 {
-			rows = append(rows, ConfigRow{Key: "stale_while_revalidate", Value: rc.Cache.StaleWhileRevalidate.String(), Kind: "dur"})
-		}
-		if rc.Cache.StaleIfError > 0 {
-			rows = append(rows, ConfigRow{Key: "stale_if_error", Value: rc.Cache.StaleIfError.String(), Kind: "dur"})
-		}
-		if rc.Cache.JitterPercent > 0 {
-			rows = append(rows, ConfigRow{Key: "jitter_percent", Value: fmt.Sprintf("%d", rc.Cache.JitterPercent), Kind: "num"})
-		}
-		if rc.Cache.StayinAlive {
-			rows = append(rows, ConfigRow{Key: "stayin_alive", Value: "true", Kind: "bool-t"})
-		}
-		if rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie {
-			rows = append(rows, ConfigRow{Key: "allow_set_cookie", Value: "true", Kind: "bool-t"})
-		}
+		rows := buildRouteCacheRows(rc)
 		routeEntries = append(routeEntries, ConfigRouteEntry{
 			PathPrefix: label,
 			Pool:       rc.Pool,
@@ -635,4 +614,33 @@ func FmtAddrPort(addr string) string {
 		return "—"
 	}
 	return addr
+}
+
+func buildRouteCacheRows(rc config.Route) []ConfigRow {
+	var rows []ConfigRow
+	if rc.Cache.NegativeTTL > 0 {
+		rows = append(rows, ConfigRow{Key: "negative_ttl", Value: rc.Cache.NegativeTTL.String(), Kind: "dur"})
+	}
+	if rc.Cache.TTLOverride > 0 {
+		rows = append(rows, ConfigRow{Key: "ttl_override", Value: rc.Cache.TTLOverride.String(), Kind: "dur"})
+	}
+	if rc.Cache.StaleWhileRevalidate > 0 {
+		rows = append(rows, ConfigRow{Key: "stale_while_revalidate", Value: rc.Cache.StaleWhileRevalidate.String(), Kind: "dur"})
+	}
+	if rc.Cache.StaleIfError > 0 {
+		rows = append(rows, ConfigRow{Key: "stale_if_error", Value: rc.Cache.StaleIfError.String(), Kind: "dur"})
+	}
+	if rc.Cache.JitterPercent > 0 {
+		rows = append(rows, ConfigRow{Key: "jitter_percent", Value: fmt.Sprintf("%d", rc.Cache.JitterPercent), Kind: "num"})
+	}
+	if rc.Cache.StayinAlive {
+		rows = append(rows, ConfigRow{Key: "stayin_alive", Value: "true", Kind: "bool-t"})
+	}
+	if rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie {
+		rows = append(rows, ConfigRow{Key: "allow_set_cookie", Value: "true", Kind: "bool-t"})
+	}
+	if rc.Cache.MaxObjectSize > 0 {
+		rows = append(rows, ConfigRow{Key: "max_object_size", Value: rc.Cache.MaxObjectSize.String(), Kind: "size"})
+	}
+	return rows
 }

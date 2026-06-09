@@ -227,6 +227,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			DefaultSWR:     rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:     rc.Cache.StaleIfError,
 			AllowSetCookie: rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
+			MaxObjectSize:  rc.Cache.MaxObjectSize.Bytes(),
 			VaryCapHits:    rs.dpMetrics.VaryCapHits,
 		}
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {

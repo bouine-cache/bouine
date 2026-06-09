@@ -118,6 +118,7 @@ type Handler struct {
 	defaultSWR     time.Duration // operator-level stale-while-revalidate floor
 	defaultSIE     time.Duration // operator-level stale-if-error floor
 	allowSetCookie bool          // when false (default), Set-Cookie blocks caching
+	maxObjectSize  int64         // skip storage for responses larger than this; 0 = no limit
 	// variantCounts tracks stored Vary variants per primary key to
 	// enforce MaxVariants cap. Protected by variantMu.
 	variantMu     sync.Mutex
@@ -174,6 +175,10 @@ type HandlerConfig struct {
 	// stored object so subsequent HITs do not replay another user's
 	// cookies.
 	AllowSetCookie bool
+	// MaxObjectSize, when > 0, skips caching for responses whose body
+	// exceeds this size. The response is still proxied to the client.
+	// Zero = no limit.
+	MaxObjectSize int64
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -213,6 +218,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		peerFetch:      cfg.PeerFetch,
 		replicateFn:    cfg.ReplicateFn,
 		allowSetCookie: cfg.AllowSetCookie,
+		maxObjectSize:  cfg.MaxObjectSize,
 	}
 }
 
@@ -588,6 +594,9 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
 			return
 		}
+		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
+			return
+		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(ctx, key, obj)
@@ -617,6 +626,9 @@ func (h *Handler) writeAndMaybeStore(
 
 	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
 		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+			return
+		}
+		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
 		// Always compute from the canonical URL so the cap is enforced
@@ -695,7 +707,8 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// response under the GET key so subsequent GETs can reuse it.
 		if r.Method == http.MethodPost && rec.statusCode >= 200 && rec.statusCode < 300 &&
 			IsCacheable(rec.statusCode, r.Header, rec.header) &&
-			(h.allowSetCookie || rec.header.Get("Set-Cookie") == "") {
+			(h.allowSetCookie || rec.header.Get("Set-Cookie") == "") &&
+			(h.maxObjectSize <= 0 || int64(rec.body.Len()) <= h.maxObjectSize) {
 			// Copy body and header to avoid aliasing the pooled recorder buffer.
 			bodyCopy := make([]byte, rec.body.Len())
 			copy(bodyCopy, rec.body.Bytes())

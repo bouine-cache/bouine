@@ -114,6 +114,7 @@ type Handler struct {
 	jitterPercent  int
 	stayinAlive    bool
 	defaultTTL     time.Duration // operator fallback when origin sends no freshness
+	overrideTTL    time.Duration // operator override; wins over origin max-age/Expires when > 0
 	defaultSWR     time.Duration // operator-level stale-while-revalidate floor
 	defaultSIE     time.Duration // operator-level stale-if-error floor
 	allowSetCookie bool          // when false (default), Set-Cookie blocks caching
@@ -151,6 +152,14 @@ type HandlerConfig struct {
 	// no explicit freshness (no max-age, no Expires, no Last-Modified).
 	// Zero means fall back to heuristic or treat as uncacheable.
 	DefaultTTL time.Duration
+	// OverrideTTL, when > 0, forces bouine's internal cache TTL to this
+	// value regardless of the upstream's Cache-Control/Expires headers.
+	// The upstream's response headers are forwarded unaltered; only
+	// the storage lifetime seen by bouine's freshness engine changes.
+	// RFC 9111 boolean directives (no-store, private, no-cache,
+	// must-revalidate) are always honoured; OverrideTTL only replaces
+	// the numeric freshness lifetime.
+	OverrideTTL time.Duration
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
@@ -195,14 +204,15 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		jitterPercent:  cfg.JitterPercent,
 		stayinAlive:    cfg.StayinAlive,
 		defaultTTL:     cfg.DefaultTTL,
+		overrideTTL:    cfg.OverrideTTL,
 		defaultSWR:     cfg.DefaultSWR,
 		defaultSIE:     cfg.DefaultSIE,
-		allowSetCookie: cfg.AllowSetCookie,
 		variantCounts:  make(map[api.Key]int),
 		VaryCapHits:    cfg.VaryCapHits,
 		ownerFn:        cfg.OwnerFn,
 		peerFetch:      cfg.PeerFetch,
 		replicateFn:    cfg.ReplicateFn,
+		allowSetCookie: cfg.AllowSetCookie,
 	}
 }
 
@@ -501,6 +511,11 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 			refreshed.TTL = ttl
 		}
+		// Re-apply route override so a 304 cannot revert bouine's storage
+		// lifetime back to the upstream's (potentially shorter) max-age.
+		if h.overrideTTL > 0 {
+			refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
+		}
 		// Refresh OriginAge from the (possibly updated) header.
 		refreshed.OriginAge = parseOriginAge(refreshed.Header)
 		// Update ETag if the 304 provides a new one.
@@ -556,6 +571,11 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 			refreshed.TTL = ttl
 		}
+		// Re-apply route override so background SWR revalidation cannot
+		// revert the storage lifetime to the upstream's max-age.
+		if h.overrideTTL > 0 {
+			refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
+		}
 		refreshed.OriginAge = parseOriginAge(refreshed.Header)
 		if newETag := res.Header.Get("ETag"); newETag != "" {
 			refreshed.ETag = newETag
@@ -568,7 +588,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
 			return
 		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(ctx, key, obj)
 	}
@@ -625,13 +645,13 @@ func (h *Handler) writeAndMaybeStore(
 			h.variantCounts[primaryKey] = n + 1
 			h.variantMu.Unlock()
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(r.Context(), storeKey, obj)
 		// Also store a "primary" entry so Vary-aware lookup finds
 		// the Vary header on the first lookup.
 		if storeKey != primaryKey {
-			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 			primaryObj.Header.Del("Set-Cookie")
 			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
 		}
@@ -684,7 +704,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 				Header:     rec.header.Clone(),
 				Body:       bodyCopy,
 			}
-			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
 			obj.Header.Del("Set-Cookie")
 			_ = h.store.Put(r.Context(), key, obj)
 		}
@@ -717,7 +737,7 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	}
 }
 
-func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, defaultSWR, defaultSIE time.Duration, jitterPct int) *api.Object {
+func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
@@ -746,6 +766,13 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
 	ttl := computeTTL(res.Header, res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
+	// Route-level override wins over the upstream's freshness directives.
+	// Applied after computeTTL so jitter is seeded from the override value,
+	// not the origin's max-age. The stored object retains the unaltered
+	// upstream Cache-Control header, which is forwarded to downstream clients.
+	if overrideTTL > 0 {
+		ttl = JitterTTL(overrideTTL, jitterPct)
+	}
 
 	obj := &api.Object{
 		Key:          key,

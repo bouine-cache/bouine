@@ -218,6 +218,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			JitterPercent:  rc.Cache.JitterPercent,
 			StayinAlive:    rc.Cache.StayinAlive,
 			DefaultTTL:     rc.Cache.TTLDefault,
+			OverrideTTL:    rc.Cache.TTLOverride,
 			DefaultSWR:     rc.Cache.StaleWhileRevalidate,
 			DefaultSIE:     rc.Cache.StaleIfError,
 			AllowSetCookie: rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,

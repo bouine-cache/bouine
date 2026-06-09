@@ -221,3 +221,41 @@ func TestClusterMode_StrongWithoutEnabled(t *testing.T) {
 		t.Fatalf("strong mode without enabled should be valid: %v", err)
 	}
 }
+
+// --- TTLOverride validation ---
+
+func TestParse_TTLOverride_ValidYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+    cache:
+      ttl_override: 1h
+      ttl_default:  30s
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Routes) != 1 {
+		t.Fatalf("expected 1 route")
+	}
+	if cfg.Routes[0].Cache.TTLOverride != 1*60*60*1e9 {
+		t.Errorf("TTLOverride = %v, want 1h", cfg.Routes[0].Cache.TTLOverride)
+	}
+}
+
+func TestValidate_TTLOverride_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Cache: RouteCache{TTLOverride: -1}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "ttl_override") {
+		t.Fatalf("expected ttl_override validation error, got %v", err)
+	}
+}

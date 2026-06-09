@@ -241,6 +241,11 @@ type RouteCache struct {
 	// only replaces the numeric freshness lifetime.
 	// Zero (default) = honour the upstream's freshness headers.
 	TTLOverride time.Duration `yaml:"ttl_override"`
+	// MaxObjectSize, when > 0, skips caching for responses whose body
+	// exceeds this size. The response is still proxied to the client —
+	// only storage is skipped. Prevents large downloads from evicting
+	// useful cache entries. Zero (default) = no limit.
+	MaxObjectSize ByteSize `yaml:"max_object_size"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

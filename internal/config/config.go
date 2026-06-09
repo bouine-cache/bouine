@@ -217,6 +217,18 @@ type RouteCache struct {
 	// of how long ago it expired. Keeps the route alive until the
 	// upstream recovers.
 	StayinAlive bool `yaml:"stayin_alive"`
+	// AllowSetCookie controls whether responses containing a Set-Cookie
+	// header are eligible for caching.
+	//
+	// Default (nil / false): Set-Cookie in the response blocks caching
+	// unconditionally, matching nginx's proxy_cache behaviour and
+	// preventing session-cookie replay across users.
+	//
+	// When explicitly set to true: caching is permitted per RFC 9111
+	// (Set-Cookie + explicit freshness), but Set-Cookie is stripped from
+	// the stored object so subsequent cache HITs do not replay cookies
+	// intended for the first client.
+	AllowSetCookie *bool `yaml:"allow_set_cookie"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

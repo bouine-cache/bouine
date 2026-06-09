@@ -211,16 +211,17 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		upstream := p.Handler(consecutive5xx, transport)
 		cfg := cache.HandlerConfig{
-			Upstream:      upstream,
-			Store:         rs.store,
-			Logger:        e.logger,
-			NegativeTTL:   rc.Cache.NegativeTTL,
-			JitterPercent: rc.Cache.JitterPercent,
-			StayinAlive:   rc.Cache.StayinAlive,
-			DefaultTTL:    rc.Cache.TTLDefault,
-			DefaultSWR:    rc.Cache.StaleWhileRevalidate,
-			DefaultSIE:    rc.Cache.StaleIfError,
-			VaryCapHits:   rs.dpMetrics.VaryCapHits,
+			Upstream:       upstream,
+			Store:          rs.store,
+			Logger:         e.logger,
+			NegativeTTL:    rc.Cache.NegativeTTL,
+			JitterPercent:  rc.Cache.JitterPercent,
+			StayinAlive:    rc.Cache.StayinAlive,
+			DefaultTTL:     rc.Cache.TTLDefault,
+			DefaultSWR:     rc.Cache.StaleWhileRevalidate,
+			DefaultSIE:     rc.Cache.StaleIfError,
+			AllowSetCookie: rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
+			VaryCapHits:    rs.dpMetrics.VaryCapHits,
 		}
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {

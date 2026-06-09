@@ -43,6 +43,11 @@ jobs:
           # not fail when the GitHub release already exists; cr still
           # refreshes index.yaml from the packaged charts.
           skip_existing: true
+          # Host the packaged .tgz files on the gh-pages branch (served by
+          # Pages at charts.thylong.com) instead of as GitHub release assets.
+          # Release assets on a private repo are not anonymously downloadable,
+          # which breaks `helm install` and Artifact Hub indexing.
+          packages_with_index: true
         env:
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

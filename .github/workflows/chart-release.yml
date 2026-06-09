@@ -39,6 +39,10 @@ jobs:
         uses: helm/chart-releaser-action@v1.7.0
         with:
           charts_dir: deploy/helm
+          # Re-runs (and tags whose chart version is already published) must
+          # not fail when the GitHub release already exists; cr still
+          # refreshes index.yaml from the packaged charts.
+          skip_existing: true
         env:
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

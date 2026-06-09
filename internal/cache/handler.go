@@ -106,16 +106,17 @@ func releaseRecorder(rec *responseRecorder) {
 // Handler is the caching HTTP handler. It wraps an upstream
 // http.Handler (the origin pool) and a storage.Store.
 type Handler struct {
-	upstream      http.Handler
-	store         storage.Store
-	flight        singleflight.Group
-	logger        *slog.Logger
-	negativeTTL   time.Duration
-	jitterPercent int
-	stayinAlive   bool
-	defaultTTL    time.Duration // operator fallback when origin sends no freshness
-	defaultSWR    time.Duration // operator-level stale-while-revalidate floor
-	defaultSIE    time.Duration // operator-level stale-if-error floor
+	upstream       http.Handler
+	store          storage.Store
+	flight         singleflight.Group
+	logger         *slog.Logger
+	negativeTTL    time.Duration
+	jitterPercent  int
+	stayinAlive    bool
+	defaultTTL     time.Duration // operator fallback when origin sends no freshness
+	defaultSWR     time.Duration // operator-level stale-while-revalidate floor
+	defaultSIE     time.Duration // operator-level stale-if-error floor
+	allowSetCookie bool          // when false (default), Set-Cookie blocks caching
 	// variantCounts tracks stored Vary variants per primary key to
 	// enforce MaxVariants cap. Protected by variantMu.
 	variantMu     sync.Mutex
@@ -156,6 +157,14 @@ type HandlerConfig struct {
 	// DefaultSIE is applied to every stored object when the origin does not
 	// send stale-if-error. Zero disables SIE fallback for this route.
 	DefaultSIE time.Duration
+	// AllowSetCookie controls caching of responses with Set-Cookie.
+	// Default (false): Set-Cookie in the response blocks caching
+	// unconditionally, matching nginx's safe default and preventing
+	// session-cookie replay across users. When true: caching is
+	// permitted per RFC 9111, but Set-Cookie is stripped from the
+	// stored object so subsequent HITs do not replay another user's
+	// cookies.
+	AllowSetCookie bool
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -179,20 +188,21 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		cfg.Logger = slog.Default()
 	}
 	return &Handler{
-		upstream:      cfg.Upstream,
-		store:         cfg.Store,
-		logger:        cfg.Logger,
-		negativeTTL:   cfg.NegativeTTL,
-		jitterPercent: cfg.JitterPercent,
-		stayinAlive:   cfg.StayinAlive,
-		defaultTTL:    cfg.DefaultTTL,
-		defaultSWR:    cfg.DefaultSWR,
-		defaultSIE:    cfg.DefaultSIE,
-		variantCounts: make(map[api.Key]int),
-		VaryCapHits:   cfg.VaryCapHits,
-		ownerFn:       cfg.OwnerFn,
-		peerFetch:     cfg.PeerFetch,
-		replicateFn:   cfg.ReplicateFn,
+		upstream:       cfg.Upstream,
+		store:          cfg.Store,
+		logger:         cfg.Logger,
+		negativeTTL:    cfg.NegativeTTL,
+		jitterPercent:  cfg.JitterPercent,
+		stayinAlive:    cfg.StayinAlive,
+		defaultTTL:     cfg.DefaultTTL,
+		defaultSWR:     cfg.DefaultSWR,
+		defaultSIE:     cfg.DefaultSIE,
+		allowSetCookie: cfg.AllowSetCookie,
+		variantCounts:  make(map[api.Key]int),
+		VaryCapHits:    cfg.VaryCapHits,
+		ownerFn:        cfg.OwnerFn,
+		peerFetch:      cfg.PeerFetch,
+		replicateFn:    cfg.ReplicateFn,
 	}
 }
 
@@ -555,7 +565,11 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	}
 
 	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
+		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+			return
+		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(ctx, key, obj)
 	}
 }
@@ -582,6 +596,9 @@ func (h *Handler) writeAndMaybeStore(
 	}
 
 	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
+		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+			return
+		}
 		// Always compute from the canonical URL so the cap is enforced
 		// against the primary key regardless of whether lookup() already
 		// resolved the variant key.
@@ -609,11 +626,13 @@ func (h *Handler) writeAndMaybeStore(
 			h.variantMu.Unlock()
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(r.Context(), storeKey, obj)
 		// Also store a "primary" entry so Vary-aware lookup finds
 		// the Vary header on the first lookup.
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			primaryObj.Header.Del("Set-Cookie")
 			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
 		}
 		// Replication hook: in full cluster mode, broadcast the newly
@@ -655,7 +674,8 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// and a Content-Location matching the request URI, store the
 		// response under the GET key so subsequent GETs can reuse it.
 		if r.Method == http.MethodPost && rec.statusCode >= 200 && rec.statusCode < 300 &&
-			IsCacheable(rec.statusCode, r.Header, rec.header) {
+			IsCacheable(rec.statusCode, r.Header, rec.header) &&
+			(h.allowSetCookie || rec.header.Get("Set-Cookie") == "") {
 			// Copy body and header to avoid aliasing the pooled recorder buffer.
 			bodyCopy := make([]byte, rec.body.Len())
 			copy(bodyCopy, rec.body.Bytes())
@@ -665,6 +685,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 				Body:       bodyCopy,
 			}
 			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			obj.Header.Del("Set-Cookie")
 			_ = h.store.Put(r.Context(), key, obj)
 		}
 	}

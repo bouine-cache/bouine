@@ -308,6 +308,9 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		if rc.Cache.StayinAlive {
 			rows = append(rows, ConfigRow{Key: "stayin_alive", Value: "true", Kind: "bool-t"})
 		}
+		if rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie {
+			rows = append(rows, ConfigRow{Key: "allow_set_cookie", Value: "true", Kind: "bool-t"})
+		}
 		routeEntries = append(routeEntries, ConfigRouteEntry{
 			PathPrefix: label,
 			Pool:       rc.Pool,

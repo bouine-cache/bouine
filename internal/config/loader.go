@@ -93,18 +93,9 @@ func (c *Config) Validate() error {
 	}
 
 	// Every route must reference a declared pool.
-	for i, r := range c.Routes {
-		if r.Pool == "" {
-			return fmt.Errorf("config: route %d has no pool", i)
-		}
-		if _, ok := seen[r.Pool]; !ok {
-			return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
-		}
-		if r.Cache.TTLOverride < 0 {
-			return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, r.Cache.TTLOverride)
-		}
-		if r.Cache.JitterPercent < 0 || r.Cache.JitterPercent > 50 {
-			return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, r.Cache.JitterPercent)
+	for i := range c.Routes {
+		if err := c.validateRoute(i, seen); err != nil {
+			return err
 		}
 	}
 
@@ -113,6 +104,27 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	return nil
+}
+
+// validateRoute checks a single route entry.
+func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
+	r := c.Routes[i]
+	if r.Pool == "" {
+		return fmt.Errorf("config: route %d has no pool", i)
+	}
+	if _, ok := pools[r.Pool]; !ok {
+		return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
+	}
+	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
+		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
+	}
+	if r.Cache.TTLOverride < 0 {
+		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, r.Cache.TTLOverride)
+	}
+	if r.Cache.JitterPercent < 0 || r.Cache.JitterPercent > 50 {
+		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, r.Cache.JitterPercent)
+	}
 	return nil
 }
 

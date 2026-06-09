@@ -9,7 +9,9 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/thylong/bouine/internal/cache"
@@ -210,6 +212,9 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			break
 		}
 		upstream := p.Handler(consecutive5xx, transport)
+		if rc.Request.StripPrefix != "" {
+			upstream = stripPrefixHandler(rc.Request.StripPrefix, upstream)
+		}
 		cfg := cache.HandlerConfig{
 			Upstream:       upstream,
 			Store:          rs.store,
@@ -240,4 +245,29 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, cached)
 	}
 	return router
+}
+
+// stripPrefixHandler strips the given prefix from r.URL.Path before
+// forwarding to next. A shallow copy of *http.Request and *url.URL is
+// made so the original path (used by the cache key builder) is preserved.
+// Zero cost on cache hits: the upstream is only invoked on misses.
+func stripPrefixHandler(prefix string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, prefix)
+		if p == r.URL.Path {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if p == "" || p[0] != '/' {
+			p = "/" + p
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		u := new(url.URL)
+		*u = *r.URL
+		u.Path = p
+		u.RawPath = ""
+		r2.URL = u
+		next.ServeHTTP(w, r2)
+	})
 }

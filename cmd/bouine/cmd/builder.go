@@ -244,7 +244,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			cfg.ReplicateFn = rs.broadcaster.BroadcastReplicate
 		}
 		cached := cache.NewHandler(cfg)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, cached)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached)
 	}
 	return router
 }

@@ -291,3 +291,52 @@ routes:
 		t.Errorf("StripPrefix = %q, want /api/v1", cfg.Routes[0].Request.StripPrefix)
 	}
 }
+
+func TestParse_MethodsNormalisedToUpper(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com, methods: [get, Post] }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Routes[0].Match.Methods[0] != "GET" || cfg.Routes[0].Match.Methods[1] != "POST" {
+		t.Errorf("methods not normalised: %v", cfg.Routes[0].Match.Methods)
+	}
+}
+
+func TestValidate_MethodsRejectsUnknown(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	route := Route{Pool: "app", Match: RouteMatch{Methods: []string{"FROBNICATE"}}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{route}}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "unknown HTTP method") {
+		t.Fatalf("expected unknown-method error, got %v", err)
+	}
+}
+
+func TestParse_EmptyMethodsMatchAll(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: [a:1]
+routes:
+  - match: { host: example.com }
+    pool: app
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Routes[0].Match.Methods) != 0 {
+		t.Errorf("empty methods should be nil/empty, got %v", cfg.Routes[0].Match.Methods)
+	}
+}

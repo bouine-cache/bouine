@@ -4,11 +4,11 @@
 # (https://charts.thylong.com) by the chart-release workflow, where
 # Artifact Hub reads it to verify ownership of the repo.
 #
-# After adding the repository on https://artifacthub.io, paste the
-# repositoryID it assigns below to claim ownership and enable the
+# After adding the repository on https://artifacthub.io, the repositoryID
+# it assigns is set below to claim ownership and enable the
 # "Verified Publisher" badge.
 #
-# repositoryID: <uuid-from-artifacthub-after-registration>
+repositoryID: ef3bdb5e-36fd-470e-856a-46288c8c248b
 owners:
   - name: thylong
     email: theotime@protonmail.com

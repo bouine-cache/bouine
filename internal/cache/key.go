@@ -34,8 +34,12 @@ func BuildKeyFromURL(rawURL string) api.Key {
 // BuildKey constructs the canonical primary cache key from a request.
 // The key is deterministic and stable across nodes.
 //
-// Zero-alloc: uses a stack buffer for the canonical string.
-func BuildKey(r *http.Request) api.Key {
+// Zero-alloc when called without skip: uses a stack buffer.
+func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
+	var skipSet map[string]bool
+	if len(skip) > 0 {
+		skipSet = skip[0]
+	}
 	// Stack buffer large enough for most URLs. If exceeded, falls back
 	// to heap (rare — URLs > 512 bytes are unusual).
 	var buf [512]byte
@@ -58,8 +62,8 @@ func BuildKey(r *http.Request) api.Key {
 	buf[n] = '|'
 	n++
 
-	// Query (canonical sorted).
-	n = appendCanonicalQuery(buf[:], n, r.URL)
+	// Query (canonical sorted, with optional param stripping).
+	n = appendCanonicalQuery(buf[:], n, r.URL, skipSet)
 	buf[n] = '|'
 	n++
 
@@ -115,7 +119,7 @@ func appendCanonicalPath(buf []byte, n int, u *url.URL) int {
 	return n
 }
 
-func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
+func appendCanonicalQuery(buf []byte, n int, u *url.URL, skip map[string]bool) int {
 	raw := u.RawQuery
 	if raw == "" {
 		return n
@@ -124,7 +128,6 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
 	// Fast path: for ≤8 simple ASCII params (no percent-encoding) use a
 	// stack-allocated pair array and an insertion sort to avoid the
 	// url.Values map + keys slice allocations from the slow path.
-	type kvPair struct{ k, v string }
 	var stackPairs [8]kvPair
 	np := 0
 	simple := true
@@ -137,6 +140,9 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
 			seg, s = s, ""
 		}
 		k, v, _ := strings.Cut(seg, "=")
+		if skip != nil && skip[k] {
+			continue
+		}
 		if strings.IndexByte(k, '%') >= 0 || strings.IndexByte(v, '%') >= 0 {
 			simple = false
 			break
@@ -150,7 +156,7 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
 	}
 
 	if !simple {
-		return appendCanonicalQuerySlow(buf, n, u)
+		return appendCanonicalQuerySlow(buf, n, u, skip)
 	}
 
 	// Insertion sort by key (fast for ≤8 elements, zero alloc).
@@ -161,6 +167,12 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
 		}
 	}
 
+	return writeSortedPairs(buf, n, pairs)
+}
+
+type kvPair struct{ k, v string }
+
+func writeSortedPairs(buf []byte, n int, pairs []kvPair) int {
 	first := true
 	for _, p := range pairs {
 		if !first {
@@ -182,12 +194,15 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL) int {
 
 // appendCanonicalQuerySlow handles query strings with percent-encoded
 // characters or more than 8 parameters. Allocates via url.Values.
-func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL) int {
+func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, skip map[string]bool) int {
 	// Parse + sort. Allocates url.Values map and a keys slice, but only
 	// for complex or long query strings (≥9 params or percent-encoded).
 	params := u.Query()
 	keys := make([]string, 0, len(params))
 	for k := range params {
+		if skip != nil && skip[k] {
+			continue
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)

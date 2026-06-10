@@ -246,6 +246,17 @@ type RouteCache struct {
 	// only storage is skipped. Prevents large downloads from evicting
 	// useful cache entries. Zero (default) = no limit.
 	MaxObjectSize ByteSize `yaml:"max_object_size"`
+	// Key controls cache key construction for this route.
+	Key RouteKey `yaml:"key"`
+}
+
+// RouteKey configures cache key construction for a route.
+type RouteKey struct {
+	// StripQueryParams removes the listed query parameter names from
+	// the cache key. The parameters are still forwarded to the upstream.
+	// This prevents tracking/analytics params (utm_source, fbclid, etc.)
+	// from fragmenting the cache.
+	StripQueryParams []string `yaml:"strip_query_params"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

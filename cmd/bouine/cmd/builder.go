@@ -216,19 +216,20 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			upstream = stripPrefixHandler(rc.Request.StripPrefix, upstream)
 		}
 		cfg := cache.HandlerConfig{
-			Upstream:       upstream,
-			Store:          rs.store,
-			Logger:         e.logger,
-			NegativeTTL:    rc.Cache.NegativeTTL,
-			JitterPercent:  rc.Cache.JitterPercent,
-			StayinAlive:    rc.Cache.StayinAlive,
-			DefaultTTL:     rc.Cache.TTLDefault,
-			OverrideTTL:    rc.Cache.TTLOverride,
-			DefaultSWR:     rc.Cache.StaleWhileRevalidate,
-			DefaultSIE:     rc.Cache.StaleIfError,
-			AllowSetCookie: rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
-			MaxObjectSize:  rc.Cache.MaxObjectSize.Bytes(),
-			VaryCapHits:    rs.dpMetrics.VaryCapHits,
+			Upstream:         upstream,
+			Store:            rs.store,
+			Logger:           e.logger,
+			NegativeTTL:      rc.Cache.NegativeTTL,
+			JitterPercent:    rc.Cache.JitterPercent,
+			StayinAlive:      rc.Cache.StayinAlive,
+			DefaultTTL:       rc.Cache.TTLDefault,
+			OverrideTTL:      rc.Cache.TTLOverride,
+			DefaultSWR:       rc.Cache.StaleWhileRevalidate,
+			DefaultSIE:       rc.Cache.StaleIfError,
+			AllowSetCookie:   rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
+			MaxObjectSize:    rc.Cache.MaxObjectSize.Bytes(),
+			StripQueryParams: buildStripSet(rc.Cache.Key.StripQueryParams),
+			VaryCapHits:      rs.dpMetrics.VaryCapHits,
 		}
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
@@ -271,4 +272,17 @@ func stripPrefixHandler(prefix string, next http.Handler) http.Handler {
 		r2.URL = u
 		next.ServeHTTP(w, r2)
 	})
+}
+
+// buildStripSet converts a config []string into a map for O(1) lookup.
+// Returns nil when the list is empty (no allocation).
+func buildStripSet(params []string) map[string]bool {
+	if len(params) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(params))
+	for _, p := range params {
+		m[p] = true
+	}
+	return m
 }

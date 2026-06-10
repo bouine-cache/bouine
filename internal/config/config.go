@@ -198,6 +198,10 @@ type Route struct {
 type RouteMatch struct {
 	Host       string `yaml:"host"`
 	PathPrefix string `yaml:"path_prefix"`
+	// Methods restricts this route to the listed HTTP methods (e.g.
+	// [GET, HEAD]). Empty means match all methods (default).
+	// Methods are normalised to upper-case at parse time.
+	Methods []string `yaml:"methods"`
 }
 
 // RouteCache is the per-route cache policy.

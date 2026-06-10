@@ -19,6 +19,7 @@ type Router struct {
 type routeEntry struct {
 	host       string
 	pathPrefix string
+	methods    map[string]bool // nil = match all methods
 	label      string
 	labelVal   []string
 	handler    http.Handler
@@ -51,8 +52,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 }
 
-// AddRoute registers a route entry.
-func (rt *Router) AddRoute(host, pathPrefix, label string, handler http.Handler) {
+// AddRoute registers a route entry. When methods is non-empty, only
+// requests whose HTTP method is in the set match this route.
+func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, handler http.Handler) {
 	if label == "" {
 		switch {
 		case host != "":
@@ -63,9 +65,17 @@ func (rt *Router) AddRoute(host, pathPrefix, label string, handler http.Handler)
 			label = "_catch-all"
 		}
 	}
+	var mset map[string]bool
+	if len(methods) > 0 {
+		mset = make(map[string]bool, len(methods))
+		for _, m := range methods {
+			mset[m] = true
+		}
+	}
 	rt.routes = append(rt.routes, routeEntry{
 		host:       strings.ToLower(host),
 		pathPrefix: pathPrefix,
+		methods:    mset,
 		label:      label,
 		labelVal:   []string{label},
 		handler:    handler,
@@ -89,6 +99,9 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if re.pathPrefix != "" && !strings.HasPrefix(r.URL.Path, re.pathPrefix) {
+			continue
+		}
+		if re.methods != nil && !re.methods[r.Method] {
 			continue
 		}
 		r.Header["X-Bouine-Route"] = re.labelVal

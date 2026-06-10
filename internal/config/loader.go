@@ -107,14 +107,21 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateRoute checks a single route entry.
+// validateRoute checks a single route entry and normalises its fields.
 func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
-	r := c.Routes[i]
+	r := &c.Routes[i]
 	if r.Pool == "" {
 		return fmt.Errorf("config: route %d has no pool", i)
 	}
 	if _, ok := pools[r.Pool]; !ok {
 		return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
+	}
+	for j, m := range r.Match.Methods {
+		up := strings.ToUpper(strings.TrimSpace(m))
+		if !isKnownHTTPMethod(up) {
+			return fmt.Errorf("config: route %d methods[%d] unknown HTTP method %q", i, j, m)
+		}
+		r.Match.Methods[j] = up
 	}
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
 		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
@@ -148,6 +155,16 @@ func (c *Config) validateCluster() error {
 		c.Cluster.Mode = ClusterModeStrong
 	}
 	return nil
+}
+
+// isKnownHTTPMethod returns true for standard HTTP methods accepted in
+// route match.methods. Non-standard methods are rejected at parse time.
+func isKnownHTTPMethod(m string) bool {
+	switch m {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE":
+		return true
+	}
+	return false
 }
 
 // ---- ByteSize YAML unmarshalling ----

@@ -106,19 +106,20 @@ func releaseRecorder(rec *responseRecorder) {
 // Handler is the caching HTTP handler. It wraps an upstream
 // http.Handler (the origin pool) and a storage.Store.
 type Handler struct {
-	upstream       http.Handler
-	store          storage.Store
-	flight         singleflight.Group
-	logger         *slog.Logger
-	negativeTTL    time.Duration
-	jitterPercent  int
-	stayinAlive    bool
-	defaultTTL     time.Duration // operator fallback when origin sends no freshness
-	overrideTTL    time.Duration // operator override; wins over origin max-age/Expires when > 0
-	defaultSWR     time.Duration // operator-level stale-while-revalidate floor
-	defaultSIE     time.Duration // operator-level stale-if-error floor
-	allowSetCookie bool          // when false (default), Set-Cookie blocks caching
-	maxObjectSize  int64         // skip storage for responses larger than this; 0 = no limit
+	upstream         http.Handler
+	store            storage.Store
+	flight           singleflight.Group
+	logger           *slog.Logger
+	negativeTTL      time.Duration
+	jitterPercent    int
+	stayinAlive      bool
+	defaultTTL       time.Duration   // operator fallback when origin sends no freshness
+	overrideTTL      time.Duration   // operator override; wins over origin max-age/Expires when > 0
+	defaultSWR       time.Duration   // operator-level stale-while-revalidate floor
+	defaultSIE       time.Duration   // operator-level stale-if-error floor
+	allowSetCookie   bool            // when false (default), Set-Cookie blocks caching
+	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
+	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	// variantCounts tracks stored Vary variants per primary key to
 	// enforce MaxVariants cap. Protected by variantMu.
 	variantMu     sync.Mutex
@@ -179,6 +180,10 @@ type HandlerConfig struct {
 	// exceeds this size. The response is still proxied to the client.
 	// Zero = no limit.
 	MaxObjectSize int64
+	// StripQueryParams, when non-nil, excludes the listed query parameter
+	// names from the cache key. The parameters are still forwarded to
+	// the upstream. Allocated once at handler construction.
+	StripQueryParams map[string]bool
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -201,25 +206,37 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Handler{
-		upstream:       cfg.Upstream,
-		store:          cfg.Store,
-		logger:         cfg.Logger,
-		negativeTTL:    cfg.NegativeTTL,
-		jitterPercent:  cfg.JitterPercent,
-		stayinAlive:    cfg.StayinAlive,
-		defaultTTL:     cfg.DefaultTTL,
-		overrideTTL:    cfg.OverrideTTL,
-		defaultSWR:     cfg.DefaultSWR,
-		defaultSIE:     cfg.DefaultSIE,
-		variantCounts:  make(map[api.Key]int),
-		VaryCapHits:    cfg.VaryCapHits,
-		ownerFn:        cfg.OwnerFn,
-		peerFetch:      cfg.PeerFetch,
-		replicateFn:    cfg.ReplicateFn,
-		allowSetCookie: cfg.AllowSetCookie,
-		maxObjectSize:  cfg.MaxObjectSize,
+	h := &Handler{
+		upstream:         cfg.Upstream,
+		store:            cfg.Store,
+		logger:           cfg.Logger,
+		negativeTTL:      cfg.NegativeTTL,
+		jitterPercent:    cfg.JitterPercent,
+		stayinAlive:      cfg.StayinAlive,
+		defaultTTL:       cfg.DefaultTTL,
+		overrideTTL:      cfg.OverrideTTL,
+		defaultSWR:       cfg.DefaultSWR,
+		defaultSIE:       cfg.DefaultSIE,
+		variantCounts:    make(map[api.Key]int),
+		VaryCapHits:      cfg.VaryCapHits,
+		ownerFn:          cfg.OwnerFn,
+		peerFetch:        cfg.PeerFetch,
+		replicateFn:      cfg.ReplicateFn,
+		allowSetCookie:   cfg.AllowSetCookie,
+		maxObjectSize:    cfg.MaxObjectSize,
+		stripQueryParams: cfg.StripQueryParams,
 	}
+	return h
+}
+
+// buildKey constructs the cache key, applying strip_query_params when
+// configured. Inlined to avoid variadic spread overhead on the hit path
+// when no strip is configured (zero added allocs).
+func (h *Handler) buildKey(r *http.Request) api.Key {
+	if h.stripQueryParams != nil {
+		return BuildKey(r, h.stripQueryParams)
+	}
+	return BuildKey(r)
 }
 
 // ServeHTTP implements http.Handler.
@@ -333,7 +350,7 @@ func reqHasNoStore(r *http.Request) bool {
 // lookup resolves the cache key and stored object for r, accounting
 // for Vary-based secondary keys.
 func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
-	key := BuildKey(r)
+	key := h.buildKey(r)
 	obj, err := h.store.Get(r.Context(), key)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "error", err)
@@ -634,7 +651,7 @@ func (h *Handler) writeAndMaybeStore(
 		// Always compute from the canonical URL so the cap is enforced
 		// against the primary key regardless of whether lookup() already
 		// resolved the variant key.
-		primaryKey := BuildKey(r)
+		primaryKey := h.buildKey(r)
 		storeKey := primaryKey
 		if vary := res.Header.Get("Vary"); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, r.Header)
@@ -688,7 +705,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
 		getReq := r.Clone(r.Context())
 		getReq.Method = http.MethodGet
-		key := BuildKey(getReq)
+		key := h.buildKey(getReq)
 		_ = h.store.Delete(r.Context(), key)
 
 		// Also evict Content-Location and Location URLs.
@@ -697,7 +714,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 				locReq := r.Clone(r.Context())
 				locReq.Method = http.MethodGet
 				locReq.URL.Path = loc
-				locKey := BuildKey(locReq)
+				locKey := h.buildKey(locReq)
 				_ = h.store.Delete(r.Context(), locKey)
 			}
 		}

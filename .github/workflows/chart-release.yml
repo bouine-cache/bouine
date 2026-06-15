@@ -48,6 +48,12 @@ jobs:
           # Release assets on a private repo are not anonymously downloadable,
           # which breaks `helm install` and Artifact Hub indexing.
           packages_with_index: true
+          # The Helm-chart release (named `bouine-<version>`) must never claim
+          # the repo "Latest" pointer — that belongs to the application release
+          # (`v<version>`). Otherwise GitHub's releases/latest API briefly
+          # resolves to the chart release, which carries no binaries, breaking
+          # the docs install one-liner until the app release publishes.
+          mark_as_latest: false
         env:
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

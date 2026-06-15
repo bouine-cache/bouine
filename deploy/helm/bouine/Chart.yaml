@@ -1,6 +1,6 @@
 apiVersion: v2
 name: bouine
-description: Cloud-native HTTP reverse-proxy cache in Go - RFC9111 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
+description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

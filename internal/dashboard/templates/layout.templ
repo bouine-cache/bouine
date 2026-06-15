@@ -35,6 +35,10 @@ templ Layout(props LayoutProps) {
 						class={ templ.KV("active", props.Page == "overview") }
 						if props.Page == "overview" { aria-current="page" }
 					><span class="ni" aria-hidden="true">◈</span>Overview</a>
+					<a href={ templ.SafeURL(pageHref("performance", props.TimeRange)) }
+						class={ templ.KV("active", props.Page == "performance") }
+						if props.Page == "performance" { aria-current="page" }
+					><span class="ni" aria-hidden="true">◷</span>Performance</a>
 					<a href={ templ.SafeURL(pageHref("routes", props.TimeRange)) }
 						class={ templ.KV("active", props.Page == "routes") }
 						if props.Page == "routes" { aria-current="page" }
@@ -81,6 +85,7 @@ templ Layout(props LayoutProps) {
 				</div>
 				<div class="tabs" role="tablist" aria-label="Dashboard sections">
 					<a href="/dashboard/" class={ templ.KV("active", props.Page == "overview") } role="tab" if props.Page == "overview" { aria-selected="true" } else { aria-selected="false" }>Overview</a>
+					<a href={ templ.SafeURL(pageHref("performance", props.TimeRange)) } class={ templ.KV("active", props.Page == "performance") } role="tab" if props.Page == "performance" { aria-selected="true" } else { aria-selected="false" }>Performance</a>
 					<a href={ templ.SafeURL(pageHref("routes", props.TimeRange)) } class={ templ.KV("active", props.Page == "routes") } role="tab" if props.Page == "routes" { aria-selected="true" } else { aria-selected="false" }>Routes</a>
 					<a href="/dashboard/cluster" class={ templ.KV("active", props.Page == "cluster") } role="tab" if props.Page == "cluster" { aria-selected="true" } else { aria-selected="false" }>Cluster</a>
 					<a href="/dashboard/invalidation" class={ templ.KV("active", props.Page == "invalidation") } role="tab" if props.Page == "invalidation" { aria-selected="true" } else { aria-selected="false" }>Invalidation</a>
@@ -110,6 +115,7 @@ templ Layout(props LayoutProps) {
 func pageHref(page, timeRange string) string {
 	base := map[string]string{
 		"overview":    "/dashboard/",
+		"performance": "/dashboard/performance",
 		"routes":      "/dashboard/routes",
 		"cluster":     "/dashboard/cluster",
 		"invalidation": "/dashboard/invalidation",

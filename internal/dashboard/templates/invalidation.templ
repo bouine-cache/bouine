@@ -69,5 +69,39 @@ templ Invalidation(d InvalidationData) {
 				</div>
 			}
 		</div>
+		if d.CFStatus != nil {
+			<div class="bc" style="margin-top:.6rem">
+				<div class="bc-t">Cloudflare CDN propagation</div>
+				if !d.CFStatus.Enabled {
+					<div style="font-size:.72rem;color:var(--m)">Not configured — invalidations are not propagated to a CDN.</div>
+				} else {
+					<div style="font-size:.7rem;color:var(--m);line-height:1.5;margin-bottom:.5rem">Purge / ban / refresh operations are mirrored to this Cloudflare zone.</div>
+					<div class="stat-row">
+						<span class="stat-k">zone</span>
+						<span class="stat-v" style="font-family:monospace;font-size:.72rem">{ d.CFStatus.ZoneID }</span>
+					</div>
+					<div class="stat-row">
+						<span class="stat-k">mode</span>
+						if d.CFStatus.Async {
+							<span class="stat-v good">async</span>
+						} else {
+							<span class="stat-v bad">sync</span>
+						}
+					</div>
+					if d.CFStatus.LastError != "" {
+						<div class="stat-row">
+							<span class="stat-k">last error</span>
+							<span class="stat-v bad" style="font-size:.68rem">{ d.CFStatus.LastError }</span>
+						</div>
+					}
+					if d.CFStatus.LastSuccessAt != "" {
+						<div class="stat-row">
+							<span class="stat-k">last success</span>
+							<span class="stat-v" style="font-size:.68rem">{ d.CFStatus.LastSuccessAt }</span>
+						</div>
+					}
+				}
+			</div>
+		}
 	}
 }

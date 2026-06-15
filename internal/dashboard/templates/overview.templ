@@ -83,34 +83,6 @@ templ Overview(d OverviewData) {
 				<div class="ch"><canvas id="c-split" aria-label="Cache split chart"></canvas></div>
 			</div>
 		</div>
-		<!-- latency distribution + stale serving row -->
-		<div class="r21">
-			<div class="cc">
-				<div class="ct">latency distribution ({ d.TimeRange })</div>
-				<div class="ch"><canvas id="c-lat" aria-label="Latency distribution chart"></canvas></div>
-			</div>
-			<div class="cc" style="display:flex;flex-direction:column">
-				<div class="ct">stale serving</div>
-				<div style="display:flex;flex-direction:column;gap:.6rem;padding:.4rem .2rem;justify-content:center;flex:1">
-					<div class="stat-row">
-						<span class="stat-k">stale served</span>
-						<span class="stat-v" title="stale-while-revalidate / stale-if-error responses">{ FmtRate(d.StalePerMin) }/min</span>
-					</div>
-					<div class="stat-row">
-						<span class="stat-k">revalidations</span>
-						<span class="stat-v" title="conditional revalidations against origin">{ FmtRate(d.RevalPerMin) }/min</span>
-					</div>
-					<div class="stat-row">
-						<span class="stat-k">stale share</span>
-						if d.StalePerMin+d.RevalPerMin > 0 {
-							<span class="stat-v">{ FmtHitPct(d.StalePerMin / (d.StalePerMin + d.RevalPerMin) * 100) }</span>
-						} else {
-							<span class="stat-v" style="color:var(--m)">—</span>
-						}
-					</div>
-				</div>
-			</div>
-		</div>
 		<!-- inline route table -->
 		<div class="tc" style="margin-bottom:.5rem;flex-shrink:0">
 			<div class="th">
@@ -233,44 +205,10 @@ templ Overview(d OverviewData) {
 					</div>
 				}
 			</div>
-			if d.CFStatus != nil {
-				<div class="bc">
-					<div class="bc-t">Cloudflare CDN</div>
-					if !d.CFStatus.Enabled {
-						<div style="font-size:.72rem;color:var(--m)">Not configured</div>
-					} else {
-						<div class="stat-row">
-							<span class="stat-k">zone</span>
-							<span class="stat-v" style="font-family:monospace;font-size:.72rem">{ d.CFStatus.ZoneID }</span>
-						</div>
-						<div class="stat-row">
-							<span class="stat-k">mode</span>
-							if d.CFStatus.Async {
-								<span class="stat-v good">async</span>
-							} else {
-								<span class="stat-v bad">sync</span>
-							}
-						</div>
-						if d.CFStatus.LastError != "" {
-							<div class="stat-row">
-								<span class="stat-k">last error</span>
-								<span class="stat-v bad" style="font-size:.68rem">{ d.CFStatus.LastError }</span>
-							</div>
-						}
-						if d.CFStatus.LastSuccessAt != "" {
-							<div class="stat-row">
-								<span class="stat-k">last success</span>
-								<span class="stat-v" style="font-size:.68rem">{ d.CFStatus.LastSuccessAt }</span>
-							</div>
-						}
-					}
-				</div>
-			}
 		</div>
 		@overviewChartScript(d.ChartLabels, d.ChartReqs, d.ChartErrs,
 			d.CacheSplit.Hits, d.CacheSplit.Misses, d.CacheSplit.Stales,
-			d.CacheSplit.Bypasses, d.CacheSplit.Revalidated,
-			LatencyBucketLabels(), d.LatHist)
+			d.CacheSplit.Bypasses, d.CacheSplit.Revalidated)
 	}
 }
 
@@ -316,18 +254,14 @@ script overviewChartScript(
 	splitStales int64,
 	splitBypasses int64,
 	splitRevalidated int64,
-	latLabels []string,
-	latHist []int64,
 ) {
 	var d=document.documentElement.getAttribute('data-theme')!=='light';
 	var gc={color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'};
 	var tc={color:d?'#6050a0':'#9ca3af',font:{size:9}};
 	try{if(window._cReq)window._cReq.destroy();}catch(e){}
 	try{if(window._cSplit)window._cSplit.destroy();}catch(e){}
-	try{if(window._cLat)window._cLat.destroy();}catch(e){}
 	var cReqEl=document.getElementById('c-req');
 	var cSplitEl=document.getElementById('c-split');
-	var cLatEl=document.getElementById('c-lat');
 	if(!cReqEl||!cSplitEl)return;
 	requestAnimationFrame(function(){
 	[cReqEl,cSplitEl].forEach(function(c){
@@ -345,13 +279,5 @@ script overviewChartScript(
 		data:{labels:['HIT','MISS','STALE','BYP','REVAL'],datasets:[{data:[splitHits,splitMisses,splitStales,splitBypasses,splitRevalidated],backgroundColor:splitColors,borderWidth:0}]},
 		options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9},padding:5}}},cutout:'70%'}
 	});
-	if(cLatEl){
-		cLatEl.removeAttribute('height');cLatEl.removeAttribute('width');
-		cLatEl.style.position='absolute';cLatEl.style.top='0';cLatEl.style.left='0';
-		cLatEl.style.right='0';cLatEl.style.bottom='0';cLatEl.style.width='100%';cLatEl.style.height='100%';
-		window._cLat=new Chart(cLatEl,{type:'bar',data:{labels:latLabels,datasets:[
-			{label:'requests',data:latHist,backgroundColor:d?'rgba(196,181,253,.55)':'rgba(91,33,182,.5)',borderColor:d?'#c4b5fd':'#5b21b6',borderWidth:1},
-		]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:gc,ticks:{color:tc.color,font:tc.font,maxRotation:0,autoSkip:false}},y:{grid:gc,ticks:{color:tc.color,font:tc.font,precision:0}}}}});
-	}
 	});
 }

@@ -1,0 +1,186 @@
+package templates
+
+import "fmt"
+
+// Performance renders latency-focused telemetry: percentile KPIs, the
+// latency distribution, a latency-over-time trend, and derived health
+// signals (Apdex, SLO compliance). Kept deliberately to three rows so the
+// page stays readable.
+templ Performance(d PerformanceData) {
+	@Layout(d.LayoutProps) {
+		<!-- latency percentile KPI cards -->
+		<div
+			class="r4"
+			hx-get={ pageHref("performance", d.TimeRange) }
+			hx-trigger="every 5s"
+			hx-swap="outerHTML"
+			hx-select=".r4"
+		>
+			<div class="mc">
+				<div class="mk">p50 latency</div>
+				<div class="mv">{ FmtLatMs(d.P50MS) }</div>
+				<div class="md"><span style="color:var(--m)">median</span></div>
+			</div>
+			<div class="mc">
+				<div class="mk">p90 latency</div>
+				<div class="mv">{ FmtLatMs(d.P90MS) }</div>
+				<div class="md"><span style="color:var(--m)">9 in 10 faster</span></div>
+			</div>
+			<div class="mc">
+				<div class="mk">p99 latency</div>
+				<div class="mv">{ FmtLatMs(d.P99MS) }</div>
+				<div class="md">
+					if d.TrendP99.Up {
+						<span class="bad">{ d.TrendP99.Label }</span>
+					} else if d.TrendP99.Down {
+						<span class="good">{ d.TrendP99.Label }</span>
+					} else {
+						{ d.TrendP99.Label }
+					}
+				</div>
+			</div>
+			<div class="mc">
+				<div class="mk">avg latency</div>
+				<div class="mv">{ FmtLatMs(d.AvgMS) }</div>
+				<div class="md"><span style="color:var(--m)">{ FmtInt64(d.TotalSamples) } samples / min</span></div>
+			</div>
+		</div>
+		<!-- distribution + latency-over-time -->
+		<div class="r21">
+			<div class="cc">
+				<div class="ct">latency distribution (last 60s)</div>
+				<div class="ch"><canvas id="c-perf-dist" aria-label="Latency distribution chart"></canvas></div>
+			</div>
+			<div class="cc">
+				<div class="ct">latency over time ({ d.TimeRange })</div>
+				<div class="ch"><canvas id="c-perf-time" aria-label="Latency over time chart"></canvas></div>
+			</div>
+		</div>
+		<!-- derived health signals -->
+		<div class="r3">
+			<div class="bc">
+				<div class="bc-t">Apdex</div>
+				<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.35rem;flex:1;padding:.4rem 0">
+					<div class={ "apdex-score", apdexColorClass(d.ApdexClass()) }>
+						if d.TotalSamples == 0 {
+							—
+						} else {
+							{ fmt.Sprintf("%.2f", d.Apdex) }
+						}
+					</div>
+					<div class={ "lz", d.ApdexClass() }>{ d.ApdexLabel() }</div>
+				</div>
+				<div style="font-size:.66rem;color:var(--m);line-height:1.5;text-align:center">
+					satisfied ≤ { FmtLatMs(d.ApdexTargetMS) } · tolerating ≤ { FmtLatMs(d.ApdexToleratMS) }
+				</div>
+			</div>
+			<div class="bc">
+				<div class="bc-t">SLO compliance</div>
+				if d.TotalSamples == 0 {
+					<div style="font-size:.72rem;color:var(--m)">No traffic in window.</div>
+				}
+				for _, s := range d.SLO {
+					<div class="tier-bar-wrap">
+						<div class="tier-bar-label">
+							<span>≤ { s.Label }</span>
+							<span>{ FmtHitPct(s.Pct) }</span>
+						</div>
+						<div class="tier-bar" role="progressbar" aria-valuenow={ fmt.Sprintf("%.0f", s.Pct) } aria-valuemin="0" aria-valuemax="100">
+							<div class={ "tier-bar-fill", sloFillClass(s.Pct) } style={ fmt.Sprintf("width:%.1f%%", s.Pct) }></div>
+						</div>
+					</div>
+				}
+			</div>
+			<div class="bc">
+				<div class="bc-t">Tail latency</div>
+				<div class="stat-row">
+					<span class="stat-k">p99 / p50 ratio</span>
+					<span class="stat-v">{ tailRatio(d.P99MS, d.P50MS) }</span>
+				</div>
+				<div class="stat-row">
+					<span class="stat-k">p90 / p50 ratio</span>
+					<span class="stat-v">{ tailRatio(d.P90MS, d.P50MS) }</span>
+				</div>
+				<div class="stat-row">
+					<span class="stat-k">avg latency</span>
+					<span class="stat-v">{ FmtLatMs(d.AvgMS) }</span>
+				</div>
+				<div class="stat-row">
+					<span class="stat-k">samples / min</span>
+					<span class="stat-v">{ FmtInt64(d.TotalSamples) }</span>
+				</div>
+				<div style="font-size:.66rem;color:var(--m);line-height:1.5;margin-top:.45rem">A high p99/p50 ratio signals tail-latency variance — slow outliers despite a fast median.</div>
+			</div>
+		</div>
+		@perfChartScript(LatencyBucketLabels(), d.LatHist, d.ChartLabels, d.P99Series, d.AvgSeries)
+	}
+}
+
+// apdexColorClass maps the badge state class (g/y/r/d) to the score colour
+// utility class used for the big Apdex number.
+func apdexColorClass(state string) string {
+	switch state {
+	case "g":
+		return "ax-g"
+	case "y":
+		return "ax-y"
+	case "r":
+		return "ax-r"
+	default:
+		return "ax-d"
+	}
+}
+
+// sloFillClass colours an SLO bar by compliance level.
+func sloFillClass(pct float64) string {
+	switch {
+	case pct >= 99:
+		return "sf-g"
+	case pct >= 90:
+		return "sf-y"
+	default:
+		return "sf-r"
+	}
+}
+
+// tailRatio formats the ratio of two latency percentiles ("3.2×").
+func tailRatio(hi, lo int64) string {
+	if lo <= 0 {
+		if hi <= 0 {
+			return "—"
+		}
+		return "∞"
+	}
+	return fmt.Sprintf("%.1f×", float64(hi)/float64(lo))
+}
+
+script perfChartScript(
+	distLabels []string,
+	distData []int64,
+	timeLabels []string,
+	p99Series []int64,
+	avgSeries []int64,
+) {
+	var d=document.documentElement.getAttribute('data-theme')!=='light';
+	var gc={color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'};
+	var tc={color:d?'#6050a0':'#9ca3af',font:{size:9}};
+	try{if(window._cPDist)window._cPDist.destroy();}catch(e){}
+	try{if(window._cPTime)window._cPTime.destroy();}catch(e){}
+	var distEl=document.getElementById('c-perf-dist');
+	var timeEl=document.getElementById('c-perf-time');
+	if(!distEl||!timeEl)return;
+	requestAnimationFrame(function(){
+	[distEl,timeEl].forEach(function(c){
+		c.removeAttribute('height');c.removeAttribute('width');
+		c.style.position='absolute';c.style.top='0';c.style.left='0';
+		c.style.right='0';c.style.bottom='0';c.style.width='100%';c.style.height='100%';
+	});
+	window._cPDist=new Chart(distEl,{type:'bar',data:{labels:distLabels,datasets:[
+		{label:'requests',data:distData,backgroundColor:d?'rgba(196,181,253,.55)':'rgba(91,33,182,.5)',borderColor:d?'#c4b5fd':'#5b21b6',borderWidth:1},
+	]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:gc,ticks:{color:tc.color,font:tc.font,maxRotation:0,autoSkip:false}},y:{grid:gc,ticks:{color:tc.color,font:tc.font,precision:0}}}}});
+	window._cPTime=new Chart(timeEl,{type:'line',data:{labels:timeLabels,datasets:[
+		{label:'p99 ms',data:p99Series,borderColor:d?'#fb7185':'#e11d48',backgroundColor:'transparent',tension:.35,pointRadius:0,borderWidth:1.5},
+		{label:'avg ms',data:avgSeries,borderColor:d?'#c4b5fd':'#5b21b6',backgroundColor:d?'rgba(196,181,253,.07)':'rgba(91,33,182,.05)',fill:true,tension:.35,pointRadius:0,borderWidth:1.5},
+	]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:d?'#6050a0':'#8b7ab8',font:{size:9}}}},scales:{x:{grid:gc,ticks:{color:tc.color,font:tc.font,maxTicksLimit:8}},y:{grid:gc,ticks:{color:tc.color,font:tc.font},beginAtZero:true}}}});
+	});
+}

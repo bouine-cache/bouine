@@ -15,6 +15,45 @@ entries:
         - name: container image
           url: https://hub.docker.com/r/thylong/bouine
     apiVersion: v2
+    appVersion: 0.1.1
+    created: "2026-06-15T18:06:28.443484944Z"
+    description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit
+      path, gossip clustering, no external K/V store.
+    digest: 09930b7e3e30d7498adff7b8c197363f53bf587501c32b7aecc073d6bbdd8bee
+    home: https://github.com/thylong/bouine
+    icon: https://raw.githubusercontent.com/thylong/bouine/main/web/dashboard/logo.png
+    keywords:
+    - cache
+    - reverse-proxy
+    - http
+    - rfc9111
+    - kubernetes
+    - golang
+    - cdn
+    maintainers:
+    - name: thylong
+      url: https://github.com/thylong
+    name: bouine
+    sources:
+    - https://github.com/thylong/bouine
+    type: application
+    urls:
+    - bouine-0.1.1.tgz
+    version: 0.1.1
+  - annotations:
+      artifacthub.io/category: integration-delivery
+      artifacthub.io/images: |
+        - name: bouine
+          image: docker.io/thylong/bouine:latest
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: source
+          url: https://github.com/thylong/bouine
+        - name: documentation
+          url: https://bouine.thylong.com
+        - name: container image
+          url: https://hub.docker.com/r/thylong/bouine
+    apiVersion: v2
     appVersion: 0.1.0
     created: "2026-06-09T11:05:16.388234+02:00"
     description: Cloud-native HTTP reverse-proxy cache in Go - RFC9111 compliant,
@@ -40,4 +79,4 @@ entries:
     urls:
     - https://charts.thylong.com/bouine-0.1.0.tgz
     version: 0.1.0
-generated: "2026-06-09T11:05:16.387651+02:00"
+generated: "2026-06-15T18:06:28.443495653Z"

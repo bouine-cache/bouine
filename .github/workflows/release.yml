@@ -82,6 +82,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          # The application release owns the repo "Latest" pointer that the
+          # docs install one-liner resolves via the releases/latest API. The
+          # chart release (helm/chart-releaser) sets mark_as_latest: false.
+          make_latest: true
           files: |
             dist/bouine-*
             dist/SHA256SUMS

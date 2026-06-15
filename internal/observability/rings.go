@@ -321,6 +321,93 @@ func (r *OpsLogRing) Snapshot(n int) []OpsLogEntry {
 	return out
 }
 
+// ── Replication ring ──────────────────────────────────────────────────
+
+// ReplicationBucket holds replication byte/object counts for one window.
+// Used in full cluster mode to chart gossip replication throughput.
+type ReplicationBucket struct {
+	BytesSent int64
+	BytesRecv int64
+	ObjSent   int64
+	ObjRecv   int64
+	Timestamp int64
+}
+
+// ReplicationRing is a circular buffer of ReplicationBuckets, fed by the
+// cluster broadcaster (sent) and gossip receive path (received).
+type ReplicationRing struct {
+	mu      sync.RWMutex
+	buckets [requestBuckets]ReplicationBucket
+	head    int
+
+	liveBytesSent atomic.Int64
+	liveBytesRecv atomic.Int64
+	liveObjSent   atomic.Int64
+	liveObjRecv   atomic.Int64
+	lastRecvUnix  atomic.Int64 // unix sec of most recent received replication
+	totalObjSent  atomic.Int64
+	totalObjRecv  atomic.Int64
+	totalBytesS   atomic.Int64
+	totalBytesR   atomic.Int64
+}
+
+// RecordReplication is called once per replicated object. direction is
+// "sent" or "received"; bytes is the wire size of the object. Zero-alloc.
+func (r *ReplicationRing) RecordReplication(direction string, bytes int) {
+	switch direction {
+	case "sent":
+		r.liveObjSent.Add(1)
+		r.liveBytesSent.Add(int64(bytes))
+		r.totalObjSent.Add(1)
+		r.totalBytesS.Add(int64(bytes))
+	case "received":
+		r.liveObjRecv.Add(1)
+		r.liveBytesRecv.Add(int64(bytes))
+		r.totalObjRecv.Add(1)
+		r.totalBytesR.Add(int64(bytes))
+		r.lastRecvUnix.Store(time.Now().Unix())
+	}
+}
+
+// Flush drains the live accumulators into the next bucket.
+func (r *ReplicationRing) Flush(now time.Time) {
+	b := ReplicationBucket{
+		BytesSent: r.liveBytesSent.Swap(0),
+		BytesRecv: r.liveBytesRecv.Swap(0),
+		ObjSent:   r.liveObjSent.Swap(0),
+		ObjRecv:   r.liveObjRecv.Swap(0),
+		Timestamp: now.Unix(),
+	}
+	r.mu.Lock()
+	r.buckets[r.head] = b
+	r.head = (r.head + 1) % requestBuckets
+	r.mu.Unlock()
+}
+
+// Snapshot returns up to n most-recent buckets, oldest first.
+func (r *ReplicationRing) Snapshot(n int) []ReplicationBucket {
+	if n > requestBuckets {
+		n = requestBuckets
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]ReplicationBucket, n)
+	head := r.head
+	for i := 0; i < n; i++ {
+		idx := (head - n + i + requestBuckets) % requestBuckets
+		out[i] = r.buckets[idx]
+	}
+	return out
+}
+
+// Totals returns cumulative replication counters: objects/bytes sent and
+// received, plus the unix-second timestamp of the last received object
+// (0 if none).
+func (r *ReplicationRing) Totals() (objSent, objRecv, bytesSent, bytesRecv, lastRecvUnix int64) {
+	return r.totalObjSent.Load(), r.totalObjRecv.Load(),
+		r.totalBytesS.Load(), r.totalBytesR.Load(), r.lastRecvUnix.Load()
+}
+
 // ── Peer ring ─────────────────────────────────────────────────────────
 
 // PeerBucket records whether a peer was reachable in a 30s window.
@@ -384,23 +471,25 @@ func (r *PeerRing) PeerHealth() map[string]float64 {
 
 // Rings holds all ring buffers and their background flush goroutine.
 type Rings struct {
-	Request  *RequestRing
-	Route    *RouteRing
-	URL      *URLRing
-	OpsLog   *OpsLogRing
-	Peer     *PeerRing
-	NodeName string
+	Request     *RequestRing
+	Route       *RouteRing
+	URL         *URLRing
+	OpsLog      *OpsLogRing
+	Peer        *PeerRing
+	Replication *ReplicationRing
+	NodeName    string
 }
 
 // NewRings creates initialised ring buffers.
 func NewRings(nodeName string) *Rings {
 	return &Rings{
-		Request:  &RequestRing{},
-		Route:    &RouteRing{},
-		URL:      &URLRing{},
-		OpsLog:   &OpsLogRing{},
-		Peer:     &PeerRing{},
-		NodeName: nodeName,
+		Request:     &RequestRing{},
+		Route:       &RouteRing{},
+		URL:         &URLRing{},
+		OpsLog:      &OpsLogRing{},
+		Peer:        &PeerRing{},
+		Replication: &ReplicationRing{},
+		NodeName:    nodeName,
 	}
 }
 
@@ -420,6 +509,7 @@ func (ri *Rings) Start(ctx interface{ Done() <-chan struct{} }, snapshotPath str
 		case now := <-reqTicker.C:
 			ri.Request.Flush(now)
 			ri.Route.Flush(now)
+			ri.Replication.Flush(now)
 		case <-snapTicker.C:
 			if snapshotPath != "" {
 				_ = ri.Save(snapshotPath)

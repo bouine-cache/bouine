@@ -29,25 +29,34 @@ templ Routes(d RoutesData) {
 					<tr>
 						<th class="sortable" onclick="sortTable('route-tbl',0,this)">Route<span class="sort-icon"></span></th>
 						<th class="sortable" onclick="sortTable('route-tbl',1,this)">Pool<span class="sort-icon"></span></th>
-						<th class="sortable desc" onclick="sortTable('route-tbl',2,this)">Hit %<span class="sort-icon"></span></th>
-						<th class="sortable" onclick="sortTable('route-tbl',3,this)">Req/min<span class="sort-icon"></span></th>
-						<th class="sortable" onclick="sortTable('route-tbl',4,this)">TTL<span class="sort-icon"></span></th>
+						<th title="match.methods: when set, this route only matches the listed HTTP methods. Lets GET and POST on the same path have different cache policies. Empty = all methods.">Methods</th>
+						<th class="sortable desc" onclick="sortTable('route-tbl',3,this)">Hit %<span class="sort-icon"></span></th>
+						<th class="sortable" onclick="sortTable('route-tbl',4,this)">Req/min<span class="sort-icon"></span></th>
+						<th class="sortable" onclick="sortTable('route-tbl',5,this)">TTL<span class="sort-icon"></span></th>
 						<th title="stale-while-revalidate: serve the stale cached response while revalidating with origin in the background for up to this duration after TTL expiry.">SWR</th>
 						<th title="stale-if-error: serve the stale cached response when origin returns a 5xx error or is unreachable, for up to this duration after TTL expiry.">SIE</th>
 						<th title="negative_ttl: cache error responses (404, 405, 410, 501) for this duration to reduce origin load from repeated requests for non-existent resources.">neg_ttl</th>
 						<th title="stayin_alive: when enabled, serve stale content indefinitely during an origin outage regardless of stale-if-error window. Useful for routes where stale is always better than an error.">stayin_alive</th>
 						<th title="jitter_percent: add a random ±N% variance to every TTL. Prevents cache stampedes where many entries expire simultaneously and flood the origin.">jitter</th>
+						<th title="Per-route features: ttl_override, allow_set_cookie, max_object_size, strip_prefix, strip_query_params.">Features</th>
 						<th>Trend</th>
 					</tr>
 				</thead>
 				<tbody>
 					if len(d.RouteRows) == 0 {
-						<tr><td colspan="11" style="color:var(--m);text-align:center;padding:1rem">No data yet</td></tr>
+						<tr><td colspan="13" style="color:var(--m);text-align:center;padding:1rem">No data yet</td></tr>
 					}
 					for _, r := range d.RouteRows {
 						<tr>
 							<td>{ r.Name }</td>
 							<td style="color:var(--m)">{ r.Pool }</td>
+							<td>
+								if r.Methods == "" {
+									<span class="lz d">ALL</span>
+								} else {
+									<span class="chip">{ r.Methods }</span>
+								}
+							</td>
 							<td data-val={ fmt.Sprintf("%.1f", r.HitPct) }>
 								if r.IsBypass {
 									<span class="lz d">bypass</span>
@@ -72,6 +81,19 @@ templ Routes(d RoutesData) {
 								}
 							</td>
 							<td>{ r.Jitter }</td>
+							<td>
+								if len(r.Features) == 0 {
+									<span class="lz d">—</span>
+								} else {
+									for _, f := range r.Features {
+										if f.Warn {
+											<span class="chip warn" title={ f.Title }>{ f.Label }</span>
+										} else {
+											<span class="chip feat" title={ f.Title }>{ f.Label }</span>
+										}
+									}
+								}
+							</td>
 							<td>@sparkline(r.Sparkline)</td>
 						</tr>
 					}

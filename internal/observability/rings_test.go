@@ -365,3 +365,55 @@ func TestReplicationRing_UnknownDirectionIgnored(t *testing.T) {
 		t.Errorf("unknown direction should be ignored, got sent=%d recv=%d", objSent, objRecv)
 	}
 }
+
+func TestLatencyHistogram_Percentile(t *testing.T) {
+	var h LatencyHistogram
+	if got := h.Percentile(0.5); got != 0 {
+		t.Fatalf("empty histogram p50 = %d, want 0", got)
+	}
+	// 100 requests all in the ≤10ms bucket (index 3, bound 10).
+	h[3] = 100
+	for _, p := range []float64{0.5, 0.9, 0.99} {
+		if got := h.Percentile(p); got != 10 {
+			t.Fatalf("p%.0f = %d, want 10", p*100, got)
+		}
+	}
+	// Mixed: 90 fast (≤1ms idx0), 10 slow (overflow idx10).
+	h = LatencyHistogram{}
+	h[0] = 90
+	h[latencyHistBuckets-1] = 10
+	if got := h.Percentile(0.5); got != 1 {
+		t.Fatalf("mixed p50 = %d, want 1", got)
+	}
+	if got := h.Percentile(0.99); got != LatencyBoundsMs[len(LatencyBoundsMs)-1] {
+		t.Fatalf("mixed p99 = %d, want %d", got, LatencyBoundsMs[len(LatencyBoundsMs)-1])
+	}
+}
+
+func TestLatencyBucketIndex(t *testing.T) {
+	cases := []struct {
+		durMs int64
+		want  int
+	}{
+		{0, 0}, {1, 0}, {2, 1}, {3, 2}, {10, 3}, {11, 4},
+		{1000, 9}, {1001, latencyHistBuckets - 1}, {99999, latencyHistBuckets - 1},
+	}
+	for _, c := range cases {
+		if got := latencyBucketIndex(c.durMs); got != c.want {
+			t.Fatalf("latencyBucketIndex(%d) = %d, want %d", c.durMs, got, c.want)
+		}
+	}
+}
+
+func TestRequestRing_LatencyHistogramFlush(t *testing.T) {
+	r := &RequestRing{}
+	r.RecordRequest("HIT", 200, 1)
+	r.RecordRequest("HIT", 200, 8)
+	r.RecordRequest("MISS", 200, 2000)
+	r.Flush(time.Unix(100, 0))
+	snap := r.Snapshot(1)
+	b := snap[0]
+	if b.LatHist[0] != 1 || b.LatHist[3] != 1 || b.LatHist[latencyHistBuckets-1] != 1 {
+		t.Fatalf("unexpected latency histogram: %v", b.LatHist)
+	}
+}

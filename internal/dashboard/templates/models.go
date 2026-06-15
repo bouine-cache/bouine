@@ -59,9 +59,17 @@ type TrendData struct {
 // OverviewData is the view model for the overview page.
 type OverviewData struct {
 	LayoutProps
-	ReqPerSec   float64
-	HitPct      float64
-	P99MS       int64
+	ReqPerSec float64
+	HitPct    float64
+	P99MS     int64
+	P50MS     int64
+	P90MS     int64
+	// LatHist is the latency distribution (request counts per bucket) for
+	// the recent window; bucket bounds are observability.LatencyBoundsMs.
+	LatHist []int64
+	// StalePerMin / RevalPerMin are stale-serving and revalidation rates.
+	StalePerMin float64
+	RevalPerMin float64
 	ErrPct      float64
 	TrendReq    TrendData
 	TrendHit    TrendData
@@ -683,6 +691,19 @@ func FmtRate(v float64) string {
 		return fmt.Sprintf("%.1f", v)
 	}
 	return fmt.Sprintf("%.0f", v)
+}
+
+// LatencyBucketLabels returns the x-axis labels for the latency
+// distribution chart, derived from observability.LatencyBoundsMs. The
+// final label is the overflow bucket (">1s").
+func LatencyBucketLabels() []string {
+	bounds := observability.LatencyBoundsMs
+	out := make([]string, 0, len(bounds)+1)
+	for _, b := range bounds {
+		out = append(out, "≤"+FmtLatMs(b))
+	}
+	out = append(out, ">"+FmtLatMs(bounds[len(bounds)-1]))
+	return out
 }
 
 // boolStr converts a bool to "true"/"false" string.

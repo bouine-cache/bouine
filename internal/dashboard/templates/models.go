@@ -59,17 +59,11 @@ type TrendData struct {
 // OverviewData is the view model for the overview page.
 type OverviewData struct {
 	LayoutProps
-	ReqPerSec float64
-	HitPct    float64
-	P99MS     int64
-	P50MS     int64
-	P90MS     int64
-	// LatHist is the latency distribution (request counts per bucket) for
-	// the recent window; bucket bounds are observability.LatencyBoundsMs.
-	LatHist []int64
-	// StalePerMin / RevalPerMin are stale-serving and revalidation rates.
-	StalePerMin float64
-	RevalPerMin float64
+	ReqPerSec   float64
+	HitPct      float64
+	P99MS       int64
+	P50MS       int64
+	P90MS       int64
 	ErrPct      float64
 	TrendReq    TrendData
 	TrendHit    TrendData
@@ -91,8 +85,6 @@ type OverviewData struct {
 	Evictions    int64
 	// Ring for the compact circular SVG on the overview bottom row.
 	RingSegs []api.RingSegment
-	// Cloudflare propagation status (nil when CF not configured).
-	CFStatus *CFStatusCard
 	// ClusterMode is the active cluster consistency model:
 	// "strong", "eventual", "full", or "single-node" when cluster is disabled.
 	// Used to conditionally render ring SVG vs. mode info on overview.
@@ -124,6 +116,69 @@ func fillPct(used, max int64) float64 {
 		return 100
 	}
 	return p
+}
+
+// ── Performance ──────────────────────────────────────────────────────
+
+// PerformanceData is the view model for the performance page. It focuses
+// exclusively on request-latency signals so the overview stays lean.
+type PerformanceData struct {
+	LayoutProps
+	// Latency percentiles over the recent window (last ~60s).
+	P50MS, P90MS, P99MS, AvgMS int64
+	TrendP99                   TrendData
+	// LatHist is the latency distribution (request counts per bucket) for
+	// the recent window; bucket bounds are observability.LatencyBoundsMs.
+	LatHist []int64
+	// Per-bucket latency series over the selected time range.
+	ChartLabels []string
+	P99Series   []int64
+	AvgSeries   []int64
+	// Apdex application-performance index over the recent window.
+	Apdex          float64 // 0..1
+	ApdexTargetMS  int64   // satisfied threshold T
+	ApdexToleratMS int64   // tolerating threshold (≈4T, bucket-aligned)
+	// SLO compliance: share of requests at or under each latency target.
+	SLO          []SLOBucket
+	TotalSamples int64
+}
+
+// SLOBucket is the share of requests served at or under a latency target.
+type SLOBucket struct {
+	Label string  // e.g. "10ms"
+	Pct   float64 // 0..100
+}
+
+// ApdexLabel returns a qualitative rating for the Apdex score.
+func (p PerformanceData) ApdexLabel() string {
+	switch {
+	case p.TotalSamples == 0:
+		return "no data"
+	case p.Apdex >= 0.94:
+		return "excellent"
+	case p.Apdex >= 0.85:
+		return "good"
+	case p.Apdex >= 0.70:
+		return "fair"
+	case p.Apdex >= 0.50:
+		return "poor"
+	default:
+		return "unacceptable"
+	}
+}
+
+// ApdexClass returns the CSS state class (g/y/r) for the Apdex score.
+func (p PerformanceData) ApdexClass() string {
+	switch {
+	case p.TotalSamples == 0:
+		return "d"
+	case p.Apdex >= 0.85:
+		return "g"
+	case p.Apdex >= 0.70:
+		return "y"
+	default:
+		return "r"
+	}
 }
 
 // ── Routes ───────────────────────────────────────────────────────────
@@ -227,6 +282,10 @@ type ClusterData struct {
 type InvalidationData struct {
 	LayoutProps
 	OpsLog []observability.OpsLogEntry
+	// CFStatus is the Cloudflare propagation status (nil when CF is not
+	// configured). Cache invalidation on bouine propagates to the CDN, so
+	// the CF status belongs with the invalidation controls.
+	CFStatus *CFStatusCard
 }
 
 // HistTypeClass maps an ops-log op to the .ht-* CSS class.

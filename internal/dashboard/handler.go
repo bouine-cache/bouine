@@ -79,6 +79,7 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 
 	protected := http.NewServeMux()
 	protected.HandleFunc("GET /dashboard/", h.overview)
+	protected.HandleFunc("GET /dashboard/performance", h.performance)
 	protected.HandleFunc("GET /dashboard/routes", h.routes)
 	protected.HandleFunc("GET /dashboard/cluster", h.cluster)
 	protected.HandleFunc("GET /dashboard/invalidation", h.invalidation)
@@ -204,12 +205,10 @@ type overviewStats struct {
 	priorReq, priorHit, priorErr, priorP99                               int64
 	hitPct, errPct, priorHitPct, priorErrPct                             float64
 	reqPerSec, priorReqPerSec                                            float64
-	// Latency distribution over the recent window.
+	// Latency percentiles over the recent window.
 	latHist          observability.LatencyHistogram
 	p50, p90, p99    int64
 	priorP99FromHist int64
-	stalePerMin      float64
-	revalPerMin      float64
 }
 
 // buildOverviewStats computes the recent and prior windowed stats from the ring snapshot.
@@ -260,8 +259,6 @@ func buildOverviewStats(snap []observability.RequestBucket, n int) overviewStats
 	s.p90 = s.latHist.Percentile(0.90)
 	s.p99 = s.latHist.Percentile(0.99)
 	s.priorP99FromHist = priorLat.Percentile(0.99)
-	s.stalePerMin = float64(s.splitStales) / windowSecs * 60
-	s.revalPerMin = float64(s.splitRevalidated) / windowSecs * 60
 	return s
 }
 
@@ -330,9 +327,6 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		P99MS:       st.p99,
 		P50MS:       st.p50,
 		P90MS:       st.p90,
-		LatHist:     latHistToInts(st.latHist),
-		StalePerMin: st.stalePerMin,
-		RevalPerMin: st.revalPerMin,
 		ErrPct:      st.errPct,
 		TrendReq:    templates.BuildTrend(st.reqPerSec, st.priorReqPerSec, true),
 		TrendHit:    templates.BuildTrend(st.hitPct, st.priorHitPct, true),
@@ -352,8 +346,128 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		Evictions:   evictions,
 		RingSegs:    ringSegs,
 		ClusterMode: h.cfg.ClusterMeta.Mode,
-		CFStatus:    h.cfStatusCard(),
 	}))
+}
+
+// performance renders the latency-focused performance page.
+func (h *Handler) performance(w http.ResponseWriter, r *http.Request) {
+	merged, _ := h.agg.Collect(r.Context())
+	chartBuckets, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+	snap := merged.RequestSnap
+	n := len(snap)
+
+	// Per-bucket latency series over the selected range.
+	start := max(0, n-chartBuckets)
+	labels := make([]string, 0, chartBuckets)
+	p99Series := make([]int64, 0, chartBuckets)
+	avgSeries := make([]int64, 0, chartBuckets)
+	for _, b := range snap[start:] {
+		if b.Timestamp == 0 {
+			continue // unfilled ring slot
+		}
+		labels = append(labels, time.Unix(b.Timestamp, 0).Format("15:04:05"))
+		p99Series = append(p99Series, b.LatHist.Percentile(0.99))
+		var avg int64
+		if b.DurN > 0 {
+			avg = b.DurSumMs / b.DurN
+		}
+		avgSeries = append(avgSeries, avg)
+	}
+	if len(labels) == 0 {
+		labels = []string{"—"}
+		p99Series = []int64{0}
+		avgSeries = []int64{0}
+	}
+
+	// Recent window (last ~60s) aggregates for KPIs, distribution, Apdex, SLO.
+	recent := min(6, n)
+	var hist observability.LatencyHistogram
+	var priorHist observability.LatencyHistogram
+	var durSum, durN, totalReq int64
+	for _, b := range snap[n-recent:] {
+		for i := range b.LatHist {
+			hist[i] += b.LatHist[i]
+		}
+		durSum += b.DurSumMs
+		durN += b.DurN
+		totalReq += b.Requests
+	}
+	priorStart := max(0, n-12)
+	for _, b := range snap[priorStart:max(priorStart, n-recent)] {
+		for i := range b.LatHist {
+			priorHist[i] += b.LatHist[i]
+		}
+	}
+	var avgMs int64
+	if durN > 0 {
+		avgMs = durSum / durN
+	}
+	p99 := hist.Percentile(0.99)
+
+	h.render(w, r, templates.Performance(templates.PerformanceData{
+		LayoutProps:    h.layoutProps("performance", "Performance", timeRange),
+		P50MS:          hist.Percentile(0.50),
+		P90MS:          hist.Percentile(0.90),
+		P99MS:          p99,
+		AvgMS:          avgMs,
+		TrendP99:       templates.BuildTrend(float64(p99), float64(priorHist.Percentile(0.99)), false),
+		LatHist:        latHistToInts(hist),
+		ChartLabels:    labels,
+		P99Series:      p99Series,
+		AvgSeries:      avgSeries,
+		Apdex:          apdexScore(hist, totalReq),
+		ApdexTargetMS:  apdexTargetMS,
+		ApdexToleratMS: apdexToleratMS,
+		SLO:            sloBuckets(hist, totalReq),
+		TotalSamples:   totalReq,
+	}))
+}
+
+// Apdex thresholds (bucket-aligned to observability.LatencyBoundsMs). A
+// request is "satisfied" at or under the target and "tolerating" up to the
+// tolerating bound; anything slower is "frustrated".
+const (
+	apdexTargetMS  = 100 // bound index 6
+	apdexToleratMS = 250 // bound index 7
+)
+
+// apdexScore computes the Apdex index (0..1) from a latency histogram.
+func apdexScore(h observability.LatencyHistogram, total int64) float64 {
+	if total == 0 {
+		return 0
+	}
+	var satisfied, tolerating int64
+	for i := 0; i <= 6; i++ { // buckets with bound ≤ 100ms
+		satisfied += h[i]
+	}
+	tolerating = h[7] // (100ms, 250ms]
+	return (float64(satisfied) + float64(tolerating)/2) / float64(total)
+}
+
+// sloBuckets reports the share of requests served at or under fixed latency
+// targets that align with the histogram bucket bounds.
+func sloBuckets(h observability.LatencyHistogram, total int64) []templates.SLOBucket {
+	targets := []struct {
+		label string
+		idx   int // inclusive bucket index for the target bound
+	}{
+		{"10ms", 3},
+		{"100ms", 6},
+		{"1s", 9},
+	}
+	out := make([]templates.SLOBucket, 0, len(targets))
+	for _, t := range targets {
+		var pct float64
+		if total > 0 {
+			var c int64
+			for i := 0; i <= t.idx && i < len(h); i++ {
+				c += h[i]
+			}
+			pct = float64(c) / float64(total) * 100
+		}
+		out = append(out, templates.SLOBucket{Label: t.label, Pct: pct})
+	}
+	return out
 }
 
 // toPeerResultsEnriched joins PeerResult with PeerInfo (for DataAddr/AdminAddr/Weight/JoinedAt).
@@ -493,6 +607,7 @@ func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, templates.Invalidation(templates.InvalidationData{
 		LayoutProps: h.layoutProps("invalidation", "Invalidation", timeRange),
 		OpsLog:      opsLog,
+		CFStatus:    h.cfStatusCard(),
 	}))
 }
 

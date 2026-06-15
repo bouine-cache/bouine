@@ -10,7 +10,23 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-15
+
+### Added
+- Operator dashboard overview now reports a real latency distribution:
+  p50 / p90 / p99 percentiles and a log-scale histogram chart, replacing the
+  previous running-max p99 approximation. Latency is recorded on the
+  alloc-free request hot path.
+- Overview stale-serving panel surfacing stale-served and revalidation rates
+  per minute and the stale share.
+- Route table now shows the request methods and per-route cache features
+  (TTL overrides, query-param stripping, max object size, etc.).
+- Full-replication clusters get a dedicated dashboard replication panel
+  (objects/bytes sent and received, throughput, last activity).
+- Build version is shown in the dashboard sidebar.
+
 ### Changed
+- Dashboard tagline no longer describes bouine as a "reverse-proxy".
 - Migrated `cloudflare-go` v2 → v4 (maintained major; identical purge surface).
 - Documentation corrected for open-source release (project layout, Makefile
   targets, security reporting channel).

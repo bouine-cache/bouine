@@ -13,7 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
 </p>
 
-`bouine` is a cloud-native HTTP reverse-proxy cache in Go — RFC 9111
+`bouine` is a cloud-native HTTP cache in Go — RFC 9111
 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
 It targets the same problem space as a classic HTTP cache (RFC 9111 cache,
 fast purge, predicate-based bans) but is designed from day one for

@@ -25,7 +25,53 @@ const (
 	opsLogCap         = 100                             // max ops-log entries
 	peerBucketSecs    = 30                              // 30-second buckets for the peer health ring
 	peerBuckets       = 30 * 60 / peerBucketSecs        // 60 = 30 min
+	// latencyHistBuckets is the number of fixed log-scale latency buckets
+	// recorded per request window (10 finite bands + 1 overflow).
+	latencyHistBuckets = 11
 )
+
+// LatencyBoundsMs are the inclusive upper bounds (ms) for the first 10
+// latency histogram buckets; the 11th bucket captures everything above
+// the last bound. Index i holds requests with bound[i-1] < dur <= bound[i].
+var LatencyBoundsMs = [latencyHistBuckets - 1]int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000}
+
+// latencyBucketIndex returns the histogram bucket for a duration in ms.
+func latencyBucketIndex(durMs int64) int {
+	for i, bound := range LatencyBoundsMs {
+		if durMs <= bound {
+			return i
+		}
+	}
+	return latencyHistBuckets - 1
+}
+
+// LatencyHistogram is a summed latency distribution over a window.
+type LatencyHistogram [latencyHistBuckets]int64
+
+// Percentile returns the upper bound (ms) of the bucket containing the
+// p-th percentile (0..1), or 0 when the histogram is empty. The overflow
+// bucket reports the last finite bound (i.e. ">1000ms" → 1000).
+func (h LatencyHistogram) Percentile(p float64) int64 {
+	var total int64
+	for _, c := range h {
+		total += c
+	}
+	if total == 0 {
+		return 0
+	}
+	target := int64(float64(total) * p)
+	var cum int64
+	for i, c := range h {
+		cum += c
+		if cum >= target {
+			if i >= len(LatencyBoundsMs) {
+				return LatencyBoundsMs[len(LatencyBoundsMs)-1]
+			}
+			return LatencyBoundsMs[i]
+		}
+	}
+	return LatencyBoundsMs[len(LatencyBoundsMs)-1]
+}
 
 // ── Request ring ─────────────────────────────────────────────────────
 
@@ -37,13 +83,14 @@ type RequestBucket struct {
 	Hits        int64
 	Misses      int64
 	StaleHits   int64
-	Bypasses    int64 // X-Cache: BYPASS
-	Revalidated int64 // X-Cache: REVALIDATED
-	Errors      int64 // HTTP 5xx
-	DurSumMs    int64 // sum of request durations in ms (for avg)
-	DurN        int64 // number of samples with duration
-	P99MS       int64 // running max latency ms (approximation)
-	Timestamp   int64 // unix seconds of window start
+	Bypasses    int64            // X-Cache: BYPASS
+	Revalidated int64            // X-Cache: REVALIDATED
+	Errors      int64            // HTTP 5xx
+	DurSumMs    int64            // sum of request durations in ms (for avg)
+	DurN        int64            // number of samples with duration
+	P99MS       int64            // running max latency ms (approximation; superseded by LatHist)
+	LatHist     LatencyHistogram // latency distribution for this window
+	Timestamp   int64            // unix seconds of window start
 }
 
 // RequestRing is a circular buffer of requestBuckets.
@@ -65,6 +112,7 @@ type RequestRing struct {
 	liveDurSumMs    atomic.Int64
 	liveDurN        atomic.Int64
 	liveP99MS       atomic.Int64 // max duration seen since last flush
+	liveLatHist     [latencyHistBuckets]atomic.Int64
 }
 
 // RecordRequest is called on the hot path for every completed request.
@@ -89,6 +137,7 @@ func (r *RequestRing) RecordRequest(xCache string, statusCode int, durMs int64) 
 	}
 	r.liveDurSumMs.Add(durMs)
 	r.liveDurN.Add(1)
+	r.liveLatHist[latencyBucketIndex(durMs)].Add(1)
 	// Update max via CAS loop.
 	for {
 		old := r.liveP99MS.Load()
@@ -116,6 +165,9 @@ func (r *RequestRing) Flush(now time.Time) {
 		DurN:        r.liveDurN.Swap(0),
 		P99MS:       r.liveP99MS.Swap(0),
 		Timestamp:   now.Unix(),
+	}
+	for i := range r.liveLatHist {
+		b.LatHist[i] = r.liveLatHist[i].Swap(0)
 	}
 	r.mu.Lock()
 	r.buckets[r.head] = b

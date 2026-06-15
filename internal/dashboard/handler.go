@@ -204,12 +204,19 @@ type overviewStats struct {
 	priorReq, priorHit, priorErr, priorP99                               int64
 	hitPct, errPct, priorHitPct, priorErrPct                             float64
 	reqPerSec, priorReqPerSec                                            float64
+	// Latency distribution over the recent window.
+	latHist          observability.LatencyHistogram
+	p50, p90, p99    int64
+	priorP99FromHist int64
+	stalePerMin      float64
+	revalPerMin      float64
 }
 
 // buildOverviewStats computes the recent and prior windowed stats from the ring snapshot.
 func buildOverviewStats(snap []observability.RequestBucket, n int) overviewStats {
 	recent := min(6, n)
 	var s overviewStats
+	var priorLat observability.LatencyHistogram
 	for _, b := range snap[n-recent:] {
 		s.totalReq += b.Requests
 		s.totalHit += b.Hits
@@ -222,6 +229,9 @@ func buildOverviewStats(snap []observability.RequestBucket, n int) overviewStats
 		if b.P99MS > s.maxP99 {
 			s.maxP99 = b.P99MS
 		}
+		for i := range b.LatHist {
+			s.latHist[i] += b.LatHist[i]
+		}
 	}
 	priorStart := max(0, n-12)
 	for _, b := range snap[priorStart:max(priorStart, n-recent)] {
@@ -230,6 +240,9 @@ func buildOverviewStats(snap []observability.RequestBucket, n int) overviewStats
 		s.priorErr += b.Errors
 		if b.P99MS > s.priorP99 {
 			s.priorP99 = b.P99MS
+		}
+		for i := range b.LatHist {
+			priorLat[i] += b.LatHist[i]
 		}
 	}
 	if s.totalReq > 0 {
@@ -240,9 +253,24 @@ func buildOverviewStats(snap []observability.RequestBucket, n int) overviewStats
 		s.priorHitPct = float64(s.priorHit) / float64(s.priorReq) * 100
 		s.priorErrPct = float64(s.priorErr) / float64(s.priorReq) * 100
 	}
-	s.reqPerSec = float64(s.totalReq) / float64(max(1, recent)*10)
-	s.priorReqPerSec = float64(s.priorReq) / float64(max(1, recent)*10)
+	windowSecs := float64(max(1, recent) * 10)
+	s.reqPerSec = float64(s.totalReq) / windowSecs
+	s.priorReqPerSec = float64(s.priorReq) / windowSecs
+	s.p50 = s.latHist.Percentile(0.50)
+	s.p90 = s.latHist.Percentile(0.90)
+	s.p99 = s.latHist.Percentile(0.99)
+	s.priorP99FromHist = priorLat.Percentile(0.99)
+	s.stalePerMin = float64(s.splitStales) / windowSecs * 60
+	s.revalPerMin = float64(s.splitRevalidated) / windowSecs * 60
 	return s
+}
+
+// latHistToInts copies the fixed-size latency histogram into a slice for
+// the view model.
+func latHistToInts(h observability.LatencyHistogram) []int64 {
+	out := make([]int64, len(h))
+	copy(out, h[:])
+	return out
 }
 
 func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
@@ -299,11 +327,16 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		LayoutProps: lprops,
 		ReqPerSec:   st.reqPerSec,
 		HitPct:      st.hitPct,
-		P99MS:       st.maxP99,
+		P99MS:       st.p99,
+		P50MS:       st.p50,
+		P90MS:       st.p90,
+		LatHist:     latHistToInts(st.latHist),
+		StalePerMin: st.stalePerMin,
+		RevalPerMin: st.revalPerMin,
 		ErrPct:      st.errPct,
 		TrendReq:    templates.BuildTrend(st.reqPerSec, st.priorReqPerSec, true),
 		TrendHit:    templates.BuildTrend(st.hitPct, st.priorHitPct, true),
-		TrendLat:    templates.BuildTrend(float64(st.maxP99), float64(st.priorP99), false),
+		TrendLat:    templates.BuildTrend(float64(st.p99), float64(st.priorP99FromHist), false),
 		TrendErr:    templates.BuildTrend(st.errPct, st.priorErrPct, false),
 		CacheSplit: templates.CacheSplitData{
 			Hits: st.splitHits, Misses: st.splitMisses, Stales: st.splitStales,

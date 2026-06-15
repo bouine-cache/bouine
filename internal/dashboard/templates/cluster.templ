@@ -139,15 +139,29 @@ templ Cluster(d ClusterData) {
 						Every node holds a copy of every cached object. Maximum hit rate
 						at N× memory cost. Invalidation + replication via gossip.
 					</div>
-				</div>
-				<div class="bc">
-					<div class="bc-t">Replication stats</div>
-					<div class="stat-row"><span class="stat-k" title="Number of cache objects replicated to this node from peers.">replications received</span><span class="stat-v">—</span></div>
-					<div class="stat-row"><span class="stat-k" title="Total gossip invalidation events (purges + bans) received from peers.">invalidations received</span><span class="stat-v">—</span></div>
-					<div class="stat-row" style="margin-top:.5rem">
+					<div class="stat-row"><span class="stat-k" title="Objects this node has replicated out to peers (since start).">objects sent</span><span class="stat-v">{ FmtInt64(d.Replication.ObjectsSent) } ({ FmtRate(d.Replication.SentPerMin) }/min)</span></div>
+					<div class="stat-row"><span class="stat-k" title="Objects this node has received and stored from peers (since start).">objects received</span><span class="stat-v">{ FmtInt64(d.Replication.ObjectsRecv) } ({ FmtRate(d.Replication.RecvPerMin) }/min)</span></div>
+					<div class="stat-row"><span class="stat-k" title="Approximate replication wire volume sent / received.">bytes sent / recv</span><span class="stat-v">{ FmtBytes(d.Replication.BytesSent) } / { FmtBytes(d.Replication.BytesRecv) }</span></div>
+					<div class="stat-row" style="margin-top:.4rem">
+						<span class="stat-k" title="Time since the last replicated object was received from a peer. A growing value indicates this node is not converging (peers not replicating to it).">last received</span>
+						if d.Replication.Idle {
+							<span class="stat-v"><span class="lz d">idle</span></span>
+						} else {
+							<span class="stat-v"><span class="lz g">{ d.Replication.LastActivity }</span></span>
+						}
+					</div>
+					<div class="stat-row">
 						<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable.">uptime avg 30m</span>
 						<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>
 					</div>
+				</div>
+				<div class="bc">
+					<div class="bc-t">Replication throughput</div>
+					<div style="height:150px;position:relative;margin-top:.4rem">
+						<canvas id="c-repl"></canvas>
+					</div>
+					<div style="font-size:.64rem;color:var(--m);margin-top:.4rem">bytes/bucket — <span style="color:var(--a2)">sent</span> vs <span style="color:#60a5fa">received</span> via gossip</div>
+					@replicationChartScript(d.Replication.SentSeries, d.Replication.RecvSeries)
 				</div>
 			}
 		</div>
@@ -191,4 +205,24 @@ func peerHealthSummary(health map[string]float64) string {
 		total += v
 	}
 	return fmt.Sprintf("%.0f%%", total/float64(len(health)))
+}
+
+// replicationChartScript renders the full-mode replication throughput
+// line chart (bytes/bucket sent vs received via gossip).
+script replicationChartScript(sent []int64, recv []int64) {
+	var el=document.getElementById('c-repl');
+	if(!el)return;
+	try{if(window._cRepl)window._cRepl.destroy();}catch(e){}
+	var d=document.documentElement.getAttribute('data-theme')!=='light';
+	requestAnimationFrame(function(){
+		el.removeAttribute('height');el.removeAttribute('width');
+		el.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%';
+		var labels=sent.map(function(_,i){return i;});
+		var axTick={color:d?'#6050a0':'#9ca3af',font:{size:9}};
+		var axGrid={color:d?'rgba(196,181,253,.05)':'rgba(91,33,182,.04)'};
+		window._cRepl=new Chart(el,{type:'line',data:{labels:labels,datasets:[
+			{data:sent,label:'sent',borderColor:'#8b5cf6',backgroundColor:'rgba(139,92,246,.12)',fill:true,tension:.35,pointRadius:0,borderWidth:1.5},
+			{data:recv,label:'received',borderColor:'#60a5fa',backgroundColor:'rgba(96,165,250,.1)',fill:true,tension:.35,pointRadius:0,borderWidth:1.5}
+		]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false,grid:{display:false}},y:{grid:axGrid,ticks:axTick,beginAtZero:true}}}});
+	});
 }

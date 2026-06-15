@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/admin"
+	"github.com/thylong/bouine/internal/buildinfo"
 	"github.com/thylong/bouine/internal/cache"
 	bouinecf "github.com/thylong/bouine/internal/cloudflare"
 	"github.com/thylong/bouine/internal/cluster"
@@ -120,7 +121,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	rings, snapshotPath := e.initRings()
 	dpMetrics.Rings = rings
 
-	clusterNode, peerFetcher, broadcaster, peersFn := e.initCluster(ctx, store)
+	clusterNode, peerFetcher, broadcaster, peersFn := e.initCluster(ctx, store, rings)
 
 	cfProp := e.initCloudflare(dpMetrics)
 
@@ -175,6 +176,7 @@ func (e *engine) initRings() (*observability.Rings, string) {
 func (e *engine) initCluster(
 	ctx context.Context,
 	store storage.Store,
+	rings *observability.Rings,
 ) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo) {
 	if !e.cfg.Cluster.Enabled || e.cfg.Listen.Cluster == "" {
 		return nil, nil, nil, nil
@@ -197,6 +199,11 @@ func (e *engine) initCluster(
 
 	clusterMetrics := cluster.RegisterMetrics(e.metrics.Registry)
 	clusterMetrics.SetMode(e.cfg.Cluster.Mode)
+	if rings != nil && rings.Replication != nil {
+		clusterMetrics.OnReplicationBytes = func(direction string, bytes float64) {
+			rings.Replication.RecordReplication(direction, int(bytes))
+		}
+	}
 	clusterNode.SetMetrics(clusterMetrics)
 
 	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry)
@@ -415,6 +422,7 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 
 	_ = dashboard.New(dashboard.Config{
 		Rings:        rs.rings,
+		Version:      buildinfo.Version,
 		PeersFn:      rs.peersFn,
 		SelfAddr:     addr,
 		Token:        rs.token,

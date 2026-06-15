@@ -27,6 +27,8 @@ type Config struct {
 	Token        string
 	Logger       *slog.Logger
 	SnapshotPath string
+	// Version is the build version shown in the dashboard sidebar.
+	Version string
 	// Storage stats.
 	StoreFn      func() api.Stats
 	HotMaxBytes  int64
@@ -137,6 +139,7 @@ func (h *Handler) layoutProps(page, title, timeRange string) templates.LayoutPro
 		Page:          page,
 		PageTitle:     title,
 		NodeName:      h.nodeName(),
+		Version:       h.cfg.Version,
 		TimeRange:     timeRange,
 		PeerCount:     peerCount,
 		LivePeers:     live,
@@ -399,7 +402,53 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 		RingSegs:    ringSegs,
 		Meta:        h.cfg.ClusterMeta,
 		FetchStats:  fetchStats,
+		Replication: h.replicationStats(timeRange),
 	}))
+}
+
+// replicationStats builds the full-mode replication view model from the
+// replication ring. Returns a zeroed (Idle) struct when no ring is wired.
+func (h *Handler) replicationStats(timeRange string) templates.ReplicationStats {
+	if h.cfg.Rings == nil || h.cfg.Rings.Replication == nil {
+		return templates.ReplicationStats{Idle: true, LastActivity: "—"}
+	}
+	rr := h.cfg.Rings.Replication
+	objSent, objRecv, bytesSent, bytesRecv, lastRecv := rr.Totals()
+	n, _ := parseTimeRange(timeRange)
+	buckets := rr.Snapshot(n)
+
+	sentSeries := make([]int64, len(buckets))
+	recvSeries := make([]int64, len(buckets))
+	var recentObjSent, recentObjRecv int64
+	const bucketSecs = 10
+	recentN := 6 // last ~60s with 10s buckets
+	for i, b := range buckets {
+		sentSeries[i] = b.BytesSent
+		recvSeries[i] = b.BytesRecv
+		if i >= len(buckets)-recentN {
+			recentObjSent += b.ObjSent
+			recentObjRecv += b.ObjRecv
+		}
+	}
+	perMinFactor := 60.0 / float64(recentN*bucketSecs)
+
+	st := templates.ReplicationStats{
+		ObjectsSent: objSent,
+		ObjectsRecv: objRecv,
+		BytesSent:   bytesSent,
+		BytesRecv:   bytesRecv,
+		SentPerMin:  float64(recentObjSent) * perMinFactor,
+		RecvPerMin:  float64(recentObjRecv) * perMinFactor,
+		SentSeries:  sentSeries,
+		RecvSeries:  recvSeries,
+	}
+	if lastRecv == 0 {
+		st.Idle = objSent == 0
+		st.LastActivity = "—"
+	} else {
+		st.LastActivity = templates.TimeAgo(time.Unix(lastRecv, 0))
+	}
+	return st
 }
 
 func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {

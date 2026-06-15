@@ -20,6 +20,7 @@ type LayoutProps struct {
 	Page      string // "overview" | "routes" | "cluster" | "invalidation" | "config"
 	PageTitle string
 	NodeName  string
+	Version   string // build version shown in the sidebar (buildinfo.Version)
 	// TimeRange is shown in the tabs-bar range selector and preserved
 	// across page navigations (M2/M3).
 	TimeRange string // "1h" | "6h" | "24h"; default "6h"
@@ -132,13 +133,25 @@ type RouteRow struct {
 	NegTTL      string
 	StayinAlive bool
 	Jitter      string
-	IsBypass    bool // private or no-store: no cache policy
+	// v0.1.0 route features
+	Methods  string         // "GET·HEAD" or "" (all methods)
+	Features []RouteFeature // compact badges for set per-route features
+	IsBypass bool           // private or no-store: no cache policy
 	// From observability.RouteStat
 	Requests  int64
 	Hits      int64
 	Misses    int64
 	HitPct    float64
 	Sparkline []int64
+}
+
+// RouteFeature is a compact badge describing a per-route capability that
+// is enabled (ttl_override, allow_set_cookie, max_object_size,
+// strip_prefix, strip_query_params).
+type RouteFeature struct {
+	Label string // short text shown in the badge, e.g. "override 1h"
+	Title string // tooltip with the full explanation
+	Warn  bool   // amber/red styling (security-relevant, e.g. allow_set_cookie)
 }
 
 // RoutesData is the view model for the routes page.
@@ -172,6 +185,23 @@ type PeerFetchStats struct {
 	DigestCount  int64
 }
 
+// ReplicationStats holds aggregated full-mode replication telemetry for
+// the cluster page. Bytes/objects are totals over the dashboard window;
+// the chart series carry per-bucket rates for the throughput graph.
+type ReplicationStats struct {
+	ObjectsSent  int64
+	ObjectsRecv  int64
+	BytesSent    int64
+	BytesRecv    int64
+	SentPerMin   float64 // objects replicated out per minute (recent)
+	RecvPerMin   float64 // objects replicated in per minute (recent)
+	LastActivity string  // human "12s ago" since last replication received, or "—"
+	Idle         bool    // true when no replication has been observed
+	// Chart series (oldest→newest), bytes per bucket.
+	SentSeries []int64
+	RecvSeries []int64
+}
+
 // ClusterData is the view model for the cluster page.
 type ClusterData struct {
 	LayoutProps
@@ -180,6 +210,7 @@ type ClusterData struct {
 	RingSegs    []api.RingSegment
 	Meta        ClusterMeta
 	FetchStats  PeerFetchStats
+	Replication ReplicationStats
 }
 
 // ── Invalidation ─────────────────────────────────────────────────────
@@ -446,6 +477,18 @@ func FmtUptime(d time.Duration) string {
 	return fmt.Sprintf("%dm", mins)
 }
 
+// fmtVersion normalises the build version for the sidebar badge.
+// Empty → "dev"; a bare semver gets a leading "v".
+func fmtVersion(v string) string {
+	if v == "" || v == "dev" {
+		return "dev"
+	}
+	if v[0] >= '0' && v[0] <= '9' {
+		return "v" + v
+	}
+	return v
+}
+
 // TimeAgo formats a past time as a human-readable relative duration.
 func TimeAgo(t time.Time) string {
 	if t.IsZero() {
@@ -535,6 +578,8 @@ func BuildRouteRows(cfgRoutes []config.Route, stats []observability.RouteStat) [
 			NegTTL:      FmtDuration(rc.Cache.NegativeTTL),
 			StayinAlive: rc.Cache.StayinAlive,
 			Jitter:      jitterStr(rc.Cache.JitterPercent),
+			Methods:     methodsLabel(rc.Match.Methods),
+			Features:    routeFeatures(rc),
 			Requests:    stat.Requests,
 			Hits:        stat.Hits,
 			Misses:      stat.Misses,
@@ -573,11 +618,72 @@ func jitterStr(pct int) string {
 	return fmt.Sprintf("%d%%", pct)
 }
 
+// methodsLabel renders the route's HTTP-method restriction as a compact
+// middot-separated chip ("GET·HEAD"), or "" when all methods are allowed.
+func methodsLabel(methods []string) string {
+	if len(methods) == 0 {
+		return ""
+	}
+	return strings.Join(methods, "·")
+}
+
+// routeFeatures returns badges for the per-route capabilities that are
+// enabled on this route (the features added in v0.1.0).
+func routeFeatures(rc config.Route) []RouteFeature {
+	var f []RouteFeature
+	if rc.Cache.TTLOverride > 0 {
+		f = append(f, RouteFeature{
+			Label: "override " + FmtDuration(rc.Cache.TTLOverride),
+			Title: "ttl_override: forces bouine's internal TTL to this value regardless of the upstream Cache-Control/Expires headers (forwarded unaltered).",
+		})
+	}
+	if rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie {
+		f = append(f, RouteFeature{
+			Label: "set-cookie",
+			Title: "allow_set_cookie: caches responses carrying Set-Cookie (the cookie is stripped from the stored copy). Security-relevant — only safe for non-user-specific cookies.",
+			Warn:  true,
+		})
+	}
+	if rc.Cache.MaxObjectSize > 0 {
+		f = append(f, RouteFeature{
+			Label: "max " + rc.Cache.MaxObjectSize.String(),
+			Title: "max_object_size: responses larger than this are proxied but not cached.",
+		})
+	}
+	if rc.Request.StripPrefix != "" {
+		f = append(f, RouteFeature{
+			Label: "strip " + rc.Request.StripPrefix,
+			Title: "strip_prefix: this path prefix is removed before forwarding to the upstream. The cache key keeps the original path.",
+		})
+	}
+	if n := len(rc.Cache.Key.StripQueryParams); n > 0 {
+		f = append(f, RouteFeature{
+			Label: fmt.Sprintf("q-strip ×%d", n),
+			Title: "strip_query_params (still forwarded to origin): " + strings.Join(rc.Cache.Key.StripQueryParams, ", "),
+		})
+	}
+	return f
+}
+
 // FmtAddrPort strips the scheme and returns host:port from a listen address.
 // FmtInt formats an integer for display.
 
 // FmtInt formats an integer for display.
 func FmtInt(v int) string { return strconv.Itoa(v) }
+
+// FmtInt64 formats an int64 for display.
+func FmtInt64(v int64) string { return strconv.FormatInt(v, 10) }
+
+// FmtRate formats a per-minute rate compactly ("0", "3.4", "120").
+func FmtRate(v float64) string {
+	if v == 0 {
+		return "0"
+	}
+	if v < 10 {
+		return fmt.Sprintf("%.1f", v)
+	}
+	return fmt.Sprintf("%.0f", v)
+}
 
 // boolStr converts a bool to "true"/"false" string.
 func boolStr(v bool) string {

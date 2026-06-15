@@ -33,6 +33,11 @@ type Metrics struct {
 	// labelled by reason (dial, timeout, 5xx). Non-zero indicates peers
 	// may have missed an invalidation; gossip provides redundant delivery.
 	BroadcastFailures *prometheus.CounterVec
+	// OnReplicationBytes, if set, is invoked on every replication byte
+	// record with the direction ("sent"/"received") and byte count. Used
+	// to feed the dashboard's replication ring without coupling the
+	// cluster package to the observability layer.
+	OnReplicationBytes func(direction string, bytes float64)
 }
 
 // RegisterMetrics creates and registers the cluster metrics on
@@ -142,7 +147,13 @@ func (m *Metrics) IncReplicationReceived() {
 // AddReplicationBytes adds the given number of bytes to the
 // replication-bytes counter for the given direction ("sent" or "received").
 func (m *Metrics) AddReplicationBytes(direction string, bytes float64) {
-	if m == nil || m.ReplicationBytes == nil {
+	if m == nil {
+		return
+	}
+	if m.OnReplicationBytes != nil {
+		m.OnReplicationBytes(direction, bytes)
+	}
+	if m.ReplicationBytes == nil {
 		return
 	}
 	m.ReplicationBytes.WithLabelValues(direction).Add(bytes)

@@ -10,6 +10,24 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-15
+
+### Added
+- New operator dashboard **Performance** page collecting latency telemetry:
+  p50 / p90 / p99 and average latency KPIs, a latency-distribution
+  histogram, a latency-over-time chart (p99 + average), and derived health
+  signals — Apdex score, SLO compliance bars (≤10ms / ≤100ms / ≤1s), and
+  tail-latency ratios.
+
+### Changed
+- De-cluttered the dashboard **Overview**: the latency-distribution chart
+  moved to the new Performance page and the stale-serving panel was removed.
+- Moved the **Cloudflare CDN** status block from the Overview to the
+  **Invalidation** page, where CDN propagation is operationally relevant.
+- The chart release no longer claims the repository "Latest" pointer; the
+  application release always owns it, so the documented install one-liner
+  never resolves to a binary-less chart release.
+
 ## [0.1.1] - 2026-06-15
 
 ### Added

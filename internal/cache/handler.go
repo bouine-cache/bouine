@@ -78,8 +78,11 @@ type fetchResult struct {
 	Err        error
 }
 
-// recorderPool reuses responseRecorder instances on the miss/invalidation
-// paths to reduce allocations. The hit path never allocates a recorder.
+// recorderPool reuses responseRecorder instances on the miss and
+// invalidation paths. Both paths copy the captured body and header out of
+// the recorder before returning it to the pool, so the recorder's buffer
+// and header map are reused across requests rather than reallocated per
+// fetch. The hit path never allocates a recorder.
 var recorderPool = sync.Pool{
 	New: func() any {
 		return &responseRecorder{
@@ -758,12 +761,19 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	outReq := r.WithContext(ctx)
 	tracing.InjectHTTP(ctx, outReq)
 	rec := acquireRecorder()
+	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, outReq)
+
+	// Copy body and header out so the fetchResult owns them before the
+	// recorder returns to the pool. The body copy is also right-sized:
+	// bytes.Buffer over-allocates, and stored objects are long-lived.
+	body := make([]byte, rec.body.Len())
+	copy(body, rec.body.Bytes())
 
 	return fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     rec.header,
-		Body:       rec.body.Bytes(),
+		Header:     rec.header.Clone(),
+		Body:       body,
 	}
 }
 

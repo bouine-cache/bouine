@@ -835,3 +835,56 @@ func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 		t.Fatal("X-Bouine-Path should not be forwarded to client")
 	}
 }
+
+type countingCap struct{ n atomic.Int64 }
+
+func (c *countingCap) Inc() { c.n.Add(1) }
+
+// TestVaryCap_RefillSameVariantDoesNotExhaust is a regression test for the
+// variant-cap bug: the cap counted store operations, not distinct variants, so
+// a single Vary variant that was refetched (e.g. on TTL expiry / eviction)
+// MaxVariants times became permanently uncacheable. The cap must track
+// distinct variant keys — refilling one variant must never consume cap.
+func TestVaryCap_RefillSameVariantDoesNotExhaust(t *testing.T) {
+	t.Parallel()
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	capHits := &countingCap{}
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store, VaryCapHits: capHits})
+
+	newReq := func() *http.Request {
+		r := httptest.NewRequest("GET", "http://example.com/v", nil)
+		r.Header.Set("Accept-Encoding", "gzip")
+		return r
+	}
+	primary := BuildKey(newReq())
+	ctx := context.Background()
+
+	// Refill the SAME variant far more than MaxVariants times, simulating
+	// repeated eviction + re-fetch of one variant.
+	for range MaxVariants + 20 {
+		h.ServeHTTP(httptest.NewRecorder(), newReq())
+		_ = store.Delete(ctx, primary)
+		_ = store.Delete(ctx, VariantKey(primary, "Accept-Encoding", newReq().Header, nil))
+	}
+
+	if got := capHits.n.Load(); got != 0 {
+		t.Fatalf("vary cap fired %d times on refills of a single variant; want 0", got)
+	}
+	if n := len(h.variantSets[primary]); n != 1 {
+		t.Fatalf("tracked %d distinct variants for one variant; want 1", n)
+	}
+
+	// The variant must still be cacheable: store once more, then HIT.
+	h.ServeHTTP(httptest.NewRecorder(), newReq())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, newReq())
+	if rr.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("variant not cacheable after refills: X-Cache = %q", rr.Header().Get("X-Cache"))
+	}
+}

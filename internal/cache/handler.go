@@ -273,6 +273,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
+		// Kick the stale-while-revalidate background refresh before serving,
+		// regardless of how this request is answered (full body, 304, or
+		// range). Doing it after serveObject meant a conditional client whose
+		// validator matched — answered with a 304 below — never triggered the
+		// refresh, pinning the object stale indefinitely.
+		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
+			h.triggerBgRevalidate(r, key, disp.Object)
+		}
 		if h.tryConditional304(w, r, disp.Object) {
 			return
 		}
@@ -280,9 +288,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveObject(w, r, disp.Object, now, cacheHit)
-		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
-			h.triggerBgRevalidate(r, key, disp.Object)
-		}
 	case Miss:
 		h.handleCacheMiss(w, r, key, obj, now)
 	case Revalidate:
@@ -476,7 +481,12 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
-	res := h.doFetch(revalReq)
+	// Collapse concurrent revalidations of the same key onto a single origin
+	// request. Without this, every client that finds the object stale fires
+	// its own conditional fetch — a thundering herd against an origin that may
+	// already be struggling. Concurrent revalidators share the same stale
+	// validators, so the collapsed conditional request is representative.
+	res := h.collapsedFetch(revalReq, key)
 	if res.Err != nil {
 		h.serveObject(w, r, stale, now, cacheStale)
 		return

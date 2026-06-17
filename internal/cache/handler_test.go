@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -886,5 +887,64 @@ func TestVaryCap_RefillSameVariantDoesNotExhaust(t *testing.T) {
 	h.ServeHTTP(rr, newReq())
 	if rr.Header().Get("X-Cache") != "HIT" {
 		t.Fatalf("variant not cacheable after refills: X-Cache = %q", rr.Header().Get("X-Cache"))
+	}
+}
+
+// TestCollapse_MissNotServedRevalidate304 is a regression test: a plain GET
+// that misses must never be served the 304 from a concurrent conditional
+// revalidation it collapsed onto. Conditional and unconditional fetches are
+// kept in separate singleflight groups, so the miss fetches unconditionally
+// and gets real content.
+func TestCollapse_MissNotServedRevalidate304(t *testing.T) {
+	inflight := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			once.Do(func() { close(inflight) })
+			<-release
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "real-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
+
+	req := httptest.NewRequest("GET", "http://example.com/x", nil)
+	key := BuildKey(req)
+	ctx := context.Background()
+	// A stale object with a validator forces Evaluate -> Revalidate.
+	_ = store.Put(ctx, key, &api.Object{
+		Key: key, StatusCode: 200,
+		Header: http.Header{"Cache-Control": {"max-age=0, must-revalidate"}},
+		Body:   []byte("real-body"), ETag: `"v1"`,
+		CacheControl: "max-age=0, must-revalidate",
+		StoredAt:     time.Now().Add(-time.Hour), TTL: 0,
+	})
+
+	// A: revalidation, blocks inside the origin on a conditional request.
+	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://example.com/x", nil))
+	<-inflight
+	_ = store.Delete(ctx, key) // evict so B sees a miss
+
+	// B: a plain GET that misses while A's conditional fetch is in flight.
+	rrB := httptest.NewRecorder()
+	doneB := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rrB, httptest.NewRequest("GET", "http://example.com/x", nil))
+		close(doneB)
+	}()
+	time.Sleep(50 * time.Millisecond) // let B reach collapsedFetch
+	close(release)
+	<-doneB
+
+	if rrB.Code == http.StatusNotModified {
+		t.Fatalf("miss client served a bare 304 (body=%q) from a collapsed revalidation", rrB.Body.String())
+	}
+	if rrB.Body.String() != "real-body" {
+		t.Fatalf("miss client body = %q, want %q", rrB.Body.String(), "real-body")
 	}
 }

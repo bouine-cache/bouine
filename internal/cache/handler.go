@@ -441,8 +441,23 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 }
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
-func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
-	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(key), 36), func() (any, error) {
+//
+// Conditional (revalidation) fetches are collapsed in a separate group from
+// unconditional (miss) fetches. A conditional request can return 304, which an
+// unconditional waiter cannot use — sharing one group would let a plain miss
+// be served a bare 304. Same-kind fetches for the same key still collapse:
+// concurrent revalidators of one stored object send identical validators, and
+// concurrent misses are interchangeable.
+func (h *Handler) collapsedFetch(r *http.Request, key api.Key, conditional bool) fetchResult {
+	// Build the flight key as <kind><key-base36> without a concat allocation:
+	// 'u'/'c' prefix + up to 13 base-36 digits for a uint64 fits in 14 bytes.
+	var kb [14]byte
+	kb[0] = 'u'
+	if conditional {
+		kb[0] = 'c'
+	}
+	flightKey := string(strconv.AppendUint(kb[:1], uint64(key), 36))
+	v, _, _ := h.flight.Do(flightKey, func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
 	})
@@ -450,7 +465,7 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 }
 
 func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.Key) {
-	res := h.collapsedFetch(r, key)
+	res := h.collapsedFetch(r, key, false)
 	if res.Err != nil {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
@@ -461,7 +476,7 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
 // serving the super-stale obj if the upstream is unavailable.
 func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time) {
-	res := h.collapsedFetch(r, key)
+	res := h.collapsedFetch(r, key, false)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", key)
@@ -486,7 +501,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	// its own conditional fetch — a thundering herd against an origin that may
 	// already be struggling. Concurrent revalidators share the same stale
 	// validators, so the collapsed conditional request is representative.
-	res := h.collapsedFetch(revalReq, key)
+	res := h.collapsedFetch(revalReq, key, true)
 	if res.Err != nil {
 		h.serveObject(w, r, stale, now, cacheStale)
 		return
@@ -577,7 +592,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	revalReq := r.Clone(ctx)
 	ConditionalHeaders(revalReq, stale)
 
-	res := h.collapsedFetch(revalReq, key)
+	res := h.collapsedFetch(revalReq, key, true)
 	if res.Err != nil {
 		return
 	}

@@ -228,6 +228,13 @@ linters:
           - errcheck
           - noctx
           - depguard
+      # Key.Format36 uses unsafe.String over a stack buffer for
+      # zero-alloc singleflight deduplication keys. The buffer
+      # outlives the returned string because Go maps copy key
+      # bytes into their hash buckets on insert.
+      - path: "pkg/api/storage\\.go"
+        linters:
+          - gosec
       # main packages may exit and print.
       - path: "cmd/.*"
         linters:

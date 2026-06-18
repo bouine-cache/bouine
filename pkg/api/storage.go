@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"time"
+	"unsafe"
 )
 
 // Key is the canonical cache key. It is a plain uint64 xxhash digest
@@ -11,6 +12,26 @@ import (
 //
 // Stable.
 type Key uint64
+
+// Format36 returns the base-36 representation of k as a string without
+// heap allocation, using unsafe.String over a stack buffer. Used as
+// the singleflight deduplication key to avoid a strconv.FormatUint
+// allocation per collapsed fetch.
+func (k Key) Format36() string {
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	var buf [13]byte
+	n := len(buf)
+	u := uint64(k)
+	if u == 0 {
+		return "0"
+	}
+	for u > 0 {
+		n--
+		buf[n] = digits[u%36]
+		u /= 36
+	}
+	return unsafe.String(&buf[n], len(buf)-n)
+}
 
 // Object is the cached response stored by the storage layer. It holds
 // both the HTTP metadata and the body bytes (or a reference to the

@@ -452,7 +452,7 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
 func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
-	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(key), 36), func() (any, error) {
+	v, _, _ := h.flight.Do(key.Format36(), func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
 	})

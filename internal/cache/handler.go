@@ -262,7 +262,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Take a single timestamp; thread it through Evaluate and serve
 	// functions to avoid a second time.Now() syscall per hit.
 	now := time.Now()
-	key, obj := h.lookup(r)
+	primaryKey, key, obj := h.lookup(r)
 	disp := Evaluate(r, obj, now)
 
 	switch disp.Decision {
@@ -275,12 +275,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.serveObject(w, r, disp.Object, now, cacheHit)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
-			h.triggerBgRevalidate(r, key, disp.Object)
+			h.triggerBgRevalidate(r, primaryKey, key, disp.Object)
 		}
 	case Miss:
-		h.handleCacheMiss(w, r, key, obj, now)
+		h.handleCacheMiss(w, r, primaryKey, key, obj, now)
 	case Revalidate:
-		h.revalidate(w, r, key, disp.Object)
+		h.revalidate(w, r, primaryKey, key, disp.Object)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
@@ -292,34 +292,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // going to origin. The owner has a much higher hit rate for keys it owns
 // (consistent hashing concentrates fills there). On a peer hit the object is
 // stored locally for future requests on this node (L0 promotion).
-func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key api.Key, obj *api.Object, now time.Time) {
+func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primaryKey, variantKey api.Key, obj *api.Object, now time.Time) {
 	if h.ownerFn != nil && h.peerFetch != nil {
-		if owner, isLocal := h.ownerFn(key); !isLocal {
-			if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
-				// Re-evaluate: the peer may have returned a stale object.
+		if owner, isLocal := h.ownerFn(primaryKey); !isLocal {
+			if peerObj, err := h.peerFetch(r.Context(), owner, variantKey); err == nil && peerObj != nil {
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					h.serveObject(w, r, peerObj, now, cacheHit)
-					// Promote to local hot tier (best-effort; ignore error).
-					_ = h.store.Put(r.Context(), key, peerObj)
+					_ = h.store.Put(r.Context(), variantKey, peerObj)
 					if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
-						h.triggerBgRevalidate(r, key, peerObj)
+						h.triggerBgRevalidate(r, primaryKey, variantKey, peerObj)
 					}
 					return
 				}
 			} else if err != nil {
 				h.logger.Debug("peer fetch error, falling back to origin",
-					"peer", owner.Addr, "key", key, "error", err)
+					"peer", owner.Addr, "key", variantKey, "error", err)
 			}
 		}
 	}
-	// If a stale object exists, use fetchAndStoreStayinAlive which will serve
-	// the stale copy on 5xx/error — unless the stored response has
-	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
-	// the error to be forwarded to the client.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, key, obj)
+		h.fetchAndStoreStayinAlive(w, r, primaryKey, variantKey, obj)
 	} else {
-		h.fetchAndStore(w, r, key)
+		h.fetchAndStore(w, r, primaryKey)
 	}
 }
 
@@ -348,25 +342,27 @@ func reqHasNoStore(r *http.Request) bool {
 }
 
 // lookup resolves the cache key and stored object for r, accounting
-// for Vary-based secondary keys.
-func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
-	key := h.buildKey(r)
-	obj, err := h.store.Get(r.Context(), key)
+// for Vary-based secondary keys. Returns the primary key (from the
+// canonical URL), the variant key (which equals primaryKey when there
+// is no Vary), and the stored object (nil on miss).
+func (h *Handler) lookup(r *http.Request) (primaryKey, variantKey api.Key, obj *api.Object) {
+	primaryKey = h.buildKey(r)
+	obj, err := h.store.Get(r.Context(), primaryKey)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "error", err)
 	}
 	if obj == nil || obj.Header.Get("Vary") == "" {
-		return key, obj
+		return primaryKey, primaryKey, obj
 	}
-	vk := VariantKey(key, obj.Header.Get("Vary"), r.Header)
-	if vk == key {
-		return key, obj
+	vk := VariantKey(primaryKey, obj.Header.Get("Vary"), r.Header)
+	if vk == primaryKey {
+		return primaryKey, primaryKey, obj
 	}
 	vobj, verr := h.store.Get(r.Context(), vk)
 	if verr == nil && vobj != nil {
-		return vk, vobj
+		return primaryKey, vk, vobj
 	}
-	return vk, nil
+	return primaryKey, vk, nil
 }
 
 // tryConditional304 returns true and writes a 304 if the client's
@@ -450,44 +446,47 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 	}
 }
 
-// collapsedFetch deduplicates concurrent origin fetches for the same key.
-func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
-	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(key), 36), func() (any, error) {
+// collapsedFetch deduplicates concurrent origin fetches for the same
+// primary key. The store+replicate happens once inside the singleflight
+// closure, not N times per collapsed caller.
+func (h *Handler) collapsedFetch(r *http.Request, primaryKey api.Key) fetchResult {
+	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(primaryKey), 36), func() (any, error) {
 		res := h.doFetch(r)
+		h.storeAndReplicate(r, primaryKey, res)
 		return res, nil
 	})
 	return v.(fetchResult)
 }
 
-func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.Key) {
-	res := h.collapsedFetch(r, key)
+func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, primaryKey api.Key) {
+	res := h.collapsedFetch(r, primaryKey)
 	if res.Err != nil {
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	h.writeAndMaybeStore(w, r, key, res)
+	h.writeResponse(w, r, res)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
 // serving the super-stale obj if the upstream is unavailable.
-func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
-	res := h.collapsedFetch(r, key)
+func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, primaryKey, variantKey api.Key, stale *api.Object) {
+	res := h.collapsedFetch(r, primaryKey)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
-			"error", res.Err, "key", key)
+			"error", res.Err, "key", variantKey)
 		h.serveObject(w, r, stale, time.Now(), cacheStale)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
-			"status", res.StatusCode, "key", key)
+			"status", res.StatusCode, "key", variantKey)
 		h.serveObject(w, r, stale, time.Now(), cacheStale)
 		return
 	}
-	h.writeAndMaybeStore(w, r, key, res)
+	h.writeResponse(w, r, res)
 }
 
-func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey, variantKey api.Key, stale *api.Object) {
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
@@ -545,41 +544,40 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		if newETag := res.Header.Get("ETag"); newETag != "" {
 			refreshed.ETag = newETag
 		}
-		_ = h.store.Put(r.Context(), key, &refreshed)
+		_ = h.store.Put(r.Context(), variantKey, &refreshed)
 		h.serveObject(w, r, &refreshed, time.Now(), cacheRevalidated)
 		return
 	}
 
-	h.writeAndMaybeStore(w, r, key, res)
+	h.storeAndReplicate(r, primaryKey, res)
+	h.writeResponse(w, r, res)
 }
 
 // triggerBgRevalidate fires a background goroutine that fetches a fresh
 // copy of the stale object and updates the store. Called after serving a
 // stale-while-revalidate response. bgRevalSem prevents goroutine explosion.
-func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) triggerBgRevalidate(r *http.Request, primaryKey, variantKey api.Key, stale *api.Object) {
 	select {
 	case bgRevalSem <- struct{}{}:
 	default:
-		return // semaphore full — next client will retry
+		return
 	}
-	// Detach from the client's context so the background fetch is not
-	// cancelled when the response is sent.
 	bgCtx := context.WithoutCancel(r.Context())
 	bgReq := r.Clone(bgCtx)
 	go func() {
 		defer func() { <-bgRevalSem }()
-		h.doBackgroundRevalidate(bgCtx, bgReq, key, stale)
+		h.doBackgroundRevalidate(bgCtx, bgReq, primaryKey, variantKey, stale)
 	}()
 }
 
 // doBackgroundRevalidate fetches a fresh copy of stale and stores it.
 // Uses the collapse group to deduplicate concurrent SWR triggers for
 // the same key.
-func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, primaryKey, variantKey api.Key, stale *api.Object) {
 	revalReq := r.Clone(ctx)
 	ConditionalHeaders(revalReq, stale)
 
-	res := h.collapsedFetch(revalReq, key)
+	res := h.collapsedFetch(revalReq, primaryKey)
 	if res.Err != nil {
 		return
 	}
@@ -594,8 +592,6 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 			refreshed.TTL = ttl
 		}
-		// Re-apply route override so background SWR revalidation cannot
-		// revert the storage lifetime to the upstream's max-age.
 		if h.overrideTTL > 0 {
 			refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
 		}
@@ -603,27 +599,65 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if newETag := res.Header.Get("ETag"); newETag != "" {
 			refreshed.ETag = newETag
 		}
-		_ = h.store.Put(ctx, key, &refreshed)
+		_ = h.store.Put(ctx, variantKey, &refreshed)
 		return
 	}
 
-	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
-		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+	// Non-304 cacheable responses are already stored by
+	// storeAndReplicate inside collapsedFetch's singleflight closure.
+}
+
+// storeAndReplicate stores a cacheable response under the appropriate
+// key(s) and fires the replication hook. Called once per singleflight
+// deduplication window to avoid N× duplicate stores/replications.
+func (h *Handler) storeAndReplicate(r *http.Request, primaryKey api.Key, res fetchResult) {
+	if !IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
+		return
+	}
+	if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+		return
+	}
+	if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
+		return
+	}
+	storeKey := primaryKey
+	if vary := res.Header.Get("Vary"); vary != "" {
+		storeKey = VariantKey(primaryKey, vary, r.Header)
+	}
+	if storeKey != primaryKey {
+		h.variantMu.Lock()
+		n := h.variantCounts[primaryKey]
+		if n >= MaxVariants {
+			h.variantMu.Unlock()
+			h.logger.Warn("vary cap exceeded, skipping variant storage",
+				"primary_key", primaryKey, "cap", MaxVariants)
+			if h.VaryCapHits != nil {
+				h.VaryCapHits.Inc()
+			}
 			return
 		}
-		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
-			return
-		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
-		obj.Header.Del("Set-Cookie")
-		_ = h.store.Put(ctx, key, obj)
+		h.variantCounts[primaryKey] = n + 1
+		h.variantMu.Unlock()
+	}
+	obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+	obj.Header.Del("Set-Cookie")
+	_ = h.store.Put(r.Context(), storeKey, obj)
+	if storeKey != primaryKey {
+		primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		primaryObj.Header.Del("Set-Cookie")
+		_ = h.store.Put(r.Context(), primaryKey, primaryObj)
+	}
+	if h.replicateFn != nil {
+		h.replicateFn(r.Context(), obj)
 	}
 }
 
-func (h *Handler) writeAndMaybeStore(
+// writeResponse writes the origin response to the client with X-Cache:
+// MISS and Age: 0 headers. It does NOT store or replicate; that is
+// handled by storeAndReplicate inside the singleflight closure.
+func (h *Handler) writeResponse(
 	w http.ResponseWriter,
 	r *http.Request,
-	_ api.Key,
 	res fetchResult,
 ) {
 	dst := w.Header()
@@ -631,65 +665,12 @@ func (h *Handler) writeAndMaybeStore(
 		dst[k] = vals
 	}
 	dst["X-Cache"] = headerMISS
-	// A proxy SHOULD add an Age header to responses it forwards,
-	// even on first fetch (Age: 0 + any origin Age).
 	if res.Header.Get("Age") == "" {
 		dst["Age"] = []string{"0"}
 	}
 	w.WriteHeader(res.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(res.Body)
-	}
-
-	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
-		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
-			return
-		}
-		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
-			return
-		}
-		// Always compute from the canonical URL so the cap is enforced
-		// against the primary key regardless of whether lookup() already
-		// resolved the variant key.
-		primaryKey := h.buildKey(r)
-		storeKey := primaryKey
-		if vary := res.Header.Get("Vary"); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, r.Header)
-		}
-		// Enforce MaxVariants cap: skip storage if this primary key already
-		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
-		// variants are a DoS vector.
-		if storeKey != primaryKey {
-			h.variantMu.Lock()
-			n := h.variantCounts[primaryKey]
-			if n >= MaxVariants {
-				h.variantMu.Unlock()
-				h.logger.Warn("vary cap exceeded, skipping variant storage",
-					"primary_key", primaryKey, "cap", MaxVariants)
-				if h.VaryCapHits != nil {
-					h.VaryCapHits.Inc()
-				}
-				return
-			}
-			h.variantCounts[primaryKey] = n + 1
-			h.variantMu.Unlock()
-		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
-		obj.Header.Del("Set-Cookie")
-		_ = h.store.Put(r.Context(), storeKey, obj)
-		// Also store a "primary" entry so Vary-aware lookup finds
-		// the Vary header on the first lookup.
-		if storeKey != primaryKey {
-			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
-			primaryObj.Header.Del("Set-Cookie")
-			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
-		}
-		// Replication hook: in full cluster mode, broadcast the newly
-		// cached object to all peers via gossip. No-op in strong and
-		// eventual modes where replicateFn is nil.
-		if h.replicateFn != nil {
-			h.replicateFn(r.Context(), obj)
-		}
 	}
 }
 

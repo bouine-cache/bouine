@@ -13,9 +13,10 @@ import (
 )
 
 // Middleware wraps an http.Handler and emits a structured access log
-// line for sampled requests. Non-2xx responses are always logged;
-// successful responses are sampled at 1:100 to keep the log write off
-// the critical path at high RPS.
+// line for sampled requests. Only 200-OK responses are sampled at
+// 1:100; every other status code (redirects, errors, and non-200 2xx
+// such as 204) is always logged, keeping the log write off the
+// critical path at high cache-hit RPS.
 //
 // Stable.
 func Middleware(logger *slog.Logger, next http.Handler) http.Handler {

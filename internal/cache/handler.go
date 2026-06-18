@@ -758,12 +758,13 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	outReq := r.WithContext(ctx)
 	tracing.InjectHTTP(ctx, outReq)
 	rec := acquireRecorder()
+	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, outReq)
 
 	return fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     rec.header,
-		Body:       rec.body.Bytes(),
+		Header:     rec.header.Clone(),
+		Body:       append([]byte(nil), rec.body.Bytes()...),
 	}
 }
 

@@ -136,6 +136,11 @@ type Handler struct {
 	// stored locally. Used in full cluster mode to broadcast the object
 	// to all peers via gossip. Nil in strong and eventual modes.
 	replicateFn func(ctx context.Context, obj *api.Object)
+
+	// tracingEnabled is set at construction from tracing.IsEnabled().
+	// When false, StartSpan and r.WithContext are skipped on the hit
+	// path to avoid a per-request heap allocation.
+	tracingEnabled bool
 }
 
 // HandlerConfig configures a cache Handler.
@@ -225,6 +230,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		allowSetCookie:   cfg.AllowSetCookie,
 		maxObjectSize:    cfg.MaxObjectSize,
 		stripQueryParams: cfg.StripQueryParams,
+		tracingEnabled:   tracing.IsEnabled(),
 	}
 	return h
 }
@@ -254,10 +260,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// L4 span: cache engine layer.
-	ctx, span := tracing.StartSpan(r.Context(), "bouine.cache")
-	defer span.End()
-	r = r.WithContext(ctx)
+	// L4 span: cache engine layer — skipped when no tracer is configured
+	// to avoid a per-hit heap alloc from r.WithContext(ctx).
+	if h.tracingEnabled {
+		ctx, span := tracing.StartSpan(r.Context(), "bouine.cache")
+		defer span.End()
+		r = r.WithContext(ctx)
+	}
 
 	// Take a single timestamp; thread it through Evaluate and serve
 	// functions to avoid a second time.Now() syscall per hit.

@@ -26,6 +26,18 @@ import (
 
 const tracerName = "bouine"
 
+// enabled is set to true when InitTracer configures a real TracerProvider.
+// It is read-only after init and used by IsEnabled to avoid per-hit
+// allocs from StartSpan + WithContext when no tracer is configured.
+var enabled bool
+
+// IsEnabled reports whether a real OTel TracerProvider has been configured.
+// When false, StartSpan returns a no-op span and callers should skip
+// the associated r.WithContext(ctx) to avoid a heap allocation per hit.
+func IsEnabled() bool {
+	return enabled
+}
+
 // Tracer returns the global tracer under the bouine instrumentation name.
 func Tracer() trace.Tracer {
 	return otel.Tracer(tracerName)
@@ -115,6 +127,7 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 		)),
 	)
 	otel.SetTracerProvider(tp)
+	enabled = true
 	// Install W3C TraceContext + Baggage as the global propagator so that
 	// InjectHTTP can stamp outbound upstream requests with traceparent headers.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(

@@ -116,6 +116,41 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	return false
 }
 
+// IsCacheableWithDefault extends IsCacheable with the operator-configured
+// default-TTL fallback. When the strict RFC 9111 decision is "not
+// cacheable" purely because the response carries no freshness information
+// (no max-age/s-maxage, no valid Expires, no Last-Modified) and defaultTTL
+// is > 0, an otherwise-unblocked response with a heuristically-cacheable
+// status becomes eligible — the operator has explicitly opted in by
+// configuring ttl_default. This mirrors nginx's proxy_cache_valid: a
+// cache lifetime supplied for responses the origin left unspecified.
+//
+// All RFC 9111 blocking directives are still honoured: no-store, private,
+// Pragma: no-cache, Vary: *, Set-Cookie (without explicit freshness), and
+// Authorization (without public/must-revalidate/s-maxage) all prevent
+// storage regardless of defaultTTL.
+func IsCacheableWithDefault(status int, reqHeader, respHeader http.Header, negativeTTL, defaultTTL time.Duration) bool {
+	if IsCacheable(status, reqHeader, respHeader, negativeTTL) {
+		return true
+	}
+	if defaultTTL <= 0 {
+		return false
+	}
+	var respCC Directives
+	if cdnCC, hasCDN := cdnCacheControl(respHeader); hasCDN {
+		respCC = cdnCC
+	} else {
+		respCC = ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
+	}
+	if isCacheBlocked(status, respCC, reqHeader, respHeader) {
+		return false
+	}
+	// Only successful / heuristically-cacheable statuses are eligible for
+	// the default-TTL fallback; 5xx and other error statuses are excluded
+	// so origin errors are never silently cached by an operator default.
+	return isHeuristicStatus(status)
+}
+
 func isCacheBlocked(status int, respCC Directives, reqHeader, respHeader http.Header) bool {
 	// RFC 9111 §5.2.2.3: must-understand means the cache MAY store even when
 	// no-store is present, but ONLY if the cache understands the status code.

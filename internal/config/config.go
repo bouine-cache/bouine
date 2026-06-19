@@ -206,7 +206,15 @@ type RouteMatch struct {
 
 // RouteCache is the per-route cache policy.
 type RouteCache struct {
-	Enabled              *bool         `yaml:"enabled"`
+	Enabled *bool `yaml:"enabled"`
+	// TTLDefault is the fallback cache lifetime applied when the origin
+	// sends no freshness information (no max-age/s-maxage, no valid
+	// Expires, no Last-Modified). When > 0 it also makes such a response
+	// eligible for storage — without it, a bare 200 is treated as
+	// uncacheable and every request is a MISS. Blocking directives
+	// (no-store, private, no-cache, Set-Cookie without freshness,
+	// Vary: *, Authorization) are always honoured. Mirrors nginx's
+	// proxy_cache_valid. Zero disables the fallback.
 	TTLDefault           time.Duration `yaml:"ttl_default"`
 	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate"`
 	StaleIfError         time.Duration `yaml:"stale_if_error"`

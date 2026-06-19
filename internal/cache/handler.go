@@ -610,7 +610,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		return
 	}
 
-	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
+	if IsCacheableWithDefault(res.StatusCode, r.Header, res.Header, h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
 			return
 		}
@@ -644,7 +644,7 @@ func (h *Handler) writeAndMaybeStore(
 		_, _ = w.Write(res.Body)
 	}
 
-	if IsCacheable(res.StatusCode, r.Header, res.Header, h.negativeTTL) {
+	if IsCacheableWithDefault(res.StatusCode, r.Header, res.Header, h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
 			return
 		}

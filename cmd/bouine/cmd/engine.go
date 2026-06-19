@@ -143,6 +143,12 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 }
 
 func (e *engine) resolveAdminToken() string {
+	// Env var takes precedence so operators can inject a token via Vault
+	// without baking it into the config ConfigMap.
+	if token := os.Getenv("BOUINE_ADMIN_TOKEN"); token != "" {
+		return token
+	}
+
 	token := e.cfg.Admin.Token
 	if token == "" {
 		tok := make([]byte, 16)
@@ -150,7 +156,7 @@ func (e *engine) resolveAdminToken() string {
 		token = hex.EncodeToString(tok)
 		e.logger.Warn("admin token not configured — using auto-generated token",
 			"token", token,
-			"hint", "set admin.token in config to silence this warning")
+			"hint", "set admin.token in config or BOUINE_ADMIN_TOKEN env var to silence this warning")
 	}
 	return token
 }

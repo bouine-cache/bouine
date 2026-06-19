@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -138,9 +137,9 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 	if body == nil {
 		return nil, nil
 	}
-	var loaded api.Object
-	if jsonErr := json.Unmarshal(body, &loaded); jsonErr != nil {
-		return nil, jsonErr
+	loaded, decErr := decodeObject(body)
+	if decErr != nil {
+		return nil, decErr
 	}
 	// Re-derive transient fields not serialised to disk (tagged json:"-").
 	// These fields exist purely for hit-path performance; recalculating them
@@ -159,8 +158,8 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 		loaded.OriginAge = time.Duration(secs) * time.Second
 	}
 	// Promote to hot tier (best-effort: ignore error).
-	_ = t.hot.Put(ctx, key, &loaded)
-	return &loaded, nil
+	_ = t.hot.Put(ctx, key, loaded)
+	return loaded, nil
 }
 
 // Put stores an object in the hot tier and, for large objects, also
@@ -171,10 +170,7 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 	}
 
 	if t.warm != nil && obj.BodySize > t.bodyThreshold {
-		body, err := json.Marshal(obj)
-		if err != nil {
-			return err
-		}
+		body := encodeObject(obj)
 		segID, offset, err := t.warm.Put(uint64(key), body) //nolint:gosec // segID fits int32
 		if err != nil {
 			return err

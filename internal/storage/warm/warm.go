@@ -199,14 +199,34 @@ func (s *Store) Delete(key uint64) error {
 
 // Get returns the raw body bytes stored for key, or nil if the key
 // is not in the warm tier.
+//
+// s.mu.RLock is held across the full operation (index lookup + segment
+// find + file read) so that Compact cannot close file handles while a
+// Get is in flight.
 func (s *Store) Get(key uint64) ([]byte, error) {
-	s.idxMu.RLock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	loc, ok := s.index[key]
-	s.idxMu.RUnlock()
 	if !ok {
 		return nil, nil
 	}
-	rec, err := s.ReadRecord(loc.segID, loc.offset)
+
+	var seg *Segment
+	for _, ss := range s.segs {
+		if ss.ID == loc.segID {
+			seg = ss
+			break
+		}
+	}
+	if seg == nil {
+		return nil, fmt.Errorf("warm: segment %d not found", loc.segID)
+	}
+
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+
+	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
 	if err != nil {
 		return nil, err
 	}
@@ -538,6 +558,17 @@ func (s *Store) Compact() error {
 	fresh, err := NewStore(Config{Dir: dir, MaxBytes: s.maxBytes, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: reopen: %w", err)
+	}
+	// NewStore opens segments but starts with an empty index.
+	// Rebuild it by scanning the compacted segments.
+	if err := fresh.Scan(func(r Record) error {
+		if !r.IsTomb {
+			fresh.SetIndex(r.Key, r.SegID, r.Offset)
+		}
+		return nil
+	}); err != nil {
+		_ = fresh.Close()
+		return fmt.Errorf("compact: rebuild index: %w", err)
 	}
 	for _, seg := range s.segs {
 		_ = seg.f.Close()

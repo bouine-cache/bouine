@@ -1,8 +1,10 @@
 package warm
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -308,4 +310,87 @@ func TestSetIndex_DelIndex(t *testing.T) {
 		t.Fatalf("expected nil after DelIndex: err=%v body=%q", err, got)
 	}
 	_ = s2
+}
+
+func TestStore_ConcurrentGetCompact(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Populate with enough records to make compaction meaningful.
+	for i := uint64(0); i < 500; i++ {
+		body := []byte(fmt.Sprintf("body-%d", i))
+		segID, offset, err := s.Put(i, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.SetIndex(i, segID, offset)
+	}
+	// Delete half to create tombstones.
+	for i := uint64(0); i < 250; i++ {
+		if err := s.Delete(i); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	// Concurrent readers.
+	for g := range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 200 {
+				key := uint64(250 + (j % 250)) // read live keys
+				body, err := s.Get(key)
+				if err != nil {
+					t.Errorf("goroutine %d: Get(%d): %v", g, key, err)
+					return
+				}
+				if body == nil {
+					t.Errorf("goroutine %d: Get(%d): unexpected miss", g, key)
+					return
+				}
+			}
+		}()
+	}
+	// Concurrent compaction.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.Compact(); err != nil {
+			t.Errorf("Compact: %v", err)
+		}
+	}()
+
+	wg.Wait()
+}
+
+func BenchmarkGet(b *testing.B) {
+	dir := b.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	for i := uint64(0); i < 1000; i++ {
+		body := make([]byte, 256)
+		if _, _, err := s.Put(i, body); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := uint64(0)
+		for pb.Next() {
+			key := i % 1000
+			_, _ = s.Get(key)
+			i++
+		}
+	})
 }

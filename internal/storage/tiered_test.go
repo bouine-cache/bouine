@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -217,5 +218,37 @@ func TestTiered_WarmGet(t *testing.T) {
 	}
 	if got2 == nil || got2.StatusCode != 200 {
 		t.Fatalf("expected object from warm tier after reopen, got %v", got2)
+	}
+}
+
+// TestTieredStore_CloseStopsCompaction verifies that Close stops the
+// background compaction goroutine without leaking. Sequential (no
+// t.Parallel) because runtime.NumGoroutine is a global counter.
+func TestTieredStore_CloseStopsCompaction(t *testing.T) {
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:  HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm: &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 64 << 20, SegMax: 1 << 20},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := runtime.NumGoroutine()
+	if err := ts.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Poll for the goroutine to exit, matching the pattern in TestHotClose.
+	for range 50 {
+		if runtime.NumGoroutine() < before {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	after := runtime.NumGoroutine()
+
+	if after >= before {
+		t.Errorf("goroutine leak: before Close=%d, after Close=%d", before, after)
 	}
 }

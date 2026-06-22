@@ -175,7 +175,6 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
 		})
-		e.obj.Hits++
 	}
 	s.mu.Unlock()
 

@@ -45,8 +45,8 @@ func TestHotStore_PutGet(t *testing.T) {
 	if got.StatusCode != 200 {
 		t.Fatalf("status = %d", got.StatusCode)
 	}
-	if got.Hits != 1 {
-		t.Fatalf("hits = %d, want 1", got.Hits)
+	if got.Hits != 0 {
+		t.Fatalf("hits = %d, want 0", got.Hits)
 	}
 }
 
@@ -395,4 +395,30 @@ func TestHotClose(t *testing.T) {
 	if after > before+1 { // +1 for test harness variance
 		t.Errorf("goroutine leak: before=%d after close=%d", before, after)
 	}
+}
+
+func TestHotStore_Get_ConcurrentNoRace(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	k := KeyHash([]byte("race-key"))
+	_ = s.Put(context.Background(), k, obj(k, 100))
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 1000 {
+				got, _ := s.Get(context.Background(), k)
+				if got == nil {
+					t.Error("expected hit")
+					return
+				}
+				_ = got.StatusCode
+				_ = got.Body
+				_ = got.Hits
+			}
+		}()
+	}
+	wg.Wait()
 }

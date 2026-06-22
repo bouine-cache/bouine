@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/thylong/bouine/internal/storage/wal"
@@ -26,6 +27,11 @@ type TieredStore struct {
 
 	// bodyThreshold: objects with Body <= this stay hot-only.
 	bodyThreshold int64
+
+	// done is closed by Close to stop the background compaction goroutine.
+	done chan struct{}
+	// compactWg tracks the compaction goroutine for join-on-close.
+	compactWg sync.WaitGroup
 }
 
 // TieredConfig configures a TieredStore.
@@ -59,6 +65,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		hot:           hot,
 		logger:        cfg.Logger,
 		bodyThreshold: cfg.BodyThreshold,
+		done:          make(chan struct{}),
 	}
 
 	if cfg.Warm != nil {
@@ -72,15 +79,22 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	// Background compaction: check every 30 minutes and compact if the
 	// warm tier has accumulated significant tombstone/dead byte waste.
 	if ts.warm != nil {
+		ts.compactWg.Add(1)
 		go func() {
+			defer ts.compactWg.Done()
 			ticker := time.NewTicker(30 * time.Minute)
 			defer ticker.Stop()
-			for range ticker.C {
-				if ts.warm.NeedsCompaction() {
-					if err := ts.warm.Compact(); err != nil {
-						cfg.Logger.Warn("warm tier compaction failed", "error", err)
-					} else {
-						cfg.Logger.Info("warm tier compaction complete")
+			for {
+				select {
+				case <-ts.done:
+					return
+				case <-ticker.C:
+					if ts.warm.NeedsCompaction() {
+						if err := ts.warm.Compact(); err != nil {
+							ts.logger.Warn("warm tier compaction failed", "error", err)
+						} else {
+							ts.logger.Info("warm tier compaction complete")
+						}
 					}
 				}
 			}
@@ -218,7 +232,12 @@ func (t *TieredStore) Stats() api.Stats {
 }
 
 // Close shuts down the WAL, warm tier, and hot tier in order.
+// The compaction goroutine is stopped and joined before the warm
+// store is closed, preventing use-after-close on file handles.
 func (t *TieredStore) Close(ctx context.Context) error {
+	close(t.done)
+	t.compactWg.Wait()
+
 	if t.wal != nil {
 		if err := t.wal.Close(); err != nil {
 			t.logger.Warn("wal close error", "error", err)

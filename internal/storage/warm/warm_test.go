@@ -354,6 +354,10 @@ func TestStore_ConcurrentGetCompact(t *testing.T) {
 					t.Errorf("goroutine %d: Get(%d): unexpected miss", g, key)
 					return
 				}
+				if want := fmt.Sprintf("body-%d", key); string(body) != want {
+					t.Errorf("goroutine %d: Get(%d) = %q, want %q", g, key, body, want)
+					return
+				}
 			}
 		}()
 	}
@@ -369,6 +373,57 @@ func TestStore_ConcurrentGetCompact(t *testing.T) {
 	wg.Wait()
 }
 
+func TestStore_ConcurrentGetPut(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	// Pre-populate keys so readers have something to find.
+	for i := uint64(0); i < 100; i++ {
+		body := []byte(fmt.Sprintf("initial-%d", i))
+		if _, _, err := s.Put(i, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	// Concurrent readers.
+	for g := range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 500 {
+				key := uint64(j % 100)
+				body, err := s.Get(key)
+				if err != nil {
+					t.Errorf("reader %d: Get(%d): %v", g, key, err)
+					return
+				}
+				if body == nil {
+					t.Errorf("reader %d: Get(%d): unexpected miss", g, key)
+					return
+				}
+			}
+		}()
+	}
+	// Concurrent writers.
+	for g := range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 100 {
+				key := uint64(j % 100)
+				body := []byte(fmt.Sprintf("writer-%d-%d", g, j))
+				if _, _, err := s.Put(key, body); err != nil {
+					t.Errorf("writer %d: Put(%d): %v", g, key, err)
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
 func BenchmarkGet(b *testing.B) {
 	dir := b.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
@@ -378,7 +433,11 @@ func BenchmarkGet(b *testing.B) {
 	defer func() { _ = s.Close() }()
 
 	for i := uint64(0); i < 1000; i++ {
-		body := make([]byte, 256)
+		body := []byte(fmt.Sprintf("bench-body-%04d-padding-to-256-bytes"+
+			"------------------------------------------------------------"+
+			"------------------------------------------------------------"+
+			"------------------------------------------------------------"+
+			"----------------------------------------------", i))
 		if _, _, err := s.Put(i, body); err != nil {
 			b.Fatal(err)
 		}

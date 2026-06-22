@@ -80,25 +80,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	// warm tier has accumulated significant tombstone/dead byte waste.
 	if ts.warm != nil {
 		ts.compactWg.Add(1)
-		go func() {
-			defer ts.compactWg.Done()
-			ticker := time.NewTicker(30 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ts.done:
-					return
-				case <-ticker.C:
-					if ts.warm.NeedsCompaction() {
-						if err := ts.warm.Compact(); err != nil {
-							ts.logger.Warn("warm tier compaction failed", "error", err)
-						} else {
-							ts.logger.Info("warm tier compaction complete")
-						}
-					}
-				}
-			}
-		}()
+		go ts.compactLoop()
 	}
 
 	if cfg.WALDir != "" {
@@ -229,6 +211,27 @@ func (t *TieredStore) Stats() api.Stats {
 		st.WarmBytes = wBytes
 	}
 	return st
+}
+
+// compactLoop runs the periodic warm-tier compaction until done is closed.
+func (t *TieredStore) compactLoop() {
+	defer t.compactWg.Done()
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-ticker.C:
+			if t.warm.NeedsCompaction() {
+				if err := t.warm.Compact(); err != nil {
+					t.logger.Warn("warm tier compaction failed", "error", err)
+				} else {
+					t.logger.Info("warm tier compaction complete")
+				}
+			}
+		}
+	}
 }
 
 // Close shuts down the WAL, warm tier, and hot tier in order.

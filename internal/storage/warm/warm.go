@@ -200,14 +200,16 @@ func (s *Store) Delete(key uint64) error {
 // Get returns the raw body bytes stored for key, or nil if the key
 // is not in the warm tier.
 //
-// s.mu.RLock is held across the full operation (index lookup + segment
-// find + file read) so that Compact cannot close file handles while a
-// Get is in flight.
+// Lock ordering: s.mu.RLock (held for the full operation to prevent
+// Compact from swapping segments) → s.idxMu.RLock (protects the
+// index map against concurrent Put/Delete writes).
 func (s *Store) Get(key uint64) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	s.idxMu.RLock()
 	loc, ok := s.index[key]
+	s.idxMu.RUnlock()
 	if !ok {
 		return nil, nil
 	}
@@ -254,8 +256,14 @@ func (s *Store) DelIndex(key uint64) {
 }
 
 // ReadRecord reads a record at the given offset in the given segment.
+//
+// s.mu.RLock is held across the full operation (segment lookup + file
+// read) so that Compact cannot close file handles while a read is in
+// flight.
 func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var seg *Segment
 	for _, ss := range s.segs {
 		if ss.ID == segID {
@@ -263,8 +271,6 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 			break
 		}
 	}
-	s.mu.RUnlock()
-
 	if seg == nil {
 		return nil, fmt.Errorf("warm: segment %d not found", segID)
 	}
@@ -504,7 +510,16 @@ func (s *Store) NeedsCompaction() bool {
 // and overwritten keys. The old segments are deleted after a successful
 // compaction.
 func (s *Store) Compact() error {
-	// Collect all live records (Scan already locks internally).
+	// Snapshot the index to know which (segID, offset) pairs are
+	// currently live. Only records matching the snapshot are copied;
+	// this correctly skips tombstoned and superseded keys.
+	s.idxMu.RLock()
+	idxSnap := make(map[uint64]warmLoc, len(s.index))
+	for k, v := range s.index {
+		idxSnap[k] = v
+	}
+	s.idxMu.RUnlock()
+
 	type liveEntry struct {
 		key  uint64
 		body []byte
@@ -513,6 +528,10 @@ func (s *Store) Compact() error {
 	_ = s.Scan(func(r Record) error {
 		if r.IsTomb {
 			return nil
+		}
+		loc, ok := idxSnap[r.Key]
+		if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
+			return nil // superseded or deleted
 		}
 		cp := make([]byte, len(r.Body))
 		copy(cp, r.Body)
@@ -529,19 +548,25 @@ func (s *Store) Compact() error {
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}
+	newIndex := make(map[uint64]warmLoc, len(live))
 	for _, e := range live {
 		segID, offset, wErr := tmp.Put(e.key, e.body)
 		if wErr != nil {
 			_ = tmp.Close()
 			return fmt.Errorf("compact: write: %w", wErr)
 		}
-		tmp.SetIndex(e.key, segID, offset)
+		newIndex[e.key] = warmLoc{segID: segID, offset: offset}
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("compact: close temp: %w", err)
 	}
 
-	// Swap: old → old.bak, compact → live.
+	// Hold s.mu.Lock across the directory swap + internal replacement
+	// so that concurrent Put/Delete (which call activeSeg → newSegment
+	// → openSegment) cannot hit a missing directory.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_ = os.RemoveAll(dir + ".bak")
 	if err := os.Rename(dir, dir+".bak"); err != nil {
 		return fmt.Errorf("compact: rename old: %w", err)
@@ -552,32 +577,18 @@ func (s *Store) Compact() error {
 	}
 	_ = os.RemoveAll(dir + ".bak")
 
-	// Re-open the compacted store and swap internals.
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	fresh, err := NewStore(Config{Dir: dir, MaxBytes: s.maxBytes, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: reopen: %w", err)
-	}
-	// NewStore opens segments but starts with an empty index.
-	// Rebuild it by scanning the compacted segments.
-	if err := fresh.Scan(func(r Record) error {
-		if !r.IsTomb {
-			fresh.SetIndex(r.Key, r.SegID, r.Offset)
-		}
-		return nil
-	}); err != nil {
-		_ = fresh.Close()
-		return fmt.Errorf("compact: rebuild index: %w", err)
 	}
 	for _, seg := range s.segs {
 		_ = seg.f.Close()
 	}
 	s.segs = fresh.segs
 	s.idxMu.Lock()
-	s.index = fresh.index
+	s.index = newIndex
 	s.idxMu.Unlock()
-	s.stats.entries.Store(fresh.stats.entries.Load())
+	s.stats.entries.Store(int64(len(newIndex)))
 	s.stats.bytes.Store(fresh.stats.bytes.Load())
 	return nil
 }

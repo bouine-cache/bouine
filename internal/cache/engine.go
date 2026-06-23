@@ -9,8 +9,8 @@ import (
 
 // engine.go implements the RFC 9111 cache state machine.
 // Decision and Disposition types, Evaluate, and the private helper
-// functions (evalMiss, evalNoCache, isFresh, evalStale, revalidateOrMiss)
-// live here. All other logic is in the sibling files.
+// functions (evalMiss, evalNoCache, freshWithRequestCC, evalStale,
+// revalidateOrMiss) live here. All other logic is in the sibling files.
 
 // Decision is the outcome of the cache state machine.
 type Decision int
@@ -81,10 +81,20 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 	if d, ok := evalNoCache(reqCC, respCC, obj); ok {
 		return d
 	}
-	if isFresh(obj, reqCC, now) {
+	if freshWithRequestCC(obj, reqCC, now) {
 		return Disposition{Decision: Hit, Object: obj}
 	}
 	return evalStale(reqCC, respCC, obj, now)
+}
+
+// effectiveOriginAge returns the Age the object had at the origin. It prefers
+// the pre-parsed field and falls back to re-parsing the header for warm-tier
+// objects or legacy builds where the transient field is zero.
+func effectiveOriginAge(obj *api.Object) time.Duration {
+	if obj.OriginAge != 0 {
+		return obj.OriginAge
+	}
+	return parseOriginAge(obj.Header)
 }
 
 func evalMiss(reqCC Directives) Disposition {
@@ -105,34 +115,42 @@ func evalNoCache(reqCC, respCC Directives, obj *api.Object) (Disposition, bool) 
 	return Disposition{}, false
 }
 
-func isFresh(obj *api.Object, reqCC Directives, now time.Time) bool {
-	// Lead 3: use pre-stored OriginAge instead of re-parsing the Age header
-	// on every freshness check. Falls back to header parsing when the field
-	// is zero (warm-tier objects or legacy builds).
-	originAge := obj.OriginAge
-	if originAge == 0 {
-		originAge = parseOriginAge(obj.Header)
+// freshWithRequestCC reports whether obj is fresh enough to serve given the
+// request's Cache-Control directives. Base freshness is delegated to
+// api.Object.Fresh — the single source of truth — and request directives can
+// only narrow it, never extend it (RFC 9111 §5.2.1).
+//
+// OriginAge is NOT re-applied to base freshness: computeTTL already subtracted
+// it from TTL at store time, so api.Object.Fresh accounts for it via the
+// StoredAt+TTL expiry. Re-adding it here is the double-count bug that declared
+// objects stale OriginAge seconds early behind a CDN.
+func freshWithRequestCC(obj *api.Object, reqCC Directives, now time.Time) bool {
+	if !obj.Fresh(now) {
+		return false
 	}
-	age := now.Sub(obj.StoredAt) + originAge
-	fresh := age < obj.TTL
-
-	if reqCC.MaxAgeSet && age > reqCC.MaxAge {
-		fresh = false
+	if reqCC.MaxAgeSet {
+		// current_age = elapsed since store + age already accrued at origin.
+		age := now.Sub(obj.StoredAt) + effectiveOriginAge(obj)
+		if age > reqCC.MaxAge {
+			return false
+		}
 	}
-	if reqCC.MinFreshSet && (obj.TTL-age) < reqCC.MinFresh {
-		fresh = false
+	if reqCC.MinFreshSet {
+		// Remaining freshness lifetime = freshness_lifetime - current_age,
+		// which reduces to (StoredAt+TTL) - now (OriginAge cancels because it
+		// is in both terms).
+		if obj.StoredAt.Add(obj.TTL).Sub(now) < reqCC.MinFresh {
+			return false
+		}
 	}
-	return fresh
+	return true
 }
 
 func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposition {
 	if respCC.MustRevalidate || respCC.ProxyRevalidate {
 		return revalidateOrMiss(obj)
 	}
-	originAge := obj.OriginAge
-	if originAge == 0 {
-		originAge = parseOriginAge(obj.Header)
-	}
+	originAge := effectiveOriginAge(obj)
 	if reqCC.MaxStaleSet {
 		age := now.Sub(obj.StoredAt) + originAge
 		// RFC 9111 §5.2.1.2: stale age = current_age - freshness_lifetime.

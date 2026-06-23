@@ -150,6 +150,36 @@ func TestEvaluate_RequestMaxAge(t *testing.T) {
 	}
 }
 
+func TestEvaluate_OriginAgeNotDoubleCounted(t *testing.T) {
+	t.Parallel()
+	// computeTTL subtracts OriginAge from TTL at store time, so freshness
+	// MUST NOT re-apply it. Object is 10s into a 30s remaining lifetime and
+	// must still be a Hit. Old engine: age = 10s+20s = 30s ≮ TTL 30s → not Hit.
+	r := httptest.NewRequest("GET", "/", nil)
+	obj := freshObj(30 * time.Second)
+	obj.OriginAge = 20 * time.Second
+	obj.StoredAt = time.Now().Add(-10 * time.Second)
+	d := Evaluate(r, obj, time.Now())
+	if d.Decision != Hit {
+		t.Fatalf("OriginAge double-counted: expected Hit, got %d", d.Decision)
+	}
+}
+
+func TestEvaluate_MinFresh_OriginAge(t *testing.T) {
+	t.Parallel()
+	// Remaining lifetime is 20s, request asks for min-fresh=15 → servable.
+	// Old engine computed TTL-age = 30s-30s = 0 < 15 → wrongly not Hit.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Cache-Control", "min-fresh=15")
+	obj := freshObj(30 * time.Second)
+	obj.OriginAge = 20 * time.Second
+	obj.StoredAt = time.Now().Add(-10 * time.Second)
+	d := Evaluate(r, obj, time.Now())
+	if d.Decision != Hit {
+		t.Fatalf("min-fresh with OriginAge: expected Hit, got %d", d.Decision)
+	}
+}
+
 func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)

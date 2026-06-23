@@ -510,12 +510,8 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 			h.serveObject(w, r, stale, time.Now(), cacheStale)
 			return
 		}
-		// Parse the stale object's CC to check for must-revalidate.
-		staleCC := stale.CacheControl
-		if staleCC == "" {
-			staleCC = mergeHeaderValues(stale.Header, "Cache-Control")
-		}
-		cc := ParseCacheControl(staleCC)
+		// Serve stale unless the stored response demands revalidation.
+		cc := objDirectives(stale)
 		if !cc.MustRevalidate && !cc.ProxyRevalidate {
 			h.serveObject(w, r, stale, time.Now(), cacheStale)
 			return
@@ -523,37 +519,44 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	}
 
 	if res.StatusCode == http.StatusNotModified {
-		// Merge 304 headers into stored object (RFC 9111 §3.2).
-		// Clone the header map before mutating: stale.Header is shared with
-		// any other goroutine that looked up the same object, and
-		// maps.Copy/range iteration on it would race with our writes.
-		refreshed := *stale
-		refreshed.Header = stale.Header.Clone()
-		refreshed.StoredAt = time.Now()
-		MergeHeaders304(&refreshed, res.Header)
-		// Recompute CacheControl string and parsed TTL from updated headers.
-		refreshed.CacheControl = mergeHeaderValues(refreshed.Header, "Cache-Control")
-		newCC := ParseCacheControl(refreshed.CacheControl)
-		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
-			refreshed.TTL = ttl
-		}
-		// Re-apply route override so a 304 cannot revert bouine's storage
-		// lifetime back to the upstream's (potentially shorter) max-age.
-		if h.overrideTTL > 0 {
-			refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
-		}
-		// Refresh OriginAge from the (possibly updated) header.
-		refreshed.OriginAge = parseOriginAge(refreshed.Header)
-		// Update ETag if the 304 provides a new one.
-		if newETag := res.Header.Get("ETag"); newETag != "" {
-			refreshed.ETag = newETag
-		}
-		_ = h.store.Put(r.Context(), key, &refreshed)
-		h.serveObject(w, r, &refreshed, time.Now(), cacheRevalidated)
+		refreshed := h.refreshFrom304(stale, res)
+		_ = h.store.Put(r.Context(), key, refreshed)
+		h.serveObject(w, r, refreshed, time.Now(), cacheRevalidated)
 		return
 	}
 
 	h.writeAndMaybeStore(w, r, key, res)
+}
+
+// refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
+// it merges the validating response's headers (RFC 9111 §3.2) and recomputes
+// the stored Cache-Control, TTL, OriginAge, and ETag. The caller stores the
+// result with its own context. Shared by foreground revalidate and background
+// SWR revalidation so the recompute logic lives in exactly one place.
+//
+// stale.Header is cloned before mutation: it is shared with any other
+// goroutine that looked up the same object, and MergeHeaders304's writes would
+// race with their reads. Do not remove the Clone.
+func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object {
+	refreshed := *stale
+	refreshed.Header = stale.Header.Clone()
+	refreshed.StoredAt = time.Now()
+	MergeHeaders304(&refreshed, res.Header)
+	// Recompute CacheControl string and parsed TTL from the updated headers.
+	refreshed.CacheControl = mergeHeaderValues(refreshed.Header, "Cache-Control")
+	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
+		refreshed.TTL = ttl
+	}
+	// Re-apply route override so a 304 cannot revert bouine's storage lifetime
+	// back to the upstream's (potentially shorter) max-age.
+	if h.overrideTTL > 0 {
+		refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
+	}
+	refreshed.OriginAge = parseOriginAge(refreshed.Header)
+	if newETag := res.Header.Get("ETag"); newETag != "" {
+		refreshed.ETag = newETag
+	}
+	return &refreshed
 }
 
 // triggerBgRevalidate fires a background goroutine that fetches a fresh
@@ -588,25 +591,8 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	}
 
 	if res.StatusCode == http.StatusNotModified {
-		refreshed := *stale
-		refreshed.Header = stale.Header.Clone()
-		refreshed.StoredAt = time.Now()
-		MergeHeaders304(&refreshed, res.Header)
-		refreshed.CacheControl = mergeHeaderValues(refreshed.Header, "Cache-Control")
-		newCC := ParseCacheControl(refreshed.CacheControl)
-		if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
-			refreshed.TTL = ttl
-		}
-		// Re-apply route override so background SWR revalidation cannot
-		// revert the storage lifetime to the upstream's max-age.
-		if h.overrideTTL > 0 {
-			refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
-		}
-		refreshed.OriginAge = parseOriginAge(refreshed.Header)
-		if newETag := res.Header.Get("ETag"); newETag != "" {
-			refreshed.ETag = newETag
-		}
-		_ = h.store.Put(ctx, key, &refreshed)
+		refreshed := h.refreshFrom304(stale, res)
+		_ = h.store.Put(ctx, key, refreshed)
 		return
 	}
 
@@ -899,14 +885,9 @@ func parseSurrogateKeys(h http.Header) []string {
 // false when the stored response has must-revalidate, proxy-revalidate,
 // no-cache, or s-maxage (all of which require a successful revalidation).
 func staleFallbackAllowed(obj *api.Object) bool {
-	staleCC := obj.CacheControl
-	if staleCC == "" {
-		staleCC = mergeHeaderValues(obj.Header, "Cache-Control")
-	}
-	if staleCC == "" {
-		return true
-	}
-	cc := ParseCacheControl(staleCC)
+	// Empty Cache-Control parses to the zero Directives (all false), so a
+	// response with no directives is allowed — no special case needed.
+	cc := objDirectives(obj)
 	return !cc.MustRevalidate && !cc.ProxyRevalidate && !cc.NoCache && !cc.SMaxAgeSet
 }
 

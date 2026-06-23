@@ -67,11 +67,15 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 		return evalMiss(reqCC)
 	}
 
-	// Lead 1: use pre-parsed CacheControl field instead of re-reading the
+	// Lead 1: use the pre-parsed CacheControl field instead of re-reading the
 	// header map on every hit. CacheControl is set once by buildObject at
-	// cache-fill time. Fall back to header lookup only when the field is
-	// empty (warm-tier load, test fixtures, or objects built before the
-	// field was introduced).
+	// cache-fill time; fall back to the header map only for warm-tier / legacy
+	// objects whose field is empty.
+	//
+	// ponytail: inlined rather than calling objDirectives — objDirectives does
+	// not inline (cost 135 > budget 80) and the extra call frame is a measured
+	// ~6% on the zero-alloc Evaluate_Hit hot path. The cold paths use the
+	// helper; this one copy is the deliberate exception.
 	ccStr := obj.CacheControl
 	if ccStr == "" {
 		ccStr = mergeHeaderValues(obj.Header, "Cache-Control")
@@ -85,6 +89,20 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 		return Disposition{Decision: Hit, Object: obj}
 	}
 	return evalStale(reqCC, respCC, obj, now)
+}
+
+// objDirectives returns the parsed Cache-Control directives for a stored
+// object. It reads the pre-merged CacheControl string set by buildObject at
+// cache-fill time and falls back to the header map only for warm-tier or
+// legacy objects whose field is empty. Single definition — every path that
+// needs a stored object's directives goes through here, never re-implementing
+// the merge-then-parse dance.
+func objDirectives(obj *api.Object) Directives {
+	cc := obj.CacheControl
+	if cc == "" {
+		cc = mergeHeaderValues(obj.Header, "Cache-Control")
+	}
+	return ParseCacheControl(cc)
 }
 
 // effectiveOriginAge returns the Age the object had at the origin. It prefers

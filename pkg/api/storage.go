@@ -64,13 +64,24 @@ type Object struct {
 	CacheControl string `json:"-"`
 
 	// OriginAge is the Age header value from the origin at cache-fill
-	// time. Pre-parsed once so isFresh never re-parses it per request.
+	// time. Pre-parsed once so the read path never re-parses it per request.
 	// Not serialized (re-derived from Header on warm-tier load).
 	OriginAge time.Duration `json:"-"`
 }
 
-// Fresh reports whether the object is still within its TTL relative to
-// now.
+// Fresh reports whether the object is still within its freshness lifetime
+// relative to now. This is the single source of truth for object
+// freshness: every other freshness/staleness decision in the cache layer is
+// computed against this same StoredAt+TTL expiry instant.
+//
+// Invariant: TTL is the *remaining* freshness lifetime at store time,
+// not the full lifetime advertised by the origin. computeTTL subtracts
+// OriginAge (the Age header value received from the upstream cache) at
+// cache-fill time, so the origin's age is already baked into TTL and
+// MUST NOT be re-applied here. Re-adding OriginAge would double-count it
+// and declare objects stale OriginAge seconds too early — the exact bug
+// that previously existed in the engine's freshness check before it was
+// collapsed onto this method.
 func (o *Object) Fresh(now time.Time) bool {
 	return now.Before(o.StoredAt.Add(o.TTL))
 }

@@ -792,8 +792,6 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
-	_, _ = FreshnessLifetimeH(respCC, res.Header) // computed inside computeTTL
-
 	originAge := parseOriginAge(res.Header)
 	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age, age_value).
 	// Apparent age is derived from the Date header: max(0, now - Date).
@@ -824,7 +822,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 		TTL:          ttl,
 		ETag:         res.Header.Get("ETag"),
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
-		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing in isFresh
+		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid

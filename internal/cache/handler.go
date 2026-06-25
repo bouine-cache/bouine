@@ -431,7 +431,7 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
-		_, _ = w.Write(obj.Body)
+		_, _ = w.Write(obj.Body) // #nosec G705 -- obj.Body is a cached origin response, not user input
 	}
 }
 

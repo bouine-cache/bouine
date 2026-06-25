@@ -16,11 +16,9 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
-func origin200(body, cc string) http.Handler {
+func origin200(body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if cc != "" {
-			w.Header().Set("Cache-Control", cc)
-		}
+		w.Header().Set("Cache-Control", "max-age=60")
 		w.Header().Set("ETag", `"v1"`)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
@@ -114,7 +112,7 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	t.Parallel()
 	// RFC 9111 §4.4: POST invalidates cached GET response.
 	// RFC 9111 §4.3.1: cacheable POST response stored under GET key.
-	h := testHandler(t, origin200("body", "max-age=60"))
+	h := testHandler(t, origin200("body"))
 
 	// Populate cache with GET.
 	rr := httptest.NewRecorder()
@@ -299,7 +297,7 @@ func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
 
 func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, origin200("body", "max-age=60"))
+	h := testHandler(t, origin200("body"))
 
 	// Populate cache.
 	rr := httptest.NewRecorder()
@@ -329,7 +327,7 @@ func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
 			var originCalls atomic.Int32
 			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				originCalls.Add(1)
-				origin200("body", "max-age=60").ServeHTTP(w, r)
+				origin200("body").ServeHTTP(w, r)
 			})
 			h := testHandler(t, upstream)
 
@@ -352,7 +350,7 @@ func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
 
 func TestHandler_HeadServedFromCache(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, origin200("full-body", "max-age=60"))
+	h := testHandler(t, origin200("full-body"))
 
 	// Populate with GET.
 	rr := httptest.NewRecorder()

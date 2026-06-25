@@ -476,3 +476,109 @@ func TestHandler_FullReplicationHookNotCalledOnBypass(t *testing.T) {
 		t.Fatalf("replicateFn called %d times, want 0 (non-cacheable)", replicated.Load())
 	}
 }
+
+func TestHandler_BanByPathRegex(t *testing.T) {
+	t.Parallel()
+	var originCalls atomic.Int64
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originCalls.Add(1)
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "cached-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+	})
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
+
+	// Warm the cache.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
+	if rr.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("warmup should be MISS, got %q", rr.Header().Get("X-Cache"))
+	}
+
+	// Second request — HIT.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
+	if rr2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("expected HIT, got %q", rr2.Header().Get("X-Cache"))
+	}
+
+	// Ban by path regex.
+	count, err := store.Ban(context.Background(), api.BanExpr{
+		PathRegex: "^/ban-me",
+	})
+	if err != nil {
+		t.Fatalf("ban failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("ban count = %d, want 1", count)
+	}
+
+	// After ban — should be MISS (re-fetch from origin).
+	rr3 := httptest.NewRecorder()
+	h.ServeHTTP(rr3, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
+	if rr3.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("after ban expected MISS, got %q", rr3.Header().Get("X-Cache"))
+	}
+}
+
+func TestHandler_BanByHostRegex(t *testing.T) {
+	t.Parallel()
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "cached-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+	})
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
+
+	// Warm the cache.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
+	if rr.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("warmup should be MISS")
+	}
+
+	// Ban by host regex.
+	count, err := store.Ban(context.Background(), api.BanExpr{
+		HostRegex: "example.com",
+	})
+	if err != nil {
+		t.Fatalf("ban failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("ban count = %d, want 1", count)
+	}
+
+	// After ban — should be MISS.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
+	if rr2.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("after ban expected MISS, got %q", rr2.Header().Get("X-Cache"))
+	}
+}
+
+func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
+	t.Parallel()
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "cached-body")
+	})
+	h := testHandler(t, upstream)
+
+	// Warm and serve from cache.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
+
+	// Internal headers must not leak to the client.
+	if rr.Header().Get("X-Bouine-Path") != "" {
+		t.Fatal("X-Bouine-Path should not be forwarded to client")
+	}
+}

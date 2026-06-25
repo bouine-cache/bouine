@@ -31,10 +31,17 @@ func varyContainsStar(vary string) bool {
 
 // VariantKey computes a composite storage key from the primary key and
 // the Vary header. If the response has no Vary (or Vary contains *),
-// only the primary key is used.
-func VariantKey(primary api.Key, vary string, reqHeader http.Header) api.Key {
+// only the primary key is used. Header names listed in exclude are
+// skipped — the variant key is computed as if those headers were absent
+// from the Vary list. When exclusion empties the Vary list entirely,
+// the variant key collapses to the primary key.
+func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...map[string]bool) api.Key {
 	if vary == "" {
 		return primary
+	}
+	var excludeSet map[string]bool
+	if len(exclude) > 0 {
+		excludeSet = exclude[0]
 	}
 	if varyContainsStar(vary) {
 		h := xxhash.New()
@@ -48,20 +55,26 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header) api.Key {
 		return api.Key(uint64(primary) ^ h.Sum64())
 	}
 
-	h := xxhash.New()
 	fields := strings.Split(strings.ToLower(vary), ",")
 	for i, f := range fields {
 		fields[i] = strings.TrimSpace(f)
 	}
 	sort.Strings(fields)
+	h := xxhash.New()
+	written := false
 	for _, f := range fields {
+		if excludeSet != nil && excludeSet[f] {
+			continue
+		}
 		_, _ = h.WriteString(f)
 		_, _ = h.WriteString("=")
-		// Normalize header value: trim, lowercase, sort comma-separated
-		// tokens. This handles Accept-Language: "en, fr" vs "fr, en".
 		val := normalizeHeaderValue(reqHeader.Get(f))
 		_, _ = h.WriteString(val)
 		_, _ = h.WriteString(";")
+		written = true
+	}
+	if !written {
+		return primary
 	}
 	return api.Key(uint64(primary) ^ h.Sum64())
 }

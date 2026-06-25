@@ -229,6 +229,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			AllowSetCookie:   rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
 			MaxObjectSize:    rc.Cache.MaxObjectSize.Bytes(),
 			StripQueryParams: buildStripSet(rc.Cache.Key.StripQueryParams),
+			ExcludeHeaders:   buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
 			VaryCapHits:      rs.dpMetrics.VaryCapHits,
 		}
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
@@ -283,6 +284,20 @@ func buildStripSet(params []string) map[string]bool {
 	m := make(map[string]bool, len(params))
 	for _, p := range params {
 		m[p] = true
+	}
+	return m
+}
+
+// buildExcludeHeaderSet converts a config []string of header names into
+// a lowercase map for case-insensitive O(1) lookup. Returns nil when
+// the list is empty.
+func buildExcludeHeaderSet(headers []string) map[string]bool {
+	if len(headers) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(headers))
+	for _, h := range headers {
+		m[strings.ToLower(h)] = true
 	}
 	return m
 }

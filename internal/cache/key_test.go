@@ -3,6 +3,7 @@ package cache
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,33 @@ func TestBuildKey_HostNormalization(t *testing.T) {
 	if BuildKey(r1) == BuildKey(r3) {
 		t.Fatal("non-default port should produce different key")
 	}
+}
+
+func TestBuildKey_LongURLNoPanic(t *testing.T) {
+	t.Parallel()
+	// Regression: URLs whose canonical key exceeds 512 bytes must not
+	// panic with "index out of range [512]". This was a production crash
+	// in preprod-eu (see key.go:67).
+	longPath := strings.Repeat("a", 600)
+	r := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1", nil)
+	// Must not panic.
+	k := BuildKey(r)
+	if k == 0 {
+		t.Fatal("expected non-zero key for long URL")
+	}
+}
+
+func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
+	t.Parallel()
+	// Regression: BuildVaryKey must not panic when Vary header values
+	// exceed the 256-byte stack buffer.
+	longVal := strings.Repeat("x", 300)
+	reqHeader := http.Header{
+		"Accept-Language": {longVal},
+		"Accept-Encoding": {longVal},
+	}
+	// Must not panic.
+	_ = BuildVaryKey("Accept-Language, Accept-Encoding", reqHeader)
 }
 
 func TestParseCacheControl(t *testing.T) {

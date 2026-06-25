@@ -135,6 +135,168 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	}
 }
 
+func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Location", "/other")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/other", nil))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
+	if rr.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("precondition: expected HIT for /other, got %q", rr.Header().Get("X-Cache"))
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/other", nil))
+	if rr2.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("Content-Location /other was not invalidated by POST /submit")
+	}
+}
+
+func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Location", "/other")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/other", nil))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("POST", "http://example.com/submit?ref=1", strings.NewReader("data")))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
+	if rr.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("POST query string leaked into Content-Location key; /other not invalidated")
+	}
+}
+
+func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Location", "http://example.com:80/cdn/v2.json?x=1")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
+	if rr.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
+	if rr2.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("absolute Content-Location was not invalidated")
+	}
+}
+
+func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Location", "../v2.json")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
+	if rr.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("POST", "http://example.com/api/sub/submit", strings.NewReader("data")))
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
+	if rr2.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("relative Content-Location ../v2.json was not invalidated")
+	}
+}
+
+func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Content-Location", "http://other.example.com/resource")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://other.example.com/resource", nil))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
+	if rr.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
+	if rr2.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("cross-host Content-Location was not invalidated")
+	}
+}
+
+func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Location", "/redirect-target")
+		w.WriteHeader(201)
+		_, _ = io.WriteString(w, "created")
+	}))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
+	if rr.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("POST", "http://example.com/create", strings.NewReader("data")))
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
+	if rr2.Header().Get("X-Cache") == "HIT" {
+		t.Fatalf("Location header was not invalidated")
+	}
+}
+
 func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body", "max-age=60"))

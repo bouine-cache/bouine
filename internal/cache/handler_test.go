@@ -536,6 +536,64 @@ type counterFunc func()
 
 func (f counterFunc) Inc() { f() }
 
+func TestMaxVariants_OverwriteDoesNotDoubleCount(t *testing.T) {
+	t.Parallel()
+	hitCount := 0
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Vary", "X-Test-Variant")
+		_, _ = w.Write([]byte("body"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:    orig,
+		Store:       store,
+		Logger:      slog.Default(),
+		VaryCapHits: counterFunc(func() { hitCount++ }),
+	})
+
+	for range 100 {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://example.com/vary", nil)
+		req.Header.Set("X-Test-Variant", "same")
+		h.ServeHTTP(rr, req)
+	}
+	if hitCount != 0 {
+		t.Fatalf("expected 0 cap hits for repeated overwrite, got %d", hitCount)
+	}
+}
+
+func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
+	t.Parallel()
+	hitCount := 0
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Vary", "X-Test-Variant")
+		_, _ = w.Write([]byte("body"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 2 << 10})
+	h := NewHandler(HandlerConfig{
+		Upstream:    orig,
+		Store:       store,
+		Logger:      slog.Default(),
+		VaryCapHits: counterFunc(func() { hitCount++ }),
+	})
+
+	for i := range MaxVariants + 10 {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://example.com/vary", nil)
+		req.Header.Set("X-Test-Variant", strconv.Itoa(i))
+		h.ServeHTTP(rr, req)
+	}
+	if hitCount > 0 {
+		t.Fatalf("expected 0 cap hits after eviction reconcile, got %d", hitCount)
+	}
+}
+
 func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	t.Parallel()
 	// In eventual mode, ownerFn and peerFetch are nil. A miss goes

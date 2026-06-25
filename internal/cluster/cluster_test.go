@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thylong/bouine/pkg/api"
 )
@@ -287,4 +290,176 @@ func TestNotifyMsg_WhenNoCallbacks(t *testing.T) {
 	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 42}
 	msg, _ := json.Marshal(evt)
 	c.NotifyMsg(msg)
+}
+
+func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipApplyTimeout = 50 * time.Millisecond
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var got atomic.Pointer[context.Context]
+	c.SetInvalidator(Invalidator{
+		PurgeFn: func(ctx context.Context, _ api.PurgeEvent) error {
+			got.Store(&ctx)
+			return nil
+		},
+	})
+	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 7, Issuer: "local"}
+	msg, _ := json.Marshal(evt)
+	c.NotifyMsg(msg)
+
+	ctx := *got.Load()
+	if ctx == nil {
+		t.Fatal("PurgeFn not called")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("context passed to PurgeFn has no deadline")
+	}
+}
+
+func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var got atomic.Pointer[context.Context]
+	c.SetInvalidator(Invalidator{
+		BanFn: func(ctx context.Context, _ api.BanEvent) error {
+			got.Store(&ctx)
+			return nil
+		},
+	})
+	evt := api.BanEvent{Type: api.GossipTypeBan, Predicate: api.BanExpr{HostRegex: "example\\.com"}, Issuer: "local"}
+	msg, _ := json.Marshal(evt)
+	c.NotifyMsg(msg)
+
+	ctx := *got.Load()
+	if ctx == nil {
+		t.Fatal("BanFn not called")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("context passed to BanFn has no deadline")
+	}
+}
+
+func TestNotifyMsg_ReplicationCtxHasDeadline(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var got atomic.Pointer[context.Context]
+	c.SetReplicator(Replicator{
+		StoreObject: func(ctx context.Context, _ *api.Object) error {
+			got.Store(&ctx)
+			return nil
+		},
+	})
+	evt := api.ReplicationEvent{Type: api.GossipTypeReplication, Method: "GET", Issuer: "local"}
+	msg, _ := json.Marshal(evt)
+	c.NotifyMsg(msg)
+
+	ctx := *got.Load()
+	if ctx == nil {
+		t.Fatal("StoreObject not called")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("context passed to StoreObject has no deadline")
+	}
+}
+
+func TestNotifyMsg_DefaultApplyTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	if c.cfg.GossipApplyTimeout != 100*time.Millisecond {
+		t.Fatalf("default GossipApplyTimeout = %v, want 100ms", c.cfg.GossipApplyTimeout)
+	}
+}
+
+func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipApplyTimeout = 10 * time.Millisecond
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	c.SetInvalidator(Invalidator{
+		PurgeFn: func(ctx context.Context, _ api.PurgeEvent) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 1, Issuer: "local"}
+	msg, _ := json.Marshal(evt)
+	start := time.Now()
+	c.NotifyMsg(msg)
+	elapsed := time.Since(start)
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("NotifyMsg blocked for %v; apply was not bounded by timeout", elapsed)
+	}
+}
+
+func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipApplyTimeout = 10 * time.Millisecond
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	c.SetMetrics(m)
+
+	c.SetInvalidator(Invalidator{
+		PurgeFn: func(ctx context.Context, _ api.PurgeEvent) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 1, Issuer: "local"}
+	msg, _ := json.Marshal(evt)
+	c.NotifyMsg(msg)
+
+	metrics, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range metrics {
+		if mf.GetName() != "bouine_cluster_invalidations_gossip_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetValue() == "purge" {
+					if m.GetCounter().GetValue() != 0 {
+						t.Fatalf("invalidation counter = %v, want 0 on failed apply", m.GetCounter().GetValue())
+					}
+				}
+			}
+		}
+	}
 }

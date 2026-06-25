@@ -51,6 +51,11 @@ type Config struct {
 	// higher network traffic. Default 5s; production deployments may use
 	// higher values. Set to 0 to use memberlist's default (30s).
 	PushPullInterval time.Duration
+	// GossipApplyTimeout bounds how long a received gossip event may
+	// spend applying to the local store before being abandoned. The
+	// bound protects memberlist's dispatch goroutine from stalling on a
+	// slow store and causing false failure detection. Default 100ms.
+	GossipApplyTimeout time.Duration
 }
 
 // Invalidator holds callbacks for applying purge and ban events received
@@ -106,6 +111,9 @@ func New(cfg Config) (*Cluster, error) {
 	}
 	if cfg.LoadFactor <= 0 {
 		cfg.LoadFactor = 1.25
+	}
+	if cfg.GossipApplyTimeout <= 0 {
+		cfg.GossipApplyTimeout = 100 * time.Millisecond
 	}
 
 	c := &Cluster{
@@ -253,10 +261,14 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 				c.logger.Warn("cluster: gossip purge unmarshal failed", "error", err)
 				return
 			}
-			if err := c.inv.PurgeFn(context.Background(), evt); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+			defer cancel()
+			err := c.inv.PurgeFn(ctx, evt)
+			if err != nil {
 				c.logger.Warn("cluster: gossip purge apply failed", "error", err)
+			} else {
+				c.metrics.IncGossipInvalidation("purge")
 			}
-			c.metrics.IncGossipInvalidation("purge")
 		}
 	case api.GossipTypeBan:
 		if c.inv.BanFn != nil {
@@ -265,10 +277,14 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 				c.logger.Warn("cluster: gossip ban unmarshal failed", "error", err)
 				return
 			}
-			if err := c.inv.BanFn(context.Background(), evt); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+			defer cancel()
+			err := c.inv.BanFn(ctx, evt)
+			if err != nil {
 				c.logger.Warn("cluster: gossip ban apply failed", "error", err)
+			} else {
+				c.metrics.IncGossipInvalidation("ban")
 			}
-			c.metrics.IncGossipInvalidation("ban")
 		}
 	case api.GossipTypeReplication:
 		if c.rep.StoreObject != nil {
@@ -277,7 +293,10 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 				c.logger.Warn("cluster: gossip replication unmarshal failed", "error", err)
 				return
 			}
-			if err := c.rep.StoreObject(context.Background(), evt.Object); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+			defer cancel()
+			err := c.rep.StoreObject(ctx, evt.Object)
+			if err != nil {
 				c.logger.Warn("cluster: gossip replication apply failed", "error", err)
 			} else {
 				c.metrics.IncReplicationReceived()

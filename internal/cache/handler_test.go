@@ -315,6 +315,41 @@ func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 	}
 }
 
+func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"no-store, max-age=60",
+		"max-age=60, no-store",
+		" no-store ",
+		"NO-STORE",
+	}
+	for _, cc := range cases {
+		t.Run(cc, func(t *testing.T) {
+			t.Parallel()
+			var originCalls atomic.Int32
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				originCalls.Add(1)
+				origin200("body", "max-age=60").ServeHTTP(w, r)
+			})
+			h := testHandler(t, upstream)
+
+			h.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("GET", "http://example.com/ns", nil))
+
+			req := httptest.NewRequest("GET", "http://example.com/ns", nil)
+			req.Header.Set("Cache-Control", cc)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != 200 {
+				t.Fatalf("bypass status = %d", rr.Code)
+			}
+			if got := originCalls.Load(); got != 2 {
+				t.Fatalf("origin called %d times, want 2 (no-store must bypass)", got)
+			}
+		})
+	}
+}
+
 func TestHandler_HeadServedFromCache(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("full-body", "max-age=60"))

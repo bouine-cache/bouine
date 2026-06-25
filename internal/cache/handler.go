@@ -260,14 +260,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fast-path: skip key computation and store lookup entirely for
-	// requests whose Cache-Control: no-store directive guarantees we
-	// will never serve from — or store into — the cache.
-	if reqHasNoStore(r) {
-		h.handleBypass(w, r)
-		return
-	}
-
 	// L4 span: cache engine layer.
 	ctx, span := tracing.StartSpan(r.Context(), "bouine.cache")
 	defer span.End()
@@ -335,30 +327,6 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key ap
 	} else {
 		h.fetchAndStore(w, r, key)
 	}
-}
-
-// reqHasNoStore returns true when the request's Cache-Control header
-// contains the no-store directive (RFC 9111 §5.2.1.5), meaning neither
-// a cache lookup nor storage is applicable. Uses a token scan to avoid
-// a full ParseCacheControl allocation.
-func reqHasNoStore(r *http.Request) bool {
-	cc := r.Header.Get("Cache-Control")
-	if cc == "" {
-		return false
-	}
-	for cc != "" {
-		var tok string
-		if i := strings.IndexByte(cc, ','); i >= 0 {
-			tok, cc = cc[:i], cc[i+1:]
-		} else {
-			tok, cc = cc, ""
-		}
-		tok = strings.TrimSpace(tok)
-		if strings.EqualFold(tok, "no-store") {
-			return true
-		}
-	}
-	return false
 }
 
 // lookup resolves the cache key and stored object for r, accounting

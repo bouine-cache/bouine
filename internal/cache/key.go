@@ -125,12 +125,20 @@ func appendCanonicalHost(buf []byte, n int, host string) int {
 		n++
 	}
 	// Strip :80 or :443 suffix.
-	if n >= 3 && n <= len(buf) && buf[n-3] == ':' && buf[n-2] == '8' && buf[n-1] == '0' {
+	if hasSuffix(buf, n, ":80") {
 		n -= 3
-	} else if n >= 4 && n <= len(buf) && buf[n-4] == ':' && buf[n-3] == '4' && buf[n-2] == '4' && buf[n-1] == '3' {
+	} else if hasSuffix(buf, n, ":443") {
 		n -= 4
 	}
 	return n
+}
+
+// hasSuffix reports whether buf[:n] ends with s. n must not exceed len(buf).
+func hasSuffix(buf []byte, n int, s string) bool {
+	if n < len(s) || n > len(buf) {
+		return false
+	}
+	return string(buf[n-len(s):n]) == s
 }
 
 func appendCanonicalPath(buf []byte, n int, u *url.URL) int {

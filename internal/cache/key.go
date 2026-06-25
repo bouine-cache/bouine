@@ -34,15 +34,16 @@ func BuildKeyFromURL(rawURL string) api.Key {
 // BuildKey constructs the canonical primary cache key from a request.
 // The key is deterministic and stable across nodes.
 //
-// Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
-// canonical key exceeds 512 bytes (rare), it falls back to a heap buffer.
+// Zero-alloc on the hot path: uses a 4 KB stack buffer. If the
+// canonical key exceeds 4 KB (rare — the project caps URLs at 8 KiB),
+// it falls back to a heap buffer.
 func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
 	var skipSet map[string]bool
 	if len(skip) > 0 {
 		skipSet = skip[0]
 	}
 
-	var stack [512]byte
+	var stack [4096]byte
 	n := buildKeyInto(stack[:], r, skipSet)
 	if n <= len(stack) {
 		return api.Key(xxhash.Sum64(stack[:n]))

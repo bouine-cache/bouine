@@ -3,6 +3,7 @@ package cache
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
@@ -61,6 +62,19 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 
 func BenchmarkBuildKey(b *testing.B) {
 	req := httptest.NewRequest("GET", "http://example.com/api/v1/users?page=1&sort=name", nil)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = BuildKey(req)
+	}
+}
+
+func BenchmarkBuildKey_LongURL(b *testing.B) {
+	// Exercises the heap fallback path: canonical key exceeds the 4 KB
+	// stack buffer. This URL is ~5 KB of path + query.
+	longPath := strings.Repeat("a", 5000)
+	req := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1&c=3&d=4", nil)
 
 	b.ResetTimer()
 	b.ReportAllocs()

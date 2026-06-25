@@ -20,9 +20,11 @@ package cache
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -707,14 +709,15 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		key := h.buildKey(getReq)
 		_ = h.store.Delete(r.Context(), key)
 
-		// Also evict Content-Location and Location URLs.
+		// Also evict Content-Location and Location URLs (RFC 9111
+		// §4.4). These are URI references (RFC 9110 §8.7) and may be
+		// absolute, relative, or same-origin bare paths.
 		for _, hdr := range []string{"Content-Location", "Location"} {
 			if loc := rec.header.Get(hdr); loc != "" {
-				locReq := r.Clone(r.Context())
-				locReq.Method = http.MethodGet
-				locReq.URL.Path = loc
-				locKey := h.buildKey(locReq)
-				_ = h.store.Delete(r.Context(), locKey)
+				locKey := h.buildLocationKey(r, loc)
+				if locKey != 0 {
+					_ = h.store.Delete(r.Context(), locKey)
+				}
 			}
 		}
 
@@ -746,6 +749,37 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(rec.statusCode)
 	_, _ = w.Write(rec.body.Bytes())
+}
+
+func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
+	ref, err := url.Parse(loc)
+	if err != nil {
+		return 0
+	}
+	resolved := r.URL.ResolveReference(ref)
+	scheme := resolved.Scheme
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := resolved.Host
+	if host == "" {
+		host = r.Host
+	}
+	var tlsState *tls.ConnectionState
+	if scheme == "https" {
+		tlsState = &tls.ConnectionState{}
+	}
+	locReq := &http.Request{
+		Method: http.MethodGet,
+		URL:    resolved,
+		Host:   host,
+		TLS:    tlsState,
+	}
+	return h.buildKey(locReq)
 }
 
 func (h *Handler) doFetch(r *http.Request) fetchResult {

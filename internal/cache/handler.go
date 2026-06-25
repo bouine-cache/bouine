@@ -123,6 +123,7 @@ type Handler struct {
 	allowSetCookie   bool            // when false (default), Set-Cookie blocks caching
 	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
+	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
 	// variantCounts tracks stored Vary variants per primary key to
 	// enforce MaxVariants cap. Protected by variantMu.
 	variantMu     sync.Mutex
@@ -187,6 +188,11 @@ type HandlerConfig struct {
 	// names from the cache key. The parameters are still forwarded to
 	// the upstream. Allocated once at handler construction.
 	StripQueryParams map[string]bool
+	// ExcludeHeaders, when non-nil, excludes the listed request header
+	// names from the Vary-based variant key. The headers are still
+	// forwarded to the upstream and the Vary response header is left
+	// intact — only the key computation skips them.
+	ExcludeHeaders map[string]bool
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -228,6 +234,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		allowSetCookie:   cfg.AllowSetCookie,
 		maxObjectSize:    cfg.MaxObjectSize,
 		stripQueryParams: cfg.StripQueryParams,
+		excludeHeaders:   cfg.ExcludeHeaders,
 	}
 	return h
 }
@@ -361,7 +368,7 @@ func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
 	if obj == nil || obj.Header.Get("Vary") == "" {
 		return key, obj
 	}
-	vk := VariantKey(key, obj.Header.Get("Vary"), r.Header)
+	vk := VariantKey(key, obj.Header.Get("Vary"), r.Header, h.excludeHeaders)
 	if vk == key {
 		return key, obj
 	}
@@ -603,7 +610,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(ctx, key, obj)
 	}
@@ -643,7 +650,7 @@ func (h *Handler) writeAndMaybeStore(
 		primaryKey := h.buildKey(r)
 		storeKey := primaryKey
 		if vary := res.Header.Get("Vary"); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, r.Header)
+			storeKey = VariantKey(primaryKey, vary, r.Header, h.excludeHeaders)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
@@ -663,13 +670,13 @@ func (h *Handler) writeAndMaybeStore(
 			h.variantCounts[primaryKey] = n + 1
 			h.variantMu.Unlock()
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		obj.Header.Del("Set-Cookie")
 		_ = h.store.Put(r.Context(), storeKey, obj)
 		// Also store a "primary" entry so Vary-aware lookup finds
 		// the Vary header on the first lookup.
 		if storeKey != primaryKey {
-			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 			primaryObj.Header.Del("Set-Cookie")
 			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
 		}
@@ -723,7 +730,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 				Header:     rec.header.Clone(),
 				Body:       bodyCopy,
 			}
-			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent)
+			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 			obj.Header.Del("Set-Cookie")
 			_ = h.store.Put(r.Context(), key, obj)
 		}
@@ -763,7 +770,7 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	}
 }
 
-func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int) *api.Object {
+func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, excludeHeaders map[string]bool) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
@@ -825,7 +832,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(res.Header.Get("Vary"), r.Header)
+	obj.VaryKey = BuildVaryKey(res.Header.Get("Vary"), r.Header, excludeHeaders)
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
 

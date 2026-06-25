@@ -269,6 +269,13 @@ type RouteKey struct {
 	// This prevents tracking/analytics params (utm_source, fbclid, etc.)
 	// from fragmenting the cache.
 	StripQueryParams []string `yaml:"strip_query_params"`
+	// ExcludeHeaders removes the listed request header names from the
+	// Vary-based variant key. The headers are still forwarded to the
+	// upstream and the origin's Vary response header is left intact —
+	// only the key computation skips them. Use this to prevent
+	// per-request headers (X-Request-ID, X-Trace-ID) from fragmenting
+	// the cache when the origin includes them in Vary.
+	ExcludeHeaders []string `yaml:"exclude_headers"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

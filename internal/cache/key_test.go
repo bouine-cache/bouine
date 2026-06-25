@@ -104,6 +104,36 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 	_ = BuildVaryKey("Accept-Language, Accept-Encoding", reqHeader)
 }
 
+func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
+	t.Parallel()
+	exclude := map[string]bool{"x-request-id": true}
+	h1 := http.Header{"Accept-Encoding": {"gzip"}, "X-Request-Id": {"abc"}}
+	h2 := http.Header{"Accept-Encoding": {"gzip"}, "X-Request-Id": {"xyz"}}
+	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, exclude)
+	k2 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, exclude)
+	if k1 != k2 {
+		t.Fatal("excluded header should not affect Vary key")
+	}
+	// Without exclusion, keys should differ.
+	k3 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1)
+	k4 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2)
+	if k3 == k4 {
+		t.Fatal("without exclusion, different X-Request-Id should produce different keys")
+	}
+}
+
+func TestBuildVaryKey_ExcludeAllHeaders(t *testing.T) {
+	t.Parallel()
+	exclude := map[string]bool{"x-request-id": true}
+	h1 := http.Header{"X-Request-Id": {"abc"}}
+	h2 := http.Header{"X-Request-Id": {"xyz"}}
+	k1 := BuildVaryKey("X-Request-Id", h1, exclude)
+	k2 := BuildVaryKey("X-Request-Id", h2, exclude)
+	if k1 != k2 {
+		t.Fatal("excluding all Vary fields should produce same key")
+	}
+}
+
 func TestParseCacheControl(t *testing.T) {
 	t.Parallel()
 	d := ParseCacheControl("max-age=300, public, stale-while-revalidate=60")

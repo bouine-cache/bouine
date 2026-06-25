@@ -265,31 +265,39 @@ func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, skip map[string]boo
 // List-valued headers (Accept-Language, Accept-Encoding, Accept) are
 // normalised by sorting their comma-separated tokens so that
 // "en, fr" and "fr, en" produce the same cache key.
-func BuildVaryKey(vary string, reqHeader http.Header) string {
+func BuildVaryKey(vary string, reqHeader http.Header, exclude ...map[string]bool) string {
 	if vary == "" || vary == "*" {
 		return vary
+	}
+
+	var excludeSet map[string]bool
+	if len(exclude) > 0 {
+		excludeSet = exclude[0]
 	}
 
 	fields := strings.Split(vary, ",")
 	sort.Strings(fields)
 
 	var stack [256]byte
-	n := buildVaryKeyInto(stack[:], fields, reqHeader)
+	n := buildVaryKeyInto(stack[:], fields, reqHeader, excludeSet)
 	if n <= len(stack) {
 		return strconv.FormatUint(xxhash.Sum64(stack[:n]), 16)
 	}
 	heap := make([]byte, n)
-	buildVaryKeyInto(heap, fields, reqHeader)
+	buildVaryKeyInto(heap, fields, reqHeader, excludeSet)
 	return strconv.FormatUint(xxhash.Sum64(heap), 16)
 }
 
 // buildVaryKeyInto writes the canonical Vary key bytes into dst and
 // returns the total canonical length. If the key exceeds len(dst), the
 // content is truncated but the returned length reflects the full size.
-func buildVaryKeyInto(dst []byte, fields []string, reqHeader http.Header) int {
+func buildVaryKeyInto(dst []byte, fields []string, reqHeader http.Header, exclude map[string]bool) int {
 	n := 0
 	for _, f := range fields {
 		f = strings.TrimSpace(strings.ToLower(f))
+		if exclude != nil && exclude[f] {
+			continue
+		}
 		n += copyOverflow(dst, n, f)
 		n = appendByte(dst, n, '=')
 		val := reqHeader.Get(f)

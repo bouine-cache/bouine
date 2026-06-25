@@ -34,47 +34,82 @@ func BuildKeyFromURL(rawURL string) api.Key {
 // BuildKey constructs the canonical primary cache key from a request.
 // The key is deterministic and stable across nodes.
 //
-// Zero-alloc when called without skip: uses a stack buffer.
+// Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
+// canonical key exceeds 512 bytes (rare), it falls back to a heap buffer.
 func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
 	var skipSet map[string]bool
 	if len(skip) > 0 {
 		skipSet = skip[0]
 	}
-	// Stack buffer large enough for most URLs. If exceeded, falls back
-	// to heap (rare — URLs > 512 bytes are unusual).
-	var buf [512]byte
+
+	var stack [512]byte
+	n := buildKeyInto(stack[:], r, skipSet)
+	if n <= len(stack) {
+		return api.Key(xxhash.Sum64(stack[:n]))
+	}
+
+	// Overflow: redo with a heap buffer sized to fit.
+	heap := make([]byte, n)
+	buildKeyInto(heap, r, skipSet)
+	return api.Key(xxhash.Sum64(heap))
+}
+
+// buildKeyInto writes the canonical key bytes into dst and returns the
+// total number of bytes that the canonical key occupies. If the key
+// exceeds len(dst), the content is truncated but the returned length
+// reflects the full canonical key size, allowing the caller to detect
+// overflow and reallocate.
+func buildKeyInto(dst []byte, r *http.Request, skipSet map[string]bool) int {
 	n := 0
 
 	// Scheme.
 	if r.TLS != nil {
-		n += copy(buf[n:], "https|")
+		n += copyOverflow(dst, n, "https|")
 	} else {
-		n += copy(buf[n:], "http|")
+		n += copyOverflow(dst, n, "http|")
 	}
 
 	// Host (canonical).
-	n = appendCanonicalHost(buf[:], n, r.Host)
-	buf[n] = '|'
-	n++
+	n = appendCanonicalHost(dst, n, r.Host)
+	n = appendByte(dst, n, '|')
 
 	// Path (canonical).
-	n = appendCanonicalPath(buf[:], n, r.URL)
-	buf[n] = '|'
-	n++
+	n = appendCanonicalPath(dst, n, r.URL)
+	n = appendByte(dst, n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	n = appendCanonicalQuery(buf[:], n, r.URL, skipSet)
-	buf[n] = '|'
-	n++
+	n = appendCanonicalQuery(dst, n, r.URL, skipSet)
+	n = appendByte(dst, n, '|')
 
 	// Method (HEAD→GET).
 	if r.Method == http.MethodHead {
-		n += copy(buf[n:], http.MethodGet)
+		n += copyOverflow(dst, n, http.MethodGet)
 	} else {
-		n += copy(buf[n:], r.Method)
+		n += copyOverflow(dst, n, r.Method)
 	}
 
-	return api.Key(xxhash.Sum64(buf[:n]))
+	return n
+}
+
+// appendByte writes a single byte at offset n into dst. If n is past
+// the end of dst the write is skipped but n is still incremented so the
+// caller can detect overflow by comparing n > len(dst).
+func appendByte(dst []byte, n int, b byte) int {
+	if n < len(dst) {
+		dst[n] = b
+	}
+	return n + 1
+}
+
+// copyOverflow copies src into dst starting at offset n. If n is past
+// the end of dst, no bytes are copied but the full length of src is
+// returned, allowing callers to track the true canonical size for
+// overflow detection.
+func copyOverflow(dst []byte, n int, src string) int {
+	if n >= len(dst) {
+		return len(src)
+	}
+	return copy(dst[n:], src)
 }
 
 func appendCanonicalHost(buf []byte, n int, host string) int {
@@ -86,14 +121,13 @@ func appendCanonicalHost(buf []byte, n int, host string) int {
 		}
 		if n < len(buf) {
 			buf[n] = c
-			n++
 		}
+		n++
 	}
 	// Strip :80 or :443 suffix.
-	written := buf[:n]
-	if len(written) >= 3 && written[n-3] == ':' && written[n-2] == '8' && written[n-1] == '0' {
+	if n >= 3 && n <= len(buf) && buf[n-3] == ':' && buf[n-2] == '8' && buf[n-1] == '0' {
 		n -= 3
-	} else if len(written) >= 4 && written[n-4] == ':' && written[n-3] == '4' && written[n-2] == '4' && written[n-1] == '3' {
+	} else if n >= 4 && n <= len(buf) && buf[n-4] == ':' && buf[n-3] == '4' && buf[n-2] == '4' && buf[n-1] == '3' {
 		n -= 4
 	}
 	return n
@@ -112,8 +146,8 @@ func appendCanonicalPath(buf []byte, n int, u *url.URL) int {
 		}
 		if n < len(buf) {
 			buf[n] = c
-			n++
 		}
+		n++
 		prev = c
 	}
 	return n
@@ -176,18 +210,12 @@ func writeSortedPairs(buf []byte, n int, pairs []kvPair) int {
 	first := true
 	for _, p := range pairs {
 		if !first {
-			if n < len(buf) {
-				buf[n] = '&'
-				n++
-			}
+			n = appendByte(buf, n, '&')
 		}
 		first = false
-		n += copy(buf[n:], p.k)
-		if n < len(buf) {
-			buf[n] = '='
-			n++
-		}
-		n += copy(buf[n:], p.v)
+		n += copyOverflow(buf, n, p.k)
+		n = appendByte(buf, n, '=')
+		n += copyOverflow(buf, n, p.v)
 	}
 	return n
 }
@@ -212,18 +240,12 @@ func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, skip map[string]boo
 		sort.Strings(vals)
 		for _, v := range vals {
 			if !first {
-				if n < len(buf) {
-					buf[n] = '&'
-					n++
-				}
+				n = appendByte(buf, n, '&')
 			}
 			first = false
-			n += copy(buf[n:], url.QueryEscape(k))
-			if n < len(buf) {
-				buf[n] = '='
-				n++
-			}
-			n += copy(buf[n:], url.QueryEscape(v))
+			n += copyOverflow(buf, n, url.QueryEscape(k))
+			n = appendByte(buf, n, '=')
+			n += copyOverflow(buf, n, url.QueryEscape(v))
 		}
 	}
 	return n
@@ -242,30 +264,33 @@ func BuildVaryKey(vary string, reqHeader http.Header) string {
 	fields := strings.Split(vary, ",")
 	sort.Strings(fields)
 
-	var buf [256]byte
+	var stack [256]byte
+	n := buildVaryKeyInto(stack[:], fields, reqHeader)
+	if n <= len(stack) {
+		return strconv.FormatUint(xxhash.Sum64(stack[:n]), 16)
+	}
+	heap := make([]byte, n)
+	buildVaryKeyInto(heap, fields, reqHeader)
+	return strconv.FormatUint(xxhash.Sum64(heap), 16)
+}
+
+// buildVaryKeyInto writes the canonical Vary key bytes into dst and
+// returns the total canonical length. If the key exceeds len(dst), the
+// content is truncated but the returned length reflects the full size.
+func buildVaryKeyInto(dst []byte, fields []string, reqHeader http.Header) int {
 	n := 0
 	for _, f := range fields {
 		f = strings.TrimSpace(strings.ToLower(f))
-		n += copy(buf[n:], f)
-		if n < len(buf) {
-			buf[n] = '='
-			n++
-		}
+		n += copyOverflow(dst, n, f)
+		n = appendByte(dst, n, '=')
 		val := reqHeader.Get(f)
-		// Normalise list-valued headers: sort their comma-separated tokens
-		// so "en, fr" and "fr, en" hash identically.
 		if isListValuedVaryField(f) {
 			val = normaliseListHeader(val)
 		}
-		n += copy(buf[n:], val)
-		if n < len(buf) {
-			buf[n] = ';'
-			n++
-		}
+		n += copyOverflow(dst, n, val)
+		n = appendByte(dst, n, ';')
 	}
-	// Return the hash as a compact string.
-	h := xxhash.Sum64(buf[:n])
-	return strconv.FormatUint(h, 16)
+	return n
 }
 
 // isListValuedVaryField reports whether a Vary field name contains a

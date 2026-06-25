@@ -79,7 +79,8 @@ func (c *Config) Validate() error {
 
 	// Upstream pool names must be unique.
 	seen := make(map[string]struct{}, len(c.UpstreamPools))
-	for _, p := range c.UpstreamPools {
+	for i := range c.UpstreamPools {
+		p := &c.UpstreamPools[i]
 		if p.Name == "" {
 			return errors.New("config: upstream pool with empty name")
 		}
@@ -89,6 +90,9 @@ func (c *Config) Validate() error {
 		seen[p.Name] = struct{}{}
 		if len(p.Targets) == 0 {
 			return fmt.Errorf("config: upstream pool %q has no targets", p.Name)
+		}
+		if err := validatePoolDurations(p); err != nil {
+			return err
 		}
 	}
 
@@ -129,8 +133,42 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if r.Cache.TTLOverride < 0 {
 		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, r.Cache.TTLOverride)
 	}
+	if r.Cache.TTLDefault < 0 {
+		return fmt.Errorf("config: route %d ttl_default must be >= 0, got %v", i, r.Cache.TTLDefault)
+	}
+	if r.Cache.StaleWhileRevalidate < 0 {
+		return fmt.Errorf("config: route %d stale_while_revalidate must be >= 0, got %v", i, r.Cache.StaleWhileRevalidate)
+	}
+	if r.Cache.StaleIfError < 0 {
+		return fmt.Errorf("config: route %d stale_if_error must be >= 0, got %v", i, r.Cache.StaleIfError)
+	}
+	if r.Cache.NegativeTTL < 0 {
+		return fmt.Errorf("config: route %d negative_ttl must be >= 0, got %v", i, r.Cache.NegativeTTL)
+	}
 	if r.Cache.JitterPercent < 0 || r.Cache.JitterPercent > 50 {
 		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, r.Cache.JitterPercent)
+	}
+	return nil
+}
+
+func validatePoolDurations(p *UpstreamPool) error {
+	if p.Health.Active.Interval < 0 {
+		return fmt.Errorf("config: upstream pool %q health.active.interval must be >= 0, got %v", p.Name, p.Health.Active.Interval)
+	}
+	if p.Health.Active.Timeout < 0 {
+		return fmt.Errorf("config: upstream pool %q health.active.timeout must be >= 0, got %v", p.Name, p.Health.Active.Timeout)
+	}
+	if p.Health.Passive.EjectFor < 0 {
+		return fmt.Errorf("config: upstream pool %q health.passive.eject_for must be >= 0, got %v", p.Name, p.Health.Passive.EjectFor)
+	}
+	if p.Connect.Timeout < 0 {
+		return fmt.Errorf("config: upstream pool %q connect.timeout must be >= 0, got %v", p.Name, p.Connect.Timeout)
+	}
+	if p.Connect.KeepAlive < 0 {
+		return fmt.Errorf("config: upstream pool %q connect.keep_alive must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
+	}
+	if p.Connect.HedgeTimeout < 0 {
+		return fmt.Errorf("config: upstream pool %q connect.hedge_timeout must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)
 	}
 	return nil
 }

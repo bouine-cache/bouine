@@ -224,6 +224,67 @@ func TestClusterMode_StrongWithoutEnabled(t *testing.T) {
 
 // --- TTLOverride validation ---
 
+func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	base := Route{Pool: "app", Cache: RouteCache{}}
+	cases := []struct {
+		name string
+		set  func(rc *RouteCache)
+	}{
+		{"ttl_default", func(rc *RouteCache) { rc.TTLDefault = -1 }},
+		{"stale_while_revalidate", func(rc *RouteCache) { rc.StaleWhileRevalidate = -1 }},
+		{"stale_if_error", func(rc *RouteCache) { rc.StaleIfError = -1 }},
+		{"negative_ttl", func(rc *RouteCache) { rc.NegativeTTL = -1 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := base
+			tc.set(&r.Cache)
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{pool}, Routes: []Route{r}}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("error %q does not mention field %q", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_PoolDurations_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	base := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cases := []struct {
+		name string
+		set  func(p *UpstreamPool)
+	}{
+		{"health.active.interval", func(p *UpstreamPool) { p.Health.Active.Interval = -1 }},
+		{"health.active.timeout", func(p *UpstreamPool) { p.Health.Active.Timeout = -1 }},
+		{"health.passive.eject_for", func(p *UpstreamPool) { p.Health.Passive.EjectFor = -1 }},
+		{"connect.timeout", func(p *UpstreamPool) { p.Connect.Timeout = -1 }},
+		{"connect.keep_alive", func(p *UpstreamPool) { p.Connect.KeepAlive = -1 }},
+		{"connect.hedge_timeout", func(p *UpstreamPool) { p.Connect.HedgeTimeout = -1 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := base
+			tc.set(&p)
+			cfg := Config{Listen: Listen{Admin: ":9000"}, UpstreamPools: []UpstreamPool{p}}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("error %q does not mention field %q", err, tc.name)
+			}
+		})
+	}
+}
+
 func TestParse_TTLOverride_ValidYAML(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `

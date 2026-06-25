@@ -126,10 +126,12 @@ type Handler struct {
 	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
-	// variantCounts tracks stored Vary variants per primary key to
-	// enforce MaxVariants cap. Protected by variantMu.
-	variantMu     sync.Mutex
-	variantCounts map[api.Key]int
+	// variantSets tracks the live variant store keys per primary key to
+	// enforce MaxVariants cap. Entries are removed when the handler observes
+	// their eviction via store probes on the cap path, or on explicit Delete.
+	// Protected by variantMu.
+	variantMu   sync.Mutex
+	variantSets map[api.Key]map[api.Key]struct{}
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
 	VaryCapHits interface{ Inc() }
 	// ownerFn returns the peer that owns a cache key and whether the key
@@ -228,7 +230,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		overrideTTL:      cfg.OverrideTTL,
 		defaultSWR:       cfg.DefaultSWR,
 		defaultSIE:       cfg.DefaultSIE,
-		variantCounts:    make(map[api.Key]int),
+		variantSets:      make(map[api.Key]map[api.Key]struct{}),
 		VaryCapHits:      cfg.VaryCapHits,
 		ownerFn:          cfg.OwnerFn,
 		peerFetch:        cfg.PeerFetch,
@@ -661,19 +663,9 @@ func (h *Handler) writeAndMaybeStore(
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
 		// variants are a DoS vector.
 		if storeKey != primaryKey {
-			h.variantMu.Lock()
-			n := h.variantCounts[primaryKey]
-			if n >= MaxVariants {
-				h.variantMu.Unlock()
-				h.logger.Warn("vary cap exceeded, skipping variant storage",
-					"primary_key", primaryKey, "cap", MaxVariants)
-				if h.VaryCapHits != nil {
-					h.VaryCapHits.Inc()
-				}
+			if !h.reserveVariantSlot(r.Context(), primaryKey, storeKey) {
 				return
 			}
-			h.variantCounts[primaryKey] = n + 1
-			h.variantMu.Unlock()
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		obj.Header.Del("Set-Cookie")
@@ -694,6 +686,63 @@ func (h *Handler) writeAndMaybeStore(
 	}
 }
 
+// reserveVariantSlot ensures a slot exists for storeKey in the variant set
+// for primaryKey, reconciling evicted entries when the cap is reached.
+// Returns false if the cap is still exceeded after reconciliation.
+func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKey api.Key) bool {
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	if set == nil {
+		set = make(map[api.Key]struct{})
+		h.variantSets[primaryKey] = set
+	}
+	if _, exists := set[storeKey]; exists {
+		h.variantMu.Unlock()
+		return true
+	}
+	if len(set) < MaxVariants {
+		set[storeKey] = struct{}{}
+		h.variantMu.Unlock()
+		return true
+	}
+	// Cap reached: snapshot keys, release lock, probe store, reacquire.
+	keys := make([]api.Key, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	h.variantMu.Unlock()
+
+	probeCtx := context.WithoutCancel(reqCtx)
+	dead := make([]api.Key, 0, len(keys))
+	for _, k := range keys {
+		obj, _ := h.store.Get(probeCtx, k)
+		if obj == nil {
+			dead = append(dead, k)
+		}
+	}
+
+	h.variantMu.Lock()
+	defer h.variantMu.Unlock()
+	set = h.variantSets[primaryKey]
+	if set == nil {
+		set = make(map[api.Key]struct{})
+		h.variantSets[primaryKey] = set
+	}
+	for _, k := range dead {
+		delete(set, k)
+	}
+	if len(set) < MaxVariants {
+		set[storeKey] = struct{}{}
+		return true
+	}
+	h.logger.Warn("vary cap exceeded, skipping variant storage",
+		"primary_key", primaryKey, "cap", MaxVariants)
+	if h.VaryCapHits != nil {
+		h.VaryCapHits.Inc()
+	}
+	return false
+}
+
 func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	// Capture the upstream response first — only invalidate on success
 	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
@@ -708,6 +757,9 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		getReq.Method = http.MethodGet
 		key := h.buildKey(getReq)
 		_ = h.store.Delete(r.Context(), key)
+		h.variantMu.Lock()
+		delete(h.variantSets, key)
+		h.variantMu.Unlock()
 
 		// Also evict Content-Location and Location URLs (RFC 9111
 		// §4.4). These are URI references (RFC 9110 §8.7) and may be

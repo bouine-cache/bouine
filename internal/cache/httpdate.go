@@ -43,8 +43,11 @@ func HeuristicTTL(header http.Header, now time.Time) time.Duration {
 // ComputeAge calculates the Age header value per RFC 9111 §4.2.3.
 func ComputeAge(obj *api.Object, now time.Time) time.Duration {
 	age := now.Sub(obj.StoredAt)
-	// Also account for any Age header from the origin (upstream cache).
-	age += parseOriginAge(obj.Header)
+	// Also account for any Age the object had at the origin. Prefer the
+	// pre-stored OriginAge field (set once at cache-fill) over re-parsing the
+	// header on every hit; effectiveOriginAge falls back to the header for
+	// warm-tier / legacy objects whose field is zero.
+	age += effectiveOriginAge(obj)
 	return age
 }
 

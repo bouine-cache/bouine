@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
@@ -260,6 +261,70 @@ func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "alive-body") {
 		t.Fatalf("body = %q, want cached", rr.Body.String())
+	}
+}
+
+// TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency verifies that when
+// the upstream is slow and returns 5xx, the stale object's Age header is
+// computed from the request-start timestamp, not from a second time.Now()
+// taken after the slow upstream returns. This is a regression test for the
+// double time.Now() bug in fetchAndStoreStayinAlive and revalidate.
+func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
+	t.Parallel()
+
+	const upstreamDelay = 500 * time.Millisecond
+	const staleAge = 700 * time.Millisecond
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Cache-Control", "max-age=1")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "age-body")
+			return
+		}
+		time.Sleep(upstreamDelay)
+		w.WriteHeader(503)
+	})
+
+	h := testHandlerStayinAlive(t, upstream)
+	url := "http://example.com/age-test"
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	key := BuildKey(httptest.NewRequest("GET", url, nil))
+	obj, _ := h.store.Get(context.Background(), key)
+	if obj == nil {
+		t.Fatal("object not stored after seed")
+	}
+	stale := *obj
+	stale.StoredAt = time.Now().Add(-staleAge)
+	_ = h.store.Put(context.Background(), key, &stale)
+
+	reqStart := time.Now()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", url, nil)
+	req.Header.Set("Cache-Control", "no-cache")
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 (stale served)", rr.Code)
+	}
+
+	ageStr := rr.Header().Get("Age")
+	ageSecs, err := strconv.Atoi(ageStr)
+	if err != nil {
+		t.Fatalf("Age header = %q, not an integer: %v", ageStr, err)
+	}
+
+	expectedMin := int(reqStart.Sub(stale.StoredAt).Seconds())
+	expectedMax := int(reqStart.Add(50 * time.Millisecond).Sub(stale.StoredAt).Seconds())
+
+	if ageSecs < expectedMin || ageSecs > expectedMax {
+		t.Fatalf("Age = %d (stored %v before request, upstream slept %v); "+
+			"expected %d-%d — a second time.Now() would inflate it to %d",
+			ageSecs, staleAge, upstreamDelay, expectedMin, expectedMax,
+			int(reqStart.Add(upstreamDelay).Sub(stale.StoredAt).Seconds()))
 	}
 }
 

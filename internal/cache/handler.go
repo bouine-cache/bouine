@@ -290,7 +290,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case Miss:
 		h.handleCacheMiss(w, r, key, obj, now)
 	case Revalidate:
-		h.revalidate(w, r, key, disp.Object)
+		h.revalidate(w, r, key, disp.Object, now)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
@@ -327,7 +327,7 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key ap
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
 	// the error to be forwarded to the client.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, key, obj)
+		h.fetchAndStoreStayinAlive(w, r, key, obj, now)
 	} else {
 		h.fetchAndStore(w, r, key)
 	}
@@ -480,30 +480,30 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
 // serving the super-stale obj if the upstream is unavailable.
-func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time) {
 	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", key)
-		h.serveObject(w, r, stale, time.Now(), cacheStale)
+		h.serveObject(w, r, stale, now, cacheStale)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 			"status", res.StatusCode, "key", key)
-		h.serveObject(w, r, stale, time.Now(), cacheStale)
+		h.serveObject(w, r, stale, now, cacheStale)
 		return
 	}
 	h.writeAndMaybeStore(w, r, key, res)
 }
 
-func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time) {
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
 	res := h.doFetch(revalReq)
 	if res.Err != nil {
-		h.serveObject(w, r, stale, time.Now(), cacheStale)
+		h.serveObject(w, r, stale, now, cacheStale)
 		return
 	}
 
@@ -514,13 +514,13 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		if h.stayinAlive {
 			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 				"status", res.StatusCode, "key", stale.Key)
-			h.serveObject(w, r, stale, time.Now(), cacheStale)
+			h.serveObject(w, r, stale, now, cacheStale)
 			return
 		}
 		// Serve stale unless the stored response demands revalidation.
 		cc := objDirectives(stale)
 		if !cc.MustRevalidate && !cc.ProxyRevalidate {
-			h.serveObject(w, r, stale, time.Now(), cacheStale)
+			h.serveObject(w, r, stale, now, cacheStale)
 			return
 		}
 	}
@@ -528,7 +528,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
 		_ = h.store.Put(r.Context(), key, refreshed)
-		h.serveObject(w, r, refreshed, time.Now(), cacheRevalidated)
+		h.serveObject(w, r, refreshed, now, cacheRevalidated)
 		return
 	}
 

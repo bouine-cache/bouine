@@ -149,3 +149,156 @@ func TestAuth_ReadEndpointsExempt(t *testing.T) {
 		}
 	}
 }
+
+func postWithToken(t *testing.T, s *Server, path, body string) (int, []byte) {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), "POST", path,
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	s.Handler().ServeHTTP(rr, req)
+	return rr.Code, rr.Body.Bytes()
+}
+
+func TestPurge_EmptyURL(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:   "secret",
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/purge", `{}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+	if !bytes.Contains(body, []byte("url field is required")) {
+		t.Fatalf("expected url error, got: %s", body)
+	}
+}
+
+func TestPurge_UnknownField(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:   "secret",
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/purge", `{"patdddh_regex":"^/reviews/"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+}
+
+func TestPurge_MalformedJSON(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:   "secret",
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error { return nil },
+	})
+	code, _ := postWithToken(t, s, "/v1/purge", `{not json`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", code)
+	}
+}
+
+func TestPurge_Valid(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:   "secret",
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/purge", `{"url":"https://example.com/reviews/1"}`)
+	if code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", code, body)
+	}
+}
+
+func TestRefresh_EmptyURL(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:     "secret",
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		RefreshFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/refresh", `{}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+	if !bytes.Contains(body, []byte("url field is required")) {
+		t.Fatalf("expected url error, got: %s", body)
+	}
+}
+
+func TestRefresh_UnknownField(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:     "secret",
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		RefreshFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/refresh", `{"patdddh_regex":"^/reviews/"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+}
+
+func TestRefresh_Valid(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:     "secret",
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		RefreshFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/refresh", `{"url":"https://example.com/reviews/1"}`)
+	if code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", code, body)
+	}
+}
+
+func TestBan_EmptyExpr(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
+	})
+	code, body := postWithToken(t, s, "/v1/ban", `{}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+	if !bytes.Contains(body, []byte("at least one of")) {
+		t.Fatalf("expected predicate error, got: %s", body)
+	}
+}
+
+func TestBan_UnknownField(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
+	})
+	code, body := postWithToken(t, s, "/v1/ban", `{"patdddh_regex":"^/reviews/"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+}
+
+func TestBan_Valid(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		BanFn:  func(_ api.BanExpr) (int, error) { return 42, nil },
+	})
+	code, body := postWithToken(t, s, "/v1/ban", `{"path_regex":"^/reviews/"}`)
+	if code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", code, body)
+	}
+	if !bytes.Contains(body, []byte("42")) {
+		t.Fatalf("expected count 42 in response, got: %s", body)
+	}
+}

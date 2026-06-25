@@ -225,8 +225,14 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, "bad request: url field is required", http.StatusBadRequest)
 		return
 	}
 	key := cache.BuildKeyFromURL(req.URL)
@@ -242,8 +248,14 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ban(w http.ResponseWriter, r *http.Request) {
 	var expr api.BanExpr
-	if err := json.NewDecoder(r.Body).Decode(&expr); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&expr); err != nil {
+		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+		return
+	}
+	if expr.HostRegex == "" && expr.PathRegex == "" && expr.SurrogateKey == "" {
+		http.Error(w, "bad request: at least one of host_regex, path_regex, or surrogate_key is required", http.StatusBadRequest)
 		return
 	}
 	count, err := s.cfg.BanFn(expr)
@@ -265,8 +277,14 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, "bad request: url field is required", http.StatusBadRequest)
 		return
 	}
 	key := cache.BuildKeyFromURL(req.URL)

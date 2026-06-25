@@ -443,6 +443,9 @@ const (
 func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult) {
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
+	// Strip internal headers used for ban matching — never forwarded to clients.
+	dst.Del("X-Bouine-Path")
+	dst.Del("Host")
 	dst["Age"] = ageHeader(ComputeAge(obj, now))
 	switch result {
 	case cacheHit:
@@ -817,6 +820,10 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 	}
+	// Stamp internal headers for ban predicate matching. These are
+	// stripped before serving to clients (see serveObject).
+	obj.Header.Set("X-Bouine-Path", r.URL.Path)
+	obj.Header.Set("Host", r.Host)
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
 	} else if defaultSWR > 0 {

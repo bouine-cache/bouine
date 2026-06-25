@@ -130,6 +130,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
 	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
 
+	// Measure the full RPC round-trip: request send, response, and decode.
+	start := time.Now()
 	resp, err := f.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
@@ -147,8 +149,6 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if err := json.NewDecoder(resp.Body).Decode(&fetchResp); err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)
 	}
-	start := time.Now()
-	_ = start // latency measured from RPC call
 	if !fetchResp.Hit {
 		f.misses.Add(1)
 		if f.pMisses != nil {

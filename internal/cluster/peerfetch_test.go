@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/thylong/bouine/pkg/api"
 )
@@ -82,6 +83,39 @@ func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 	h.ServeHTTP(rr, r)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
+	t.Parallel()
+	const delay = 5 * time.Millisecond // > 1ms so it survives Milliseconds() truncation
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{
+			Hit:    true,
+			Object: &api.Object{Key: 1, StatusCode: 200, Body: []byte("cached")},
+		})
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: 1})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if obj == nil {
+		t.Fatal("expected hit object")
+	}
+
+	hits, _, _, latN, latSumMs := f.PeerFetchStats()
+	if hits != 1 || latN != 1 {
+		t.Fatalf("hits=%d latN=%d, want 1,1", hits, latN)
+	}
+	if latSumMs <= 0 {
+		t.Fatalf("latSumMs=%d, want >0 (latency must be measured around the RPC)", latSumMs)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -86,8 +87,13 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 	if cfg.Endpoint == "" {
 		return func() {}, nil
 	}
+	// otlptracehttp.WithEndpoint expects "host:port" without a scheme.
+	// The OTEL_EXPORTER_OTLP_ENDPOINT env var (and some YAML configs)
+	// include the "http://" or "https://" prefix, so strip it here.
+	endpoint := strings.TrimPrefix(cfg.Endpoint, "https://")
+	endpoint = strings.TrimPrefix(endpoint, "http://")
 	exp, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithEndpoint(cfg.Endpoint),
+		otlptracehttp.WithEndpoint(endpoint),
 		otlptracehttp.WithInsecure(), // use http:// by default; caller can override with https://
 	)
 	if err != nil {

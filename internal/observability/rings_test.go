@@ -417,3 +417,50 @@ func TestRequestRing_LatencyHistogramFlush(t *testing.T) {
 		t.Fatalf("unexpected latency histogram: %v", b.LatHist)
 	}
 }
+
+func TestMergeSummaries_LatencyHistogram(t *testing.T) {
+	t.Parallel()
+	s1 := MetricsSummary{
+		NodeName:    "n1",
+		RequestSnap: make([]RequestBucket, requestBuckets),
+	}
+	s1.RequestSnap[0].LatHist[0] = 2
+	s1.RequestSnap[0].LatHist[3] = 5
+	s1.RequestSnap[0].LatHist[latencyHistBuckets-1] = 1
+	last := requestBuckets - 1
+	s1.RequestSnap[last].LatHist[1] = 3
+	s1.RequestSnap[last].LatHist[5] = 4
+
+	s2 := MetricsSummary{
+		NodeName:    "n2",
+		RequestSnap: make([]RequestBucket, requestBuckets),
+	}
+	s2.RequestSnap[0].LatHist[0] = 4
+	s2.RequestSnap[0].LatHist[3] = 7
+	s2.RequestSnap[0].LatHist[latencyHistBuckets-1] = 2
+	s2.RequestSnap[last].LatHist[1] = 6
+	s2.RequestSnap[last].LatHist[5] = 8
+
+	merged := MergeSummaries([]MetricsSummary{s1, s2})
+
+	b0 := merged.RequestSnap[0].LatHist
+	if b0[0] != 6 || b0[3] != 12 || b0[latencyHistBuckets-1] != 3 {
+		t.Fatalf("merged LatHist[0] not summed: got %v", b0)
+	}
+
+	bLast := merged.RequestSnap[last].LatHist
+	if bLast[1] != 9 || bLast[5] != 12 {
+		t.Fatalf("merged LatHist[%d] not summed: got %v", last, bLast)
+	}
+
+	for i := range requestBuckets {
+		if i != 0 && i != last {
+			h := merged.RequestSnap[i].LatHist
+			for j, v := range h {
+				if v != 0 {
+					t.Fatalf("merged LatHist[%d][%d] = %d, want 0", i, j, v)
+				}
+			}
+		}
+	}
+}

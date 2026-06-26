@@ -665,8 +665,11 @@ func (ri *Rings) Summary() MetricsSummary {
 //   - Counters: sum
 //   - Ratios: weighted average
 //   - Latency p99: max
+//   - Latency histogram: element-wise sum (so the dashboard latency
+//     distribution reflects the combined cluster traffic, not just one node)
 //
-// mergeRequestBuckets accumulates per-bucket counters from all summaries into merged.
+// mergeRequestBuckets accumulates per-bucket counters and latency histogram
+// bins from all summaries into merged.
 func mergeRequestBuckets(merged *MetricsSummary, summaries []MetricsSummary) {
 	for _, s := range summaries {
 		for i, b := range s.RequestSnap {
@@ -685,6 +688,9 @@ func mergeRequestBuckets(merged *MetricsSummary, summaries []MetricsSummary) {
 			}
 			if b.Timestamp > m.Timestamp {
 				m.Timestamp = b.Timestamp
+			}
+			for j := range b.LatHist {
+				m.LatHist[j] += b.LatHist[j]
 			}
 		}
 	}
@@ -755,6 +761,7 @@ func mergeURLStatsList(summaries []MetricsSummary) []URLStat {
 //   - Counters: sum
 //   - Ratios: weighted average
 //   - Latency p99: max
+//   - Latency histogram: element-wise sum across all peer summaries
 func MergeSummaries(summaries []MetricsSummary) MetricsSummary {
 	if len(summaries) == 0 {
 		return MetricsSummary{}

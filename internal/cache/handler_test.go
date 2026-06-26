@@ -908,8 +908,11 @@ func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
 
 	// Internal headers must not leak to the client.
-	if rr.Header().Get("X-Bouine-Path") != "" {
-		t.Fatal("X-Bouine-Path should not be forwarded to client")
+	if v := rr.Header().Get("X-Bouine-Path"); v != "" {
+		t.Fatalf("X-Bouine-Path leaked to client: %q", v)
+	}
+	if v := rr.Header().Get("X-Bouine-Host"); v != "" {
+		t.Fatalf("X-Bouine-Host leaked to client: %q", v)
 	}
 }
 

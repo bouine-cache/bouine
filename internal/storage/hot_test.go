@@ -597,3 +597,146 @@ func TestHotClose(t *testing.T) {
 		t.Errorf("goroutine leak: before=%d after close=%d", before, after)
 	}
 }
+
+func TestHotStore_BanByHostRegex(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	k := KeyHash([]byte("host-ban"))
+	o := obj(k, 50)
+	o.Header.Set("X-Bouine-Host", "example.com")
+	o.Header.Set("X-Bouine-Path", "/keep")
+	_ = s.Put(context.Background(), k, o)
+
+	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "example\\.com"})
+	if err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("ban count = %d, want 1", count)
+	}
+
+	got, _ := s.Get(context.Background(), k)
+	if got != nil {
+		t.Fatal("expected miss after ban")
+	}
+}
+
+func TestHotStore_BanByPathRegex(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	k := KeyHash([]byte("path-ban"))
+	o := obj(k, 50)
+	o.Header.Set("X-Bouine-Host", "example.com")
+	o.Header.Set("X-Bouine-Path", "/ban-me")
+	_ = s.Put(context.Background(), k, o)
+
+	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me"})
+	if err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("ban count = %d, want 1", count)
+	}
+
+	got, _ := s.Get(context.Background(), k)
+	if got != nil {
+		t.Fatal("expected miss after ban")
+	}
+}
+
+func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	banTime := time.Now()
+	count, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "example\\.com",
+		CreatedAt: banTime,
+	})
+	if err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("ban count = %d, want 0 (store empty)", count)
+	}
+
+	// Simulate peer replication: Put an object with StoredAt before the ban.
+	k := KeyHash([]byte("lazy-ban"))
+	o := obj(k, 50)
+	o.Header.Set("X-Bouine-Host", "example.com")
+	o.Header.Set("X-Bouine-Path", "/ban-me")
+	o.StoredAt = banTime.Add(-1 * time.Hour)
+	_ = s.Put(context.Background(), k, o)
+
+	got, _ := s.Get(context.Background(), k)
+	if got != nil {
+		t.Fatal("expected miss from lazy ban on slow path")
+	}
+}
+
+func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Put a matching object with old StoredAt and access it to set visited=true.
+	k := KeyHash([]byte("lazy-fast"))
+	o := obj(k, 50)
+	o.Header.Set("X-Bouine-Host", "example.com")
+	o.Header.Set("X-Bouine-Path", "/ban-me")
+	o.StoredAt = time.Now().Add(-1 * time.Hour)
+	_ = s.Put(context.Background(), k, o)
+
+	got, _ := s.Get(context.Background(), k)
+	if got == nil {
+		t.Fatal("expected hit before ban")
+	}
+
+	// Issue a ban that covers the object's StoredAt. The next Get
+	// takes the fast path (visited=true) and must enforce the lazy ban.
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "example\\.com",
+		CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+
+	got, _ = s.Get(context.Background(), k)
+	if got != nil {
+		t.Fatal("expected miss from lazy ban on fast path")
+	}
+}
+
+func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	banTime := time.Now()
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "example\\.com",
+		CreatedAt: banTime,
+	})
+	if err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+
+	// Object stored AFTER the ban — should be exempt from lazy eviction.
+	k := KeyHash([]byte("exempt"))
+	o := obj(k, 50)
+	o.Header.Set("X-Bouine-Host", "example.com")
+	o.Header.Set("X-Bouine-Path", "/ban-me")
+	o.StoredAt = banTime.Add(1 * time.Hour)
+	_ = s.Put(context.Background(), k, o)
+
+	got, _ := s.Get(context.Background(), k)
+	if got == nil {
+		t.Fatal("expected hit — object stored after ban should be exempt")
+	}
+}

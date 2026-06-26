@@ -217,18 +217,8 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 	if e != nil && e.sieve.Visited() {
 		obj := e.obj
 		s.mu.RUnlock()
-		// Lazy ban check: if any active ban matches this object, evict and
-		// return nil (RFC 9111 §4.4 lazy semantics).
 		if h.matchesActiveBan(obj) {
-			// Upgrade to write lock to delete the entry.
-			s.mu.Lock()
-			if cur, ok := s.entries[key]; ok && cur.obj == obj {
-				s.bytes -= objSize(obj)
-				s.evict.Remove(cur.sieve)
-				delete(s.entries, key)
-				h.stats.evictions.Add(1)
-			}
-			s.mu.Unlock()
+			h.evictBanned(s, key, obj)
 			h.stats.misses.Add(1)
 			return nil, nil
 		}
@@ -246,20 +236,41 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 	// (entry may have been evicted between RUnlock and Lock), then set it.
 	s.mu.Lock()
 	e = s.entries[key]
+	var obj *api.Object
 	if e != nil {
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
 		})
 		e.obj.Hits++
+		obj = e.obj
 	}
 	s.mu.Unlock()
 
-	if e == nil {
+	if obj == nil {
+		h.stats.misses.Add(1)
+		return nil, nil
+	}
+	if h.matchesActiveBan(obj) {
+		h.evictBanned(s, key, obj)
 		h.stats.misses.Add(1)
 		return nil, nil
 	}
 	h.stats.hits.Add(1)
-	return e.obj, nil
+	return obj, nil
+}
+
+// evictBanned removes a ban-matching entry from the shard. It re-checks
+// that the current entry is still the same object pointer to avoid
+// evicting a replacement that arrived between the unlock and re-lock.
+func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
+	s.mu.Lock()
+	if cur, ok := s.entries[key]; ok && cur.obj == obj {
+		s.bytes -= objSize(obj)
+		s.evict.Remove(cur.sieve)
+		delete(s.entries, key)
+		h.stats.evictions.Add(1)
+	}
+	s.mu.Unlock()
 }
 
 // Put stores an object. If the shard is over budget, SIEVE eviction
@@ -480,7 +491,7 @@ func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
 		if !expr.CreatedAt.IsZero() && obj.StoredAt.After(expr.CreatedAt) {
 			return false
 		}
-		if hostRE != nil && !hostRE.MatchString(obj.Header.Get("Host")) {
+		if hostRE != nil && !hostRE.MatchString(obj.Header.Get("X-Bouine-Host")) {
 			return false
 		}
 		if pathRE != nil && !pathRE.MatchString(obj.Header.Get("X-Bouine-Path")) {

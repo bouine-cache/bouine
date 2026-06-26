@@ -108,8 +108,16 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 
+	// Fall back to OTEL_EXPORTER_OTLP_ENDPOINT env var when the YAML
+	// config doesn't set tracing.endpoint. The chassis chart injects
+	// this env var pointing at the node-local OTel collector agent.
+	endpoint := e.cfg.Tracing.Endpoint
+	if endpoint == "" {
+		endpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+
 	shutdownTracer, err := tracing.InitTracer(ctx, tracing.TracingConfig{
-		Endpoint:     e.cfg.Tracing.Endpoint,
+		Endpoint:     endpoint,
 		ServiceName:  e.cfg.Tracing.ServiceName,
 		SamplingRate: e.cfg.Tracing.SamplingRate,
 	})

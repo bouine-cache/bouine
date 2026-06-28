@@ -36,7 +36,7 @@ func (h *HedgedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	fire := func() {
 		r := req.Clone(ctx)
-		resp, err := h.Inner.RoundTrip(r) //nolint:bodyclose // closed by drainLoser
+		resp, err := h.Inner.RoundTrip(r) //nolint:bodyclose // closed by loser cleanup goroutine
 		ch <- hedgeResult{resp, err}
 	}
 
@@ -54,16 +54,13 @@ func (h *HedgedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	res := <-ch
-	go drainLoser(ch)
-	return res.resp, res.err
-}
-
-func drainLoser(ch <-chan hedgeResult) {
-	for res := range ch {
-		if res.resp != nil {
-			_ = res.resp.Body.Close()
+	go func() {
+		loser := <-ch
+		if loser.resp != nil {
+			_ = loser.resp.Body.Close()
 		}
-	}
+	}()
+	return res.resp, res.err
 }
 
 func isIdempotent(method string) bool {

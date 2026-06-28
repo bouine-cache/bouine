@@ -221,7 +221,7 @@ func eqFold(a, b string) bool {
 // precedence over Cache-Control for shared-cache TTL decisions
 // (RFC 9211).
 func FreshnessLifetime(respCC Directives, header func(string) string) (time.Duration, bool) {
-	// CDN-Cache-Control takes precedence when present.
+	// CDN-Cache-Control takes precedence when present (RFC 9211).
 	if cdnCC := header("CDN-Cache-Control"); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
 		if cdnD.MaxAgeSet {
@@ -230,8 +230,9 @@ func FreshnessLifetime(respCC Directives, header func(string) string) (time.Dura
 		if cdnD.NoStore || cdnD.Private {
 			return 0, true // blocked by CDN directive
 		}
-		// CDN-CC present but no TTL directive — treat as expired.
-		return 0, true
+		// CDN-CC present but carries no freshness directive (e.g. "public",
+		// "stale-while-revalidate=60"). Fall through to respCC and Expires
+		// instead of forcing TTL 0.
 	}
 	if respCC.SMaxAgeSet {
 		return respCC.SMaxAge, true
@@ -269,7 +270,9 @@ func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) 
 		if cdnD.NoStore || cdnD.Private {
 			return 0, true
 		}
-		return 0, true
+		// CDN-CC present but carries no freshness directive (e.g. "public",
+		// "stale-while-revalidate=60"). Fall through to respCC and Expires
+		// instead of forcing TTL 0.
 	}
 	if respCC.SMaxAgeSet {
 		return respCC.SMaxAge, true

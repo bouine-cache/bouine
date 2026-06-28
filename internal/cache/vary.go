@@ -98,7 +98,10 @@ func normalizeHeaderValue(v string) string {
 // parses the Range header, validates it, and writes a 206 Partial Content
 // response. Both single-range and multi-range (multipart/byteranges) are
 // supported. Returns true if a range response was written.
-func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object) bool {
+//
+// stale controls the X-Cache label: true for StaleHit (STALE + Warning 110),
+// false for a fresh Hit (HIT).
+func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale bool) bool {
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
 		return false
@@ -130,6 +133,13 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object) bool {
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
+	}
+
+	if stale {
+		w.Header()["X-Cache"] = headerSTALE
+		w.Header()["Warning"] = []string{`110 - "Response is Stale"`}
+	} else {
+		w.Header()["X-Cache"] = headerHIT
 	}
 
 	if len(ranges) == 1 {

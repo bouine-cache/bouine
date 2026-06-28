@@ -27,6 +27,8 @@ import (
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 	webdash "github.com/thylong/bouine/web/dashboard"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type engine struct {
@@ -62,8 +64,9 @@ type runState struct {
 	broadcaster *cluster.Broadcaster
 	peersFn     func() []api.PeerInfo
 
-	cfProp *cfPropagator
-	seq    *shutdown.Sequencer
+	cfProp    *cfPropagator
+	seq       *shutdown.Sequencer
+	listeners []*server.Listener
 }
 
 // invalidationOps provides shared purge/ban/refresh closures used by
@@ -86,7 +89,7 @@ func (e *engine) run(ctx context.Context) error {
 	g := supervised.NewGroup(ctx, e.logger)
 	e.startBackgroundTasks(g, rs)    // rings snapshot, prefetch sitemap crawler, config watcher
 	e.startAdmin(g, ctx, rs)         // admin API, dashboard, peer-fetch handler
-	e.startListeners(g, handler)     // HTTP/HTTPS data-plane listeners
+	e.startListeners(g, handler, rs) // HTTP/HTTPS data-plane listeners
 	e.startHealthChecks(g, rs.pools) // active health probes per upstream pool
 	e.startClusterJoin(g, rs)        // gossip join with retry against seed peers
 	e.registerShutdownSteps(g, rs)   // ordered drain: readiness, store flush, cluster leave
@@ -488,13 +491,14 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 	return dashMux
 }
 
-func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
+func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *runState) {
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:    e.cfg.Listen.HTTP,
 			Handler: handler,
 			Logger:  e.logger,
 		})
+		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
 	}
 
@@ -510,6 +514,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler) {
 			Logger:    e.logger,
 			TLSConfig: tlsCfg,
 		})
+		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)
 	}
 }
@@ -545,9 +550,12 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 }
 
 func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
-	rs.seq.AddStep("mark-not-ready", 2*time.Second, func(_ context.Context) error {
-		time.Sleep(time.Second)
-		return nil
+	rs.seq.AddStep("mark-not-ready", 15*time.Second, func(ctx context.Context) error {
+		var wg errgroup.Group
+		for _, ln := range rs.listeners {
+			wg.Go(func() error { return ln.Shutdown(ctx) })
+		}
+		return wg.Wait()
 	})
 	rs.seq.AddStep("flush-store", 10*time.Second, func(ctx context.Context) error {
 		return rs.store.Close(ctx)

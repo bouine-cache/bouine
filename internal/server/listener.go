@@ -126,6 +126,13 @@ func (s *Listener) Serve(ctx context.Context) error {
 	}
 }
 
+// Shutdown gracefully stops the listener, waiting for in-flight
+// requests to complete or ctx to expire. Safe to call concurrently
+// with Serve; the inner http.Server.Shutdown is idempotent.
+func (s *Listener) Shutdown(ctx context.Context) error {
+	return s.inner.Shutdown(ctx)
+}
+
 // Name returns the protocol label ("http", "https").
 func (s *Listener) Name() string { return s.name }
 

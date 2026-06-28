@@ -35,6 +35,9 @@ type ResponseWriter struct {
 	http.ResponseWriter
 	Status int
 	Bytes  int64
+	// headerWritten records whether WriteHeader has been called, mirroring
+	// net/http which ignores the second and subsequent calls.
+	headerWritten bool
 }
 
 // pool reuses ResponseWriter instances to avoid a heap allocation on
@@ -51,6 +54,7 @@ func Acquire(w http.ResponseWriter) *ResponseWriter {
 	rw.ResponseWriter = w
 	rw.Status = 200
 	rw.Bytes = 0
+	rw.headerWritten = false
 	return rw
 }
 
@@ -68,13 +72,25 @@ func New(w http.ResponseWriter) *ResponseWriter {
 }
 
 // WriteHeader records the status and delegates to the underlying writer.
+// Only the first call records the status, mirroring net/http which
+// ignores subsequent WriteHeader calls.
 func (w *ResponseWriter) WriteHeader(code int) {
+	if w.headerWritten {
+		return
+	}
+	w.headerWritten = true
 	w.Status = code
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// Write counts bytes and delegates to the underlying writer.
+// Write counts bytes and delegates to the underlying writer. The first
+// Write triggers an implicit WriteHeader(200) in net/http, so we mark
+// the header as written to keep subsequent explicit WriteHeader calls
+// from overwriting the recorded status.
 func (w *ResponseWriter) Write(b []byte) (int, error) {
+	if !w.headerWritten {
+		w.headerWritten = true
+	}
 	n, err := w.ResponseWriter.Write(b)
 	w.Bytes += int64(n)
 	return n, err

@@ -73,6 +73,57 @@ func TestWriteHeaderAndWrite(t *testing.T) {
 	Release(rw)
 }
 
+func TestWriteHeaderRecordsOnlyFirstCall(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := Acquire(rec)
+	defer Release(rw)
+
+	rw.WriteHeader(http.StatusInternalServerError)
+	rw.WriteHeader(http.StatusOK)
+
+	if rw.Status != http.StatusInternalServerError {
+		t.Fatalf("Status = %d, want %d (first call must win)", rw.Status, http.StatusInternalServerError)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("wire Code = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestWriteBeforeWriteHeaderKeepsDefaultStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := Acquire(rec)
+	defer Release(rw)
+
+	_, _ = rw.Write([]byte("hello"))
+	rw.WriteHeader(http.StatusInternalServerError)
+
+	if rw.Status != http.StatusOK {
+		t.Fatalf("Status = %d, want %d (implicit 200 from Write must win)", rw.Status, http.StatusOK)
+	}
+	if rw.Bytes != 5 {
+		t.Fatalf("Bytes = %d, want 5", rw.Bytes)
+	}
+}
+
+func TestAcquireResetsHeaderWritten(t *testing.T) {
+	rec1 := httptest.NewRecorder()
+	rw := Acquire(rec1)
+	rw.WriteHeader(http.StatusTeapot)
+	Release(rw)
+
+	rec2 := httptest.NewRecorder()
+	rw = Acquire(rec2)
+	defer Release(rw)
+
+	if rw.headerWritten {
+		t.Fatal("headerWritten not reset after Acquire")
+	}
+	rw.WriteHeader(http.StatusCreated)
+	if rw.Status != http.StatusCreated {
+		t.Fatalf("Status = %d, want %d", rw.Status, http.StatusCreated)
+	}
+}
+
 func TestFlushDelegates(t *testing.T) {
 	frw := &fullResponseWriter{ResponseWriter: httptest.NewRecorder()}
 	rw := Acquire(frw)

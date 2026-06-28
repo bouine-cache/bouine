@@ -1,10 +1,12 @@
 package cache
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thylong/bouine/pkg/api"
 )
@@ -122,7 +124,7 @@ func TestServeRange_SingleRange(t *testing.T) {
 	r.Header.Set("Range", "bytes=0-4")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj)
+	ok := ServeRange(rr, r, obj, false)
 	if !ok {
 		t.Fatal("expected range served")
 	}
@@ -135,6 +137,9 @@ func TestServeRange_SingleRange(t *testing.T) {
 	cr := rr.Header().Get("Content-Range")
 	if cr != "bytes 0-4/13" {
 		t.Fatalf("Content-Range = %q", cr)
+	}
+	if xc := rr.Header().Get("X-Cache"); xc != "HIT" {
+		t.Fatalf("X-Cache = %q, want HIT", xc)
 	}
 }
 
@@ -151,7 +156,7 @@ func TestServeRange_SuffixRange(t *testing.T) {
 	r.Header.Set("Range", "bytes=-3")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj)
+	ok := ServeRange(rr, r, obj, false)
 	if !ok {
 		t.Fatal("expected range served")
 	}
@@ -173,7 +178,7 @@ func TestServeRange_OpenEnded(t *testing.T) {
 	r.Header.Set("Range", "bytes=3-")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj)
+	ok := ServeRange(rr, r, obj, false)
 	if !ok {
 		t.Fatal("expected range served")
 	}
@@ -195,7 +200,7 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 	r.Header.Set("Range", "bytes=5-10")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj)
+	ok := ServeRange(rr, r, obj, false)
 	if !ok {
 		t.Fatal("expected range handled (416)")
 	}
@@ -210,7 +215,7 @@ func TestServeRange_NoRangeHeader(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj)
+	ok := ServeRange(rr, r, obj, false)
 	if ok {
 		t.Fatal("no Range header should return false")
 	}
@@ -223,7 +228,7 @@ func TestServeRange_MultiRange(t *testing.T) {
 	r.Header.Set("Range", "bytes=0-1, 3-4")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj)
+	ok := ServeRange(rr, r, obj, false)
 	if !ok {
 		t.Fatal("multi-range should be served as multipart/byteranges")
 	}
@@ -233,6 +238,9 @@ func TestServeRange_MultiRange(t *testing.T) {
 	ct := rr.Header().Get("Content-Type")
 	if !strings.HasPrefix(ct, "multipart/byteranges") {
 		t.Fatalf("expected multipart/byteranges Content-Type, got %q", ct)
+	}
+	if xc := rr.Header().Get("X-Cache"); xc != "HIT" {
+		t.Fatalf("X-Cache = %q, want HIT", xc)
 	}
 }
 
@@ -306,5 +314,49 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 	}
 	if rr2.Body.String() != "Hello" {
 		t.Fatalf("range body = %q, want Hello", rr2.Body.String())
+	}
+	if xc := rr2.Header().Get("X-Cache"); xc != "HIT" {
+		t.Fatalf("range X-Cache = %q, want HIT", xc)
+	}
+}
+
+func TestHandler_RangeOnStaleObject(t *testing.T) {
+	t.Parallel()
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=1, stale-while-revalidate=60")
+		w.Header().Set("ETag", `"full"`)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("Hello, Range World!"))
+	})
+	h := testHandler(t, upstream)
+
+	url := "http://example.com/stale-range"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	key := BuildKey(httptest.NewRequest("GET", url, nil))
+	obj, _ := h.store.Get(context.Background(), key)
+	if obj == nil {
+		t.Fatal("object not stored")
+	}
+	stale := *obj
+	stale.StoredAt = time.Now().Add(-2 * time.Second)
+	_ = h.store.Put(context.Background(), key, &stale)
+
+	rangeReq := httptest.NewRequest("GET", url, nil)
+	rangeReq.Header.Set("Range", "bytes=0-4")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, rangeReq)
+
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206", rr.Code)
+	}
+	if rr.Body.String() != "Hello" {
+		t.Fatalf("body = %q, want Hello", rr.Body.String())
+	}
+	if xc := rr.Header().Get("X-Cache"); xc != "STALE" {
+		t.Fatalf("stale range X-Cache = %q, want STALE", xc)
+	}
+	if w := rr.Header().Get("Warning"); !strings.HasPrefix(w, "110") {
+		t.Fatalf("Warning = %q, want 110 prefix", w)
 	}
 }

@@ -284,7 +284,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.tryConditional304(w, r, disp.Object) {
 			return
 		}
-		if ServeRange(w, r, disp.Object) {
+		if ServeRange(w, r, disp.Object, disp.Decision == StaleHit) {
 			return
 		}
 		h.serveObject(w, r, disp.Object, now, cacheHit)

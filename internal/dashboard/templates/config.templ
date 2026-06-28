@@ -3,8 +3,8 @@ package templates
 import "fmt"
 
 // Config renders the config-reload view. The left panel has a Structured /
-// JSON toggle so operators can switch between the visual section view and
-// a raw pretty-printed JSON of the running config.
+// JSON / YAML toggle so operators can switch between the visual section view,
+// a raw pretty-printed JSON, or a raw YAML dump of the running config.
 templ Config(d ConfigData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
@@ -27,10 +27,17 @@ templ Config(d ConfigData) {
 					style="cursor:pointer"
 					onclick="cfgToggle('json')"
 				>JSON</a>
+				<a
+					id="cfg-btn-yaml"
+					class="tb"
+					aria-pressed="false"
+					style="cursor:pointer"
+					onclick="cfgToggle('yaml')"
+				>YAML</a>
 			</div>
 		</div>
 		<div class="r2">
-			<!-- left: running config viewer (two overlapping views) -->
+			<!-- left: running config viewer (three overlapping views) -->
 			<div class="bc" style="overflow:auto;position:relative">
 				<div class="bc-t" style="display:flex;justify-content:space-between;align-items:center">
 					Current config (read-only)
@@ -45,6 +52,36 @@ templ Config(d ConfigData) {
 				</div>
 				<!-- Structured view -->
 				<div id="cfg-view-structured">
+					<!-- Capacity bars -->
+					if d.HotMaxBytes > 0 || d.WarmMaxBytes > 0 {
+						<div class="cfg-section">
+							<div class="cfg-section-hd">
+								<span class="cfg-section-icon">▮</span>
+								capacity
+								<span class="cfg-badge cfg-badge-y">live</span>
+							</div>
+							<div class="cfg-grid" style="padding:.5rem .75rem">
+								<div class="tier-bar-wrap" style="margin-bottom:.6rem">
+									<div class="tier-bar-label">
+										<span>hot tier</span>
+										<span>{ FmtBytes(d.HotBytes) } / { FmtBytes(d.HotMaxBytes) } · { fmt.Sprintf("%d entries", d.HotEntries) }</span>
+									</div>
+									<div class="tier-bar" role="progressbar" aria-valuenow={ fmt.Sprintf("%.0f", d.HotFillPct()) } aria-valuemin="0" aria-valuemax="100">
+										<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.HotFillPct()) }></div>
+									</div>
+								</div>
+								<div class="tier-bar-wrap">
+									<div class="tier-bar-label">
+										<span>warm tier</span>
+										<span>{ FmtBytes(d.WarmBytes) } / { FmtBytes(d.WarmMaxBytes) } · { fmt.Sprintf("%d entries", d.WarmEntries) }</span>
+									</div>
+									<div class="tier-bar" role="progressbar" aria-valuenow={ fmt.Sprintf("%.0f", d.WarmFillPct()) } aria-valuemin="0" aria-valuemax="100">
+										<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.WarmFillPct()) }></div>
+									</div>
+								</div>
+							</div>
+						</div>
+					}
 					if len(d.Sections) == 0 {
 						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
 					}
@@ -99,6 +136,14 @@ templ Config(d ConfigData) {
 				<div id="cfg-view-json" style="display:none">
 					if d.RawJSON != "" {
 						<pre style="font-family:'JetBrains Mono',monospace;font-size:.72rem;line-height:1.7;color:var(--t);white-space:pre-wrap;word-break:break-all;margin:0;padding:.25rem 0">{ d.RawJSON }</pre>
+					} else {
+						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
+					}
+				</div>
+				<!-- YAML view (hidden by default) -->
+				<div id="cfg-view-yaml" style="display:none">
+					if d.RawYAML != "" {
+						<pre style="font-family:'JetBrains Mono',monospace;font-size:.72rem;line-height:1.7;color:var(--t);white-space:pre-wrap;word-break:break-all;margin:0;padding:.25rem 0">{ d.RawYAML }</pre>
 					} else {
 						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
 					}
@@ -163,19 +208,26 @@ script cfgToggleScript() {
 	window.cfgToggle = function(mode) {
 		var s = document.getElementById('cfg-view-structured');
 		var j = document.getElementById('cfg-view-json');
+		var y = document.getElementById('cfg-view-yaml');
 		var bs = document.getElementById('cfg-btn-structured');
 		var bj = document.getElementById('cfg-btn-json');
-		if (!s || !j) return;
+		var by = document.getElementById('cfg-btn-yaml');
+		if (!s || !j || !y) return;
+		s.style.display = 'none';
+		j.style.display = 'none';
+		y.style.display = 'none';
+		bs.classList.remove('active'); bs.setAttribute('aria-pressed','false');
+		bj.classList.remove('active'); bj.setAttribute('aria-pressed','false');
+		by.classList.remove('active'); by.setAttribute('aria-pressed','false');
 		if (mode === 'json') {
-			s.style.display = 'none';
 			j.style.display = '';
-			bs.classList.remove('active'); bs.setAttribute('aria-pressed','false');
-			bj.classList.add('active');    bj.setAttribute('aria-pressed','true');
+			bj.classList.add('active'); bj.setAttribute('aria-pressed','true');
+		} else if (mode === 'yaml') {
+			y.style.display = '';
+			by.classList.add('active'); by.setAttribute('aria-pressed','true');
 		} else {
-			j.style.display = 'none';
 			s.style.display = '';
-			bj.classList.remove('active'); bj.setAttribute('aria-pressed','false');
-			bs.classList.add('active');    bs.setAttribute('aria-pressed','true');
+			bs.classList.add('active'); bs.setAttribute('aria-pressed','true');
 		}
 	};
 }

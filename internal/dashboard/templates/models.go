@@ -373,7 +373,21 @@ type ConfigData struct {
 	Uptime       string // "3d 14h 22m"
 	Sections     []ConfigSection
 	RawJSON      string // pretty-printed JSON of the running config
+	RawYAML      string // pretty-printed YAML of the running config
+	// Storage capacity (live usage vs configured max).
+	HotBytes     int64
+	HotMaxBytes  int64
+	HotEntries   int64
+	WarmBytes    int64
+	WarmMaxBytes int64
+	WarmEntries  int64
 }
+
+// HotFillPct returns the hot-tier fill percentage (0–100), clamped.
+func (c ConfigData) HotFillPct() float64 { return fillPct(c.HotBytes, c.HotMaxBytes) }
+
+// WarmFillPct returns the warm-tier fill percentage (0–100), clamped.
+func (c ConfigData) WarmFillPct() float64 { return fillPct(c.WarmBytes, c.WarmMaxBytes) }
 
 // BuildConfigSections converts a *config.Config into structured viewer sections.
 func BuildConfigSections(cfg *config.Config) []ConfigSection {

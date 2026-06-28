@@ -5,9 +5,26 @@
 package responsewriter
 
 import (
+	"bufio"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"sync"
 )
+
+var (
+	// Compile-time guards: removing any method below breaks the build
+	// instead of silently regressing interface satisfaction (see issue #73).
+	_ http.ResponseWriter = (*ResponseWriter)(nil)
+	_ http.Flusher        = (*ResponseWriter)(nil)
+	_ http.Hijacker       = (*ResponseWriter)(nil)
+	_ io.ReaderFrom       = (*ResponseWriter)(nil)
+)
+
+// ErrNotSupported is returned when the underlying http.ResponseWriter
+// does not implement the requested optional interface.
+var ErrNotSupported = errors.New("responsewriter: underlying ResponseWriter does not support this operation")
 
 // ResponseWriter wraps an http.ResponseWriter and records the status
 // code and total bytes written. Both fields default to zero-values;
@@ -61,4 +78,32 @@ func (w *ResponseWriter) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	w.Bytes += int64(n)
 	return n, err
+}
+
+// Flush delegates to the underlying writer when it implements http.Flusher.
+func (w *ResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack delegates to the underlying writer when it implements http.Hijacker.
+func (w *ResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, ErrNotSupported
+	}
+	return h.Hijack()
+}
+
+// ReadFrom delegates to the underlying writer when it implements
+// io.ReaderFrom so that zero-copy fast paths (e.g. sendfile) are preserved.
+// Bytes written are counted after the copy completes.
+func (w *ResponseWriter) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		w.Bytes += n
+		return n, err
+	}
+	return io.Copy(struct{ io.Writer }{w}, src)
 }

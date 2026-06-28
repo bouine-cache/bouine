@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/a-h/templ"
+	"gopkg.in/yaml.v3"
 
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/dashboard/templates"
@@ -624,11 +625,16 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
 	uptime := templates.FmtUptime(time.Since(h.cfg.StartTime))
 	var rawJSON string
+	var rawYAML string
 	if h.cfg.Config != nil {
 		if b, err := json.MarshalIndent(h.cfg.Config, "", "  "); err == nil {
 			rawJSON = string(b)
 		}
+		if b, err := yaml.Marshal(h.cfg.Config); err == nil {
+			rawYAML = string(b)
+		}
 	}
+	hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, _ := h.storeStats()
 	h.render(w, r, templates.Config(templates.ConfigData{
 		LayoutProps:  h.layoutProps("config", "Config", timeRange),
 		ConfigPath:   h.cfg.ConfigPath,
@@ -636,6 +642,13 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 		Uptime:       uptime,
 		Sections:     templates.BuildConfigSections(h.cfg.Config),
 		RawJSON:      rawJSON,
+		RawYAML:      rawYAML,
+		HotBytes:     hotBytes,
+		HotMaxBytes:  hotMax,
+		HotEntries:   hotEntries,
+		WarmBytes:    warmBytes,
+		WarmMaxBytes: warmMax,
+		WarmEntries:  warmEntries,
 	}))
 }
 

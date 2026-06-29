@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -231,6 +232,27 @@ func (b *ByteSize) UnmarshalYAML(value *yaml.Node) error {
 
 // Bytes returns the value as a plain int64.
 func (b ByteSize) Bytes() int64 { return int64(b) }
+
+// IsZero reports whether the ByteSize is zero so yaml.v3 omitempty works.
+func (b ByteSize) IsZero() bool { return int64(b) == 0 }
+
+// MarshalYAML emits ByteSize as its human-readable string form (e.g. "2Go")
+// so the YAML representation matches what operators write in config files.
+func (b ByteSize) MarshalYAML() (interface{}, error) {
+	if b == 0 {
+		return 0, nil
+	}
+	return b.String(), nil
+}
+
+// MarshalJSON emits ByteSize as its human-readable string form so the
+// JSON representation in the dashboard matches the YAML representation.
+func (b ByteSize) MarshalJSON() ([]byte, error) {
+	if b == 0 {
+		return []byte("0"), nil
+	}
+	return json.Marshal(b.String())
+}
 
 // String returns a human-readable representation of the byte size.
 func (b ByteSize) String() string {

@@ -502,7 +502,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		_ = h.store.Put(r.Context(), key, refreshed)
+		h.storeAndReplicate(r.Context(), key, refreshed)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated)
 		return
 	}
@@ -574,7 +574,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		_ = h.store.Put(ctx, key, refreshed)
+		h.storeAndReplicate(ctx, key, refreshed)
 		return
 	}
 
@@ -587,7 +587,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		obj.Header.Del("Set-Cookie")
-		_ = h.store.Put(ctx, key, obj)
+		h.storeAndReplicate(ctx, key, obj)
 	}
 }
 
@@ -637,19 +637,11 @@ func (h *Handler) writeAndMaybeStore(
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		obj.Header.Del("Set-Cookie")
-		_ = h.store.Put(r.Context(), storeKey, obj)
-		// Also store a "primary" entry so Vary-aware lookup finds
-		// the Vary header on the first lookup.
+		h.storeAndReplicate(r.Context(), storeKey, obj)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 			primaryObj.Header.Del("Set-Cookie")
-			_ = h.store.Put(r.Context(), primaryKey, primaryObj)
-		}
-		// Replication hook: in full cluster mode, broadcast the newly
-		// cached object to all peers via gossip. No-op in strong and
-		// eventual modes where replicateFn is nil.
-		if h.replicateFn != nil {
-			h.replicateFn(r.Context(), obj)
+			h.storeAndReplicate(r.Context(), primaryKey, primaryObj)
 		}
 	}
 }
@@ -758,7 +750,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 			obj.Header.Del("Set-Cookie")
-			_ = h.store.Put(r.Context(), key, obj)
+			h.storeAndReplicate(r.Context(), key, obj)
 		}
 	}
 
@@ -800,6 +792,16 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 		TLS:    tlsState,
 	}
 	return h.buildKey(locReq)
+}
+
+// storeAndReplicate stores obj under key and, if replicateFn is set,
+// broadcasts it to all peers. Every path that stores a cacheable object
+// must go through this helper so replication is never skipped.
+func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.Object) {
+	_ = h.store.Put(ctx, key, obj)
+	if h.replicateFn != nil {
+		h.replicateFn(ctx, obj)
+	}
 }
 
 func (h *Handler) doFetch(r *http.Request) fetchResult {

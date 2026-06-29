@@ -292,27 +292,60 @@ func TestHotStore_SetWarm(t *testing.T) {
 
 func TestHotStore_EvictPreferWarm(t *testing.T) {
 	t.Parallel()
-	s := NewHotStore(HotConfig{MaxBytes: 4 << 10, NumShards: 1})
+	// Single shard, 2 KiB budget. Each object is 1280 bytes (1024 body +
+	// 256 overhead), so the budget holds 1 entry; the 2nd Put forces
+	// eviction.
+	s := NewHotStore(HotConfig{MaxBytes: 2 << 10, NumShards: 1})
 	ctx := context.Background()
 
 	k1 := KeyHash([]byte("a"))
 	k2 := KeyHash([]byte("b"))
 	_ = s.Put(ctx, k1, obj(k1, 1024))
+
+	// Mark k1 as warm-backed before k2 arrives.
+	s.SetWarm(k1)
+
+	// k2 triggers eviction. k1 (warm) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
-	// Mark k2 as warm-backed. It should be evicted first.
+	if got, _ := s.Get(ctx, k1); got != nil {
+		t.Error("k1 (warm-backed) should have been evicted first")
+	}
+	if got, _ := s.Get(ctx, k2); got == nil {
+		t.Error("k2 (hot-only, newly inserted) should exist")
+	}
+}
+
+func TestHotStore_EvictPreferWarm_PreservesVisitedBit(t *testing.T) {
+	t.Parallel()
+	// Single shard, 2 KiB budget. Insert k1 (hot-only) and access it to
+	// set visited=true. Then insert k2 (warm-backed). k2 should be
+	// evicted first because it's warm-backed. k1's visited bit should
+	// be preserved by the Defer path.
+	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
+	ctx := context.Background()
+
+	k1 := KeyHash([]byte("hot"))
+	k2 := KeyHash([]byte("warm"))
+	_ = s.Put(ctx, k1, obj(k1, 1024))
+	_ = s.Put(ctx, k2, obj(k2, 1024))
+
+	// Access k1 to set visited=true.
+	_, _ = s.Get(ctx, k1)
+
+	// Mark k2 as warm-backed.
 	s.SetWarm(k2)
 
-	// Add a third entry — triggers eviction.
-	k3 := KeyHash([]byte("c"))
-	if err := s.Put(ctx, k3, obj(k3, 1024)); err != nil {
-		t.Fatal(err)
-	}
+	// k3 triggers eviction. k2 (warm) should be evicted, k1 (hot, visited)
+	// should survive with its visited bit intact.
+	k3 := KeyHash([]byte("new"))
+	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	// k1 (hot-only) should survive; k2 may or may not depending
-	// on SIEVE visited bits, but k3 must be present.
-	if _, err := s.Get(ctx, k3); err != nil {
-		t.Fatal("k3 should exist, got:", err)
+	if got, _ := s.Get(ctx, k1); got == nil {
+		t.Error("k1 (hot-only, visited) should survive — visited bit preserved")
+	}
+	if got, _ := s.Get(ctx, k2); got != nil {
+		t.Error("k2 (warm-backed) should have been evicted")
 	}
 }
 

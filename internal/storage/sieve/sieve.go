@@ -137,6 +137,21 @@ func (l *List[K]) Remove(e *Entry[K]) {
 	l.pool.Put(e)
 }
 
+// Defer moves an entry to the head of the list without changing its
+// visited bit and without returning it to the pool. This is used by
+// eviction policies that want to skip an entry and give it another
+// chance without losing its access history.
+func (l *List[K]) Defer(e *Entry[K]) {
+	if e == nil {
+		return
+	}
+	if l.hand == e {
+		l.hand = e.prev
+	}
+	l.remove(e)
+	l.pushHead(e)
+}
+
 func (l *List[K]) pushHead(e *Entry[K]) {
 	e.prev = nil
 	e.next = l.head

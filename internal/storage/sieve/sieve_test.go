@@ -153,3 +153,47 @@ func TestSieve_SecondChance(t *testing.T) {
 		t.Fatalf("len = %d", l.Len())
 	}
 }
+
+func TestSieve_Defer_PreservesVisitedBit(t *testing.T) {
+	t.Parallel()
+	l := NewList[uint64]()
+	m := map[uint64]*Entry[uint64]{}
+
+	for _, k := range []uint64{1, 2, 3} {
+		e, _ := l.Access(k, func(k uint64) *Entry[uint64] { return m[k] })
+		m[k] = e
+	}
+
+	// Visit key 1 (visited=true).
+	l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
+	if !m[1].Visited() {
+		t.Fatal("key 1 should have visited=true after Access")
+	}
+
+	// Defer key 1 — move to head, preserve visited bit.
+	l.Defer(m[1])
+
+	if !m[1].Visited() {
+		t.Fatal("key 1 visited bit should be preserved after Defer")
+	}
+	if l.Len() != 3 {
+		t.Fatalf("len = %d after Defer, want 3", l.Len())
+	}
+
+	// Key 1 should now get a second chance during eviction.
+	// Evict twice — key 1 (visited) should survive the first evict.
+	evicted := []uint64{}
+	for range 2 {
+		k, ok := l.Evict()
+		if !ok {
+			t.Fatal("expected eviction")
+		}
+		evicted = append(evicted, k)
+		delete(m, k)
+	}
+	for _, k := range evicted {
+		if k == 1 {
+			t.Fatalf("key 1 (visited, deferred) should not have been evicted before non-visited keys, evicted: %v", evicted)
+		}
+	}
+}

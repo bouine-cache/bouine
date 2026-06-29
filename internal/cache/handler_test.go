@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -833,5 +835,192 @@ func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	// Internal headers must not leak to the client.
 	if rr.Header().Get("X-Bouine-Path") != "" {
 		t.Fatal("X-Bouine-Path should not be forwarded to client")
+	}
+}
+
+func TestHandler_ReplicateOnForegroundRevalidate(t *testing.T) {
+	t.Parallel()
+	var replicated atomic.Int32
+	replicateFn := func(_ context.Context, obj *api.Object) {
+		if obj != nil {
+			replicated.Add(1)
+		}
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:    upstream,
+		Store:       store,
+		ReplicateFn: replicateFn,
+	})
+
+	url := "http://example.com/r"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	key := BuildKey(httptest.NewRequest("GET", url, nil))
+	obj, _ := store.Get(context.Background(), key)
+	if obj == nil {
+		t.Fatal("object not stored after initial fill")
+	}
+	stale := *obj
+	stale.TTL = 1 * time.Second
+	stale.StoredAt = time.Now().Add(-2 * time.Second)
+	_ = store.Put(context.Background(), key, &stale)
+
+	replicated.Store(0)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+	if rr.Header().Get("X-Cache") != "REVALIDATED" {
+		t.Fatalf("X-Cache = %q, want REVALIDATED", rr.Header().Get("X-Cache"))
+	}
+	if replicated.Load() != 1 {
+		t.Fatalf("replicateFn called %d times after 304 revalidation, want 1", replicated.Load())
+	}
+}
+
+func TestHandler_ReplicateOnBackgroundSWR(t *testing.T) {
+	t.Parallel()
+	var replicated atomic.Int32
+	replicateFn := func(_ context.Context, obj *api.Object) {
+		if obj != nil {
+			replicated.Add(1)
+		}
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Cache-Control", "max-age=60, stale-while-revalidate=60")
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:    upstream,
+		Store:       store,
+		ReplicateFn: replicateFn,
+	})
+
+	url := "http://example.com/swr"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	key := BuildKey(httptest.NewRequest("GET", url, nil))
+	obj, _ := store.Get(context.Background(), key)
+	if obj == nil {
+		t.Fatal("object not stored after initial fill")
+	}
+	stale := *obj
+	stale.TTL = 1 * time.Second
+	stale.StoredAt = time.Now().Add(-2 * time.Second)
+	_ = store.Put(context.Background(), key, &stale)
+
+	replicated.Store(0)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if replicated.Load() > 0 {
+			break
+		}
+		runtime.Gosched()
+	}
+	if replicated.Load() < 1 {
+		t.Fatalf("replicateFn called %d times after background SWR, want >= 1", replicated.Load())
+	}
+}
+
+func TestHandler_ReplicateOnPOSTCacheable(t *testing.T) {
+	t.Parallel()
+	var replicated atomic.Int32
+	replicateFn := func(_ context.Context, obj *api.Object) {
+		if obj != nil {
+			replicated.Add(1)
+		}
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Cache-Control", "max-age=60")
+			w.Header().Set("Content-Location", "/post-resource")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "post-body")
+			return
+		}
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "get-body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:    upstream,
+		Store:       store,
+		ReplicateFn: replicateFn,
+	})
+
+	postReq := httptest.NewRequest("POST", "http://example.com/post-resource", strings.NewReader("data"))
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.ServeHTTP(httptest.NewRecorder(), postReq)
+
+	if replicated.Load() != 1 {
+		t.Fatalf("replicateFn called %d times after POST, want 1", replicated.Load())
+	}
+}
+
+func TestHandler_ReplicateVaryPrimaryAndVariant(t *testing.T) {
+	t.Parallel()
+	var replicatedKeys sync.Map
+	replicateFn := func(_ context.Context, obj *api.Object) {
+		if obj != nil {
+			replicatedKeys.Store(obj.Key, true)
+		}
+	}
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.Header().Set("Content-Encoding", r.Header.Get("Accept-Encoding"))
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("body-" + r.Header.Get("Accept-Encoding")))
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:    upstream,
+		Store:       store,
+		ReplicateFn: replicateFn,
+	})
+
+	r := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	r.Header.Set("Accept-Encoding", "gzip")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	primaryKey := BuildKey(r)
+	variantKey := VariantKey(primaryKey, "Accept-Encoding", r.Header)
+	primaryReplicated := false
+	variantReplicated := false
+	replicatedKeys.Range(func(k, _ any) bool {
+		if k.(api.Key) == primaryKey {
+			primaryReplicated = true
+		}
+		if k.(api.Key) == variantKey {
+			variantReplicated = true
+		}
+		return true
+	})
+	if !primaryReplicated {
+		t.Fatal("primary marker was not replicated")
+	}
+	if !variantReplicated {
+		t.Fatal("variant was not replicated")
 	}
 }

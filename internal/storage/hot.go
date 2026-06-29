@@ -537,11 +537,9 @@ func (s *shard) evictPreferWarm() (key api.Key, ok bool) {
 				s.warmCount--
 				return k, true
 			}
-			// Hot-only entry: put it back at the head (deferred).
-			se, _ := s.evict.Access(k, func(ek api.Key) *sieve.Entry[api.Key] {
-				return nil
-			})
-			he.sieve = se
+			// Hot-only entry: defer it back to the head without
+			// resetting the visited bit.
+			s.evict.Defer(he.sieve)
 		}
 	}
 	// Fall back to standard eviction after skips exhausted.

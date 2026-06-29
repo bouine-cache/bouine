@@ -207,6 +207,71 @@ func TestBroadcastReplicate_Strong_Noop(t *testing.T) {
 	}
 }
 
+func TestBroadcastReplicate_Full_BodyCopiedNotAliased(t *testing.T) {
+	t.Parallel()
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "full"
+
+	b := NewBroadcaster(c, nil)
+
+	originalBody := []byte("the quick brown fox jumps over the lazy dog")
+	obj := &api.Object{
+		Key:           api.Key(42),
+		StatusCode:    200,
+		Body:          originalBody,
+		Header:        http.Header{"X-Test": []string{"v1"}},
+		SurrogateKeys: []string{"tag-a", "tag-b"},
+	}
+	b.BroadcastReplicate(context.Background(), obj)
+
+	c.gossipMu.Lock()
+	msgs := append([]gossipBroadcast(nil), c.gossipQueue...)
+	c.gossipMu.Unlock()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 gossip message, got %d", len(msgs))
+	}
+
+	var evt api.ReplicationEvent
+	if err := json.Unmarshal(msgs[0].data, &evt); err != nil {
+		t.Fatalf("unmarshal replication event: %v", err)
+	}
+	if evt.Object == nil {
+		t.Fatal("replication event has nil object")
+	}
+	if string(evt.Object.Body) != string(originalBody) {
+		t.Fatalf("body mismatch after marshal: got %q want %q", evt.Object.Body, originalBody)
+	}
+
+	// The queued payload is a marshaled snapshot. Mutating the
+	// caller's body and header after BroadcastReplicate returns must
+	// not change the already-queued bytes. This pins the contract
+	// that BroadcastReplicate does not defer marshaling or hold
+	// references to the caller's slices — a property the defensive
+	// copy inside the function guarantees even if the caller's Body
+	// aliases a sync.Pool buffer that could be reused.
+	for i := range originalBody {
+		originalBody[i] = 'X'
+	}
+	obj.Header.Set("X-Test", "v2")
+	obj.SurrogateKeys[0] = "mutated"
+
+	var evt2 api.ReplicationEvent
+	if err := json.Unmarshal(msgs[0].data, &evt2); err != nil {
+		t.Fatalf("unmarshal after mutation: %v", err)
+	}
+	if string(evt2.Object.Body) != "the quick brown fox jumps over the lazy dog" {
+		t.Fatalf("queued payload observed caller body mutation: got %q", evt2.Object.Body)
+	}
+	if evt2.Object.Header.Get("X-Test") != "v1" {
+		t.Fatalf("queued payload observed header mutation: got %q", evt2.Object.Header.Get("X-Test"))
+	}
+	if len(evt2.Object.SurrogateKeys) != 2 ||
+		evt2.Object.SurrogateKeys[0] != "tag-a" ||
+		evt2.Object.SurrogateKeys[1] != "tag-b" {
+		t.Fatalf("queued payload observed surrogate-keys mutation: got %v", evt2.Object.SurrogateKeys)
+	}
+}
+
 func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 	t.Parallel()
 	httpCalled := 0

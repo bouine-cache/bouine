@@ -2,14 +2,18 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/thylong/bouine/internal/storage/sieve"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -186,6 +190,81 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 	st := s.Stats()
 	if st.HotEntries != 2 {
 		t.Fatalf("entries after reap = %d, want 2 (SWR and SIE still valid)", st.HotEntries)
+	}
+}
+
+func TestObjSize_AccountsForHeaders(t *testing.T) {
+	t.Parallel()
+	smallHeaders := http.Header{"X-Bouine-Path": {"/a"}}
+	bigHeaders := http.Header{}
+	for i := range 20 {
+		bigHeaders.Set(fmt.Sprintf("X-H%d", i), strings.Repeat("v", 100))
+	}
+
+	bodyLen := int64(100)
+	objSmall := &api.Object{Body: make([]byte, bodyLen), Header: smallHeaders}
+	objBig := &api.Object{Body: make([]byte, bodyLen), Header: bigHeaders}
+
+	sizeSmall := objSize(objSmall)
+	sizeBig := objSize(objBig)
+
+	if sizeSmall <= bodyLen {
+		t.Fatalf("sizeSmall = %d, expected > bodyLen (%d) — overhead not counted",
+			sizeSmall, bodyLen)
+	}
+	if sizeBig <= sizeSmall+bodyLen {
+		t.Fatalf("sizeBig = %d, sizeSmall = %d — header bytes not accounted for",
+			sizeBig, sizeSmall)
+	}
+}
+
+func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
+	t.Parallel()
+	if want := int64(unsafe.Sizeof(api.Object{})); objectStructSize != want {
+		t.Errorf("objectStructSize = %d, but unsafe.Sizeof(api.Object{}) = %d — update the constant",
+			objectStructSize, want)
+	}
+	if want := int64(unsafe.Sizeof(hotEntry{})); hotEntrySize != want {
+		t.Errorf("hotEntrySize = %d, but unsafe.Sizeof(hotEntry{}) = %d — update the constant",
+			hotEntrySize, want)
+	}
+	if want := int64(unsafe.Sizeof(sieve.Entry[api.Key]{})); sieveEntrySize != want {
+		t.Errorf("sieveEntrySize = %d, but unsafe.Sizeof(sieve.Entry[api.Key]{}) = %d — update the constant",
+			sieveEntrySize, want)
+	}
+}
+
+func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
+	t.Parallel()
+	const budget = 1 << 16 // 64 KiB
+	s := NewHotStore(HotConfig{MaxBytes: budget, NumShards: 4})
+	ctx := context.Background()
+
+	hdr := http.Header{}
+	for i := range 20 {
+		hdr.Set(fmt.Sprintf("X-H%d", i), strings.Repeat("v", 200))
+	}
+
+	for i := range 500 {
+		k := api.Key(i)
+		_ = s.Put(ctx, k, &api.Object{
+			Key:        k,
+			StatusCode: 200,
+			Header:     hdr,
+			Body:       make([]byte, 64),
+			BodySize:   64,
+			StoredAt:   time.Now(),
+			TTL:        time.Minute,
+		})
+	}
+
+	st := s.Stats()
+	if st.Evictions == 0 {
+		t.Fatal("expected evictions with large headers and small bodies")
+	}
+	overshoot := int64(budget * 11 / 10) // 10% transient overshoot bound
+	if st.HotBytes > overshoot {
+		t.Fatalf("HotBytes = %d, exceeds overshoot bound %d", st.HotBytes, overshoot)
 	}
 }
 

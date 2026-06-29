@@ -551,9 +551,37 @@ func KeyHash(b []byte) api.Key {
 	return api.Key(xxhash.Sum64(b))
 }
 
+const (
+	objectStructSize       int64 = 216
+	hotEntrySize           int64 = 24
+	sieveEntrySize         int64 = 32
+	mapPerEntryOverhead    int64 = 50
+	headerMapBaseOverhead  int64 = 48
+	headerPerEntryOverhead int64 = 48
+)
+
 func objSize(obj *api.Object) int64 {
-	// Body + a fixed overhead for the struct and header map.
-	return int64(len(obj.Body)) + 256
+	size := int64(len(obj.Body)) +
+		objectStructSize + hotEntrySize + sieveEntrySize + mapPerEntryOverhead
+
+	if obj.Header != nil {
+		size += headerMapBaseOverhead
+		for k, vs := range obj.Header {
+			size += headerPerEntryOverhead + int64(len(k))
+			for _, v := range vs {
+				size += int64(len(v))
+			}
+		}
+	}
+
+	size += int64(len(obj.VaryKey))
+	size += int64(len(obj.ETag))
+	size += int64(len(obj.CacheControl))
+	for _, sk := range obj.SurrogateKeys {
+		size += int64(len(sk))
+	}
+
+	return size
 }
 
 func nextPow2(v int) int {

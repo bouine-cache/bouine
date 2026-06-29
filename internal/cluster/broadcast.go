@@ -156,14 +156,37 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 
 // BroadcastReplicate sends a full cached object to all peers via gossip.
 // Only used in full mode. In other modes this is a no-op.
+//
+// The caller may pass an Object whose Body aliases a sync.Pool buffer
+// (e.g. the recorder pool used by the cache handler). To keep the
+// marshaling free of lifetime hazards regardless of the caller's
+// ownership story, the body, header, and surrogate keys are copied
+// into storage owned by this function before json.Marshal reads it.
+// The body copy is right-sized so the gossip payload does not carry
+// the pool's over-allocation.
 func (b *Broadcaster) BroadcastReplicate(_ context.Context, obj *api.Object) {
 	if b.mode != config.ClusterModeFull {
 		return
 	}
+	// Defensive copy so the marshaled payload cannot observe a slice
+	// or map that the caller may return to a pool or mutate before
+	// memberlist's gossip round reads the queued bytes.
+	replicated := *obj
+	if len(obj.Body) > 0 {
+		bodyCopy := make([]byte, len(obj.Body))
+		copy(bodyCopy, obj.Body)
+		replicated.Body = bodyCopy
+	}
+	if len(obj.SurrogateKeys) > 0 {
+		keysCopy := make([]string, len(obj.SurrogateKeys))
+		copy(keysCopy, obj.SurrogateKeys)
+		replicated.SurrogateKeys = keysCopy
+	}
+	replicated.Header = obj.Header.Clone()
 	evt := api.ReplicationEvent{
 		Type:     api.GossipTypeReplication,
 		Method:   "GET",
-		Object:   obj,
+		Object:   &replicated,
 		Issuer:   b.cluster.cfg.NodeName,
 		IssuedAt: time.Now(),
 		Seq:      b.seq.Add(1),

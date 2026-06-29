@@ -100,6 +100,95 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 	}
 }
 
+func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	ctx := context.Background()
+
+	now := time.Now()
+	fresh := &api.Object{
+		Key:        KeyHash([]byte("fresh")),
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": {"text/plain"}},
+		Body:       make([]byte, 100),
+		BodySize:   100,
+		StoredAt:   now,
+		TTL:        time.Minute,
+	}
+	expired := &api.Object{
+		Key:                  KeyHash([]byte("expired")),
+		StatusCode:           200,
+		Header:               http.Header{"Content-Type": {"text/plain"}},
+		Body:                 make([]byte, 100),
+		BodySize:             100,
+		StoredAt:             now.Add(-10 * time.Minute),
+		TTL:                  time.Second,
+		StaleWhileRevalidate: time.Second,
+		StaleIfError:         time.Second,
+	}
+
+	_ = s.Put(ctx, fresh.Key, fresh)
+	_ = s.Put(ctx, expired.Key, expired)
+
+	before := s.Stats()
+	if before.HotEntries != 2 {
+		t.Fatalf("entries before reap = %d, want 2", before.HotEntries)
+	}
+
+	s.reapExpired(now)
+
+	after := s.Stats()
+	if after.HotEntries != 1 {
+		t.Fatalf("entries after reap = %d, want 1 (fresh only)", after.HotEntries)
+	}
+	got, _ := s.Get(ctx, expired.Key)
+	if got != nil {
+		t.Fatal("expired entry should have been reaped")
+	}
+	got, _ = s.Get(ctx, fresh.Key)
+	if got == nil {
+		t.Fatal("fresh entry should still be present")
+	}
+}
+
+func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	ctx := context.Background()
+
+	now := time.Now()
+	withinSWR := &api.Object{
+		Key:                  KeyHash([]byte("swr")),
+		StatusCode:           200,
+		Header:               http.Header{"Content-Type": {"text/plain"}},
+		Body:                 make([]byte, 100),
+		BodySize:             100,
+		StoredAt:             now.Add(-5 * time.Second),
+		TTL:                  time.Second,
+		StaleWhileRevalidate: 30 * time.Second,
+	}
+	withinSIE := &api.Object{
+		Key:          KeyHash([]byte("sie")),
+		StatusCode:   200,
+		Header:       http.Header{"Content-Type": {"text/plain"}},
+		Body:         make([]byte, 100),
+		BodySize:     100,
+		StoredAt:     now.Add(-5 * time.Second),
+		TTL:          time.Second,
+		StaleIfError: 30 * time.Second,
+	}
+
+	_ = s.Put(ctx, withinSWR.Key, withinSWR)
+	_ = s.Put(ctx, withinSIE.Key, withinSIE)
+
+	s.reapExpired(now)
+
+	st := s.Stats()
+	if st.HotEntries != 2 {
+		t.Fatalf("entries after reap = %d, want 2 (SWR and SIE still valid)", st.HotEntries)
+	}
+}
+
 func TestHotStore_Replace(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})

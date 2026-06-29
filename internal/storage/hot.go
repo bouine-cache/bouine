@@ -21,6 +21,14 @@ import (
 // This bounds the worst-case lock hold time on the Put path.
 const inlineEvictCap = 4
 
+// defaultReaperInterval is how often the TTL reaper scans shards for
+// expired entries. Overridable via HotConfig.ReaperInterval.
+const defaultReaperInterval = 30 * time.Second
+
+// reaperShardBudget caps the wall-clock time spent holding the write
+// lock on a single shard during a TTL reaper pass.
+const reaperShardBudget = 10 * time.Millisecond
+
 // HotStore is the sharded in-memory (L0) cache tier. It implements
 // the Store interface using a fixed number of shards, each protected
 // by its own mutex, with SIEVE eviction.
@@ -50,7 +58,10 @@ type HotStore struct {
 	// the inline cap was reached. Buffered to len(shards); non-blocking
 	// sends coalesce burst signals.
 	evictSignal chan int
-	// done is closed by Close() to stop the background sweeper.
+	// reaperInterval is how often the TTL reaper wakes to scan for
+	// expired entries. Zero disables background reaping.
+	reaperInterval time.Duration
+	// done is closed by Close() to stop all background goroutines.
 	done chan struct{}
 }
 
@@ -90,6 +101,11 @@ type HotConfig struct {
 	// NumShards overrides the default shard count. Zero means
 	// min(runtime.NumCPU(), 64).
 	NumShards int
+	// ReaperInterval controls how often the background TTL reaper scans
+	// shards for entries past TTL + SWR + SIE. Zero means use the
+	// default (30 s). A negative value disables background reaping
+	// entirely (lazy expiry on Get remains).
+	ReaperInterval time.Duration
 }
 
 // NewHotStore creates a sharded in-memory store and starts the
@@ -110,14 +126,22 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		shards[i].entries = make(map[api.Key]*hotEntry)
 		shards[i].evict = sieve.NewList[api.Key]()
 	}
+	reaperInterval := defaultReaperInterval
+	if cfg.ReaperInterval > 0 {
+		reaperInterval = cfg.ReaperInterval
+	}
 	h := &HotStore{
-		shards:      shards,
-		mask:        uint64(n - 1), //nolint:gosec // n is always a positive power of two
-		maxBytes:    cfg.MaxBytes,
-		evictSignal: make(chan int, n),
-		done:        make(chan struct{}),
+		shards:         shards,
+		mask:           uint64(n - 1), //nolint:gosec // n is always a positive power of two
+		maxBytes:       cfg.MaxBytes,
+		evictSignal:    make(chan int, n),
+		reaperInterval: reaperInterval,
+		done:           make(chan struct{}),
 	}
 	go h.sweeper()
+	if cfg.ReaperInterval >= 0 {
+		go h.reaperLoop()
+	}
 	return h
 }
 
@@ -243,6 +267,51 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		}
 	}
 	return nil
+}
+
+// reaperLoop periodically scans all shards for entries that have
+// exceeded TTL + SWR + SIE and removes them. This prevents dead entries
+// from accumulating indefinitely when they are never accessed again.
+func (h *HotStore) reaperLoop() {
+	ticker := time.NewTicker(h.reaperInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-h.done:
+			return
+		case <-ticker.C:
+			h.reapExpired(time.Now())
+		}
+	}
+}
+
+// reapExpired scans all shards and removes entries whose TTL + SWR + SIE
+// has elapsed. Each shard is locked individually and for at most
+// reaperShardBudget to avoid blocking readers.
+func (h *HotStore) reapExpired(now time.Time) {
+	for i := range h.shards {
+		h.reapShard(i, now)
+	}
+}
+
+func (h *HotStore) reapShard(idx int, now time.Time) {
+	s := &h.shards[idx]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deadline := time.Now().Add(reaperShardBudget)
+	for key, e := range s.entries {
+		if time.Now().After(deadline) {
+			break
+		}
+		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
+		if now.After(expiry) {
+			s.bytes -= objSize(e.obj)
+			s.evict.Remove(e.sieve)
+			delete(s.entries, key)
+			h.stats.evictions.Add(1)
+		}
+	}
 }
 
 // sweeper is the background goroutine that drains overshoot evictions

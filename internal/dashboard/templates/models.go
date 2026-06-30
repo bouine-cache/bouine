@@ -118,6 +118,15 @@ func fillPct(used, max int64) float64 {
 	return p
 }
 
+// sharePct returns part's percentage of total (0–100), or 0 when total
+// is zero. Used for doughnut chart legend labels.
+func sharePct(part, total int64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(part) / float64(total) * 100
+}
+
 // ── Performance ──────────────────────────────────────────────────────
 
 // PerformanceData is the view model for the performance page. It focuses

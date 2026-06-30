@@ -274,6 +274,40 @@ type ClusterData struct {
 	Meta        ClusterMeta
 	FetchStats  PeerFetchStats
 	Replication ReplicationStats
+	// Store stats (same fields as OverviewData).
+	HotBytes     int64
+	HotMaxBytes  int64
+	HotEntries   int64
+	WarmBytes    int64
+	WarmMaxBytes int64
+	WarmEntries  int64
+	Evictions    int64
+}
+
+// HotFillPct returns the hot-tier fill percentage (0–100), clamped.
+func (d ClusterData) HotFillPct() float64 { return fillPct(d.HotBytes, d.HotMaxBytes) }
+
+// WarmFillPct returns the warm-tier fill percentage (0–100), clamped.
+func (d ClusterData) WarmFillPct() float64 { return fillPct(d.WarmBytes, d.WarmMaxBytes) }
+
+// TotalBytes returns the combined hot + warm bytes.
+func (d ClusterData) TotalBytes() int64 { return d.HotBytes + d.WarmBytes }
+
+// TotalEntries returns the combined hot + warm entry count.
+func (d ClusterData) TotalEntries() int64 { return d.HotEntries + d.WarmEntries }
+
+// HasStoreData reports whether any store stats are populated.
+func (d ClusterData) HasStoreData() bool {
+	return d.HotBytes > 0 || d.WarmBytes > 0 || d.HotEntries > 0 || d.WarmEntries > 0
+}
+
+// WarmAvgObjSize returns the average warm-tier object size in bytes,
+// or 0 when there are no warm entries.
+func (d ClusterData) WarmAvgObjSize() int64 {
+	if d.WarmEntries == 0 {
+		return 0
+	}
+	return d.WarmBytes / d.WarmEntries
 }
 
 // ── Invalidation ─────────────────────────────────────────────────────

@@ -165,6 +165,80 @@ templ Cluster(d ClusterData) {
 				</div>
 			}
 		</div>
+		if d.HasStoreData() {
+			<div id="cluster-cache" style="margin-top:.7rem"
+				hx-get="/dashboard/cluster"
+				hx-trigger="every 10s"
+				hx-swap="outerHTML"
+				hx-select="#cluster-cache"
+			>
+				<div class="r2" style="margin-bottom:.5rem">
+					<div class="bc">
+						<div class="bc-t">Content size (bytes)</div>
+						<div style="height:160px;position:relative">
+							<canvas id="c-cache-bytes" aria-label="Cache content size distribution"></canvas>
+							<div class="center-stat">
+								<div class="val">{ FmtBytes(d.TotalBytes()) }</div>
+								<div class="lbl">total cached</div>
+							</div>
+						</div>
+						<div class="cache-legend">
+							<span><span class="cache-legend-dot" style="background:#8b5cf6"></span>Hot { FmtBytes(d.HotBytes) }</span>
+							<span><span class="cache-legend-dot" style="background:#60a5fa"></span>Warm { FmtBytes(d.WarmBytes) }</span>
+						</div>
+					</div>
+					<div class="bc">
+						<div class="bc-t">Object count (entries)</div>
+						<div style="height:160px;position:relative">
+							<canvas id="c-cache-entries" aria-label="Cache object count distribution"></canvas>
+							<div class="center-stat">
+								<div class="val">{ FmtInt(int(d.TotalEntries())) }</div>
+								<div class="lbl">total objects</div>
+							</div>
+						</div>
+						<div class="cache-legend">
+							<span><span class="cache-legend-dot" style="background:#8b5cf6"></span>Hot { FmtInt(int(d.HotEntries)) }</span>
+							<span><span class="cache-legend-dot" style="background:#60a5fa"></span>Warm { FmtInt(int(d.WarmEntries)) }</span>
+						</div>
+					</div>
+				</div>
+				<div class="r2">
+					<div class="bc">
+						<div class="bc-t">Hot tier (RAM)</div>
+						<div class="stat-row"><span class="stat-k">entries</span><span class="stat-v">{ FmtInt(int(d.HotEntries)) }</span></div>
+						<div class="tier-bar-wrap">
+							<div class="tier-bar-label">
+								<span>used</span>
+								<span>{ FmtBytes(d.HotBytes) } / { FmtBytes(d.HotMaxBytes) }</span>
+							</div>
+							<div class="tier-bar" role="progressbar" aria-valuenow={ fmt.Sprintf("%.0f", d.HotFillPct()) } aria-valuemin="0" aria-valuemax="100">
+								<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.HotFillPct()) }></div>
+							</div>
+						</div>
+						<div class="stat-row"><span class="stat-k">fill ratio</span><span class="stat-v">{ fmt.Sprintf("%.1f%%", d.HotFillPct()) }</span></div>
+						<div class="stat-row"><span class="stat-k">evictions / min</span><span class="stat-v">{ FmtInt(int(d.Evictions)) }</span></div>
+					</div>
+					<div class="bc">
+						<div class="bc-t">Warm tier (disk)</div>
+						<div class="stat-row"><span class="stat-k">entries</span><span class="stat-v">{ FmtInt(int(d.WarmEntries)) }</span></div>
+						<div class="tier-bar-wrap">
+							<div class="tier-bar-label">
+								<span>used</span>
+								<span>{ FmtBytes(d.WarmBytes) } / { FmtBytes(d.WarmMaxBytes) }</span>
+							</div>
+							<div class="tier-bar">
+								<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.WarmFillPct()) }></div>
+							</div>
+						</div>
+						<div class="stat-row"><span class="stat-k">fill ratio</span><span class="stat-v">{ fmt.Sprintf("%.2f%%", d.WarmFillPct()) }</span></div>
+						if d.WarmAvgObjSize() > 0 {
+							<div class="stat-row"><span class="stat-k">avg object size</span><span class="stat-v">{ FmtBytes(d.WarmAvgObjSize()) }</span></div>
+						}
+					</div>
+				</div>
+				@cacheStorageChartScript(d.HotBytes, d.WarmBytes, d.HotEntries, d.WarmEntries)
+			</div>
+		}
 	}
 }
 
@@ -224,5 +298,27 @@ script replicationChartScript(sent []int64, recv []int64) {
 			{data:sent,label:'sent',borderColor:'#8b5cf6',backgroundColor:'rgba(139,92,246,.12)',fill:true,tension:.35,pointRadius:0,borderWidth:1.5},
 			{data:recv,label:'received',borderColor:'#60a5fa',backgroundColor:'rgba(96,165,250,.1)',fill:true,tension:.35,pointRadius:0,borderWidth:1.5}
 		]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false,grid:{display:false}},y:{grid:axGrid,ticks:axTick,beginAtZero:true}}}});
+	});
+}
+
+// cacheStorageChartScript renders two doughnut charts showing the
+// hot/warm tier distribution for content size (bytes) and object
+// count (entries) on the cluster page.
+script cacheStorageChartScript(hotBytes int64, warmBytes int64, hotEntries int64, warmEntries int64) {
+	var d=document.documentElement.getAttribute('data-theme')!=='light';
+	var colors=d?['#8b5cf6','#60a5fa']:['#7c3aed','#3b82f6'];
+	try{if(window._cCacheBytes)window._cCacheBytes.destroy();}catch(e){}
+	try{if(window._cCacheEntries)window._cCacheEntries.destroy();}catch(e){}
+	var elB=document.getElementById('c-cache-bytes');
+	var elE=document.getElementById('c-cache-entries');
+	if(!elB||!elE)return;
+	var ttOpts={backgroundColor:d?'#110e1c':'#fff',titleColor:d?'#c4b5fd':'#5b21b6',bodyColor:d?'#ede6ff':'#180840',borderColor:d?'#1e1830':'#e4d9ff',borderWidth:1,callbacks:{label:function(ctx){return ctx.label+': '+ctx.raw}}};
+	requestAnimationFrame(function(){
+		[elB,elE].forEach(function(c){
+			c.removeAttribute('height');c.removeAttribute('width');
+			c.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%';
+		});
+		window._cCacheBytes=new Chart(elB,{type:'doughnut',data:{labels:['Hot','Warm'],datasets:[{data:[hotBytes,warmBytes],backgroundColor:colors,borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'72%',plugins:{legend:{display:false},tooltip:ttOpts}}});
+		window._cCacheEntries=new Chart(elE,{type:'doughnut',data:{labels:['Hot','Warm'],datasets:[{data:[hotEntries,warmEntries],backgroundColor:colors,borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,cutout:'72%',plugins:{legend:{display:false},tooltip:ttOpts}}});
 	});
 }

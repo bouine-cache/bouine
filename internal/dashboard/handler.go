@@ -542,14 +542,23 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 		fetchStats = h.cfg.PeerFetchStatsFn()
 	}
 
+	hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, evictions := h.storeStats()
+
 	h.render(w, r, templates.Cluster(templates.ClusterData{
-		LayoutProps: h.layoutProps("cluster", "Cluster", timeRange),
-		PeerResults: toPeerResultsEnriched(peers, h.cfg.PeersFn),
-		PeerHealth:  peerHealth,
-		RingSegs:    ringSegs,
-		Meta:        h.cfg.ClusterMeta,
-		FetchStats:  fetchStats,
-		Replication: h.replicationStats(timeRange),
+		LayoutProps:  h.layoutProps("cluster", "Cluster", timeRange),
+		PeerResults:  toPeerResultsEnriched(peers, h.cfg.PeersFn),
+		PeerHealth:   peerHealth,
+		RingSegs:     ringSegs,
+		Meta:         h.cfg.ClusterMeta,
+		FetchStats:   fetchStats,
+		Replication:  h.replicationStats(timeRange),
+		HotBytes:     hotBytes,
+		HotMaxBytes:  hotMax,
+		HotEntries:   hotEntries,
+		WarmBytes:    warmBytes,
+		WarmMaxBytes: warmMax,
+		WarmEntries:  warmEntries,
+		Evictions:    evictions,
 	}))
 }
 

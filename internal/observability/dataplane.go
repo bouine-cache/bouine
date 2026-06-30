@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/thylong/bouine/internal/observability/responsewriter"
@@ -97,6 +98,17 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	return m
 }
 
+// VaryCapHitsCount returns the current Vary cap hit counter value as int64.
+// Used by the dashboard insights engine to detect Vary explosion.
+func (m *DataPlaneMetrics) VaryCapHitsCount() int64 {
+	if m == nil {
+		return 0
+	}
+	var d dto.Metric
+	_ = m.VaryCapHits.(prometheus.Metric).Write(&d)
+	return int64(d.GetCounter().GetValue())
+}
+
 // statusStrings is a pre-allocated table of HTTP status code strings
 // for codes 100–599. Avoids strconv.Itoa allocation on every request.
 // Index 0 → "100", index 499 → "599".
@@ -180,9 +192,13 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 			durMs := time.Since(start).Milliseconds()
 			m.Rings.Request.RecordRequest(xCache, sw.Status, durMs)
 			if route != "_default" {
-				m.Rings.Route.RecordRoute(route, xCache)
+				m.Rings.Route.RecordRoute(route, xCache, sw.Status, durMs)
 			}
 			m.Rings.URL.RecordURL(r.URL.Path, route, xCache)
+			// Sample origin response headers on miss/bypass (origin was contacted).
+			if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
+				m.Rings.HeaderRing.Sample(route, w.Header(), sw.Status)
+			}
 		}
 	})
 }

@@ -24,6 +24,7 @@ type cfPropagator struct {
 
 	lastErr     atomic.Pointer[string]
 	lastSuccess atomic.Pointer[time.Time]
+	lastLagMs   atomic.Int64
 
 	wg       sync.WaitGroup
 	closeCtx context.Context
@@ -70,6 +71,7 @@ func (p *cfPropagator) Status() admin.CloudflareStatus {
 		Async:         p.cfg.IsAsync(),
 		LastError:     lastErr,
 		LastSuccessAt: lastSuccessAt,
+		LastLagMs:     p.lastLagMs.Load(),
 	}
 }
 
@@ -182,18 +184,19 @@ func (p *cfPropagator) Close(ctx context.Context) error {
 // dispatch executes fn either in a background goroutine (async=true, the
 // default) or inline (async=false). Either way it records metrics.
 func (p *cfPropagator) dispatch(ctx context.Context, op string, fn func(context.Context) error) {
+	requestStart := time.Now()
 	if p.cfg.IsAsync() {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			p.run(p.closeCtx, op, fn)
+			p.run(p.closeCtx, op, fn, requestStart)
 		}()
 	} else {
-		p.run(ctx, op, fn)
+		p.run(ctx, op, fn, requestStart)
 	}
 }
 
-func (p *cfPropagator) run(ctx context.Context, op string, fn func(context.Context) error) {
+func (p *cfPropagator) run(ctx context.Context, op string, fn func(context.Context) error, requestStart time.Time) {
 	start := time.Now()
 	err := fn(ctx)
 	dur := time.Since(start)
@@ -211,5 +214,6 @@ func (p *cfPropagator) run(ctx context.Context, op string, fn func(context.Conte
 	}
 	now := time.Now()
 	p.lastSuccess.Store(&now)
+	p.lastLagMs.Store(now.Sub(requestStart).Milliseconds())
 	p.metrics.CFPurgeTotal.WithLabelValues(op, "ok").Inc()
 }

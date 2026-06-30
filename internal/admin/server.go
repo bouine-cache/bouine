@@ -454,6 +454,9 @@ type CloudflareStatus struct {
 	LastError *string `json:"last_error"`
 	// LastSuccessAt is the most recent successful propagation timestamp (RFC 3339).
 	LastSuccessAt *string `json:"last_success_at"`
+	// LastLagMs is the duration between the last invalidation request
+	// and the CF API completion. 0 when no propagation has occurred.
+	LastLagMs int64 `json:"last_lag_ms,omitempty"`
 }
 
 func (s *Server) cloudflareStatus(w http.ResponseWriter, _ *http.Request) {

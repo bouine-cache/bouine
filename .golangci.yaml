@@ -179,6 +179,7 @@ linters:
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
             - github.com/prometheus/client_golang
+            - github.com/prometheus/client_model/go
             - go.opentelemetry.io/otel
         ai-L8:
           list-mode: strict

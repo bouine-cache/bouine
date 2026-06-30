@@ -99,10 +99,10 @@ func TestRequestRing_SnapshotWraparound(t *testing.T) {
 func TestRouteRing_RecordAndFlush(t *testing.T) {
 	t.Parallel()
 	r := &RouteRing{}
-	r.RecordRoute("/api/v1", "HIT")
-	r.RecordRoute("/api/v1", "HIT")
-	r.RecordRoute("/api/v1", "MISS")
-	r.RecordRoute("/static", "HIT")
+	r.RecordRoute("/api/v1", "HIT", 200, 10)
+	r.RecordRoute("/api/v1", "HIT", 200, 10)
+	r.RecordRoute("/api/v1", "MISS", 200, 20)
+	r.RecordRoute("/static", "HIT", 200, 5)
 	r.Flush(time.Now())
 
 	stats := r.RouteStats(1)
@@ -137,7 +137,7 @@ func TestRouteRing_Sparkline(t *testing.T) {
 	now := time.Now()
 	for i := range 10 {
 		for range i + 1 {
-			r.RecordRoute("/test", "HIT")
+			r.RecordRoute("/test", "HIT", 200, 10)
 		}
 		r.Flush(now.Add(time.Duration(i) * time.Minute))
 	}
@@ -188,7 +188,7 @@ func TestRings_SaveLoad(t *testing.T) {
 	ri := NewRings("node-1")
 	ri.Request.RecordRequest("HIT", 200, 10)
 	ri.Request.Flush(time.Now())
-	ri.Route.RecordRoute("/test", "HIT")
+	ri.Route.RecordRoute("/test", "HIT", 200, 10)
 	ri.Route.Flush(time.Now())
 
 	if err := ri.Save(path); err != nil {
@@ -289,9 +289,9 @@ func TestRequestRing_RecordRequestZeroAllocs(t *testing.T) {
 // steady-state path (route already known).
 func TestRouteRing_RecordRouteZeroAllocs(t *testing.T) {
 	r := &RouteRing{}
-	r.RecordRoute("/api/v1", "HIT") // seed so LoadOrStore hits fast path
+	r.RecordRoute("/api/v1", "HIT", 200, 10) // seed so LoadOrStore hits fast path
 	allocs := testing.AllocsPerRun(200, func() {
-		r.RecordRoute("/api/v1", "HIT")
+		r.RecordRoute("/api/v1", "HIT", 200, 10)
 	})
 	if allocs != 0 {
 		t.Errorf("RecordRoute: want 0 allocs/op on hot path, got %v", allocs)
@@ -312,11 +312,11 @@ func BenchmarkRequestRing_RecordRequest(b *testing.B) {
 // BenchmarkRouteRing_RecordRoute measures steady-state route recording.
 func BenchmarkRouteRing_RecordRoute(b *testing.B) {
 	r := &RouteRing{}
-	r.RecordRoute("/api", "HIT") // seed
+	r.RecordRoute("/api", "HIT", 200, 10) // seed
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		r.RecordRoute("/api", "HIT")
+		r.RecordRoute("/api", "HIT", 200, 10)
 	}
 }
 

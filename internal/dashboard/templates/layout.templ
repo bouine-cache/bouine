@@ -90,6 +90,7 @@ templ Layout(props LayoutProps) {
 					<a href="/dashboard/cluster" class={ templ.KV("active", props.Page == "cluster") } role="tab" if props.Page == "cluster" { aria-selected="true" } else { aria-selected="false" }>Cluster</a>
 					<a href="/dashboard/invalidation" class={ templ.KV("active", props.Page == "invalidation") } role="tab" if props.Page == "invalidation" { aria-selected="true" } else { aria-selected="false" }>Invalidation</a>
 					<a href="/dashboard/config" class={ templ.KV("active", props.Page == "config") } role="tab" if props.Page == "config" { aria-selected="true" } else { aria-selected="false" }>Config</a>
+					<a href="/dashboard/insights" class={ templ.KV("active", props.Page == "insights") } role="tab" if props.Page == "insights" { aria-selected="true" } else { aria-selected="false" }>Insights</a>
 					<div class="tg" role="group" aria-label="Time range">
 						<a href={ templ.SafeURL(pageHref(props.Page, "1h")) } class={ "tb", templ.KV("active", props.TimeRange == "1h") } aria-label="1 hour range" aria-pressed={ boolStr(props.TimeRange == "1h") }>1H</a>
 						<a href={ templ.SafeURL(pageHref(props.Page, "6h")) } class={ "tb", templ.KV("active", props.TimeRange == "6h" || props.TimeRange == "") } aria-label="6 hour range" aria-pressed={ boolStr(props.TimeRange == "6h" || props.TimeRange == "") }>6H</a>
@@ -120,6 +121,7 @@ func pageHref(page, timeRange string) string {
 		"cluster":     "/dashboard/cluster",
 		"invalidation": "/dashboard/invalidation",
 		"config":      "/dashboard/config",
+		"insights":    "/dashboard/insights",
 	}[page]
 	if base == "" {
 		base = "/dashboard/"

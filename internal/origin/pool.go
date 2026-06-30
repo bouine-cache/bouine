@@ -218,6 +218,29 @@ func (p *Pool) Healthy() []string {
 	return out
 }
 
+// TargetStatus reports the health and consecutive-error count for a
+// single upstream target.
+type TargetStatus struct {
+	Addr              string
+	Healthy           bool
+	ConsecutiveErrors int64
+}
+
+// Targets returns the health status of all targets in the pool.
+func (p *Pool) Targets() []TargetStatus {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]TargetStatus, len(p.targets))
+	for i, t := range p.targets {
+		out[i] = TargetStatus{
+			Addr:              t.addr,
+			Healthy:           t.healthy.Load(),
+			ConsecutiveErrors: t.errors.Load(),
+		}
+	}
+	return out
+}
+
 // MarkHealthy resets a previously ejected target so it can receive
 // traffic again. Called by the active health checker.
 func (p *Pool) MarkHealthy(addr string) {

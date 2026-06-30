@@ -73,6 +73,17 @@ func (h LatencyHistogram) Percentile(p float64) int64 {
 	return LatencyBoundsMs[len(LatencyBoundsMs)-1]
 }
 
+// Merge adds the counts from other into h element-wise, returning the
+// combined histogram. Used to aggregate latency distributions across
+// routes that share the same upstream pool.
+func (h LatencyHistogram) Merge(other LatencyHistogram) LatencyHistogram {
+	var out LatencyHistogram
+	for i := range h {
+		out[i] = h[i] + other[i]
+	}
+	return out
+}
+
 // ── Request ring ─────────────────────────────────────────────────────
 
 // RequestBucket holds aggregated counters for one time window.
@@ -199,6 +210,8 @@ type RouteBucket struct {
 	Requests  int64
 	Hits      int64
 	Misses    int64
+	Errors    int64 // HTTP 5xx
+	LatHist   LatencyHistogram
 	Timestamp int64
 }
 
@@ -214,11 +227,15 @@ type routeCounters struct {
 	requests atomic.Int64
 	hits     atomic.Int64
 	misses   atomic.Int64
+	errors   atomic.Int64
+	latHist  [latencyHistBuckets]atomic.Int64
 }
 
 // RecordRoute is called on the hot path.
 // xCache is the X-Cache header value; "HIT" increments hits, "MISS" misses.
-func (r *RouteRing) RecordRoute(route, xCache string) {
+// statusCode is used to track 5xx errors per route.
+// durMs is the request duration in milliseconds, used for per-route latency.
+func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int64) {
 	v, ok := r.liveRoutes.Load(route)
 	if !ok {
 		v, _ = r.liveRoutes.LoadOrStore(route, &routeCounters{})
@@ -231,6 +248,10 @@ func (r *RouteRing) RecordRoute(route, xCache string) {
 	case "MISS":
 		c.misses.Add(1)
 	}
+	if statusCode >= 500 {
+		c.errors.Add(1)
+	}
+	c.latHist[latencyBucketIndex(durMs)].Add(1)
 }
 
 // Flush drains live per-route counters into the ring.
@@ -244,7 +265,11 @@ func (r *RouteRing) Flush(now time.Time) {
 			Requests:  c.requests.Swap(0),
 			Hits:      c.hits.Swap(0),
 			Misses:    c.misses.Swap(0),
+			Errors:    c.errors.Swap(0),
 			Timestamp: ts,
+		}
+		for i := range c.latHist {
+			b.LatHist[i] = c.latHist[i].Swap(0)
 		}
 		r.mu.Lock()
 		r.buckets = append(r.buckets, b)
@@ -275,6 +300,8 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 		s.Requests += b.Requests
 		s.Hits += b.Hits
 		s.Misses += b.Misses
+		s.Errors += b.Errors
+		s.LatHist = s.LatHist.Merge(b.LatHist)
 	}
 
 	// Build sparkline (last sparklinePoints per-minute counts) per route.
@@ -298,6 +325,7 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 		if s.Requests > 0 {
 			s.HitPct = math.Round(float64(s.Hits)/float64(s.Requests)*1000) / 10
 		}
+		s.P99MS = s.LatHist.Percentile(0.99)
 		// Reverse sparkline so oldest-first.
 		raw := sparkRaw[s.Route]
 		s.Sparkline = make([]int64, sparklinePoints)
@@ -315,6 +343,9 @@ type RouteStat struct {
 	Requests  int64
 	Hits      int64
 	Misses    int64
+	Errors    int64 // HTTP 5xx
+	P99MS     int64
+	LatHist   LatencyHistogram
 	HitPct    float64 // 0-100
 	Sparkline []int64 // last sparklinePoints per-minute request counts
 }
@@ -529,6 +560,7 @@ type Rings struct {
 	OpsLog      *OpsLogRing
 	Peer        *PeerRing
 	Replication *ReplicationRing
+	HeaderRing  *OriginHeaderRing
 	NodeName    string
 }
 

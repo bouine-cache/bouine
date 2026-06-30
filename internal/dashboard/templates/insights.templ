@@ -1,0 +1,489 @@
+package templates
+
+import (
+	"fmt"
+	"strings"
+)
+
+// SVG layout constants.
+const (
+	svgW            = 520
+	svgPad          = 20
+	arrowH          = 32
+	regularNodeH    = 72
+	nodeW           = 400
+	nodeX           = (svgW - nodeW) / 2
+	maxVisiblePeers = 8
+
+	clusterHeaderH    = 50
+	clusterPeerH      = 55
+	clusterStorH      = 60
+	clusterBottomPad  = 15
+	clusterMinH       = 80
+	clusterStorW      = 70
+	clusterStorSpacing = 110
+)
+
+// ── Layout helpers ────────────────────────────────────────────────────
+
+func svgHeight(nodes []ArchNode) int {
+	h := svgPad
+	for i, node := range nodes {
+		h += nodeHVal(node)
+		if i < len(nodes)-1 {
+			h += arrowH
+		}
+	}
+	return h + svgPad
+}
+
+func nodeHVal(node ArchNode) int {
+	if node.Type == "bouine" {
+		return clusterHeight(node)
+	}
+	return regularNodeH
+}
+
+// clusterHeight computes the dynamic height of the cluster container based
+// on whether peers and/or storage tiers are present.
+func clusterHeight(node ArchNode) int {
+	h := clusterHeaderH
+	if len(node.Peers) > 0 {
+		h += clusterPeerH
+	}
+	if len(node.StorageTiers) > 0 {
+		h += clusterStorH
+	}
+	h += clusterBottomPad
+	if h < clusterMinH {
+		h = clusterMinH
+	}
+	return h
+}
+
+func nodeYAt(nodes []ArchNode, idx int) int {
+	y := svgPad
+	for i := 0; i < idx; i++ {
+		y += nodeHVal(nodes[i])
+		y += arrowH
+	}
+	return y
+}
+
+func arrowY1(nodes []ArchNode, idx int) int {
+	return nodeYAt(nodes, idx) + nodeHVal(nodes[idx])
+}
+
+func arrowY2(nodes []ArchNode, idx int) int {
+	return nodeYAt(nodes, idx+1)
+}
+
+// ── Shape position helpers ────────────────────────────────────────────
+
+func browserPositions() []int {
+	return []int{svgW/2 - 72, svgW/2 - 24, svgW/2 + 24}
+}
+
+func cdnHexPoints(y int) string {
+	cx, cy := svgW/2, y+30
+	return fmt.Sprintf("%d,%d %d,%d %d,%d %d,%d %d,%d %d,%d",
+		cx-70, cy, cx-35, cy-22, cx+35, cy-22, cx+70, cy, cx+35, cy+22, cx-35, cy+22)
+}
+
+func peerCircleX(visible, i int) int {
+	spacing := 44
+	startX := svgW/2 - (visible-1)*spacing/2
+	return startX + i*spacing
+}
+
+// peerCircleData holds the pre-computed position and peer info for one
+// circle inside the cluster container.
+type peerCircleData struct {
+	X, Y int
+	Peer PeerNode
+}
+
+func peerCircles(peers []PeerNode, baseY int) []peerCircleData {
+	if len(peers) == 0 {
+		return nil
+	}
+	visible := min(len(peers), maxVisiblePeers)
+	peerY := peerCircleY(baseY)
+	out := make([]peerCircleData, visible)
+	for i := 0; i < visible; i++ {
+		out[i] = peerCircleData{X: peerCircleX(visible, i), Y: peerY, Peer: peers[i]}
+	}
+	return out
+}
+
+func peerCircleY(baseY int) int {
+	return baseY + clusterHeaderH + 19
+}
+
+func peerOverflowY(baseY int) int {
+	return peerCircleY(baseY) + 30
+}
+
+func peerOverflow(peers []PeerNode) int {
+	if len(peers) > maxVisiblePeers {
+		return len(peers) - maxVisiblePeers
+	}
+	return 0
+}
+
+// ── Storage-in-cluster position helpers ───────────────────────────────
+
+func storageSectionY(node ArchNode, baseY int) int {
+	y := baseY + clusterHeaderH
+	if len(node.Peers) > 0 {
+		y += clusterPeerH
+	}
+	return y
+}
+
+func clusterStorageX(tiers []StorageTier, i int) int {
+	if len(tiers) <= 1 {
+		return svgW / 2
+	}
+	startX := svgW/2 - (len(tiers)-1)*clusterStorSpacing/2
+	return startX + i*clusterStorSpacing
+}
+
+func clusterStorageTopY(node ArchNode, baseY int) int {
+	return storageSectionY(node, baseY) + 8
+}
+
+func clusterStorageBotY(node ArchNode, baseY int) int {
+	return clusterStorageTopY(node, baseY) + 32
+}
+
+func clusterStorageLabelY(node ArchNode, baseY int) int {
+	return clusterStorageBotY(node, baseY) + 14
+}
+
+// ── Class helpers ─────────────────────────────────────────────────────
+
+func sevClass(sev string) string {
+	switch sev {
+	case "HIGH":
+		return "high"
+	case "MED":
+		return "med"
+	default:
+		return "low"
+	}
+}
+
+func nodeStatusClass(status string) string {
+	switch status {
+	case "healthy":
+		return "healthy"
+	case "degraded":
+		return "degraded"
+	case "unhealthy":
+		return "unhealthy"
+	default:
+		return "disabled"
+	}
+}
+
+func peerStatusClass(status string) string {
+	switch status {
+	case "healthy":
+		return "healthy"
+	default:
+		return "stale"
+	}
+}
+
+func shortPeerName(name string) string {
+	if len(name) <= 4 {
+		return name
+	}
+	if idx := strings.LastIndex(name, "-"); idx >= 0 && idx < len(name)-1 {
+		short := name[idx+1:]
+		if len(short) <= 6 {
+			return short
+		}
+		return short[:6]
+	}
+	return name[:4]
+}
+
+// ── Insights page ─────────────────────────────────────────────────────
+
+// Insights renders the insights page with an SVG architecture flow diagram
+// (left, 40%) and an insight card sidebar (right, 60%). The maximize toggle
+// flips the CSS class, with state persisted in localStorage. Clicking a
+// node in the diagram filters insights to those related to that node.
+templ Insights(d InsightsData) {
+	@Layout(d.LayoutProps) {
+		<div class="insights-container insights-split" id="insights-container">
+			<div class="insights-diagram">
+				<div class="insights-diagram-hd">
+					<span class="ct">Architecture Flow</span>
+					<button
+						class="insights-max-btn"
+						id="insights-max-btn"
+						onclick="toggleInsightsMax()"
+						aria-label="Toggle diagram maximize"
+						title="Maximize diagram (V)"
+					>⛶</button>
+				</div>
+				<div class="insights-svg-wrap">
+					@insightsSVG(d.Nodes)
+				</div>
+			</div>
+			<div class="insights-sidebar">
+				<div class="insights-sidebar-hd">
+					<span class="ct">Insights</span>
+					<div class="insights-filters" id="insights-filters">
+						if d.HighCount > 0 {
+							<button class="filter-chip fc-high" data-sev="HIGH" onclick="filterInsights('HIGH')">
+								<span class="fc-dot fc-dot-high"></span>
+								{ fmt.Sprintf("%d HIGH", d.HighCount) }
+							</button>
+						}
+						if d.MedCount > 0 {
+							<button class="filter-chip fc-med" data-sev="MED" onclick="filterInsights('MED')">
+								<span class="fc-dot fc-dot-med"></span>
+								{ fmt.Sprintf("%d MED", d.MedCount) }
+							</button>
+						}
+						if d.LowCount > 0 {
+							<button class="filter-chip fc-low" data-sev="LOW" onclick="filterInsights('LOW')">
+								<span class="fc-dot fc-dot-low"></span>
+								{ fmt.Sprintf("%d LOW", d.LowCount) }
+							</button>
+						}
+						<button class="filter-chip fc-all active" data-sev="ALL" onclick="filterInsights('ALL')">All</button>
+					</div>
+				</div>
+				<div class="focus-indicator" id="focus-indicator" style="display:none">
+					<span id="focus-indicator-label"></span>
+					<button class="focus-indicator-clear" onclick="defocusInsights()" aria-label="Clear focus">✕</button>
+				</div>
+				<div class="insights-list" id="insights-list">
+					if len(d.Insights) == 0 {
+						<div class="insights-empty">
+							<span class="insights-empty-icon">✓</span>
+							<p>No insights — all systems nominal.</p>
+						</div>
+					} else {
+						for _, ins := range d.Insights {
+							<div class="insight-card" data-sev={ ins.Severity } data-node-ids={ strings.Join(ins.NodeIDs, " ") }>
+								<div class="insight-card-hd">
+									<span class={ "insight-sev", "insight-sev-" + sevClass(ins.Severity) }>{ ins.Severity }</span>
+									<span class="insight-cat">{ ins.Category }</span>
+								</div>
+								<div class="insight-card-title">{ ins.Title }</div>
+								<div class="insight-card-detail">{ ins.Detail }</div>
+								if ins.Evidence != "" {
+									<div class="insight-card-evidence">{ ins.Evidence }</div>
+								}
+								if len(ins.Routes) > 0 {
+									<div class="insight-card-routes">
+										for _, r := range ins.Routes {
+											<span class="chip">{ r }</span>
+										}
+									</div>
+								}
+								if ins.Action != "" {
+									<div class="insight-card-action">→ { ins.Action }</div>
+								}
+							</div>
+						}
+					}
+				</div>
+			</div>
+		</div>
+		@insightsScript()
+	}
+}
+
+// ── SVG diagram ───────────────────────────────────────────────────────
+
+templ insightsSVG(nodes []ArchNode) {
+	if len(nodes) == 0 {
+		<div class="insights-diagram-empty">No architecture data</div>
+	} else {
+		<svg
+			viewBox={ fmt.Sprintf("0 0 %d %d", svgW, svgHeight(nodes)) }
+			preserveAspectRatio="xMidYMid meet"
+			class="insights-svg"
+			id="insights-svg"
+			aria-label="Architecture flow diagram"
+		>
+			for i, node := range nodes {
+				if i > 0 {
+					@svgArrow(nodes, i-1)
+				}
+				@svgNode(node, nodeYAt(nodes, i))
+			}
+		</svg>
+	}
+}
+
+templ svgArrow(nodes []ArchNode, idx int) {
+	<line x1={ fmt.Sprintf("%d", svgW/2) } y1={ fmt.Sprintf("%d", arrowY1(nodes, idx)) } x2={ fmt.Sprintf("%d", svgW/2) } y2={ fmt.Sprintf("%d", arrowY2(nodes, idx)-6) } class="insights-arrow"/>
+	<polygon points={ fmt.Sprintf("%d,%d %d,%d %d,%d", svgW/2-5, arrowY2(nodes, idx)-6, svgW/2+5, arrowY2(nodes, idx)-6, svgW/2, arrowY2(nodes, idx)) } class="insights-arrow-head"/>
+}
+
+templ svgNode(node ArchNode, y int) {
+	<g class={ "arch-node-group", "arch-node-" + nodeStatusClass(node.Status) } data-node-id={ node.ID }>
+		if node.Type == "client" {
+			@clientShape(node, y)
+		} else if node.Type == "cdn" {
+			@cdnShape(node, y)
+		} else if node.Type == "bouine" {
+			@clusterShape(node, y)
+		} else if node.Type == "pool" {
+			@poolShape(node, y)
+		}
+	</g>
+}
+
+// clientShape draws three browser windows representing clients.
+templ clientShape(node ArchNode, y int) {
+	for _, bx := range browserPositions() {
+		<rect x={ fmt.Sprintf("%d", bx) } y={ fmt.Sprintf("%d", y) } width="40" height="28" rx="4" class="arch-shape arch-shape-client"/>
+		<rect x={ fmt.Sprintf("%d", bx) } y={ fmt.Sprintf("%d", y) } width="40" height="6" rx="4" class="arch-shape-client-bar"/>
+		<circle cx={ fmt.Sprintf("%d", bx+5) } cy={ fmt.Sprintf("%d", y+3) } r="1.5" class="arch-shape-client-dot"/>
+		<circle cx={ fmt.Sprintf("%d", bx+10) } cy={ fmt.Sprintf("%d", y+3) } r="1.5" class="arch-shape-client-dot"/>
+		<circle cx={ fmt.Sprintf("%d", bx+15) } cy={ fmt.Sprintf("%d", y+3) } r="1.5" class="arch-shape-client-dot"/>
+	}
+	<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+44) } text-anchor="middle" class="arch-label">{ node.Label }</text>
+	<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+58) } text-anchor="middle" class="arch-detail">{ node.Detail }</text>
+}
+
+// cdnShape draws a hexagon representing the CDN layer.
+templ cdnShape(node ArchNode, y int) {
+	<polygon points={ cdnHexPoints(y) } class="arch-shape arch-shape-cdn"/>
+	<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+28) } text-anchor="middle" class="arch-label">{ node.Label }</text>
+	<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+44) } text-anchor="middle" class="arch-detail">{ node.Detail }</text>
+}
+
+// clusterShape draws a dashed container with peer circles and storage
+// cylinders inside. Storage is split into hot and warm tiers (warm only
+// shown if configured).
+templ clusterShape(node ArchNode, y int) {
+	<rect x={ fmt.Sprintf("%d", nodeX) } y={ fmt.Sprintf("%d", y) } width={ fmt.Sprintf("%d", nodeW) } height={ fmt.Sprintf("%d", clusterHeight(node)) } rx="10" class="arch-shape arch-shape-cluster"/>
+	<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+24) } text-anchor="middle" class="arch-label">{ node.Label }</text>
+	<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+40) } text-anchor="middle" class="arch-detail">{ node.Detail }</text>
+	if len(node.Peers) > 0 {
+		for _, pc := range peerCircles(node.Peers, y) {
+			<circle cx={ fmt.Sprintf("%d", pc.X) } cy={ fmt.Sprintf("%d", pc.Y) } r="14" class={ "arch-peer", "arch-peer-" + peerStatusClass(pc.Peer.Status) }/>
+			<text x={ fmt.Sprintf("%d", pc.X) } y={ fmt.Sprintf("%d", pc.Y+2) } text-anchor="middle" class="arch-peer-label">{ shortPeerName(pc.Peer.Name) }</text>
+			<text x={ fmt.Sprintf("%d", pc.X) } y={ fmt.Sprintf("%d", pc.Y+30) } text-anchor="middle" class="arch-peer-name">{ pc.Peer.Name }</text>
+		}
+		if peerOverflow(node.Peers) > 0 {
+			<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", peerOverflowY(y)) } text-anchor="middle" class="arch-detail">+{ fmt.Sprintf("%d", peerOverflow(node.Peers)) } more</text>
+		}
+	} else {
+		if len(node.StorageTiers) == 0 {
+			<text x={ fmt.Sprintf("%d", svgW/2) } y={ fmt.Sprintf("%d", y+70) } text-anchor="middle" class="arch-detail">single node</text>
+		}
+	}
+	for i, tier := range node.StorageTiers {
+		@storageCylinder(tier, i, node.StorageTiers, node, y)
+	}
+}
+// poolShape draws a rounded rect with a server-stack icon on the left.
+templ poolShape(node ArchNode, y int) {
+	<rect x={ fmt.Sprintf("%d", nodeX) } y={ fmt.Sprintf("%d", y) } width={ fmt.Sprintf("%d", nodeW) } height={ fmt.Sprintf("%d", regularNodeH) } rx="8" class="arch-shape arch-shape-pool"/>
+	<rect x={ fmt.Sprintf("%d", nodeX+20) } y={ fmt.Sprintf("%d", y+16) } width="24" height="10" rx="2" class="arch-server-icon"/>
+	<rect x={ fmt.Sprintf("%d", nodeX+20) } y={ fmt.Sprintf("%d", y+30) } width="24" height="10" rx="2" class="arch-server-icon"/>
+	<circle cx={ fmt.Sprintf("%d", nodeX+24) } cy={ fmt.Sprintf("%d", y+21) } r="1.5" class="arch-server-dot"/>
+	<circle cx={ fmt.Sprintf("%d", nodeX+24) } cy={ fmt.Sprintf("%d", y+35) } r="1.5" class="arch-server-dot"/>
+	<circle cx={ fmt.Sprintf("%d", nodeX+nodeW-20) } cy={ fmt.Sprintf("%d", y+regularNodeH/2) } r="5" class={ "arch-status-dot", "arch-status-dot-" + nodeStatusClass(node.Status) }/>
+	<text x={ fmt.Sprintf("%d", nodeX+60) } y={ fmt.Sprintf("%d", y+28) } class="arch-label">{ node.Label }</text>
+	<text x={ fmt.Sprintf("%d", nodeX+60) } y={ fmt.Sprintf("%d", y+48) } class="arch-detail">{ node.Detail }</text>
+}
+
+// storageCylinder draws a single storage tier cylinder inside the cluster.
+templ storageCylinder(tier StorageTier, i int, tiers []StorageTier, node ArchNode, baseY int) {
+	<rect x={ fmt.Sprintf("%d", clusterStorageX(tiers, i)-clusterStorW/2) } y={ fmt.Sprintf("%d", clusterStorageTopY(node, baseY)) } width={ fmt.Sprintf("%d", clusterStorW) } height={ fmt.Sprintf("%d", clusterStorageBotY(node, baseY)-clusterStorageTopY(node, baseY)) } class={ "arch-shape-storage-body", "arch-shape-storage-" + nodeStatusClass(tier.Status) }/>
+	<ellipse cx={ fmt.Sprintf("%d", clusterStorageX(tiers, i)) } cy={ fmt.Sprintf("%d", clusterStorageTopY(node, baseY)) } rx={ fmt.Sprintf("%d", clusterStorW/2) } ry="6" class={ "arch-shape-storage-top", "arch-shape-storage-" + nodeStatusClass(tier.Status) }/>
+	<ellipse cx={ fmt.Sprintf("%d", clusterStorageX(tiers, i)) } cy={ fmt.Sprintf("%d", clusterStorageBotY(node, baseY)) } rx={ fmt.Sprintf("%d", clusterStorW/2) } ry="6" class="arch-shape-storage-bottom"/>
+	<text x={ fmt.Sprintf("%d", clusterStorageX(tiers, i)) } y={ fmt.Sprintf("%d", clusterStorageTopY(node, baseY)+18) } text-anchor="middle" class="arch-storage-label">{ tier.Name }</text>
+	<text x={ fmt.Sprintf("%d", clusterStorageX(tiers, i)) } y={ fmt.Sprintf("%d", clusterStorageLabelY(node, baseY)) } text-anchor="middle" class="arch-detail">{ tier.Detail }</text>
+}
+
+// ── JavaScript ────────────────────────────────────────────────────────
+
+script insightsScript() {
+	function toggleInsightsMax(){
+		var c=document.getElementById('insights-container');
+		if(!c)return;
+		var isMax=c.classList.contains('insights-maximized');
+		if(isMax){c.classList.remove('insights-maximized');c.classList.add('insights-split');}
+		else{c.classList.remove('insights-split');c.classList.add('insights-maximized');}
+		localStorage.setItem('bouine-insights-view',isMax?'split':'max');
+		var btn=document.getElementById('insights-max-btn');
+		if(btn)btn.textContent=isMax?'⛶':'⤢';
+	}
+	(function(){
+		var saved=localStorage.getItem('bouine-insights-view');
+		if(saved==='max'){
+			var c=document.getElementById('insights-container');
+			if(c){c.classList.remove('insights-split');c.classList.add('insights-maximized');
+				var btn=document.getElementById('insights-max-btn');
+				if(btn)btn.textContent='⤢';
+			}
+		}
+	})();
+	document.addEventListener('keydown',function(e){
+		if(e.key==='v'||e.key==='V'){
+			var tag=(e.target&&e.target.tagName)||'';
+			if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+			toggleInsightsMax();
+		}
+	});
+	var currentSev='ALL';
+	var focusedNode=null;
+	window.filterInsights=function(sev){
+		currentSev=sev;
+		var chips=document.querySelectorAll('#insights-filters .filter-chip');
+		chips.forEach(function(c){c.classList.remove('active');if(c.getAttribute('data-sev')===sev)c.classList.add('active');});
+		applyFilters();
+	};
+	function focusInsights(nodeId){
+		focusedNode=nodeId;
+		document.querySelectorAll('.arch-node-group').forEach(function(g){
+			if(g.getAttribute('data-node-id')===nodeId){g.classList.add('focused');g.classList.remove('dimmed');}
+			else{g.classList.add('dimmed');g.classList.remove('focused');}
+		});
+		var label='';
+		var lbl=document.querySelector('.arch-node-group[data-node-id="'+nodeId+'"] .arch-label');
+		if(lbl)label=lbl.textContent;
+		var ind=document.getElementById('focus-indicator');
+		var indLabel=document.getElementById('focus-indicator-label');
+		if(ind&&indLabel){indLabel.textContent='Filtered: '+label;ind.style.display='flex';}
+		applyFilters();
+	}
+	window.defocusInsights=function(){
+		focusedNode=null;
+		document.querySelectorAll('.arch-node-group').forEach(function(g){g.classList.remove('focused','dimmed');});
+		var ind=document.getElementById('focus-indicator');
+		if(ind)ind.style.display='none';
+		applyFilters();
+	};
+	function applyFilters(){
+		var cards=document.querySelectorAll('#insights-list .insight-card');
+		cards.forEach(function(c){
+			var sevMatch=currentSev==='ALL'||c.getAttribute('data-sev')===currentSev;
+			var nodeIds=c.getAttribute('data-node-ids')||'';
+			var nodeMatch=!focusedNode||nodeIds.split(' ').indexOf(focusedNode)>=0;
+			c.style.display=(sevMatch&&nodeMatch)?'':'none';
+		});
+	}
+	(function(){
+		var svg=document.getElementById('insights-svg');
+		if(!svg)return;
+		svg.addEventListener('click',function(e){
+			var g=e.target.closest('.arch-node-group');
+			if(g){e.stopPropagation();focusInsights(g.getAttribute('data-node-id'));}
+			else{defocusInsights();}
+		});
+	})();
+}

@@ -99,6 +99,7 @@ type CFStatusCard struct {
 	Async         bool
 	LastError     string // empty when no error
 	LastSuccessAt string // RFC 3339 or empty
+	LastLagMs     int64  // async propagation latency (0 when sync or disabled)
 }
 
 // HotFillPct returns the hot-tier fill percentage (0–100), clamped.
@@ -892,4 +893,56 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 		rows = append(rows, ConfigRow{Key: "strip_query_params", Value: strings.Join(rc.Cache.Key.StripQueryParams, ", "), Kind: "list"})
 	}
 	return rows
+}
+
+// ── Insights ────────────────────────────────────────────────────────
+
+// InsightsData is the view model for /dashboard/insights.
+type InsightsData struct {
+	LayoutProps
+	// Architecture nodes for the flow diagram.
+	Nodes []ArchNode
+	// Insights sorted by severity (HIGH first).
+	Insights []InsightCard
+	// InsightCount per severity for the filter chips.
+	HighCount, MedCount, LowCount int
+}
+
+// ArchNode represents a single component in the architecture flow diagram.
+type ArchNode struct {
+	ID           string // "client", "cdn", "bouine", "pool:api-pool"
+	Type         string // "client" | "cdn" | "bouine" | "pool"
+	Label        string
+	Status       string // "healthy" | "degraded" | "unhealthy" | "disabled"
+	Detail       string
+	Peers        []PeerNode    // only populated for "bouine" type
+	StorageTiers []StorageTier // only populated for "bouine" type
+}
+
+// PeerNode is a single bouine cluster member shown inside the cluster
+// container in the architecture diagram.
+type PeerNode struct {
+	Name   string
+	Status string // "healthy" | "stale"
+}
+
+// StorageTier represents a storage tier (hot or warm) drawn as a cylinder
+// inside the bouine cluster container.
+type StorageTier struct {
+	Name   string // "Hot" or "Warm"
+	Status string // "healthy" | "degraded" | "unhealthy"
+	Detail string
+}
+
+// InsightCard is a single insight rendered as a card in the sidebar.
+type InsightCard struct {
+	ID       string
+	Severity string // "HIGH" | "MED" | "LOW"
+	Category string
+	Title    string
+	Detail   string
+	Evidence string
+	Routes   []string
+	Action   string
+	NodeIDs  []string // related ArchNode IDs for click-to-focus filtering
 }

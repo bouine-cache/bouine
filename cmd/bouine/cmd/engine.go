@@ -56,6 +56,7 @@ type runState struct {
 	pools        map[string]*origin.Pool
 	dpMetrics    *observability.DataPlaneMetrics
 	rings        *observability.Rings
+	headerRing   *observability.OriginHeaderRing
 	snapshotPath string
 	token        string
 
@@ -139,11 +140,15 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	cfCtx, cfCancel := context.WithCancel(context.Background())
 	cfProp := e.initCloudflare(dpMetrics, cfCtx) //nolint:contextcheck // detached lifecycle for CF async goroutines
 
+	headerRing := observability.NewOriginHeaderRing()
+	rings.HeaderRing = headerRing
+
 	rs := &runState{
 		store:        store,
 		pools:        pools,
 		dpMetrics:    dpMetrics,
 		rings:        rings,
+		headerRing:   headerRing,
 		snapshotPath: snapshotPath,
 		token:        token,
 		clusterNode:  clusterNode,
@@ -508,13 +513,43 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		CFStatusFn: func() templates.CFStatusCard {
 			s := rs.cfProp.Status()
 			return templates.CFStatusCard{
-				Enabled: s.Enabled,
-				ZoneID:  s.ZoneID,
-				Async:   s.Async,
+				Enabled:   s.Enabled,
+				ZoneID:    s.ZoneID,
+				Async:     s.Async,
+				LastLagMs: s.LastLagMs,
 			}
 		},
+		PoolHealthFn:        insightsPoolHealth(rs),
+		OriginHeaderAuditFn: insightsHeaderAudit(rs),
+		VaryCapHitsFn:       func() int64 { return rs.dpMetrics.VaryCapHitsCount() },
 	}, dashMux)
 	return dashMux
+}
+
+// insightsPoolHealth returns a closure that snapshots all upstream pool
+// target health for the dashboard insights diagram.
+func insightsPoolHealth(rs *runState) func() map[string][]origin.TargetStatus {
+	return func() map[string][]origin.TargetStatus {
+		if rs.pools == nil {
+			return nil
+		}
+		out := make(map[string][]origin.TargetStatus, len(rs.pools))
+		for name, p := range rs.pools {
+			out[name] = p.Targets()
+		}
+		return out
+	}
+}
+
+// insightsHeaderAudit returns a closure that snapshots the origin header
+// audit ring for the dashboard insights engine.
+func insightsHeaderAudit(rs *runState) func() map[string]observability.HeaderAuditSummary {
+	return func() map[string]observability.HeaderAuditSummary {
+		if rs.headerRing == nil {
+			return nil
+		}
+		return rs.headerRing.HeaderAudit()
+	}
 }
 
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *runState) {

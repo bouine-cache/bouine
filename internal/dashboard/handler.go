@@ -14,8 +14,10 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/thylong/bouine/internal/config"
+	"github.com/thylong/bouine/internal/dashboard/insights"
 	"github.com/thylong/bouine/internal/dashboard/templates"
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -51,13 +53,21 @@ type Config struct {
 	// CFStatusFn returns the current Cloudflare propagation status.
 	// nil means CF is not configured.
 	CFStatusFn func() templates.CFStatusCard
+	// PoolHealthFn returns per-pool target health for the insights diagram.
+	// nil means pool health is not available (single-node or no pools).
+	PoolHealthFn func() map[string][]origin.TargetStatus
+	// OriginHeaderAuditFn returns per-pool origin header audit stats.
+	OriginHeaderAuditFn func() map[string]observability.HeaderAuditSummary
+	// VaryCapHitsFn returns the total Vary cap hit count.
+	VaryCapHitsFn func() int64
 }
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
 type Handler struct {
-	cfg  Config
-	auth *sessionAuth
-	agg  *Aggregator
+	cfg           Config
+	auth          *sessionAuth
+	agg           *Aggregator
+	insightEngine *insights.Engine
 }
 
 // New creates and registers dashboard routes on mux.
@@ -67,9 +77,10 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 		cfg.StartTime = time.Now()
 	}
 	h := &Handler{
-		cfg:  cfg,
-		auth: newSessionAuth(cfg.Token),
-		agg:  NewAggregator(cfg.Rings, cfg.PeersFn, cfg.SelfAddr, cfg.Token, cfg.Logger),
+		cfg:           cfg,
+		auth:          newSessionAuth(cfg.Token),
+		agg:           NewAggregator(cfg.Rings, cfg.PeersFn, cfg.SelfAddr, cfg.Token, cfg.Logger),
+		insightEngine: insights.New(),
 	}
 
 	mux.HandleFunc("GET /dashboard/login", h.auth.LoginHandler)
@@ -82,6 +93,7 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 	protected.HandleFunc("GET /dashboard/cluster", h.cluster)
 	protected.HandleFunc("GET /dashboard/invalidation", h.invalidation)
 	protected.HandleFunc("GET /dashboard/config", h.config)
+	protected.HandleFunc("GET /dashboard/insights", h.insights)
 	protected.HandleFunc("POST /dashboard/config/reload", h.configReload)
 	protected.HandleFunc("POST /dashboard/api/purge", h.apiPurge)
 	protected.HandleFunc("POST /dashboard/api/ban", h.apiBan)
@@ -823,4 +835,289 @@ func validateRegex(fieldName, s string) string {
 		return fmt.Sprintf("%s is not a valid regex — %s", fieldName, err)
 	}
 	return ""
+}
+
+// ── Insights ──────────────────────────────────────────────────────────
+
+func (h *Handler) insights(w http.ResponseWriter, r *http.Request) {
+	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+	merged, peers := h.agg.Collect(r.Context())
+
+	data := h.collectInsightData(merged, peers)
+	rawInsights := h.insightEngine.Evaluate(r.Context(), data)
+	routeToPool := h.buildRouteToPool()
+	cards, highCount, medCount, lowCount := convertInsightCards(rawInsights, routeToPool)
+	nodes := h.buildArchNodes(data.PoolHealth, h.cfStatusCard(), data.StoreStats, peers)
+
+	h.render(w, r, templates.Insights(templates.InsightsData{
+		LayoutProps: h.layoutProps("insights", "Insights", timeRange),
+		Nodes:       nodes,
+		Insights:    cards,
+		HighCount:   highCount,
+		MedCount:    medCount,
+		LowCount:    lowCount,
+	}))
+}
+
+// collectInsightData gathers all telemetry inputs needed by the insight
+// engine from the dashboard config closures and merged cluster data.
+func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers []PeerResult) insights.InsightData {
+	var storeStats api.Stats
+	if h.cfg.StoreFn != nil {
+		storeStats = h.cfg.StoreFn()
+	}
+	var poolHealth map[string][]origin.TargetStatus
+	if h.cfg.PoolHealthFn != nil {
+		poolHealth = h.cfg.PoolHealthFn()
+	}
+	var headerAudit map[string]observability.HeaderAuditSummary
+	if h.cfg.OriginHeaderAuditFn != nil {
+		headerAudit = h.cfg.OriginHeaderAuditFn()
+	}
+	var varyCapHits int64
+	if h.cfg.VaryCapHitsFn != nil {
+		varyCapHits = h.cfg.VaryCapHitsFn()
+	}
+	cfCard := h.cfStatusCard()
+	cfStatus := insights.CFStatus{}
+	if cfCard != nil {
+		cfStatus.Enabled = cfCard.Enabled
+		cfStatus.Async = cfCard.Async
+		cfStatus.LastLagMs = cfCard.LastLagMs
+	}
+	peerInfos := make([]insights.PeerInfo, len(peers))
+	for i, p := range peers {
+		peerInfos[i] = insights.PeerInfo{Name: p.NodeName, Stale: p.Stale}
+	}
+	return insights.InsightData{
+		Config:         h.cfg.Config,
+		StoreStats:     storeStats,
+		RouteStats:     merged.RouteStats,
+		RequestBuckets: merged.RequestSnap,
+		PeerResults:    peerInfos,
+		CFStatus:       cfStatus,
+		PoolHealth:     poolHealth,
+		HeaderAudit:    headerAudit,
+		VaryCapHits:    varyCapHits,
+	}
+}
+
+// convertInsightCards maps insight engine results to template cards and
+// counts per severity for the filter chips.
+func convertInsightCards(raw []insights.Insight, routeToPool map[string]string) (cards []templates.InsightCard, high, med, low int) {
+	cards = make([]templates.InsightCard, len(raw))
+	for i, ins := range raw {
+		cards[i] = templates.InsightCard{
+			ID:       ins.ID,
+			Severity: string(ins.Severity),
+			Category: string(ins.Category),
+			Title:    ins.Title,
+			Detail:   ins.Detail,
+			Evidence: ins.Evidence,
+			Routes:   ins.Routes,
+			Action:   ins.Action,
+			NodeIDs:  insightNodeIDs(ins, routeToPool),
+		}
+		switch ins.Severity {
+		case insights.SeverityHigh:
+			high++
+		case insights.SeverityMed:
+			med++
+		default:
+			low++
+		}
+	}
+	return
+}
+
+// insightNodeIDs maps an insight to the architecture node IDs it relates
+// to, enabling click-to-focus filtering on the diagram.
+func insightNodeIDs(ins insights.Insight, routeToPool map[string]string) []string {
+	var ids []string
+	switch ins.Category {
+	case insights.CategoryCDN:
+		ids = append(ids, "cdn")
+	case insights.CategoryCluster, insights.CategoryConfig:
+		ids = append(ids, "bouine")
+	default:
+		for _, route := range ins.Routes {
+			if pool, ok := routeToPool[route]; ok && pool != "" {
+				ids = append(ids, "pool:"+pool)
+			}
+		}
+		if len(ids) == 0 {
+			ids = append(ids, "bouine")
+		}
+	}
+	return ids
+}
+
+// buildRouteToPool creates a route-name → pool-name mapping from config.
+func (h *Handler) buildRouteToPool() map[string]string {
+	m := make(map[string]string)
+	if h.cfg.Config == nil {
+		return m
+	}
+	for _, rc := range h.cfg.Config.Routes {
+		name := rc.Name
+		if name == "" {
+			name = rc.Match.PathPrefix
+		}
+		m[name] = rc.Pool
+	}
+	return m
+}
+
+// buildArchNodes constructs the architecture flow diagram nodes from the
+// running config, live pool health, CF status, and storage stats.
+func (h *Handler) buildArchNodes(
+	poolHealth map[string][]origin.TargetStatus,
+	cfCard *templates.CFStatusCard,
+	storeStats api.Stats,
+	peers []PeerResult,
+) []templates.ArchNode {
+	var nodes []templates.ArchNode
+	nodes = append(nodes, clientNode())
+	if cfCard != nil && cfCard.Enabled {
+		nodes = append(nodes, cdnNode(cfCard))
+	}
+	nodes = append(nodes, h.clusterNode(peers, storeStats))
+	if h.cfg.Config != nil {
+		seen := make(map[string]bool)
+		for _, rc := range h.cfg.Config.Routes {
+			if rc.Pool == "" || seen[rc.Pool] {
+				continue
+			}
+			seen[rc.Pool] = true
+			status, detail := poolNodeStatus(rc.Pool, poolHealth)
+			nodes = append(nodes, templates.ArchNode{
+				ID:     "pool:" + rc.Pool,
+				Type:   "pool",
+				Label:  rc.Pool,
+				Status: status,
+				Detail: detail,
+			})
+		}
+	}
+	return nodes
+}
+
+func clientNode() templates.ArchNode {
+	return templates.ArchNode{
+		ID:     "client",
+		Type:   "client",
+		Label:  "Clients",
+		Status: "healthy",
+		Detail: "HTTP/1.1 + h2c + h3",
+	}
+}
+
+func cdnNode(cfCard *templates.CFStatusCard) templates.ArchNode {
+	detail := "zone " + cfCard.ZoneID
+	if cfCard.Async {
+		detail += " · async"
+	}
+	return templates.ArchNode{
+		ID:     "cdn",
+		Type:   "cdn",
+		Label:  "Cloudflare CDN",
+		Status: "healthy",
+		Detail: detail,
+	}
+}
+
+func (h *Handler) clusterNode(peers []PeerResult, storeStats api.Stats) templates.ArchNode {
+	clusterMode := "single-node"
+	if h.cfg.ClusterMeta.Mode != "" {
+		clusterMode = h.cfg.ClusterMeta.Mode
+	}
+	var peerNodes []templates.PeerNode
+	staleCount := 0
+	for _, p := range peers {
+		st := "healthy"
+		if p.Stale {
+			st = "stale"
+			staleCount++
+		}
+		peerNodes = append(peerNodes, templates.PeerNode{Name: p.NodeName, Status: st})
+	}
+	clusterStatus := "healthy"
+	if len(peers) > 0 {
+		if staleCount == len(peers) {
+			clusterStatus = "unhealthy"
+		} else if staleCount > 0 {
+			clusterStatus = "degraded"
+		}
+	}
+	return templates.ArchNode{
+		ID:           "bouine",
+		Type:         "bouine",
+		Label:        "bouine cluster",
+		Status:       clusterStatus,
+		Detail:       "mode: " + clusterMode,
+		Peers:        peerNodes,
+		StorageTiers: storageTiers(h.cfg.WarmMaxBytes, h.cfg.HotMaxBytes, storeStats),
+	}
+}
+
+// storageTiers builds the storage tier list shown inside the cluster
+// container. If warm storage is configured (warmMax > 0), both hot and
+// warm tiers are returned. Otherwise only the hot tier is shown.
+// Tier status degrades when fill exceeds 90%.
+func storageTiers(warmMax, hotMax int64, storeStats api.Stats) []templates.StorageTier {
+	hotStatus := "healthy"
+	if hotMax > 0 {
+		hotPct := float64(storeStats.HotBytes) / float64(hotMax) * 100
+		if hotPct > 100 {
+			hotPct = 100
+		}
+		if hotPct > 90 {
+			hotStatus = "degraded"
+		}
+	}
+	warmStatus := "healthy"
+	if warmMax > 0 {
+		warmPct := float64(storeStats.WarmBytes) / float64(warmMax) * 100
+		if warmPct > 100 {
+			warmPct = 100
+		}
+		if warmPct > 90 {
+			warmStatus = "degraded"
+		}
+	}
+	tiers := []templates.StorageTier{
+		{Name: "Hot", Status: hotStatus, Detail: templates.FmtBytes(storeStats.HotBytes)},
+	}
+	if warmMax > 0 {
+		tiers = append(tiers, templates.StorageTier{
+			Name:   "Warm",
+			Status: warmStatus,
+			Detail: templates.FmtBytes(storeStats.WarmBytes),
+		})
+	}
+	return tiers
+}
+
+// poolNodeStatus computes the health status and detail string for a single
+// upstream pool from the live target health map.
+func poolNodeStatus(poolName string, poolHealth map[string][]origin.TargetStatus) (status, detail string) {
+	status = "healthy"
+	detail = poolName
+	targets, ok := poolHealth[poolName]
+	if !ok {
+		return
+	}
+	healthy, total := 0, len(targets)
+	for _, t := range targets {
+		if t.Healthy {
+			healthy++
+		}
+	}
+	if healthy == 0 {
+		status = "unhealthy"
+	} else if healthy < total {
+		status = "degraded"
+	}
+	detail = fmt.Sprintf("%s · %d/%d targets", poolName, healthy, total)
+	return
 }

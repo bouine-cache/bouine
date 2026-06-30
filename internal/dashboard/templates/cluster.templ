@@ -183,8 +183,8 @@ templ Cluster(d ClusterData) {
 							</div>
 						</div>
 						<div class="cache-legend">
-							<span><span class="cache-legend-dot" style="background:#8b5cf6"></span>Hot { FmtBytes(d.HotBytes) }</span>
-							<span><span class="cache-legend-dot" style="background:#60a5fa"></span>Warm { FmtBytes(d.WarmBytes) }</span>
+							<span><span class="cache-legend-dot" style="background:#8b5cf6"></span>Hot { FmtBytes(d.HotBytes) } ({ fmt.Sprintf("%.0f%%", sharePct(d.HotBytes, d.TotalBytes())) })</span>
+							<span><span class="cache-legend-dot" style="background:#60a5fa"></span>Warm { FmtBytes(d.WarmBytes) } ({ fmt.Sprintf("%.0f%%", sharePct(d.WarmBytes, d.TotalBytes())) })</span>
 						</div>
 					</div>
 					<div class="bc">
@@ -197,8 +197,8 @@ templ Cluster(d ClusterData) {
 							</div>
 						</div>
 						<div class="cache-legend">
-							<span><span class="cache-legend-dot" style="background:#8b5cf6"></span>Hot { FmtInt(int(d.HotEntries)) }</span>
-							<span><span class="cache-legend-dot" style="background:#60a5fa"></span>Warm { FmtInt(int(d.WarmEntries)) }</span>
+							<span><span class="cache-legend-dot" style="background:#8b5cf6"></span>Hot { FmtInt(int(d.HotEntries)) } ({ fmt.Sprintf("%.0f%%", sharePct(d.HotEntries, d.TotalEntries())) })</span>
+							<span><span class="cache-legend-dot" style="background:#60a5fa"></span>Warm { FmtInt(int(d.WarmEntries)) } ({ fmt.Sprintf("%.0f%%", sharePct(d.WarmEntries, d.TotalEntries())) })</span>
 						</div>
 					</div>
 				</div>
@@ -227,7 +227,7 @@ templ Cluster(d ClusterData) {
 								<span>{ FmtBytes(d.WarmBytes) } / { FmtBytes(d.WarmMaxBytes) }</span>
 							</div>
 							<div class="tier-bar">
-								<div class="tier-bar-fill" style={ fmt.Sprintf("width:%.1f%%", d.WarmFillPct()) }></div>
+								<div class="tier-bar-fill warm" style={ fmt.Sprintf("width:%.1f%%", d.WarmFillPct()) }></div>
 							</div>
 						</div>
 						<div class="stat-row"><span class="stat-k">fill ratio</span><span class="stat-v">{ fmt.Sprintf("%.2f%%", d.WarmFillPct()) }</span></div>

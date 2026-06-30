@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/config"
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -26,7 +26,7 @@ type Broadcaster struct {
 	cluster *Cluster
 	fetcher *PeerFetcher
 	seq     atomic.Uint64
-	logger  *slog.Logger
+	logger  observability.Logger
 	token   string
 	mode    string // ClusterModeStrong | ClusterModeEventual | ClusterModeFull
 	metrics *Metrics
@@ -37,7 +37,7 @@ type Broadcaster struct {
 func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcaster {
 	logger := c.logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	tok := ""
 	if len(token) > 0 {
@@ -104,6 +104,12 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 	if body, err := json.Marshal(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
+	b.logger.Info("gossiped purge to peers",
+		"key", evt.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+		"peers", len(b.cluster.Members())-1,
+	)
 }
 
 // BroadcastBan sends a ban predicate to all live peers.
@@ -152,6 +158,11 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	if body, err := json.Marshal(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
+	b.logger.Info("gossiped ban to peers",
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+		"peers", len(b.cluster.Members())-1,
+	)
 }
 
 // BroadcastReplicate sends a full cached object to all peers via gossip.
@@ -196,6 +207,12 @@ func (b *Broadcaster) BroadcastReplicate(_ context.Context, obj *api.Object) {
 		b.metrics.IncReplicationSent()
 		b.metrics.AddReplicationBytes("sent", float64(len(body)))
 	}
+	b.logger.Info("gossiped replication to peers",
+		"key", obj.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+		"peers", len(b.cluster.Members())-1,
+	)
 }
 
 func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.PurgeEvent) error {

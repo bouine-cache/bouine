@@ -1,16 +1,29 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 )
 
 // Key is the canonical cache key. It is a plain uint64 xxhash digest
 // of the normalized request attributes (scheme + host + path + query +
 // method + Vary headers).
-//
-// Stable.
 type Key uint64
+
+// LogValue renders the key as a zero-allocation slog.UintValue so the
+// hot path never pays for string conversion. The decimal form is used
+// in JSON logs; the runbook documents how to convert it to hex in log
+// queries (to_hex() in Loki, format() in Grafana).
+func (k Key) LogValue() slog.Value { return slog.Uint64Value(uint64(k)) }
+
+// Hex returns the lowercase hex representation of the key. Intended for
+// non-hot-path use (admin API, runbook examples). Allocates a string.
+func (k Key) Hex() string { return strconv.FormatUint(uint64(k), 16) }
+
+// String returns the decimal representation, satisfying fmt.Stringer.
+func (k Key) String() string { return strconv.FormatUint(uint64(k), 10) }
 
 // Object is the cached response stored by the storage layer. It holds
 // both the HTTP metadata and the body bytes (or a reference to the

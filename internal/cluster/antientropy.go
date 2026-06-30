@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -21,7 +21,7 @@ type AntiEntropyConfig struct {
 	// FetchTimeout bounds each peer-fetch during backfill. Default 2s.
 	FetchTimeout time.Duration
 	// Logger is the structured logger.
-	Logger *slog.Logger
+	Logger observability.Logger
 }
 
 // KeySource provides the local key set for anti-entropy diffing.
@@ -52,7 +52,7 @@ type AntiEntropy struct {
 	store   Storer
 	peers   func() []api.PeerInfo
 	metrics *Metrics
-	logger  *slog.Logger
+	logger  observability.Logger
 }
 
 // NewAntiEntropy creates a reconciler. peers returns the current peer list
@@ -68,7 +68,7 @@ func NewAntiEntropy(cfg AntiEntropyConfig, node string, keys KeySource, fetch Ba
 	}
 	logger := cfg.Logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	return &AntiEntropy{
 		cfg:     cfg,
@@ -139,6 +139,7 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 
 	ae.logger.Debug("anti-entropy: backfilling", "peer", peer.Name, "missing", len(missing))
 
+	start := time.Now()
 	repaired := 0
 	for _, key := range missing {
 		select {
@@ -153,6 +154,13 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 
 	ae.metrics.IncAntiEntropyReconcile()
 	ae.metrics.SetAntiEntropyKeysRepaired(float64(repaired))
+	ae.logger.Info("reconciled with peer",
+		"peer", peer.Name,
+		"peer_address", peer.Addr,
+		"missing_count", len(missing),
+		"backfilled_count", repaired,
+		"dur_ms", time.Since(start).Milliseconds(),
+	)
 }
 
 func (ae *AntiEntropy) fetchPeerKeys(ctx context.Context, peer api.PeerInfo) ([]uint64, bool) {
@@ -208,6 +216,11 @@ func (ae *AntiEntropy) backfillKey(ctx context.Context, peer api.PeerInfo, key a
 		return false
 	}
 	ae.metrics.IncAntiEntropyRepaired()
+	ae.logger.Info("backfilled key from peer",
+		"key", key,
+		"peer", peer.Name,
+		"peer_address", peer.Addr,
+	)
 	return true
 }
 

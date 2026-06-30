@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,21 +25,27 @@ type cfPropagator struct {
 
 	lastErr     atomic.Pointer[string]
 	lastSuccess atomic.Pointer[time.Time]
+
+	wg       sync.WaitGroup
+	closeCtx context.Context
 }
 
 // buildCFPropagator constructs a cfPropagator. inv may be nil when CF is
-// disabled; all propagate methods become no-ops.
+// disabled; all propagate methods become no-ops. closeCtx is the lifecycle
+// context whose cancellation stops in-flight async propagations.
 func buildCFPropagator(
 	inv bouinecf.Invalidator,
 	cfg config.CloudflareConfig,
 	metrics *observability.DataPlaneMetrics,
 	logger *slog.Logger,
+	closeCtx context.Context,
 ) *cfPropagator {
 	return &cfPropagator{
-		inv:     inv,
-		cfg:     cfg,
-		metrics: metrics,
-		logger:  logger,
+		inv:      inv,
+		cfg:      cfg,
+		metrics:  metrics,
+		logger:   logger,
+		closeCtx: closeCtx,
 	}
 }
 
@@ -76,7 +83,10 @@ func (p *cfPropagator) PropagateForPurge(ctx context.Context, url string) {
 	result := bouinecf.MapURL(url)
 	p.dispatch(ctx, "purge", func(ctx context.Context) error {
 		if result.Skipped {
-			p.metrics.CFPurgeSkipped.WithLabelValues(result.SkipReason).Inc()
+			p.metrics.CFPurgeSkipped.WithLabelValues(bouinecf.SkipCategory(result.SkipReason)).Inc()
+			p.logger.Warn("cloudflare propagation skipped",
+				"op", "purge",
+				"reason", result.SkipReason)
 			return nil
 		}
 		return p.inv.PurgeURLs(ctx, result.URLs)
@@ -95,10 +105,13 @@ func (p *cfPropagator) PropagateForBan(ctx context.Context, expr api.BanExpr) {
 	case expr.SurrogateKey != "":
 		result = bouinecf.MapSurrogateKey(expr.SurrogateKey)
 	case expr.PathRegex != "" && expr.HostRegex != "":
-		result = bouinecf.MergeResults(
-			bouinecf.MapPathRegex(expr.PathRegex),
-			bouinecf.MapHostRegex(expr.HostRegex),
-		)
+		// CF has no compound predicate (host AND path). Translating both
+		// independently would over-purge (OR semantics). Skip with a clear
+		// reason so the operator knows to issue two separate bans.
+		result = bouinecf.MapResult{
+			Skipped:    true,
+			SkipReason: "compound ban (host AND path) cannot be mapped to a single CF purge operation",
+		}
 	case expr.PathRegex != "":
 		result = bouinecf.MapPathRegex(expr.PathRegex)
 	case expr.HostRegex != "":
@@ -108,7 +121,10 @@ func (p *cfPropagator) PropagateForBan(ctx context.Context, expr api.BanExpr) {
 	}
 	p.dispatch(ctx, "ban", func(ctx context.Context) error {
 		if result.Skipped {
-			p.metrics.CFPurgeSkipped.WithLabelValues(result.SkipReason).Inc()
+			p.metrics.CFPurgeSkipped.WithLabelValues(bouinecf.SkipCategory(result.SkipReason)).Inc()
+			p.logger.Warn("cloudflare propagation skipped",
+				"op", "ban",
+				"reason", result.SkipReason)
 			return nil
 		}
 		if len(result.Tags) > 0 {
@@ -138,18 +154,41 @@ func (p *cfPropagator) PropagateForRefresh(ctx context.Context, url string) {
 	result := bouinecf.MapURL(url)
 	p.dispatch(ctx, "refresh", func(ctx context.Context) error {
 		if result.Skipped {
-			p.metrics.CFPurgeSkipped.WithLabelValues(result.SkipReason).Inc()
+			p.metrics.CFPurgeSkipped.WithLabelValues(bouinecf.SkipCategory(result.SkipReason)).Inc()
+			p.logger.Warn("cloudflare propagation skipped",
+				"op", "refresh",
+				"reason", result.SkipReason)
 			return nil
 		}
 		return p.inv.PurgeURLs(ctx, result.URLs)
 	})
 }
 
+// Close waits for in-flight async propagations to finish or ctx to expire.
+// Must be called during shutdown to prevent goroutine leaks.
+func (p *cfPropagator) Close(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // dispatch executes fn either in a background goroutine (async=true, the
 // default) or inline (async=false). Either way it records metrics.
 func (p *cfPropagator) dispatch(ctx context.Context, op string, fn func(context.Context) error) {
 	if p.cfg.IsAsync() {
-		go p.run(context.WithoutCancel(ctx), op, fn)
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			p.run(p.closeCtx, op, fn)
+		}()
 	} else {
 		p.run(ctx, op, fn)
 	}
@@ -163,10 +202,11 @@ func (p *cfPropagator) run(ctx context.Context, op string, fn func(context.Conte
 	if err != nil {
 		errStr := err.Error()
 		p.lastErr.Store(&errStr)
-		p.metrics.CFPurgeTotal.WithLabelValues(op, "error").Inc()
+		p.metrics.CFPurgeTotal.WithLabelValues(op, bouinecf.ErrorType(err)).Inc()
 		p.logger.Warn("cloudflare propagation failed",
 			"op", op,
 			"error", err,
+			"error_type", bouinecf.ErrorType(err),
 			"duration_ms", dur.Milliseconds())
 		return
 	}

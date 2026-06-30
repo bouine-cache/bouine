@@ -92,6 +92,59 @@ func TestMapHostRegex_Metacharacters(t *testing.T) {
 	}
 }
 
+func TestMapPathRegex_SuffixAnchor(t *testing.T) {
+	t.Parallel()
+	cases := []string{"^/api/v1/$", "/exact$"}
+	for _, tc := range cases {
+		r := cf.MapPathRegex(tc)
+		if !r.Skipped {
+			t.Errorf("%q: expected skip for suffix anchor", tc)
+		}
+		if !strings.Contains(r.SkipReason, "suffix anchor") {
+			t.Errorf("%q: skip reason should mention suffix anchor: %s", tc, r.SkipReason)
+		}
+	}
+}
+
+func TestMapHostRegex_Anchor(t *testing.T) {
+	t.Parallel()
+	cases := []string{"^example.com", "^api\\.example\\.com"}
+	for _, tc := range cases {
+		r := cf.MapHostRegex(tc)
+		if !r.Skipped {
+			t.Errorf("%q: expected skip for anchor", tc)
+		}
+		if !strings.Contains(r.SkipReason, "anchors") {
+			t.Errorf("%q: skip reason should mention anchors: %s", tc, r.SkipReason)
+		}
+	}
+}
+
+func TestSkipCategory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		reason string
+		want   string
+	}{
+		{"empty URL", cf.SkipCategoryEmpty},
+		{"path_regex contains metacharacters — cannot map to CF prefix: ^/api/[0-9]+", cf.SkipCategoryPathMetachar},
+		{"path_regex is a suffix anchor (ends with $) — cannot map to CF prefix: ^/api/$", cf.SkipCategoryPathSuffix},
+		{"host_regex contains metacharacters — cannot map to CF hostname: .*example.*", cf.SkipCategoryHostMetachar},
+		{"host_regex contains anchors — cannot map to CF hostname: ^example.com", cf.SkipCategoryHostAnchor},
+		{"compound ban (host AND path) cannot be mapped to a single CF purge operation", cf.SkipCategoryCompoundBan},
+		{"something weird", "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.want, func(t *testing.T) {
+			t.Parallel()
+			got := cf.SkipCategory(tc.reason)
+			if got != tc.want {
+				t.Fatalf("SkipCategory(%q) = %q, want %q", tc.reason, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMergeResults(t *testing.T) {
 	t.Parallel()
 	a := cf.MapURL("https://a.com/")

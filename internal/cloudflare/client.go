@@ -9,7 +9,6 @@ package cloudflare
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/cloudflare/cloudflare-go/v4"
@@ -58,10 +57,10 @@ type Config struct {
 // New creates a Client from Config. Returns an error if credentials are missing.
 func New(cfg Config) (*Client, error) {
 	if cfg.ZoneID == "" {
-		return nil, fmt.Errorf("cloudflare: zone_id must not be empty")
+		return nil, &ZoneConfigError{Msg: "cloudflare: zone_id must not be empty"}
 	}
 	if cfg.APIToken == "" {
-		return nil, fmt.Errorf("cloudflare: api_token must not be empty")
+		return nil, &ZoneConfigError{Msg: "cloudflare: api_token must not be empty"}
 	}
 
 	sdkClient := cloudflare.NewClient(option.WithAPIToken(cfg.APIToken))

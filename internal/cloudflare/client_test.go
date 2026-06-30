@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/cache"
 	"github.com/cloudflare/cloudflare-go/v4/option"
 
@@ -103,6 +104,9 @@ func TestNew_MissingZone(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing zone_id")
 	}
+	if _, ok := err.(*cf.ZoneConfigError); !ok {
+		t.Fatalf("expected *ZoneConfigError, got %T: %v", err, err)
+	}
 }
 
 func TestNew_MissingToken(t *testing.T) {
@@ -111,18 +115,30 @@ func TestNew_MissingToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing api_token")
 	}
+	if _, ok := err.(*cf.ZoneConfigError); !ok {
+		t.Fatalf("expected *ZoneConfigError, got %T: %v", err, err)
+	}
 }
 
-func TestRetry_RateLimit(t *testing.T) {
+// asSDKError wraps a status code and optional response in a real
+// *cloudflare.Error so the errors.As(err, &apiErr) branch in retry.go
+// is exercised, including parseRetryAfter(apiErr.Response).
+func asSDKError(statusCode int, resp *http.Response) *cloudflare.Error {
+	return &cloudflare.Error{
+		StatusCode: statusCode,
+		Response:   resp,
+	}
+}
+
+func TestRetry_RateLimit_WithRetryAfter(t *testing.T) {
 	t.Parallel()
-	// Simulate two 429s followed by success.
+	// Simulate two 429s with Retry-After header, followed by success.
 	resp429 := &http.Response{Header: http.Header{"Retry-After": {"0"}}}
-	_ = resp429 // only used for parseRetryAfter; fakePurger error doesn't carry response
 
 	purger := &fakePurger{
 		errors: []error{
-			&fakeAPIError{status: 429},
-			&fakeAPIError{status: 429},
+			asSDKError(429, resp429),
+			asSDKError(429, resp429),
 			nil, // success on third attempt
 		},
 	}
@@ -141,7 +157,7 @@ func TestRetry_500_ThenSuccess(t *testing.T) {
 	t.Parallel()
 	purger := &fakePurger{
 		errors: []error{
-			&fakeAPIError{status: 500},
+			asSDKError(500, nil),
 			nil,
 		},
 	}
@@ -156,10 +172,96 @@ func TestRetry_500_ThenSuccess(t *testing.T) {
 	}
 }
 
-// fakeAPIError mimics cloudflare-go's *cloudflare.Error for retry testing.
-type fakeAPIError struct {
-	status int
+func TestRetry_RateLimit_Exhausted(t *testing.T) {
+	t.Parallel()
+	resp429 := &http.Response{Header: http.Header{"Retry-After": {"0"}}}
+
+	purger := &fakePurger{
+		errors: []error{
+			asSDKError(429, resp429),
+			asSDKError(429, resp429),
+			asSDKError(429, resp429),
+		},
+	}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
+	if err == nil {
+		t.Fatal("expected rate limit error after retries exhausted")
+	}
+	var rlErr *cf.RateLimitError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("expected *RateLimitError, got %T: %v", err, err)
+	}
 }
 
-func (e *fakeAPIError) Error() string   { return http.StatusText(e.status) }
-func (e *fakeAPIError) HTTPStatus() int { return e.status }
+func TestRetry_HTTPDateRetryAfter(t *testing.T) {
+	t.Parallel()
+	// Retry-After as HTTP-date format (2 seconds in the future).
+	future := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
+	respRL := &http.Response{Header: http.Header{"Retry-After": {future}}}
+
+	purger := &fakePurger{
+		errors: []error{
+			asSDKError(429, respRL),
+			nil,
+		},
+	}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
+	if err != nil {
+		t.Fatalf("expected success after retry, got %v", err)
+	}
+	if len(purger.calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(purger.calls))
+	}
+}
+
+func TestRetry_PastHTTPDate_FallsBackToDefault(t *testing.T) {
+	t.Parallel()
+	// Retry-After as an HTTP-date in the past (clock skew scenario).
+	// Should fall back to the default jittered delay, not fire immediately.
+	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
+	respPast := &http.Response{Header: http.Header{"Retry-After": {past}}}
+
+	purger := &fakePurger{
+		errors: []error{
+			asSDKError(429, respPast),
+			nil,
+		},
+	}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
+	if err != nil {
+		t.Fatalf("expected success after retry with past date, got %v", err)
+	}
+	if len(purger.calls) != 2 {
+		t.Fatalf("expected 2 calls (retry with fallback delay), got %d", len(purger.calls))
+	}
+}
+
+func TestErrorType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"rate_limit", &cf.RateLimitError{}, cf.ErrTypeRateLimit},
+		{"zone_config", &cf.ZoneConfigError{Msg: "bad"}, cf.ErrTypeZoneConfig},
+		{"server_error", asSDKError(500, nil), cf.ErrTypeServerError},
+		{"client_error", asSDKError(404, nil), cf.ErrTypeClientError},
+		{"network_error", errors.New("connection refused"), cf.ErrTypeNetworkError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := cf.ErrorType(tc.err)
+			if got != tc.want {
+				t.Fatalf("ErrorType(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}

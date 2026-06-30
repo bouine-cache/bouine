@@ -9,6 +9,39 @@ import (
 // the regex as a plain literal value.
 var metaCharPattern = regexp.MustCompile(`[+*?()|\[\]{}\\$]`)
 
+// Skip reason categories for metric labels. Using fixed categories instead
+// of raw user-supplied patterns prevents unbounded metric cardinality.
+const (
+	SkipCategoryEmpty        = "empty_input"
+	SkipCategoryPathMetachar = "path_regex_metacharacters"
+	SkipCategoryPathSuffix   = "path_regex_suffix_anchor"
+	SkipCategoryHostMetachar = "host_regex_metacharacters"
+	SkipCategoryHostAnchor   = "host_regex_anchors"
+	SkipCategoryCompoundBan  = "compound_ban"
+)
+
+// SkipCategory maps a full SkipReason string to a fixed metric label value.
+// The full reason (which may contain user-supplied patterns) goes into logs;
+// the category goes into Prometheus labels to keep cardinality bounded.
+func SkipCategory(reason string) string {
+	switch {
+	case strings.Contains(reason, "compound ban"):
+		return SkipCategoryCompoundBan
+	case strings.Contains(reason, "path_regex is a suffix anchor"):
+		return SkipCategoryPathSuffix
+	case strings.Contains(reason, "path_regex contains metacharacters"):
+		return SkipCategoryPathMetachar
+	case strings.Contains(reason, "host_regex contains metacharacters"):
+		return SkipCategoryHostMetachar
+	case strings.Contains(reason, "host_regex contains anchors"):
+		return SkipCategoryHostAnchor
+	case strings.Contains(reason, "empty"):
+		return SkipCategoryEmpty
+	default:
+		return "unknown"
+	}
+}
+
 // MapResult holds the result of mapping a bouine invalidation to one or more
 // Cloudflare purge operations.
 type MapResult struct {
@@ -55,19 +88,21 @@ func MapPathRegex(pattern string) MapResult {
 	// Strip leading ^ anchor — CF prefixes are implied anchors.
 	literal := strings.TrimPrefix(pattern, "^")
 
+	// A trailing $ anchor means exact-match, not prefix-match. Check this
+	// before the metacharacter rejection below ($ is itself a metacharacter)
+	// so we can give a more specific skip reason.
+	if strings.HasSuffix(literal, "$") {
+		return MapResult{
+			Skipped:    true,
+			SkipReason: "path_regex is a suffix anchor (ends with $) — cannot map to CF prefix: " + pattern,
+		}
+	}
+
 	// Reject any remaining metacharacters.
 	if metaCharPattern.MatchString(literal) {
 		return MapResult{
 			Skipped:    true,
 			SkipReason: "path_regex contains metacharacters — cannot map to CF prefix: " + pattern,
-		}
-	}
-
-	// Also strip trailing $ anchor if present (literal suffix match).
-	if strings.HasSuffix(literal, "$") {
-		return MapResult{
-			Skipped:    true,
-			SkipReason: "path_regex is a suffix anchor (ends with $) — cannot map to CF prefix: " + pattern,
 		}
 	}
 
@@ -99,8 +134,8 @@ func MapHostRegex(pattern string) MapResult {
 		}
 	}
 
-	// Reject anchors.
-	if strings.ContainsAny(literal, "^$") {
+	// Reject ^ anchor ($ is already caught by the metacharacter check above).
+	if strings.Contains(literal, "^") {
 		return MapResult{
 			Skipped:    true,
 			SkipReason: "host_regex contains anchors — cannot map to CF hostname: " + pattern,

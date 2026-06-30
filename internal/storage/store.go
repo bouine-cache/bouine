@@ -30,3 +30,11 @@ type Store interface {
 	Stats() api.Stats
 	Close(ctx context.Context) error
 }
+
+// KeyLister returns all cache keys in the store. Implemented by HotStore
+// and consumed by the anti-entropy reconciler in full cluster mode.
+//
+// Unstable.
+type KeyLister interface {
+	Keys() []api.Key
+}

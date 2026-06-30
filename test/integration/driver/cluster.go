@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/cmd/bouine/cmd"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 const (
@@ -472,6 +473,14 @@ func (s *ClusterStack) Ban(t *testing.T, n int, hostRegex, pathRegex string) {
 	}
 	body, _ := json.Marshal(payload)
 	s.adminPost(t, n, "/v1/ban", body)
+}
+
+// PeerPurge sends a local-only purge to node n via /v1/peer/purge.
+// Unlike Purge, this does not broadcast to other peers.
+func (s *ClusterStack) PeerPurge(t *testing.T, n int, evt api.PurgeEvent) {
+	t.Helper()
+	body, _ := json.Marshal(evt)
+	s.adminPost(t, n, "/v1/peer/purge", body)
 }
 
 func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) {

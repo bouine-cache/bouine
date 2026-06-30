@@ -546,6 +546,30 @@ func (s *shard) evictPreferWarm() (key api.Key, ok bool) {
 	return s.evict.Evict()
 }
 
+// Keys returns all cache keys currently stored in the hot tier. Used by
+// the anti-entropy reconciler in full cluster mode to compute the diff
+// against peer key sets. The returned slice is unsorted; callers that
+// need determinism must sort it.
+func (h *HotStore) Keys() []api.Key {
+	var totalEntries int
+	for i := range h.shards {
+		s := &h.shards[i]
+		s.mu.RLock()
+		totalEntries += len(s.entries)
+		s.mu.RUnlock()
+	}
+	keys := make([]api.Key, 0, totalEntries)
+	for i := range h.shards {
+		s := &h.shards[i]
+		s.mu.RLock()
+		for k := range s.entries {
+			keys = append(keys, k)
+		}
+		s.mu.RUnlock()
+	}
+	return keys
+}
+
 // KeyHash computes the canonical cache key from a byte slice.
 func KeyHash(b []byte) api.Key {
 	return api.Key(xxhash.Sum64(b))

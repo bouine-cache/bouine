@@ -63,6 +63,7 @@ type runState struct {
 	peerFetcher *cluster.PeerFetcher
 	broadcaster *cluster.Broadcaster
 	peersFn     func() []api.PeerInfo
+	antiEntropy *cluster.AntiEntropy
 
 	cfProp    *cfPropagator
 	seq       *shutdown.Sequencer
@@ -87,12 +88,12 @@ func (e *engine) run(ctx context.Context) error {
 	handler := e.buildDataPlane(rs)
 
 	g := supervised.NewGroup(ctx, e.logger)
-	e.startBackgroundTasks(g, rs)    // rings snapshot, prefetch sitemap crawler, config watcher
-	e.startAdmin(g, ctx, rs)         // admin API, dashboard, peer-fetch handler
-	e.startListeners(g, handler, rs) // HTTP/HTTPS data-plane listeners
-	e.startHealthChecks(g, rs.pools) // active health probes per upstream pool
-	e.startClusterJoin(g, rs)        // gossip join with retry against seed peers
-	e.registerShutdownSteps(g, rs)   // ordered drain: readiness, store flush, cluster leave
+	e.startBackgroundTasks(g, rs, ctx) // rings snapshot, prefetch sitemap crawler, config watcher, anti-entropy
+	e.startAdmin(g, ctx, rs)           // admin API, dashboard, peer-fetch handler
+	e.startListeners(g, handler, rs)   // HTTP/HTTPS data-plane listeners
+	e.startHealthChecks(g, rs.pools)   // active health probes per upstream pool
+	e.startClusterJoin(g, rs)          // gossip join with retry against seed peers
+	e.registerShutdownSteps(g, rs)     // ordered drain: readiness, store flush, cluster leave
 
 	return g.Wait()
 }
@@ -132,7 +133,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	rings, snapshotPath := e.initRings()
 	dpMetrics.Rings = rings
 
-	clusterNode, peerFetcher, broadcaster, peersFn := e.initCluster(ctx, store, rings)
+	clusterNode, peerFetcher, broadcaster, peersFn, ae := e.initCluster(ctx, store, rings)
 
 	cfProp := e.initCloudflare(dpMetrics)
 
@@ -147,6 +148,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 		peerFetcher:  peerFetcher,
 		broadcaster:  broadcaster,
 		peersFn:      peersFn,
+		antiEntropy:  ae,
 		cfProp:       cfProp,
 		seq:          shutdown.NewSequencer(e.logger),
 	}
@@ -194,15 +196,15 @@ func (e *engine) initCluster(
 	ctx context.Context,
 	store storage.Store,
 	rings *observability.Rings,
-) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo) {
+) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.AntiEntropy) {
 	if !e.cfg.Cluster.Enabled || e.cfg.Listen.Cluster == "" {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	clusterNode, err := e.buildCluster(ctx)
 	if err != nil {
 		e.logger.Error("cluster init failed", "error", err)
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	var clusterTLS *tls.Config
@@ -210,7 +212,7 @@ func (e *engine) initCluster(
 		clusterTLS, err = buildClusterTLSConfig(e.cfg.Cluster.TLS)
 		if err != nil {
 			e.logger.Error("cluster TLS failed", "error", err)
-			return nil, nil, nil, nil
+			return nil, nil, nil, nil, nil
 		}
 	}
 
@@ -235,12 +237,21 @@ func (e *engine) initCluster(
 			return err
 		},
 	})
+
+	var ae *cluster.AntiEntropy
 	if e.cfg.Cluster.Mode == config.ClusterModeFull {
 		clusterNode.SetReplicator(cluster.Replicator{
 			StoreObject: func(ctx context.Context, obj *api.Object) error {
 				return store.Put(ctx, obj.Key, obj)
 			},
 		})
+		keyLister, ok := any(store).(storage.KeyLister)
+		if ok {
+			ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
+				Interval: e.cfg.Cluster.AntiEntropyInterval,
+				Logger:   e.logger,
+			}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, store, clusterNode.Members, clusterMetrics)
+		}
 	}
 
 	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
@@ -251,7 +262,7 @@ func (e *engine) initCluster(
 		e.logger.Warn("cluster.mode 'full': memory scales linearly with cluster size")
 	}
 
-	return clusterNode, peerFetcher, broadcaster, clusterNode.Members
+	return clusterNode, peerFetcher, broadcaster, clusterNode.Members, ae
 }
 
 func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics) *cfPropagator {
@@ -284,7 +295,7 @@ func (e *engine) buildDataPlane(rs *runState) http.Handler {
 	return e.buildHandler(rs)
 }
 
-func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
+func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx context.Context) {
 	g.Go("rings", func(rCtx context.Context) error {
 		rs.rings.Start(rCtx, rs.snapshotPath)
 		return nil
@@ -313,6 +324,9 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 			}
 		}
 	})
+	if rs.antiEntropy != nil {
+		rs.antiEntropy.Start(ctx)
+	}
 }
 
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
@@ -404,11 +418,20 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 		},
 		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store),
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
+		PeerKeysHandler:    e.buildPeerKeysHandler(rs.store),
 		DashboardHandler:   dashMux,
 		FaviconHandler:     webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	g.Go("admin", srv.Serve)
+}
+
+func (e *engine) buildPeerKeysHandler(store storage.Store) http.Handler {
+	keyLister, ok := any(store).(storage.KeyLister)
+	if !ok {
+		return nil
+	}
+	return cluster.NewPeerKeysHandler(keyLister, e.cfg.Cluster.NodeName)
 }
 
 // buildDashboard wires and returns the dashboard ServeMux.

@@ -17,9 +17,10 @@ import (
 	"github.com/thylong/bouine/internal/testutil/tlsutil"
 )
 
-// waitForPort polls until addr accepts TCP connections or the timeout expires.
-func waitForPort(t *testing.T, addr string, timeout time.Duration) {
+// waitForPort polls until addr accepts TCP connections or the 3s timeout expires.
+func waitForPort(t *testing.T, addr string) {
 	t.Helper()
+	const timeout = 3 * time.Second
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
@@ -188,7 +189,9 @@ routes:
 	errCh := make(chan error, 1)
 	go func() { errCh <- root.ExecuteContext(ctx) }()
 
-	waitForPort(t, "127.0.0.1:18092", 3*time.Second)
+	waitForPort(t, "127.0.0.1:18090")
+	waitForPort(t, "127.0.0.1:18091")
+	waitForPort(t, "127.0.0.1:18092")
 
 	// HTTP/1.1 proxy test.
 	resp, err := http.Get("http://127.0.0.1:18090/hello")

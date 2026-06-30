@@ -57,7 +57,7 @@ routes:
 	errCh := make(chan error, 1)
 	go func() { errCh <- root.ExecuteContext(ctx) }()
 
-	waitForPort(t, "127.0.0.1:18121", 3*time.Second)
+	waitForPort(t, "127.0.0.1:18121")
 
 	reqDone := make(chan error, 1)
 	go func() {

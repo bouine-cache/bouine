@@ -56,8 +56,10 @@ func (d tryDecision) next(err error) tryDecision {
 	if statusCode == http.StatusTooManyRequests {
 		if d.attempt < maxRetries {
 			delay := retryAfter
-			if delay == 0 {
+			if delay <= 0 {
 				delay = withJitter(d.defaultDelay)
+			} else {
+				delay = withJitter(delay)
 			}
 			return tryDecision{
 				shouldTry: true, attempt: d.attempt + 1,

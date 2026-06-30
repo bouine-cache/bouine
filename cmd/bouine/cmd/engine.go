@@ -66,6 +66,7 @@ type runState struct {
 	antiEntropy *cluster.AntiEntropy
 
 	cfProp    *cfPropagator
+	cfCancel  context.CancelFunc
 	seq       *shutdown.Sequencer
 	listeners []*server.Listener
 }
@@ -135,7 +136,8 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 
 	clusterNode, peerFetcher, broadcaster, peersFn, ae := e.initCluster(ctx, store, rings)
 
-	cfProp := e.initCloudflare(dpMetrics)
+	cfCtx, cfCancel := context.WithCancel(context.Background())
+	cfProp := e.initCloudflare(dpMetrics, cfCtx) //nolint:contextcheck // detached lifecycle for CF async goroutines
 
 	rs := &runState{
 		store:        store,
@@ -150,6 +152,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 		peersFn:      peersFn,
 		antiEntropy:  ae,
 		cfProp:       cfProp,
+		cfCancel:     cfCancel,
 		seq:          shutdown.NewSequencer(e.logger),
 	}
 	return rs, shutdownTracer, nil
@@ -265,7 +268,7 @@ func (e *engine) initCluster(
 	return clusterNode, peerFetcher, broadcaster, clusterNode.Members, ae
 }
 
-func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics) *cfPropagator {
+func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics, closeCtx context.Context) *cfPropagator {
 	cfAPIToken := e.cfg.Cloudflare.APIToken
 	if cfAPIToken == "" {
 		cfAPIToken = os.Getenv("CF_API_TOKEN")
@@ -287,7 +290,7 @@ func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics) *cfPr
 				"propagate", e.cfg.Cloudflare.Propagate)
 		}
 	}
-	return buildCFPropagator(cfInvalidator, e.cfg.Cloudflare, dpMetrics, e.logger)
+	return buildCFPropagator(cfInvalidator, e.cfg.Cloudflare, dpMetrics, e.logger, closeCtx)
 }
 
 // buildDataPlane assembles the data-plane handler chain.
@@ -583,6 +586,12 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 	rs.seq.AddStep("flush-store", 10*time.Second, func(ctx context.Context) error {
 		return rs.store.Close(ctx)
 	})
+	if rs.cfProp != nil {
+		rs.seq.AddStep("drain-cloudflare", 5*time.Second, func(ctx context.Context) error {
+			rs.cfCancel()
+			return rs.cfProp.Close(ctx)
+		})
+	}
 	if rs.clusterNode != nil {
 		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
 			return rs.clusterNode.Leave(context.WithoutCancel(ctx))

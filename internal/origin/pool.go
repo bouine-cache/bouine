@@ -8,7 +8,6 @@ package origin
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/thylong/bouine/internal/observability"
 )
 
 // Pool is a named set of upstream targets with round-robin selection
@@ -27,7 +28,7 @@ type Pool struct {
 	Name    string
 	targets []*Target
 	next    atomic.Uint64
-	logger  *slog.Logger
+	logger  observability.Logger
 	mu      sync.RWMutex
 }
 
@@ -43,7 +44,7 @@ type Target struct {
 type PoolConfig struct {
 	Name    string
 	Targets []string
-	Logger  *slog.Logger
+	Logger  observability.Logger
 
 	// Passive health: eject after this many consecutive 5xx.
 	// Zero disables passive health.
@@ -63,7 +64,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		return nil, fmt.Errorf("origin: pool %q has no targets", cfg.Name)
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	p := &Pool{

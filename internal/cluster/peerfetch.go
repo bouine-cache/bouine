@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -51,6 +52,7 @@ type PeerFetcher struct {
 	latN         atomic.Int64
 	hopLimitHits atomic.Int64
 	maxBodyBytes int64
+	logger       observability.Logger
 	// Prometheus counters — registered if a non-nil registry is passed.
 	pHits     prometheus.Counter
 	pMisses   prometheus.Counter
@@ -67,6 +69,12 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // mTLS credentials. If nil a plain HTTP client is used (test-only).
 // reg, if non-nil, receives Prometheus metric registration.
 func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher {
+	return NewPeerFetcherWithLogger(tlsCfg, reg, nil)
+}
+
+// NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
+// If logger is nil, a SampledLogger wrapping slog.Default() is used.
+func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger) *PeerFetcher {
 	transport := &http.Transport{
 		ForceAttemptHTTP2: true,
 		TLSClientConfig:   tlsCfg,
@@ -77,6 +85,10 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher 
 			Timeout:   peerFetchTimeout,
 		},
 		maxBodyBytes: maxPeerFetchBytes,
+		logger:       logger,
+	}
+	if f.logger == nil {
+		f.logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if reg != nil {
 		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
@@ -102,6 +114,34 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher 
 	return f
 }
 
+// buildPeerRequest constructs the HTTP request for a peer-fetch RPC.
+// Extracted from Fetch to keep complexity under gocyclo/funlen limits.
+func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) (*http.Request, error) {
+	fetchAddr := peer.AdminAddr
+	if fetchAddr == "" {
+		fetchAddr = peer.Addr
+	}
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+	url := scheme + "://" + fetchAddr + PeerFetchPath
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("peer fetch marshal: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("peer fetch request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
+	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
+	return httpReq, nil
+}
+
 // Fetch asks a peer for a cached object. Returns nil, nil on a cache
 // miss at the peer; returns an error only on network/protocol failure.
 func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
@@ -114,32 +154,12 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	req.Hops++
 
-	body, err := json.Marshal(req)
+	useTLS := f.client.Transport.(*http.Transport).TLSClientConfig != nil
+	httpReq, err := buildPeerRequest(ctx, peer, req, useTLS)
 	if err != nil {
-		return nil, fmt.Errorf("peer fetch marshal: %w", err)
+		return nil, err
 	}
 
-	// Peer-fetch RPCs are served on the peer's admin port (where
-	// /v1/peer/fetch is registered). The cluster gossip port (peer.Addr)
-	// is used for memberlist only; HTTP peer fetch uses peer.AdminAddr.
-	fetchAddr := peer.AdminAddr
-	if fetchAddr == "" {
-		fetchAddr = peer.Addr // fallback for nodes without AdminAddr
-	}
-	url := "http://" + fetchAddr + PeerFetchPath
-	if f.client.Transport.(*http.Transport).TLSClientConfig != nil {
-		url = "https://" + fetchAddr + PeerFetchPath
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("peer fetch request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
-	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
-
-	// Measure the full RPC round-trip: request send, response, and decode.
 	start := time.Now()
 	resp, err := f.client.Do(httpReq)
 	if err != nil {
@@ -148,6 +168,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
+		f.logger.Info("peer fetch miss",
+			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
 		return nil, nil // peer miss
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -163,6 +185,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 		if f.pMisses != nil {
 			f.pMisses.Inc()
 		}
+		f.logger.Info("peer fetch miss",
+			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
 		return nil, nil
 	}
 	f.hits.Add(1)
@@ -175,13 +199,17 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if f.pDuration != nil {
 		f.pDuration.Observe(float64(latMs) / 1000)
 	}
+	f.logger.Info("peer fetch hit",
+		"key", req.Key, "peer", peer.Addr, "hops", req.Hops,
+		"dur_ms", latMs)
 	return fetchResp.Object, nil
 }
 
 // PeerFetchHandler returns an http.Handler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
 type PeerFetchHandler struct {
-	store PeerStore
+	store  PeerStore
+	logger observability.Logger
 }
 
 // PeerStore is the minimal storage interface needed by peer fetch.
@@ -192,7 +220,17 @@ type PeerStore interface {
 
 // NewPeerFetchHandler creates a peer-fetch handler backed by store.
 func NewPeerFetchHandler(store PeerStore) *PeerFetchHandler {
-	return &PeerFetchHandler{store: store}
+	return NewPeerFetchHandlerWithLogger(store, nil)
+}
+
+// NewPeerFetchHandlerWithLogger creates a peer-fetch handler with a
+// structured logger. If logger is nil, a SampledLogger wrapping
+// slog.Default() is used.
+func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger) *PeerFetchHandler {
+	if logger == nil {
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+	}
+	return &PeerFetchHandler{store: store, logger: logger}
 }
 
 // ServeHTTP handles peer fetch requests.
@@ -226,10 +264,12 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	obj, err := h.store.Get(r.Context(), req.Key)
 	if err != nil || obj == nil {
+		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
+	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
 }

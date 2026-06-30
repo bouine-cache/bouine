@@ -17,7 +17,6 @@ import (
 	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/accesslog"
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
@@ -107,7 +106,7 @@ func (e *engine) buildCluster(ctx context.Context) (*cluster.Cluster, error) {
 		AdvertiseAddr: advertiseAddr,
 		Join:          e.cfg.Cluster.Join,
 		PeerInfo:      peerInfo,
-		Logger:        observability.NewSampledLogger(e.logger, observability.DefaultKeySampleRate),
+		Logger:        e.logger,
 		Mode:          e.cfg.Cluster.Mode,
 	})
 }

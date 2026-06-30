@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,7 +20,7 @@ type cfPropagator struct {
 	inv     bouinecf.Invalidator
 	cfg     config.CloudflareConfig
 	metrics *observability.DataPlaneMetrics
-	logger  *slog.Logger
+	logger  observability.Logger
 
 	lastErr     atomic.Pointer[string]
 	lastSuccess atomic.Pointer[time.Time]
@@ -37,7 +36,7 @@ func buildCFPropagator(
 	inv bouinecf.Invalidator,
 	cfg config.CloudflareConfig,
 	metrics *observability.DataPlaneMetrics,
-	logger *slog.Logger,
+	logger observability.Logger,
 	closeCtx context.Context,
 ) *cfPropagator {
 	return &cfPropagator{

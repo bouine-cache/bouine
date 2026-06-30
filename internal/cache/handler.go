@@ -22,7 +22,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -33,6 +32,8 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/internal/observability/responsewriter"
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
@@ -131,7 +132,7 @@ type Handler struct {
 	upstream         http.Handler
 	store            storage.Store
 	flight           singleflight.Group
-	logger           *slog.Logger
+	logger           observability.Logger
 	negativeTTL      time.Duration
 	jitterPercent    int
 	stayinAlive      bool
@@ -170,7 +171,7 @@ type Handler struct {
 type HandlerConfig struct {
 	Upstream http.Handler
 	Store    storage.Store
-	Logger   *slog.Logger
+	Logger   observability.Logger
 	// NegativeTTL enables caching of 404/405/410/501 responses.
 	NegativeTTL time.Duration
 	// JitterPercent adds random ±N% to TTLs (0–50). 0 disables.
@@ -244,7 +245,7 @@ type HandlerConfig struct {
 // NewHandler creates a caching handler.
 func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	h := &Handler{
 		upstream:         cfg.Upstream,
@@ -300,6 +301,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// functions to avoid a second time.Now() syscall per hit.
 	now := time.Now()
 	key, obj := h.lookup(r)
+	if rw, ok := w.(*responsewriter.ResponseWriter); ok {
+		rw.SetCacheKey(key)
+	}
 	disp := Evaluate(r, obj, now)
 
 	switch disp.Decision {

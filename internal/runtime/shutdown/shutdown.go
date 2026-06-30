@@ -5,16 +5,17 @@ package shutdown
 
 import (
 	"context"
-	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/thylong/bouine/internal/observability"
 )
 
 // Sequencer runs an ordered series of shutdown steps, each with a
 // time budget. Steps run in the order they are registered.
 type Sequencer struct {
 	steps  []step
-	logger *slog.Logger
+	logger observability.Logger
 	ready  atomic.Bool
 }
 
@@ -25,9 +26,9 @@ type step struct {
 }
 
 // NewSequencer creates a Sequencer. It starts in the "ready" state.
-func NewSequencer(logger *slog.Logger) *Sequencer {
+func NewSequencer(logger observability.Logger) *Sequencer {
 	if logger == nil {
-		logger = slog.Default()
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	s := &Sequencer{logger: logger}
 	s.ready.Store(true)

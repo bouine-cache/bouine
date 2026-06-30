@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -26,7 +25,7 @@ type Config struct {
 	PeersFn      func() []api.PeerInfo
 	SelfAddr     string
 	Token        string
-	Logger       *slog.Logger
+	Logger       observability.Logger
 	SnapshotPath string
 	// Version is the build version shown in the dashboard sidebar.
 	Version string
@@ -64,7 +63,7 @@ type Handler struct {
 // New creates and registers dashboard routes on mux.
 func New(cfg Config, mux *http.ServeMux) *Handler {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if cfg.StartTime.IsZero() {
 		cfg.StartTime = time.Now()

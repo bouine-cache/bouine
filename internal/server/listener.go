@@ -7,12 +7,12 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/tracing"
 )
 
@@ -20,7 +20,7 @@ import (
 type ListenerConfig struct {
 	Addr      string
 	Handler   http.Handler
-	Logger    *slog.Logger
+	Logger    observability.Logger
 	TLSConfig *tls.Config
 }
 
@@ -31,7 +31,7 @@ type ListenerConfig struct {
 type Listener struct {
 	inner    *http.Server
 	name     string
-	logger   *slog.Logger
+	logger   observability.Logger
 	resolved atomic.Value // stores string
 }
 
@@ -40,7 +40,7 @@ type Listener struct {
 // Stable.
 func NewHTTP(cfg ListenerConfig) *Listener {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	var protos http.Protocols
@@ -65,7 +65,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 // Stable.
 func NewHTTPS(cfg ListenerConfig) *Listener {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if cfg.TLSConfig == nil {
 		cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}

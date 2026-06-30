@@ -104,11 +104,15 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 	if body, err := json.Marshal(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
+	peerCount := len(b.cluster.Members())
+	if peerCount > 0 {
+		peerCount--
+	}
 	b.logger.Info("gossiped purge to peers",
 		"key", evt.Key,
 		"issuer", evt.Issuer,
 		"seq", evt.Seq,
-		"peers", len(b.cluster.Members())-1,
+		"peers", peerCount,
 	)
 }
 
@@ -158,10 +162,14 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	if body, err := json.Marshal(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
+	peerCount := len(b.cluster.Members())
+	if peerCount > 0 {
+		peerCount--
+	}
 	b.logger.Info("gossiped ban to peers",
 		"issuer", evt.Issuer,
 		"seq", evt.Seq,
-		"peers", len(b.cluster.Members())-1,
+		"peers", peerCount,
 	)
 }
 
@@ -207,11 +215,15 @@ func (b *Broadcaster) BroadcastReplicate(_ context.Context, obj *api.Object) {
 		b.metrics.IncReplicationSent()
 		b.metrics.AddReplicationBytes("sent", float64(len(body)))
 	}
+	peerCount := len(b.cluster.Members())
+	if peerCount > 0 {
+		peerCount--
+	}
 	b.logger.Info("gossiped replication to peers",
 		"key", obj.Key,
 		"issuer", evt.Issuer,
 		"seq", evt.Seq,
-		"peers", len(b.cluster.Members())-1,
+		"peers", peerCount,
 	)
 }
 

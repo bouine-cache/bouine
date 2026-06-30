@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"sort"
 	"sync"
@@ -24,16 +23,16 @@ type Aggregator struct {
 	selfAddr string
 	token    string
 	timeout  time.Duration
-	logger   *slog.Logger
+	logger   observability.Logger
 
 	mu        sync.Mutex
 	lastKnown map[string]observability.MetricsSummary // peer name → last successful summary
 }
 
 // NewAggregator creates an Aggregator.
-func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, selfAddr, token string, logger *slog.Logger) *Aggregator {
+func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, selfAddr, token string, logger observability.Logger) *Aggregator {
 	if logger == nil {
-		logger = slog.Default()
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	return &Aggregator{
 		rings:     rings,

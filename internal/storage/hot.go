@@ -11,6 +11,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/storage/sieve"
 	"github.com/thylong/bouine/pkg/api"
 )
@@ -44,6 +45,7 @@ type HotStore struct {
 	mask     uint64
 	maxBytes int64
 	stats    hotStats
+	logger   observability.Logger
 	// activeBans is the lazy ban list. Each entry was added via Ban() and
 	// is checked against objects returned by Get(). Objects stored AFTER
 	// the ban's CreatedAt are not subject to it (RFC 9111 §4.4 semantics).
@@ -88,6 +90,50 @@ type hotEntry struct {
 	hasWarm bool
 }
 
+// evictionLog is a deferred log record collected under the shard lock
+// and flushed after the lock is released. Warm-backed evictions are
+// Info (sampled by key); evictions without warm backup are Warn
+// (never sampled — signals potential data loss).
+type evictionLog struct {
+	key     api.Key
+	reason  string
+	hadWarm bool
+	size    int64
+	varyKey string
+}
+
+func (h *HotStore) flushEvictionLogs(logs []evictionLog) {
+	for _, e := range logs {
+		attrs := []any{
+			"reason", e.reason,
+			"had_warm_backup", e.hadWarm,
+			"size_bytes", e.size,
+			"key", e.key,
+		}
+		if e.varyKey != "" {
+			attrs = append(attrs, "vary_key", e.varyKey)
+		}
+		if e.hadWarm {
+			h.logger.Info("evicted from hot store", attrs...)
+		} else {
+			h.logger.Warn("evicted from hot store", attrs...)
+		}
+	}
+}
+
+func recordEviction(logs *[]evictionLog, key api.Key, entry *hotEntry, reason string) {
+	if entry == nil || entry.obj == nil {
+		return
+	}
+	*logs = append(*logs, evictionLog{
+		key:     key,
+		reason:  reason,
+		hadWarm: entry.hasWarm,
+		size:    objSize(entry.obj),
+		varyKey: entry.obj.VaryKey,
+	})
+}
+
 type hotStats struct {
 	hits      atomic.Int64
 	misses    atomic.Int64
@@ -106,6 +152,9 @@ type HotConfig struct {
 	// default (30 s). A negative value disables background reaping
 	// entirely (lazy expiry on Get remains).
 	ReaperInterval time.Duration
+	// Logger receives eviction records. Defaults to a SampledLogger
+	// wrapping slog.Default().
+	Logger observability.Logger
 }
 
 // NewHotStore creates a sharded in-memory store and starts the
@@ -137,6 +186,10 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		evictSignal:    make(chan int, n),
 		reaperInterval: reaperInterval,
 		done:           make(chan struct{}),
+		logger:         cfg.Logger,
+	}
+	if h.logger == nil {
+		h.logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	go h.sweeper()
 	if cfg.ReaperInterval >= 0 {
@@ -221,6 +274,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	shardIdx := int(uint64(key) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
+	var logs []evictionLog
 	s.mu.Lock()
 	stillOver := false
 	for range inlineEvictCap {
@@ -232,6 +286,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 			break
 		}
 		if old, exists := s.entries[evKey]; exists {
+			recordEviction(&logs, evKey, old, "inline_overshoot")
 			s.bytes -= objSize(old.obj)
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
@@ -256,6 +311,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	s.entries[key] = &hotEntry{obj: obj, sieve: se}
 	s.bytes += size
 	s.mu.Unlock()
+	h.flushEvictionLogs(logs)
 
 	// Signal the sweeper if the shard is still over budget after the
 	// inline cap. Non-blocking: a full channel means a signal is already
@@ -296,8 +352,8 @@ func (h *HotStore) reapExpired(now time.Time) {
 
 func (h *HotStore) reapShard(idx int, now time.Time) {
 	s := &h.shards[idx]
+	var logs []evictionLog
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	deadline := time.Now().Add(reaperShardBudget)
 	for key, e := range s.entries {
@@ -306,12 +362,15 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 		}
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
+			recordEviction(&logs, key, e, "expired")
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
 			h.stats.evictions.Add(1)
 		}
 	}
+	s.mu.Unlock()
+	h.flushEvictionLogs(logs)
 }
 
 // sweeper is the background goroutine that drains overshoot evictions
@@ -324,6 +383,7 @@ func (h *HotStore) sweeper() {
 			return
 		case idx := <-h.evictSignal:
 			s := &h.shards[idx]
+			var logs []evictionLog
 			s.mu.Lock()
 			for s.bytes > perShardMax && s.evict.Len() > 0 {
 				evKey, ok := s.evictPreferWarm()
@@ -331,12 +391,14 @@ func (h *HotStore) sweeper() {
 					break
 				}
 				if old, exists := s.entries[evKey]; exists {
+					recordEviction(&logs, evKey, old, "sweeper_overshoot")
 					s.bytes -= objSize(old.obj)
 					delete(s.entries, evKey)
 					h.stats.evictions.Add(1)
 				}
 			}
 			s.mu.Unlock()
+			h.flushEvictionLogs(logs)
 		}
 	}
 }

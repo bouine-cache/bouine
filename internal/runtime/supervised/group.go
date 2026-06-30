@@ -19,8 +19,9 @@ package supervised
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"runtime/debug"
+
+	"github.com/thylong/bouine/internal/observability"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -32,7 +33,7 @@ import (
 type Group struct {
 	eg     *errgroup.Group
 	ctx    context.Context //nolint:containedctx // group lifetime is the context
-	logger *slog.Logger
+	logger observability.Logger
 }
 
 // NewGroup returns a Group whose derived context is cancelled when the
@@ -40,9 +41,9 @@ type Group struct {
 // back to slog.Default.
 //
 // Stable.
-func NewGroup(ctx context.Context, logger *slog.Logger) *Group {
+func NewGroup(ctx context.Context, logger observability.Logger) *Group {
 	if logger == nil {
-		logger = slog.Default()
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	eg, gctx := errgroup.WithContext(ctx)
 	return &Group{eg: eg, ctx: gctx, logger: logger}

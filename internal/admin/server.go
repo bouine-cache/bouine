@@ -12,7 +12,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"runtime"
@@ -33,7 +32,7 @@ type Config struct {
 	// ":9000".
 	Addr string
 	// Logger is the structured logger. Required.
-	Logger *slog.Logger
+	Logger observability.Logger
 	// ReadyFn reports whether the server is ready to serve traffic.
 	// nil is treated as "always ready".
 	ReadyFn func() bool
@@ -106,7 +105,7 @@ func New(cfg Config) *Server {
 		cfg.Addr = ":9000"
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	mux := http.NewServeMux()

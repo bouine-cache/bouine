@@ -2,10 +2,10 @@ package storage
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/storage/wal"
 	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
@@ -23,7 +23,7 @@ type TieredStore struct {
 	hot    *HotStore
 	warm   *warm.Store
 	wal    *wal.Log
-	logger *slog.Logger
+	logger observability.Logger
 
 	// bodyThreshold: objects with Body <= this stay hot-only.
 	bodyThreshold int64
@@ -39,7 +39,7 @@ type TieredConfig struct {
 	Hot    HotConfig
 	Warm   *warm.Config // nil = no warm tier (ephemeral mode)
 	WALDir string       // empty = no WAL
-	Logger *slog.Logger
+	Logger observability.Logger
 
 	// BodyThreshold controls the hot/warm admission boundary. Objects
 	// with BodySize <= this value stay in the hot tier only. Objects
@@ -53,7 +53,7 @@ type TieredConfig struct {
 // WAL is replayed on open to rebuild the warm-tier index.
 func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if cfg.BodyThreshold <= 0 {
 		cfg.BodyThreshold = 64 << 10

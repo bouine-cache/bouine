@@ -1,9 +1,10 @@
 package server
 
 import (
-	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/thylong/bouine/internal/observability"
 )
 
 // Router is the data-plane HTTP handler. It matches an incoming request
@@ -12,7 +13,7 @@ import (
 // Stable.
 type Router struct {
 	routes  []routeEntry
-	logger  *slog.Logger
+	logger  observability.Logger
 	metrics *RouterMetrics
 }
 
@@ -33,7 +34,7 @@ type RouterMetrics struct {
 
 // RouterConfig configures a Router.
 type RouterConfig struct {
-	Logger  *slog.Logger
+	Logger  observability.Logger
 	Metrics *RouterMetrics
 }
 
@@ -41,7 +42,7 @@ type RouterConfig struct {
 // added; the first match wins.
 func NewRouter(cfg RouterConfig) *Router {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = &RouterMetrics{}

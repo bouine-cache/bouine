@@ -3,10 +3,14 @@
 package integration_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/thylong/bouine/internal/cache"
+	"github.com/thylong/bouine/pkg/api"
 	"github.com/thylong/bouine/test/integration/driver"
 )
 
@@ -144,6 +148,69 @@ func TestFull_ReplicationConvergence(t *testing.T) {
 	}
 	t.Logf("replication: sent=%.0f recv1=%.0f recv2=%.0f bytes_sent=%.0f",
 		sent, recv1, recv2, bytesSent)
+}
+
+// --- Anti-entropy reconciliation ---
+
+func TestFull_AntiEntropyKeySetExchange(t *testing.T) {
+	s := sharedCluster(t, "full")
+
+	r := s.GetWithHost(t, 0, "/hit?x=full-ae-keys", crossNodeHost)
+	_ = r
+
+	driver.RetryUntil(t, driver.ReplicationDeadline, 500*time.Millisecond, func() bool {
+		return s.GetWithHost(t, 1, "/hit?x=full-ae-keys", crossNodeHost).Header.Get("X-Cache") == "HIT" &&
+			s.GetWithHost(t, 2, "/hit?x=full-ae-keys", crossNodeHost).Header.Get("X-Cache") == "HIT"
+	})
+
+	for i := range s.Nodes {
+		url := s.Nodes[i].AdminAddr + "/v1/peer/keys"
+		resp, err := http.Get(url) //nolint:noctx
+		if err != nil {
+			t.Fatalf("node %d: GET /v1/peer/keys: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("node %d: status %d", i, resp.StatusCode)
+		}
+		var ks api.KeySet
+		if err := json.NewDecoder(resp.Body).Decode(&ks); err != nil {
+			t.Fatalf("node %d: decode: %v", i, err)
+		}
+		_ = resp.Body.Close()
+		if len(ks.Keys) == 0 {
+			t.Errorf("node %d: key set is empty", i)
+		}
+	}
+}
+
+func TestFull_AntiEntropyReconcilesMissingKeys(t *testing.T) {
+	s := sharedCluster(t, "full")
+
+	path := "/hit?x=full-ae-reconcile"
+	r := s.GetWithHost(t, 0, path, crossNodeHost)
+	_ = r
+
+	driver.RetryUntil(t, driver.ReplicationDeadline, 500*time.Millisecond, func() bool {
+		return s.GetWithHost(t, 1, path, crossNodeHost).Header.Get("X-Cache") == "HIT" &&
+			s.GetWithHost(t, 2, path, crossNodeHost).Header.Get("X-Cache") == "HIT"
+	})
+
+	purgeURL := "http://" + driver.CrossNodeHost + path
+	key := cache.BuildKeyFromURL(purgeURL)
+	s.PeerPurge(t, 1, api.PurgeEvent{
+		Type: api.GossipTypePurge,
+		Key:  key,
+	})
+
+	resp := s.GetWithHost(t, 1, path, crossNodeHost)
+	if resp.Header.Get("X-Cache") == "HIT" {
+		t.Fatal("node 1 should be missing the key after local purge")
+	}
+
+	driver.RetryUntil(t, 90*time.Second, 2*time.Second, func() bool {
+		resp := s.GetWithHost(t, 1, path, crossNodeHost)
+		return resp.Header.Get("X-Cache") == "HIT"
+	})
 }
 
 // --- Destructive test: runs last in this file ---

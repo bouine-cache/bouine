@@ -1,0 +1,208 @@
+package cluster
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/thylong/bouine/pkg/api"
+)
+
+type mockKeySource struct {
+	keys []api.Key
+}
+
+func (m *mockKeySource) Keys() []api.Key {
+	return m.keys
+}
+
+type mockBackfiller struct {
+	objs  map[api.Key]*api.Object
+	calls atomic.Int32
+}
+
+func (m *mockBackfiller) Fetch(_ context.Context, _ api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
+	m.calls.Add(1)
+	return m.objs[req.Key], nil
+}
+
+type mockStorer struct {
+	puts atomic.Int32
+}
+
+func (m *mockStorer) Put(_ context.Context, _ api.Key, _ *api.Object) error {
+	m.puts.Add(1)
+	return nil
+}
+
+func TestPeerKeysHandler_ServesKeySet(t *testing.T) {
+	t.Parallel()
+	keys := []api.Key{1, 2, 3}
+	h := NewPeerKeysHandler(&mockKeySource{keys: keys}, "test-node")
+	req := httptest.NewRequest(http.MethodGet, "/v1/peer/keys", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var ks api.KeySet
+	if err := json.Unmarshal(rec.Body.Bytes(), &ks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ks.NodeName != "test-node" {
+		t.Errorf("node_name = %q, want test-node", ks.NodeName)
+	}
+	if len(ks.Keys) != 3 {
+		t.Fatalf("keys = %d, want 3", len(ks.Keys))
+	}
+}
+
+func TestPeerKeysHandler_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
+	h := NewPeerKeysHandler(&mockKeySource{}, "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/keys", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestAntiEntropy_ReconcileBackfillsAndStores(t *testing.T) {
+	t.Parallel()
+	localKeys := []api.Key{1, 2, 3}
+	peerKeys := []uint64{1, 2, 3, 4, 5}
+	obj4 := &api.Object{Key: 4, Body: []byte("d")}
+	obj5 := &api.Object{Key: 5, Body: []byte("e")}
+
+	peer := api.PeerInfo{Name: "peer-1", AdminAddr: ""}
+
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			ks := api.KeySet{NodeName: "peer-1", Keys: peerKeys}
+			_ = json.NewEncoder(w).Encode(ks)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			var req api.PeerFetchRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if obj, ok := map[api.Key]*api.Object{4: obj4, 5: obj5}[req.Key]; ok {
+				_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer peerSrv.Close()
+
+	peer.AdminAddr = peerSrv.Listener.Addr().String()
+
+	bf := &mockBackfiller{objs: map[api.Key]*api.Object{4: obj4, 5: obj5}}
+	ks := &mockKeySource{keys: localKeys}
+	st := &mockStorer{}
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:      50 * time.Millisecond,
+		FetchTimeout:  2 * time.Second,
+		BackfillLimit: 0,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bf.calls.Load() >= 2 && st.puts.Load() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	if got := bf.calls.Load(); got < 2 {
+		t.Fatalf("backfill fetch calls = %d, want >= 2", got)
+	}
+	if got := st.puts.Load(); got < 2 {
+		t.Fatalf("store puts = %d, want >= 2 (objects must be stored, not just fetched)", got)
+	}
+}
+
+func TestAntiEntropy_NoMissingKeysNoBackfill(t *testing.T) {
+	t.Parallel()
+	localKeys := []api.Key{1, 2, 3}
+	peerKeys := []uint64{1, 2, 3}
+
+	peer := api.PeerInfo{Name: "peer-1"}
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ks := api.KeySet{NodeName: "peer-1", Keys: peerKeys}
+		_ = json.NewEncoder(w).Encode(ks)
+	}))
+	defer peerSrv.Close()
+	peer.AdminAddr = peerSrv.Listener.Addr().String()
+
+	bf := &mockBackfiller{objs: map[api.Key]*api.Object{}}
+	ks := &mockKeySource{keys: localKeys}
+	st := &mockStorer{}
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:     50 * time.Millisecond,
+		FetchTimeout: 2 * time.Second,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if got := bf.calls.Load(); got != 0 {
+		t.Fatalf("backfill calls = %d, want 0", got)
+	}
+	if got := st.puts.Load(); got != 0 {
+		t.Fatalf("store puts = %d, want 0", got)
+	}
+}
+
+func TestAntiEntropy_SkipsSelf(t *testing.T) {
+	t.Parallel()
+	ks := &mockKeySource{keys: []api.Key{1}}
+	bf := &mockBackfiller{}
+	st := &mockStorer{}
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:     50 * time.Millisecond,
+		FetchTimeout: 2 * time.Second,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{{Name: "local"}} }, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if got := bf.calls.Load(); got != 0 {
+		t.Fatalf("backfill calls = %d, want 0 (self should be skipped)", got)
+	}
+}
+
+func TestKeysToUint64(t *testing.T) {
+	t.Parallel()
+	keys := []api.Key{1, 2, 3}
+	out := keysToUint64(keys)
+	if len(out) != 3 {
+		t.Fatalf("len = %d, want 3", len(out))
+	}
+	for i, k := range keys {
+		if out[i] != uint64(k) {
+			t.Errorf("out[%d] = %d, want %d", i, out[i], uint64(k))
+		}
+	}
+}

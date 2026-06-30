@@ -107,6 +107,10 @@ type Cluster struct {
 	Join     []string `yaml:"join"`
 	Replicas int      `yaml:"replicas"`
 	HopLimit int      `yaml:"hop_limit"`
+	// AntiEntropyInterval is the period between anti-entropy object
+	// reconciliation rounds in full mode. Default 30s. Set to 0 to
+	// disable. Has no effect in strong or eventual mode.
+	AntiEntropyInterval time.Duration `yaml:"anti_entropy_interval"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

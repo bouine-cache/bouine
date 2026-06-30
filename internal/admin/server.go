@@ -73,6 +73,10 @@ type Config struct {
 	// required — callers are trusted cluster peers on the internal
 	// network; protected by network policy / mTLS in production).
 	PeerFetchHandler http.Handler
+	// PeerKeysHandler, if non-nil, serves the local key set for
+	// anti-entropy reconciliation. Mounted at GET /v1/peer/keys (no auth;
+	// same rationale as peer fetch).
+	PeerKeysHandler http.Handler
 	// PeerMetricsHandler, if non-nil, is mounted at GET /v1/peer/metrics
 	// (behind bearer-token auth) so peers can fetch this node's ring summary.
 	PeerMetricsHandler http.Handler
@@ -183,6 +187,9 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.PeerFetchHandler != nil {
 		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
+	}
+	if cfg.PeerKeysHandler != nil {
+		mux.Handle("GET /v1/peer/keys", cfg.PeerKeysHandler)
 	}
 	if cfg.PeerMetricsHandler != nil {
 		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
@@ -381,6 +388,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// access in production. Must remain auth-exempt so peers without a
 		// shared token can still perform lookups.
 		"/v1/peer/fetch": true,
+		"/v1/peer/keys":  true,
 		// Peer-to-peer invalidation RPCs: same rationale as peer fetch.
 		// Peers forward purge/ban events via HTTP fan-out in strong mode.
 		"/v1/peer/purge": true,

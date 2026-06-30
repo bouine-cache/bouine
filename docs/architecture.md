@@ -267,8 +267,12 @@ bounds traversal depth (default 2).
 
 Writes are local-first; eventual replication is fire-and-forget to N-1
 replicas with hinted handoff in a bounded queue. Purges are broadcast via
-gossip + anti-entropy reconciliation every 30s. A purge is monotonic — once a
-TTL marker is set, late writes for that key are rejected until TTL expires.
+gossip. In `full` mode, anti-entropy reconciliation runs every 30s
+(configurable via `cluster.anti_entropy_interval`): each node exchanges its
+complete key set with peers via `GET /v1/peer/keys`, computes the diff,
+and backfills missing objects via the existing peer-fetch HTTP path. A
+purge is monotonic — once a TTL marker is set, late writes for that key are
+rejected until TTL expires.
 
 ### 5.5 Wire protocol versioning
 

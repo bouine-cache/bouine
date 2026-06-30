@@ -33,6 +33,12 @@ type Metrics struct {
 	// labelled by reason (dial, timeout, 5xx). Non-zero indicates peers
 	// may have missed an invalidation; gossip provides redundant delivery.
 	BroadcastFailures *prometheus.CounterVec
+	// AntiEntropyReconcile counts anti-entropy reconciliation rounds.
+	AntiEntropyReconcile prometheus.Counter
+	// AntiEntropyRepaired counts individual keys backfilled.
+	AntiEntropyRepaired prometheus.Counter
+	// AntiEntropyKeysRepaired is the gauge of keys repaired in the last round.
+	AntiEntropyKeysRepaired prometheus.Gauge
 	// OnReplicationBytes, if set, is invoked on every replication byte
 	// record with the direction ("sent"/"received") and byte count. Used
 	// to feed the dashboard's replication ring without coupling the
@@ -82,6 +88,21 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_broadcast_failures_total",
 			Help:      "HTTP fan-out failures by invalidation type and reason. Gossip provides redundant delivery.",
 		}, []string{"type", "reason"}),
+		AntiEntropyReconcile: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_anti_entropy_reconcile_total",
+			Help:      "Anti-entropy reconciliation rounds completed.",
+		}),
+		AntiEntropyRepaired: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_anti_entropy_repaired_total",
+			Help:      "Cache keys backfilled by the anti-entropy reconciler.",
+		}),
+		AntiEntropyKeysRepaired: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "bouine",
+			Name:      "cluster_anti_entropy_keys_repaired",
+			Help:      "Keys repaired in the last anti-entropy round.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -91,6 +112,9 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.ReplicationsReceived,
 		m.ReplicationBytes,
 		m.BroadcastFailures,
+		m.AntiEntropyReconcile,
+		m.AntiEntropyRepaired,
+		m.AntiEntropyKeysRepaired,
 	)
 	return m
 }
@@ -167,4 +191,30 @@ func (m *Metrics) IncBroadcastFailure(typ, reason string) {
 		return
 	}
 	m.BroadcastFailures.WithLabelValues(typ, reason).Inc()
+}
+
+// IncAntiEntropyReconcile increments the reconcile counter for the
+// given direction ("sent" or "received").
+func (m *Metrics) IncAntiEntropyReconcile() {
+	if m == nil || m.AntiEntropyReconcile == nil {
+		return
+	}
+	m.AntiEntropyReconcile.Inc()
+}
+
+// IncAntiEntropyRepaired increments the repaired-key counter.
+func (m *Metrics) IncAntiEntropyRepaired() {
+	if m == nil || m.AntiEntropyRepaired == nil {
+		return
+	}
+	m.AntiEntropyRepaired.Inc()
+}
+
+// SetAntiEntropyKeysRepaired sets the gauge for keys repaired in the
+// last round.
+func (m *Metrics) SetAntiEntropyKeysRepaired(v float64) {
+	if m == nil || m.AntiEntropyKeysRepaired == nil {
+		return
+	}
+	m.AntiEntropyKeysRepaired.Set(v)
 }

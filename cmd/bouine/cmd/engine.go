@@ -249,7 +249,7 @@ func (e *engine) initCluster(
 		if ok {
 			ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
 				Interval: e.cfg.Cluster.AntiEntropyInterval,
-				Logger:   e.logger,
+				Logger:   observability.NewSampledLogger(e.logger, observability.DefaultKeySampleRate),
 			}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, store, clusterNode.Members, clusterMetrics)
 		}
 	}

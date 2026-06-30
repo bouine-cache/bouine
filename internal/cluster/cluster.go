@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"sort"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/hashicorp/memberlist"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -32,8 +32,9 @@ type Config struct {
 	Join []string
 	// PeerInfo is the metadata this node broadcasts to peers.
 	PeerInfo api.PeerInfo
-	// Logger is the structured logger.
-	Logger *slog.Logger
+	// Logger receives gossip and lifecycle records. Defaults to
+	// a SampledLogger wrapping slog.Default().
+	Logger observability.Logger
 	// VirtualNodes is the number of virtual nodes per real node on
 	// the consistent hash ring. Default 256.
 	VirtualNodes int
@@ -88,7 +89,7 @@ type Cluster struct {
 	mu     sync.RWMutex
 	peers  map[string]*Member // keyed by NodeName
 	local  api.PeerInfo
-	logger *slog.Logger
+	logger observability.Logger
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipMu    sync.Mutex
@@ -104,7 +105,7 @@ type Cluster struct {
 // Stable.
 func New(cfg Config) (*Cluster, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if cfg.VirtualNodes <= 0 {
 		cfg.VirtualNodes = 256
@@ -268,6 +269,11 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 				c.logger.Warn("cluster: gossip purge apply failed", "error", err)
 			} else {
 				c.metrics.IncGossipInvalidation("purge")
+				c.logger.Info("received purge from peer",
+					"key", evt.Key,
+					"issuer", evt.Issuer,
+					"seq", evt.Seq,
+				)
 			}
 		}
 	case api.GossipTypeBan:
@@ -284,6 +290,10 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 				c.logger.Warn("cluster: gossip ban apply failed", "error", err)
 			} else {
 				c.metrics.IncGossipInvalidation("ban")
+				c.logger.Info("received ban from peer",
+					"issuer", evt.Issuer,
+					"seq", evt.Seq,
+				)
 			}
 		}
 	case api.GossipTypeReplication:
@@ -301,6 +311,13 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 			} else {
 				c.metrics.IncReplicationReceived()
 				c.metrics.AddReplicationBytes("received", float64(len(msg)))
+				if evt.Object != nil {
+					c.logger.Info("received replication from peer",
+						"key", evt.Object.Key,
+						"issuer", evt.Issuer,
+						"seq", evt.Seq,
+					)
+				}
 			}
 		}
 	default:

@@ -4,7 +4,6 @@
 package accesslog
 
 import (
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -13,12 +12,13 @@ import (
 )
 
 // Middleware wraps an http.Handler and emits a structured access log
-// line for sampled requests. Non-2xx responses are always logged;
-// successful responses are sampled at 1:100 to keep the log write off
-// the critical path at high RPS.
+// line for sampled requests. Non-200 responses are always logged at
+// Warn level (never sampled). 200-OK responses with a cache key are
+// sampled deterministically by key via the SampledLogger; 200-OK
+// responses without a key are sampled by counter fallback.
 //
 // Stable.
-func Middleware(logger *slog.Logger, next http.Handler) http.Handler {
+func Middleware(logger observability.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := responsewriter.Acquire(w)
@@ -26,18 +26,51 @@ func Middleware(logger *slog.Logger, next http.Handler) http.Handler {
 
 		next.ServeHTTP(sw, r)
 
-		if observability.ShouldLogAccess(sw.Status) {
-			logger.Info("access",
-				"method", r.Method,
-				"host", r.Host,
-				"path", r.URL.Path,
-				"proto", r.Proto,
-				"status", sw.Status,
-				"bytes_out", sw.Bytes,
-				"dur_ms", time.Since(start).Milliseconds(),
-				"remote", r.RemoteAddr,
-				"cache_status", sw.Header().Get("X-Cache"),
-			)
+		cacheResult := sw.Header().Get("X-Cache")
+		msg := requestMessage(cacheResult, sw.Status)
+		attrs := []any{
+			"method", r.Method,
+			"host", r.Host,
+			"path", r.URL.Path,
+			"proto", r.Proto,
+			"status", sw.Status,
+			"bytes_out", sw.Bytes,
+			"dur_ms", time.Since(start).Milliseconds(),
+			"remote", r.RemoteAddr,
+			"cache_status", cacheResult,
+		}
+		if sw.Key != 0 {
+			attrs = append(attrs, "key", sw.Key)
+		}
+
+		if sw.Status != http.StatusOK {
+			logger.Warn(msg, attrs...)
+		} else {
+			logger.Info(msg, attrs...)
 		}
 	})
+}
+
+// requestMessage returns a human-readable log message based on the
+// cache result and HTTP status code.
+func requestMessage(cacheResult string, status int) string {
+	if status != http.StatusOK {
+		return "request completed with error"
+	}
+	switch cacheResult {
+	case "HIT":
+		return "served cache hit"
+	case "MISS":
+		return "served cache miss"
+	case "BYPASS":
+		return "bypassed cache"
+	case "STALE":
+		return "served stale response"
+	case "REVALIDATED":
+		return "served revalidated response"
+	case "":
+		return "served uncached response"
+	default:
+		return "served response (unknown cache status)"
+	}
 }

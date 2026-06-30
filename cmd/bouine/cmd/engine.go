@@ -35,7 +35,7 @@ type engine struct {
 	cfg        *config.Config
 	configPath string
 	startTime  time.Time
-	logger     *slog.Logger
+	logger     observability.Logger
 	metrics    *observability.Metrics
 }
 
@@ -44,7 +44,7 @@ func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engi
 		cfg:        cfg,
 		configPath: configPath,
 		startTime:  time.Now(),
-		logger:     logger,
+		logger:     observability.NewSampledLogger(logger, observability.DefaultKeySampleRate),
 		metrics:    observability.NewMetrics(),
 	}
 }
@@ -252,7 +252,7 @@ func (e *engine) initCluster(
 		if ok {
 			ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
 				Interval: e.cfg.Cluster.AntiEntropyInterval,
-				Logger:   observability.NewSampledLogger(e.logger, observability.DefaultKeySampleRate),
+				Logger:   e.logger,
 			}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, store, clusterNode.Members, clusterMetrics)
 		}
 	}

@@ -2,11 +2,12 @@ package origin
 
 import (
 	"context"
-	"log/slog"
 	"math/rand"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/thylong/bouine/internal/observability"
 )
 
 // ActiveHealthChecker runs periodic HTTP probes against every target
@@ -16,7 +17,7 @@ import (
 type ActiveHealthChecker struct {
 	pool   *Pool
 	cfg    ActiveHealthConfig
-	logger *slog.Logger
+	logger observability.Logger
 	client *http.Client
 }
 
@@ -32,7 +33,7 @@ type ActiveHealthConfig struct {
 }
 
 // NewActiveHealthChecker creates a health checker for the given pool.
-func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger *slog.Logger) *ActiveHealthChecker {
+func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger observability.Logger) *ActiveHealthChecker {
 	if cfg.Method == "" {
 		cfg.Method = "GET"
 	}
@@ -55,7 +56,7 @@ func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger *slog.Log
 		cfg.ExpectedCodes = []int{200}
 	}
 	if logger == nil {
-		logger = slog.Default()
+		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	return &ActiveHealthChecker{

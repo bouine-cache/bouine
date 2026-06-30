@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"sync"
+
+	"github.com/thylong/bouine/pkg/api"
 )
 
 var (
@@ -35,6 +37,10 @@ type ResponseWriter struct {
 	http.ResponseWriter
 	Status int
 	Bytes  int64
+	// Key is the cache key for this request, threaded from the cache
+	// handler so the access-log middleware can sample by key. Zero
+	// means no key was set (uncacheable request or bypass).
+	Key api.Key
 	// headerWritten records whether WriteHeader has been called, mirroring
 	// net/http which ignores the second and subsequent calls.
 	headerWritten bool
@@ -54,6 +60,7 @@ func Acquire(w http.ResponseWriter) *ResponseWriter {
 	rw.ResponseWriter = w
 	rw.Status = 200
 	rw.Bytes = 0
+	rw.Key = 0
 	rw.headerWritten = false
 	return rw
 }
@@ -122,4 +129,19 @@ func (w *ResponseWriter) ReadFrom(src io.Reader) (int64, error) {
 		return n, err
 	}
 	return io.Copy(struct{ io.Writer }{w}, src)
+}
+
+// SetCacheKey threads the cache key through the wrapper chain so the
+// access-log middleware can sample by key. Walks outward in case of
+// nested ResponseWriter wrappers (data-plane metrics wraps access-log).
+func (w *ResponseWriter) SetCacheKey(k api.Key) {
+	cur := w
+	for cur != nil {
+		cur.Key = k
+		if outer, ok := cur.ResponseWriter.(*ResponseWriter); ok {
+			cur = outer
+			continue
+		}
+		return
+	}
 }

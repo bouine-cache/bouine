@@ -2,7 +2,6 @@ package observability
 
 import (
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -188,10 +187,6 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// sampleCounter tracks requests for 1:100 access-log sampling.
-// Using atomic so the counter is lock-free.
-var sampleCounter atomic.Uint64
-
 // normaliseCacheResult maps X-Cache header values to a stable Prometheus
 // label. Unknown values are kept as-is (forward-compatible).
 func normaliseCacheResult(xCache string) string {
@@ -203,15 +198,4 @@ func normaliseCacheResult(xCache string) string {
 	default:
 		return xCache
 	}
-}
-
-// ShouldLogAccess reports whether this request should be written to
-// the access log. Only 200-OK responses are sampled at 1:100; all
-// other status codes (redirects, errors, unusual 2xx) are always
-// logged since they are rare relative to cache-hit volume.
-func ShouldLogAccess(status int) bool {
-	if status != http.StatusOK {
-		return true
-	}
-	return sampleCounter.Add(1)%100 == 0
 }

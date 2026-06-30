@@ -213,6 +213,7 @@ linters:
           allow:
             - $gostd
             - github.com/thylong/bouine/internal/runtime
+            - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
             - golang.org/x/sync
 

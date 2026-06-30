@@ -154,7 +154,7 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 
 	ae.metrics.IncAntiEntropyReconcile()
 	ae.metrics.SetAntiEntropyKeysRepaired(float64(repaired))
-	ae.logger.Info("reconciled with peer",
+	ae.logger.Debug("reconciled with peer",
 		"peer", peer.Name,
 		"peer_address", peer.Addr,
 		"missing_count", len(missing),

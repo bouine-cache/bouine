@@ -255,6 +255,34 @@ func (s *Store) DelIndex(key uint64) {
 	s.idxMu.Unlock()
 }
 
+// RecomputeStats scans all segments and recounts live entries and bytes
+// from the current index. Called after WAL replay to restore the stats
+// counters that are not persisted in the WAL.
+func (s *Store) RecomputeStats() {
+	s.idxMu.RLock()
+	idxSnap := make(map[uint64]warmLoc, len(s.index))
+	for k, v := range s.index {
+		idxSnap[k] = v
+	}
+	s.idxMu.RUnlock()
+
+	var entries, bytes int64
+	_ = s.Scan(func(r Record) error {
+		if r.IsTomb {
+			return nil
+		}
+		loc, ok := idxSnap[r.Key]
+		if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
+			return nil
+		}
+		entries++
+		bytes += int64(headerLen + len(r.Body) + footerLen)
+		return nil
+	})
+	s.stats.entries.Store(entries)
+	s.stats.bytes.Store(bytes)
+}
+
 // ReadRecord reads a record at the given offset in the given segment.
 //
 // s.mu.RLock is held across the full operation (segment lookup + file

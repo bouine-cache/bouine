@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"runtime"
@@ -218,6 +219,56 @@ func TestTiered_WarmGet(t *testing.T) {
 	}
 	if got2 == nil || got2.StatusCode != 200 {
 		t.Fatalf("expected object from warm tier after reopen, got %v", got2)
+	}
+}
+
+// TestTiered_WarmStatsRestoredAfterReopen verifies that warm-tier stats
+// (entries, bytes) are correctly restored after a restart via WAL replay
+// + RecomputeStats, not left at zero.
+func TestTiered_WarmStatsRestoredAfterReopen(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	newStore := func() *TieredStore {
+		ts, err := NewTieredStore(TieredConfig{
+			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:        walPath,
+			BodyThreshold: 512,
+		})
+		if err != nil {
+			t.Fatalf("NewTieredStore: %v", err)
+		}
+		return ts
+	}
+
+	ts1 := newStore()
+	for i := range 5 {
+		k := KeyHash([]byte(fmt.Sprintf("stats-key-%d", i)))
+		if err := ts1.Put(ctx, k, bigObj(k, 1024)); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	st1 := ts1.Stats()
+	if st1.WarmEntries != 5 {
+		t.Fatalf("before close: warm entries = %d, want 5", st1.WarmEntries)
+	}
+	if st1.WarmBytes <= 0 {
+		t.Fatalf("before close: warm bytes = %d", st1.WarmBytes)
+	}
+	_ = ts1.Close(ctx)
+
+	ts2 := newStore()
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+	st2 := ts2.Stats()
+	if st2.WarmEntries != 5 {
+		t.Fatalf("after reopen: warm entries = %d, want 5", st2.WarmEntries)
+	}
+	if st2.WarmBytes != st1.WarmBytes {
+		t.Fatalf("after reopen: warm bytes = %d, want %d", st2.WarmBytes, st1.WarmBytes)
 	}
 }
 

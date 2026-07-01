@@ -630,6 +630,80 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 	}
 }
 
+func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Vary", "X-Test-Variant")
+		_, _ = w.Write([]byte("body"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:       4 << 20,
+		ReaperInterval: -1,
+	})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req1 := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	req1.Header.Set("X-Test-Variant", "a")
+	h.ServeHTTP(httptest.NewRecorder(), req1)
+
+	primaryKey := h.buildKey(req1)
+	storeKey := VariantKey(primaryKey, "X-Test-Variant", req1.Header, nil)
+
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	if set == nil || len(set) != 1 {
+		h.variantMu.Unlock()
+		t.Fatalf("expected 1 variant in set, got %v", set)
+	}
+	if _, ok := set[storeKey]; !ok {
+		h.variantMu.Unlock()
+		t.Fatalf("expected storeKey in set")
+	}
+	h.variantMu.Unlock()
+
+	// Simulate silent SIEVE eviction: the primary key and its variant
+	// are removed from the store without notifying variantSets (unlike
+	// the explicit Delete path in invalidateAndProxy).
+	_ = store.Delete(context.Background(), primaryKey)
+	_ = store.Delete(context.Background(), storeKey)
+
+	pkObj, _ := store.Get(context.Background(), primaryKey)
+	if pkObj != nil {
+		t.Fatal("primary key should be gone from store")
+	}
+
+	// Request a new variant. The handler should detect the evicted
+	// primary key and reset the stale variant set.
+	req2 := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	req2.Header.Set("X-Test-Variant", "b")
+	h.ServeHTTP(httptest.NewRecorder(), req2)
+
+	newStoreKey := VariantKey(primaryKey, "X-Test-Variant", req2.Header, nil)
+
+	h.variantMu.Lock()
+	set = h.variantSets[primaryKey]
+	if set == nil {
+		h.variantMu.Unlock()
+		t.Fatal("expected variant set to exist after re-store")
+	}
+	if len(set) != 1 {
+		h.variantMu.Unlock()
+		t.Fatalf("expected 1 variant after reset, got %d (stale entries not cleaned up)", len(set))
+	}
+	if _, ok := set[newStoreKey]; !ok {
+		h.variantMu.Unlock()
+		t.Fatalf("expected new storeKey in set after reset")
+	}
+	h.variantMu.Unlock()
+}
+
 func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	t.Parallel()
 	// In eventual mode, ownerFn and peerFetch are nil. A miss goes

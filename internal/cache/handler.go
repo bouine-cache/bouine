@@ -136,7 +136,9 @@ type Handler struct {
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
 	// variantSets tracks the live variant store keys per primary key to
 	// enforce MaxVariants cap. Entries are removed when the handler observes
-	// their eviction via store probes on the cap path, or on explicit Delete.
+	// their eviction via store probes on the cap path, on explicit Delete,
+	// or when reserveVariantSlot detects the primary key has been evicted
+	// by SIEVE and resets the set.
 	// Protected by variantMu.
 	variantMu   sync.Mutex
 	variantSets map[api.Key]map[api.Key]struct{}
@@ -667,6 +669,27 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	if _, exists := set[storeKey]; exists {
 		h.variantMu.Unlock()
 		return true
+	}
+	// If the set exists from a prior incarnation of this primary key that
+	// was since evicted by SIEVE or TTL, the tracked variants are stale.
+	// Probe the primary key and reset the set if it is gone from the
+	// store. Without this, variantSets grows without bound as primary
+	// keys are evicted, and stale entries can cause incorrect MaxVariants
+	// enforcement.
+	if len(set) > 0 {
+		h.variantMu.Unlock()
+		probeCtx := context.WithoutCancel(reqCtx)
+		pkObj, _ := h.store.Get(probeCtx, primaryKey)
+		h.variantMu.Lock()
+		set = h.variantSets[primaryKey]
+		if set == nil {
+			set = make(map[api.Key]struct{})
+			h.variantSets[primaryKey] = set
+		}
+		if pkObj == nil {
+			set = make(map[api.Key]struct{})
+			h.variantSets[primaryKey] = set
+		}
 	}
 	if len(set) < MaxVariants {
 		set[storeKey] = struct{}{}

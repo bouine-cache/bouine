@@ -230,6 +230,13 @@ linters:
           - errcheck
           - noctx
           - depguard
+      # SA5011 (possible nil pointer dereference after nil check) is a
+      # false positive in tests: t.Fatal calls runtime.Goexit and never
+      # returns, but staticcheck does not model that.
+      - path: "_test\\.go"
+        linters:
+          - staticcheck
+        text: "SA5011"
       # main packages may exit and print.
       - path: "cmd/.*"
         linters:

@@ -973,3 +973,30 @@ func TestRuleClusterPeerHealthDegraded(t *testing.T) {
 		t.Fatal("expected no insight when uptime >= 90%")
 	}
 }
+
+func TestRuleUpstreamPoolNoTraffic(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.UpstreamPools = append(cfg.UpstreamPools, config.UpstreamPool{Name: "idle-pool"})
+	data := InsightData{
+		Config: cfg,
+		RouteStats: []observability.RouteStat{
+			routeStats("api", 200, 100, 0, 50),
+		},
+	}
+	ins := ruleUpstreamPoolNoTraffic(data)
+	if ins == nil {
+		t.Fatal("expected insight for pool with no traffic")
+	}
+	if ins.Severity != SeverityLow {
+		t.Errorf("severity: want LOW, got %s", ins.Severity)
+	}
+
+	// All pools have traffic → no insight.
+	cfg.UpstreamPools = cfg.UpstreamPools[:1]
+	data.Config = cfg
+	ins = ruleUpstreamPoolNoTraffic(data)
+	if ins != nil {
+		t.Fatal("expected no insight when all pools have traffic")
+	}
+}

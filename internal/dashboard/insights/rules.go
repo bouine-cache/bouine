@@ -27,6 +27,7 @@ func init() {
 		ruleUpstreamNoCacheControl,
 		ruleUpstreamNoETag,
 		ruleUpstreamNoSurrogateKey,
+		ruleUpstreamPoolNoTraffic,
 		ruleCDNNotConfigured,
 		ruleCDNAsyncLatency,
 		ruleClusterHopLimitNoEffect,
@@ -515,6 +516,31 @@ func ruleUpstreamNoSurrogateKey(data InsightData) *Insight {
 				Detail:   "Without Surrogate-Key, granular invalidation by tag is impossible — only URL/prefix purges work",
 				Evidence: fmt.Sprintf("samples: %d, has SK: %.1f%%", audit.SampleCount, audit.HasSurrogateKeyPct),
 				Action:   "/dashboard/invalidation",
+			}
+		}
+	}
+	return nil
+}
+
+func ruleUpstreamPoolNoTraffic(data InsightData) *Insight {
+	poolReqs := make(map[string]int64)
+	for _, rs := range data.RouteStats {
+		r := routeNameToConfig(data, rs.Route)
+		if r == nil {
+			continue
+		}
+		poolReqs[r.Pool] += rs.Requests
+	}
+	for _, pool := range data.Config.UpstreamPools {
+		if poolReqs[pool.Name] == 0 {
+			return &Insight{
+				ID:       "upstream-pool-no-traffic",
+				Severity: SeverityLow,
+				Category: CategoryUpstream,
+				Title:    fmt.Sprintf("Pool %s has received no traffic", pool.Name),
+				Detail:   "The upstream pool is configured but no routes have sent requests to it. Check route matching or remove the unused pool.",
+				Evidence: fmt.Sprintf("pool: %s, total_requests: 0", pool.Name),
+				Action:   "/dashboard/config",
 			}
 		}
 	}

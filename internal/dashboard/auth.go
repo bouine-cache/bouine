@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"net/http"
 	"time"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 const (
@@ -82,7 +84,7 @@ func (sa *sessionAuth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// GET — render login form.
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set(header.ContentType, "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(loginHTML)
 }

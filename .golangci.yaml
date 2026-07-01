@@ -108,6 +108,7 @@ linters:
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/internal/buildinfo
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - golang.org/x/net
             - golang.org/x/sync
             - golang.org/x/sys
@@ -119,6 +120,7 @@ linters:
             - github.com/thylong/bouine/internal/storage
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - github.com/cespare/xxhash/v2
             - golang.org/x/sys
         cache-L3:
@@ -131,6 +133,7 @@ linters:
             - github.com/thylong/bouine/internal/origin
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - github.com/cespare/xxhash/v2
             - golang.org/x/sync
         origin-L4:
@@ -141,6 +144,7 @@ linters:
             - github.com/thylong/bouine/internal/origin
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - golang.org/x/sync
         cluster-L5:
           list-mode: strict
@@ -153,6 +157,7 @@ linters:
             - github.com/thylong/bouine/internal/config
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - github.com/hashicorp/memberlist
             - github.com/cespare/xxhash/v2
             - github.com/prometheus/client_golang
@@ -170,6 +175,7 @@ linters:
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/internal/buildinfo
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - github.com/prometheus/client_golang
         observability-L7:
           list-mode: strict
@@ -178,6 +184,7 @@ linters:
             - $gostd
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - github.com/prometheus/client_golang
             - github.com/prometheus/client_model/go
             - go.opentelemetry.io/otel
@@ -190,6 +197,7 @@ linters:
             - github.com/thylong/bouine/internal/admin
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
         public-api-leaf:
           list-mode: strict
           files:
@@ -199,6 +207,7 @@ linters:
             - $gostd
             - github.com/thylong/bouine/pkg/api
             - github.com/thylong/bouine/pkg/bouineapi
+            - github.com/thylong/bouine/pkg/header
         config-leaf:
           list-mode: strict
           files: ["**/internal/config/**"]
@@ -206,6 +215,7 @@ linters:
             - $gostd
             - github.com/thylong/bouine/internal/config
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - gopkg.in/yaml.v3
             - github.com/fsnotify/fsnotify
         runtime-leaf:
@@ -216,6 +226,7 @@ linters:
             - github.com/thylong/bouine/internal/runtime
             - github.com/thylong/bouine/internal/observability
             - github.com/thylong/bouine/pkg/api
+            - github.com/thylong/bouine/pkg/header
             - golang.org/x/sync
 
   exclusions:

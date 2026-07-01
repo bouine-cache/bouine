@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func getAuth(t *testing.T, s *Server, path string) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
-	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set(header.Authorization, "Bearer test")
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	return rr.Code, rr.Body.Bytes()
@@ -40,8 +41,8 @@ func TestPurge_CallsOnPurged(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
 		bytes.NewBufferString(`{"url":"https://example.com/products/123"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -67,8 +68,8 @@ func TestRefresh_CallsOnRefreshed(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/refresh",
 		bytes.NewBufferString(`{"url":"https://example.com/img/logo.png"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -94,8 +95,8 @@ func TestBan_CallsOnBanned(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/ban",
 		bytes.NewBufferString(`{"host_regex":"cdn.example.com","path_regex":"/api/v2/.*"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -175,8 +176,8 @@ func TestPurge_OnPurgedNotCalledOnError(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
 		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
 	// Purge failed, so the handler still returns 500 and OnPurged should not fire.
 	_ = rr.Code // status is 500 but we only care that OnPurged was not called

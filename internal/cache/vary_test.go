@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestVariantKey_NoVary(t *testing.T) {
@@ -23,8 +24,8 @@ func TestVariantKey_NoVary(t *testing.T) {
 func TestVariantKey_DifferentHeaders(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
-	h1 := http.Header{"Accept-Encoding": {"gzip"}}
-	h2 := http.Header{"Accept-Encoding": {"br"}}
+	h1 := http.Header{header.AcceptEncoding: {"gzip"}}
+	h2 := http.Header{header.AcceptEncoding: {"br"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h1)
 	k2 := VariantKey(primary, "Accept-Encoding", h2)
 	if k1 == k2 {
@@ -38,7 +39,7 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 func TestVariantKey_SameHeaders(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
-	h := http.Header{"Accept-Encoding": {"gzip"}}
+	h := http.Header{header.AcceptEncoding: {"gzip"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h)
 	k2 := VariantKey(primary, "Accept-Encoding", h)
 	if k1 != k2 {
@@ -49,8 +50,8 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 func TestVariantKey_VaryStar(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
-	h1 := http.Header{"Accept": {"text/html"}}
-	h2 := http.Header{"Accept": {"application/json"}}
+	h1 := http.Header{header.Accept: {"text/html"}}
+	h2 := http.Header{header.Accept: {"application/json"}}
 	k1 := VariantKey(primary, "*", h1)
 	k2 := VariantKey(primary, "*", h2)
 	if k1 == k2 {
@@ -62,8 +63,8 @@ func TestVariantKey_ExcludeHeader(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
 	exclude := map[string]bool{"x-request-id": true}
-	h1 := http.Header{"Accept-Encoding": {"gzip"}, "X-Request-Id": {"abc"}}
-	h2 := http.Header{"Accept-Encoding": {"gzip"}, "X-Request-Id": {"xyz"}}
+	h1 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"abc"}}
+	h2 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"xyz"}}
 	// Origin varies on both Accept-Encoding and X-Request-Id, but we
 	// exclude X-Request-Id — so differing values should produce the
 	// same variant key.
@@ -115,13 +116,13 @@ func TestServeRange_SingleRange(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     http.Header{"Content-Type": {"text/plain"}},
+		Header:     http.Header{header.ContentType: {"text/plain"}},
 		Body:       []byte("Hello, World!"),
 		BodySize:   13,
 	}
 
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Range", "bytes=0-4")
+	r.Header.Set(header.Range, "bytes=0-4")
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false)
@@ -134,11 +135,11 @@ func TestServeRange_SingleRange(t *testing.T) {
 	if rr.Body.String() != "Hello" {
 		t.Fatalf("body = %q, want Hello", rr.Body.String())
 	}
-	cr := rr.Header().Get("Content-Range")
+	cr := rr.Header().Get(header.ContentRange)
 	if cr != "bytes 0-4/13" {
 		t.Fatalf("Content-Range = %q", cr)
 	}
-	if xc := rr.Header().Get("X-Cache"); xc != "HIT" {
+	if xc := rr.Header().Get(header.XCache); xc != "HIT" {
 		t.Fatalf("X-Cache = %q, want HIT", xc)
 	}
 }
@@ -153,7 +154,7 @@ func TestServeRange_SuffixRange(t *testing.T) {
 	}
 
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Range", "bytes=-3")
+	r.Header.Set(header.Range, "bytes=-3")
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false)
@@ -175,7 +176,7 @@ func TestServeRange_OpenEnded(t *testing.T) {
 	}
 
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Range", "bytes=3-")
+	r.Header.Set(header.Range, "bytes=3-")
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false)
@@ -197,7 +198,7 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 	}
 
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Range", "bytes=5-10")
+	r.Header.Set(header.Range, "bytes=5-10")
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false)
@@ -225,7 +226,7 @@ func TestServeRange_MultiRange(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{Body: []byte("abcde"), BodySize: 5}
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Range", "bytes=0-1, 3-4")
+	r.Header.Set(header.Range, "bytes=0-1, 3-4")
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false)
@@ -235,11 +236,11 @@ func TestServeRange_MultiRange(t *testing.T) {
 	if rr.Code != 206 {
 		t.Fatalf("expected 206, got %d", rr.Code)
 	}
-	ct := rr.Header().Get("Content-Type")
+	ct := rr.Header().Get(header.ContentType)
 	if !strings.HasPrefix(ct, "multipart/byteranges") {
 		t.Fatalf("expected multipart/byteranges Content-Type, got %q", ct)
 	}
-	if xc := rr.Header().Get("X-Cache"); xc != "HIT" {
+	if xc := rr.Header().Get(header.XCache); xc != "HIT" {
 		t.Fatalf("X-Cache = %q, want HIT", xc)
 	}
 }
@@ -247,40 +248,40 @@ func TestServeRange_MultiRange(t *testing.T) {
 func TestHandler_VaryAwareStorage(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Vary", "Accept-Encoding")
-		w.Header().Set("Content-Encoding", r.Header.Get("Accept-Encoding"))
-		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.Vary, "Accept-Encoding")
+		w.Header().Set(header.ContentEncoding, r.Header.Get(header.AcceptEncoding))
+		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)
-		_, _ = w.Write([]byte("body-" + r.Header.Get("Accept-Encoding")))
+		_, _ = w.Write([]byte("body-" + r.Header.Get(header.AcceptEncoding)))
 	})
 	h := testHandler(t, upstream)
 
 	// gzip request.
 	r1 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r1.Header.Set("Accept-Encoding", "gzip")
+	r1.Header.Set(header.AcceptEncoding, "gzip")
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, r1)
-	if rr1.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("gzip first: X-Cache = %q", rr1.Header().Get("X-Cache"))
+	if rr1.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("gzip first: X-Cache = %q", rr1.Header().Get(header.XCache))
 	}
 
 	// br request — different variant, should MISS.
 	r2 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r2.Header.Set("Accept-Encoding", "br")
+	r2.Header.Set(header.AcceptEncoding, "br")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, r2)
-	if rr2.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("br first: X-Cache = %q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("br first: X-Cache = %q", rr2.Header().Get(header.XCache))
 	}
 
 	// gzip again — should HIT.
 	r3 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r3.Header.Set("Accept-Encoding", "gzip")
+	r3.Header.Set(header.AcceptEncoding, "gzip")
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, r3)
-	if rr3.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("gzip second: X-Cache = %q, want HIT", rr3.Header().Get("X-Cache"))
+	if rr3.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("gzip second: X-Cache = %q, want HIT", rr3.Header().Get(header.XCache))
 	}
 	if rr3.Body.String() != "body-gzip" {
 		t.Fatalf("body = %q, want body-gzip", rr3.Body.String())
@@ -290,8 +291,8 @@ func TestHandler_VaryAwareStorage(t *testing.T) {
 func TestHandler_RangeOnCachedObject(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("ETag", `"full"`)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"full"`)
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("Hello, Range World!"))
 	})
@@ -306,7 +307,7 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 
 	// Range request on cached object.
 	rangeReq := httptest.NewRequest("GET", "http://example.com/range", nil)
-	rangeReq.Header.Set("Range", "bytes=0-4")
+	rangeReq.Header.Set(header.Range, "bytes=0-4")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, rangeReq)
 	if rr2.Code != http.StatusPartialContent {
@@ -315,7 +316,7 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 	if rr2.Body.String() != "Hello" {
 		t.Fatalf("range body = %q, want Hello", rr2.Body.String())
 	}
-	if xc := rr2.Header().Get("X-Cache"); xc != "HIT" {
+	if xc := rr2.Header().Get(header.XCache); xc != "HIT" {
 		t.Fatalf("range X-Cache = %q, want HIT", xc)
 	}
 }
@@ -323,8 +324,8 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 func TestHandler_RangeOnStaleObject(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=1, stale-while-revalidate=60")
-		w.Header().Set("ETag", `"full"`)
+		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"full"`)
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("Hello, Range World!"))
 	})
@@ -343,7 +344,7 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	_ = h.store.Put(context.Background(), key, &stale)
 
 	rangeReq := httptest.NewRequest("GET", url, nil)
-	rangeReq.Header.Set("Range", "bytes=0-4")
+	rangeReq.Header.Set(header.Range, "bytes=0-4")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, rangeReq)
 
@@ -353,10 +354,10 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	if rr.Body.String() != "Hello" {
 		t.Fatalf("body = %q, want Hello", rr.Body.String())
 	}
-	if xc := rr.Header().Get("X-Cache"); xc != "STALE" {
+	if xc := rr.Header().Get(header.XCache); xc != "STALE" {
 		t.Fatalf("stale range X-Cache = %q, want STALE", xc)
 	}
-	if w := rr.Header().Get("Warning"); !strings.HasPrefix(w, "110") {
+	if w := rr.Header().Get(header.Warning); !strings.HasPrefix(w, "110") {
 		t.Fatalf("Warning = %q, want 110 prefix", w)
 	}
 }

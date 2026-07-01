@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func newSetCookieHandler(t *testing.T, upstream http.Handler, allow bool) *Handler {
@@ -22,10 +23,10 @@ func newSetCookieHandler(t *testing.T, upstream http.Handler, allow bool) *Handl
 func originWithSetCookie(body, cc, cookie string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if cc != "" {
-			w.Header().Set("Cache-Control", cc)
+			w.Header().Set(header.CacheControl, cc)
 		}
 		if cookie != "" {
-			w.Header().Set("Set-Cookie", cookie)
+			w.Header().Set(header.SetCookie, cookie)
 		}
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
@@ -40,8 +41,8 @@ func TestSetCookie_DefaultBlocksCaching(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Set-Cookie", "session=abc123; Path=/")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.SetCookie, "session=abc123; Path=/")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -54,8 +55,8 @@ func TestSetCookie_DefaultBlocksCaching(t *testing.T) {
 	if rr1.Code != 200 {
 		t.Fatalf("req1 status = %d", rr1.Code)
 	}
-	if rr1.Header().Get("Set-Cookie") != "session=abc123; Path=/" {
-		t.Errorf("first client should receive Set-Cookie, got %q", rr1.Header().Get("Set-Cookie"))
+	if rr1.Header().Get(header.SetCookie) != "session=abc123; Path=/" {
+		t.Errorf("first client should receive Set-Cookie, got %q", rr1.Header().Get(header.SetCookie))
 	}
 
 	rr2 := httptest.NewRecorder()
@@ -64,7 +65,7 @@ func TestSetCookie_DefaultBlocksCaching(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("origin called %d times, want 2 (response must not be cached)", calls)
 	}
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Error("second request must not be a HIT when allow_set_cookie is false")
 	}
 }
@@ -78,9 +79,9 @@ func TestSetCookie_AllowTrueStoresWithoutCookie(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Set-Cookie", "session=xyz789; Path=/; HttpOnly")
-		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.SetCookie, "session=xyz789; Path=/; HttpOnly")
+		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "public-body")
 	})
@@ -94,18 +95,18 @@ func TestSetCookie_AllowTrueStoresWithoutCookie(t *testing.T) {
 	if rr1.Code != 200 {
 		t.Fatalf("req1 status = %d", rr1.Code)
 	}
-	if rr1.Header().Get("Set-Cookie") == "" {
+	if rr1.Header().Get(header.SetCookie) == "" {
 		t.Error("first client (MISS) should receive Set-Cookie from origin")
 	}
 
 	// Second request: HIT — must NOT have Set-Cookie.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("second request should be HIT, got X-Cache=%q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("second request should be HIT, got X-Cache=%q", rr2.Header().Get(header.XCache))
 	}
-	if rr2.Header().Get("Set-Cookie") != "" {
-		t.Errorf("cached response must NOT contain Set-Cookie, got %q", rr2.Header().Get("Set-Cookie"))
+	if rr2.Header().Get(header.SetCookie) != "" {
+		t.Errorf("cached response must NOT contain Set-Cookie, got %q", rr2.Header().Get(header.SetCookie))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1 (response should be cached)", calls)
@@ -119,8 +120,8 @@ func TestSetCookie_NoStoreStillBlocks(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Set-Cookie", "session=nope")
+		w.Header().Set(header.CacheControl, "no-store")
+		w.Header().Set(header.SetCookie, "session=nope")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "private")
 	})
@@ -142,7 +143,7 @@ func TestSetCookie_NoSetCookieHeaderUnaffected(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "public")
 	})
@@ -153,8 +154,8 @@ func TestSetCookie_NoSetCookieHeaderUnaffected(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
 
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("response without Set-Cookie should be cached, got X-Cache=%q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("response without Set-Cookie should be cached, got X-Cache=%q", rr2.Header().Get(header.XCache))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1", calls)

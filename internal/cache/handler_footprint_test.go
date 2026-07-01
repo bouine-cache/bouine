@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // chunkedOrigin returns an upstream that writes a body of bodySize bytes in
@@ -16,8 +17,8 @@ import (
 func chunkedOrigin(bodySize, chunkSize int) http.Handler {
 	payload := make([]byte, bodySize)
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("ETag", `"footprint"`)
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"footprint"`)
 		w.WriteHeader(200)
 		for off := 0; off < len(payload); off += chunkSize {
 			_, _ = w.Write(payload[off:min(off+chunkSize, len(payload))])
@@ -41,8 +42,8 @@ func TestFetchStoresRightSizedBody(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/right-sized", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("expected MISS, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("expected MISS, got %q", rr.Header().Get(header.XCache))
 	}
 
 	key := BuildKey(req)

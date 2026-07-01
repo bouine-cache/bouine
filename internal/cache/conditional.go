@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // conditional.go handles conditional request matching (304 / If-None-Match
@@ -16,14 +17,14 @@ import (
 // If it matches, the handler should return 304 instead of 200.
 func ClientConditionalMatch(r *http.Request, obj *api.Object) bool {
 	// If-None-Match takes precedence (RFC 9110 §13.1.2).
-	if inm := r.Header.Get("If-None-Match"); inm != "" {
+	if inm := r.Header.Get(header.IfNoneMatch); inm != "" {
 		if obj.ETag != "" && etagMatch(inm, obj.ETag) {
 			return true
 		}
 		return false
 	}
 	// If-Modified-Since (RFC 9110 §13.1.3).
-	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
+	if ims := r.Header.Get(header.IfModifiedSince); ims != "" {
 		imsTime := parseHTTPDate(ims)
 		if imsTime.IsZero() {
 			return false
@@ -33,7 +34,7 @@ func ClientConditionalMatch(r *http.Request, obj *api.Object) bool {
 		}
 		// Fall back to Date header then StoredAt if no Last-Modified.
 		if obj.LastModified.IsZero() {
-			if d := obj.Header.Get("Date"); d != "" {
+			if d := obj.Header.Get(header.Date); d != "" {
 				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
 					return true
 				}
@@ -73,9 +74,9 @@ func etagMatch(list, needle string) bool {
 func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
 	// Headers that MUST NOT be updated from a 304 (content-specific).
 	skip := map[string]bool{
-		"Content-Length":    true,
-		"Content-Encoding":  true,
-		"Transfer-Encoding": true,
+		header.ContentLength:    true,
+		header.ContentEncoding:  true,
+		header.TransferEncoding: true,
 	}
 	for k, vals := range resp304Header {
 		if skip[k] {
@@ -91,10 +92,10 @@ func ConditionalHeaders(req *http.Request, obj *api.Object) {
 	if obj.ETag != "" {
 		// Ensure the ETag is properly quoted (RFC 9110 §8.8.3).
 		etag := quoteETag(obj.ETag)
-		req.Header.Set("If-None-Match", etag)
+		req.Header.Set(header.IfNoneMatch, etag)
 	}
 	if !obj.LastModified.IsZero() {
-		req.Header.Set("If-Modified-Since",
+		req.Header.Set(header.IfModifiedSince,
 			obj.LastModified.UTC().Format(http.TimeFormat))
 	}
 }

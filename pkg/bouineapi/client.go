@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Client is the bouine admin API client.
@@ -162,7 +163,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 		return err
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(header.ContentType, "application/json")
 	}
 	c.setAuth(req)
 	return c.doJSON(req, out)
@@ -170,7 +171,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 
 func (c *Client) setAuth(req *http.Request) {
 	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set(header.Authorization, "Bearer "+c.Token)
 	}
 }
 

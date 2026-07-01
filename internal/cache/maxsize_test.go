@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func newMaxSizeHandler(t *testing.T, upstream http.Handler, maxSize int64) *Handler {
@@ -25,7 +26,7 @@ func TestMaxObjectSize_SmallResponseCached(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "small")
 	})
@@ -36,8 +37,8 @@ func TestMaxObjectSize_SmallResponseCached(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
 
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("small response should be cached, got X-Cache=%q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("small response should be cached, got X-Cache=%q", rr.Header().Get(header.XCache))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1", calls)
@@ -50,7 +51,7 @@ func TestMaxObjectSize_LargeResponseSkipped(t *testing.T) {
 	body := strings.Repeat("x", 2048)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})
@@ -69,7 +70,7 @@ func TestMaxObjectSize_LargeResponseSkipped(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("origin called %d times, want 2 (large response must not be cached)", calls)
 	}
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Error("large response should NOT be a HIT")
 	}
 }
@@ -80,7 +81,7 @@ func TestMaxObjectSize_ZeroDisabled(t *testing.T) {
 	body := strings.Repeat("x", 4096)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})
@@ -91,8 +92,8 @@ func TestMaxObjectSize_ZeroDisabled(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
 
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("zero max_object_size should not limit caching, got X-Cache=%q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("zero max_object_size should not limit caching, got X-Cache=%q", rr.Header().Get(header.XCache))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1", calls)
@@ -103,7 +104,7 @@ func TestMaxObjectSize_ExactBoundaryCached(t *testing.T) {
 	t.Parallel()
 	body := strings.Repeat("a", 512)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})

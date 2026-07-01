@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
@@ -15,9 +16,9 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		VaryKey:    "accept-encoding=gzip",
 		StatusCode: http.StatusOK,
 		Header: http.Header{
-			"Content-Type":  {"application/json"},
-			"Cache-Control": {"public", "max-age=600"},
-			"Vary":          {"Accept-Encoding"},
+			header.ContentType:  {"application/json"},
+			header.CacheControl: {"public", "max-age=600"},
+			header.Vary:         {"Accept-Encoding"},
 		},
 		Body:                 []byte("the quick brown fox jumps over the lazy dog"),
 		BodySize:             43,
@@ -65,7 +66,7 @@ func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 	// Zero LastModified, empty body, no surrogate keys, single header.
 	orig := &api.Object{
 		StatusCode: http.StatusNoContent,
-		Header:     http.Header{"X-Cache": {"MISS"}},
+		Header:     http.Header{header.XCache: {"MISS"}},
 		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
 	}
 	got, err := decodeObject(encodeObject(orig))

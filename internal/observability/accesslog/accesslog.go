@@ -9,6 +9,7 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/responsewriter"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Middleware wraps an http.Handler and emits a structured access log
@@ -26,7 +27,7 @@ func Middleware(logger observability.Logger, next http.Handler) http.Handler {
 
 		next.ServeHTTP(sw, r)
 
-		cacheResult := sw.Header().Get("X-Cache")
+		cacheResult := sw.Header().Get(header.XCache)
 		msg := requestMessage(cacheResult, sw.Status)
 		attrs := []any{
 			"method", r.Method,

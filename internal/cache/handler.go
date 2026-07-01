@@ -37,6 +37,7 @@ import (
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // defaultMaxResponseBytes is the hard cap on response body buffering
@@ -370,10 +371,10 @@ func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
 	if err != nil {
 		h.logger.Warn("cache lookup error", "error", err)
 	}
-	if obj == nil || obj.Header.Get("Vary") == "" {
+	if obj == nil || obj.Header.Get(header.Vary) == "" {
 		return key, obj
 	}
-	vk := VariantKey(key, obj.Header.Get("Vary"), r.Header, h.excludeHeaders)
+	vk := VariantKey(key, obj.Header.Get(header.Vary), r.Header, h.excludeHeaders)
 	if vk == key {
 		return key, obj
 	}
@@ -392,9 +393,9 @@ func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj 
 		return false
 	}
 	if obj.ETag != "" {
-		w.Header().Set("ETag", obj.ETag)
+		w.Header().Set(header.ETag, obj.ETag)
 	}
-	w.Header().Set("X-Cache", "HIT")
+	w.Header().Set(header.XCache, "HIT")
 	w.WriteHeader(http.StatusNotModified)
 	return true
 }
@@ -402,12 +403,12 @@ func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj 
 func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 	// only-if-cached with no cached response → 504 Gateway Timeout
 	// (RFC 9111 §5.2.1.7).
-	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, "Cache-Control"))
+	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, header.CacheControl))
 	if reqCC.OnlyIfCached {
 		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		return
 	}
-	w.Header()["X-Cache"] = headerBYPASS
+	w.Header()[header.XCache] = headerBYPASS
 	h.upstream.ServeHTTP(w, r)
 }
 
@@ -449,17 +450,17 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 	dst := w.Header()
 	maps.Copy(dst, obj.Header)
 	// Strip internal headers used for ban matching — never forwarded to clients.
-	dst.Del("X-Bouine-Path")
-	dst.Del("X-Bouine-Host")
-	dst["Age"] = ageHeader(ComputeAge(obj, now))
+	dst.Del(header.XBouinePath)
+	dst.Del(header.XBouineHost)
+	dst[header.Age] = ageHeader(ComputeAge(obj, now))
 	switch result {
 	case cacheHit:
-		dst["X-Cache"] = headerHIT
+		dst[header.XCache] = headerHIT
 	case cacheStale:
-		dst["X-Cache"] = headerSTALE
-		dst["Warning"] = []string{`110 - "Response is Stale"`}
+		dst[header.XCache] = headerSTALE
+		dst[header.Warning] = []string{`110 - "Response is Stale"`}
 	case cacheRevalidated:
-		dst["X-Cache"] = headerREVALIDATED
+		dst[header.XCache] = headerREVALIDATED
 	}
 	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
@@ -558,7 +559,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	refreshed.StoredAt = time.Now()
 	MergeHeaders304(&refreshed, res.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
-	refreshed.CacheControl = mergeHeaderValues(refreshed.Header, "Cache-Control")
+	refreshed.CacheControl = mergeHeaderValues(refreshed.Header, header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
 		refreshed.TTL = ttl
 	}
@@ -568,7 +569,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 		refreshed.TTL = JitterTTL(h.overrideTTL, h.jitterPercent)
 	}
 	refreshed.OriginAge = parseOriginAge(refreshed.Header)
-	if newETag := res.Header.Get("ETag"); newETag != "" {
+	if newETag := res.Header.Get(header.ETag); newETag != "" {
 		refreshed.ETag = newETag
 	}
 	return &refreshed
@@ -612,14 +613,14 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	}
 
 	if IsCacheableWithDefault(res.StatusCode, r.Header, res.Header, h.negativeTTL, h.defaultTTL) {
-		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		obj.Header.Del("Set-Cookie")
+		obj.Header.Del(header.SetCookie)
 		h.storeAndReplicate(ctx, key, obj)
 	}
 }
@@ -634,11 +635,11 @@ func (h *Handler) writeAndMaybeStore(
 	for k, vals := range res.Header {
 		dst[k] = vals
 	}
-	dst["X-Cache"] = headerMISS
+	dst[header.XCache] = headerMISS
 	// A proxy SHOULD add an Age header to responses it forwards,
 	// even on first fetch (Age: 0 + any origin Age).
-	if res.Header.Get("Age") == "" {
-		dst["Age"] = []string{"0"}
+	if res.Header.Get(header.Age) == "" {
+		dst[header.Age] = []string{"0"}
 	}
 	w.WriteHeader(res.StatusCode)
 	if r.Method != http.MethodHead {
@@ -646,7 +647,7 @@ func (h *Handler) writeAndMaybeStore(
 	}
 
 	if IsCacheableWithDefault(res.StatusCode, r.Header, res.Header, h.negativeTTL, h.defaultTTL) {
-		if !h.allowSetCookie && res.Header.Get("Set-Cookie") != "" {
+		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
@@ -657,7 +658,7 @@ func (h *Handler) writeAndMaybeStore(
 		// resolved the variant key.
 		primaryKey := h.buildKey(r)
 		storeKey := primaryKey
-		if vary := res.Header.Get("Vary"); vary != "" {
+		if vary := res.Header.Get(header.Vary); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, r.Header, h.excludeHeaders)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
@@ -669,11 +670,11 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		obj.Header.Del("Set-Cookie")
+		obj.Header.Del(header.SetCookie)
 		h.storeAndReplicate(r.Context(), storeKey, obj)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			primaryObj.Header.Del("Set-Cookie")
+			primaryObj.Header.Del(header.SetCookie)
 			h.storeAndReplicate(r.Context(), primaryKey, primaryObj)
 		}
 	}
@@ -785,7 +786,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// Also evict Content-Location and Location URLs (RFC 9111
 		// §4.4). These are URI references (RFC 9110 §8.7) and may be
 		// absolute, relative, or same-origin bare paths.
-		for _, hdr := range []string{"Content-Location", "Location"} {
+		for _, hdr := range []string{header.ContentLocation, header.Location} {
 			if loc := rec.header.Get(hdr); loc != "" {
 				locKey := h.buildLocationKey(r, loc)
 				if locKey != 0 {
@@ -818,7 +819,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 	if !IsCacheable(rec.statusCode, r.Header, rec.header) {
 		return
 	}
-	if !h.allowSetCookie && rec.header.Get("Set-Cookie") != "" {
+	if !h.allowSetCookie && rec.header.Get(header.SetCookie) != "" {
 		return
 	}
 	if h.maxObjectSize > 0 && int64(rec.body.Len()) > h.maxObjectSize {
@@ -832,7 +833,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-	obj.Header.Del("Set-Cookie")
+	obj.Header.Del(header.SetCookie)
 	h.storeAndReplicate(r.Context(), key, obj)
 }
 
@@ -911,7 +912,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
-	ccHeader := mergeHeaderValues(res.Header, "Cache-Control")
+	ccHeader := mergeHeaderValues(res.Header, header.CacheControl)
 	var respCC Directives
 	if cdnCC, hasCDN := cdnCacheControl(res.Header); hasCDN {
 		respCC = cdnCC
@@ -924,7 +925,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	originAge := parseOriginAge(res.Header)
 	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age, age_value).
 	// Apparent age is derived from the Date header: max(0, now - Date).
-	if dateStr := res.Header.Get("Date"); dateStr != "" {
+	if dateStr := res.Header.Get(header.Date); dateStr != "" {
 		if dt := parseHTTPDate(dateStr); !dt.IsZero() && !dt.After(now) {
 			if apparentAge := now.Sub(dt); apparentAge > originAge {
 				originAge = apparentAge
@@ -949,14 +950,14 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 		BodySize:     int64(len(res.Body)),
 		StoredAt:     now,
 		TTL:          ttl,
-		ETag:         res.Header.Get("ETag"),
+		ETag:         res.Header.Get(header.ETag),
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).
-	obj.Header.Set("X-Bouine-Path", r.URL.Path)
-	obj.Header.Set("X-Bouine-Host", r.Host)
+	obj.Header.Set(header.XBouinePath, r.URL.Path)
+	obj.Header.Set(header.XBouineHost, r.Host)
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
 	} else if defaultSWR > 0 {
@@ -967,12 +968,12 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	} else if defaultSIE > 0 {
 		obj.StaleIfError = defaultSIE
 	}
-	if lm := res.Header.Get("Last-Modified"); lm != "" {
+	if lm := res.Header.Get(header.LastModified); lm != "" {
 		if t, err := time.Parse(http.TimeFormat, lm); err == nil {
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(res.Header.Get("Vary"), r.Header, excludeHeaders)
+	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), r.Header, excludeHeaders)
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
 
@@ -1007,7 +1008,7 @@ func computeTTL(header http.Header, status int, respCC Directives,
 // Varnish: X-Cache-Tags). The first non-empty header wins; tokens are
 // whitespace/comma-separated and de-duplicated.
 func parseSurrogateKeys(h http.Header) []string {
-	for _, hdr := range []string{"Surrogate-Key", "Cache-Tag", "X-Cache-Tags"} {
+	for _, hdr := range header.SurrogateKeyHeaders {
 		v := h.Get(hdr)
 		if v == "" {
 			continue

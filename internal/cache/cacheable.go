@@ -3,6 +3,8 @@ package cache
 import (
 	"net/http"
 	"time"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // cacheable.go contains the cache storage eligibility functions.
@@ -66,7 +68,7 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	if cdnCC, hasCDN := cdnCacheControl(respHeader); hasCDN {
 		respCC = cdnCC
 	} else {
-		respCC = ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
+		respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
 	}
 
 	if isCacheBlocked(status, respCC, reqHeader, respHeader) {
@@ -85,7 +87,7 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	// Valid Expires header: only a syntactically correct date counts as
 	// explicit freshness. An invalid Expires must not prevent heuristic
 	// caching (RFC 9111 §4.2.1 “do not use invalid Expires in calculations”).
-	if exp := respHeader.Get("Expires"); exp != "" {
+	if exp := respHeader.Get(header.Expires); exp != "" {
 		if !parseHTTPDate(exp).IsZero() {
 			return true
 		}
@@ -95,7 +97,7 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	// status code is heuristically cacheable (RFC 9111 §4.2.2). When
 	// Cache-Control: public is present, unknown status codes (e.g. 599) are
 	// also eligible — the server is explicitly opting in to caching.
-	if respHeader.Get("Last-Modified") != "" && (isHeuristicStatus(status) || respCC.Public) {
+	if respHeader.Get(header.LastModified) != "" && (isHeuristicStatus(status) || respCC.Public) {
 		// Pragma: no-cache in a response without explicit Cache-Control
 		// blocks heuristic caching (RFC 9111 §5.4 / HTTP/1.0 compat).
 		if isBlockedByPragma(respCC, respHeader) {
@@ -140,7 +142,7 @@ func IsCacheableWithDefault(status int, reqHeader, respHeader http.Header, negat
 	if cdnCC, hasCDN := cdnCacheControl(respHeader); hasCDN {
 		respCC = cdnCC
 	} else {
-		respCC = ParseCacheControl(mergeHeaderValues(respHeader, "Cache-Control"))
+		respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
 	}
 	if isCacheBlocked(status, respCC, reqHeader, respHeader) {
 		return false
@@ -176,7 +178,7 @@ func isCacheBlocked(status int, respCC Directives, reqHeader, respHeader http.He
 	if isBlockedBySetCookie(respCC, respHeader) {
 		return true
 	}
-	if reqHeader.Get("Authorization") != "" {
+	if reqHeader.Get(header.Authorization) != "" {
 		if !respCC.Public && !respCC.MustRevalidate && !respCC.SMaxAgeSet {
 			return true
 		}
@@ -188,14 +190,14 @@ func isBlockedByPragma(respCC Directives, h http.Header) bool {
 	// RFC 9111 §5.4: Pragma: no-cache in a response blocks caching only when
 	// there is no explicit freshness information. If Last-Modified or Expires
 	// is present, heuristic or explicit freshness overrides Pragma.
-	return h.Get("Pragma") == "no-cache" &&
+	return h.Get(header.Pragma) == "no-cache" &&
 		!respCC.MaxAgeSet && !respCC.SMaxAgeSet &&
-		h.Get("Expires") == "" &&
-		h.Get("Last-Modified") == ""
+		h.Get(header.Expires) == "" &&
+		h.Get(header.LastModified) == ""
 }
 
 func hasVaryStar(h http.Header) bool {
-	for _, v := range h.Values("Vary") {
+	for _, v := range h.Values(header.Vary) {
 		if varyContainsStar(v) {
 			return true
 		}
@@ -204,7 +206,7 @@ func hasVaryStar(h http.Header) bool {
 }
 
 func isBlockedBySetCookie(respCC Directives, h http.Header) bool {
-	if h.Get("Set-Cookie") == "" {
+	if h.Get(header.SetCookie) == "" {
 		return false
 	}
 	// A shared cache MAY store responses with Set-Cookie if the

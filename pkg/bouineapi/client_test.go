@@ -8,12 +8,13 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestClient_Healthz(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(api.HealthStatus{Status: "ok"})
 	}))
 	defer srv.Close()
@@ -31,7 +32,7 @@ func TestClient_Healthz(t *testing.T) {
 func TestClient_Version(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(api.VersionInfo{Version: "1.0.0", Commit: "abc", Date: "today"})
 	}))
 	defer srv.Close()
@@ -55,7 +56,7 @@ func TestClient_Purge(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		receivedURL = body.URL
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(PurgeResult{Status: "purged"})
 	}))
 	defer srv.Close()
@@ -76,7 +77,7 @@ func TestClient_Purge(t *testing.T) {
 func TestClient_Ban(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(BanResult{Status: "banned", Count: 5})
 	}))
 	defer srv.Close()
@@ -94,7 +95,7 @@ func TestClient_Ban(t *testing.T) {
 func TestClient_Refresh(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(RefreshResult{Status: "refreshed"})
 	}))
 	defer srv.Close()
@@ -112,7 +113,7 @@ func TestClient_Refresh(t *testing.T) {
 func TestClient_Reload(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(ReloadResult{Status: "reload-requested"})
 	}))
 	defer srv.Close()
@@ -131,8 +132,8 @@ func TestClient_WithToken(t *testing.T) {
 	t.Parallel()
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
+		gotAuth = r.Header.Get(header.Authorization)
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(api.HealthStatus{Status: "ok"})
 	}))
 	defer srv.Close()

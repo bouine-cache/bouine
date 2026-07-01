@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // TestComputeAge_PrefersStoredOriginAge proves ComputeAge uses the pre-parsed
@@ -18,7 +19,7 @@ func TestComputeAge_PrefersStoredOriginAge(t *testing.T) {
 	obj := &api.Object{
 		StoredAt:  now, // elapsed-since-store contributes 0
 		OriginAge: 30 * time.Second,
-		Header:    http.Header{"Age": {"5"}},
+		Header:    http.Header{header.Age: {"5"}},
 	}
 	if got := ComputeAge(obj, now); got != 30*time.Second {
 		t.Fatalf("ComputeAge = %v, want 30s (stored OriginAge must win over Age header)", got)
@@ -33,7 +34,7 @@ func TestComputeAge_FallsBackToHeader(t *testing.T) {
 	now := time.Now()
 	obj := &api.Object{
 		StoredAt: now,
-		Header:   http.Header{"Age": {"42"}},
+		Header:   http.Header{header.Age: {"42"}},
 	}
 	if got := ComputeAge(obj, now); got != 42*time.Second {
 		t.Fatalf("ComputeAge = %v, want 42s (fallback to Age header when OriginAge==0)", got)

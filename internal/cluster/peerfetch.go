@@ -15,6 +15,7 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 const (
@@ -24,10 +25,10 @@ const (
 	// may traverse before going to origin (threat T36).
 	MaxHops = 2
 	// BouineHopHeader carries the current hop count for loop detection.
-	BouineHopHeader = "Bouine-Hop"
+	BouineHopHeader = header.BouineHop
 	// ClusterVersionHeader carries the cluster protocol version for
 	// negotiation during rolling upgrades.
-	ClusterVersionHeader = "X-Bouine-Cluster-Version"
+	ClusterVersionHeader = header.XBouineClusterVersion
 	// ClusterProtocolVersion is the current protocol version.
 	ClusterProtocolVersion = "1"
 	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
@@ -132,7 +133,7 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 	if err != nil {
 		return nil, fmt.Errorf("peer fetch request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(header.ContentType, "application/json")
 	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
 	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
 	return httpReq, nil
@@ -262,6 +263,6 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(header.ContentType, "application/json")
 	_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
 }

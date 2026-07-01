@@ -22,6 +22,7 @@ import (
 	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Config controls the admin server.
@@ -412,9 +413,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		want := "Bearer " + s.cfg.Token
-		got := r.Header.Get("Authorization")
+		got := r.Header.Get(header.Authorization)
 		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="bouine-admin"`)
+			w.Header().Set(header.WWWAuthenticate, `Bearer realm="bouine-admin"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -437,7 +438,7 @@ func manifestRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(header.ContentType, "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

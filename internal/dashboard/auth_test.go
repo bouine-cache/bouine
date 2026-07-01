@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestSessionAuth_SignAndValidate(t *testing.T) {
@@ -74,7 +76,7 @@ func TestSessionAuth_LoginPostWrongToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/dashboard/login",
 		strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
 	sa.LoginHandler(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("wrong token: want 401, got %d", w.Code)
@@ -88,12 +90,12 @@ func TestSessionAuth_LoginPostCorrectToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/dashboard/login",
 		strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
 	sa.LoginHandler(w, r)
 	if w.Code != http.StatusSeeOther {
 		t.Errorf("correct token: want 303, got %d", w.Code)
 	}
-	cookie := w.Header().Get("Set-Cookie")
+	cookie := w.Header().Get(header.SetCookie)
 	if !strings.Contains(cookie, sessionCookieName) {
 		t.Errorf("expected session cookie in Set-Cookie, got: %q", cookie)
 	}

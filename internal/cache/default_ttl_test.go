@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // newDefaultTTLHandler builds a Handler with DefaultTTL set, backed by an
@@ -53,12 +54,12 @@ func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
 		resp   http.Header
 		want   bool
 	}{
-		{"no-store", 200, http.Header{}, http.Header{"Cache-Control": {"no-store"}}, false},
-		{"private", 200, http.Header{}, http.Header{"Cache-Control": {"private"}}, false},
-		{"set-cookie", 200, http.Header{}, http.Header{"Set-Cookie": {"sid=abc"}}, false},
-		{"vary-star", 200, http.Header{}, http.Header{"Vary": {"*"}}, false},
-		{"pragma-no-cache", 200, http.Header{}, http.Header{"Pragma": {"no-cache"}}, false},
-		{"authorization", 200, http.Header{"Authorization": {"Bearer x"}}, http.Header{}, false},
+		{"no-store", 200, http.Header{}, http.Header{header.CacheControl: {"no-store"}}, false},
+		{"private", 200, http.Header{}, http.Header{header.CacheControl: {"private"}}, false},
+		{"set-cookie", 200, http.Header{}, http.Header{header.SetCookie: {"sid=abc"}}, false},
+		{"vary-star", 200, http.Header{}, http.Header{header.Vary: {"*"}}, false},
+		{"pragma-no-cache", 200, http.Header{}, http.Header{header.Pragma: {"no-cache"}}, false},
+		{"authorization", 200, http.Header{header.Authorization: {"Bearer x"}}, http.Header{}, false},
 		{"5xx-excluded", 500, http.Header{}, http.Header{}, false},
 		{"plain-200-ok", 200, http.Header{}, http.Header{}, true},
 	}
@@ -90,13 +91,13 @@ func TestDefaultTTL_CachesHeaderlessResponse(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/r", nil)
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, req)
-	if got := rr1.Header().Get("X-Cache"); got != "MISS" {
+	if got := rr1.Header().Get(header.XCache); got != "MISS" {
 		t.Fatalf("first request X-Cache = %q, want MISS", got)
 	}
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/r", nil))
-	if got := rr2.Header().Get("X-Cache"); got != "HIT" {
+	if got := rr2.Header().Get(header.XCache); got != "HIT" {
 		t.Fatalf("second request X-Cache = %q, want HIT", got)
 	}
 	if hits != 1 {
@@ -117,7 +118,7 @@ func TestDefaultTTL_DisabledKeepsMISS(t *testing.T) {
 	for i := range 2 {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
-		if got := rr.Header().Get("X-Cache"); got != "MISS" {
+		if got := rr.Header().Get(header.XCache); got != "MISS" {
 			t.Fatalf("request %d X-Cache = %q, want MISS (DefaultTTL disabled)", i+1, got)
 		}
 	}
@@ -128,7 +129,7 @@ func TestDefaultTTL_DisabledKeepsMISS(t *testing.T) {
 func TestDefaultTTL_NoStoreStillBypasses(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set(header.CacheControl, "no-store")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -137,7 +138,7 @@ func TestDefaultTTL_NoStoreStillBypasses(t *testing.T) {
 	for i := range 2 {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
-		if got := rr.Header().Get("X-Cache"); got != "MISS" {
+		if got := rr.Header().Get(header.XCache); got != "MISS" {
 			t.Fatalf("request %d X-Cache = %q, want MISS (no-store)", i+1, got)
 		}
 	}

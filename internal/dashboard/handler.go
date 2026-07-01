@@ -19,6 +19,7 @@ import (
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Config controls the dashboard server.
@@ -117,7 +118,7 @@ func (h *Handler) nodeName() string {
 }
 
 func (h *Handler) render(w http.ResponseWriter, r *http.Request, c templ.Component) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set(header.ContentType, "text/html; charset=utf-8")
 	if err := c.Render(r.Context(), w); err != nil {
 		h.cfg.Logger.Error("dashboard render error", "error", err)
 	}
@@ -666,7 +667,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set(header.ContentType, "text/html")
 
 	if h.cfg.ConfigPath == "" {
 		_, _ = fmt.Fprint(w, `<div class="flash-err">✗ Config path not configured</div>`)
@@ -802,13 +803,13 @@ func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiOK(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "text/html")
-	w.Header().Set("HX-Trigger", "refreshOpsLog")
+	w.Header().Set(header.ContentType, "text/html")
+	w.Header().Set(header.HXTrigger, "refreshOpsLog")
 	_, _ = fmt.Fprintf(w, `<span class="flash-ok">✓ %s</span>`, msg)
 }
 
 func (h *Handler) apiError(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set(header.ContentType, "text/html")
 	_, _ = fmt.Fprintf(w, `<span class="flash-err">✗ %s</span>`, msg)
 }
 

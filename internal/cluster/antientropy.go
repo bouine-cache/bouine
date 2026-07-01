@@ -9,6 +9,7 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // AntiEntropyConfig configures the anti-entropy reconciler.
@@ -251,7 +252,7 @@ func (h *PeerKeysHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		NodeName: h.node,
 		Keys:     out,
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(header.ContentType, "application/json")
 	_ = json.NewEncoder(w).Encode(ks)
 }
 

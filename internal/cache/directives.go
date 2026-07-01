@@ -3,6 +3,8 @@ package cache
 import (
 	"net/http"
 	"time"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Directives holds the parsed Cache-Control directives from either a
@@ -220,9 +222,9 @@ func eqFold(a, b string) bool {
 // per RFC 9111 §4.2.1. When CDN-Cache-Control is present it takes
 // precedence over Cache-Control for shared-cache TTL decisions
 // (RFC 9211).
-func FreshnessLifetime(respCC Directives, header func(string) string) (time.Duration, bool) {
+func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Duration, bool) {
 	// CDN-Cache-Control takes precedence when present.
-	if cdnCC := header("CDN-Cache-Control"); cdnCC != "" {
+	if cdnCC := getHdr("CDN-Cache-Control"); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
 		if cdnD.MaxAgeSet {
 			return cdnD.MaxAge, true
@@ -239,14 +241,14 @@ func FreshnessLifetime(respCC Directives, header func(string) string) (time.Dura
 	if respCC.MaxAgeSet {
 		return respCC.MaxAge, true
 	}
-	if exp := header("Expires"); exp != "" {
+	if exp := getHdr(header.Expires); exp != "" {
 		expTime := parseHTTPDate(exp)
 		if expTime.IsZero() {
 			// Invalid Expires → treat as no freshness information,
 			// not as explicitly expired, so heuristic can still apply.
 			return 0, false
 		}
-		dateStr := header("Date")
+		dateStr := getHdr(header.Date)
 		dateTime := parseHTTPDate(dateStr)
 		if dateTime.IsZero() {
 			return 0, false
@@ -277,7 +279,7 @@ func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) 
 	if respCC.MaxAgeSet {
 		return respCC.MaxAge, true
 	}
-	expiresVals := h.Values("Expires")
+	expiresVals := h.Values(header.Expires)
 	if len(expiresVals) == 0 {
 		return 0, false
 	}
@@ -291,7 +293,7 @@ func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) 
 		// (RFC 9111 §4.2.1: don't use invalid Expires in calculations).
 		return 0, false
 	}
-	dateStr := h.Get("Date")
+	dateStr := h.Get(header.Date)
 	dateTime := parseHTTPDate(dateStr)
 	if dateTime.IsZero() {
 		// RFC 9111 §4.2.1: if Date is absent or invalid, use the current

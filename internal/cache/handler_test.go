@@ -17,12 +17,13 @@ import (
 
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func origin200(body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})
@@ -45,8 +46,8 @@ func TestHandler_MissThenHit(t *testing.T) {
 	var originCalls int
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		originCalls++
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "cached-body")
 	})
@@ -58,8 +59,8 @@ func TestHandler_MissThenHit(t *testing.T) {
 	if rr1.Code != 200 {
 		t.Fatalf("req1 status = %d", rr1.Code)
 	}
-	if rr1.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("req1 X-Cache = %q", rr1.Header().Get("X-Cache"))
+	if rr1.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("req1 X-Cache = %q", rr1.Header().Get(header.XCache))
 	}
 	if rr1.Body.String() != "cached-body" {
 		t.Fatalf("req1 body = %q", rr1.Body.String())
@@ -71,15 +72,15 @@ func TestHandler_MissThenHit(t *testing.T) {
 	if rr2.Code != 200 {
 		t.Fatalf("req2 status = %d", rr2.Code)
 	}
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("req2 X-Cache = %q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("req2 X-Cache = %q", rr2.Header().Get(header.XCache))
 	}
 	if rr2.Body.String() != "cached-body" {
 		t.Fatalf("req2 body = %q", rr2.Body.String())
 	}
 
 	// Age header should be present.
-	if rr2.Header().Get("Age") == "" {
+	if rr2.Header().Get(header.Age) == "" {
 		t.Fatal("req2 missing Age header")
 	}
 
@@ -94,7 +95,7 @@ func TestHandler_NoStoreNotCached(t *testing.T) {
 	var calls int
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set(header.CacheControl, "no-store")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "private")
 	}))
@@ -120,7 +121,7 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	// Populate cache with GET.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/res", nil))
-	if rr.Header().Get("X-Cache") != "MISS" {
+	if rr.Header().Get(header.XCache) != "MISS" {
 		t.Fatal("expected MISS for initial GET")
 	}
 
@@ -131,16 +132,16 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	// GET — should be HIT (POST response stored after invalidation).
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, httptest.NewRequest("GET", "http://example.com/res", nil))
-	if rr3.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("expected HIT for GET after POST (cacheable), got %q", rr3.Header().Get("X-Cache"))
+	if rr3.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("expected HIT for GET after POST (cacheable), got %q", rr3.Header().Get(header.XCache))
 	}
 }
 
 func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Content-Location", "/other")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ContentLocation, "/other")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	}))
@@ -150,8 +151,8 @@ func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("precondition: expected HIT for /other, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("precondition: expected HIT for /other, got %q", rr.Header().Get(header.XCache))
 	}
 
 	h.ServeHTTP(httptest.NewRecorder(),
@@ -159,7 +160,7 @@ func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/other", nil))
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Fatalf("Content-Location /other was not invalidated by POST /submit")
 	}
 }
@@ -167,8 +168,8 @@ func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
 func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Content-Location", "/other")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ContentLocation, "/other")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	}))
@@ -181,7 +182,7 @@ func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
-	if rr.Header().Get("X-Cache") == "HIT" {
+	if rr.Header().Get(header.XCache) == "HIT" {
 		t.Fatalf("POST query string leaked into Content-Location key; /other not invalidated")
 	}
 }
@@ -189,8 +190,8 @@ func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
 func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Content-Location", "http://example.com:80/cdn/v2.json?x=1")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ContentLocation, "http://example.com:80/cdn/v2.json?x=1")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	}))
@@ -200,8 +201,8 @@ func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
 	}
 
 	h.ServeHTTP(httptest.NewRecorder(),
@@ -209,7 +210,7 @@ func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Fatalf("absolute Content-Location was not invalidated")
 	}
 }
@@ -217,8 +218,8 @@ func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
 func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Content-Location", "../v2.json")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ContentLocation, "../v2.json")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	}))
@@ -228,8 +229,8 @@ func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
 	}
 
 	h.ServeHTTP(httptest.NewRecorder(),
@@ -237,7 +238,7 @@ func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Fatalf("relative Content-Location ../v2.json was not invalidated")
 	}
 }
@@ -245,8 +246,8 @@ func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
 func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Content-Location", "http://other.example.com/resource")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ContentLocation, "http://other.example.com/resource")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	}))
@@ -256,8 +257,8 @@ func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
 	}
 
 	h.ServeHTTP(httptest.NewRecorder(),
@@ -265,7 +266,7 @@ func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Fatalf("cross-host Content-Location was not invalidated")
 	}
 }
@@ -273,8 +274,8 @@ func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
 func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Location", "/redirect-target")
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.Location, "/redirect-target")
 		w.WriteHeader(201)
 		_, _ = io.WriteString(w, "created")
 	}))
@@ -284,8 +285,8 @@ func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
 	}
 
 	h.ServeHTTP(httptest.NewRecorder(),
@@ -293,7 +294,7 @@ func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Fatalf("Location header was not invalidated")
 	}
 }
@@ -308,7 +309,7 @@ func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 
 	// Request with no-store bypasses cache — goes directly to upstream.
 	req := httptest.NewRequest("GET", "http://example.com/bp", nil)
-	req.Header.Set("Cache-Control", "no-store")
+	req.Header.Set(header.CacheControl, "no-store")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, req)
 	if rr2.Code != 200 {
@@ -338,7 +339,7 @@ func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
 				httptest.NewRequest("GET", "http://example.com/ns", nil))
 
 			req := httptest.NewRequest("GET", "http://example.com/ns", nil)
-			req.Header.Set("Cache-Control", cc)
+			req.Header.Set(header.CacheControl, cc)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
 			if rr.Code != 200 {
@@ -365,8 +366,8 @@ func TestHandler_HeadServedFromCache(t *testing.T) {
 	if rr2.Code != 200 {
 		t.Fatalf("HEAD status = %d", rr2.Code)
 	}
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("HEAD X-Cache = %q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("HEAD X-Cache = %q", rr2.Header().Get(header.XCache))
 	}
 	if rr2.Body.Len() != 0 {
 		t.Fatalf("HEAD should have empty body, got %d bytes", rr2.Body.Len())
@@ -393,7 +394,7 @@ func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
 		calls++
 		if calls == 1 {
 			// First call: serve a cacheable response.
-			w.Header().Set("Cache-Control", "max-age=1")
+			w.Header().Set(header.CacheControl, "max-age=1")
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "healthy-body")
 			return
@@ -416,7 +417,7 @@ func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
 	// revalidation with 5xx triggers stayin-alive serving.
 	rr2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest("GET", "http://example.com/sa", nil)
-	req2.Header.Set("Cache-Control", "no-cache") // force revalidation
+	req2.Header.Set(header.CacheControl, "no-cache") // force revalidation
 	h.ServeHTTP(rr2, req2)
 	if rr2.Code != 200 {
 		t.Fatalf("stayin-alive: status = %d, want 200 (stale served)", rr2.Code)
@@ -433,7 +434,7 @@ func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		if calls == 1 {
-			w.Header().Set("Cache-Control", "max-age=1")
+			w.Header().Set(header.CacheControl, "max-age=1")
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "alive-body")
 			return
@@ -452,7 +453,7 @@ func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
 	// Force revalidation.
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://example.com/err", nil)
-	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set(header.CacheControl, "no-cache")
 	h.ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatalf("stayin-alive on 500: status = %d", rr.Code)
@@ -476,7 +477,7 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		if calls == 1 {
-			w.Header().Set("Cache-Control", "max-age=1")
+			w.Header().Set(header.CacheControl, "max-age=1")
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "age-body")
 			return
@@ -502,14 +503,14 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	reqStart := time.Now()
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", url, nil)
-	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set(header.CacheControl, "no-cache")
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, want 200 (stale served)", rr.Code)
 	}
 
-	ageStr := rr.Header().Get("Age")
+	ageStr := rr.Header().Get(header.Age)
 	ageSecs, err := strconv.Atoi(ageStr)
 	if err != nil {
 		t.Fatalf("Age header = %q, not an integer: %v", ageStr, err)
@@ -534,8 +535,8 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	hitCount := 0
 
 	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("Vary", "X-Test-Variant")
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.Vary, "X-Test-Variant")
 		_, _ = w.Write([]byte("body"))
 	})
 
@@ -577,8 +578,8 @@ func TestMaxVariants_OverwriteDoesNotDoubleCount(t *testing.T) {
 	hitCount := 0
 
 	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("Vary", "X-Test-Variant")
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.Vary, "X-Test-Variant")
 		_, _ = w.Write([]byte("body"))
 	})
 
@@ -606,8 +607,8 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 	hitCount := 0
 
 	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("Vary", "X-Test-Variant")
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.Vary, "X-Test-Variant")
 		_, _ = w.Write([]byte("body"))
 	})
 
@@ -634,8 +635,8 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	t.Parallel()
 
 	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("Vary", "X-Test-Variant")
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.Vary, "X-Test-Variant")
 		_, _ = w.Write([]byte("body"))
 	})
 
@@ -711,7 +712,7 @@ func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	originCalls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		originCalls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "eventual-body")
 	})
@@ -731,15 +732,15 @@ func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	if originCalls != 1 {
 		t.Fatalf("expected 1 origin call, got %d", originCalls)
 	}
-	if rr.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("X-Cache = %q, want MISS", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("X-Cache = %q, want MISS", rr.Header().Get(header.XCache))
 	}
 
 	// Second request should be a HIT — served from local cache.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/e", nil))
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("X-Cache = %q, want HIT", rr2.Header().Get(header.XCache))
 	}
 }
 
@@ -756,7 +757,7 @@ func TestHandler_FullReplicationHook(t *testing.T) {
 		replicated.Add(1)
 	}
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "full-mode-body")
 	})
@@ -812,7 +813,7 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 	var originCalls atomic.Int64
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		originCalls.Add(1)
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "cached-body")
 	})
@@ -825,15 +826,15 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 	// Warm the cache.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	if rr.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("warmup should be MISS, got %q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("warmup should be MISS, got %q", rr.Header().Get(header.XCache))
 	}
 
 	// Second request — HIT.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Fatalf("expected HIT, got %q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Fatalf("expected HIT, got %q", rr2.Header().Get(header.XCache))
 	}
 
 	// Ban by path regex.
@@ -850,15 +851,15 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 	// After ban — should be MISS (re-fetch from origin).
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	if rr3.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("after ban expected MISS, got %q", rr3.Header().Get("X-Cache"))
+	if rr3.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("after ban expected MISS, got %q", rr3.Header().Get(header.XCache))
 	}
 }
 
 func TestHandler_BanByHostRegex(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "cached-body")
 	})
@@ -871,7 +872,7 @@ func TestHandler_BanByHostRegex(t *testing.T) {
 	// Warm the cache.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if rr.Header().Get("X-Cache") != "MISS" {
+	if rr.Header().Get(header.XCache) != "MISS" {
 		t.Fatalf("warmup should be MISS")
 	}
 
@@ -889,15 +890,15 @@ func TestHandler_BanByHostRegex(t *testing.T) {
 	// After ban — should be MISS.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if rr2.Header().Get("X-Cache") != "MISS" {
-		t.Fatalf("after ban expected MISS, got %q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("after ban expected MISS, got %q", rr2.Header().Get(header.XCache))
 	}
 }
 
 func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "cached-body")
 	})
@@ -908,10 +909,10 @@ func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
 
 	// Internal headers must not leak to the client.
-	if v := rr.Header().Get("X-Bouine-Path"); v != "" {
+	if v := rr.Header().Get(header.XBouinePath); v != "" {
 		t.Fatalf("X-Bouine-Path leaked to client: %q", v)
 	}
-	if v := rr.Header().Get("X-Bouine-Host"); v != "" {
+	if v := rr.Header().Get(header.XBouineHost); v != "" {
 		t.Fatalf("X-Bouine-Host leaked to client: %q", v)
 	}
 }
@@ -925,12 +926,12 @@ func TestHandler_ReplicateOnForegroundRevalidate(t *testing.T) {
 		}
 	}
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") != "" {
+		if r.Header.Get(header.IfNoneMatch) != "" {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -958,8 +959,8 @@ func TestHandler_ReplicateOnForegroundRevalidate(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
-	if rr.Header().Get("X-Cache") != "REVALIDATED" {
-		t.Fatalf("X-Cache = %q, want REVALIDATED", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "REVALIDATED" {
+		t.Fatalf("X-Cache = %q, want REVALIDATED", rr.Header().Get(header.XCache))
 	}
 	if replicated.Load() != 1 {
 		t.Fatalf("replicateFn called %d times after 304 revalidation, want 1", replicated.Load())
@@ -975,12 +976,12 @@ func TestHandler_ReplicateOnBackgroundSWR(t *testing.T) {
 		}
 	}
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("If-None-Match") != "" {
+		if r.Header.Get(header.IfNoneMatch) != "" {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		w.Header().Set("Cache-Control", "max-age=60, stale-while-revalidate=60")
-		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set(header.CacheControl, "max-age=60, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -1030,13 +1031,13 @@ func TestHandler_ReplicateOnPOSTCacheable(t *testing.T) {
 	}
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			w.Header().Set("Cache-Control", "max-age=60")
-			w.Header().Set("Content-Location", "/post-resource")
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ContentLocation, "/post-resource")
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "post-body")
 			return
 		}
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "get-body")
 	})
@@ -1048,7 +1049,7 @@ func TestHandler_ReplicateOnPOSTCacheable(t *testing.T) {
 	})
 
 	postReq := httptest.NewRequest("POST", "http://example.com/post-resource", strings.NewReader("data"))
-	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postReq.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
 	h.ServeHTTP(httptest.NewRecorder(), postReq)
 
 	if replicated.Load() != 1 {
@@ -1065,11 +1066,11 @@ func TestHandler_ReplicateVaryPrimaryAndVariant(t *testing.T) {
 		}
 	}
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
-		w.Header().Set("Vary", "Accept-Encoding")
-		w.Header().Set("Content-Encoding", r.Header.Get("Accept-Encoding"))
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.Vary, "Accept-Encoding")
+		w.Header().Set(header.ContentEncoding, r.Header.Get(header.AcceptEncoding))
 		w.WriteHeader(200)
-		_, _ = w.Write([]byte("body-" + r.Header.Get("Accept-Encoding")))
+		_, _ = w.Write([]byte("body-" + r.Header.Get(header.AcceptEncoding)))
 	})
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
@@ -1079,7 +1080,7 @@ func TestHandler_ReplicateVaryPrimaryAndVariant(t *testing.T) {
 	})
 
 	r := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r.Header.Set("Accept-Encoding", "gzip")
+	r.Header.Set(header.AcceptEncoding, "gzip")
 	h.ServeHTTP(httptest.NewRecorder(), r)
 
 	primaryKey := BuildKey(r)

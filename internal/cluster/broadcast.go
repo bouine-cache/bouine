@@ -15,6 +15,7 @@ import (
 	"github.com/thylong/bouine/internal/config"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // countPeers returns the number of live peers excluding the local node.
@@ -257,9 +258,9 @@ func (b *Broadcaster) post(ctx context.Context, addr, path string, body any) err
 	if err != nil {
 		return fmt.Errorf("broadcast request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(header.ContentType, "application/json")
 	if b.token != "" {
-		req.Header.Set("Authorization", "Bearer "+b.token)
+		req.Header.Set(header.Authorization, "Bearer "+b.token)
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}

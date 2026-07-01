@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Router is the data-plane HTTP handler. It matches an incoming request
@@ -103,7 +104,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if re.methods != nil && !re.methods[r.Method] {
 			continue
 		}
-		r.Header["X-Bouine-Route"] = re.labelVal
+		r.Header[header.XBouineRoute] = re.labelVal
 		re.handler.ServeHTTP(w, r)
 		return
 	}

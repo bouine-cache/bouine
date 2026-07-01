@@ -149,6 +149,9 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if r.Cache.JitterPercent < 0 || r.Cache.JitterPercent > 50 {
 		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, r.Cache.JitterPercent)
 	}
+	if r.Cache.MaxResponseBytes < 0 {
+		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, r.Cache.MaxResponseBytes)
+	}
 	return nil
 }
 

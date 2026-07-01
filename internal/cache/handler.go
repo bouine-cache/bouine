@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -36,6 +37,12 @@ import (
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 )
+
+// defaultMaxResponseBytes is the hard cap on response body buffering
+// when the operator has not configured max_response_bytes. It prevents
+// a single oversized origin response from exhausting memory before the
+// post-fetch MaxObjectSize check runs.
+const defaultMaxResponseBytes int64 = 64 << 20 // 64 MiB
 
 // bgRevalSem bounds concurrent background stale-while-revalidate
 // goroutines. When full, excess revalidation attempts are silently
@@ -99,9 +106,11 @@ var recorderPool = sync.Pool{
 	},
 }
 
-func acquireRecorder() *responseRecorder {
+func acquireRecorder(maxBytes int64) *responseRecorder {
 	rec := recorderPool.Get().(*responseRecorder)
 	rec.statusCode = 0
+	rec.truncated = false
+	rec.maxBytes = maxBytes
 	rec.body.Reset()
 	for k := range rec.header {
 		delete(rec.header, k)
@@ -132,6 +141,7 @@ type Handler struct {
 	defaultSIE       time.Duration   // operator-level stale-if-error floor
 	allowSetCookie   bool            // when false (default), Set-Cookie blocks caching
 	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
+	maxResponseBytes int64           // hard cap on body buffering; 0 = defaultMaxResponseBytes
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
 	// variantSets tracks the live variant store keys per primary key to
@@ -198,6 +208,13 @@ type HandlerConfig struct {
 	// exceeds this size. The response is still proxied to the client.
 	// Zero = no limit.
 	MaxObjectSize int64
+	// MaxResponseBytes is a hard limit on the amount of response body
+	// data buffered in memory during an upstream fetch. When exceeded the
+	// fetch is aborted and the client receives a 502. This is distinct
+	// from MaxObjectSize, which only prevents storage after the body has
+	// already been fully buffered. Zero (default) applies a safe built-in
+	// limit (64 MiB).
+	MaxResponseBytes int64
 	// StripQueryParams, when non-nil, excludes the listed query parameter
 	// names from the cache key. The parameters are still forwarded to
 	// the upstream. Allocated once at handler construction.
@@ -247,8 +264,12 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		replicateFn:      cfg.ReplicateFn,
 		allowSetCookie:   cfg.AllowSetCookie,
 		maxObjectSize:    cfg.MaxObjectSize,
+		maxResponseBytes: cfg.MaxResponseBytes,
 		stripQueryParams: cfg.StripQueryParams,
 		excludeHeaders:   cfg.ExcludeHeaders,
+	}
+	if h.maxResponseBytes == 0 {
+		h.maxResponseBytes = defaultMaxResponseBytes
 	}
 	return h
 }
@@ -738,9 +759,16 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	// Capture the upstream response first — only invalidate on success
 	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
 	// indicates a server error).
-	rec := acquireRecorder()
+	rec := acquireRecorder(h.maxResponseBytes)
 	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, r)
+
+	if rec.truncated {
+		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
+			"key", h.buildKey(r), "limit", h.maxResponseBytes)
+		http.Error(w, "upstream response too large", http.StatusBadGateway)
+		return
+	}
 
 	// Only invalidate on 2xx/3xx success.
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
@@ -843,9 +871,13 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	// can participate in the distributed trace.
 	outReq := r.WithContext(ctx)
 	tracing.InjectHTTP(ctx, outReq)
-	rec := acquireRecorder()
+	rec := acquireRecorder(h.maxResponseBytes)
 	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, outReq)
+
+	if rec.truncated {
+		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
+	}
 
 	// Copy body and header out so the fetchResult owns them before the
 	// recorder returns to the pool. The body copy is also right-sized:
@@ -1007,6 +1039,8 @@ type responseRecorder struct {
 	header     http.Header
 	body       *bytes.Buffer
 	statusCode int
+	maxBytes   int64
+	truncated  bool
 }
 
 func (r *responseRecorder) Header() http.Header { return r.header }
@@ -1016,6 +1050,10 @@ func (r *responseRecorder) WriteHeader(code int) { r.statusCode = code }
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	if r.statusCode == 0 {
 		r.statusCode = 200
+	}
+	if r.maxBytes > 0 && int64(r.body.Len())+int64(len(b)) > r.maxBytes {
+		r.truncated = true
+		return 0, fmt.Errorf("response body exceeds %d bytes", r.maxBytes)
 	}
 	return r.body.Write(b)
 }

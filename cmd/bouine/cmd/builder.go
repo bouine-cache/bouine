@@ -229,6 +229,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			DefaultSIE:       rc.Cache.StaleIfError,
 			AllowSetCookie:   rc.Cache.AllowSetCookie != nil && *rc.Cache.AllowSetCookie,
 			MaxObjectSize:    rc.Cache.MaxObjectSize.Bytes(),
+			MaxResponseBytes: rc.Cache.MaxResponseBytes.Bytes(),
 			StripQueryParams: buildStripSet(rc.Cache.Key.StripQueryParams),
 			ExcludeHeaders:   buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
 			VaryCapHits:      rs.dpMetrics.VaryCapHits,

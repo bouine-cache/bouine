@@ -565,9 +565,10 @@ func insightsHeaderAudit(rs *runState) func() map[string]observability.HeaderAud
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *runState) {
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
-			Addr:    e.cfg.Listen.HTTP,
-			Handler: handler,
-			Logger:  e.logger,
+			Addr:           e.cfg.Listen.HTTP,
+			Handler:        handler,
+			Logger:         e.logger,
+			MaxConnections: e.cfg.Listen.MaxConnections,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -580,10 +581,11 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			return
 		}
 		srv := server.NewHTTPS(server.ListenerConfig{
-			Addr:      e.cfg.Listen.HTTPS,
-			Handler:   handler,
-			Logger:    e.logger,
-			TLSConfig: tlsCfg,
+			Addr:           e.cfg.Listen.HTTPS,
+			Handler:        handler,
+			Logger:         e.logger,
+			TLSConfig:      tlsCfg,
+			MaxConnections: e.cfg.Listen.MaxConnections,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)

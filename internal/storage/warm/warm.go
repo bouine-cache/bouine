@@ -555,48 +555,9 @@ func (s *Store) Compact() error {
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}
-	newIndex := make(map[uint64]warmLoc, len(idxSnap))
-	written := 0
-
-	s.mu.RLock()
-	segs := make([]*Segment, len(s.segs))
-	copy(segs, s.segs)
-	s.mu.RUnlock()
-
-	type pendingRec struct {
-		key  uint64
-		body []byte
-	}
-	for _, seg := range segs {
-		seg.mu.Lock()
-		var pending []pendingRec
-		scanErr := scanSegment(seg.f, seg.ID, func(r Record) error {
-			if r.IsTomb {
-				return nil
-			}
-			loc, ok := idxSnap[r.Key]
-			if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
-				return nil
-			}
-			pending = append(pending, pendingRec{key: r.Key, body: r.Body})
-			return nil
-		})
-		seg.mu.Unlock()
-		if scanErr != nil {
-			_ = tmp.Close()
-			_ = os.RemoveAll(compactDir)
-			return fmt.Errorf("compact: scan: %w", scanErr)
-		}
-		for _, p := range pending {
-			segID, offset, wErr := tmp.Put(p.key, p.body)
-			if wErr != nil {
-				_ = tmp.Close()
-				_ = os.RemoveAll(compactDir)
-				return fmt.Errorf("compact: write: %w", wErr)
-			}
-			newIndex[p.key] = warmLoc{segID: segID, offset: offset}
-			written++
-		}
+	newIndex, written, err := s.compactSegments(tmp, idxSnap, compactDir)
+	if err != nil {
+		return err
 	}
 	if written == 0 {
 		_ = tmp.Close()
@@ -637,4 +598,54 @@ func (s *Store) Compact() error {
 	s.stats.entries.Store(int64(len(newIndex)))
 	s.stats.bytes.Store(fresh.stats.bytes.Load())
 	return nil
+}
+
+type pendingRec struct {
+	key  uint64
+	body []byte
+}
+
+// compactSegments scans each source segment for live records and writes
+// them to tmp, returning the new index and count. Segment locks are held
+// only during the scan, not during cross-store writes.
+func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactDir string) (map[uint64]warmLoc, int, error) {
+	s.mu.RLock()
+	segs := make([]*Segment, len(s.segs))
+	copy(segs, s.segs)
+	s.mu.RUnlock()
+
+	newIndex := make(map[uint64]warmLoc, len(idxSnap))
+	written := 0
+	for _, seg := range segs {
+		seg.mu.Lock()
+		var pending []pendingRec
+		scanErr := scanSegment(seg.f, seg.ID, func(r Record) error {
+			if r.IsTomb {
+				return nil
+			}
+			loc, ok := idxSnap[r.Key]
+			if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
+				return nil
+			}
+			pending = append(pending, pendingRec{key: r.Key, body: r.Body})
+			return nil
+		})
+		seg.mu.Unlock()
+		if scanErr != nil {
+			_ = tmp.Close()
+			_ = os.RemoveAll(compactDir)
+			return nil, 0, fmt.Errorf("compact: scan: %w", scanErr)
+		}
+		for _, p := range pending {
+			segID, offset, wErr := tmp.Put(p.key, p.body)
+			if wErr != nil {
+				_ = tmp.Close()
+				_ = os.RemoveAll(compactDir)
+				return nil, 0, fmt.Errorf("compact: write: %w", wErr)
+			}
+			newIndex[p.key] = warmLoc{segID: segID, offset: offset}
+			written++
+		}
+	}
+	return newIndex, written, nil
 }

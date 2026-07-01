@@ -412,7 +412,7 @@ templ storageCylinder(tier StorageTier, i int, tiers []StorageTier, node ArchNod
 // ── JavaScript ────────────────────────────────────────────────────────
 
 script insightsScript() {
-	function toggleInsightsMax(){
+	window.toggleInsightsMax=function(){
 		var c=document.getElementById('insights-container');
 		if(!c)return;
 		var isMax=c.classList.contains('insights-maximized');
@@ -421,7 +421,7 @@ script insightsScript() {
 		localStorage.setItem('bouine-insights-view',isMax?'split':'max');
 		var btn=document.getElementById('insights-max-btn');
 		if(btn)btn.textContent=isMax?'⛶':'⤢';
-	}
+	};
 	(function(){
 		var saved=localStorage.getItem('bouine-insights-view');
 		if(saved==='max'){

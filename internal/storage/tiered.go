@@ -158,6 +158,14 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 	}
 	// Promote to hot tier (best-effort: ignore error).
 	_ = t.hot.Put(ctx, key, loaded)
+	// Check lazy bans before serving: Ban() only touches the hot tier,
+	// so warm-tier hits must be checked against the hot tier's active
+	// ban list to avoid serving stale objects that were banned after
+	// being demoted to warm.
+	if t.hot.MatchesActiveBan(loaded) {
+		_ = t.hot.Delete(ctx, key)
+		return nil, nil
+	}
 	return loaded, nil
 }
 
@@ -200,7 +208,8 @@ func (t *TieredStore) Delete(ctx context.Context, key api.Key) error {
 	return nil
 }
 
-// Ban delegates to the hot tier. Warm-tier lazy bans are deferred.
+// Ban delegates to the hot tier's eager scan and registers a lazy ban
+// that is also checked on warm-tier hits via MatchesActiveBan in Get.
 func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 	return t.hot.Ban(ctx, expr)
 }

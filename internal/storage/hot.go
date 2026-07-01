@@ -514,6 +514,13 @@ func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
 	}, nil
 }
 
+// MatchesActiveBan reports whether obj is subject to any active lazy
+// ban. It is exported so the tiered store can check warm-tier hits
+// against the same ban list used by the hot tier.
+func (h *HotStore) MatchesActiveBan(obj *api.Object) bool {
+	return h.matchesActiveBan(obj)
+}
+
 // matchesActiveBan reports whether obj is subject to any active lazy ban.
 // Expired bans (where the ban's CreatedAt is far in the past and unlikely to
 // be relevant) are pruned to bound the list size.

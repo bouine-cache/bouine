@@ -385,7 +385,7 @@ func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
 	key := h.buildKey(r)
 	obj, err := h.store.Get(r.Context(), key)
 	if err != nil {
-		h.logger.Warn("cache lookup error", "error", err)
+		h.logger.Warn("cache lookup error", "key", key, "error", err)
 	}
 	if obj == nil || obj.Header.Get("Vary") == "" {
 		return key, obj

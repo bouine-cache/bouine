@@ -227,7 +227,7 @@ func (t *TieredStore) compactLoop() {
 		case <-ticker.C:
 			if t.warm.NeedsCompaction() {
 				if err := t.warm.Compact(); err != nil {
-					t.logger.Warn("warm tier compaction failed", "error", err)
+					t.logger.Error("warm tier compaction failed", "error", err)
 				} else {
 					t.logger.Info("warm tier compaction complete")
 				}

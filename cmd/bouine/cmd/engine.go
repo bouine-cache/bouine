@@ -60,11 +60,12 @@ type runState struct {
 	snapshotPath string
 	token        string
 
-	clusterNode *cluster.Cluster
-	peerFetcher *cluster.PeerFetcher
-	broadcaster *cluster.Broadcaster
-	peersFn     func() []api.PeerInfo
-	antiEntropy *cluster.AntiEntropy
+	clusterNode    *cluster.Cluster
+	peerFetcher    *cluster.PeerFetcher
+	broadcaster    *cluster.Broadcaster
+	peersFn        func() []api.PeerInfo
+	antiEntropy    *cluster.AntiEntropy
+	clusterMetrics *cluster.Metrics
 
 	cfProp    *cfPropagator
 	cfCancel  context.CancelFunc
@@ -135,7 +136,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	rings, snapshotPath := e.initRings()
 	dpMetrics.Rings = rings
 
-	clusterNode, peerFetcher, broadcaster, peersFn, ae := e.initCluster(ctx, store, rings)
+	clusterNode, peerFetcher, broadcaster, peersFn, ae, clusterMetrics := e.initCluster(ctx, store, rings)
 
 	cfCtx, cfCancel := context.WithCancel(context.Background())
 	cfProp := e.initCloudflare(dpMetrics, cfCtx) //nolint:contextcheck // detached lifecycle for CF async goroutines
@@ -144,21 +145,22 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	rings.HeaderRing = headerRing
 
 	rs := &runState{
-		store:        store,
-		pools:        pools,
-		dpMetrics:    dpMetrics,
-		rings:        rings,
-		headerRing:   headerRing,
-		snapshotPath: snapshotPath,
-		token:        token,
-		clusterNode:  clusterNode,
-		peerFetcher:  peerFetcher,
-		broadcaster:  broadcaster,
-		peersFn:      peersFn,
-		antiEntropy:  ae,
-		cfProp:       cfProp,
-		cfCancel:     cfCancel,
-		seq:          shutdown.NewSequencer(e.logger),
+		store:          store,
+		pools:          pools,
+		dpMetrics:      dpMetrics,
+		rings:          rings,
+		headerRing:     headerRing,
+		snapshotPath:   snapshotPath,
+		token:          token,
+		clusterNode:    clusterNode,
+		peerFetcher:    peerFetcher,
+		broadcaster:    broadcaster,
+		peersFn:        peersFn,
+		antiEntropy:    ae,
+		clusterMetrics: clusterMetrics,
+		cfProp:         cfProp,
+		cfCancel:       cfCancel,
+		seq:            shutdown.NewSequencer(e.logger),
 	}
 	return rs, shutdownTracer, nil
 }
@@ -204,15 +206,15 @@ func (e *engine) initCluster(
 	ctx context.Context,
 	store storage.Store,
 	rings *observability.Rings,
-) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.AntiEntropy) {
+) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.AntiEntropy, *cluster.Metrics) {
 	if !e.cfg.Cluster.Enabled || e.cfg.Listen.Cluster == "" {
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 
 	clusterNode, err := e.buildCluster(ctx)
 	if err != nil {
 		e.logger.Error("cluster init failed", "error", err)
-		return nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}
 
 	var clusterTLS *tls.Config
@@ -220,7 +222,7 @@ func (e *engine) initCluster(
 		clusterTLS, err = buildClusterTLSConfig(e.cfg.Cluster.TLS)
 		if err != nil {
 			e.logger.Error("cluster TLS failed", "error", err)
-			return nil, nil, nil, nil, nil
+			return nil, nil, nil, nil, nil, nil
 		}
 	}
 
@@ -270,7 +272,7 @@ func (e *engine) initCluster(
 		e.logger.Warn("cluster.mode 'full': memory scales linearly with cluster size")
 	}
 
-	return clusterNode, peerFetcher, broadcaster, clusterNode.Members, ae
+	return clusterNode, peerFetcher, broadcaster, clusterNode.Members, ae, clusterMetrics
 }
 
 func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics, closeCtx context.Context) *cfPropagator {
@@ -451,22 +453,7 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		ringFn = rs.clusterNode.RingSegments
 	}
 
-	clusterMeta := templates.ClusterMeta{
-		ProtocolVersion:  cluster.ClusterProtocolVersion,
-		GossipInterval:   "5s",
-		JoinRetryBudget:  "60s · 2s step",
-		PeerFetchTimeout: "500ms",
-	}
-	if rs.clusterNode != nil {
-		clusterMeta.VirtualNodes = rs.clusterNode.Config().VirtualNodes
-		clusterMeta.LoadFactor = rs.clusterNode.Config().LoadFactor
-		clusterMeta.Mode = rs.clusterNode.Mode()
-	} else {
-		clusterMeta.Mode = "single-node"
-	}
-	if e.cfg.Cluster.HopLimit > 0 {
-		clusterMeta.HopLimit = e.cfg.Cluster.HopLimit
-	}
+	clusterMeta := e.buildClusterMeta(rs)
 
 	_ = dashboard.New(dashboard.Config{
 		Rings:        rs.rings,
@@ -522,8 +509,31 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		PoolHealthFn:        insightsPoolHealth(rs),
 		OriginHeaderAuditFn: insightsHeaderAudit(rs),
 		VaryCapHitsFn:       func() int64 { return rs.dpMetrics.VaryCapHitsCount() },
+		BroadcastFailuresFn: func() int64 { return rs.clusterMetrics.BroadcastFailuresCount() },
+		CFPurgeSkippedFn:    func() int64 { return rs.dpMetrics.CFPurgeSkippedCount() },
 	}, dashMux)
 	return dashMux
+}
+
+// buildClusterMeta constructs the cluster metadata card for the dashboard.
+func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
+	meta := templates.ClusterMeta{
+		ProtocolVersion:  cluster.ClusterProtocolVersion,
+		GossipInterval:   "5s",
+		JoinRetryBudget:  "60s · 2s step",
+		PeerFetchTimeout: "500ms",
+	}
+	if rs.clusterNode != nil {
+		meta.VirtualNodes = rs.clusterNode.Config().VirtualNodes
+		meta.LoadFactor = rs.clusterNode.Config().LoadFactor
+		meta.Mode = rs.clusterNode.Mode()
+	} else {
+		meta.Mode = "single-node"
+	}
+	if e.cfg.Cluster.HopLimit > 0 {
+		meta.HopLimit = e.cfg.Cluster.HopLimit
+	}
+	return meta
 }
 
 // insightsPoolHealth returns a closure that snapshots all upstream pool

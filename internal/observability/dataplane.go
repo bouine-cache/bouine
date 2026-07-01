@@ -109,6 +109,22 @@ func (m *DataPlaneMetrics) VaryCapHitsCount() int64 {
 	return int64(d.GetCounter().GetValue())
 }
 
+// CFPurgeSkippedCount returns the total CF purge skip count across all
+// reasons by summing the CounterVec label combinations.
+func (m *DataPlaneMetrics) CFPurgeSkippedCount() int64 {
+	if m == nil || m.CFPurgeSkipped == nil {
+		return 0
+	}
+	var total int64
+	for _, reason := range []string{"rate_limited", "batch_full", "disabled"} {
+		var d dto.Metric
+		if err := m.CFPurgeSkipped.WithLabelValues(reason).(prometheus.Metric).Write(&d); err == nil {
+			total += int64(d.GetCounter().GetValue())
+		}
+	}
+	return total
+}
+
 // statusStrings is a pre-allocated table of HTTP status code strings
 // for codes 100–599. Avoids strconv.Itoa allocation on every request.
 // Index 0 → "100", index 499 → "599".

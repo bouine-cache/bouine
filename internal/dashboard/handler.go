@@ -60,6 +60,10 @@ type Config struct {
 	OriginHeaderAuditFn func() map[string]observability.HeaderAuditSummary
 	// VaryCapHitsFn returns the total Vary cap hit count.
 	VaryCapHitsFn func() int64
+	// BroadcastFailuresFn returns total cluster broadcast failures.
+	BroadcastFailuresFn func() int64
+	// CFPurgeSkippedFn returns total CF purges skipped.
+	CFPurgeSkippedFn func() int64
 }
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
@@ -884,21 +888,45 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 		cfStatus.Enabled = cfCard.Enabled
 		cfStatus.Async = cfCard.Async
 		cfStatus.LastLagMs = cfCard.LastLagMs
+		cfStatus.LastError = cfCard.LastError
 	}
 	peerInfos := make([]insights.PeerInfo, len(peers))
 	for i, p := range peers {
 		peerInfos[i] = insights.PeerInfo{Name: p.NodeName, Stale: p.Stale}
 	}
+	var peerHealth map[string]float64
+	if h.cfg.Rings != nil && h.cfg.Rings.Peer != nil {
+		peerHealth = h.cfg.Rings.Peer.PeerHealth()
+	}
+	var repLastRecv, repBytes int64
+	if h.cfg.Rings != nil && h.cfg.Rings.Replication != nil {
+		_, _, bytesSent, bytesRecv, lastRecv := h.cfg.Rings.Replication.Totals()
+		repLastRecv = lastRecv
+		repBytes = bytesSent + bytesRecv
+	}
+	var broadcastFailures int64
+	if h.cfg.BroadcastFailuresFn != nil {
+		broadcastFailures = h.cfg.BroadcastFailuresFn()
+	}
+	var cfPurgeSkipped int64
+	if h.cfg.CFPurgeSkippedFn != nil {
+		cfPurgeSkipped = h.cfg.CFPurgeSkippedFn()
+	}
 	return insights.InsightData{
-		Config:         h.cfg.Config,
-		StoreStats:     storeStats,
-		RouteStats:     merged.RouteStats,
-		RequestBuckets: merged.RequestSnap,
-		PeerResults:    peerInfos,
-		CFStatus:       cfStatus,
-		PoolHealth:     poolHealth,
-		HeaderAudit:    headerAudit,
-		VaryCapHits:    varyCapHits,
+		Config:              h.cfg.Config,
+		StoreStats:          storeStats,
+		RouteStats:          merged.RouteStats,
+		RequestBuckets:      merged.RequestSnap,
+		PeerResults:         peerInfos,
+		PeerHealth:          peerHealth,
+		CFStatus:            cfStatus,
+		PoolHealth:          poolHealth,
+		HeaderAudit:         headerAudit,
+		VaryCapHits:         varyCapHits,
+		ReplicationLastRecv: repLastRecv,
+		ReplicationBytes:    repBytes,
+		BroadcastFailures:   broadcastFailures,
+		CFPurgeSkipped:      cfPurgeSkipped,
 	}
 }
 

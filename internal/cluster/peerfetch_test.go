@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,4 +162,81 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	if obj != nil {
 		t.Fatalf("expected nil object on decode error, got %+v", obj)
 	}
+}
+
+func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
+	t.Parallel()
+	var inFlight, maxInFlight atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cur := inFlight.Add(1)
+		for {
+			old := maxInFlight.Load()
+			if cur <= old || maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inFlight.Add(-1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{
+			Hit:    true,
+			Object: &api.Object{Key: 1, StatusCode: 200, Body: []byte("x")},
+		})
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < defaultPeerFetchConcurrency*3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(),
+				api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+				api.PeerFetchRequest{Key: 1})
+		}()
+	}
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > int32(defaultPeerFetchConcurrency) {
+		t.Fatalf("max concurrent peer-fetches = %d, want <= %d", got, defaultPeerFetchConcurrency)
+	}
+}
+
+func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
+	t.Parallel()
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-block
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: &api.Object{Key: 1}})
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	f := NewPeerFetcher(nil, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < defaultPeerFetchConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(),
+				api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+				api.PeerFetchRequest{Key: 1})
+		}()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := f.Fetch(ctx,
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: 2})
+	if err == nil {
+		t.Fatal("expected error when context cancelled while waiting for semaphore")
+	}
+
+	wg.Wait()
 }

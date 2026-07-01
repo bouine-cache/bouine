@@ -152,6 +152,9 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if r.Cache.MaxResponseBytes < 0 {
 		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, r.Cache.MaxResponseBytes)
 	}
+	if r.Cache.MaxFetchConcurrency < 0 {
+		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, r.Cache.MaxFetchConcurrency)
+	}
 	return nil
 }
 

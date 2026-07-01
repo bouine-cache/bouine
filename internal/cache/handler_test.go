@@ -1125,3 +1125,44 @@ func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
 	}
 	releaseRecorder(fresh)
 }
+
+func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
+	t.Parallel()
+	const maxConc = 2
+	var inFlight, maxInFlight atomic.Int32
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := inFlight.Add(1)
+		for {
+			old := maxInFlight.Load()
+			if cur <= old || maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inFlight.Add(-1)
+		w.Header().Set("Cache-Control", "max-age=0")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:            upstream,
+		Store:               store,
+		MaxFetchConcurrency: maxConc,
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < maxConc*3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			url := "http://example.com/sem-test-" + strconv.Itoa(i)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+		}(i)
+	}
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > int32(maxConc) {
+		t.Fatalf("max concurrent origin fetches = %d, want <= %d", got, maxConc)
+	}
+}

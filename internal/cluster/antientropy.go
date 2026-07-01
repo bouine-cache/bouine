@@ -187,15 +187,9 @@ func (ae *AntiEntropy) fetchPeerKeys(ctx context.Context, peer api.PeerInfo) ([]
 		return nil, false
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
-	if err != nil {
-		ae.logger.Debug("anti-entropy: read key set", "peer", peer.Name, "error", err)
-		return nil, false
-	}
-
 	var ks api.KeySet
-	if err := json.Unmarshal(body, &ks); err != nil {
-		ae.logger.Debug("anti-entropy: unmarshal key set", "peer", peer.Name, "error", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024*1024)).Decode(&ks); err != nil {
+		ae.logger.Debug("anti-entropy: decode key set", "peer", peer.Name, "error", err)
 		return nil, false
 	}
 

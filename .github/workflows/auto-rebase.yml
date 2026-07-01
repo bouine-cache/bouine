@@ -1,0 +1,44 @@
+name: Auto-rebase
+
+# Keeps open PRs up-to-date with main so that branch protection's
+# "Require branches to be up to date" can pass and auto-merge can fire.
+#
+# Triggers:
+#   - Every push to main (immediate)
+#   - Every 6 hours (catches manual pushes, force-pushes to main, etc.)
+#   - Manual dispatch
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rebase:
+    name: Rebase open PRs onto main
+    runs-on: ubuntu-latest
+    if: github.repository == 'thylong/bouine'
+    steps:
+      - name: Update PR branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --state open --json number,headRefName,mergeStateStatus \
+            --jq '.[] | select(.mergeStateStatus == "BEHIND") | "\(.number) \(.headRefName)"' \
+            | while read -r number branch; do
+                echo "::group::Rebasing PR #$number ($branch)"
+                gh api --method PUT \
+                  "repos/$GITHUB_REPOSITORY/pulls/$number/update-branch" \
+                  -f update_method=rebase \
+                  -f expected_head_sha="$(
+                    gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" --jq '.object.sha'
+                  )" \
+                  2>&1 || echo "::warning::Could not rebase PR #$number"
+                echo "::endgroup::"
+              done

@@ -554,3 +554,67 @@ func TestStore_CompactStreamsLiveRecords(t *testing.T) {
 		t.Fatalf("entries after compact: got %d, want %d", entries, want)
 	}
 }
+
+// TestStore_CompactReadOnlyParent verifies that compaction works when the
+// parent of the warm dir is read-only. This reproduces the Kubernetes
+// readOnlyRootFilesystem deployment where only the PVC mount (warm_dir) is
+// writable and the old sibling compactDir (dir+".compact") landed on the
+// read-only root filesystem and failed with EROFS.
+func TestStore_CompactReadOnlyParent(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+
+	// Create the warm dir and make the parent read-only so that creating
+	// a sibling directory (dir+".compact") would fail with EROFS.
+	warmDir := filepath.Join(parent, "warm")
+	if err := os.MkdirAll(warmDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Store must be created before the parent goes read-only.
+	s, err := NewStore(Config{Dir: warmDir, MaxBytes: 256 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = s.Close()
+		_ = os.Chmod(parent, 0o755) // restore for cleanup
+	})
+
+	// Populate and create enough dead bytes for compaction.
+	for i := range 200 {
+		body := []byte(fmt.Sprintf("body-%d-padding-------------------------------------", i))
+		segID, off, err := s.Put(uint64(i), body)
+		if err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+		s.SetIndex(uint64(i), segID, off)
+	}
+	for i := range 100 {
+		if err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	// Make the parent read-only: a sibling compactDir would fail.
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compact must succeed — the compact dir is a subdirectory of warmDir
+	// which lives on the writable PVC, not a sibling on the read-only parent.
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact with read-only parent: %v", err)
+	}
+
+	// Verify live keys survived.
+	for i := 100; i < 200; i++ {
+		got, err := s.Get(uint64(i))
+		if err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("key %d: expected live after compact, got nil", i)
+		}
+	}
+}

@@ -51,7 +51,17 @@ func (d tryDecision) next(err error) tryDecision {
 		if errors.As(err, &sc) {
 			statusCode = sc.HTTPStatus()
 		} else {
-			return tryDecision{finalError: fmt.Errorf("cloudflare: network error: %w", err)}
+			// Network error (DNS, connection refused, TCP reset, TLS
+			// handshake, timeout). Retry with backoff — transient network
+			// blips should not permanently lose a purge.
+			if d.attempt < maxRetries {
+				return tryDecision{
+					shouldTry: true, attempt: d.attempt + 1,
+					delay:        withJitter(d.defaultDelay),
+					defaultDelay: d.defaultDelay,
+				}
+			}
+			return tryDecision{finalError: fmt.Errorf("cloudflare: network error after %d retries: %w", d.attempt, err)}
 		}
 	}
 

@@ -101,11 +101,11 @@ type Server struct {
 //
 // Stable.
 func New(cfg Config) *Server {
+	if cfg.Logger == nil {
+		cfg.Logger = observability.NoopLogger{}
+	}
 	if cfg.Addr == "" {
 		cfg.Addr = ":9000"
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	mux := http.NewServeMux()

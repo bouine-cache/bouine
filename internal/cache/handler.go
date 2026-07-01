@@ -245,7 +245,7 @@ type HandlerConfig struct {
 // NewHandler creates a caching handler.
 func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		cfg.Logger = observability.NoopLogger{}
 	}
 	h := &Handler{
 		upstream:         cfg.Upstream,

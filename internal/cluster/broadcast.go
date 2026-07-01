@@ -36,9 +36,6 @@ type Broadcaster struct {
 // token is the admin bearer token used when posting to peer admin APIs.
 func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcaster {
 	logger := c.logger
-	if logger == nil {
-		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
-	}
 	tok := ""
 	if len(token) > 0 {
 		tok = token[0]

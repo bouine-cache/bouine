@@ -42,7 +42,7 @@ type RouterConfig struct {
 // added; the first match wins.
 func NewRouter(cfg RouterConfig) *Router {
 	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		cfg.Logger = observability.NoopLogger{}
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = &RouterMetrics{}

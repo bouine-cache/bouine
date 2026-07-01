@@ -60,11 +60,11 @@ type PoolConfig struct {
 // NewPool constructs a pool from config. Returns an error if no
 // targets are provided.
 func NewPool(cfg PoolConfig) (*Pool, error) {
+	if cfg.Logger == nil {
+		cfg.Logger = observability.NoopLogger{}
+	}
 	if len(cfg.Targets) == 0 {
 		return nil, fmt.Errorf("origin: pool %q has no targets", cfg.Name)
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	p := &Pool{

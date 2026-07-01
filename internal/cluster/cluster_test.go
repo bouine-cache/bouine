@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -18,6 +19,7 @@ func defaultConfig(t *testing.T, name, addr string) Config {
 		NodeName: name,
 		BindAddr: addr,
 		Mode:     "strong",
+		Logger:   observability.NoopLogger{},
 		PeerInfo: api.PeerInfo{
 			Name:      name,
 			Addr:      addr,

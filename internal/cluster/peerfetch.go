@@ -69,11 +69,10 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // mTLS credentials. If nil a plain HTTP client is used (test-only).
 // reg, if non-nil, receives Prometheus metric registration.
 func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher {
-	return NewPeerFetcherWithLogger(tlsCfg, reg, nil)
+	return NewPeerFetcherWithLogger(tlsCfg, reg, observability.NoopLogger{})
 }
 
 // NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
-// If logger is nil, a SampledLogger wrapping slog.Default() is used.
 func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger) *PeerFetcher {
 	transport := &http.Transport{
 		ForceAttemptHTTP2: true,
@@ -86,9 +85,6 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 		},
 		maxBodyBytes: maxPeerFetchBytes,
 		logger:       logger,
-	}
-	if f.logger == nil {
-		f.logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 	if reg != nil {
 		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
@@ -220,16 +216,12 @@ type PeerStore interface {
 
 // NewPeerFetchHandler creates a peer-fetch handler backed by store.
 func NewPeerFetchHandler(store PeerStore) *PeerFetchHandler {
-	return NewPeerFetchHandlerWithLogger(store, nil)
+	return NewPeerFetchHandlerWithLogger(store, observability.NoopLogger{})
 }
 
 // NewPeerFetchHandlerWithLogger creates a peer-fetch handler with a
-// structured logger. If logger is nil, a SampledLogger wrapping
-// slog.Default() is used.
+// structured logger.
 func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger) *PeerFetchHandler {
-	if logger == nil {
-		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
-	}
 	return &PeerFetchHandler{store: store, logger: logger}
 }
 

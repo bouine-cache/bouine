@@ -63,7 +63,7 @@ type Handler struct {
 // New creates and registers dashboard routes on mux.
 func New(cfg Config, mux *http.ServeMux) *Handler {
 	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		cfg.Logger = observability.NoopLogger{}
 	}
 	if cfg.StartTime.IsZero() {
 		cfg.StartTime = time.Now()

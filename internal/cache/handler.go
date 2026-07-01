@@ -43,13 +43,16 @@ import (
 // defaultMaxResponseBytes is the hard cap on response body buffering
 // when the operator has not configured max_response_bytes. It prevents
 // a single oversized origin response from exhausting memory before the
-// post-fetch MaxObjectSize check runs.
-const defaultMaxResponseBytes int64 = 64 << 20 // 64 MiB
+// post-fetch MaxObjectSize check runs. 4 MiB covers the vast majority of
+// cacheable web objects (HTML, JSON, CSS, JS, small images). Operators
+// caching larger objects should set max_response_bytes explicitly.
+const defaultMaxResponseBytes int64 = 4 << 20 // 4 MiB
 
 // defaultFetchConcurrency bounds concurrent foreground origin fetches.
-// Each fetch can buffer up to defaultMaxResponseBytes, so this caps
-// worst-case memory at concurrency × maxResponseBytes (issue #133).
-const defaultFetchConcurrency = 64
+// Each fetch can buffer up to defaultMaxResponseBytes (with 2x
+// over-allocation from bytes.Buffer), so this caps worst-case memory
+// at concurrency × 2 × maxResponseBytes = 32 × 2 × 4 MiB = 256 MiB.
+const defaultFetchConcurrency = 32
 
 // bgRevalSem bounds concurrent background stale-while-revalidate
 // goroutines. When full, excess revalidation attempts are silently

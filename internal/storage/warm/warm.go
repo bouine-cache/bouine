@@ -537,10 +537,11 @@ func (s *Store) NeedsCompaction() bool {
 // Compact rewrites all live records to a fresh segment, dropping tombstones
 // and overwritten keys. The old segments are deleted after a successful
 // compaction.
+//
+// Records are streamed per-segment: live records from one segment are
+// collected, the segment lock is released, and only then written to the
+// temp store. Peak heap is O(1 segment) instead of O(total live bytes).
 func (s *Store) Compact() error {
-	// Snapshot the index to know which (segID, offset) pairs are
-	// currently live. Only records matching the snapshot are copied;
-	// this correctly skips tombstoned and superseded keys.
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))
 	for k, v := range s.index {
@@ -548,42 +549,59 @@ func (s *Store) Compact() error {
 	}
 	s.idxMu.RUnlock()
 
-	type liveEntry struct {
-		key  uint64
-		body []byte
-	}
-	var live []liveEntry
-	_ = s.Scan(func(r Record) error {
-		if r.IsTomb {
-			return nil
-		}
-		loc, ok := idxSnap[r.Key]
-		if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
-			return nil // superseded or deleted
-		}
-		cp := make([]byte, len(r.Body))
-		copy(cp, r.Body)
-		live = append(live, liveEntry{key: r.Key, body: cp})
-		return nil
-	})
-	if len(live) == 0 {
-		return nil
-	}
-
 	dir := s.dir
 	compactDir := dir + ".compact"
 	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: s.maxBytes, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}
-	newIndex := make(map[uint64]warmLoc, len(live))
-	for _, e := range live {
-		segID, offset, wErr := tmp.Put(e.key, e.body)
-		if wErr != nil {
+	newIndex := make(map[uint64]warmLoc, len(idxSnap))
+	written := 0
+
+	s.mu.RLock()
+	segs := make([]*Segment, len(s.segs))
+	copy(segs, s.segs)
+	s.mu.RUnlock()
+
+	type pendingRec struct {
+		key  uint64
+		body []byte
+	}
+	for _, seg := range segs {
+		seg.mu.Lock()
+		var pending []pendingRec
+		scanErr := scanSegment(seg.f, seg.ID, func(r Record) error {
+			if r.IsTomb {
+				return nil
+			}
+			loc, ok := idxSnap[r.Key]
+			if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
+				return nil
+			}
+			pending = append(pending, pendingRec{key: r.Key, body: r.Body})
+			return nil
+		})
+		seg.mu.Unlock()
+		if scanErr != nil {
 			_ = tmp.Close()
-			return fmt.Errorf("compact: write: %w", wErr)
+			_ = os.RemoveAll(compactDir)
+			return fmt.Errorf("compact: scan: %w", scanErr)
 		}
-		newIndex[e.key] = warmLoc{segID: segID, offset: offset}
+		for _, p := range pending {
+			segID, offset, wErr := tmp.Put(p.key, p.body)
+			if wErr != nil {
+				_ = tmp.Close()
+				_ = os.RemoveAll(compactDir)
+				return fmt.Errorf("compact: write: %w", wErr)
+			}
+			newIndex[p.key] = warmLoc{segID: segID, offset: offset}
+			written++
+		}
+	}
+	if written == 0 {
+		_ = tmp.Close()
+		_ = os.RemoveAll(compactDir)
+		return nil
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("compact: close temp: %w", err)

@@ -453,3 +453,62 @@ func BenchmarkGet(b *testing.B) {
 		}
 	})
 }
+
+func TestStore_CompactStreamsLiveRecords(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	const liveKeys = 300
+	for i := range liveKeys {
+		body := []byte(fmt.Sprintf("v1-%d", i))
+		segID, off, err := s.Put(uint64(i), body)
+		if err != nil {
+			t.Fatalf("Put v1 %d: %v", i, err)
+		}
+		s.SetIndex(uint64(i), segID, off)
+	}
+	for i := range 100 {
+		if err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+	for i := 100; i < liveKeys; i++ {
+		body := []byte(fmt.Sprintf("v2-%d", i))
+		segID, off, err := s.Put(uint64(i), body)
+		if err != nil {
+			t.Fatalf("Put v2 %d: %v", i, err)
+		}
+		s.SetIndex(uint64(i), segID, off)
+	}
+
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	for i := range liveKeys {
+		got, err := s.Get(uint64(i))
+		if err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+		if i < 100 {
+			if got != nil {
+				t.Fatalf("key %d: expected nil after delete+compact, got %q", i, got)
+			}
+			continue
+		}
+		want := fmt.Sprintf("v2-%d", i)
+		if string(got) != want {
+			t.Fatalf("key %d: got %q, want %q", i, got, want)
+		}
+	}
+
+	entries, _ := s.Stats()
+	if want := int64(liveKeys - 100); entries != want {
+		t.Fatalf("entries after compact: got %d, want %d", entries, want)
+	}
+}

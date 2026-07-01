@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -190,6 +192,94 @@ func TestAntiEntropy_SkipsSelf(t *testing.T) {
 
 	if got := bf.calls.Load(); got != 0 {
 		t.Fatalf("backfill calls = %d, want 0 (self should be skipped)", got)
+	}
+}
+
+func TestAntiEntropy_ReconcileCounterFiresOnZeroDrift(t *testing.T) {
+	t.Parallel()
+	localKeys := []api.Key{1, 2, 3}
+	peerKeys := []uint64{1, 2, 3}
+
+	peer := api.PeerInfo{Name: "peer-1"}
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(api.KeySet{NodeName: "peer-1", Keys: peerKeys})
+	}))
+	defer peerSrv.Close()
+	peer.AdminAddr = peerSrv.Listener.Addr().String()
+
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:     50 * time.Millisecond,
+		FetchTimeout: 2 * time.Second,
+	}, "local", &mockKeySource{keys: localKeys}, &mockBackfiller{}, &mockStorer{},
+		func() []api.PeerInfo { return []api.PeerInfo{peer} }, m)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var reconcileCount, keysRepaired float64
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "bouine_cluster_anti_entropy_reconcile_total":
+			for _, s := range mf.GetMetric() {
+				reconcileCount += s.GetCounter().GetValue()
+			}
+		case "bouine_cluster_anti_entropy_keys_repaired":
+			for _, s := range mf.GetMetric() {
+				keysRepaired = s.GetGauge().GetValue()
+			}
+		}
+	}
+	if reconcileCount == 0 {
+		t.Fatal("reconcile_total = 0, want > 0 (counter must fire on zero-drift rounds)")
+	}
+	if keysRepaired != 0 {
+		t.Errorf("keys_repaired = %v, want 0", keysRepaired)
+	}
+}
+
+func TestAntiEntropy_FetchFailureCounter(t *testing.T) {
+	t.Parallel()
+	peer := api.PeerInfo{Name: "peer-1", AdminAddr: "127.0.0.1:1"}
+
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:     50 * time.Millisecond,
+		FetchTimeout: 100 * time.Millisecond,
+	}, "local", &mockKeySource{keys: []api.Key{1}}, &mockBackfiller{}, &mockStorer{},
+		func() []api.PeerInfo { return []api.PeerInfo{peer} }, m)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var failures float64
+	for _, mf := range mfs {
+		if mf.GetName() == "bouine_cluster_anti_entropy_fetch_failures_total" {
+			for _, s := range mf.GetMetric() {
+				failures += s.GetCounter().GetValue()
+			}
+		}
+	}
+	if failures == 0 {
+		t.Fatal("fetch_failures_total = 0, want > 0 (unreachable peer must increment failure counter)")
 	}
 }
 

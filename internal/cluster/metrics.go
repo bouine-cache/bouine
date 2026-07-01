@@ -41,6 +41,8 @@ type Metrics struct {
 	AntiEntropyRepaired prometheus.Counter
 	// AntiEntropyKeysRepaired is the gauge of keys repaired in the last round.
 	AntiEntropyKeysRepaired prometheus.Gauge
+	// AntiEntropyFetchFailures counts peer key-set fetch failures.
+	AntiEntropyFetchFailures prometheus.Counter
 	// OnReplicationBytes, if set, is invoked on every replication byte
 	// record with the direction ("sent"/"received") and byte count. Used
 	// to feed the dashboard's replication ring without coupling the
@@ -110,6 +112,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_anti_entropy_keys_repaired",
 			Help:      "Keys repaired in the last anti-entropy round.",
 		}),
+		AntiEntropyFetchFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_anti_entropy_fetch_failures_total",
+			Help:      "Anti-entropy peer key-set fetch failures.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -122,6 +129,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.AntiEntropyReconcile,
 		m.AntiEntropyRepaired,
 		m.AntiEntropyKeysRepaired,
+		m.AntiEntropyFetchFailures,
 	)
 	return m
 }
@@ -234,4 +242,12 @@ func (m *Metrics) SetAntiEntropyKeysRepaired(v float64) {
 		return
 	}
 	m.AntiEntropyKeysRepaired.Set(v)
+}
+
+// IncAntiEntropyFetchFailure increments the peer key-set fetch failure counter.
+func (m *Metrics) IncAntiEntropyFetchFailure() {
+	if m == nil || m.AntiEntropyFetchFailures == nil {
+		return
+	}
+	m.AntiEntropyFetchFailures.Inc()
 }

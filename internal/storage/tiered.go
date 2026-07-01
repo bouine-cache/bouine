@@ -104,7 +104,10 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 				ts.logger.Warn("wal replay failed; warm-tier index may be incomplete",
 					"error", rErr)
 			}
-			ts.warm.RecomputeStats()
+			if err := ts.warm.RecomputeStats(); err != nil {
+				ts.logger.Warn("warm-tier stats recompute failed; counters may be stale",
+					"error", err)
+			}
 		}
 	}
 

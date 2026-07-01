@@ -58,13 +58,13 @@ func TestEventual_PurgePropagationGossip(t *testing.T) {
 	s := sharedCluster(t, "eventual")
 	path := "/hit?x=eventual-purge"
 
+	// Warm all nodes — retry until every node reports a HIT.
 	for i := range s.Nodes {
 		s.GetWithHost(t, i, path, crossNodeHost)
-		time.Sleep(100 * time.Millisecond)
-		resp := s.GetWithHost(t, i, path, crossNodeHost)
-		if got := resp.Header.Get("X-Cache"); got != "HIT" {
-			t.Skipf("node %d not cached (X-Cache=%q) — skipping propagation test", i, got)
-		}
+		driver.RetryUntil(t, 5*time.Second, 200*time.Millisecond, func() bool {
+			resp := s.GetWithHost(t, i, path, crossNodeHost)
+			return resp.Header.Get("X-Cache") == "HIT"
+		})
 	}
 	s.Purge(t, 0, "http://"+driver.CrossNodeHost+path)
 	driver.RetryUntil(t, driver.GossipConvergence, 500*time.Millisecond, func() bool {

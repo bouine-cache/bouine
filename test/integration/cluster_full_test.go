@@ -33,8 +33,16 @@ func TestFull_ReplicationOnFill(t *testing.T) {
 
 	r := s.GetWithHost(t, 0, path, crossNodeHost)
 	if got := r.Header.Get("X-Cache"); got != "MISS" {
-		t.Skipf("node 0 first: X-Cache = %q (expected MISS; shared-process state)", got)
+		t.Fatalf("node 0 first: X-Cache = %q, want MISS (unique path should be cold)", got)
 	}
+
+	// In full mode, the object should be replicated to all peers.
+	// Verify by checking that other nodes serve a HIT after replication
+	// converges.
+	driver.RetryUntil(t, driver.ReplicationDeadline, 500*time.Millisecond, func() bool {
+		return s.GetWithHost(t, 1, path, crossNodeHost).Header.Get("X-Cache") == "HIT" &&
+			s.GetWithHost(t, 2, path, crossNodeHost).Header.Get("X-Cache") == "HIT"
+	})
 }
 
 func TestFull_ReplicationNoPeerFetch(t *testing.T) {

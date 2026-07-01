@@ -117,8 +117,11 @@ func (ae *AntiEntropy) reconcile(ctx context.Context) {
 func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo, localSet map[api.Key]struct{}) {
 	peerKeys, ok := ae.fetchPeerKeys(ctx, peer)
 	if !ok {
+		ae.metrics.IncAntiEntropyFetchFailure()
 		return
 	}
+
+	ae.metrics.IncAntiEntropyReconcile()
 
 	var missing []api.Key
 	for _, k := range peerKeys {
@@ -129,6 +132,7 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 	}
 
 	if len(missing) == 0 {
+		ae.metrics.SetAntiEntropyKeysRepaired(0)
 		return
 	}
 
@@ -151,7 +155,6 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 		}
 	}
 
-	ae.metrics.IncAntiEntropyReconcile()
 	ae.metrics.SetAntiEntropyKeysRepaired(float64(repaired))
 	ae.logger.Debug("reconciled with peer",
 		"peer", peer.Name,

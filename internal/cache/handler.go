@@ -795,22 +795,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// RFC 9111 §4.3.1: if the POST response has explicit freshness
 		// and a Content-Location matching the request URI, store the
 		// response under the GET key so subsequent GETs can reuse it.
-		if r.Method == http.MethodPost && rec.statusCode >= 200 && rec.statusCode < 300 &&
-			IsCacheable(rec.statusCode, r.Header, rec.header) &&
-			(h.allowSetCookie || rec.header.Get("Set-Cookie") == "") &&
-			(h.maxObjectSize <= 0 || int64(rec.body.Len()) <= h.maxObjectSize) {
-			// Copy body and header to avoid aliasing the pooled recorder buffer.
-			bodyCopy := make([]byte, rec.body.Len())
-			copy(bodyCopy, rec.body.Bytes())
-			res := fetchResult{
-				StatusCode: rec.statusCode,
-				Header:     rec.header.Clone(),
-				Body:       bodyCopy,
-			}
-			obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			obj.Header.Del("Set-Cookie")
-			h.storeAndReplicate(r.Context(), key, obj)
-		}
+		h.maybeStorePostResponse(r, getReq, key, rec)
 	}
 
 	// Write the captured response to the client.
@@ -820,6 +805,33 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(rec.statusCode)
 	_, _ = w.Write(rec.body.Bytes())
+}
+
+// maybeStorePostResponse stores a successful POST response under the GET
+// key when it is cacheable, per RFC 9111 §4.3.1.
+func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, key api.Key, rec *responseRecorder) {
+	if r.Method != http.MethodPost || rec.statusCode < 200 || rec.statusCode >= 300 {
+		return
+	}
+	if !IsCacheable(rec.statusCode, r.Header, rec.header) {
+		return
+	}
+	if !h.allowSetCookie && rec.header.Get("Set-Cookie") != "" {
+		return
+	}
+	if h.maxObjectSize > 0 && int64(rec.body.Len()) > h.maxObjectSize {
+		return
+	}
+	bodyCopy := make([]byte, rec.body.Len())
+	copy(bodyCopy, rec.body.Bytes())
+	res := fetchResult{
+		StatusCode: rec.statusCode,
+		Header:     rec.header.Clone(),
+		Body:       bodyCopy,
+	}
+	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
+	obj.Header.Del("Set-Cookie")
+	h.storeAndReplicate(r.Context(), key, obj)
 }
 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {

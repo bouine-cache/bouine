@@ -145,17 +145,22 @@ func (hc *ActiveHealthChecker) isExpectedCode(code int) bool {
 // failures increment toward the threshold.
 func (hc *ActiveHealthChecker) recordSuccess(t *Target) {
 	t.errors.Store(0)
-	if !t.healthy.Load() {
-		// Count consecutive successes needed to restore.
-		// One success restores.
+	if t.healthy.Load() {
+		return
+	}
+	cnt := t.successes.Add(1)
+	if cnt >= int64(hc.cfg.HealthyThreshold) {
 		t.healthy.Store(true)
+		t.successes.Store(0)
 		hc.logger.Info("target restored by active health check",
 			"pool", hc.pool.Name,
-			"target", t.addr)
+			"target", t.addr,
+			"consecutive_successes", cnt)
 	}
 }
 
 func (hc *ActiveHealthChecker) recordFailure(t *Target) {
+	t.successes.Store(0)
 	cnt := t.errors.Add(1)
 	if cnt >= int64(hc.cfg.UnhealthyThreshold) && t.healthy.Load() {
 		t.healthy.Store(false)

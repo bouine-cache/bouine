@@ -34,10 +34,11 @@ type Pool struct {
 
 // Target is a single upstream endpoint.
 type Target struct {
-	addr    string
-	url     *url.URL
-	healthy atomic.Bool
-	errors  atomic.Int64
+	addr      string
+	url       *url.URL
+	healthy   atomic.Bool
+	errors    atomic.Int64
+	successes atomic.Int64
 }
 
 // PoolConfig configures a Pool at construction time.

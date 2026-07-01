@@ -53,7 +53,7 @@ type TieredConfig struct {
 // WAL is replayed on open to rebuild the warm-tier index.
 func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		cfg.Logger = observability.NoopLogger{}
 	}
 	if cfg.BodyThreshold <= 0 {
 		cfg.BodyThreshold = 64 << 10

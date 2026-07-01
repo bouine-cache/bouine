@@ -34,6 +34,9 @@ type ActiveHealthConfig struct {
 
 // NewActiveHealthChecker creates a health checker for the given pool.
 func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger observability.Logger) *ActiveHealthChecker {
+	if logger == nil {
+		logger = observability.NoopLogger{}
+	}
 	if cfg.Method == "" {
 		cfg.Method = "GET"
 	}
@@ -54,9 +57,6 @@ func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger observabi
 	}
 	if len(cfg.ExpectedCodes) == 0 {
 		cfg.ExpectedCodes = []int{200}
-	}
-	if logger == nil {
-		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
 	}
 
 	return &ActiveHealthChecker{

@@ -31,9 +31,6 @@ type Aggregator struct {
 
 // NewAggregator creates an Aggregator.
 func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, selfAddr, token string, logger observability.Logger) *Aggregator {
-	if logger == nil {
-		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
-	}
 	return &Aggregator{
 		rings:     rings,
 		peersFn:   peersFn,

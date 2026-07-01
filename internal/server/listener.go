@@ -40,7 +40,7 @@ type Listener struct {
 // Stable.
 func NewHTTP(cfg ListenerConfig) *Listener {
 	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		cfg.Logger = observability.NoopLogger{}
 	}
 
 	var protos http.Protocols
@@ -65,7 +65,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 // Stable.
 func NewHTTPS(cfg ListenerConfig) *Listener {
 	if cfg.Logger == nil {
-		cfg.Logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		cfg.Logger = observability.NoopLogger{}
 	}
 	if cfg.TLSConfig == nil {
 		cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}

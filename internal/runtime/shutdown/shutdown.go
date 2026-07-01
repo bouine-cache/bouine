@@ -28,7 +28,7 @@ type step struct {
 // NewSequencer creates a Sequencer. It starts in the "ready" state.
 func NewSequencer(logger observability.Logger) *Sequencer {
 	if logger == nil {
-		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		logger = observability.NoopLogger{}
 	}
 	s := &Sequencer{logger: logger}
 	s.ready.Store(true)

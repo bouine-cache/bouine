@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -374,7 +375,7 @@ func minimalCluster(_ *testing.T, _ string) *Cluster {
 		cfg:     Config{NodeName: "node-0", Mode: "strong"},
 		peers:   make(map[string]*Member),
 		ring:    newRing(256),
-		logger:  nil,
+		logger:  observability.NoopLogger{},
 		metrics: &Metrics{},
 	}
 }

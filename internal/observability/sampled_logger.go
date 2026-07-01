@@ -12,14 +12,35 @@ import (
 const DefaultKeySampleRate uint64 = 1000
 
 // Logger is the structured logging interface used throughout bouine.
-// Both *slog.Logger and *SampledLogger satisfy it. Components receive
-// a Logger without needing to know whether sampling is active.
+// Both *slog.Logger, *SampledLogger, and NoopLogger satisfy it.
+// Components receive a Logger from their caller (typically the engine)
+// and never create their own. Tests use NoopLogger when they don't
+// need to assert on log output.
 type Logger interface {
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 	Debug(msg string, args ...any)
 }
+
+// NoopLogger is a Logger that discards all records. It is the zero
+// value for the Logger interface in tests and in components that are
+// constructed without a logger. Using NoopLogger instead of nil means
+// every component can call logger.Info(...) unconditionally — no
+// nil-checks, no defensive fallbacks.
+type NoopLogger struct{}
+
+// Info implements Logger by discarding the record.
+func (NoopLogger) Info(string, ...any) {}
+
+// Warn implements Logger by discarding the record.
+func (NoopLogger) Warn(string, ...any) {}
+
+// Error implements Logger by discarding the record.
+func (NoopLogger) Error(string, ...any) {}
+
+// Debug implements Logger by discarding the record.
+func (NoopLogger) Debug(string, ...any) {}
 
 // SampledLogger wraps a slog.Logger with deterministic sampling.
 // Info is always sampled: if a "key" attribute is present, sampling
@@ -34,11 +55,9 @@ type SampledLogger struct {
 
 // NewSampledLogger wraps base with key-based sampling at
 // 1-in-sampleRate. A sampleRate of 0 disables sampling (every
-// key is logged).
+// key is logged). base must be non-nil; callers that don't need
+// logging should use NoopLogger instead.
 func NewSampledLogger(base *slog.Logger, sampleRate uint64) *SampledLogger {
-	if base == nil {
-		base = slog.Default()
-	}
 	return &SampledLogger{logger: base, sampleRate: sampleRate}
 }
 

@@ -43,7 +43,7 @@ type Group struct {
 // Stable.
 func NewGroup(ctx context.Context, logger observability.Logger) *Group {
 	if logger == nil {
-		logger = observability.NewSampledLogger(nil, observability.DefaultKeySampleRate)
+		logger = observability.NoopLogger{}
 	}
 	eg, gctx := errgroup.WithContext(ctx)
 	return &Group{eg: eg, ctx: gctx, logger: logger}

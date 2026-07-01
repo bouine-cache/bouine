@@ -131,29 +131,33 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if sp := r.Request.StripPrefix; sp != "" && !strings.HasPrefix(sp, "/") {
 		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
 	}
-	if r.Cache.TTLOverride < 0 {
-		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, r.Cache.TTLOverride)
+	return validateRouteCache(i, r.Cache)
+}
+
+func validateRouteCache(i int, rc RouteCache) error {
+	if rc.TTLOverride < 0 {
+		return fmt.Errorf("config: route %d ttl_override must be >= 0, got %v", i, rc.TTLOverride)
 	}
-	if r.Cache.TTLDefault < 0 {
-		return fmt.Errorf("config: route %d ttl_default must be >= 0, got %v", i, r.Cache.TTLDefault)
+	if rc.TTLDefault < 0 {
+		return fmt.Errorf("config: route %d ttl_default must be >= 0, got %v", i, rc.TTLDefault)
 	}
-	if r.Cache.StaleWhileRevalidate < 0 {
-		return fmt.Errorf("config: route %d stale_while_revalidate must be >= 0, got %v", i, r.Cache.StaleWhileRevalidate)
+	if rc.StaleWhileRevalidate < 0 {
+		return fmt.Errorf("config: route %d stale_while_revalidate must be >= 0, got %v", i, rc.StaleWhileRevalidate)
 	}
-	if r.Cache.StaleIfError < 0 {
-		return fmt.Errorf("config: route %d stale_if_error must be >= 0, got %v", i, r.Cache.StaleIfError)
+	if rc.StaleIfError < 0 {
+		return fmt.Errorf("config: route %d stale_if_error must be >= 0, got %v", i, rc.StaleIfError)
 	}
-	if r.Cache.NegativeTTL < 0 {
-		return fmt.Errorf("config: route %d negative_ttl must be >= 0, got %v", i, r.Cache.NegativeTTL)
+	if rc.NegativeTTL < 0 {
+		return fmt.Errorf("config: route %d negative_ttl must be >= 0, got %v", i, rc.NegativeTTL)
 	}
-	if r.Cache.JitterPercent < 0 || r.Cache.JitterPercent > 50 {
-		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, r.Cache.JitterPercent)
+	if rc.JitterPercent < 0 || rc.JitterPercent > 50 {
+		return fmt.Errorf("config: route %d jitter_percent must be 0–50, got %d", i, rc.JitterPercent)
 	}
-	if r.Cache.MaxResponseBytes < 0 {
-		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, r.Cache.MaxResponseBytes)
+	if rc.MaxResponseBytes < 0 {
+		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, rc.MaxResponseBytes)
 	}
-	if r.Cache.MaxFetchConcurrency < 0 {
-		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, r.Cache.MaxFetchConcurrency)
+	if rc.MaxFetchConcurrency < 0 {
+		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, rc.MaxFetchConcurrency)
 	}
 	return nil
 }

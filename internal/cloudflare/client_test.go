@@ -84,18 +84,34 @@ func TestClient_EmptySlice_NoOp(t *testing.T) {
 	}
 }
 
-func TestClient_NetworkError_NoRetry(t *testing.T) {
+func TestClient_NetworkError_RetriesThenSucceeds(t *testing.T) {
 	t.Parallel()
 	purger := &fakePurger{errors: []error{errors.New("network down"), nil}}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err == nil {
-		t.Fatal("expected error from network failure, got nil")
+	if err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
 	}
-	// Only one call — network errors are not retried.
-	if len(purger.calls) != 1 {
-		t.Fatalf("expected 1 call (no retry on network error), got %d", len(purger.calls))
+	// Two calls — first fails with network error, retry succeeds.
+	if len(purger.calls) != 2 {
+		t.Fatalf("expected 2 calls (retry on network error), got %d", len(purger.calls))
+	}
+}
+
+func TestClient_NetworkError_RetriesExhausted(t *testing.T) {
+	t.Parallel()
+	netErr := errors.New("connection refused")
+	purger := &fakePurger{errors: []error{netErr, netErr, netErr}}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	// maxRetries=2 → 3 total attempts.
+	if len(purger.calls) != 3 {
+		t.Fatalf("expected 3 calls (2 retries), got %d", len(purger.calls))
 	}
 }
 

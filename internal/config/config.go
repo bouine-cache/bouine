@@ -47,10 +47,11 @@ type Config struct {
 
 // Listen enumerates the listener addresses. Empty strings disable.
 type Listen struct {
-	HTTP    string `yaml:"http,omitempty" json:"http,omitempty"`
-	HTTPS   string `yaml:"https,omitempty" json:"https,omitempty"`
-	Admin   string `yaml:"admin,omitempty" json:"admin,omitempty"`
-	Cluster string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
+	HTTP           string `yaml:"http,omitempty" json:"http,omitempty"`
+	HTTPS          string `yaml:"https,omitempty" json:"https,omitempty"`
+	Admin          string `yaml:"admin,omitempty" json:"admin,omitempty"`
+	Cluster        string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
+	MaxConnections int    `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are

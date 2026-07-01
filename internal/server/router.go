@@ -41,9 +41,7 @@ type RouterConfig struct {
 // NewRouter builds a Router. Routes are matched in the order they are
 // added; the first match wins.
 func NewRouter(cfg RouterConfig) *Router {
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NoopLogger{}
-	}
+	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.Metrics == nil {
 		cfg.Metrics = &RouterMetrics{}
 	}

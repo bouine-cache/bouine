@@ -160,9 +160,7 @@ type HotConfig struct {
 // NewHotStore creates a sharded in-memory store and starts the
 // background eviction sweeper.
 func NewHotStore(cfg HotConfig) *HotStore {
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NoopLogger{}
-	}
+	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	n := cfg.NumShards
 	if n <= 0 {
 		n = runtime.NumCPU()

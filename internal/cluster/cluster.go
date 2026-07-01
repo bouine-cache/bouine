@@ -104,9 +104,7 @@ type Cluster struct {
 //
 // Stable.
 func New(cfg Config) (*Cluster, error) {
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NoopLogger{}
-	}
+	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.VirtualNodes <= 0 {
 		cfg.VirtualNodes = 256
 	}

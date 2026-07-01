@@ -56,6 +56,10 @@ templ Layout(props LayoutProps) {
 						class={ templ.KV("active", props.Page == "config") }
 						if props.Page == "config" { aria-current="page" }
 					><span class="ni" aria-hidden="true">⚙</span>Config</a>
+					<a href="/dashboard/insights"
+						class={ templ.KV("active", props.Page == "insights") }
+						if props.Page == "insights" { aria-current="page" }
+					><span class="ni" aria-hidden="true">💡</span>Insights</a>
 				</nav>
 				<div class="sbf">
 					<div class="sl">

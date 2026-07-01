@@ -33,6 +33,13 @@ const (
 	peerFetchTimeout = 500 * time.Millisecond
 )
 
+// maxPeerFetchBytes caps the response body read from a peer during
+// JSON decode. A compromised peer could send an arbitrarily large
+// payload; without a limit json.Decoder buffers unbounded data on
+// the heap. The Object body is base64-encoded (~33% inflation), so
+// this allows roughly 192 MiB of raw body bytes.
+const maxPeerFetchBytes int64 = 256 << 20
+
 // PeerFetcher issues cache-lookup RPCs to peer nodes.
 //
 // Stable.
@@ -43,6 +50,7 @@ type PeerFetcher struct {
 	latSumMs     atomic.Int64
 	latN         atomic.Int64
 	hopLimitHits atomic.Int64
+	maxBodyBytes int64
 	// Prometheus counters — registered if a non-nil registry is passed.
 	pHits     prometheus.Counter
 	pMisses   prometheus.Counter
@@ -68,6 +76,7 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher 
 			Transport: transport,
 			Timeout:   peerFetchTimeout,
 		},
+		maxBodyBytes: maxPeerFetchBytes,
 	}
 	if reg != nil {
 		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
@@ -146,7 +155,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 
 	var fetchResp api.PeerFetchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&fetchResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, f.maxBodyBytes)).Decode(&fetchResp); err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)
 	}
 	if !fetchResp.Hit {

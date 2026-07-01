@@ -131,3 +131,33 @@ func TestPeerFetcher_HopLimitReached(t *testing.T) {
 		t.Fatal("hop limit should return nil object")
 	}
 }
+
+func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
+	t.Parallel()
+	validResp, err := json.Marshal(api.PeerFetchResponse{
+		Hit:    true,
+		Object: &api.Object{Key: 1, StatusCode: 200, Body: bytes.Repeat([]byte("A"), 4096)},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(validResp)
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	f.maxBodyBytes = int64(len(validResp) - 1)
+
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: 1})
+	if err == nil {
+		t.Fatal("expected error from oversized peer response, got nil")
+	}
+	if obj != nil {
+		t.Fatalf("expected nil object on decode error, got %+v", obj)
+	}
+}

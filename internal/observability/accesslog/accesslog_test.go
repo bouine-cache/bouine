@@ -12,6 +12,7 @@ import (
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/observability/responsewriter"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestMiddleware_LogsAccess(t *testing.T) {
@@ -70,7 +71,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 	// It sets the cache key on sw, which is the outer wrapper.
 	// The middleware reads sw.Key after the handler returns.
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Cache", "HIT")
+		w.Header().Set(header.XCache, "HIT")
 		w.WriteHeader(200)
 		if rw, ok := w.(*responsewriter.ResponseWriter); ok {
 			rw.SetCacheKey(api.Key(42))
@@ -104,7 +105,7 @@ func TestMiddleware_200WithoutKeyLogsInfo(t *testing.T) {
 	)
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-Cache", "MISS")
+		w.Header().Set(header.XCache, "MISS")
 		w.WriteHeader(200)
 	})
 

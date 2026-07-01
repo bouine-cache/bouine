@@ -12,6 +12,7 @@ import (
 	"github.com/thylong/bouine/internal/storage/wal"
 	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func tieredStore(t *testing.T, withWarm bool) *TieredStore {
@@ -44,7 +45,7 @@ func bigObj(key api.Key, bodySize int) *api.Object {
 	return &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     http.Header{"Content-Type": {"application/octet-stream"}},
+		Header:     http.Header{header.ContentType: {"application/octet-stream"}},
 		Body:       make([]byte, bodySize),
 		BodySize:   int64(bodySize),
 		StoredAt:   time.Now(),

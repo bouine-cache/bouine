@@ -10,6 +10,8 @@ import (
 	"time"
 
 	cfsdk "github.com/cloudflare/cloudflare-go/v4"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 const (
@@ -96,7 +98,7 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	if resp == nil {
 		return 0
 	}
-	v := resp.Header.Get("Retry-After")
+	v := resp.Header.Get(header.RetryAfter)
 	if v == "" {
 		return 0
 	}

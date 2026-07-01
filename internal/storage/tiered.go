@@ -9,6 +9,7 @@ import (
 	"github.com/thylong/bouine/internal/storage/wal"
 	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // TieredStore wraps a hot tier (RAM) and an optional warm tier (disk)
@@ -142,10 +143,10 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 	// Re-derive transient fields not serialised to disk (tagged json:"-").
 	// These fields exist purely for hit-path performance; recalculating them
 	// once on warm-tier load restores the fast path for subsequent hits.
-	if cc := loaded.Header.Get("Cache-Control"); cc != "" {
+	if cc := loaded.Header.Get(header.CacheControl); cc != "" {
 		loaded.CacheControl = cc
 	}
-	if age := loaded.Header.Get("Age"); age != "" {
+	if age := loaded.Header.Get(header.Age); age != "" {
 		var secs int64
 		for _, b := range []byte(age) {
 			if b < '0' || b > '9' {

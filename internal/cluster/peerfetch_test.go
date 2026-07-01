@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 type stubStore struct {
@@ -30,7 +31,7 @@ func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop 
 		t.Fatalf("marshal: %v", err)
 	}
 	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerFetchPath, bytes.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(header.ContentType, "application/json")
 	if hop > 0 {
 		r.Header.Set(BouineHopHeader, fmt.Sprintf("%d", hop))
 	}
@@ -93,7 +94,7 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	const delay = 5 * time.Millisecond // > 1ms so it survives Milliseconds() truncation
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(delay)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{
 			Hit:    true,
 			Object: &api.Object{Key: 1, StatusCode: 200, Body: []byte("cached")},
@@ -145,7 +146,7 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_, _ = w.Write(validResp)
 	}))
 	defer srv.Close()

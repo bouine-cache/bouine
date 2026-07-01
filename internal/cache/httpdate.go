@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // httpdate.go provides HTTP date parsing, age computation, heuristic
@@ -15,8 +16,8 @@ import (
 // Last-Modified per RFC 9111 §4.2.2. The heuristic is 10% of
 // the interval between the Date header (or now as fallback) and
 // Last-Modified. Returns 0 if not applicable.
-func HeuristicTTL(header http.Header, now time.Time) time.Duration {
-	lm := header.Get("Last-Modified")
+func HeuristicTTL(h http.Header, now time.Time) time.Duration {
+	lm := h.Get(header.LastModified)
 	if lm == "" {
 		return 0
 	}
@@ -28,7 +29,7 @@ func HeuristicTTL(header http.Header, now time.Time) time.Duration {
 	// freshness lifetime is stable across proxy hops and does not grow
 	// when the response is served from a cache that has held it for a while.
 	refTime := now
-	if dateStr := header.Get("Date"); dateStr != "" {
+	if dateStr := h.Get(header.Date); dateStr != "" {
 		if dt := parseHTTPDate(dateStr); !dt.IsZero() {
 			refTime = dt
 		}
@@ -55,8 +56,8 @@ func ComputeAge(obj *api.Object, now time.Time) time.Duration {
 // malformed values per RFC 9110 §5.6.1. Invalid, negative, or
 // non-integer values (e.g. floats like "7200.0") return 0.
 // Values > 2^31 are treated as stale (RFC 9111 §5.1).
-func parseOriginAge(header http.Header) time.Duration {
-	ageStr := strings.TrimSpace(header.Get("Age"))
+func parseOriginAge(h http.Header) time.Duration {
+	ageStr := strings.TrimSpace(h.Get(header.Age))
 	if ageStr == "" {
 		return 0
 	}
@@ -83,10 +84,10 @@ func parseOriginAge(header http.Header) time.Duration {
 // mergeHeaderValues joins all values of a header name into a single
 // comma-separated string. HTTP allows multiple headers with the same
 // name; Cache-Control especially may appear as multiple lines.
-func mergeHeaderValues(header http.Header, name string) string { //nolint:unparam // intentionally general
-	vals := header.Values(name)
+func mergeHeaderValues(h http.Header, name string) string { //nolint:unparam // intentionally general
+	vals := h.Values(name)
 	if len(vals) <= 1 {
-		return header.Get(name)
+		return h.Get(name)
 	}
 	return strings.Join(vals, ", ")
 }

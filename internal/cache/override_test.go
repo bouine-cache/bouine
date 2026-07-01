@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // newOverrideHandler builds a Handler with OverrideTTL set, backed by an
@@ -31,7 +32,7 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 	const routeOverride = 2 * time.Hour
 
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=30")
+		w.Header().Set(header.CacheControl, "max-age=30")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -63,7 +64,7 @@ func TestOverrideTTL_ForwardsOriginalCacheControlHeader(t *testing.T) {
 	const upstreamCC = "max-age=30, must-revalidate"
 
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", upstreamCC)
+		w.Header().Set(header.CacheControl, upstreamCC)
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -73,7 +74,7 @@ func TestOverrideTTL_ForwardsOriginalCacheControlHeader(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	got := rr.Header().Get("Cache-Control")
+	got := rr.Header().Get(header.CacheControl)
 	if got != upstreamCC {
 		t.Errorf("downstream Cache-Control = %q, want %q", got, upstreamCC)
 	}
@@ -81,8 +82,8 @@ func TestOverrideTTL_ForwardsOriginalCacheControlHeader(t *testing.T) {
 	// Second request hits cache — header is served from the stored object.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/fwd", nil))
-	if rr2.Header().Get("Cache-Control") != upstreamCC {
-		t.Errorf("cached Cache-Control = %q, want %q", rr2.Header().Get("Cache-Control"), upstreamCC)
+	if rr2.Header().Get(header.CacheControl) != upstreamCC {
+		t.Errorf("cached Cache-Control = %q, want %q", rr2.Header().Get(header.CacheControl), upstreamCC)
 	}
 }
 
@@ -93,7 +94,7 @@ func TestOverrideTTL_ZeroDisabled(t *testing.T) {
 	const originMaxAge = 45 * time.Second
 
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=45")
+		w.Header().Set(header.CacheControl, "max-age=45")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -121,7 +122,7 @@ func TestOverrideTTL_HitBeforeExpiry(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=1") // stale after 1 s
+		w.Header().Set(header.CacheControl, "max-age=1") // stale after 1 s
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -135,8 +136,8 @@ func TestOverrideTTL_HitBeforeExpiry(t *testing.T) {
 	// upstream's max-age=1 has logically not elapsed yet (test runs < 1 s).
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("X-Cache = %q, want HIT", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("X-Cache = %q, want HIT", rr.Header().Get(header.XCache))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1", calls)
@@ -150,7 +151,7 @@ func TestOverrideTTL_NoStoreNotCached(t *testing.T) {
 	calls := 0
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set(header.CacheControl, "no-store")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "private-body")
 	})
@@ -170,7 +171,7 @@ func TestOverrideTTL_NoStoreNotCached(t *testing.T) {
 func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600") // 1 h from upstream
+		w.Header().Set(header.CacheControl, "max-age=3600") // 1 h from upstream
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -188,8 +189,8 @@ func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 		t.Errorf("obj.TTL = %v, want 5s", obj.TTL)
 	}
 	// Downstream still sees the upstream's 1 h header.
-	if obj.Header.Get("Cache-Control") != "max-age=3600" {
-		t.Errorf("stored Cache-Control = %q, want max-age=3600", obj.Header.Get("Cache-Control"))
+	if obj.Header.Get(header.CacheControl) != "max-age=3600" {
+		t.Errorf("stored Cache-Control = %q, want max-age=3600", obj.Header.Get(header.CacheControl))
 	}
 }
 
@@ -199,7 +200,7 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -239,14 +240,14 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch phase {
 		case 0:
-			w.Header().Set("Cache-Control", "max-age=1, must-revalidate")
-			w.Header().Set("ETag", etag)
+			w.Header().Set(header.CacheControl, "max-age=1, must-revalidate")
+			w.Header().Set(header.ETag, etag)
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "body")
 		case 1:
-			if r.Header.Get("If-None-Match") == etag {
-				w.Header().Set("Cache-Control", "max-age=1, must-revalidate")
-				w.Header().Set("ETag", etag)
+			if r.Header.Get(header.IfNoneMatch) == etag {
+				w.Header().Set(header.CacheControl, "max-age=1, must-revalidate")
+				w.Header().Set(header.ETag, etag)
 				w.WriteHeader(304)
 			} else {
 				t.Error("304 phase: expected If-None-Match")
@@ -288,7 +289,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 		t.Errorf("TTL after 304 = %v, want %v (override must survive revalidation)", after.TTL, override)
 	}
 	// Upstream's original Cache-Control is still forwarded verbatim.
-	if after.Header.Get("Cache-Control") != "max-age=1, must-revalidate" {
-		t.Errorf("stored Cache-Control = %q, want max-age=1, must-revalidate", after.Header.Get("Cache-Control"))
+	if after.Header.Get(header.CacheControl) != "max-age=1, must-revalidate" {
+		t.Errorf("stored Cache-Control = %q, want max-age=1, must-revalidate", after.Header.Get(header.CacheControl))
 	}
 }

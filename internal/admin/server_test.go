@@ -12,6 +12,7 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func newTestServer(t *testing.T, ready func() bool) *Server {
@@ -104,7 +105,7 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
 		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(header.ContentType, "application/json")
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("no token: got %d, want 401", rr.Code)
@@ -114,8 +115,8 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
 		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer wrong")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer wrong")
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong token: got %d, want 401", rr.Code)
@@ -125,8 +126,8 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
 		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer secret")
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("correct token: got %d, want 200", rr.Code)
@@ -155,8 +156,8 @@ func postWithToken(t *testing.T, s *Server, path, body string) (int, []byte) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "POST", path,
 		bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.Authorization, "Bearer secret")
 	s.Handler().ServeHTTP(rr, req)
 	return rr.Code, rr.Body.Bytes()
 }

@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestBuildKey_Deterministic(t *testing.T) {
@@ -97,8 +99,8 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 	// exceed the 256-byte stack buffer.
 	longVal := strings.Repeat("x", 300)
 	reqHeader := http.Header{
-		"Accept-Language": {longVal},
-		"Accept-Encoding": {longVal},
+		header.AcceptLanguage: {longVal},
+		header.AcceptEncoding: {longVal},
 	}
 	// Must not panic.
 	_ = BuildVaryKey("Accept-Language, Accept-Encoding", reqHeader)
@@ -107,8 +109,8 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 	t.Parallel()
 	exclude := map[string]bool{"x-request-id": true}
-	h1 := http.Header{"Accept-Encoding": {"gzip"}, "X-Request-Id": {"abc"}}
-	h2 := http.Header{"Accept-Encoding": {"gzip"}, "X-Request-Id": {"xyz"}}
+	h1 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"abc"}}
+	h2 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"xyz"}}
 	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, exclude)
 	k2 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, exclude)
 	if k1 != k2 {
@@ -169,7 +171,7 @@ func TestParseCacheControl_MaxStaleNoValue(t *testing.T) {
 
 func TestIsCacheable_BasicPositive(t *testing.T) {
 	t.Parallel()
-	resp := http.Header{"Cache-Control": {"max-age=60"}}
+	resp := http.Header{header.CacheControl: {"max-age=60"}}
 	if !IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("200 with max-age should be cacheable")
 	}
@@ -177,7 +179,7 @@ func TestIsCacheable_BasicPositive(t *testing.T) {
 
 func TestIsCacheable_NoStore(t *testing.T) {
 	t.Parallel()
-	resp := http.Header{"Cache-Control": {"no-store"}}
+	resp := http.Header{header.CacheControl: {"no-store"}}
 	if IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("no-store should not be cacheable")
 	}
@@ -185,7 +187,7 @@ func TestIsCacheable_NoStore(t *testing.T) {
 
 func TestIsCacheable_Private(t *testing.T) {
 	t.Parallel()
-	resp := http.Header{"Cache-Control": {"private, max-age=60"}}
+	resp := http.Header{header.CacheControl: {"private, max-age=60"}}
 	if IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("private should not be cacheable by shared cache")
 	}
@@ -195,15 +197,15 @@ func TestIsCacheable_SetCookie(t *testing.T) {
 	t.Parallel()
 	// Set-Cookie WITHOUT explicit freshness blocks caching.
 	resp := http.Header{
-		"Set-Cookie": {"sid=abc"},
+		header.SetCookie: {"sid=abc"},
 	}
 	if IsCacheable(200, http.Header{}, resp) {
 		t.Fatal("Set-Cookie without max-age should block caching")
 	}
 	// Set-Cookie WITH explicit max-age is cacheable (shared cache behavior).
 	resp2 := http.Header{
-		"Cache-Control": {"max-age=60"},
-		"Set-Cookie":    {"sid=abc"},
+		header.CacheControl: {"max-age=60"},
+		header.SetCookie:    {"sid=abc"},
 	}
 	if !IsCacheable(200, http.Header{}, resp2) {
 		t.Fatal("Set-Cookie with max-age should be cacheable")
@@ -212,13 +214,13 @@ func TestIsCacheable_SetCookie(t *testing.T) {
 
 func TestIsCacheable_Authorization(t *testing.T) {
 	t.Parallel()
-	req := http.Header{"Authorization": {"Bearer tok"}}
-	resp := http.Header{"Cache-Control": {"max-age=60"}}
+	req := http.Header{header.Authorization: {"Bearer tok"}}
+	resp := http.Header{header.CacheControl: {"max-age=60"}}
 	if IsCacheable(200, req, resp) {
 		t.Fatal("Authorization without public/must-revalidate should block")
 	}
 
-	resp2 := http.Header{"Cache-Control": {"max-age=60, public"}}
+	resp2 := http.Header{header.CacheControl: {"max-age=60, public"}}
 	if !IsCacheable(200, req, resp2) {
 		t.Fatal("Authorization + public should be cacheable")
 	}
@@ -227,7 +229,7 @@ func TestIsCacheable_Authorization(t *testing.T) {
 func TestIsCacheable_HeuristicStatus(t *testing.T) {
 	t.Parallel()
 	// 301 with Last-Modified is heuristically cacheable.
-	resp := http.Header{"Last-Modified": {"Mon, 01 Jan 2024 00:00:00 GMT"}}
+	resp := http.Header{header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"}}
 	if !IsCacheable(301, http.Header{}, resp) {
 		t.Fatal("301 with Last-Modified should be heuristically cacheable")
 	}
@@ -236,7 +238,7 @@ func TestIsCacheable_HeuristicStatus(t *testing.T) {
 		t.Fatal("301 without Last-Modified should NOT be heuristically cacheable")
 	}
 	// 302 is never heuristically cacheable.
-	if IsCacheable(302, http.Header{}, http.Header{"Last-Modified": {"Mon, 01 Jan 2024 00:00:00 GMT"}}) {
+	if IsCacheable(302, http.Header{}, http.Header{header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"}}) {
 		t.Fatal("302 should NOT be heuristically cacheable")
 	}
 }

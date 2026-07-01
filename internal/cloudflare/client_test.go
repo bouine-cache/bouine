@@ -12,6 +12,7 @@ import (
 	"github.com/cloudflare/cloudflare-go/v4/option"
 
 	cf "github.com/thylong/bouine/internal/cloudflare"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // fakePurger records calls and returns a pre-set sequence of errors.
@@ -133,7 +134,7 @@ func asSDKError(statusCode int, resp *http.Response) *cloudflare.Error {
 func TestRetry_RateLimit_WithRetryAfter(t *testing.T) {
 	t.Parallel()
 	// Simulate two 429s with Retry-After header, followed by success.
-	resp429 := &http.Response{Header: http.Header{"Retry-After": {"0"}}}
+	resp429 := &http.Response{Header: http.Header{header.RetryAfter: {"0"}}}
 
 	purger := &fakePurger{
 		errors: []error{
@@ -174,7 +175,7 @@ func TestRetry_500_ThenSuccess(t *testing.T) {
 
 func TestRetry_RateLimit_Exhausted(t *testing.T) {
 	t.Parallel()
-	resp429 := &http.Response{Header: http.Header{"Retry-After": {"0"}}}
+	resp429 := &http.Response{Header: http.Header{header.RetryAfter: {"0"}}}
 
 	purger := &fakePurger{
 		errors: []error{
@@ -199,7 +200,7 @@ func TestRetry_HTTPDateRetryAfter(t *testing.T) {
 	t.Parallel()
 	// Retry-After as HTTP-date format (2 seconds in the future).
 	future := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
-	respRL := &http.Response{Header: http.Header{"Retry-After": {future}}}
+	respRL := &http.Response{Header: http.Header{header.RetryAfter: {future}}}
 
 	purger := &fakePurger{
 		errors: []error{
@@ -223,7 +224,7 @@ func TestRetry_PastHTTPDate_FallsBackToDefault(t *testing.T) {
 	// Retry-After as an HTTP-date in the past (clock skew scenario).
 	// Should fall back to the default jittered delay, not fire immediately.
 	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
-	respPast := &http.Response{Header: http.Header{"Retry-After": {past}}}
+	respPast := &http.Response{Header: http.Header{header.RetryAfter: {past}}}
 
 	purger := &fakePurger{
 		errors: []error{

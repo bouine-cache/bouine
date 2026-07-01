@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestOriginHeaderRing_SampleAndAudit(t *testing.T) {
@@ -11,16 +13,16 @@ func TestOriginHeaderRing_SampleAndAudit(t *testing.T) {
 	r := NewOriginHeaderRing()
 
 	r.Sample("api-pool", http.Header{
-		"Cache-Control": []string{"max-age=60"},
-		"Etag":          []string{"\"abc\""},
+		header.CacheControl: []string{"max-age=60"},
+		"Etag":              []string{"\"abc\""},
 	}, 200)
 	r.Sample("api-pool", http.Header{
 		"Etag": []string{"\"def\""},
 	}, 200)
 	r.Sample("static-pool", http.Header{
-		"Cache-Control": []string{"max-age=3600"},
-		"Last-Modified": []string{"Mon, 01 Jan 2024 00:00:00 GMT"},
-		"Surrogate-Key": []string{"product-42"},
+		header.CacheControl: []string{"max-age=3600"},
+		header.LastModified: []string{"Mon, 01 Jan 2024 00:00:00 GMT"},
+		header.SurrogateKey: []string{"product-42"},
 	}, 200)
 
 	audit := r.HeaderAudit()
@@ -66,7 +68,7 @@ func TestOriginHeaderRing_Wraparound(t *testing.T) {
 	r := NewOriginHeaderRing()
 	// Fill past capacity to verify circular buffer wraparound.
 	for range originHeaderRingCap + 50 {
-		r.Sample("p", http.Header{"Cache-Control": []string{"x"}}, 200)
+		r.Sample("p", http.Header{header.CacheControl: []string{"x"}}, 200)
 	}
 	audit := r.HeaderAudit()
 	s := audit["p"]
@@ -87,7 +89,7 @@ func TestOriginHeaderRing_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 100 {
-				r.Sample("p", http.Header{"Cache-Control": []string{"x"}}, 200)
+				r.Sample("p", http.Header{header.CacheControl: []string{"x"}}, 200)
 			}
 		}()
 	}

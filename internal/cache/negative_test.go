@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestIsNegativeCacheable(t *testing.T) {
@@ -76,7 +77,7 @@ func TestSoftPurge(t *testing.T) {
 	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     http.Header{"Content-Type": {"text/html"}},
+		Header:     http.Header{header.ContentType: {"text/html"}},
 		Body:       []byte("hello"),
 		StoredAt:   now.Add(-30 * time.Second),
 		TTL:        60 * time.Second,

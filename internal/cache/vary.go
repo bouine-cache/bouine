@@ -10,6 +10,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // MaxVariants is the default cap on stored variants per primary key.
@@ -102,7 +103,7 @@ func normalizeHeaderValue(v string) string {
 // stale controls the X-Cache label: true for StaleHit (STALE + Warning 110),
 // false for a fresh Hit (HIT).
 func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale bool) bool {
-	rangeHeader := r.Header.Get("Range")
+	rangeHeader := r.Header.Get(header.Range)
 	if rangeHeader == "" {
 		return false
 	}
@@ -118,7 +119,7 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 	for _, s := range specs {
 		start, end, ok := parseRange(strings.TrimSpace(s), obj.BodySize)
 		if !ok {
-			w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(obj.BodySize, 10))
+			w.Header().Set(header.ContentRange, "bytes */"+strconv.FormatInt(obj.BodySize, 10))
 			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 			return true
 		}
@@ -127,7 +128,7 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 
 	// Copy stored response headers (skip Content-Length; we replace it).
 	for k, vals := range obj.Header {
-		if strings.EqualFold(k, "Content-Length") {
+		if strings.EqualFold(k, header.ContentLength) {
 			continue
 		}
 		for _, v := range vals {
@@ -136,21 +137,21 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 	}
 
 	if stale {
-		w.Header()["X-Cache"] = headerSTALE
-		w.Header()["Warning"] = []string{`110 - "Response is Stale"`}
+		w.Header()[header.XCache] = headerSTALE
+		w.Header()[header.Warning] = []string{`110 - "Response is Stale"`}
 	} else {
-		w.Header()["X-Cache"] = headerHIT
+		w.Header()[header.XCache] = headerHIT
 	}
 
 	if len(ranges) == 1 {
 		// Single-range: standard 206.
 		ra := ranges[0]
 		length := ra.end - ra.start + 1
-		w.Header().Set("Content-Range",
+		w.Header().Set(header.ContentRange,
 			"bytes "+strconv.FormatInt(ra.start, 10)+"-"+
 				strconv.FormatInt(ra.end, 10)+"/"+
 				strconv.FormatInt(obj.BodySize, 10))
-		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		w.Header().Set(header.ContentLength, strconv.FormatInt(length, 10))
 		w.WriteHeader(http.StatusPartialContent)
 		if r.Method != http.MethodHead {
 			_, _ = w.Write(obj.Body[ra.start : ra.end+1])
@@ -161,12 +162,12 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 	// Multi-range: multipart/byteranges (RFC 7233 §4.1).
 	boundary := "bouine-range-" + strconv.FormatUint(uint64(obj.Key), 16)
 	contentType := "multipart/byteranges; boundary=" + boundary
-	w.Header().Set("Content-Type", contentType)
+	w.Header().Set(header.ContentType, contentType)
 	w.WriteHeader(http.StatusPartialContent)
 	if r.Method == http.MethodHead {
 		return true
 	}
-	ct := obj.Header.Get("Content-Type")
+	ct := obj.Header.Get(header.ContentType)
 	if ct == "" {
 		ct = "application/octet-stream"
 	}

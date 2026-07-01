@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func freshObj(ttl time.Duration) *api.Object {
 	return &api.Object{
 		StatusCode:   200,
-		Header:       http.Header{"Cache-Control": {"max-age=60"}},
+		Header:       http.Header{header.CacheControl: {"max-age=60"}},
 		CacheControl: "max-age=60",
 		Body:         []byte("cached"),
 		BodySize:     6,
@@ -55,7 +56,7 @@ func TestEvaluate_BypassOnPost(t *testing.T) {
 func TestEvaluate_BypassOnRequestNoStore(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Cache-Control", "no-store")
+	r.Header.Set(header.CacheControl, "no-store")
 	d := Evaluate(r, freshObj(time.Minute), time.Now())
 	if d.Decision != Bypass {
 		t.Fatalf("expected Bypass for no-store, got %d", d.Decision)
@@ -66,7 +67,7 @@ func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Minute)
-	obj.Header.Set("Cache-Control", "no-cache")
+	obj.Header.Set(header.CacheControl, "no-cache")
 	obj.CacheControl = "no-cache"
 	d := Evaluate(r, obj, time.Now())
 	if d.Decision != Revalidate {
@@ -77,7 +78,7 @@ func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
 func TestEvaluate_RevalidateOnRequestNoCache(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Cache-Control", "no-cache")
+	r.Header.Set(header.CacheControl, "no-cache")
 	obj := freshObj(time.Minute)
 	d := Evaluate(r, obj, time.Now())
 	if d.Decision != Revalidate {
@@ -116,7 +117,7 @@ func TestEvaluate_StaleWithSIE(t *testing.T) {
 func TestEvaluate_StaleWithMaxStale(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Cache-Control", "max-stale=60")
+	r.Header.Set(header.CacheControl, "max-stale=60")
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-10 * time.Second) // 9s past TTL
 	d := Evaluate(r, obj, time.Now())
@@ -130,7 +131,7 @@ func TestEvaluate_MustRevalidate(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // stale
-	obj.Header.Set("Cache-Control", "max-age=1, must-revalidate")
+	obj.Header.Set(header.CacheControl, "max-age=1, must-revalidate")
 	obj.CacheControl = "max-age=1, must-revalidate"
 	d := Evaluate(r, obj, time.Now())
 	if d.Decision != Revalidate {
@@ -141,7 +142,7 @@ func TestEvaluate_MustRevalidate(t *testing.T) {
 func TestEvaluate_RequestMaxAge(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Cache-Control", "max-age=0")
+	r.Header.Set(header.CacheControl, "max-age=0")
 	obj := freshObj(time.Minute)
 	d := Evaluate(r, obj, time.Now())
 	// max-age=0 from request means the object is considered stale.
@@ -170,7 +171,7 @@ func TestEvaluate_MinFresh_OriginAge(t *testing.T) {
 	// Remaining lifetime is 20s, request asks for min-fresh=15 → servable.
 	// Old engine computed TTL-age = 30s-30s = 0 < 15 → wrongly not Hit.
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Cache-Control", "min-fresh=15")
+	r.Header.Set(header.CacheControl, "min-fresh=15")
 	obj := freshObj(30 * time.Second)
 	obj.OriginAge = 20 * time.Second
 	obj.StoredAt = time.Now().Add(-10 * time.Second)
@@ -183,7 +184,7 @@ func TestEvaluate_MinFresh_OriginAge(t *testing.T) {
 func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set("Cache-Control", "only-if-cached")
+	r.Header.Set(header.CacheControl, "only-if-cached")
 	d := Evaluate(r, nil, time.Now())
 	if d.Decision != Bypass {
 		t.Fatalf("expected Bypass for only-if-cached + miss, got %d", d.Decision)
@@ -198,10 +199,10 @@ func TestConditionalHeaders(t *testing.T) {
 		LastModified: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 	ConditionalHeaders(r, obj)
-	if r.Header.Get("If-None-Match") != `W/"xyz"` {
-		t.Errorf("INM = %q", r.Header.Get("If-None-Match"))
+	if r.Header.Get(header.IfNoneMatch) != `W/"xyz"` {
+		t.Errorf("INM = %q", r.Header.Get(header.IfNoneMatch))
 	}
-	if r.Header.Get("If-Modified-Since") == "" {
+	if r.Header.Get(header.IfModifiedSince) == "" {
 		t.Error("IMS not set")
 	}
 }

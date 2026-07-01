@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {
@@ -21,9 +23,9 @@ func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {
 	})
 	h := testHandler(t, upstream)
 
-	body := `{"response_headers":[["Cache-Control","max-age=60"]]}`
+	body := `{"response_headers":[[header.CacheControl,"max-age=60"]]}`
 	req := httptest.NewRequest("PUT", "http://example.com/config/test-uuid", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(header.ContentType, "application/json")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -53,8 +55,8 @@ func TestHandler_GETAfterPUTConfigSetup(t *testing.T) {
 			w.WriteHeader(201)
 			_, _ = io.WriteString(w, "OK")
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/test/"):
-			w.Header().Set("Cache-Control", "max-age=3600")
-			w.Header().Set("ETag", `"v1"`)
+			w.Header().Set(header.CacheControl, "max-age=3600")
+			w.Header().Set(header.ETag, `"v1"`)
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "test-response")
 		default:
@@ -66,7 +68,7 @@ func TestHandler_GETAfterPUTConfigSetup(t *testing.T) {
 	// Step 1: PUT config.
 	putReq := httptest.NewRequest("PUT", "http://example.com/config/abc123",
 		strings.NewReader(`{"test":"data"}`))
-	putReq.Header.Set("Content-Type", "application/json")
+	putReq.Header.Set(header.ContentType, "application/json")
 	putRR := httptest.NewRecorder()
 	h.ServeHTTP(putRR, putReq)
 

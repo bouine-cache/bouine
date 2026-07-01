@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestBuildKey_StripQueryParams(t *testing.T) {
@@ -73,7 +74,7 @@ func TestStripQueryParams_HandlerIntegration(t *testing.T) {
 		if r.URL.Query().Get("utm_source") == "" {
 			t.Error("upstream should receive the full query string including utm_source")
 		}
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "body")
 	})
@@ -92,8 +93,8 @@ func TestStripQueryParams_HandlerIntegration(t *testing.T) {
 	h.ServeHTTP(rr,
 		httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=twitter", nil))
 
-	if rr.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("second request (different utm_source) should be HIT, got X-Cache=%q", rr.Header().Get("X-Cache"))
+	if rr.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("second request (different utm_source) should be HIT, got X-Cache=%q", rr.Header().Get(header.XCache))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1 (utm_source should be stripped from key)", calls)

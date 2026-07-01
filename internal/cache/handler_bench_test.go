@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func BenchmarkHandler_CacheHit(b *testing.B) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("ETag", `"bench"`)
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"bench"`)
 		w.WriteHeader(200)
 		_, _ = w.Write(make([]byte, 1024))
 	})
@@ -25,7 +26,7 @@ func BenchmarkHandler_CacheHit(b *testing.B) {
 	// Warm the cache.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://bench.local/hit", nil))
-	if rr.Header().Get("X-Cache") != "MISS" {
+	if rr.Header().Get(header.XCache) != "MISS" {
 		b.Fatal("warmup should be MISS")
 	}
 
@@ -41,7 +42,7 @@ func BenchmarkHandler_CacheHit(b *testing.B) {
 
 func BenchmarkHandler_CacheMiss(b *testing.B) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set(header.CacheControl, "no-store")
 		w.WriteHeader(200)
 		_, _ = w.Write(make([]byte, 1024))
 	})

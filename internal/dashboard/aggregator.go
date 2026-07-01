@@ -12,6 +12,7 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Aggregator fetches metrics from all cluster peers and merges them.
@@ -166,7 +167,7 @@ func (a *Aggregator) fetchPeer(ctx context.Context, peer api.PeerInfo) (observab
 		return observability.MetricsSummary{NodeName: peer.Name}, err
 	}
 	if a.token != "" {
-		req.Header.Set("Authorization", "Bearer "+a.token)
+		req.Header.Set(header.Authorization, "Bearer "+a.token)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -192,7 +193,7 @@ func (a *Aggregator) fetchPeer(ctx context.Context, peer api.PeerInfo) (observab
 func PeerMetricsHandler(rings *observability.Rings) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sum := rings.Summary()
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(sum)
 	})
 }

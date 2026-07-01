@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/thylong/bouine/internal/observability/responsewriter"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // DataPlaneMetrics holds the RED counters for the data-plane pipeline.
@@ -174,12 +175,12 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		status := statusString(sw.Status)
 		// Route label is written by the pipeline router as a direct header
 		// map entry to avoid CanonicalMIMEHeaderKey on every request.
-		route := r.Header.Get("X-Bouine-Route")
+		route := r.Header.Get(header.XBouineRoute)
 		if route == "" {
 			route = "_default"
 		}
 		// cache_result: normalise X-Cache to HIT/MISS/STALE/REVALIDATED/BYPASS.
-		cacheResult := normaliseCacheResult(w.Header().Get("X-Cache"))
+		cacheResult := normaliseCacheResult(w.Header().Get(header.XCache))
 
 		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, route).Inc()
 
@@ -204,7 +205,7 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 
 		// Update ring buffers for the dashboard (if enabled).
 		if m.Rings != nil {
-			xCache := w.Header().Get("X-Cache")
+			xCache := w.Header().Get(header.XCache)
 			durMs := time.Since(start).Milliseconds()
 			m.Rings.Request.RecordRequest(xCache, sw.Status, durMs)
 			if route != "_default" {

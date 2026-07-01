@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // engine.go implements the RFC 9111 cache state machine.
@@ -46,17 +47,17 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 	// "absent" (false / zero), which is the correct interpretation of a
 	// missing Cache-Control header per RFC 9111 §5.2.
 	var reqCC Directives
-	if rawCC, hasCCReq := r.Header["Cache-Control"]; hasCCReq {
+	if rawCC, hasCCReq := r.Header[header.CacheControl]; hasCCReq {
 		reqCC = ParseCacheControl(rawCC[0])
 		if len(rawCC) > 1 {
 			// Rare: multiple Cache-Control headers. Re-parse merged value.
-			reqCC = ParseCacheControl(mergeHeaderValues(r.Header, "Cache-Control"))
+			reqCC = ParseCacheControl(mergeHeaderValues(r.Header, header.CacheControl))
 		}
 	}
 
 	// Pragma: no-cache is equivalent to Cache-Control: no-cache
 	// for HTTP/1.0 compatibility (RFC 9111 §5.4).
-	if !reqCC.NoCache && r.Header.Get("Pragma") == "no-cache" {
+	if !reqCC.NoCache && r.Header.Get(header.Pragma) == "no-cache" {
 		reqCC.NoCache = true
 	}
 
@@ -78,7 +79,7 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 	// helper; this one copy is the deliberate exception.
 	ccStr := obj.CacheControl
 	if ccStr == "" {
-		ccStr = mergeHeaderValues(obj.Header, "Cache-Control")
+		ccStr = mergeHeaderValues(obj.Header, header.CacheControl)
 	}
 	respCC := ParseCacheControl(ccStr)
 
@@ -100,7 +101,7 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 func objDirectives(obj *api.Object) Directives {
 	cc := obj.CacheControl
 	if cc == "" {
-		cc = mergeHeaderValues(obj.Header, "Cache-Control")
+		cc = mergeHeaderValues(obj.Header, header.CacheControl)
 	}
 	return ParseCacheControl(cc)
 }
@@ -195,7 +196,7 @@ func evalStale(reqCC, respCC Directives, obj *api.Object, now time.Time) Disposi
 	// the object was cached purely heuristically via Last-Modified/10%.
 	// Without must-revalidate, a cache MAY serve it stale rather than always
 	// revalidating on every miss.
-	if !respCC.MaxAgeSet && !respCC.SMaxAgeSet && obj.Header.Get("Expires") == "" {
+	if !respCC.MaxAgeSet && !respCC.SMaxAgeSet && obj.Header.Get(header.Expires) == "" {
 		return Disposition{Decision: StaleHit, Object: obj}
 	}
 	return revalidateOrMiss(obj)

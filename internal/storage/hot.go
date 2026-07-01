@@ -14,6 +14,7 @@ import (
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/storage/sieve"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // inlineEvictCap is the maximum number of entries evicted synchronously
@@ -491,10 +492,10 @@ func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
 		if !expr.CreatedAt.IsZero() && obj.StoredAt.After(expr.CreatedAt) {
 			return false
 		}
-		if hostRE != nil && !hostRE.MatchString(obj.Header.Get("X-Bouine-Host")) {
+		if hostRE != nil && !hostRE.MatchString(obj.Header.Get(header.XBouineHost)) {
 			return false
 		}
-		if pathRE != nil && !pathRE.MatchString(obj.Header.Get("X-Bouine-Path")) {
+		if pathRE != nil && !pathRE.MatchString(obj.Header.Get(header.XBouinePath)) {
 			return false
 		}
 		if expr.SurrogateKey != "" {

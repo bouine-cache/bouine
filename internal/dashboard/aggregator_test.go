@@ -9,12 +9,13 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(header.ContentType, "application/json")
 		_ = json.NewEncoder(w).Encode(sum)
 	}))
 }

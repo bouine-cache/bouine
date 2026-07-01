@@ -8,6 +8,7 @@ import (
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func baseConfig() *config.Config {
@@ -581,7 +582,7 @@ func TestRuleConfigMaxObjectSizeUnset(t *testing.T) {
 func TestRuleConfigRouteStripsCacheHeaders(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
-	cfg.Routes[0].Response.HeaderRemove = []string{"Cache-Control", "X-Custom"}
+	cfg.Routes[0].Response.HeaderRemove = []string{header.CacheControl, "X-Custom"}
 	data := InsightData{Config: cfg}
 	ins := ruleConfigRouteStripsCacheHeaders(data)
 	if ins == nil {

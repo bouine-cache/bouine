@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/thylong/bouine/internal/storage"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func newMaxResponseBytesHandler(t *testing.T, upstream http.Handler, maxBytes int64) *Handler {
@@ -26,7 +27,7 @@ func TestMaxResponseBytes_OverLimitReturns502(t *testing.T) {
 	body := strings.Repeat("x", 2048)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})
@@ -45,7 +46,7 @@ func TestMaxResponseBytes_OverLimitReturns502(t *testing.T) {
 	// Second request should also miss (nothing cached).
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/too-big", nil))
-	if rr2.Header().Get("X-Cache") == "HIT" {
+	if rr2.Header().Get(header.XCache) == "HIT" {
 		t.Error("truncated response must not be cached")
 	}
 	if calls != 2 {
@@ -59,7 +60,7 @@ func TestMaxResponseBytes_UnderLimitSucceeds(t *testing.T) {
 	body := strings.Repeat("y", 512)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})
@@ -74,8 +75,8 @@ func TestMaxResponseBytes_UnderLimitSucceeds(t *testing.T) {
 	// Should be cached.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/ok", nil))
-	if rr2.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("response under limit should be cached, got X-Cache=%q", rr2.Header().Get("X-Cache"))
+	if rr2.Header().Get(header.XCache) != "HIT" {
+		t.Errorf("response under limit should be cached, got X-Cache=%q", rr2.Header().Get(header.XCache))
 	}
 	if calls != 1 {
 		t.Errorf("origin called %d times, want 1 (cached)", calls)
@@ -86,7 +87,7 @@ func TestMaxResponseBytes_ExactBoundarySucceeds(t *testing.T) {
 	t.Parallel()
 	body := strings.Repeat("a", 512)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})
@@ -104,7 +105,7 @@ func TestMaxResponseBytes_DefaultAppliedWhenZero(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
 		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Cache-Control", "max-age=60")
+			w.Header().Set(header.CacheControl, "max-age=60")
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "small")
 		}),
@@ -122,7 +123,7 @@ func TestMaxResponseBytes_InvalidateAndProxyOverLimit(t *testing.T) {
 	body := strings.Repeat("z", 2048)
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		w.Header().Set("Cache-Control", "max-age=60")
+		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, body)
 	})

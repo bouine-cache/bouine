@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -1023,4 +1024,27 @@ func TestHandler_ReplicateVaryPrimaryAndVariant(t *testing.T) {
 	if !variantReplicated {
 		t.Fatal("variant was not replicated")
 	}
+}
+
+func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
+	// sync.Pool is per-P and may be cleared by GC, both of which mask the
+	// regression. Pin to a single P and disable GC so Put→Get on the same
+	// P reliably returns the just-put recorder when it was not discarded.
+	prevGC := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(prevGC) })
+	prevProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prevProcs) })
+
+	rec := acquireRecorder()
+	if _, err := rec.body.Write(make([]byte, maxRecorderCap+1)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	releaseRecorder(rec)
+
+	fresh := acquireRecorder()
+	if fresh.body.Cap() > maxRecorderCap {
+		t.Fatalf("reacquired recorder retained oversized buffer: cap=%d > %d",
+			fresh.body.Cap(), maxRecorderCap)
+	}
+	releaseRecorder(fresh)
 }

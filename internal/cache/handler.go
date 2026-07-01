@@ -80,6 +80,11 @@ type fetchResult struct {
 	Err        error
 }
 
+// maxRecorderCap bounds the backing array retained by the recorder pool.
+// Recorders that grew past this on a large response are discarded so the
+// pool never pins a transiently oversized buffer across GC cycles.
+const maxRecorderCap = 1 << 20 // 1 MiB
+
 // recorderPool reuses responseRecorder instances on the miss and
 // invalidation paths. Both paths copy the captured body and header out of
 // the recorder before returning it to the pool, so the recorder's buffer
@@ -105,6 +110,9 @@ func acquireRecorder() *responseRecorder {
 }
 
 func releaseRecorder(rec *responseRecorder) {
+	if rec.body.Cap() > maxRecorderCap {
+		return
+	}
 	recorderPool.Put(rec)
 }
 

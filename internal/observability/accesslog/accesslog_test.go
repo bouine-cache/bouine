@@ -91,8 +91,8 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 	if rec["msg"] != "served cache hit" {
 		t.Errorf("msg = %v, want 'served cache hit'", rec["msg"])
 	}
-	if rec["key"] != float64(42) {
-		t.Errorf("key = %v, want 42", rec["key"])
+	if rec["key"] != "2a" {
+		t.Errorf("key = %v, want 2a", rec["key"])
 	}
 }
 

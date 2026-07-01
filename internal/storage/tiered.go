@@ -105,7 +105,10 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 				ts.logger.Warn("wal replay failed; warm-tier index may be incomplete",
 					"error", rErr)
 			}
-			ts.warm.RecomputeStats()
+			if err := ts.warm.RecomputeStats(); err != nil {
+				ts.logger.Warn("warm-tier stats recompute failed; counters may be stale",
+					"error", err)
+			}
 		}
 	}
 
@@ -225,7 +228,7 @@ func (t *TieredStore) compactLoop() {
 		case <-ticker.C:
 			if t.warm.NeedsCompaction() {
 				if err := t.warm.Compact(); err != nil {
-					t.logger.Warn("warm tier compaction failed", "error", err)
+					t.logger.Error("warm tier compaction failed", "error", err)
 				} else {
 					t.logger.Info("warm tier compaction complete")
 				}

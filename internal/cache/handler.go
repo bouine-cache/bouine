@@ -46,6 +46,11 @@ import (
 // post-fetch MaxObjectSize check runs.
 const defaultMaxResponseBytes int64 = 64 << 20 // 64 MiB
 
+// defaultFetchConcurrency bounds concurrent foreground origin fetches.
+// Each fetch can buffer up to defaultMaxResponseBytes, so this caps
+// worst-case memory at concurrency × maxResponseBytes (issue #133).
+const defaultFetchConcurrency = 64
+
 // bgRevalSem bounds concurrent background stale-while-revalidate
 // goroutines. When full, excess revalidation attempts are silently
 // dropped — the next client will re-trigger if still stale.
@@ -144,6 +149,7 @@ type Handler struct {
 	allowSetCookie   bool            // when false (default), Set-Cookie blocks caching
 	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
 	maxResponseBytes int64           // hard cap on body buffering; 0 = defaultMaxResponseBytes
+	fetchSem         chan struct{}   // bounds concurrent foreground origin fetches
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
 	// variantSets tracks the live variant store keys per primary key to
@@ -217,6 +223,11 @@ type HandlerConfig struct {
 	// already been fully buffered. Zero (default) applies a safe built-in
 	// limit (64 MiB).
 	MaxResponseBytes int64
+	// MaxFetchConcurrency bounds the number of concurrent foreground
+	// origin fetches. When the limit is reached, additional fetches
+	// block until a slot frees or the request context is cancelled.
+	// Zero (default) applies a safe built-in limit (64).
+	MaxFetchConcurrency int
 	// StripQueryParams, when non-nil, excludes the listed query parameter
 	// names from the cache key. The parameters are still forwarded to
 	// the upstream. Allocated once at handler construction.
@@ -271,6 +282,11 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
 	}
+	conc := cfg.MaxFetchConcurrency
+	if conc <= 0 {
+		conc = defaultFetchConcurrency
+	}
+	h.fetchSem = make(chan struct{}, conc)
 	return h
 }
 
@@ -369,7 +385,7 @@ func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
 	key := h.buildKey(r)
 	obj, err := h.store.Get(r.Context(), key)
 	if err != nil {
-		h.logger.Warn("cache lookup error", "error", err)
+		h.logger.Warn("cache lookup error", "key", key, "error", err)
 	}
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
 		return key, obj
@@ -773,6 +789,14 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Write the captured response to the client.
+	dst := w.Header()
+	for k, vals := range rec.header {
+		dst[k] = vals
+	}
+	w.WriteHeader(rec.statusCode)
+	_, _ = w.Write(rec.body.Bytes())
+
 	// Only invalidate on 2xx/3xx success.
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
 		getReq := r.Clone(r.Context())
@@ -800,14 +824,6 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// response under the GET key so subsequent GETs can reuse it.
 		h.maybeStorePostResponse(r, getReq, key, rec)
 	}
-
-	// Write the captured response to the client.
-	dst := w.Header()
-	for k, vals := range rec.header {
-		dst[k] = vals
-	}
-	w.WriteHeader(rec.statusCode)
-	_, _ = w.Write(rec.body.Bytes())
 }
 
 // maybeStorePostResponse stores a successful POST response under the GET
@@ -882,6 +898,12 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	// L5 span: upstream origin pool layer.
 	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
 	defer span.End()
+	select {
+	case h.fetchSem <- struct{}{}:
+		defer func() { <-h.fetchSem }()
+	case <-ctx.Done():
+		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", ctx.Err())}
+	}
 	// Propagate W3C TraceContext into the upstream request so the origin
 	// can participate in the distributed trace.
 	outReq := r.WithContext(ctx)
@@ -894,15 +916,15 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy body and header out so the fetchResult owns them before the
-	// recorder returns to the pool. The body copy is also right-sized:
-	// bytes.Buffer over-allocates, and stored objects are long-lived.
+	// Right-size the body copy: the recorder's bytes.Buffer may have slack
+	// capacity from doubling, and stored objects are long-lived.
 	body := make([]byte, rec.body.Len())
 	copy(body, rec.body.Bytes())
+	header := rec.header.Clone()
 
 	return fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     rec.header.Clone(),
+		Header:     header,
 		Body:       body,
 	}
 }
@@ -1060,7 +1082,22 @@ type responseRecorder struct {
 
 func (r *responseRecorder) Header() http.Header { return r.header }
 
-func (r *responseRecorder) WriteHeader(code int) { r.statusCode = code }
+func (r *responseRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	// Pre-size the buffer when Content-Length is known, avoiding
+	// bytes.Buffer doubling over-allocation that causes transient heap
+	// spikes under concurrent miss traffic (issue #141). Only grows
+	// if the pooled buffer is too small.
+	if r.maxBytes > 0 {
+		if cl := r.header.Get("Content-Length"); cl != "" {
+			if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n > 0 && n <= r.maxBytes {
+				if int64(r.body.Cap()) < n {
+					r.body.Grow(int(n))
+				}
+			}
+		}
+	}
+}
 
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	if r.statusCode == 0 {

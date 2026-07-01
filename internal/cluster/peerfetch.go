@@ -33,26 +33,32 @@ const (
 	ClusterProtocolVersion = "1"
 	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
 	peerFetchTimeout = 500 * time.Millisecond
+	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
+	// prevent memory blow-up during miss fan-out or anti-entropy
+	// backfill (issue #133).
+	defaultPeerFetchConcurrency = 4
 )
 
 // maxPeerFetchBytes caps the response body read from a peer during
 // JSON decode. A compromised peer could send an arbitrarily large
 // payload; without a limit json.Decoder buffers unbounded data on
 // the heap. The Object body is base64-encoded (~33% inflation), so
-// this allows roughly 192 MiB of raw body bytes.
-const maxPeerFetchBytes int64 = 256 << 20
+// this allows roughly 48 MiB of raw body bytes.
+const maxPeerFetchBytes int64 = 64 << 20
 
 // PeerFetcher issues cache-lookup RPCs to peer nodes.
 //
 // Stable.
 type PeerFetcher struct {
 	client       *http.Client
+	useTLS       bool
 	hits         atomic.Int64
 	misses       atomic.Int64
 	latSumMs     atomic.Int64
 	latN         atomic.Int64
 	hopLimitHits atomic.Int64
 	maxBodyBytes int64
+	fetchSem     chan struct{}
 	logger       observability.Logger
 	// Prometheus counters — registered if a non-nil registry is passed.
 	pHits     prometheus.Counter
@@ -84,7 +90,9 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 			Transport: transport,
 			Timeout:   peerFetchTimeout,
 		},
+		useTLS:       tlsCfg != nil,
 		maxBodyBytes: maxPeerFetchBytes,
+		fetchSem:     make(chan struct{}, defaultPeerFetchConcurrency),
 		logger:       observability.ResolveLogger(logger),
 	}
 	if reg != nil {
@@ -151,10 +159,16 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	req.Hops++
 
-	useTLS := f.client.Transport.(*http.Transport).TLSClientConfig != nil
-	httpReq, err := buildPeerRequest(ctx, peer, req, useTLS)
+	httpReq, err := buildPeerRequest(ctx, peer, req, f.useTLS)
 	if err != nil {
 		return nil, err
+	}
+
+	select {
+	case f.fetchSem <- struct{}{}:
+		defer func() { <-f.fetchSem }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ctx.Err())
 	}
 
 	start := time.Now()

@@ -257,8 +257,10 @@ func (s *Store) DelIndex(key uint64) {
 
 // RecomputeStats scans all segments and recounts live entries and bytes
 // from the current index. Called after WAL replay to restore the stats
-// counters that are not persisted in the WAL.
-func (s *Store) RecomputeStats() {
+// counters that are not persisted in the WAL. Returns an error if the
+// underlying scan fails; the stats counters are left unchanged in that
+// case so callers do not act on partial data.
+func (s *Store) RecomputeStats() error {
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))
 	for k, v := range s.index {
@@ -267,7 +269,7 @@ func (s *Store) RecomputeStats() {
 	s.idxMu.RUnlock()
 
 	var entries, bytes int64
-	_ = s.Scan(func(r Record) error {
+	if err := s.Scan(func(r Record) error {
 		if r.IsTomb {
 			return nil
 		}
@@ -278,9 +280,12 @@ func (s *Store) RecomputeStats() {
 		entries++
 		bytes += int64(headerLen + len(r.Body) + footerLen)
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("warm: recompute stats: %w", err)
+	}
 	s.stats.entries.Store(entries)
 	s.stats.bytes.Store(bytes)
+	return nil
 }
 
 // ReadRecord reads a record at the given offset in the given segment.
@@ -550,7 +555,8 @@ func (s *Store) Compact() error {
 	s.idxMu.RUnlock()
 
 	dir := s.dir
-	compactDir := dir + ".compact"
+	compactDir := filepath.Join(dir, ".compact")
+	_ = os.RemoveAll(compactDir) // stale dir from a previous failed run
 	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: s.maxBytes, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
@@ -568,26 +574,28 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("compact: close temp: %w", err)
 	}
 
-	// Hold s.mu.Lock across the directory swap + internal replacement
+	// Hold s.mu.Lock across the segment-file swap + internal replacement
 	// so that concurrent Put/Delete (which call activeSeg → newSegment
-	// → openSegment) cannot hit a missing directory.
+	// → openSegment) cannot hit missing files.
+	//
+	// The compact directory is a subdirectory of dir so it lives on the
+	// same writable volume. This is required for read-only root
+	// filesystems (e.g. Kubernetes readOnlyRootFilesystem: true) where
+	// only the mounted PVC at dir is writable.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_ = os.RemoveAll(dir + ".bak")
-	if err := os.Rename(dir, dir+".bak"); err != nil {
-		return fmt.Errorf("compact: rename old: %w", err)
+	if err := swapSegmentFiles(dir, compactDir); err != nil {
+		return err
 	}
-	if err := os.Rename(compactDir, dir); err != nil {
-		_ = os.Rename(dir+".bak", dir)
-		return fmt.Errorf("compact: rename new: %w", err)
-	}
-	_ = os.RemoveAll(dir + ".bak")
 
 	fresh, err := NewStore(Config{Dir: dir, MaxBytes: s.maxBytes, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: reopen: %w", err)
 	}
+
+	// Now safe to close old handles: new store is open, old inodes are
+	// unlinked and will be freed when these fds close.
 	for _, seg := range s.segs {
 		_ = seg.f.Close()
 	}
@@ -597,6 +605,41 @@ func (s *Store) Compact() error {
 	s.idxMu.Unlock()
 	s.stats.entries.Store(int64(len(newIndex)))
 	s.stats.bytes.Store(fresh.stats.bytes.Load())
+	return nil
+}
+
+// swapSegmentFiles removes old segment files from dir, moves compacted
+// segment files from compactDir into dir, then removes compactDir.
+// On Unix, removing an open file does not invalidate existing file handles
+// (the inode lives until the last fd closes), so callers can defer closing
+// old segment handles until after the swap completes.
+func swapSegmentFiles(dir, compactDir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("compact: readdir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), segExt) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("compact: remove old segment %s: %w", e.Name(), err)
+		}
+	}
+
+	compactEntries, err := os.ReadDir(compactDir)
+	if err != nil {
+		return fmt.Errorf("compact: readdir compact: %w", err)
+	}
+	for _, e := range compactEntries {
+		if e.IsDir() {
+			continue
+		}
+		if err := os.Rename(filepath.Join(compactDir, e.Name()), filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("compact: move compacted segment %s: %w", e.Name(), err)
+		}
+	}
+	_ = os.RemoveAll(compactDir)
 	return nil
 }
 

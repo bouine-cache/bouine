@@ -269,6 +269,11 @@ type RouteCache struct {
 	// allocation that causes OOM. Zero (default) applies a safe
 	// built-in limit (64 MiB).
 	MaxResponseBytes ByteSize `yaml:"max_response_bytes,omitempty" json:"max_response_bytes,omitempty"`
+	// MaxFetchConcurrency bounds the number of concurrent foreground
+	// origin fetches per route. When the limit is reached, additional
+	// fetches block until a slot frees or the request context is
+	// cancelled. Zero (default) applies a safe built-in limit (64).
+	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

@@ -3,6 +3,7 @@ package insights
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/thylong/bouine/internal/config"
 )
@@ -34,6 +35,33 @@ func init() {
 		ruleConfigKeyQueryParams,
 		ruleConfigAllowSetCookie,
 		ruleConfigJitterZero,
+		// Tier 1: config-derived standing insights.
+		ruleConfigTLSBelow12,
+		ruleConfigNoOCSPStapling,
+		ruleConfigTracingSamplingZero,
+		ruleConfigClusterDisabledWithPeers,
+		ruleConfigAntiEntropyDisabled,
+		ruleConfigPoolNoTimeout,
+		ruleConfigPoolNoMaxConnections,
+		ruleConfigMaxObjectSizeUnset,
+		ruleConfigRouteStripsCacheHeaders,
+		// Tier 2: existing ring data.
+		ruleCacheHighEvictionRate,
+		ruleCacheStaleHitRatioHigh,
+		ruleCacheSWRConfiguredButUnused,
+		ruleAnomalyLatencyP99Spike,
+		ruleAnomalyRevalidationStorm,
+		ruleUpstreamTargetErrorStreak,
+		ruleCacheHotTierCritical,
+		ruleCacheWarmEntriesZero,
+		// Tier 3: existing data, new plumbing.
+		ruleClusterReplicationStalled,
+		ruleClusterNoReplicationTraffic,
+		ruleClusterBroadcastFailures,
+		ruleCDNLastError,
+		ruleCDNPurgeSkipped,
+		ruleConfigPoolPassiveEjectForever,
+		ruleClusterPeerHealthDegraded,
 	}
 }
 
@@ -646,6 +674,544 @@ func ruleConfigJitterZero(data InsightData) *Insight {
 		Routes:   truncateRoutes(triggered),
 		Action:   "/dashboard/config",
 	}
+}
+
+// ── Tier 1: Config-derived standing insights ─────────────────────────
+
+func ruleConfigTLSBelow12(data InsightData) *Insight {
+	mv := data.Config.TLS.MinVersion
+	if mv == "" || data.Config.Listen.HTTPS == "" {
+		return nil
+	}
+	if mv == "1.2" || mv == "1.3" {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-tls-below-12",
+		Severity: SeverityMed,
+		Category: CategoryConfig,
+		Title:    fmt.Sprintf("TLS min version is %s (below 1.2)", mv),
+		Detail:   "TLS 1.0/1.1 are deprecated and vulnerable to known attacks",
+		Evidence: fmt.Sprintf("min_version: %s", mv),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleConfigNoOCSPStapling(data InsightData) *Insight {
+	if data.Config.Listen.HTTPS == "" {
+		return nil
+	}
+	ocsp := data.Config.TLS.OCSPStapling
+	if ocsp != "" && ocsp != "off" {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-no-ocsp-stapling",
+		Severity: SeverityLow,
+		Category: CategoryConfig,
+		Title:    "OCSP stapling not configured",
+		Detail:   "Without OCSP stapling, clients must contact the CA to verify certificate revocation status",
+		Evidence: fmt.Sprintf("ocsp_stapling: %q", ocsp),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleConfigTracingSamplingZero(data InsightData) *Insight {
+	if data.Config.Tracing.Endpoint == "" {
+		return nil
+	}
+	if data.Config.Tracing.SamplingRate > 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-tracing-sampling-zero",
+		Severity: SeverityLow,
+		Category: CategoryConfig,
+		Title:    "Tracing endpoint configured but sampling rate is 0",
+		Detail:   "Traces are exported to the collector but nothing is sampled — no traces will be sent",
+		Evidence: fmt.Sprintf("endpoint: %s, sampling: 0", data.Config.Tracing.Endpoint),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleConfigClusterDisabledWithPeers(data InsightData) *Insight {
+	if data.Config.Cluster.Enabled {
+		return nil
+	}
+	if len(data.Config.Cluster.Join) == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-cluster-disabled-with-peers",
+		Severity: SeverityMed,
+		Category: CategoryConfig,
+		Title:    "Cluster disabled but join addresses configured",
+		Detail:   fmt.Sprintf("%d join address(es) configured but cluster.enabled is false", len(data.Config.Cluster.Join)),
+		Evidence: fmt.Sprintf("join: %d entries, enabled: false", len(data.Config.Cluster.Join)),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleConfigAntiEntropyDisabled(data InsightData) *Insight {
+	if !data.Config.Cluster.Enabled || data.Config.Cluster.Mode != config.ClusterModeFull {
+		return nil
+	}
+	if data.Config.Cluster.AntiEntropyInterval > 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-anti-entropy-disabled",
+		Severity: SeverityLow,
+		Category: CategoryConfig,
+		Title:    "Anti-entropy disabled in full mode",
+		Detail:   "Full replication without anti-entropy will drift over time as replication failures accumulate",
+		Evidence: "mode: full, anti_entropy_interval: 0",
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleConfigPoolNoTimeout(data InsightData) *Insight {
+	for _, pool := range data.Config.UpstreamPools {
+		if pool.Connect.Timeout == 0 {
+			return &Insight{
+				ID:       "config-pool-no-timeout",
+				Severity: SeverityMed,
+				Category: CategoryUpstream,
+				Title:    fmt.Sprintf("Pool %s has no connect timeout", pool.Name),
+				Detail:   "Without a connect timeout, origin can hang indefinitely and exhaust the connection pool",
+				Evidence: fmt.Sprintf("pool: %s, connect_timeout: 0", pool.Name),
+				Action:   "/dashboard/config",
+			}
+		}
+	}
+	return nil
+}
+
+func ruleConfigPoolNoMaxConnections(data InsightData) *Insight {
+	for _, pool := range data.Config.UpstreamPools {
+		if pool.Connect.MaxConnections == 0 {
+			return &Insight{
+				ID:       "config-pool-no-max-connections",
+				Severity: SeverityLow,
+				Category: CategoryUpstream,
+				Title:    fmt.Sprintf("Pool %s has no max connections limit", pool.Name),
+				Detail:   "Without a connection limit, a slow origin can exhaust file descriptors",
+				Evidence: fmt.Sprintf("pool: %s, max_connections: 0", pool.Name),
+				Action:   "/dashboard/config",
+			}
+		}
+	}
+	return nil
+}
+
+func ruleConfigMaxObjectSizeUnset(data InsightData) *Insight {
+	var triggered []string
+	for i := range data.Config.Routes {
+		r := &data.Config.Routes[i]
+		if isCacheEnabled(r) && r.Cache.MaxObjectSize == 0 {
+			triggered = append(triggered, r.Name)
+		}
+	}
+	if len(triggered) == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-max-object-size-unset",
+		Severity: SeverityLow,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("Route %s has no max object size", triggered[0]),
+		Detail:   fmt.Sprintf("%d route(s) have no MaxObjectSize — large responses can exhaust RAM", len(triggered)),
+		Evidence: "MaxObjectSize == 0",
+		Routes:   truncateRoutes(triggered),
+		Action:   "/dashboard/config",
+	}
+}
+
+var cachingHeaders = map[string]bool{
+	"cache-control": true,
+	"etag":          true,
+	"last-modified": true,
+	"vary":          true,
+	"surrogate-key": true,
+	"age":           true,
+	"expires":       true,
+}
+
+func ruleConfigRouteStripsCacheHeaders(data InsightData) *Insight {
+	var triggered []string
+	for i := range data.Config.Routes {
+		r := &data.Config.Routes[i]
+		for _, h := range r.Response.HeaderRemove {
+			if cachingHeaders[strings.ToLower(h)] {
+				triggered = append(triggered, r.Name)
+				break
+			}
+		}
+	}
+	if len(triggered) == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "config-route-strips-cache-headers",
+		Severity: SeverityMed,
+		Category: CategoryConfig,
+		Title:    fmt.Sprintf("Route %s strips caching headers", triggered[0]),
+		Detail:   fmt.Sprintf("%d route(s) remove caching-relevant response headers (Cache-Control, ETag, etc.)", len(triggered)),
+		Evidence: "HeaderRemove contains caching headers",
+		Routes:   truncateRoutes(triggered),
+		Action:   "/dashboard/config",
+	}
+}
+
+// ── Tier 2: Existing ring data ────────────────────────────────────────
+
+func ruleCacheHighEvictionRate(data InsightData) *Insight {
+	if data.StoreStats.HotEntries < 100 {
+		return nil
+	}
+	evictDelta := data.StoreStats.Evictions - data.PrevStoreStats.Evictions
+	if evictDelta <= 0 {
+		return nil
+	}
+	ratio := float64(evictDelta) / float64(data.StoreStats.HotEntries) * 100
+	if ratio < 5 {
+		return nil
+	}
+	sev := SeverityMed
+	if ratio > 10 {
+		sev = SeverityHigh
+	}
+	return &Insight{
+		ID:       "cache-high-eviction-rate",
+		Severity: sev,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("Hot tier evicting %.1f%% of entries per cycle", ratio),
+		Detail:   "High eviction rate indicates the hot tier is too small for the working set",
+		Evidence: fmt.Sprintf("evictions_delta: %d, hot_entries: %d, ratio: %.1f%%", evictDelta, data.StoreStats.HotEntries, ratio),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleCacheStaleHitRatioHigh(data InsightData) *Insight {
+	var totalReqs, totalStale int64
+	for _, b := range data.RequestBuckets {
+		totalReqs += b.Requests
+		totalStale += b.StaleHits
+	}
+	if totalReqs < 100 {
+		return nil
+	}
+	ratio := float64(totalStale) / float64(totalReqs) * 100
+	if ratio < 20 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cache-stale-hit-ratio-high",
+		Severity: SeverityLow,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("%.0f%% of hits are stale (SWR)", ratio),
+		Detail:   "SWR is carrying the cache — the origin may be under-provisioned or TTLs are too short",
+		Evidence: fmt.Sprintf("stale_hits: %d, requests: %d, ratio: %.1f%%", totalStale, totalReqs, ratio),
+		Action:   "/dashboard/routes",
+	}
+}
+
+func ruleCacheSWRConfiguredButUnused(data InsightData) *Insight {
+	var totalMisses, totalStale int64
+	for _, b := range data.RequestBuckets {
+		totalMisses += b.Misses
+		totalStale += b.StaleHits
+	}
+	if totalStale > 0 || totalMisses < 100 {
+		return nil
+	}
+	swrRoutes := 0
+	for i := range data.Config.Routes {
+		r := &data.Config.Routes[i]
+		if isCacheEnabled(r) && r.Cache.StaleWhileRevalidate > 0 {
+			swrRoutes++
+		}
+	}
+	if swrRoutes == 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cache-swr-configured-but-unused",
+		Severity: SeverityLow,
+		Category: CategoryCache,
+		Title:    "SWR configured but never serving stale",
+		Detail:   fmt.Sprintf("%d route(s) have SWR but 0 stale hits with %d misses — SWR could have helped but didn't", swrRoutes, totalMisses),
+		Evidence: fmt.Sprintf("stale_hits: 0, misses: %d, swr_routes: %d", totalMisses, swrRoutes),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleAnomalyLatencyP99Spike(data InsightData) *Insight {
+	n := len(data.RequestBuckets)
+	if n < 7 {
+		return nil
+	}
+	current := data.RequestBuckets[n-1]
+	prev := data.RequestBuckets[n-6 : n-1]
+	currentP99 := current.LatHist.Percentile(0.99)
+	if currentP99 == 0 {
+		return nil
+	}
+	var prevSum int64
+	count := 0
+	for _, b := range prev {
+		p := b.LatHist.Percentile(0.99)
+		if p > 0 {
+			prevSum += p
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	avgPrev := float64(prevSum) / float64(count)
+	if avgPrev == 0 {
+		return nil
+	}
+	ratio := float64(currentP99) / avgPrev
+	if ratio < 2 {
+		return nil
+	}
+	sev := SeverityMed
+	if ratio > 3 {
+		sev = SeverityHigh
+	}
+	return &Insight{
+		ID:       "anomaly-latency-p99-spike",
+		Severity: sev,
+		Category: CategoryAnomaly,
+		Title:    fmt.Sprintf("p99 latency spike: %dms (%.1fx above average)", currentP99, ratio),
+		Detail:   "Recent p99 latency is significantly higher than the preceding window",
+		Evidence: fmt.Sprintf("current_p99: %dms, avg_prev_p99: %.0fms, ratio: %.1f", currentP99, avgPrev, ratio),
+		Action:   "/dashboard/performance",
+	}
+}
+
+func ruleAnomalyRevalidationStorm(data InsightData) *Insight {
+	n := len(data.RequestBuckets)
+	if n < 7 {
+		return nil
+	}
+	current := data.RequestBuckets[n-1].Revalidated
+	if current == 0 {
+		return nil
+	}
+	prev := data.RequestBuckets[n-6 : n-1]
+	var prevSum int64
+	count := 0
+	for _, b := range prev {
+		if b.Revalidated > 0 {
+			prevSum += b.Revalidated
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	avgPrev := float64(prevSum) / float64(count)
+	if avgPrev == 0 {
+		return nil
+	}
+	ratio := float64(current) / avgPrev
+	if ratio < 3 {
+		return nil
+	}
+	return &Insight{
+		ID:       "anomaly-revalidation-storm",
+		Severity: SeverityMed,
+		Category: CategoryAnomaly,
+		Title:    fmt.Sprintf("Revalidation storm: %d revalidations (%.1fx above average)", current, ratio),
+		Detail:   "Sudden spike in conditional requests — TTLs may have expired simultaneously",
+		Evidence: fmt.Sprintf("current: %d, avg_prev: %.0f, ratio: %.1f", current, avgPrev, ratio),
+		Action:   "/dashboard/routes",
+	}
+}
+
+func ruleUpstreamTargetErrorStreak(data InsightData) *Insight {
+	for pool, targets := range data.PoolHealth {
+		for _, t := range targets {
+			if t.Healthy && t.ConsecutiveErrors >= 5 {
+				return &Insight{
+					ID:       "upstream-target-error-streak",
+					Severity: SeverityMed,
+					Category: CategoryUpstream,
+					Title:    fmt.Sprintf("Target %s has %d consecutive errors (still healthy)", t.Addr, t.ConsecutiveErrors),
+					Detail:   fmt.Sprintf("Pool %s target is about to be passively ejected", pool),
+					Evidence: fmt.Sprintf("target: %s, errors: %d, pool: %s", t.Addr, t.ConsecutiveErrors, pool),
+					Action:   "/dashboard/config",
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func ruleCacheHotTierCritical(data InsightData) *Insight {
+	hotMax := int64(data.Config.Storage.HotMaxBytes)
+	if hotMax <= 0 {
+		return nil
+	}
+	pct := float64(data.StoreStats.HotBytes) / float64(hotMax) * 100
+	if pct < 95 {
+		return nil
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return &Insight{
+		ID:       "cache-hot-tier-critical",
+		Severity: SeverityHigh,
+		Category: CategoryCache,
+		Title:    fmt.Sprintf("Hot tier at %.0f%% capacity (critical)", pct),
+		Detail:   "Hot tier is nearly full — new entries will evict existing ones immediately",
+		Evidence: fmt.Sprintf("hot_bytes: %d, hot_max: %d, pct: %.1f%%", data.StoreStats.HotBytes, hotMax, pct),
+		Action:   "/dashboard/config",
+	}
+}
+
+func ruleCacheWarmEntriesZero(data InsightData) *Insight {
+	if data.Config.Storage.WarmMaxBytes <= 0 {
+		return nil
+	}
+	if data.StoreStats.WarmEntries > 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cache-warm-entries-zero",
+		Severity: SeverityLow,
+		Category: CategoryCache,
+		Title:    "Warm tier configured but empty",
+		Detail:   "WarmMaxBytes is set but WarmEntries is 0 — the warm tier is not receiving objects",
+		Evidence: fmt.Sprintf("warm_entries: 0, warm_max_bytes: %d", data.Config.Storage.WarmMaxBytes),
+		Action:   "/dashboard/config",
+	}
+}
+
+// ── Tier 3: Existing data, new plumbing ───────────────────────────────
+
+func ruleClusterReplicationStalled(data InsightData) *Insight {
+	if data.Config.Cluster.Mode != config.ClusterModeFull {
+		return nil
+	}
+	if data.ReplicationLastRecv == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	stalledSecs := now - data.ReplicationLastRecv
+	if stalledSecs < 300 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cluster-replication-stalled",
+		Severity: SeverityMed,
+		Category: CategoryCluster,
+		Title:    fmt.Sprintf("No replication received in %dm", stalledSecs/60),
+		Detail:   "Full mode expects continuous replication. Stalled receive may indicate peer disconnection or broadcast failures.",
+		Evidence: fmt.Sprintf("last_recv_unix: %d, stalled_secs: %d", data.ReplicationLastRecv, stalledSecs),
+		Action:   "/dashboard/cluster",
+	}
+}
+
+func ruleClusterNoReplicationTraffic(data InsightData) *Insight {
+	if data.Config.Cluster.Mode != config.ClusterModeFull {
+		return nil
+	}
+	if data.ReplicationBytes > 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cluster-no-replication-traffic",
+		Severity: SeverityLow,
+		Category: CategoryCluster,
+		Title:    "No replication traffic since startup",
+		Detail:   "Full mode is active but no replication bytes have been sent or received",
+		Evidence: "replication_bytes: 0, mode: full",
+		Action:   "/dashboard/cluster",
+	}
+}
+
+func ruleClusterBroadcastFailures(data InsightData) *Insight {
+	if data.BroadcastFailures <= 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cluster-broadcast-failures",
+		Severity: SeverityMed,
+		Category: CategoryCluster,
+		Title:    fmt.Sprintf("%d cluster broadcast failures", data.BroadcastFailures),
+		Detail:   "Invalidation fan-out to peers is failing — some peers may not receive purges or bans",
+		Evidence: fmt.Sprintf("broadcast_failures: %d", data.BroadcastFailures),
+		Action:   "/dashboard/cluster",
+	}
+}
+
+func ruleCDNLastError(data InsightData) *Insight {
+	if !data.CFStatus.Enabled || data.CFStatus.LastError == "" {
+		return nil
+	}
+	return &Insight{
+		ID:       "cdn-last-error",
+		Severity: SeverityMed,
+		Category: CategoryCDN,
+		Title:    fmt.Sprintf("Cloudflare last error: %s", data.CFStatus.LastError),
+		Detail:   "The last CF propagation attempt failed. CDN edge may have stale content.",
+		Evidence: fmt.Sprintf("last_error: %s", data.CFStatus.LastError),
+		Action:   "/dashboard/invalidation",
+	}
+}
+
+func ruleCDNPurgeSkipped(data InsightData) *Insight {
+	if data.CFPurgeSkipped <= 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "cdn-purge-skipped",
+		Severity: SeverityLow,
+		Category: CategoryCDN,
+		Title:    fmt.Sprintf("%d CF purges skipped", data.CFPurgeSkipped),
+		Detail:   "Purges are being skipped (e.g. rate limited or batch-full). CDN edge may lag behind local cache.",
+		Evidence: fmt.Sprintf("purge_skipped: %d", data.CFPurgeSkipped),
+		Action:   "/dashboard/invalidation",
+	}
+}
+
+func ruleConfigPoolPassiveEjectForever(data InsightData) *Insight {
+	for _, pool := range data.Config.UpstreamPools {
+		if pool.Health.Passive.EjectFor == 0 && pool.Health.Active.Path == "" {
+			return &Insight{
+				ID:       "config-pool-passive-eject-forever",
+				Severity: SeverityMed,
+				Category: CategoryUpstream,
+				Title:    fmt.Sprintf("Pool %s: ejected targets never rejoin", pool.Name),
+				Detail:   "PassiveEjectFor is 0 and no active health check is configured — passively ejected targets are gone forever",
+				Evidence: fmt.Sprintf("pool: %s, eject_for: 0, active_check: none", pool.Name),
+				Action:   "/dashboard/config",
+			}
+		}
+	}
+	return nil
+}
+
+func ruleClusterPeerHealthDegraded(data InsightData) *Insight {
+	for peer, uptime := range data.PeerHealth {
+		if uptime < 90 {
+			return &Insight{
+				ID:       "cluster-peer-health-degraded",
+				Severity: SeverityLow,
+				Category: CategoryCluster,
+				Title:    fmt.Sprintf("Peer %s uptime %.0f%%", peer, uptime),
+				Detail:   "Peer uptime is below 90% over the 30-minute window — check network or node health",
+				Evidence: fmt.Sprintf("peer: %s, uptime: %.1f%%", peer, uptime),
+				Action:   "/dashboard/cluster",
+			}
+		}
+	}
+	return nil
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

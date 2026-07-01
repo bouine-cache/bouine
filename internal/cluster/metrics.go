@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -44,6 +46,11 @@ type Metrics struct {
 	// to feed the dashboard's replication ring without coupling the
 	// cluster package to the observability layer.
 	OnReplicationBytes func(direction string, bytes float64)
+
+	// broadcastFailuresTotal is a lock-free total of all broadcast
+	// failures, used by the dashboard insights engine without needing
+	// to read Prometheus dto.Metric from the cluster package.
+	broadcastFailuresTotal atomic.Int64
 }
 
 // RegisterMetrics creates and registers the cluster metrics on
@@ -191,6 +198,16 @@ func (m *Metrics) IncBroadcastFailure(typ, reason string) {
 		return
 	}
 	m.BroadcastFailures.WithLabelValues(typ, reason).Inc()
+	m.broadcastFailuresTotal.Add(1)
+}
+
+// BroadcastFailuresCount returns the total number of broadcast failures
+// across all types and reasons. Used by the dashboard insights engine.
+func (m *Metrics) BroadcastFailuresCount() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.broadcastFailuresTotal.Load()
 }
 
 // IncAntiEntropyReconcile increments the reconcile counter for the

@@ -46,9 +46,8 @@ import (
 const defaultMaxResponseBytes int64 = 64 << 20 // 64 MiB
 
 // defaultFetchConcurrency bounds concurrent foreground origin fetches.
-// Each fetch can buffer up to defaultMaxResponseBytes (with 2x
-// over-allocation from bytes.Buffer), so this caps worst-case memory
-// at concurrency × 2 × maxResponseBytes (issue #133).
+// Each fetch can buffer up to defaultMaxResponseBytes, so this caps
+// worst-case memory at concurrency × maxResponseBytes (issue #133).
 const defaultFetchConcurrency = 64
 
 // bgRevalSem bounds concurrent background stale-while-revalidate
@@ -789,6 +788,14 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Write the captured response to the client.
+	dst := w.Header()
+	for k, vals := range rec.header {
+		dst[k] = vals
+	}
+	w.WriteHeader(rec.statusCode)
+	_, _ = w.Write(rec.body.Bytes())
+
 	// Only invalidate on 2xx/3xx success.
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
 		getReq := r.Clone(r.Context())
@@ -816,14 +823,6 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// response under the GET key so subsequent GETs can reuse it.
 		h.maybeStorePostResponse(r, getReq, key, rec)
 	}
-
-	// Write the captured response to the client.
-	dst := w.Header()
-	for k, vals := range rec.header {
-		dst[k] = vals
-	}
-	w.WriteHeader(rec.statusCode)
-	_, _ = w.Write(rec.body.Bytes())
 }
 
 // maybeStorePostResponse stores a successful POST response under the GET
@@ -916,15 +915,15 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy body and header out so the fetchResult owns them before the
-	// recorder returns to the pool. The body copy is also right-sized:
-	// bytes.Buffer over-allocates, and stored objects are long-lived.
+	// Right-size the body copy: the recorder's bytes.Buffer may have slack
+	// capacity from doubling, and stored objects are long-lived.
 	body := make([]byte, rec.body.Len())
 	copy(body, rec.body.Bytes())
+	header := rec.header.Clone()
 
 	return fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     rec.header.Clone(),
+		Header:     header,
 		Body:       body,
 	}
 }
@@ -1082,7 +1081,22 @@ type responseRecorder struct {
 
 func (r *responseRecorder) Header() http.Header { return r.header }
 
-func (r *responseRecorder) WriteHeader(code int) { r.statusCode = code }
+func (r *responseRecorder) WriteHeader(code int) {
+	r.statusCode = code
+	// Pre-size the buffer when Content-Length is known, avoiding
+	// bytes.Buffer doubling over-allocation that causes transient heap
+	// spikes under concurrent miss traffic (issue #141). Only grows
+	// if the pooled buffer is too small.
+	if r.maxBytes > 0 {
+		if cl := r.header.Get("Content-Length"); cl != "" {
+			if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n > 0 && n <= r.maxBytes {
+				if int64(r.body.Cap()) < n {
+					r.body.Grow(int(n))
+				}
+			}
+		}
+	}
+}
 
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	if r.statusCode == 0 {

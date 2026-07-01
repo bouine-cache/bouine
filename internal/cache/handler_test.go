@@ -1109,13 +1109,13 @@ func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
 	prevProcs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() { runtime.GOMAXPROCS(prevProcs) })
 
-	rec := acquireRecorder()
+	rec := acquireRecorder(0)
 	if _, err := rec.body.Write(make([]byte, maxRecorderCap+1)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	releaseRecorder(rec)
 
-	fresh := acquireRecorder()
+	fresh := acquireRecorder(0)
 	if fresh.body.Cap() > maxRecorderCap {
 		t.Fatalf("reacquired recorder retained oversized buffer: cap=%d > %d",
 			fresh.body.Cap(), maxRecorderCap)

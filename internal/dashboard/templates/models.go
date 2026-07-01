@@ -885,6 +885,9 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 	if rc.Cache.MaxObjectSize > 0 {
 		rows = append(rows, ConfigRow{Key: "max_object_size", Value: rc.Cache.MaxObjectSize.String(), Kind: "size"})
 	}
+	if rc.Cache.MaxResponseBytes > 0 {
+		rows = append(rows, ConfigRow{Key: "max_response_bytes", Value: rc.Cache.MaxResponseBytes.String(), Kind: "size"})
+	}
 	if len(rc.Cache.Key.StripQueryParams) > 0 {
 		rows = append(rows, ConfigRow{Key: "strip_query_params", Value: strings.Join(rc.Cache.Key.StripQueryParams, ", "), Kind: "list"})
 	}

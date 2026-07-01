@@ -262,6 +262,13 @@ type RouteCache struct {
 	// only storage is skipped. Prevents large downloads from evicting
 	// useful cache entries. Zero (default) = no limit.
 	MaxObjectSize ByteSize `yaml:"max_object_size,omitempty" json:"max_object_size,omitempty"`
+	// MaxResponseBytes is a hard limit on the amount of response body
+	// data buffered in memory during an upstream fetch. When exceeded
+	// the fetch is aborted and the client receives a 502. Unlike
+	// MaxObjectSize (which only skips storage), this prevents the
+	// allocation that causes OOM. Zero (default) applies a safe
+	// built-in limit (64 MiB).
+	MaxResponseBytes ByteSize `yaml:"max_response_bytes,omitempty" json:"max_response_bytes,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

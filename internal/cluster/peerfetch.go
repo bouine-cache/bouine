@@ -69,7 +69,7 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // mTLS credentials. If nil a plain HTTP client is used (test-only).
 // reg, if non-nil, receives Prometheus metric registration.
 func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher {
-	return NewPeerFetcherWithLogger(tlsCfg, reg, observability.NoopLogger{})
+	return NewPeerFetcherWithLogger(tlsCfg, reg, nil)
 }
 
 // NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
@@ -84,7 +84,7 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 			Timeout:   peerFetchTimeout,
 		},
 		maxBodyBytes: maxPeerFetchBytes,
-		logger:       logger,
+		logger:       observability.ResolveLogger(logger),
 	}
 	if reg != nil {
 		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
@@ -216,13 +216,13 @@ type PeerStore interface {
 
 // NewPeerFetchHandler creates a peer-fetch handler backed by store.
 func NewPeerFetchHandler(store PeerStore) *PeerFetchHandler {
-	return NewPeerFetchHandlerWithLogger(store, observability.NoopLogger{})
+	return NewPeerFetchHandlerWithLogger(store, nil)
 }
 
 // NewPeerFetchHandlerWithLogger creates a peer-fetch handler with a
 // structured logger.
 func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger) *PeerFetchHandler {
-	return &PeerFetchHandler{store: store, logger: logger}
+	return &PeerFetchHandler{store: store, logger: observability.ResolveLogger(logger)}
 }
 
 // ServeHTTP handles peer fetch requests.

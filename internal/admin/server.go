@@ -101,9 +101,7 @@ type Server struct {
 //
 // Stable.
 func New(cfg Config) *Server {
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NoopLogger{}
-	}
+	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.Addr == "" {
 		cfg.Addr = ":9000"
 	}

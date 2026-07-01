@@ -60,9 +60,7 @@ type AntiEntropy struct {
 // the local store where backfilled objects are written. keys provides
 // the local key set.
 func NewAntiEntropy(cfg AntiEntropyConfig, node string, keys KeySource, fetch Backfiller, store Storer, peers func() []api.PeerInfo, metrics *Metrics) *AntiEntropy {
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NoopLogger{}
-	}
+	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}

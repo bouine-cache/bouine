@@ -52,9 +52,7 @@ type TieredConfig struct {
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
 // WAL is replayed on open to rebuild the warm-tier index.
 func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
-	if cfg.Logger == nil {
-		cfg.Logger = observability.NoopLogger{}
-	}
+	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.BodyThreshold <= 0 {
 		cfg.BodyThreshold = 64 << 10
 	}

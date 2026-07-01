@@ -42,6 +42,17 @@ func (NoopLogger) Error(string, ...any) {}
 // Debug implements Logger by discarding the record.
 func (NoopLogger) Debug(string, ...any) {}
 
+// ResolveLogger returns l if non-nil, otherwise NoopLogger{}. Use it
+// in constructors to default a nil Logger field in one line:
+//
+//	logger := observability.ResolveLogger(cfg.Logger)
+func ResolveLogger(l Logger) Logger {
+	if l == nil {
+		return NoopLogger{}
+	}
+	return l
+}
+
 // SampledLogger wraps a slog.Logger with deterministic sampling.
 // Info is always sampled: if a "key" attribute is present, sampling
 // is deterministic (key % sampleRate); otherwise a counter-based

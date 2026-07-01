@@ -25,11 +25,12 @@ import (
 //
 // Stable.
 type Pool struct {
-	Name    string
-	targets []*Target
-	next    atomic.Uint64
-	logger  observability.Logger
-	mu      sync.RWMutex
+	Name      string
+	targets   []*Target
+	next      atomic.Uint64
+	logger    observability.Logger
+	mu        sync.RWMutex
+	transport http.RoundTripper
 }
 
 // Target is a single upstream endpoint.
@@ -138,6 +139,7 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 			ForceAttemptHTTP2:   true,
 		}
 	}
+	p.transport = transport
 
 	// Construct the ReverseProxy once. The selected target is stored in
 	// the request context so Director/ModifyResponse/ErrorHandler can
@@ -255,5 +257,12 @@ func (p *Pool) MarkHealthy(addr string) {
 	}
 }
 
-// Close shuts down idle connections. Satisfies the lifecycle contract.
-func (p *Pool) Close(_ context.Context) error { return nil }
+// Close drains idle upstream connections. Satisfies the lifecycle
+// contract so that rolling restarts don't leak TIME_WAIT sockets on
+// the origin side.
+func (p *Pool) Close(_ context.Context) error {
+	if t, ok := p.transport.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
+	return nil
+}

@@ -206,3 +206,32 @@ func TestKeysToUint64(t *testing.T) {
 		}
 	}
 }
+
+func TestAntiEntropy_StreamingDecodeLargeKeySet(t *testing.T) {
+	t.Parallel()
+	largeKeySet := make([]uint64, 10000)
+	for i := range largeKeySet {
+		largeKeySet[i] = uint64(i + 1)
+	}
+
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.KeySet{NodeName: "peer-1", Keys: largeKeySet})
+	}))
+	defer peerSrv.Close()
+
+	peer := api.PeerInfo{Name: "peer-1", AdminAddr: peerSrv.Listener.Addr().String()}
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:     time.Hour,
+		FetchTimeout: 2 * time.Second,
+	}, "local", &mockKeySource{keys: []api.Key{}}, &mockBackfiller{}, &mockStorer{},
+		func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
+
+	keys, ok := ae.fetchPeerKeys(context.Background(), peer)
+	if !ok {
+		t.Fatal("expected successful key set fetch")
+	}
+	if len(keys) != len(largeKeySet) {
+		t.Fatalf("keys = %d, want %d", len(keys), len(largeKeySet))
+	}
+}

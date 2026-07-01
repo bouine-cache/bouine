@@ -45,6 +45,12 @@ import (
 // post-fetch MaxObjectSize check runs.
 const defaultMaxResponseBytes int64 = 64 << 20 // 64 MiB
 
+// defaultFetchConcurrency bounds concurrent foreground origin fetches.
+// Each fetch can buffer up to defaultMaxResponseBytes (with 2x
+// over-allocation from bytes.Buffer), so this caps worst-case memory
+// at concurrency × 2 × maxResponseBytes (issue #133).
+const defaultFetchConcurrency = 64
+
 // bgRevalSem bounds concurrent background stale-while-revalidate
 // goroutines. When full, excess revalidation attempts are silently
 // dropped — the next client will re-trigger if still stale.
@@ -143,6 +149,7 @@ type Handler struct {
 	allowSetCookie   bool            // when false (default), Set-Cookie blocks caching
 	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
 	maxResponseBytes int64           // hard cap on body buffering; 0 = defaultMaxResponseBytes
+	fetchSem         chan struct{}   // bounds concurrent foreground origin fetches
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
 	// variantSets tracks the live variant store keys per primary key to
@@ -216,6 +223,11 @@ type HandlerConfig struct {
 	// already been fully buffered. Zero (default) applies a safe built-in
 	// limit (64 MiB).
 	MaxResponseBytes int64
+	// MaxFetchConcurrency bounds the number of concurrent foreground
+	// origin fetches. When the limit is reached, additional fetches
+	// block until a slot frees or the request context is cancelled.
+	// Zero (default) applies a safe built-in limit (64).
+	MaxFetchConcurrency int
 	// StripQueryParams, when non-nil, excludes the listed query parameter
 	// names from the cache key. The parameters are still forwarded to
 	// the upstream. Allocated once at handler construction.
@@ -270,6 +282,11 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
 	}
+	conc := cfg.MaxFetchConcurrency
+	if conc <= 0 {
+		conc = defaultFetchConcurrency
+	}
+	h.fetchSem = make(chan struct{}, conc)
 	return h
 }
 
@@ -881,6 +898,12 @@ func (h *Handler) doFetch(r *http.Request) fetchResult {
 	// L5 span: upstream origin pool layer.
 	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
 	defer span.End()
+	select {
+	case h.fetchSem <- struct{}{}:
+		defer func() { <-h.fetchSem }()
+	case <-ctx.Done():
+		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", ctx.Err())}
+	}
 	// Propagate W3C TraceContext into the upstream request so the origin
 	// can participate in the distributed trace.
 	outReq := r.WithContext(ctx)

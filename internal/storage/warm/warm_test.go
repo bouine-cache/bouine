@@ -206,6 +206,48 @@ func TestStats(t *testing.T) {
 	}
 }
 
+func TestRecomputeStats_ScanError(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	segID, off, err := s.Put(42, []byte("live record"))
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	s.mu.RLock()
+	var seg *Segment
+	for _, ss := range s.segs {
+		if ss.ID == segID {
+			seg = ss
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	seg.mu.Lock()
+	if _, err := seg.f.WriteAt([]byte{0xFF}, off+headerLen+2); err != nil {
+		seg.mu.Unlock()
+		t.Fatalf("corrupt: %v", err)
+	}
+	seg.mu.Unlock()
+
+	wantEntries, wantBytes := s.Stats()
+	if wantEntries != 1 {
+		t.Fatalf("precondition: entries = %d, want 1", wantEntries)
+	}
+
+	if err := s.RecomputeStats(); err == nil {
+		t.Fatal("expected error from RecomputeStats on corrupt segment, got nil")
+	}
+
+	ent, byt := s.Stats()
+	if ent != wantEntries || byt != wantBytes {
+		t.Fatalf("stats should be unchanged on error, got entries=%d bytes=%d, want %d/%d",
+			ent, byt, wantEntries, wantBytes)
+	}
+}
+
 func TestNonexistentSegment(t *testing.T) {
 	t.Parallel()
 	s := tmpStore(t)

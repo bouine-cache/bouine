@@ -257,8 +257,10 @@ func (s *Store) DelIndex(key uint64) {
 
 // RecomputeStats scans all segments and recounts live entries and bytes
 // from the current index. Called after WAL replay to restore the stats
-// counters that are not persisted in the WAL.
-func (s *Store) RecomputeStats() {
+// counters that are not persisted in the WAL. Returns an error if the
+// underlying scan fails; the stats counters are left unchanged in that
+// case so callers do not act on partial data.
+func (s *Store) RecomputeStats() error {
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))
 	for k, v := range s.index {
@@ -267,7 +269,7 @@ func (s *Store) RecomputeStats() {
 	s.idxMu.RUnlock()
 
 	var entries, bytes int64
-	_ = s.Scan(func(r Record) error {
+	if err := s.Scan(func(r Record) error {
 		if r.IsTomb {
 			return nil
 		}
@@ -278,9 +280,12 @@ func (s *Store) RecomputeStats() {
 		entries++
 		bytes += int64(headerLen + len(r.Body) + footerLen)
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("warm: recompute stats: %w", err)
+	}
 	s.stats.entries.Store(entries)
 	s.stats.bytes.Store(bytes)
+	return nil
 }
 
 // ReadRecord reads a record at the given offset in the given segment.

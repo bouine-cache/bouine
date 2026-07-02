@@ -3,13 +3,14 @@
 package integration_test
 
 import (
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/thylong/bouine/internal/cache"
+	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/pkg/api"
 	"github.com/thylong/bouine/test/integration/driver"
 )
@@ -180,12 +181,13 @@ func TestFull_AntiEntropyKeySetExchange(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("node %d: status %d", i, resp.StatusCode)
 		}
-		var ks api.KeySet
-		if err := json.NewDecoder(resp.Body).Decode(&ks); err != nil {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		_, keys, err := cluster.DecodeKeySet(body)
+		if err != nil {
 			t.Fatalf("node %d: decode: %v", i, err)
 		}
-		_ = resp.Body.Close()
-		if len(ks.Keys) == 0 {
+		if len(keys) == 0 {
 			t.Errorf("node %d: key set is empty", i)
 		}
 	}

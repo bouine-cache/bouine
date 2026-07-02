@@ -241,59 +241,74 @@ func (c *Cluster) NodeMeta(limit int) []byte {
 }
 
 // NotifyMsg handles incoming gossip user messages (purge/ban/replication
-// events). Dispatches based on the explicit "type" field in the JSON
-// payload. Malformed or unrecognised payloads are logged and skipped.
+// events). Binary frames (purge/ban) are dispatched by the msgType byte;
+// JSON frames (replication) are dispatched by the "type" field. Malformed
+// or unrecognised payloads are logged and skipped.
 func (c *Cluster) NotifyMsg(msg []byte) {
-	// All gossip events carry a "type" discriminator. Peek at it first.
-	var header struct {
+	if IsBinaryFrame(msg) {
+		c.handleBinaryGossip(msg)
+		return
+	}
+	c.handleJSONGossip(msg)
+}
+
+func (c *Cluster) handleBinaryGossip(msg []byte) {
+	switch GossipMsgType(msg) {
+	case msgTypePurge:
+		if c.inv.PurgeFn == nil {
+			return
+		}
+		evt, err := DecodePurgeGossip(msg)
+		if err != nil {
+			c.logger.Warn("cluster: gossip purge decode failed", "error", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		defer cancel()
+		if err := c.inv.PurgeFn(ctx, evt); err != nil {
+			c.logger.Warn("cluster: gossip purge apply failed", "error", err)
+			return
+		}
+		c.metrics.IncGossipInvalidation("purge")
+		c.logger.Info("received purge from peer",
+			"key", evt.Key,
+			"issuer", evt.Issuer,
+			"seq", evt.Seq,
+		)
+	case msgTypeBan:
+		if c.inv.BanFn == nil {
+			return
+		}
+		evt, err := DecodeBanGossip(msg)
+		if err != nil {
+			c.logger.Warn("cluster: gossip ban decode failed", "error", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		defer cancel()
+		if err := c.inv.BanFn(ctx, evt); err != nil {
+			c.logger.Warn("cluster: gossip ban apply failed", "error", err)
+			return
+		}
+		c.metrics.IncGossipInvalidation("ban")
+		c.logger.Info("received ban from peer",
+			"issuer", evt.Issuer,
+			"seq", evt.Seq,
+		)
+	default:
+		c.logger.Debug("cluster: unrecognized binary gossip msgType", "msgType", GossipMsgType(msg), "len", len(msg))
+	}
+}
+
+func (c *Cluster) handleJSONGossip(msg []byte) {
+	var hdr struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(msg, &header); err != nil {
+	if err := json.Unmarshal(msg, &hdr); err != nil {
 		c.logger.Debug("cluster: malformed gossip message", "error", err)
 		return
 	}
-	switch header.Type {
-	case api.GossipTypePurge:
-		if c.inv.PurgeFn != nil {
-			var evt api.PurgeEvent
-			if err := json.Unmarshal(msg, &evt); err != nil {
-				c.logger.Warn("cluster: gossip purge unmarshal failed", "error", err)
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-			defer cancel()
-			err := c.inv.PurgeFn(ctx, evt)
-			if err != nil {
-				c.logger.Warn("cluster: gossip purge apply failed", "error", err)
-			} else {
-				c.metrics.IncGossipInvalidation("purge")
-				c.logger.Info("received purge from peer",
-					"key", evt.Key,
-					"issuer", evt.Issuer,
-					"seq", evt.Seq,
-				)
-			}
-		}
-	case api.GossipTypeBan:
-		if c.inv.BanFn != nil {
-			var evt api.BanEvent
-			if err := json.Unmarshal(msg, &evt); err != nil {
-				c.logger.Warn("cluster: gossip ban unmarshal failed", "error", err)
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-			defer cancel()
-			err := c.inv.BanFn(ctx, evt)
-			if err != nil {
-				c.logger.Warn("cluster: gossip ban apply failed", "error", err)
-			} else {
-				c.metrics.IncGossipInvalidation("ban")
-				c.logger.Info("received ban from peer",
-					"issuer", evt.Issuer,
-					"seq", evt.Seq,
-				)
-			}
-		}
+	switch hdr.Type {
 	case api.GossipTypeReplication:
 		if c.rep.StoreObject != nil {
 			var evt api.ReplicationEvent
@@ -319,7 +334,7 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 			}
 		}
 	default:
-		c.logger.Debug("cluster: unrecognized gossip message", "type", header.Type, "len", len(msg))
+		c.logger.Debug("cluster: unrecognized gossip message", "type", hdr.Type, "len", len(msg))
 	}
 }
 

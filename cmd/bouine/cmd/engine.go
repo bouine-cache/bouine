@@ -424,13 +424,13 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 		RefreshFn: func(key api.Key) error {
 			return rs.store.Delete(ctx, key)
 		},
-		PeerPurgeFn: func(evt api.PurgeEvent) error {
+		PeerPurgeHandler: cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
 			return rs.store.Delete(ctx, evt.Key)
-		},
-		PeerBanFn: func(evt api.BanEvent) error {
+		}),
+		PeerBanHandler: cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
 			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
-		},
+		}),
 		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store),
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
 		PeerKeysHandler:    e.buildPeerKeysHandler(rs.store),

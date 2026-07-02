@@ -52,15 +52,15 @@ func TestPeerKeysHandler_ServesKeySet(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	var ks api.KeySet
-	if err := json.Unmarshal(rec.Body.Bytes(), &ks); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	name, decoded, err := DecodeKeySet(rec.Body.Bytes())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	if ks.NodeName != "test-node" {
-		t.Errorf("node_name = %q, want test-node", ks.NodeName)
+	if name != "test-node" {
+		t.Errorf("node_name = %q, want test-node", name)
 	}
-	if len(ks.Keys) != 3 {
-		t.Fatalf("keys = %d, want 3", len(ks.Keys))
+	if len(decoded) != 3 {
+		t.Fatalf("keys = %d, want 3", len(decoded))
 	}
 }
 
@@ -78,7 +78,7 @@ func TestPeerKeysHandler_MethodNotAllowed(t *testing.T) {
 func TestAntiEntropy_ReconcileBackfillsAndStores(t *testing.T) {
 	t.Parallel()
 	localKeys := []api.Key{1, 2, 3}
-	peerKeys := []uint64{1, 2, 3, 4, 5}
+	peerKeys := []api.Key{1, 2, 3, 4, 5}
 	obj4 := &api.Object{Key: 4, Body: []byte("d")}
 	obj5 := &api.Object{Key: 5, Body: []byte("e")}
 
@@ -86,8 +86,9 @@ func TestAntiEntropy_ReconcileBackfillsAndStores(t *testing.T) {
 
 	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/peer/keys" {
-			ks := api.KeySet{NodeName: "peer-1", Keys: peerKeys}
-			_ = json.NewEncoder(w).Encode(ks)
+			buf, _ := EncodeKeySet("peer-1", peerKeys)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
 			return
 		}
 		if r.URL.Path == "/v1/peer/fetch" {
@@ -140,12 +141,13 @@ func TestAntiEntropy_ReconcileBackfillsAndStores(t *testing.T) {
 func TestAntiEntropy_NoMissingKeysNoBackfill(t *testing.T) {
 	t.Parallel()
 	localKeys := []api.Key{1, 2, 3}
-	peerKeys := []uint64{1, 2, 3}
+	peerKeys := []api.Key{1, 2, 3}
 
 	peer := api.PeerInfo{Name: "peer-1"}
 	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		ks := api.KeySet{NodeName: "peer-1", Keys: peerKeys}
-		_ = json.NewEncoder(w).Encode(ks)
+		buf, _ := EncodeKeySet("peer-1", peerKeys)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(buf)
 	}))
 	defer peerSrv.Close()
 	peer.AdminAddr = peerSrv.Listener.Addr().String()
@@ -198,11 +200,13 @@ func TestAntiEntropy_SkipsSelf(t *testing.T) {
 func TestAntiEntropy_ReconcileCounterFiresOnZeroDrift(t *testing.T) {
 	t.Parallel()
 	localKeys := []api.Key{1, 2, 3}
-	peerKeys := []uint64{1, 2, 3}
+	peerKeys := []api.Key{1, 2, 3}
 
 	peer := api.PeerInfo{Name: "peer-1"}
 	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(api.KeySet{NodeName: "peer-1", Keys: peerKeys})
+		buf, _ := EncodeKeySet("peer-1", peerKeys)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(buf)
 	}))
 	defer peerSrv.Close()
 	peer.AdminAddr = peerSrv.Listener.Addr().String()
@@ -235,7 +239,7 @@ func TestAntiEntropy_ReconcileCounterFiresOnZeroDrift(t *testing.T) {
 			}
 		case "bouine_cluster_anti_entropy_keys_repaired":
 			for _, s := range mf.GetMetric() {
-				keysRepaired = s.GetGauge().GetValue()
+				keysRepaired += s.GetGauge().GetValue()
 			}
 		}
 	}
@@ -299,14 +303,15 @@ func TestKeysToUint64(t *testing.T) {
 
 func TestAntiEntropy_StreamingDecodeLargeKeySet(t *testing.T) {
 	t.Parallel()
-	largeKeySet := make([]uint64, 10000)
+	largeKeySet := make([]api.Key, 10000)
 	for i := range largeKeySet {
-		largeKeySet[i] = uint64(i + 1)
+		largeKeySet[i] = api.Key(i + 1)
 	}
 
-	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.KeySet{NodeName: "peer-1", Keys: largeKeySet})
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		buf, _ := EncodeKeySet("peer-1", largeKeySet)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(buf)
 	}))
 	defer peerSrv.Close()
 

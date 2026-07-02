@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/cmd/bouine/cmd"
+	"github.com/thylong/bouine/internal/cluster"
 	"github.com/thylong/bouine/pkg/api"
 )
 
@@ -479,8 +480,25 @@ func (s *ClusterStack) Ban(t *testing.T, n int, hostRegex, pathRegex string) {
 // Unlike Purge, this does not broadcast to other peers.
 func (s *ClusterStack) PeerPurge(t *testing.T, n int, evt api.PurgeEvent) {
 	t.Helper()
-	body, _ := json.Marshal(evt)
-	s.adminPost(t, n, "/v1/peer/purge", body)
+	body, _ := cluster.EncodePurgeHTTP(evt)
+	s.peerPost(t, n, "/v1/peer/purge", body)
+}
+
+func (s *ClusterStack) peerPost(t *testing.T, n int, path string, body []byte) {
+	t.Helper()
+	url := s.Nodes[n].AdminAddr + path
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode, string(b))
+	}
 }
 
 func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) {

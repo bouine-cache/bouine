@@ -56,11 +56,13 @@ type Config struct {
 	RateLimitPerSecond int
 	// RefreshFn, if non-nil, handles soft-purge (refresh) requests.
 	RefreshFn func(key api.Key) error
-	// PeerPurgeFn, if non-nil, handles incoming purge broadcasts from
-	// peer nodes. The key has already been determined by the sender.
-	PeerPurgeFn func(evt api.PurgeEvent) error
-	// PeerBanFn, if non-nil, handles incoming ban broadcasts from peers.
-	PeerBanFn func(evt api.BanEvent) error
+	// PeerPurgeHandler, if non-nil, handles incoming purge broadcasts
+	// from peer nodes. Mounted at POST /v1/peer/purge (auth-exempt;
+	// callers are trusted cluster peers on the internal network).
+	PeerPurgeHandler http.Handler
+	// PeerBanHandler, if non-nil, handles incoming ban broadcasts from
+	// peers. Mounted at POST /v1/peer/ban (auth-exempt; same rationale).
+	PeerBanHandler http.Handler
 	// CFStatusFn, if non-nil, returns a snapshot of the Cloudflare
 	// integration state for GET /v1/cloudflare/status.
 	CFStatusFn func() CloudflareStatus
@@ -185,11 +187,11 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	if cfg.Token != "" {
 		mux.HandleFunc("GET /v1/auth/check", s.authCheck)
 	}
-	if cfg.PeerPurgeFn != nil {
-		mux.HandleFunc("POST /v1/peer/purge", s.peerPurge)
+	if cfg.PeerPurgeHandler != nil {
+		mux.Handle("POST /v1/peer/purge", cfg.PeerPurgeHandler)
 	}
-	if cfg.PeerBanFn != nil {
-		mux.HandleFunc("POST /v1/peer/ban", s.peerBan)
+	if cfg.PeerBanHandler != nil {
+		mux.Handle("POST /v1/peer/ban", cfg.PeerBanHandler)
 	}
 	if cfg.CFStatusFn != nil {
 		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
@@ -403,32 +405,6 @@ func (s *Server) Addr() string {
 		return v.(string)
 	}
 	return s.inner.Addr
-}
-
-func (s *Server) peerPurge(w http.ResponseWriter, r *http.Request) {
-	var evt api.PurgeEvent
-	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if err := s.cfg.PeerPurgeFn(evt); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
-}
-
-func (s *Server) peerBan(w http.ResponseWriter, r *http.Request) {
-	var evt api.BanEvent
-	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if err := s.cfg.PeerBanFn(evt); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "banned"})
 }
 
 // rateLimitMiddleware enforces a per-second token bucket on write

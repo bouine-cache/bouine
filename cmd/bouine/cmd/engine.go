@@ -256,7 +256,10 @@ func (e *engine) initCluster(
 			},
 		})
 		keyLister, ok := any(store).(storage.KeyLister)
-		if ok {
+		if !ok {
+			e.logger.Warn("anti-entropy disabled: store does not implement KeyLister",
+				"mode", e.cfg.Cluster.Mode)
+		} else {
 			ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
 				Interval: e.cfg.Cluster.AntiEntropyInterval,
 				Logger:   e.logger,
@@ -439,6 +442,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 func (e *engine) buildPeerKeysHandler(store storage.Store) http.Handler {
 	keyLister, ok := any(store).(storage.KeyLister)
 	if !ok {
+		e.logger.Warn("peer-keys endpoint disabled: store does not implement KeyLister")
 		return nil
 	}
 	return cluster.NewPeerKeysHandler(keyLister, e.cfg.Cluster.NodeName)

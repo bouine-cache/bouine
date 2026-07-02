@@ -388,15 +388,17 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 	dashMux := e.buildDashboard(rs, addr, ops)
 
 	srv := admin.New(admin.Config{
-		Addr:        addr,
-		Token:       rs.token,
-		Logger:      e.logger,
-		Metrics:     e.metrics,
-		PeersFn:     rs.peersFn,
-		CFStatusFn:  rs.cfProp.Status,
-		ReadyFn:     rs.seq.IsReady,
-		OnPurged:    rs.cfProp.PropagateForPurge,
-		OnRefreshed: rs.cfProp.PropagateForRefresh,
+		Addr:               addr,
+		Token:              rs.token,
+		Logger:             e.logger,
+		Metrics:            e.metrics,
+		PeersFn:            rs.peersFn,
+		CFStatusFn:         rs.cfProp.Status,
+		ReadyFn:            rs.seq.IsReady,
+		MaxBatchSize:       e.cfg.Admin.MaxBatchSize,
+		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
+		OnPurged:           rs.cfProp.PropagateForPurge,
+		OnRefreshed:        rs.cfProp.PropagateForRefresh,
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {
 			rs.cfProp.PropagateForBan(bCtx, expr)
 		},

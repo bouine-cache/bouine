@@ -95,6 +95,33 @@ func (c *Client) Purge(ctx context.Context, url string) (*PurgeResult, error) {
 	return &out, nil
 }
 
+// BatchPurgeResult is the response from a batch purge operation.
+type BatchPurgeResult struct {
+	Status string `json:"status"`
+	Count  int    `json:"count"`
+	Failed int    `json:"failed"`
+}
+
+// BatchPurge invalidates multiple URLs in a single request.
+// The server caps the batch size (default 1000, configurable via
+// admin.max_batch_size). Exceeding the cap returns an error.
+func (c *Client) BatchPurge(ctx context.Context, urls []string) (*BatchPurgeResult, error) {
+	body := map[string][]string{"urls": urls}
+	var out BatchPurgeResult
+	if err := c.post(ctx, "/v1/purge/batch", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// AuthCheck verifies that the admin token is valid and the server is
+// reachable. Returns nil on success, an error otherwise. Useful as a
+// readiness probe for invalidation wiring.
+func (c *Client) AuthCheck(ctx context.Context) error {
+	var out map[string]string
+	return c.get(ctx, "/v1/auth/check", &out)
+}
+
 // BanResult is the response from a ban operation.
 type BanResult struct {
 	Status string `json:"status"`

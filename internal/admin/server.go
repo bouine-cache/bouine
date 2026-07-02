@@ -50,6 +50,10 @@ type Config struct {
 	// Token is the bearer token required on all write endpoints.
 	// If empty, the server refuses to start (engine generates one).
 	Token string
+	// MaxBatchSize caps URLs per POST /v1/purge/batch. Zero = 1000.
+	MaxBatchSize int
+	// RateLimitPerSecond caps write requests per second. Zero = unlimited.
+	RateLimitPerSecond int
 	// RefreshFn, if non-nil, handles soft-purge (refresh) requests.
 	RefreshFn func(key api.Key) error
 	// PeerPurgeFn, if non-nil, handles incoming purge broadcasts from
@@ -125,6 +129,9 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /v1/config/reload", s.configReload)
 
 	topHandler := s.authMiddleware(mux)
+	if cfg.RateLimitPerSecond > 0 {
+		topHandler = s.rateLimitMiddleware(topHandler, cfg.RateLimitPerSecond)
+	}
 	if cfg.DashboardHandler != nil {
 		outerMux := http.NewServeMux()
 		outerMux.Handle("/dashboard/", cfg.DashboardHandler)
@@ -167,12 +174,16 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.PurgeFn != nil {
 		mux.HandleFunc("POST /v1/purge", s.purge)
+		mux.HandleFunc("POST /v1/purge/batch", s.purgeBatch)
 	}
 	if cfg.BanFn != nil {
 		mux.HandleFunc("POST /v1/ban", s.ban)
 	}
 	if cfg.RefreshFn != nil {
 		mux.HandleFunc("POST /v1/refresh", s.refresh)
+	}
+	if cfg.Token != "" {
+		mux.HandleFunc("GET /v1/auth/check", s.authCheck)
 	}
 	if cfg.PeerPurgeFn != nil {
 		mux.HandleFunc("POST /v1/peer/purge", s.peerPurge)
@@ -249,6 +260,56 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 		s.cfg.OnPurged(r.Context(), req.URL)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
+}
+
+func (s *Server) purgeBatch(w http.ResponseWriter, r *http.Request) {
+	maxBatch := s.cfg.MaxBatchSize
+	if maxBatch <= 0 {
+		maxBatch = 1000
+	}
+	var req struct {
+		URLs []string `json:"urls"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+		return
+	}
+	if len(req.URLs) == 0 {
+		http.Error(w, "bad request: urls field is required and must not be empty", http.StatusBadRequest)
+		return
+	}
+	if len(req.URLs) > maxBatch {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error":          "batch size exceeds maximum",
+			"max_batch_size": maxBatch,
+			"provided":       len(req.URLs),
+		})
+		return
+	}
+	purged := 0
+	failed := 0
+	for _, urlStr := range req.URLs {
+		key := cache.BuildKeyFromURL(urlStr)
+		if err := s.cfg.PurgeFn(key); err != nil {
+			failed++
+			continue
+		}
+		purged++
+		if s.cfg.OnPurged != nil {
+			s.cfg.OnPurged(r.Context(), urlStr)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "purged",
+		"count":  purged,
+		"failed": failed,
+	})
+}
+
+func (s *Server) authCheck(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) ban(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +429,50 @@ func (s *Server) peerBan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "banned"})
+}
+
+// rateLimitMiddleware enforces a per-second token bucket on write
+// (POST) requests. GET requests (healthz, readyz, metrics, dashboard)
+// are always allowed — rate limiting probes would break K8s.
+func (s *Server) rateLimitMiddleware(next http.Handler, perSecond int) http.Handler {
+	capacity := perSecond
+	if capacity > 10000 {
+		capacity = 10000
+	}
+	tokens := make(chan struct{}, capacity)
+	// Pre-fill the bucket.
+	for i := 0; i < capacity; i++ {
+		tokens <- struct{}{}
+	}
+	// Refill at 1 token per interval, capped at capacity.
+	refillInterval := time.Second / time.Duration(capacity)
+	if refillInterval < time.Millisecond {
+		refillInterval = time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(refillInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			select {
+			case tokens <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
+		select {
+		case <-tokens:
+			next.ServeHTTP(w, r)
+		default:
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error": "rate limit exceeded",
+			})
+		}
+	})
 }
 
 // authMiddleware enforces bearer token authentication on all write

@@ -366,6 +366,13 @@ type AdminConfig struct {
 	// If empty, a random token is generated at startup and logged as
 	// a WARN so operators are forced to notice it.
 	Token string `yaml:"token,omitempty" json:"token,omitempty"`
+	// MaxBatchSize caps the number of URLs accepted in a single
+	// POST /v1/purge/batch request. Zero (default) applies a safe
+	// built-in limit (1000).
+	MaxBatchSize int `yaml:"max_batch_size,omitempty" json:"max_batch_size,omitempty"`
+	// RateLimitPerSecond caps the number of write requests per second
+	// on the admin API. Zero (default) disables rate limiting.
+	RateLimitPerSecond int `yaml:"rate_limit_per_second,omitempty" json:"rate_limit_per_second,omitempty"`
 }
 
 // ByteSize is a typed size in bytes, parsed from strings like "2Go"

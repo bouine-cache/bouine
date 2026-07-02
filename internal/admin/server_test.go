@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/thylong/bouine/internal/cache"
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
 	"github.com/thylong/bouine/pkg/header"
@@ -301,5 +303,131 @@ func TestBan_Valid(t *testing.T) {
 	}
 	if !bytes.Contains(body, []byte("42")) {
 		t.Fatalf("expected count 42 in response, got: %s", body)
+	}
+}
+
+func TestPurgeBatch_Success(t *testing.T) {
+	t.Parallel()
+	var purgedKeys []api.Key
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(key api.Key) error {
+			purgedKeys = append(purgedKeys, key)
+			return nil
+		},
+	})
+	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
+	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
+	if code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", code, respBody)
+	}
+	if len(purgedKeys) != 3 {
+		t.Fatalf("expected 3 purged keys, got %d", len(purgedKeys))
+	}
+	if !bytes.Contains(respBody, []byte(`"count":3`)) {
+		t.Fatalf("expected count 3, got: %s", respBody)
+	}
+	if !bytes.Contains(respBody, []byte(`"failed":0`)) {
+		t.Fatalf("expected failed 0, got: %s", respBody)
+	}
+}
+
+func TestPurgeBatch_PartialFailure(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(key api.Key) error {
+			if key == cache.BuildKeyFromURL("https://b.com/") {
+				return errors.New("storage error")
+			}
+			return nil
+		},
+	})
+	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
+	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
+	if code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", code, respBody)
+	}
+	if !bytes.Contains(respBody, []byte(`"count":2`)) {
+		t.Fatalf("expected count 2 (one failed), got: %s", respBody)
+	}
+	if !bytes.Contains(respBody, []byte(`"failed":1`)) {
+		t.Fatalf("expected failed 1, got: %s", respBody)
+	}
+}
+
+func TestPurgeBatch_Empty(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:   "secret",
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error { return nil },
+	})
+	code, body := postWithToken(t, s, "/v1/purge/batch", `{"urls":[]}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", code, body)
+	}
+}
+
+func TestPurgeBatch_ExceedsMax(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:        "secret",
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn:      func(_ api.Key) error { return nil },
+		MaxBatchSize: 2,
+	})
+	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
+	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
+	if code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("got %d, want 413: %s", code, respBody)
+	}
+}
+
+func TestAuthCheck_WithToken(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	// Without token → 401.
+	status, _ := get(t, s, "/v1/auth/check")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("no token: got %d, want 401", status)
+	}
+	// With token → 200.
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/auth/check", nil)
+	req.Header.Set(header.Authorization, "Bearer secret")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("with token: got %d, want 200", rr.Code)
+	}
+}
+
+func TestRateLimit_PostRejected(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:              "secret",
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn:            func(_ api.Key) error { return nil },
+		RateLimitPerSecond: 1,
+	})
+	// First POST succeeds (consumes the single token).
+	code, _ := postWithToken(t, s, "/v1/purge", `{"url":"https://a.com/"}`)
+	if code != http.StatusOK {
+		t.Fatalf("first POST: got %d, want 200", code)
+	}
+	// Second POST immediately → 429 (bucket empty, refill not yet).
+	code, body := postWithToken(t, s, "/v1/purge", `{"url":"https://b.com/"}`)
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("second POST: got %d, want 429: %s", code, body)
+	}
+	// GET still works (rate limiter skips GET).
+	status, _ := get(t, s, "/healthz")
+	if status != http.StatusOK {
+		t.Fatalf("GET during rate limit: got %d, want 200", status)
 	}
 }

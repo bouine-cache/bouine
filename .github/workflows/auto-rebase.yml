@@ -29,7 +29,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr list --state open --json number,headRefName,mergeStateStatus \
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --json number,headRefName,mergeStateStatus \
             --jq '.[] | select(.mergeStateStatus == "BEHIND") | "\(.number) \(.headRefName)"' \
             | while read -r number branch; do
                 echo "::group::Rebasing PR #$number ($branch)"

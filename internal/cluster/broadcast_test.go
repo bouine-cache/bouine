@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,8 +22,9 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 		if r.URL.Path != "/v1/peer/purge" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		var evt api.PurgeEvent
-		if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		body, _ := io.ReadAll(r.Body)
+		evt, err := DecodePurgeHTTP(body)
+		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
 		received = append(received, evt)
@@ -54,8 +56,9 @@ func TestBroadcaster_BroadcastBan(t *testing.T) {
 		if r.URL.Path != "/v1/peer/ban" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		var evt api.BanEvent
-		if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		body, _ := io.ReadAll(r.Body)
+		evt, err := DecodeBanHTTP(body)
+		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
 		received = append(received, evt)

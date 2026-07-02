@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -124,8 +123,7 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 	ae.metrics.IncAntiEntropyReconcile()
 
 	var missing []api.Key
-	for _, k := range peerKeys {
-		key := api.Key(k)
+	for _, key := range peerKeys {
 		if _, ok := localSet[key]; !ok {
 			missing = append(missing, key)
 		}
@@ -165,7 +163,7 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 	)
 }
 
-func (ae *AntiEntropy) fetchPeerKeys(ctx context.Context, peer api.PeerInfo) ([]uint64, bool) {
+func (ae *AntiEntropy) fetchPeerKeys(ctx context.Context, peer api.PeerInfo) ([]api.Key, bool) {
 	fetchAddr := peer.AdminAddr
 	if fetchAddr == "" {
 		fetchAddr = peer.Addr
@@ -191,13 +189,17 @@ func (ae *AntiEntropy) fetchPeerKeys(ctx context.Context, peer api.PeerInfo) ([]
 		return nil, false
 	}
 
-	var ks api.KeySet
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024*1024)).Decode(&ks); err != nil {
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
+	if err != nil {
+		ae.logger.Debug("anti-entropy: read key set", "peer", peer.Name, "error", err)
+		return nil, false
+	}
+	_, ksKeys, err := DecodeKeySet(buf)
+	if err != nil {
 		ae.logger.Debug("anti-entropy: decode key set", "peer", peer.Name, "error", err)
 		return nil, false
 	}
-
-	return ks.Keys, true
+	return ksKeys, true
 }
 
 func (ae *AntiEntropy) backfillKey(ctx context.Context, peer api.PeerInfo, key api.Key) bool {
@@ -221,7 +223,7 @@ func (ae *AntiEntropy) backfillKey(ctx context.Context, peer api.PeerInfo, key a
 }
 
 // PeerKeysHandler serves the local key set for anti-entropy reconciliation.
-// Mounted at GET /v1/peer/keys. Returns a JSON KeySet.
+// Mounted at GET /v1/peer/keys. Returns a binary KeySet.
 type PeerKeysHandler struct {
 	keys KeySource
 	node string
@@ -240,17 +242,13 @@ func (h *PeerKeysHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	raw := h.keys.Keys()
-	out := make([]uint64, len(raw))
-	for i, k := range raw {
-		out[i] = uint64(k)
+	buf, err := EncodeKeySet(h.node, h.keys.Keys())
+	if err != nil {
+		http.Error(w, "encode error", http.StatusInternalServerError)
+		return
 	}
-	ks := api.KeySet{
-		NodeName: h.node,
-		Keys:     out,
-	}
-	w.Header().Set(header.ContentType, "application/json")
-	_ = json.NewEncoder(w).Encode(ks)
+	w.Header().Set(header.ContentType, "application/octet-stream")
+	_, _ = w.Write(buf)
 }
 
 // keysToUint64 is a helper for tests.

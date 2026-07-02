@@ -30,7 +30,7 @@ const (
 	// negotiation during rolling upgrades.
 	ClusterVersionHeader = header.XBouineClusterVersion
 	// ClusterProtocolVersion is the current protocol version.
-	ClusterProtocolVersion = "1"
+	ClusterProtocolVersion = "2"
 	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
 	peerFetchTimeout = 500 * time.Millisecond
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to

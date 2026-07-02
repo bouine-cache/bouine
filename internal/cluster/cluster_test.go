@@ -165,8 +165,8 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 		},
 	})
 
-	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 42, VaryKey: "v1", Issuer: "local"}
-	msg, _ := json.Marshal(evt)
+	evt := api.PurgeEvent{Key: 42, VaryKey: "v1", Issuer: "local"}
+	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
 	if got := called.Load(); got != 1 {
@@ -191,8 +191,8 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 		},
 	})
 
-	evt := api.BanEvent{Type: api.GossipTypeBan, Predicate: api.BanExpr{HostRegex: "example\\.com"}, Issuer: "local"}
-	msg, _ := json.Marshal(evt)
+	evt := api.BanEvent{Predicate: api.BanExpr{HostRegex: "example\\.com"}, Issuer: "local"}
+	msg, _ := EncodeBanGossip(evt)
 	c.NotifyMsg(msg)
 
 	if got := called.Load(); got != 1 {
@@ -272,7 +272,7 @@ func TestNotifyMsg_MalformedPayload(t *testing.T) {
 	}
 	defer func() { _ = c.Leave(t.Context()) }()
 
-	// Should not panic on invalid JSON.
+	// Should not panic on invalid data.
 	c.NotifyMsg([]byte("{not json}"))
 	c.NotifyMsg([]byte(""))
 	// An empty JSON object has no "type" field and should be silently ignored.
@@ -289,8 +289,8 @@ func TestNotifyMsg_WhenNoCallbacks(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// Should not panic when no invalidator or replicator is set.
-	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 42}
-	msg, _ := json.Marshal(evt)
+	evt := api.PurgeEvent{Key: 42}
+	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 }
 
@@ -311,8 +311,8 @@ func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
 			return nil
 		},
 	})
-	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 7, Issuer: "local"}
-	msg, _ := json.Marshal(evt)
+	evt := api.PurgeEvent{Key: 7, Issuer: "local"}
+	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
 	ctx := *got.Load()
@@ -340,8 +340,8 @@ func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
 			return nil
 		},
 	})
-	evt := api.BanEvent{Type: api.GossipTypeBan, Predicate: api.BanExpr{HostRegex: "example\\.com"}, Issuer: "local"}
-	msg, _ := json.Marshal(evt)
+	evt := api.BanEvent{Predicate: api.BanExpr{HostRegex: "example\\.com"}, Issuer: "local"}
+	msg, _ := EncodeBanGossip(evt)
 	c.NotifyMsg(msg)
 
 	ctx := *got.Load()
@@ -412,8 +412,8 @@ func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
 			return ctx.Err()
 		},
 	})
-	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 1, Issuer: "local"}
-	msg, _ := json.Marshal(evt)
+	evt := api.PurgeEvent{Key: 1, Issuer: "local"}
+	msg, _ := EncodePurgeGossip(evt)
 	start := time.Now()
 	c.NotifyMsg(msg)
 	elapsed := time.Since(start)
@@ -442,8 +442,8 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 			return ctx.Err()
 		},
 	})
-	evt := api.PurgeEvent{Type: api.GossipTypePurge, Key: 1, Issuer: "local"}
-	msg, _ := json.Marshal(evt)
+	evt := api.PurgeEvent{Key: 1, Issuer: "local"}
+	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
 	metrics, err := reg.Gather()

@@ -108,7 +108,7 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 	// All modes: enqueue via gossip. In strong mode this is redundant
 	// delivery (peer admin may be temporarily unreachable). In eventual
 	// and full modes this is the sole delivery path for invalidations.
-	if body, err := json.Marshal(evt); err == nil {
+	if body, err := EncodePurgeGossip(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
 	peerCount := countPeers(b.cluster.Members())
@@ -163,7 +163,7 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	}
 
 	// All modes: enqueue via gossip.
-	if body, err := json.Marshal(evt); err == nil {
+	if body, err := EncodeBanGossip(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
 	peerCount := countPeers(b.cluster.Members())
@@ -226,11 +226,19 @@ func (b *Broadcaster) BroadcastReplicate(_ context.Context, obj *api.Object) {
 }
 
 func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.PurgeEvent) error {
-	return b.post(ctx, peer.AdminAddr, "/v1/peer/purge", evt)
+	body, err := EncodePurgeHTTP(evt)
+	if err != nil {
+		return fmt.Errorf("broadcast purge encode: %w", err)
+	}
+	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/purge", body)
 }
 
 func (b *Broadcaster) sendBan(ctx context.Context, peer api.PeerInfo, evt api.BanEvent) error {
-	return b.post(ctx, peer.AdminAddr, "/v1/peer/ban", evt)
+	body, err := EncodeBanHTTP(evt)
+	if err != nil {
+		return fmt.Errorf("broadcast ban encode: %w", err)
+	}
+	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/ban", body)
 }
 
 // broadcastFailureReason maps a broadcast HTTP error to a short label
@@ -246,19 +254,14 @@ func broadcastFailureReason(err error) string {
 	return "5xx"
 }
 
-func (b *Broadcaster) post(ctx context.Context, addr, path string, body any) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("broadcast marshal: %w", err)
-	}
-
+func (b *Broadcaster) postBinary(ctx context.Context, addr, path string, body []byte) error {
 	url := "http://" + addr + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url,
-		bytes.NewReader(data))
+		bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("broadcast request: %w", err)
 	}
-	req.Header.Set(header.ContentType, "application/json")
+	req.Header.Set(header.ContentType, "application/octet-stream")
 	if b.token != "" {
 		req.Header.Set(header.Authorization, "Bearer "+b.token)
 	}

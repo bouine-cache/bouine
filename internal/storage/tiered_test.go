@@ -304,3 +304,38 @@ func TestTieredStore_CloseStopsCompaction(t *testing.T) {
 		t.Errorf("goroutine leak: before Close=%d, after Close=%d", before, after)
 	}
 }
+
+func TestTieredStore_ImplementsKeyLister(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	ts := tieredStore(t, true)
+	keys := []api.Key{
+		KeyHash([]byte("k1")),
+		KeyHash([]byte("k2")),
+		KeyHash([]byte("k3")),
+	}
+	for _, k := range keys {
+		if err := ts.Put(ctx, k, bigObj(k, 100)); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	kl, ok := any(ts).(KeyLister)
+	if !ok {
+		t.Fatal("TieredStore does not implement KeyLister")
+	}
+	got := kl.Keys()
+	if len(got) != len(keys) {
+		t.Fatalf("Keys() returned %d keys, want %d", len(got), len(keys))
+	}
+	want := make(map[api.Key]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Errorf("unexpected key %d in Keys()", k)
+		}
+	}
+}

@@ -214,6 +214,14 @@ func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 	return t.hot.Ban(ctx, expr)
 }
 
+// Keys returns all hot-tier cache keys. Used by the anti-entropy
+// reconciler in full cluster mode to compute the diff against peer key
+// sets. Only hot-tier keys are reported; warm-tier-only keys (evicted
+// from RAM) are not included.
+func (t *TieredStore) Keys() []api.Key {
+	return t.hot.Keys()
+}
+
 // Stats merges hot + warm stats.
 func (t *TieredStore) Stats() api.Stats {
 	st := t.hot.Stats()

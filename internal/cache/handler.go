@@ -213,8 +213,8 @@ type Handler struct {
 	refreshMargin       time.Duration
 	refreshTimeout      time.Duration
 	refreshNegative     bool
-	routeName           string
 	done                chan struct{}
+	closeOnce           sync.Once
 	refreshWg           sync.WaitGroup
 	// variantSets tracks the live variant store keys per primary key to
 	// enforce MaxVariants cap. Entries are removed when the handler observes
@@ -329,8 +329,6 @@ type HandlerConfig struct {
 	RefreshConcurrency int
 	// RefreshNegative controls whether negative-cached objects are refreshed.
 	RefreshNegative bool
-	// RouteName is the route's name from config, used for metrics labels.
-	RouteName string
 }
 
 // NewHandler creates a caching handler.
@@ -361,7 +359,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshMargin:       cfg.RefreshMargin,
 		refreshTimeout:      cfg.RefreshTimeout,
 		refreshNegative:     cfg.RefreshNegative,
-		routeName:           cfg.RouteName,
 		done:                make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
@@ -396,9 +393,11 @@ func NewHandler(cfg HandlerConfig) *Handler {
 
 // Close drains in-flight refresh goroutines and stops the scheduler.
 // Called during engine shutdown before store.Close() to prevent
-// use-after-close panics.
+// use-after-close panics. Safe to call multiple times.
 func (h *Handler) Close(ctx context.Context) error {
-	close(h.done)
+	h.closeOnce.Do(func() {
+		close(h.done)
+	})
 	if h.scheduler != nil {
 		h.scheduler.Stop()
 	}
@@ -454,6 +453,9 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 		return
 	}
 	if !obj.Fresh(time.Now()) {
+		if h.refreshRegistry != nil {
+			h.refreshRegistry.Unregister(key)
+		}
 		return
 	}
 
@@ -471,10 +473,20 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 		}()
 
 		bgCtx, bgCancel := context.WithTimeout(
-			context.WithoutCancel(context.Background()),
+			context.Background(),
 			h.refreshTimeout,
 		)
 		defer bgCancel()
+
+		// Cancel the refresh if the handler is shutting down so
+		// we don't call store.Put on a closed store.
+		go func() {
+			select {
+			case <-h.done:
+				bgCancel()
+			case <-bgCtx.Done():
+			}
+		}()
 
 		h.doBackgroundRefresh(bgCtx, key, obj)
 	}()
@@ -1227,6 +1239,17 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 		h.replicateFn(ctx, obj)
 	}
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
+		if !h.refreshNegative && IsNegativeCacheable(obj.StatusCode) {
+			return
+		}
+		// In strong cluster mode, only the key owner schedules
+		// background refresh. Non-owners that fetched from origin
+		// (peer fetch failed) would waste origin requests.
+		if h.ownerFn != nil {
+			if _, isLocal := h.ownerFn(key); !isLocal {
+				return
+			}
+		}
 		var varyHeader string
 		if obj.Header.Len() > 0 {
 			varyHeader = obj.Header.Get(header.Vary)

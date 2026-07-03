@@ -73,6 +73,7 @@ const compactionWindow = 5 * time.Second
 type RefreshScheduler struct {
 	mu    sync.Mutex
 	heap  refreshHeap
+	index map[api.Key]*heapEntry // O(1) lookup for updates
 	done  chan struct{}
 	ready chan struct{} // signals the drainer to wake early (new top)
 	wg    sync.WaitGroup
@@ -99,6 +100,7 @@ func NewRefreshScheduler(onPop func(key api.Key), alive func(key api.Key) *api.O
 	s := &RefreshScheduler{
 		done:  make(chan struct{}),
 		ready: make(chan struct{}, 1),
+		index: make(map[api.Key]*heapEntry),
 		onPop: onPop,
 		alive: alive,
 	}
@@ -126,17 +128,16 @@ func (s *RefreshScheduler) Schedule(key api.Key, refreshAt time.Time) {
 		s.mu.Unlock()
 		return
 	}
-	// Check if key already exists — update in place.
-	for _, e := range s.heap {
-		if e.key == key {
-			e.refreshAt = refreshAt.UnixNano()
-			heap.Fix(&s.heap, e.index)
-			s.mu.Unlock()
-			s.wake()
-			return
-		}
+	if e, ok := s.index[key]; ok {
+		e.refreshAt = refreshAt.UnixNano()
+		heap.Fix(&s.heap, e.index)
+		s.mu.Unlock()
+		s.wake()
+		return
 	}
-	heap.Push(&s.heap, &heapEntry{key: key, refreshAt: refreshAt.UnixNano()})
+	entry := &heapEntry{key: key, refreshAt: refreshAt.UnixNano()}
+	heap.Push(&s.heap, entry)
+	s.index[key] = entry
 	s.mu.Unlock()
 	s.wake()
 }
@@ -209,6 +210,7 @@ func (s *RefreshScheduler) run() {
 			continue
 		}
 		entry := heap.Pop(&s.heap).(*heapEntry)
+		delete(s.index, entry.key)
 		s.mu.Unlock()
 
 		s.onPop(entry.key)
@@ -239,6 +241,7 @@ func (s *RefreshScheduler) compact() {
 			break
 		}
 		entry := heap.Pop(&s.heap).(*heapEntry)
+		delete(s.index, entry.key)
 		// Call alive while holding the lock. This blocks Schedule
 		// briefly, but alive is a hot-tier Get (microseconds) and
 		// compaction touches only the near-future window (a few
@@ -251,6 +254,7 @@ func (s *RefreshScheduler) compact() {
 	}
 	for _, e := range live {
 		heap.Push(&s.heap, e)
+		s.index[e.key] = e
 	}
 	s.mu.Unlock()
 }

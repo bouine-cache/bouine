@@ -36,9 +36,9 @@ func TestRefreshHeapOrdering(t *testing.T) {
 func TestSchedulerScheduleAndStop(t *testing.T) {
 	t.Parallel()
 
-	var popped atomic.Int64
+	popped := make(chan api.Key, 1)
 	onPop := func(key api.Key) {
-		popped.Add(int64(key))
+		popped <- key
 	}
 	alive := func(key api.Key) *api.Object {
 		return &api.Object{Key: key, TTL: 10 * time.Second}
@@ -50,10 +50,13 @@ func TestSchedulerScheduleAndStop(t *testing.T) {
 
 	s.Schedule(api.Key(42), time.Now().Add(50*time.Millisecond))
 
-	time.Sleep(200 * time.Millisecond)
-
-	if got := popped.Load(); got != 42 {
-		t.Fatalf("popped key = %d, want 42", got)
+	select {
+	case got := <-popped:
+		if got != 42 {
+			t.Fatalf("popped key = %d, want 42", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drainer did not pop within 1s")
 	}
 }
 
@@ -83,11 +86,15 @@ func TestSchedulerWakesOnEarlierTop(t *testing.T) {
 	t.Parallel()
 
 	var mu sync.Mutex
-	var popped []api.Key
+	popped := make([]api.Key, 0)
+	done := make(chan struct{})
 	onPop := func(key api.Key) {
 		mu.Lock()
 		popped = append(popped, key)
 		mu.Unlock()
+		if len(popped) == 1 {
+			close(done)
+		}
 	}
 	alive := func(key api.Key) *api.Object { return nil }
 
@@ -100,7 +107,11 @@ func TestSchedulerWakesOnEarlierTop(t *testing.T) {
 	// Schedule a nearer entry — should wake the drainer.
 	s.Schedule(api.Key(2), time.Now().Add(50*time.Millisecond))
 
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("drainer did not pop key 2 within 1s")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -112,9 +123,9 @@ func TestSchedulerWakesOnEarlierTop(t *testing.T) {
 func TestSchedulerUpdateExistingKey(t *testing.T) {
 	t.Parallel()
 
-	var popped atomic.Int64
+	popped := make(chan api.Key, 1)
 	onPop := func(key api.Key) {
-		popped.Add(int64(key))
+		popped <- key
 	}
 	alive := func(key api.Key) *api.Object { return nil }
 
@@ -127,10 +138,13 @@ func TestSchedulerUpdateExistingKey(t *testing.T) {
 	// Update key 1 to fire soon.
 	s.Schedule(api.Key(1), time.Now().Add(50*time.Millisecond))
 
-	time.Sleep(200 * time.Millisecond)
-
-	if got := popped.Load(); got != 1 {
-		t.Fatalf("popped key = %d, want 1", got)
+	select {
+	case got := <-popped:
+		if got != 1 {
+			t.Fatalf("popped key = %d, want 1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drainer did not pop within 1s")
 	}
 	if s.Len() != 0 {
 		t.Fatalf("heap len after pop = %d, want 0", s.Len())
@@ -178,9 +192,76 @@ func TestSchedulerEmptyHeapBlocksOnReady(t *testing.T) {
 
 	s := NewRefreshScheduler(onPop, alive)
 	s.Start()
+
+	// Verify Stop works cleanly — if the drainer were busy-looping
+	// on an empty heap, Stop would hang waiting for the goroutine.
+	done := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not terminate drainer within 1s (empty heap busy-loop?)")
+	}
+}
+
+func TestSchedulerScheduleAfterStopIsNoop(t *testing.T) {
+	t.Parallel()
+
+	onPop := func(key api.Key) {}
+	alive := func(key api.Key) *api.Object { return nil }
+
+	s := NewRefreshScheduler(onPop, alive)
+	s.Start()
+	s.Stop()
+
+	// Schedule after Stop should not insert into the heap.
+	s.Schedule(api.Key(1), time.Now().Add(50*time.Millisecond))
+	if s.Len() != 0 {
+		t.Fatalf("heap len after post-Stop Schedule = %d, want 0", s.Len())
+	}
+}
+
+// TestSchedulerIndexConsistency verifies that the index map stays
+// consistent with the heap after Schedule, Pop, and compact.
+func TestSchedulerIndexConsistency(t *testing.T) {
+	t.Parallel()
+
+	var popped atomic.Int64
+	onPop := func(key api.Key) {
+		popped.Add(int64(key))
+	}
+	alive := func(key api.Key) *api.Object { return nil }
+
+	s := NewRefreshScheduler(onPop, alive)
+	s.Start()
 	defer s.Stop()
 
-	// Heap is empty — drainer should be blocked on ready, not busy-looping.
-	// Just verify Stop works cleanly after a brief delay.
-	time.Sleep(50 * time.Millisecond)
+	s.Schedule(api.Key(1), time.Now().Add(50*time.Millisecond))
+	s.Schedule(api.Key(2), time.Now().Add(60*time.Millisecond))
+	s.Schedule(api.Key(3), time.Now().Add(70*time.Millisecond))
+
+	// Update key 1 to fire later — should not create a duplicate.
+	s.Schedule(api.Key(1), time.Now().Add(80*time.Millisecond))
+	if s.Len() != 3 {
+		t.Fatalf("heap len after update = %d, want 3 (no duplicate)", s.Len())
+	}
+
+	// Wait for all three to pop.
+	// Key 2 pops first (60ms), then key 3 (70ms), then key 1 (80ms).
+	total := int64(1 + 2 + 3)
+	deadline := time.After(2 * time.Second)
+	for popped.Load() != total {
+		select {
+		case <-deadline:
+			t.Fatalf("popped total = %d, want %d", popped.Load(), total)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if s.Len() != 0 {
+		t.Fatalf("heap len after all pops = %d, want 0", s.Len())
+	}
 }

@@ -76,6 +76,8 @@ spec:
             - name: cluster-udp
               containerPort: 8443
               protocol: UDP
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           livenessProbe:

@@ -45,6 +45,12 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
+// ErrTornRecord indicates a partial trailing record — the segment was
+// truncated mid-write (torn write). Callers should treat the affected
+// index entry as stale (drop it, return a miss) rather than surfacing
+// a hard error, mirroring wal.Replay's handling of partial records.
+var ErrTornRecord = errors.New("warm: torn trailing record")
+
 // Record is a single warm-tier entry read from a segment.
 type Record struct {
 	Key    uint64
@@ -177,16 +183,18 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 }
 
 // Delete writes a tombstone for the key and removes it from the index.
-func (s *Store) Delete(key uint64) error {
+// Returns the segment ID the tombstone was written to, so callers can
+// sync that segment before appending to the WAL.
+func (s *Store) Delete(key uint64) (segID int, err error) {
 	seg, err := s.activeSeg()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 
 	if err := writeRecord(seg.f, magicDead, key, nil); err != nil {
-		return fmt.Errorf("warm: tombstone: %w", err)
+		return 0, fmt.Errorf("warm: tombstone: %w", err)
 	}
 	recSize := int64(headerLen + footerLen)
 	seg.size += recSize
@@ -194,7 +202,7 @@ func (s *Store) Delete(key uint64) error {
 	s.idxMu.Lock()
 	delete(s.index, key)
 	s.idxMu.Unlock()
-	return nil
+	return seg.ID, nil
 }
 
 // Get returns the raw body bytes stored for key, or nil if the key
@@ -230,6 +238,12 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 
 	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
 	if err != nil {
+		if errors.Is(err, ErrTornRecord) {
+			s.idxMu.Lock()
+			delete(s.index, key)
+			s.idxMu.Unlock()
+			return nil, nil
+		}
 		return nil, err
 	}
 	if rec.IsTomb {
@@ -311,7 +325,14 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 
-	return readRecordAt(seg.f, offset, segID)
+	rec, err := readRecordAt(seg.f, offset, segID)
+	if err != nil {
+		if errors.Is(err, ErrTornRecord) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return rec, nil
 }
 
 // Scan reads all live records from all segments. Used for index
@@ -338,12 +359,54 @@ func (s *Store) Stats() (entries, bytes int64) {
 	return s.stats.entries.Load(), s.stats.bytes.Load()
 }
 
-// Close closes all segment files.
+// Sync flushes all open segment files to stable storage. Used by Close
+// and available for checkpoint-style callers. Hot-path callers (Put,
+// Delete) should use SyncSegment instead to avoid syncing unrelated
+// segments.
+func (s *Store) Sync() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var firstErr error
+	for _, seg := range s.segs {
+		seg.mu.Lock()
+		if err := seg.f.Sync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		seg.mu.Unlock()
+	}
+	return firstErr
+}
+
+// SyncSegment flushes a single segment to stable storage. Callers that
+// also append to the WAL must invoke this before wal.Append so the
+// segment data is durable before the WAL pointer to it is durable.
+func (s *Store) SyncSegment(segID int) error {
+	s.mu.RLock()
+	var seg *Segment
+	for _, ss := range s.segs {
+		if ss.ID == segID {
+			seg = ss
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if seg == nil {
+		return fmt.Errorf("warm: sync: segment %d not found", segID)
+	}
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	return seg.f.Sync()
+}
+
+// Close syncs and closes all segment files.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var firstErr error
 	for _, seg := range s.segs {
+		if err := seg.f.Sync(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		if err := seg.f.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -452,6 +515,9 @@ func writeRecord(w io.Writer, magic uint32, key uint64, body []byte) error {
 func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 	hdr := make([]byte, headerLen)
 	if _, err := f.ReadAt(hdr, offset); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrTornRecord
+		}
 		return nil, fmt.Errorf("warm: read header at %d: %w", offset, err)
 	}
 
@@ -463,12 +529,18 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 	if bodyLen > 0 {
 		body = make([]byte, bodyLen)
 		if _, err := f.ReadAt(body, offset+headerLen); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, ErrTornRecord
+			}
 			return nil, fmt.Errorf("warm: read body at %d: %w", offset, err)
 		}
 	}
 
 	footBuf := make([]byte, footerLen)
 	if _, err := f.ReadAt(footBuf, offset+headerLen+int64(bodyLen)); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrTornRecord
+		}
 		return nil, fmt.Errorf("warm: read footer at %d: %w", offset, err)
 	}
 	storedCRC := binary.LittleEndian.Uint32(footBuf)
@@ -500,6 +572,9 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 	for offset < info.Size() {
 		rec, err := readRecordAt(f, offset, segID)
 		if err != nil {
+			if errors.Is(err, ErrTornRecord) {
+				return nil
+			}
 			return err
 		}
 		if err := fn(*rec); err != nil {

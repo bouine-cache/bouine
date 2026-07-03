@@ -56,7 +56,7 @@ func TestTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if err := s.Delete(99); err != nil {
+	if _, err := s.Delete(99); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -312,7 +312,7 @@ func TestGet_AfterDelete(t *testing.T) {
 	if _, _, err := s.Put(55, []byte("to be deleted")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if err := s.Delete(55); err != nil {
+	if _, err := s.Delete(55); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
@@ -374,7 +374,7 @@ func TestStore_ConcurrentGetCompact(t *testing.T) {
 	}
 	// Delete half to create tombstones.
 	for i := uint64(0); i < 250; i++ {
-		if err := s.Delete(i); err != nil {
+		if _, err := s.Delete(i); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -515,7 +515,7 @@ func TestStore_CompactStreamsLiveRecords(t *testing.T) {
 		s.SetIndex(uint64(i), segID, off)
 	}
 	for i := range 100 {
-		if err := s.Delete(uint64(i)); err != nil {
+		if _, err := s.Delete(uint64(i)); err != nil {
 			t.Fatalf("Delete %d: %v", i, err)
 		}
 	}
@@ -591,7 +591,7 @@ func TestStore_CompactReadOnlyParent(t *testing.T) {
 		s.SetIndex(uint64(i), segID, off)
 	}
 	for i := range 100 {
-		if err := s.Delete(uint64(i)); err != nil {
+		if _, err := s.Delete(uint64(i)); err != nil {
 			t.Fatalf("Delete %d: %v", i, err)
 		}
 	}
@@ -615,6 +615,174 @@ func TestStore_CompactReadOnlyParent(t *testing.T) {
 		}
 		if got == nil {
 			t.Fatalf("key %d: expected live after compact, got nil", i)
+		}
+	}
+}
+
+// truncateLastRecord truncates the given segment file so the last record
+// written at lastOff is torn: the header is present but the body is cut
+// short. This simulates a crash where the WAL entry was fsynced but the
+// segment data was not fully flushed.
+func truncateLastRecord(t *testing.T, s *Store, segID int, lastOff int64) {
+	t.Helper()
+	s.mu.RLock()
+	var seg *Segment
+	for _, ss := range s.segs {
+		if ss.ID == segID {
+			seg = ss
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if seg == nil {
+		t.Fatalf("segment %d not found", segID)
+	}
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	cutAt := lastOff + headerLen + 4 // header + partial body
+	if err := seg.f.Truncate(cutAt); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+}
+
+func TestTornRecord_GetReturnsMiss(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	body := make([]byte, 256)
+	segID, off, err := s.Put(42, body)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	truncateLastRecord(t, s, segID, off)
+
+	got, err := s.Get(42)
+	if err != nil {
+		t.Fatalf("Get after torn write: expected nil error, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Get after torn write: expected nil (miss), got %q", got)
+	}
+
+	s.idxMu.RLock()
+	_, ok := s.index[42]
+	s.idxMu.RUnlock()
+	if ok {
+		t.Fatal("stale index entry should be dropped after torn read")
+	}
+}
+
+func TestTornRecord_ReadRecordReturnsNil(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	body := make([]byte, 256)
+	segID, off, err := s.Put(42, body)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	truncateLastRecord(t, s, segID, off)
+
+	rec, err := s.ReadRecord(segID, off)
+	if err != nil {
+		t.Fatalf("ReadRecord after torn write: expected nil error, got %v", err)
+	}
+	if rec != nil {
+		t.Fatalf("ReadRecord after torn write: expected nil, got %+v", rec)
+	}
+}
+
+func TestTornRecord_ScanSkipsTrailing(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	var lastSegID int
+	var lastOff int64
+	for i := range 5 {
+		segID, off, err := s.Put(uint64(i), []byte("good"))
+		if err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+		lastSegID, lastOff = segID, off
+	}
+
+	truncateLastRecord(t, s, lastSegID, lastOff)
+
+	var count int
+	if err := s.Scan(func(_ Record) error {
+		count++
+		return nil
+	}); err != nil {
+		t.Fatalf("Scan with torn trailing record: expected nil error, got %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("Scan count = %d, want 4 (torn 5th record skipped)", count)
+	}
+}
+
+func TestTornRecord_RecomputeStatsSucceeds(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	var lastSegID int
+	var lastOff int64
+	for i := range 5 {
+		segID, off, err := s.Put(uint64(i), []byte("good"))
+		if err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+		lastSegID, lastOff = segID, off
+	}
+
+	truncateLastRecord(t, s, lastSegID, lastOff)
+
+	if err := s.RecomputeStats(); err != nil {
+		t.Fatalf("RecomputeStats with torn trailing record: %v", err)
+	}
+}
+
+func TestTornRecord_CompactSucceeds(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := range 10 {
+		if _, _, err := s.Put(uint64(i), []byte("compact-me")); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	for i := range 5 {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("delete %d: %v", i, err)
+		}
+	}
+
+	var lastSegID int
+	var lastOff int64
+	lastSegID, lastOff, err = s.Put(99, make([]byte, 128))
+	if err != nil {
+		t.Fatalf("put last: %v", err)
+	}
+
+	truncateLastRecord(t, s, lastSegID, lastOff)
+
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact with torn trailing record: %v", err)
+	}
+
+	for i := 5; i < 10; i++ {
+		got, err := s.Get(uint64(i))
+		if err != nil {
+			t.Fatalf("Get %d after compact: %v", i, err)
+		}
+		if string(got) != "compact-me" {
+			t.Fatalf("Get %d = %q, want %q", i, got, "compact-me")
 		}
 	}
 }

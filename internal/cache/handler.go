@@ -978,6 +978,12 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	// stripped before serving to clients (see serveObject).
 	obj.Header.Set(header.XBouinePath, r.URL.Path)
 	obj.Header.Set(header.XBouineHost, r.Host)
+	// Set-Cookie is always stripped from cached objects: joining multiple
+	// Set-Cookie values with ", " is non-conformant per RFC 9110 §5.2,
+	// and serving stale cookies to a different client is a security risk.
+	// AllowSetCookie controls whether responses with Set-Cookie are cached
+	// at all (gated above); it does not preserve Set-Cookie in the cache.
+	obj.Header.Del(header.SetCookie)
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
 	} else if defaultSWR > 0 {

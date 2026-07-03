@@ -20,10 +20,8 @@ import (
 // (http.CanonicalHeaderKey) and lookups are case-insensitive.
 //
 // Multi-value headers are joined with ", " at store time (RFC 9110 §5.2
-// permits this for all headers except Set-Cookie, which FromHTTP drops
-// during conversion). This means Values always returns a single-element
-// slice for stored objects, but the method is retained for interface
-// compatibility with http.Header.
+// permits this for all headers except Set-Cookie, which callers must
+// strip or preserve based on the configured caching policy).
 //
 // The flat values design allows WriteTo to populate an http.Header
 // (map[string][]string) without any per-header allocations on the hit
@@ -71,12 +69,14 @@ func InternKey(key string) string {
 // does not share any underlying storage with h. Multi-value headers are
 // joined with ", " per RFC 9110 §5.2.
 //
-// Set-Cookie is dropped during conversion: joining multiple Set-Cookie
-// values with ", " is non-conformant per RFC 9110 §5.2 (it changes the
-// cookie semantics), so the header is skipped by construction rather than
-// relying on every caller to Del it afterwards. Callers that need to
-// preserve Set-Cookie (e.g. when allowSetCookie is configured) must use
-// SetValues on the resulting Map.
+// Set-Cookie is joined like any other multi-value header, which is
+// non-conformant per RFC 9110 §5.2. Callers that need to exclude
+// Set-Cookie (the default caching policy) must Del it after conversion.
+// This keeps the policy decision at the caller, not inside a generic
+// conversion function.
+//
+// Entries are sorted by canonical key so that Range and the binary
+// codec produce deterministic output without per-call allocation.
 func FromHTTP(h http.Header) Map {
 	if len(h) == 0 {
 		return Map{}
@@ -86,7 +86,7 @@ func FromHTTP(h http.Header) Map {
 		values:  make([]string, 0, len(h)),
 	}
 	for k, vals := range h {
-		if k == SetCookie || len(vals) == 0 {
+		if len(vals) == 0 {
 			continue
 		}
 		var v string
@@ -101,6 +101,7 @@ func FromHTTP(h http.Header) Map {
 			off: len(hm.values) - 1,
 		})
 	}
+	hm.SortEntries()
 	return hm
 }
 
@@ -119,7 +120,7 @@ func (h Map) Get(key string) string {
 
 // Set sets the header with the given key to the single value. If the
 // header already exists its value is replaced; otherwise a new entry is
-// appended. The key is canonicalized and interned.
+// inserted in canonical-key order. The key is canonicalized and interned.
 func (h *Map) Set(key, value string) {
 	ck := InternKey(key)
 	for i := range h.entries {
@@ -128,8 +129,7 @@ func (h *Map) Set(key, value string) {
 			return
 		}
 	}
-	h.values = append(h.values, value)
-	h.entries = append(h.entries, headerEntry{key: ck, off: len(h.values) - 1})
+	h.insertSorted(ck, value)
 }
 
 // SetValues sets the header with the given key to the provided values.
@@ -169,22 +169,6 @@ func (h *Map) Del(key string) {
 	}
 }
 
-// Values returns all values for the header with the given key. Since
-// multi-value headers are joined at store time, this always returns a
-// single-element slice (or nil if not present). The returned slice is a
-// sub-slice of the Map's internal values slice and shares its backing
-// array; callers should not modify it.
-func (h Map) Values(key string) []string {
-	ck := http.CanonicalHeaderKey(key)
-	for i := range h.entries {
-		if h.entries[i].key == ck {
-			off := h.entries[i].off
-			return h.values[off : off+1 : off+1]
-		}
-	}
-	return nil
-}
-
 // Has reports whether the header with the given key exists.
 func (h Map) Has(key string) bool {
 	ck := http.CanonicalHeaderKey(key)
@@ -199,12 +183,47 @@ func (h Map) Has(key string) bool {
 // AppendEntry adds a key-value pair without checking for duplicates.
 // Intended for bulk construction from a known-unique source (e.g. the
 // binary codec decoder). The key is canonicalized and interned.
+// Entries are appended in source order; call sortEntries after the
+// bulk construction loop to restore canonical-key order.
 func (h *Map) AppendEntry(key, value string) {
 	h.values = append(h.values, value)
 	h.entries = append(h.entries, headerEntry{
 		key: InternKey(key),
 		off: len(h.values) - 1,
 	})
+}
+
+// SortEntries sorts the entries slice by canonical key in place.
+// Called at the end of bulk construction (decodeObject) so that Range
+// iterates in canonical-key order without per-call allocation.
+// FromHTTP and Set already keep entries sorted; this is for callers
+// that use AppendEntry in a loop.
+func (h *Map) SortEntries() {
+	if len(h.entries) <= 1 {
+		return
+	}
+	sort.Slice(h.entries, func(i, j int) bool {
+		return h.entries[i].key < h.entries[j].key
+	})
+}
+
+// insertSorted inserts a new entry in canonical-key order. Used by Set
+// when the key does not already exist.
+func (h *Map) insertSorted(key, value string) {
+	h.values = append(h.values, value)
+	off := len(h.values) - 1
+	entry := headerEntry{key: key, off: off}
+	// Find the insertion point via linear scan (entries is typically
+	// 10-15 elements; binary search would add complexity for no gain).
+	for i := range h.entries {
+		if h.entries[i].key > key {
+			h.entries = append(h.entries, headerEntry{})
+			copy(h.entries[i+1:], h.entries[i:])
+			h.entries[i] = entry
+			return
+		}
+	}
+	h.entries = append(h.entries, entry)
 }
 
 // NewMap returns a Map pre-allocated for n entries.
@@ -252,29 +271,12 @@ func (h Map) WriteTo(dst http.Header) {
 // each. If f returns false, iteration stops. This replaces
 // `for k, vs := range obj.Header` loops.
 //
-// The sort is over a temporary index slice so the iteration order is
-// deterministic regardless of how the Map was constructed (FromHTTP
-// inherits Go map iteration order; AppendEntry preserves wire order).
-// Deterministic Range output makes the binary codec produce stable bytes
-// for logically identical objects, which anti-entropy checksums rely on.
-// Range is not on the hit path, so the allocation is acceptable.
+// Entries are kept sorted at construction time (FromHTTP, decodeObject,
+// Set), so Range is a zero-allocation linear scan. Deterministic Range
+// output makes the binary codec produce stable bytes for logically
+// identical objects, which anti-entropy checksums rely on.
 func (h Map) Range(f func(key string, value string) bool) {
-	if len(h.entries) <= 1 {
-		for i := range h.entries {
-			if !f(h.entries[i].key, h.values[h.entries[i].off]) {
-				return
-			}
-		}
-		return
-	}
-	idx := make([]int, len(h.entries))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.Slice(idx, func(i, j int) bool {
-		return h.entries[idx[i]].key < h.entries[idx[j]].key
-	})
-	for _, i := range idx {
+	for i := range h.entries {
 		if !f(h.entries[i].key, h.values[h.entries[i].off]) {
 			return
 		}

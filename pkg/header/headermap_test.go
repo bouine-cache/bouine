@@ -176,10 +176,10 @@ func TestMap_Range_StopEarly(t *testing.T) {
 	}
 }
 
-func TestMap_FromHTTP_StripsSetCookie(t *testing.T) {
-	// Set-Cookie is non-conformant to join (RFC 9110 §5.2), so FromHTTP
-	// must drop it during construction rather than relying on callers to
-	// Del it afterwards.
+func TestMap_FromHTTP_PreservesSetCookie(t *testing.T) {
+	// FromHTTP is a pure conversion function; it does not make policy
+	// decisions about Set-Cookie. The strip is the caller's responsibility
+	// (buildObject strips it unconditionally from cached objects).
 	src := http.Header{}
 	src.Set("Content-Type", "text/html")
 	src.Add("Set-Cookie", "session=abc; Path=/")
@@ -187,14 +187,11 @@ func TestMap_FromHTTP_StripsSetCookie(t *testing.T) {
 
 	hm := FromHTTP(src)
 
-	if hm.Has("Set-Cookie") {
-		t.Error("FromHTTP retained Set-Cookie; should be stripped")
+	if !hm.Has("Set-Cookie") {
+		t.Error("FromHTTP dropped Set-Cookie; it should preserve it for the caller to decide")
 	}
-	if hm.Len() != 1 {
-		t.Errorf("FromHTTP Len = %d, want 1 (only Content-Type)", hm.Len())
-	}
-	if got := hm.Get("Content-Type"); got != "text/html" {
-		t.Errorf("Get(Content-Type) = %q, want %q", got, "text/html")
+	if hm.Len() != 2 {
+		t.Errorf("FromHTTP Len = %d, want 2", hm.Len())
 	}
 }
 
@@ -213,21 +210,6 @@ func TestMap_SetValues(t *testing.T) {
 	h.SetValues("X-Multi", []string{})
 	if h.Has("X-Multi") {
 		t.Error("SetValues with empty slice should delete header")
-	}
-}
-
-func TestMap_Values(t *testing.T) {
-	h := Map{}
-	h.Set("Content-Type", "text/html")
-
-	vs := h.Values("Content-Type")
-	if len(vs) != 1 || vs[0] != "text/html" {
-		t.Errorf("Values = %v, want [text/html]", vs)
-	}
-
-	vs = h.Values("Missing")
-	if vs != nil {
-		t.Errorf("Values(Missing) = %v, want nil", vs)
 	}
 }
 

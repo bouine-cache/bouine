@@ -73,10 +73,13 @@ func etagMatch(list, needle string) bool {
 // stored response, except for content-specific headers.
 func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
 	// Headers that MUST NOT be updated from a 304 (content-specific).
+	// Set-Cookie is excluded because SetValues joins multi-values with
+	// ", " which is non-conformant per RFC 9110 §5.2.
 	skip := map[string]bool{
 		header.ContentLength:    true,
 		header.ContentEncoding:  true,
 		header.TransferEncoding: true,
+		header.SetCookie:        true,
 	}
 	for k, vals := range resp304Header {
 		if skip[k] {

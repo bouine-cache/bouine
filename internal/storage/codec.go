@@ -101,6 +101,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 			v := r.str()
 			hm.AppendEntry(k, v)
 		}
+		hm.SortEntries()
 		obj.Header = hm
 	} else {
 		obj.Header = header.Map{}

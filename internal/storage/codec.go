@@ -4,17 +4,17 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
+	headerpkg "github.com/thylong/bouine/pkg/header"
 )
 
 // objCodecVersion is the warm-tier object encoding version. It is the
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-const objCodecVersion byte = 1
+const objCodecVersion byte = 2
 
 // errCorrupt is returned when an encoded object blob is truncated or
 // otherwise malformed. The caller (TieredStore.Get) treats it like any
@@ -46,15 +46,13 @@ func encodeObject(obj *api.Object) []byte {
 	buf = binary.AppendUvarint(buf, obj.Hits)
 	buf = appendString(buf, obj.ETag)
 
-	// Header map: count, then (key, nvals, vals...) per entry.
-	buf = binary.AppendUvarint(buf, uint64(len(obj.Header)))
-	for k, vals := range obj.Header {
+	// Header map: count, then (key, value) per entry.
+	buf = binary.AppendUvarint(buf, uint64(obj.Header.Len())) //nolint:gosec // Len() returns int len of a slice, always non-negative and bounded by memory
+	obj.Header.Range(func(k, v string) bool {
 		buf = appendString(buf, k)
-		buf = binary.AppendUvarint(buf, uint64(len(vals)))
-		for _, v := range vals {
-			buf = appendString(buf, v)
-		}
-	}
+		buf = appendString(buf, v)
+		return true
+	})
 
 	// Surrogate keys.
 	buf = binary.AppendUvarint(buf, uint64(len(obj.SurrogateKeys)))
@@ -97,19 +95,15 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	obj.ETag = r.str()
 
 	if nh := r.count(); nh > 0 {
-		hdr := make(http.Header, min(nh, 32))
+		hm := headerpkg.NewMap(min(nh, 32))
 		for range nh {
 			k := r.str()
-			nv := r.count()
-			vals := make([]string, 0, min(nv, 8))
-			for range nv {
-				vals = append(vals, r.str())
-			}
-			hdr[k] = vals
+			v := r.str()
+			hm.AppendEntry(k, v)
 		}
-		obj.Header = hdr
+		obj.Header = hm
 	} else {
-		obj.Header = http.Header{}
+		obj.Header = headerpkg.Map{}
 	}
 
 	if nsk := r.count(); nsk > 0 {

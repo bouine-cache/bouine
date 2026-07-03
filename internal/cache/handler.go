@@ -22,7 +22,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -467,7 +466,7 @@ const (
 // RFC 7234 §5.5.3.
 func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult) {
 	dst := w.Header()
-	maps.Copy(dst, obj.Header)
+	obj.Header.WriteTo(dst)
 	// Strip internal headers used for ban matching — never forwarded to clients.
 	dst.Del(header.XBouinePath)
 	dst.Del(header.XBouineHost)
@@ -970,7 +969,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	obj := &api.Object{
 		Key:          key,
 		StatusCode:   res.StatusCode,
-		Header:       res.Header.Clone(),
+		Header:       header.FromHTTP(res.Header),
 		Body:         res.Body,
 		BodySize:     int64(len(res.Body)),
 		StoredAt:     now,

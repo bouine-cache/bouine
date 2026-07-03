@@ -13,6 +13,7 @@ import (
 
 	"github.com/thylong/bouine/internal/observability"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 func TestBroadcaster_BroadcastPurge(t *testing.T) {
@@ -223,7 +224,7 @@ func TestBroadcastReplicate_Full_BodyCopiedNotAliased(t *testing.T) {
 		Key:           api.Key(42),
 		StatusCode:    200,
 		Body:          originalBody,
-		Header:        http.Header{"X-Test": []string{"v1"}},
+		Header:        header.FromHTTP(http.Header{"X-Test": []string{"v1"}}),
 		SurrogateKeys: []string{"tag-a", "tag-b"},
 	}
 	b.BroadcastReplicate(context.Background(), obj)

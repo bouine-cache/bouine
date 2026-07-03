@@ -46,7 +46,7 @@ func bigObj(key api.Key, bodySize int) *api.Object {
 	return &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     http.Header{header.ContentType: {"application/octet-stream"}},
+		Header:     header.FromHTTP(http.Header{header.ContentType: {"application/octet-stream"}}),
 		Body:       make([]byte, bodySize),
 		BodySize:   int64(bodySize),
 		StoredAt:   time.Now(),

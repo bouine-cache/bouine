@@ -2,9 +2,10 @@ package api
 
 import (
 	"log/slog"
-	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Key is the canonical cache key. It is a plain uint64 xxhash digest
@@ -40,8 +41,11 @@ type Object struct {
 	// StatusCode is the origin HTTP status code.
 	StatusCode int `json:"status_code"`
 	// Header is the stored response headers. Hop-by-hop headers are
-	// stripped at store time.
-	Header http.Header `json:"header"`
+	// stripped at store time. Stored as a compact Map (flat slice
+	// with interned keys) instead of http.Header to reduce per-entry
+	// memory overhead from ~528 B to ~144 B for a typical 10-header
+	// response.
+	Header header.Map `json:"header"`
 	// Body is the response body. For objects in the hot tier this is
 	// the full body; for warm-tier objects it may be nil (body lives
 	// on disk in the mmap segment).

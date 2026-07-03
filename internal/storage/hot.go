@@ -655,20 +655,24 @@ func KeyHash(b []byte) api.Key {
 }
 
 const (
-	objectStructSize    int64 = 232
+	objectStructSize    int64 = 256
 	hotEntrySize        int64 = 24
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 50
-	headerSliceOverhead int64 = 24 // []headerEntry slice header
-	headerEntryOverhead int64 = 32 // headerEntry struct (2 string headers)
+	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
+	headerEntriesSlice int64 = 24 // []headerEntry slice header
+	headerValuesSlice  int64 = 24 // []string slice header
+	headerEntrySize    int64 = 24 // headerEntry struct (key string header 16B + off int 8B)
+	headerValueHeader  int64 = 16 // string header in values slice (ptr + len)
 )
 
 func objSize(obj *api.Object) int64 {
 	size := int64(len(obj.Body)) +
 		objectStructSize + hotEntrySize + sieveEntrySize + mapPerEntryOverhead
 
-	// Map: slice header (24B) + entries (32B each with interned key).
-	size += headerSliceOverhead + headerEntryOverhead*int64(obj.Header.Len())
+	// Map: two slice headers + per-entry overhead (headerEntry 24B + value string header 16B).
+	n := int64(obj.Header.Len())
+	size += headerEntriesSlice + headerValuesSlice + (headerEntrySize+headerValueHeader)*n
 	obj.Header.Range(func(k, v string) bool {
 		size += int64(len(v))
 		return true

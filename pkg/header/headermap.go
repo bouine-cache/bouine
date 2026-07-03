@@ -9,9 +9,9 @@ import (
 )
 
 // Map is a compact, allocation-efficient replacement for http.Header
-// in cached objects. It stores headers as a flat slice of key-value pairs
-// instead of a map[string][]string, eliminating ~528 B/entry of map bucket
-// overhead for a typical 10-header response.
+// in cached objects. It stores headers as a flat slice of key-offset pairs
+// backed by a shared []string values slice, eliminating map bucket overhead
+// for a typical 10-header response.
 //
 // Header keys are interned via a global sync.Map so all cached objects
 // share the same string for common keys like "Content-Type" — saving
@@ -24,17 +24,27 @@ import (
 // stored objects, but the method is retained for interface compatibility
 // with http.Header.
 //
+// The flat values design allows WriteTo to populate an http.Header
+// (map[string][]string) without any per-header allocations on the hit
+// path: each entry's value is a sub-slice of the shared values slice,
+// assigned by reference into the destination map.
+//
 // Map implements json.Marshaler/Unmarshaler so api.Object serializes
 // to the same JSON wire format as when Header was http.Header — the cluster
 // gossip protocol and peer-fetch HTTP API are unaffected.
 type Map struct {
 	entries []headerEntry
+	values  []string
 }
 
-// headerEntry is a single key-value pair in a Map.
+// headerEntry is a single key-offset pair in a Map. The off field indexes
+// into Map.values, so the actual string value lives in the flat values
+// slice. This keeps each entry at 24 bytes (string header + int) instead
+// of 32 bytes (two string headers), and enables zero-allocation WriteTo
+// via values[off : off+1 : off+1] sub-slicing.
 type headerEntry struct {
-	key   string
-	value string
+	key string
+	off int
 }
 
 // keyIntern deduplicates canonical header key strings across all cached
@@ -66,6 +76,7 @@ func FromHTTP(h http.Header) Map {
 	}
 	hm := Map{
 		entries: make([]headerEntry, 0, len(h)),
+		values:  make([]string, 0, len(h)),
 	}
 	for k, vals := range h {
 		if len(vals) == 0 {
@@ -77,9 +88,10 @@ func FromHTTP(h http.Header) Map {
 		} else {
 			v = strings.Join(vals, ", ")
 		}
+		hm.values = append(hm.values, v)
 		hm.entries = append(hm.entries, headerEntry{
-			key:   InternKey(k),
-			value: v,
+			key: InternKey(k),
+			off: len(hm.values) - 1,
 		})
 	}
 	return hm
@@ -92,7 +104,7 @@ func (h Map) Get(key string) string {
 	ck := http.CanonicalHeaderKey(key)
 	for i := range h.entries {
 		if h.entries[i].key == ck {
-			return h.entries[i].value
+			return h.values[h.entries[i].off]
 		}
 	}
 	return ""
@@ -105,11 +117,12 @@ func (h *Map) Set(key, value string) {
 	ck := InternKey(key)
 	for i := range h.entries {
 		if h.entries[i].key == ck {
-			h.entries[i].value = value
+			h.values[h.entries[i].off] = value
 			return
 		}
 	}
-	h.entries = append(h.entries, headerEntry{key: ck, value: value})
+	h.values = append(h.values, value)
+	h.entries = append(h.entries, headerEntry{key: ck, off: len(h.values) - 1})
 }
 
 // SetValues sets the header with the given key to the provided values.
@@ -130,7 +143,9 @@ func (h *Map) SetValues(key string, vals []string) {
 }
 
 // Del removes the header with the given key. No-op if the header is not
-// present.
+// present. The value slot in the values slice is orphaned (not reclaimed)
+// to avoid shifting offsets of other entries; this is acceptable because
+// Del is only called on the store path, not the hit path.
 func (h *Map) Del(key string) {
 	ck := http.CanonicalHeaderKey(key)
 	for i := range h.entries {
@@ -143,14 +158,18 @@ func (h *Map) Del(key string) {
 
 // Values returns all values for the header with the given key. Since
 // multi-value headers are joined at store time, this always returns a
-// single-element slice (or nil if not present). The returned slice is
-// freshly allocated; callers should not hold it across mutations.
+// single-element slice (or nil if not present). The returned slice is a
+// sub-slice of the Map's internal values slice and shares its backing
+// array; callers should not modify it.
 func (h Map) Values(key string) []string {
-	v := h.Get(key)
-	if v == "" {
-		return nil
+	ck := http.CanonicalHeaderKey(key)
+	for i := range h.entries {
+		if h.entries[i].key == ck {
+			off := h.entries[i].off
+			return h.values[off : off+1 : off+1]
+		}
 	}
-	return []string{v}
+	return nil
 }
 
 // Has reports whether the header with the given key exists.
@@ -168,15 +187,19 @@ func (h Map) Has(key string) bool {
 // Intended for bulk construction from a known-unique source (e.g. the
 // binary codec decoder). The key is canonicalized and interned.
 func (h *Map) AppendEntry(key, value string) {
+	h.values = append(h.values, value)
 	h.entries = append(h.entries, headerEntry{
-		key:   InternKey(key),
-		value: value,
+		key: InternKey(key),
+		off: len(h.values) - 1,
 	})
 }
 
 // NewMap returns a Map pre-allocated for n entries.
 func NewMap(n int) Map {
-	return Map{entries: make([]headerEntry, 0, n)}
+	return Map{
+		entries: make([]headerEntry, 0, n),
+		values:  make([]string, 0, n),
+	}
 }
 
 // Len returns the number of distinct header keys.
@@ -184,23 +207,31 @@ func (h Map) Len() int {
 	return len(h.entries)
 }
 
-// Clone returns a shallow copy of the Map. The entry slice is newly
-// allocated; the interned keys and immutable string values are shared.
+// Clone returns a shallow copy of the Map. The entry and values slices
+// are newly allocated; the interned keys and immutable string value data
+// are shared. Mutating the clone does not affect the original.
 func (h Map) Clone() Map {
 	if len(h.entries) == 0 {
 		return Map{}
 	}
 	entries := make([]headerEntry, len(h.entries))
 	copy(entries, h.entries)
-	return Map{entries: entries}
+	values := make([]string, len(h.values))
+	copy(values, h.values)
+	return Map{entries: entries, values: values}
 }
 
 // WriteTo copies all headers into dst, converting each to the
 // map[string][]string form expected by net/http. This replaces
 // maps.Copy(dst, obj.Header) and produces the same result.
+//
+// This is the hit-path method and is allocation-free: each entry's
+// value is a single-element sub-slice of the internal values slice,
+// assigned by reference into dst.
 func (h Map) WriteTo(dst http.Header) {
 	for i := range h.entries {
-		dst[h.entries[i].key] = []string{h.entries[i].value}
+		off := h.entries[i].off
+		dst[h.entries[i].key] = h.values[off : off+1 : off+1]
 	}
 }
 
@@ -209,7 +240,7 @@ func (h Map) WriteTo(dst http.Header) {
 // `for k, vs := range obj.Header` loops.
 func (h Map) Range(f func(key string, value string) bool) {
 	for i := range h.entries {
-		if !f(h.entries[i].key, h.entries[i].value) {
+		if !f(h.entries[i].key, h.values[h.entries[i].off]) {
 			return
 		}
 	}
@@ -224,7 +255,8 @@ func (h Map) MarshalJSON() ([]byte, error) {
 	}
 	m := make(map[string][]string, len(h.entries))
 	for i := range h.entries {
-		m[h.entries[i].key] = []string{h.entries[i].value}
+		off := h.entries[i].off
+		m[h.entries[i].key] = h.values[off : off+1 : off+1]
 	}
 	return json.Marshal(m)
 }
@@ -237,6 +269,7 @@ func (h *Map) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	h.entries = make([]headerEntry, 0, len(m))
+	h.values = make([]string, 0, len(m))
 	for k, vals := range m {
 		if len(vals) == 0 {
 			continue
@@ -247,9 +280,10 @@ func (h *Map) UnmarshalJSON(data []byte) error {
 		} else {
 			v = strings.Join(vals, ", ")
 		}
+		h.values = append(h.values, v)
 		h.entries = append(h.entries, headerEntry{
-			key:   InternKey(textproto.CanonicalMIMEHeaderKey(k)),
-			value: v,
+			key: InternKey(textproto.CanonicalMIMEHeaderKey(k)),
+			off: len(h.values) - 1,
 		})
 	}
 	return nil

@@ -261,8 +261,9 @@ func (e *engine) initCluster(
 				"mode", e.cfg.Cluster.Mode)
 		} else {
 			ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
-				Interval: e.cfg.Cluster.AntiEntropyInterval,
-				Logger:   e.logger,
+				Interval:      e.cfg.Cluster.AntiEntropyInterval,
+				BackfillLimit: e.cfg.Cluster.BackfillLimit,
+				Logger:        e.logger,
 			}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, store, clusterNode.Members, clusterMetrics)
 		}
 	}

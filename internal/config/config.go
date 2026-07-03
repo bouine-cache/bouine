@@ -120,6 +120,12 @@ type Cluster struct {
 	// reconciliation rounds in full mode. Default 30s. Set to 0 to
 	// disable. Has no effect in strong or eventual mode.
 	AntiEntropyInterval time.Duration `yaml:"anti_entropy_interval,omitempty" json:"anti_entropy_interval,omitempty"`
+	// BackfillLimit caps the number of keys backfilled per peer per
+	// anti-entropy round. 0 (default) means no limit — all missing
+	// keys are fetched in one round. Set to a positive value (e.g.
+	// 1000) to prevent thundering herd when a new pod joins a cluster
+	// with many cached objects.
+	BackfillLimit int `yaml:"backfill_limit,omitempty" json:"backfill_limit,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

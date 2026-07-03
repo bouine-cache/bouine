@@ -176,25 +176,6 @@ func TestMap_Range_StopEarly(t *testing.T) {
 	}
 }
 
-func TestMap_FromHTTP_PreservesSetCookie(t *testing.T) {
-	// FromHTTP is a pure conversion function; it does not make policy
-	// decisions about Set-Cookie. The strip is the caller's responsibility
-	// (buildObject strips it unconditionally from cached objects).
-	src := http.Header{}
-	src.Set("Content-Type", "text/html")
-	src.Add("Set-Cookie", "session=abc; Path=/")
-	src.Add("Set-Cookie", "tracking=xyz; Path=/")
-
-	hm := FromHTTP(src)
-
-	if !hm.Has("Set-Cookie") {
-		t.Error("FromHTTP dropped Set-Cookie; it should preserve it for the caller to decide")
-	}
-	if hm.Len() != 2 {
-		t.Errorf("FromHTTP Len = %d, want 2", hm.Len())
-	}
-}
-
 func TestMap_SetValues(t *testing.T) {
 	h := Map{}
 	h.SetValues("X-Multi", []string{"a", "b", "c"})

@@ -401,3 +401,143 @@ routes:
 		t.Errorf("empty methods should be nil/empty, got %v", cfg.Routes[0].Match.Methods)
 	}
 }
+
+// --- HotMaxBytes GOMEMLIMIT derivation (issue #161) ---
+
+func TestResolveHotMaxBytes_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		limit string
+		want  int64
+		ratio int
+	}{
+		{"24GiB default 75%", "24GiB", int64(24<<30) * 75 / 100, 0},
+		{"3GiB default 75%", "3GiB", int64(3<<30) * 75 / 100, 0},
+		{"24GiB ratio 70", "24GiB", int64(24<<30) * 70 / 100, 70},
+		{"24GiB ratio 80", "24GiB", int64(24<<30) * 80 / 100, 80},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := Storage{HotMaxBytesRatio: tc.ratio}
+			s.ResolveHotMaxBytes(tc.limit)
+			if got := s.HotMaxBytes.Bytes(); got != tc.want {
+				t.Fatalf("HotMaxBytes = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveHotMaxBytes_ExplicitOverrideKept(t *testing.T) {
+	t.Parallel()
+	s := Storage{HotMaxBytes: ByteSize(1 << 30)} // 1 GiB explicit
+	s.ResolveHotMaxBytes("24GiB")
+	if got := s.HotMaxBytes.Bytes(); got != 1<<30 {
+		t.Fatalf("explicit override clobbered: got %d, want %d", got, 1<<30)
+	}
+}
+
+func TestResolveHotMaxBytes_NoGomemLimitStaysZero(t *testing.T) {
+	t.Parallel()
+	s := Storage{}
+	s.ResolveHotMaxBytes("")
+	if s.HotMaxBytes.Bytes() != 0 {
+		t.Fatalf("expected 0 when GOMEMLIMIT unset, got %d", s.HotMaxBytes.Bytes())
+	}
+}
+
+func TestResolveHotMaxBytes_InvalidGomemLimitIgnored(t *testing.T) {
+	t.Parallel()
+	s := Storage{}
+	s.ResolveHotMaxBytes("garbage")
+	if s.HotMaxBytes.Bytes() != 0 {
+		t.Fatalf("expected 0 for invalid GOMEMLIMIT, got %d", s.HotMaxBytes.Bytes())
+	}
+}
+
+func TestParse_DerivesHotMaxBytesFromGomemLimitEnv(t *testing.T) {
+	t.Setenv("GOMEMLIMIT", "24GiB")
+	yamlSrc := `
+listen:
+  admin: ":9000"
+storage:
+  eviction: sieve
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := int64(24<<30) * 75 / 100
+	if got := cfg.Storage.HotMaxBytes.Bytes(); got != want {
+		t.Fatalf("HotMaxBytes = %d, want %d (24GiB*0.75)", got, want)
+	}
+}
+
+func TestParse_EmptyConfigDerivesHotMaxBytesFromGomemLimit(t *testing.T) {
+	t.Setenv("GOMEMLIMIT", "3GiB")
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := int64(3<<30) * 75 / 100
+	if got := cfg.Storage.HotMaxBytes.Bytes(); got != want {
+		t.Fatalf("HotMaxBytes = %d, want %d (3GiB*0.75)", got, want)
+	}
+}
+
+func TestResolveHotMaxBytes_PlainIntegerBytes(t *testing.T) {
+	t.Parallel()
+	// The Go runtime's GOMEMLIMIT is a plain byte count when no unit
+	// suffix is supplied.
+	s := Storage{}
+	s.ResolveHotMaxBytes("3221225472") // 3 GiB
+	want := int64(3221225472) * 75 / 100
+	if got := s.HotMaxBytes.Bytes(); got != want {
+		t.Fatalf("HotMaxBytes = %d, want %d", got, want)
+	}
+}
+
+func TestParse_ExplicitHotMaxBytesNotOverriddenByGomemLimit(t *testing.T) {
+	t.Setenv("GOMEMLIMIT", "24GiB")
+	yamlSrc := `
+listen:
+  admin: ":9000"
+storage:
+  hot_max_bytes: 2GiB
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := cfg.Storage.HotMaxBytes.Bytes(); got != 2<<30 {
+		t.Fatalf("explicit hot_max_bytes overridden by GOMEMLIMIT: got %d, want %d", got, 2<<30)
+	}
+}
+
+func TestValidate_HotMaxBytesRatioOutOfRange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		ratio int
+	}{
+		{"negative", -1},
+		{"over 100", 101},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Listen:  Listen{Admin: ":9000"},
+				Storage: Storage{HotMaxBytesRatio: tc.ratio},
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("expected error for ratio %d", tc.ratio)
+			}
+			if !strings.Contains(err.Error(), "hot_max_bytes_ratio") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

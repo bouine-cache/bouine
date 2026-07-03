@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -64,5 +65,9 @@ func loadConfig(path string) (*config.Config, error) {
 		return cfg, nil
 	}
 	d := config.Defaults()
+	// Resolve derived values for the no-config-file path too (Load does
+	// this via Parse). Without it, a container with GOMEMLIMIT set but
+	// no config file would run the hot store without an eviction budget.
+	d.Storage.ResolveHotMaxBytes(os.Getenv("GOMEMLIMIT"))
 	return &d, nil
 }

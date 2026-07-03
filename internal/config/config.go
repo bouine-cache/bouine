@@ -72,10 +72,18 @@ type TLSCert struct {
 
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
-	HotMaxBytes  ByteSize `yaml:"hot_max_bytes,omitempty" json:"hot_max_bytes,omitempty"`
-	WarmDir      string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
-	WarmMaxBytes ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
-	Eviction     string   `yaml:"eviction,omitempty" json:"eviction,omitempty"`
+	HotMaxBytes ByteSize `yaml:"hot_max_bytes,omitempty" json:"hot_max_bytes,omitempty"`
+	// HotMaxBytesRatio is the percentage of GOMEMLIMIT used to derive
+	// HotMaxBytes when hot_max_bytes is not explicitly set. Zero means
+	// use the default (75); otherwise the value must be 1–100. Deriving
+	// from GOMEMLIMIT keeps SIEVE eviction headroom below the Go runtime
+	// soft memory limit so the GC does not enter a death spiral as the
+	// cache fills (issue #161). An explicit hot_max_bytes always takes
+	// precedence.
+	HotMaxBytesRatio int      `yaml:"hot_max_bytes_ratio,omitempty" json:"hot_max_bytes_ratio,omitempty"`
+	WarmDir          string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
+	WarmMaxBytes     ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
+	Eviction         string   `yaml:"eviction,omitempty" json:"eviction,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

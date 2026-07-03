@@ -31,6 +31,12 @@ func Defaults() Config {
 	}
 }
 
+// defaultHotMaxBytesRatio is the fraction of GOMEMLIMIT used to derive
+// the hot store budget when hot_max_bytes is unset. 75% leaves headroom
+// for RSS overhead and lets the Go GC run without aggressive cycles
+// near GOMEMLIMIT (issue #161).
+const defaultHotMaxBytesRatio = 75
+
 // Load reads a YAML file from path, applies Defaults, and validates.
 // Strict mode rejects unknown fields so typos surface immediately.
 func Load(path string) (*Config, error) {
@@ -51,20 +57,21 @@ func Load(path string) (*Config, error) {
 // config equal to Defaults().
 func Parse(b []byte) (*Config, error) {
 	cfg := Defaults()
-	if len(strings.TrimSpace(string(b))) == 0 {
-		if err := cfg.Validate(); err != nil {
-			return nil, err
+	if len(strings.TrimSpace(string(b))) > 0 {
+		dec := yaml.NewDecoder(strings.NewReader(string(b)))
+		dec.KnownFields(true)
+		if err := dec.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("yaml decode: %w", err)
 		}
-		return &cfg, nil
-	}
-	dec := yaml.NewDecoder(strings.NewReader(string(b)))
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("yaml decode: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	// Derive hot_max_bytes from GOMEMLIMIT when unset so the budget
+	// adapts to the runtime memory limit of the deployment (issue #161).
+	// Runs for both empty and populated configs so an empty config file
+	// in a container with GOMEMLIMIT still gets an eviction budget.
+	cfg.Storage.ResolveHotMaxBytes(os.Getenv("GOMEMLIMIT"))
 	return &cfg, nil
 }
 
@@ -109,7 +116,43 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// hot_max_bytes_ratio range check. Zero means "use default" and is valid.
+	if r := c.Storage.HotMaxBytesRatio; r < 0 || r > 100 {
+		return fmt.Errorf("config: storage.hot_max_bytes_ratio must be 0–100, got %d", r)
+	}
+
 	return nil
+}
+
+// ResolveHotMaxBytes derives the hot store memory budget from the
+// GOMEMLIMIT value (as exported by the Go runtime) when hot_max_bytes
+// is not explicitly configured. This keeps SIEVE eviction headroom
+// below the Go runtime soft memory limit so the GC does not enter a
+// death spiral as the cache fills (issue #161).
+//
+// When hot_max_bytes is set explicitly it is kept as-is (operator
+// override). When GOMEMLIMIT is empty or unparseable, HotMaxBytes is
+// left unchanged so the HotStore falls back to its internal default.
+// In practice the Go runtime rejects an invalid GOMEMLIMIT before the
+// process starts, so the unparseable branch is unreachable for the env
+// var; it is tolerated only so unit tests can pass synthetic values.
+func (s *Storage) ResolveHotMaxBytes(goMemLimit string) {
+	if s.HotMaxBytes > 0 {
+		return
+	}
+	raw := strings.TrimSpace(goMemLimit)
+	if raw == "" {
+		return
+	}
+	n, err := parseByteSize(raw)
+	if err != nil || n <= 0 {
+		return
+	}
+	ratio := s.HotMaxBytesRatio
+	if ratio == 0 {
+		ratio = defaultHotMaxBytesRatio
+	}
+	s.HotMaxBytes = ByteSize(n * int64(ratio) / 100)
 }
 
 // validateRoute checks a single route entry and normalises its fields.

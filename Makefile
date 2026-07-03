@@ -117,7 +117,7 @@ templ: ## Regenerate dashboard _templ.go files from *.templ sources.
 .PHONY: hooks
 hooks: ## Install pre-commit hooks (commit + commit-msg + pre-push).
 	@command -v pre-commit >/dev/null || { \
-		echo "pre-commit is required. Install with: pip install pre-commit"; \
+		echo "pre-commit is required. Install with: brew install pre-commit"; \
 		exit 1; \
 	}
 	pre-commit install

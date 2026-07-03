@@ -409,7 +409,7 @@ the CI gates; they exist so problems are caught in seconds, not minutes.
 **Setup is required**, not optional:
 
 ```
-pip install pre-commit            # or: brew install pre-commit
+brew install pre-commit           # or: pip install pre-commit
 pre-commit install                # installs the git hook
 pre-commit install --hook-type commit-msg   # Conventional Commits check
 make hooks                        # one-shot equivalent of the two above

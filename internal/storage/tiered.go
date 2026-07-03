@@ -276,13 +276,13 @@ func (t *TieredStore) Keys() []api.Key {
 		seen[k] = struct{}{}
 		out = append(out, k)
 	}
-	for _, k := range warmKeys {
-		kk := api.Key(k)
-		if _, ok := seen[kk]; ok {
+	for _, wk := range warmKeys {
+		k := api.Key(wk)
+		if _, ok := seen[k]; ok {
 			continue
 		}
-		seen[kk] = struct{}{}
-		out = append(out, kk)
+		seen[k] = struct{}{}
+		out = append(out, k)
 	}
 	return out
 }

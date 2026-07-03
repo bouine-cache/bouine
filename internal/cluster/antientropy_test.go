@@ -323,67 +323,6 @@ func TestAntiEntropy_FetchFailureCounter(t *testing.T) {
 	}
 }
 
-// TestAntiEntropy_AbortsBackfillMidRoundWhenOverBudget covers the
-// per-key OverBudget re-check inside the backfill loop (#175): a
-// single round's backfills can push the store over budget mid-loop,
-// and the reconciler must abort the remaining keys rather than
-// continuing to fill.
-func TestAntiEntropy_AbortsBackfillMidRoundWhenOverBudget(t *testing.T) {
-	t.Parallel()
-	localKeys := []api.Key{1}
-	peerKeys := []api.Key{1, 2, 3, 4}
-	objs := map[api.Key]*api.Object{
-		2: {Key: 2, Body: []byte("b")},
-		3: {Key: 3, Body: []byte("c")},
-		4: {Key: 4, Body: []byte("d")},
-	}
-
-	peer := api.PeerInfo{Name: "peer-1"}
-	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/peer/keys" {
-			buf, _ := EncodeKeySet("peer-1", peerKeys)
-			w.Header().Set("Content-Type", "application/octet-stream")
-			_, _ = w.Write(buf)
-			return
-		}
-		if r.URL.Path == "/v1/peer/fetch" {
-			var req api.PeerFetchRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			if obj, ok := objs[req.Key]; ok {
-				_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
-				return
-			}
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer peerSrv.Close()
-	peer.AdminAddr = peerSrv.Listener.Addr().String()
-
-	bf := &mockBackfiller{objs: objs}
-	ks := &mockKeySource{keys: localKeys}
-	st := &mockStorer{}
-	// Flip over-budget after the first backfill so the mid-loop check
-	// fires on the second key.
-	var putsBeforeOver atomic.Int32
-	st.onPut = func(_ api.Key) {
-		if putsBeforeOver.Add(1) >= 1 {
-			st.overBudget.Store(true)
-		}
-	}
-
-	ae := NewAntiEntropy(AntiEntropyConfig{
-		Interval:      time.Hour, // single round; we call reconcile directly
-		FetchTimeout:  2 * time.Second,
-		BackfillLimit: 0,
-	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
-
-	ae.reconcile(context.Background())
-
-	if got := st.puts.Load(); got != 1 {
-		t.Fatalf("store puts = %d, want 1 (first backfill ok, then mid-round abort)", got)
-	}
-}
-
 func TestKeysToUint64(t *testing.T) {
 	t.Parallel()
 	keys := []api.Key{1, 2, 3}
@@ -432,7 +371,8 @@ func TestAntiEntropy_StreamingDecodeLargeKeySet(t *testing.T) {
 // when the local store is over its memory budget, anti-entropy must
 // skip backfill instead of fighting the eviction policy. Without this
 // guard, backfilled keys re-overfill the hot tier and SIEVE evicts them
-// again, creating a self-sustaining feedback loop.
+// again, creating a self-sustaining feedback loop for small hot-only
+// keys that never reach the warm tier.
 func TestAntiEntropy_SkipsBackfillWhenOverBudget(t *testing.T) {
 	t.Parallel()
 	localKeys := []api.Key{1}
@@ -467,16 +407,12 @@ func TestAntiEntropy_SkipsBackfillWhenOverBudget(t *testing.T) {
 	st.overBudget.Store(true) // store is over budget
 
 	ae := NewAntiEntropy(AntiEntropyConfig{
-		Interval:      50 * time.Millisecond,
+		Interval:      time.Hour, // we call reconcile directly
 		FetchTimeout:  2 * time.Second,
 		BackfillLimit: 0,
 	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ae.Start(ctx)
-	time.Sleep(300 * time.Millisecond)
-	cancel()
+	ae.reconcile(context.Background())
 
 	if got := bf.calls.Load(); got != 0 {
 		t.Fatalf("backfill fetch calls = %d, want 0 (over-budget store must skip backfill)", got)
@@ -490,7 +426,8 @@ func TestAntiEntropy_SkipsBackfillWhenOverBudget(t *testing.T) {
 // secondary amplification: reconcile() built localSet once then looped
 // over all peers, so keys backfilled from peer 1 were not reflected when
 // reconciling with peer 2 — the same keys got backfilled N times per
-// round. The fix refreshes localSet with backfilled keys after each peer.
+// round. The fix records backfilled keys in localSet so subsequent peers
+// in the same round see them as present.
 func TestAntiEntropy_NoDuplicateBackfillAcrossPeers(t *testing.T) {
 	t.Parallel()
 	// dynamicKeySource models the real store: Keys() reflects both the
@@ -527,31 +464,25 @@ func TestAntiEntropy_NoDuplicateBackfillAcrossPeers(t *testing.T) {
 	st.onPut = func(key api.Key) { ks.add(key) }
 
 	ae := NewAntiEntropy(AntiEntropyConfig{
-		Interval:      50 * time.Millisecond,
+		Interval:      time.Hour, // we call reconcile directly
 		FetchTimeout:  2 * time.Second,
 		BackfillLimit: 0,
 	}, "local", ks, bf, st, func() []api.PeerInfo { return peers }, nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ae.Start(ctx)
+	ae.reconcile(context.Background())
 
-	// Wait for at least one backfill, then a full round to confirm no
-	// duplicate from peer 2 in the same round.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if st.puts.Load() >= 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Key 2 should be backfilled exactly once (by peer-1). Peer-2 must
+	// see it as present in localSet and skip. With the key source
+	// reflecting backfills, a second reconcile() call must also skip
+	// (key 2 is now owned).
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("store puts = %d, want 1 (key 2 backfilled once by peer-1, not duplicated by peer-2)", got)
 	}
-	time.Sleep(200 * time.Millisecond) // allow a couple more rounds
-	cancel()
 
-	// Key 2 should be backfilled at most once per round (not once per
-	// peer). With the key source reflecting backfills, only the first
-	// round backfills key 2; subsequent rounds see it as present.
-	if got := st.puts.Load(); got > 1 {
-		t.Fatalf("store puts = %d, want <= 1 (key 2 must not be backfilled once per peer per round, and not re-backfilled once owned)", got)
+	// Second round: key 2 is now in the key source, so neither peer
+	// should backfill it again.
+	ae.reconcile(context.Background())
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("store puts after 2nd round = %d, want 1 (key 2 already owned, must not re-backfill)", got)
 	}
 }

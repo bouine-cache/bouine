@@ -355,41 +355,46 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 	}
 }
 
-// TestTieredStore_OverBudget reports whether the hot tier is over its
-// memory budget. Anti-entropy uses this to skip backfill when the local
-// store is full, preventing the eviction ↔ backfill feedback loop (#175).
+// TestTieredStore_OverBudget verifies the OverBudget contract: it must
+// report true when and only when Stats().HotBytes exceeds the configured
+// MaxBytes. Anti-entropy uses this to skip backfill under memory pressure,
+// preventing the eviction ↔ backfill feedback loop (#175).
 func TestTieredStore_OverBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	const maxBytes = 1024
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1024, NumShards: 2},
-		BodyThreshold: 64 << 10,
+		Hot:           HotConfig{MaxBytes: maxBytes, NumShards: 1},
+		BodyThreshold: 64 << 10, // objects stay hot-only
 	})
 	if err != nil {
 		t.Fatalf("NewTieredStore: %v", err)
 	}
 	t.Cleanup(func() { _ = ts.Close(ctx) })
 
+	// Empty store is not over budget.
 	if ts.OverBudget() {
 		t.Fatal("OverBudget = true on empty store")
 	}
 
-	// Fill past the budget with a hot-only object (below body threshold).
+	// Put a single object larger than maxBytes. With NumShards=1 and an
+	// empty shard, inline eviction has nothing to evict, so the store is
+	// transiently over budget until the background sweeper reclaims.
 	k := KeyHash([]byte("overbudget"))
-	if err := ts.Put(ctx, k, bigObj(k, 900)); err != nil {
+	if err := ts.Put(ctx, k, bigObj(k, maxBytes*2)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// SIEVE may have evicted inline; force over-budget by raising the
-	// bar: put a second object so combined bytes exceed 1024.
-	k2 := KeyHash([]byte("overbudget-2"))
-	if err := ts.Put(ctx, k2, bigObj(k2, 900)); err != nil {
-		t.Fatalf("Put k2: %v", err)
-	}
 
-	// After two ~900-byte objects in a 1024-byte store, at least one
-	// Put must have left the store over budget transiently. The sweeper
-	// may reclaim, so we only assert OverBudget compiles and runs.
-	_ = ts.OverBudget()
+	// OverBudget must agree with the byte-level comparison at the same
+	// instant. The sweeper may or may not have reclaimed by now; either
+	// way, the boolean must match the bytes.
+	st := ts.Stats()
+	got := ts.OverBudget()
+	want := st.HotBytes > maxBytes
+	if got != want {
+		t.Fatalf("OverBudget = %v, want %v (HotBytes=%d, MaxBytes=%d)",
+			got, want, st.HotBytes, maxBytes)
+	}
 }
 
 func TestTieredStore_ImplementsKeyLister(t *testing.T) {

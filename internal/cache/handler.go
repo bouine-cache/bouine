@@ -531,6 +531,12 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		return
 	}
 
+	// Don't store if the handler is shutting down — the store may
+	// close before or during the Put.
+	if ctx.Err() != nil {
+		return
+	}
+
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
 		h.storeAndReplicate(ctx, key, refreshed, req)

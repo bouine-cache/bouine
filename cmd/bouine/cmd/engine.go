@@ -345,6 +345,15 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx con
 					rs.dpMetrics.HotStoreEvictions.Add(float64(delta))
 					lastEvictions = s.Evictions
 				}
+				// Refresh gauges: poll scheduler heap and registry sizes.
+				for _, h := range rs.handlers {
+					scheduled, registry := h.RefreshStats()
+					route := h.RouteName()
+					if route != "" && rs.dpMetrics.RefreshScheduled != nil {
+						rs.dpMetrics.RefreshScheduled.WithLabelValues(route).Set(float64(scheduled))
+						rs.dpMetrics.RefreshRegistrySize.WithLabelValues(route).Set(float64(registry))
+					}
+				}
 			}
 		}
 	})

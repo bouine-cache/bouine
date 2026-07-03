@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -186,6 +187,9 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		// can prefer it under memory pressure.
 		t.hot.SetWarm(key)
 		if t.wal != nil {
+			if err := t.warm.SyncSegment(segID); err != nil {
+				return fmt.Errorf("warm: sync before wal append: %w", err)
+			}
 			return t.wal.Append(wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
 		}
 	}
@@ -198,10 +202,14 @@ func (t *TieredStore) Delete(ctx context.Context, key api.Key) error {
 		return err
 	}
 	if t.warm != nil {
-		if err := t.warm.Delete(uint64(key)); err != nil {
+		segID, err := t.warm.Delete(uint64(key))
+		if err != nil {
 			return err
 		}
 		if t.wal != nil {
+			if err := t.warm.SyncSegment(segID); err != nil {
+				return fmt.Errorf("warm: sync before wal append: %w", err)
+			}
 			return t.wal.Append(wal.DeleteEntry(uint64(key)))
 		}
 	}

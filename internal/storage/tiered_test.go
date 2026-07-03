@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -337,5 +338,153 @@ func TestTieredStore_ImplementsKeyLister(t *testing.T) {
 		if !want[k] {
 			t.Errorf("unexpected key %d in Keys()", k)
 		}
+	}
+}
+
+// TestTiered_TornWriteReplayReturnsMiss reproduces the bug from issue #157:
+// the WAL entry is fsynced but the segment data is not. On restart, WAL
+// replay rebuilds the index pointing at a torn offset. Get must return a
+// clean miss (nil, nil), not an error, and drop the stale index entry.
+func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	ts1, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:        walPath,
+		BodyThreshold: 512,
+	})
+	if err != nil {
+		t.Fatalf("NewTieredStore: %v", err)
+	}
+	k := KeyHash([]byte("torn-write-key"))
+	if err := ts1.Put(ctx, k, bigObj(k, 1024)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := ts1.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	truncateLastSegmentRecord(t, warmDir)
+
+	ts2, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:        walPath,
+		BodyThreshold: 512,
+	})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+
+	got, err := ts2.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get after torn write replay: expected nil error, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected miss (nil) after torn write replay, got object")
+	}
+}
+
+// TestTiered_PutCloseReopenRoundTrip verifies the happy path: after
+// Put + Close + reopen, the warm-tier object is intact and servable.
+// This is a round-trip smoke test, not a durability-ordering proof —
+// the ordering invariant is exercised by TestTiered_TornWriteReplayReturnsMiss.
+func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	ts1, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:        walPath,
+		BodyThreshold: 512,
+	})
+	if err != nil {
+		t.Fatalf("NewTieredStore: %v", err)
+	}
+	k := KeyHash([]byte("durable-key"))
+	if err := ts1.Put(ctx, k, bigObj(k, 1024)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := ts1.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ts2, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:        walPath,
+		BodyThreshold: 512,
+	})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+
+	_ = ts2.hot.Delete(ctx, k)
+	got, err := ts2.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get after reopen: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected hit from warm tier after reopen (data should be durable)")
+	}
+}
+
+// truncateLastSegmentRecord finds the last (highest-ID) .seg file in
+// warmDir, finds the offset of the last record by scanning, and truncates
+// the file mid-body to simulate a torn write where the WAL entry
+// persisted but the segment data did not.
+func truncateLastSegmentRecord(t *testing.T, warmDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(warmDir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", warmDir, err)
+	}
+	var segFile string
+	var maxID = -1
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) != ".seg" {
+			continue
+		}
+		var id int
+		if _, err := fmt.Sscanf(e.Name(), "%d.seg", &id); err != nil {
+			continue
+		}
+		if id > maxID {
+			maxID = id
+			segFile = filepath.Join(warmDir, e.Name())
+		}
+	}
+	if segFile == "" {
+		t.Fatal("no segment file found")
+	}
+
+	scan, err := warm.NewStore(warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("open for scan: %v", err)
+	}
+	var lastOff int64
+	if err := scan.Scan(func(r warm.Record) error {
+		lastOff = r.Offset
+		return nil
+	}); err != nil {
+		_ = scan.Close()
+		t.Fatalf("scan for last offset: %v", err)
+	}
+	_ = scan.Close()
+
+	cutAt := lastOff + 20
+	if err := os.Truncate(segFile, cutAt); err != nil {
+		t.Fatalf("truncate: %v", err)
 	}
 }

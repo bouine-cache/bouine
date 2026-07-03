@@ -201,11 +201,9 @@ func (h *HotStore) shard(key api.Key) *shard {
 	return &h.shards[uint64(key)&h.mask]
 }
 
-// Get looks up a key in the hot tier. Returns nil, nil on miss (not
-// an error — a miss is a normal control-flow outcome).
-//
-// Get looks up key in the hot tier. Returns the object, api.SourceHot
-// on a hit, or nil + empty source on a miss. Bans are checked lazily.
+// Get looks up key in the hot tier. Returns the object and api.SourceHot
+// on a hit, or nil + empty source on a miss (a miss is not an error —
+// it is a normal control-flow outcome). Bans are checked lazily.
 //
 // Fast path (visited bit already set): acquires only a read lock,
 // avoiding write-lock contention under concurrent read-heavy workloads.

@@ -17,8 +17,11 @@ import (
 const objCodecVersion byte = 2
 
 // errCorrupt is returned when an encoded object blob is truncated or
-// otherwise malformed. The caller (TieredStore.Get) treats it like any
-// other store error: log and fall through to a miss.
+// otherwise malformed. TieredStore.Get treats it as a durable eviction:
+// the blob is removed from the warm tier (tombstone + WAL delete) and
+// the call returns a clean miss so the next Put rewrites it. This is
+// distinct from warm.Get errors (CRC mismatch, segment-not-found),
+// which still propagate as hard errors.
 var errCorrupt = errors.New("storage: corrupt object blob")
 
 // encodeObject serialises an Object into the compact binary form used by

@@ -216,30 +216,16 @@ func (t *TieredStore) Delete(ctx context.Context, key api.Key) error {
 // logged, not returned, because callers (Get on decode failure) treat
 // warm eviction as a hint to miss-and-refetch, not a hard failure.
 func (t *TieredStore) evictWarm(key api.Key) {
-	if t.warm == nil {
-		return
-	}
-	segID, err := t.warm.Delete(uint64(key))
-	if err != nil {
+	if err := t.evictWarmErr(key); err != nil {
 		t.logger.Warn("warm evict failed on decode error",
 			"key", key, "error", err)
-		return
-	}
-	if t.wal != nil {
-		if err := t.warm.SyncSegment(segID); err != nil {
-			t.logger.Warn("warm sync failed on decode error",
-				"key", key, "error", err)
-			return
-		}
-		if err := t.wal.Append(wal.DeleteEntry(uint64(key))); err != nil {
-			t.logger.Warn("wal append failed on decode error",
-				"key", key, "error", err)
-		}
 	}
 }
 
-// evictWarmErr is the error-returning variant used by Delete, where a
-// warm eviction failure is a real error the caller must see.
+// evictWarmErr removes a key from the warm tier and appends a WAL delete
+// record so the eviction survives restart. Errors are returned so
+// callers (Delete) can surface them; Get uses the best-effort evictWarm
+// wrapper instead.
 func (t *TieredStore) evictWarmErr(key api.Key) error {
 	if t.warm == nil {
 		return nil

@@ -101,8 +101,9 @@ func normalizeHeaderValue(v string) string {
 // supported. Returns true if a range response was written.
 //
 // stale controls the X-Cache label: true for StaleHit (STALE + Warning 110),
-// false for a fresh Hit (HIT).
-func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale bool) bool {
+// false for a fresh Hit (HIT). src is the storage-tier source (hot/warm/peer),
+// set as X-Cache-Source via direct map assignment (zero alloc).
+func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale bool, src api.Source) bool {
 	rangeHeader := r.Header.Get(header.Range)
 	if rangeHeader == "" {
 		return false
@@ -137,9 +138,11 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 
 	if stale {
 		w.Header()[header.XCache] = headerSTALE
+		w.Header()[header.XCacheSource] = sourceSlice(src)
 		w.Header()[header.Warning] = []string{`110 - "Response is Stale"`}
 	} else {
 		w.Header()[header.XCache] = headerHIT
+		w.Header()[header.XCacheSource] = sourceSlice(src)
 	}
 
 	if len(ranges) == 1 {

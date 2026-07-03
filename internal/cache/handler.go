@@ -65,7 +65,31 @@ var (
 	headerSTALE       = []string{"STALE"}
 	headerBYPASS      = []string{"BYPASS"}
 	headerREVALIDATED = []string{"REVALIDATED"}
+
+	// Pre-allocated X-Cache-Source header values (zero-alloc hit path).
+	sourceHot    = []string{string(api.SourceHot)}
+	sourceWarm   = []string{string(api.SourceWarm)}
+	sourcePeer   = []string{string(api.SourcePeer)}
+	sourceOrigin = []string{string(api.SourceOrigin)}
 )
+
+// sourceSlice returns the pre-allocated []string for a given Source,
+// avoiding per-request slice allocation on the hit path. Returns nil
+// (no header) for the empty source.
+func sourceSlice(src api.Source) []string {
+	switch src {
+	case api.SourceHot:
+		return sourceHot
+	case api.SourceWarm:
+		return sourceWarm
+	case api.SourcePeer:
+		return sourcePeer
+	case api.SourceOrigin:
+		return sourceOrigin
+	default:
+		return nil
+	}
+}
 
 // ageHeaderCache is a pre-allocated table of Age header values for
 // 0–599 seconds. Covers fresh objects with TTLs up to 10 minutes and
@@ -317,7 +341,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Take a single timestamp; thread it through Evaluate and serve
 	// functions to avoid a second time.Now() syscall per hit.
 	now := time.Now()
-	key, obj := h.lookup(r)
+	key, obj, src := h.lookup(r)
 	if rw, ok := w.(*responsewriter.ResponseWriter); ok {
 		rw.SetCacheKey(key)
 	}
@@ -325,20 +349,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if h.tryConditional304(w, r, disp.Object) {
+		if h.tryConditional304(w, r, disp.Object, src) {
 			return
 		}
-		if ServeRange(w, r, disp.Object, disp.Decision == StaleHit) {
+		if ServeRange(w, r, disp.Object, disp.Decision == StaleHit, src) {
 			return
 		}
-		h.serveObject(w, r, disp.Object, now, cacheHit)
+		h.serveObject(w, r, disp.Object, now, cacheHit, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
 			h.triggerBgRevalidate(r, key, disp.Object)
 		}
 	case Miss:
-		h.handleCacheMiss(w, r, key, obj, now)
+		h.handleCacheMiss(w, r, key, obj, now, src)
 	case Revalidate:
-		h.revalidate(w, r, key, disp.Object, now)
+		h.revalidate(w, r, key, disp.Object, now, src)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
@@ -350,13 +374,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // going to origin. The owner has a much higher hit rate for keys it owns
 // (consistent hashing concentrates fills there). On a peer hit the object is
 // stored locally for future requests on this node (L0 promotion).
-func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key api.Key, obj *api.Object, now time.Time) {
+// src is the storage-tier source from lookup (hot/warm); it is overridden
+// to "peer" on a successful peer hit.
+func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key api.Key, obj *api.Object, now time.Time, src api.Source) {
 	if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(key); !isLocal {
 			if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-					h.serveObject(w, r, peerObj, now, cacheHit)
+					h.serveObject(w, r, peerObj, now, cacheHit, api.SourcePeer)
 					// Promote to local hot tier (best-effort; ignore error).
 					_ = h.store.Put(r.Context(), key, peerObj)
 					if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
@@ -375,58 +401,65 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key ap
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
 	// the error to be forwarded to the client.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, key, obj, now)
+		h.fetchAndStoreStayinAlive(w, r, key, obj, now, src)
 	} else {
 		h.fetchAndStore(w, r, key)
 	}
 }
 
 // lookup resolves the cache key and stored object for r, accounting
-// for Vary-based secondary keys.
-func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object) {
+// for Vary-based secondary keys. Returns the source (hot/warm) from
+// the storage tier that served the object.
+func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object, api.Source) {
 	key := h.buildKey(r)
-	obj, err := h.store.Get(r.Context(), key)
+	obj, src, err := h.store.GetWithSource(r.Context(), key)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "key", key, "error", err)
 	}
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
-		return key, obj
+		return key, obj, src
 	}
 	vk := VariantKey(key, obj.Header.Get(header.Vary), r.Header, h.excludeHeaders)
 	if vk == key {
-		return key, obj
+		return key, obj, src
 	}
-	vobj, verr := h.store.Get(r.Context(), vk)
+	vobj, vsrc, verr := h.store.GetWithSource(r.Context(), vk)
 	if verr == nil && vobj != nil {
-		return vk, vobj
+		return vk, vobj, vsrc
 	}
-	return vk, nil
+	return vk, nil, ""
 }
 
 // tryConditional304 returns true and writes a 304 if the client's
 // conditional headers match the cached object. Used for both hit and
-// revalidate paths.
-func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj *api.Object) bool {
+// revalidate paths. src is the storage-tier source (hot/warm).
+func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj *api.Object, src api.Source) bool {
 	if !ClientConditionalMatch(r, obj) {
 		return false
 	}
 	if obj.ETag != "" {
-		w.Header().Set(header.ETag, obj.ETag)
+		w.Header()[header.ETag] = []string{obj.ETag}
 	}
-	w.Header().Set(header.XCache, "HIT")
+	// Direct map assignment avoids http.CanonicalMIMEHeaderKey alloc
+	// from .Set() on the hit path.
+	w.Header()[header.XCache] = headerHIT
+	w.Header()[header.XCacheSource] = sourceSlice(src)
 	w.WriteHeader(http.StatusNotModified)
 	return true
 }
 
 func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 	// only-if-cached with no cached response → 504 Gateway Timeout
-	// (RFC 9111 §5.2.1.7).
+	// (RFC 9111 §5.2.1.7). Source is empty — origin was not contacted.
 	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, header.CacheControl))
 	if reqCC.OnlyIfCached {
+		w.Header()[header.XCache] = headerMISS
 		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		return
 	}
 	w.Header()[header.XCache] = headerBYPASS
+	// Source is empty for BYPASS — origin contact is not attributed to
+	// a cache tier.
 	h.upstream.ServeHTTP(w, r)
 }
 
@@ -463,14 +496,16 @@ const (
 
 // serveObject writes a cached object to the client with the appropriate
 // X-Cache header and Age. Stale responses also get Warning: 110 per
-// RFC 7234 §5.5.3.
-func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult) {
+// RFC 7234 §5.5.3. src is the storage-tier source (hot/warm/peer),
+// set as X-Cache-Source via direct map assignment (zero alloc).
+func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
 	dst := w.Header()
 	obj.Header.WriteTo(dst)
 	// Strip internal headers used for ban matching — never forwarded to clients.
 	dst.Del(header.XBouinePath)
 	dst.Del(header.XBouineHost)
 	dst[header.Age] = ageHeader(ComputeAge(obj, now))
+	dst[header.XCacheSource] = sourceSlice(src)
 	switch result {
 	case cacheHit:
 		dst[header.XCache] = headerHIT
@@ -499,6 +534,8 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.Key) {
 	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
+		w.Header()[header.XCache] = headerMISS
+		w.Header()[header.XCacheSource] = sourceOrigin
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -507,30 +544,32 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
 // serving the super-stale obj if the upstream is unavailable.
-func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time) {
+// src is the original storage-tier source from lookup (hot/warm),
+// threaded to stale-fallback serveObject calls.
+func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
 	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", key)
-		h.serveObject(w, r, stale, now, cacheStale)
+		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 			"status", res.StatusCode, "key", key)
-		h.serveObject(w, r, stale, now, cacheStale)
+		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
 	h.writeAndMaybeStore(w, r, key, res)
 }
 
-func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time) {
+func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
 	res := h.doFetch(revalReq)
 	if res.Err != nil {
-		h.serveObject(w, r, stale, now, cacheStale)
+		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
 
@@ -541,13 +580,13 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		if h.stayinAlive {
 			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
 				"status", res.StatusCode, "key", stale.Key)
-			h.serveObject(w, r, stale, now, cacheStale)
+			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}
 		// Serve stale unless the stored response demands revalidation.
 		cc := objDirectives(stale)
 		if !cc.MustRevalidate && !cc.ProxyRevalidate {
-			h.serveObject(w, r, stale, now, cacheStale)
+			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}
 	}
@@ -555,7 +594,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
 		h.storeAndReplicate(r.Context(), key, refreshed)
-		h.serveObject(w, r, refreshed, now, cacheRevalidated)
+		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
@@ -653,6 +692,7 @@ func (h *Handler) writeAndMaybeStore(
 		dst[k] = vals
 	}
 	dst[header.XCache] = headerMISS
+	dst[header.XCacheSource] = sourceOrigin
 	// A proxy SHOULD add an Age header to responses it forwards,
 	// even on first fetch (Age: 0 + any origin Age).
 	if res.Header.Get(header.Age) == "" {
@@ -774,6 +814,11 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 }
 
 func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
+	// POST/PUT/DELETE proxies to the upstream — the upstream was
+	// contacted, so source="origin" is the correct attribution even
+	// though no cache read occurred.
+	w.Header()[header.XCacheSource] = sourceOrigin
+
 	// Capture the upstream response first — only invalidate on success
 	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
 	// indicates a server error).
@@ -784,6 +829,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	if rec.truncated {
 		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
 			"key", h.buildKey(r), "limit", h.maxResponseBytes)
+		w.Header()[header.XCache] = headerMISS
 		http.Error(w, "upstream response too large", http.StatusBadGateway)
 		return
 	}
@@ -793,6 +839,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	for k, vals := range rec.header {
 		dst[k] = vals
 	}
+	dst[header.XCache] = headerMISS
 	w.WriteHeader(rec.statusCode)
 	_, _ = w.Write(rec.body.Bytes())
 

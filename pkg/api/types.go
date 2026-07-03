@@ -21,6 +21,27 @@ const (
 	CacheResultBypass CacheResult = "bypass"
 )
 
+// Source describes where a cached response was served from. It is the
+// value carried by the X-Cache-Source response header and the `source`
+// Prometheus label on data-plane request metrics. Clients MUST tolerate
+// unknown values.
+//
+// Stable.
+type Source string
+
+const (
+	// SourceHot — served from the hot tier (in-RAM, L0).
+	SourceHot Source = "hot"
+	// SourceWarm — served from the warm tier (mmap disk, L1), promoted
+	// to hot on access.
+	SourceWarm Source = "warm"
+	// SourcePeer — served from a cluster peer via peer-fetch RPC.
+	SourcePeer Source = "peer"
+	// SourceOrigin — fetched from the upstream origin (including error
+	// responses and write-through proxy).
+	SourceOrigin Source = "origin"
+)
+
 // RequestContext is the canonical metadata captured for a single
 // processed request. Phase 1+ populate fields as features land.
 //

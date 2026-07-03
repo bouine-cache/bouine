@@ -120,22 +120,30 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 // consulted and the object is promoted back into the hot tier so
 // the next hit is served from RAM.
 func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error) {
-	obj, err := t.hot.Get(ctx, key)
+	obj, _, err := t.GetWithSource(ctx, key)
+	return obj, err
+}
+
+// GetWithSource is the source-aware variant of Get. It returns
+// api.SourceHot for a hot-tier hit and api.SourceWarm for a warm-tier
+// hit (the object is promoted to hot on warm-tier access).
+func (t *TieredStore) GetWithSource(ctx context.Context, key api.Key) (*api.Object, api.Source, error) {
+	obj, src, err := t.hot.GetWithSource(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if obj != nil {
-		return obj, nil
+		return obj, src, nil
 	}
 	if t.warm == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	body, wErr := t.warm.Get(uint64(key))
 	if wErr != nil {
-		return nil, wErr
+		return nil, "", wErr
 	}
 	if body == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	loaded, decErr := decodeObject(body)
 	if decErr != nil {
@@ -146,7 +154,7 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 		t.logger.Warn("evicting undecodable warm blob",
 			"key", key, "error", decErr)
 		t.evictWarm(key)
-		return nil, nil
+		return nil, "", nil
 	}
 	// Re-derive transient fields not serialised to disk (tagged json:"-").
 	// These fields exist purely for hit-path performance; recalculating them
@@ -172,9 +180,9 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 	// being demoted to warm.
 	if t.hot.MatchesActiveBan(loaded) {
 		_ = t.hot.Delete(ctx, key)
-		return nil, nil
+		return nil, "", nil
 	}
-	return loaded, nil
+	return loaded, api.SourceWarm, nil
 }
 
 // Put stores an object in the hot tier and, for large objects, also

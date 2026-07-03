@@ -174,6 +174,13 @@ const (
 	// response: "HIT", "MISS", "STALE", "BYPASS", or "REVALIDATED".
 	XCache = "X-Cache"
 
+	// XCacheSource — bouine's cache source header set on every served
+	// response: "hot", "warm", "peer", "origin", or empty for non-origin
+	// paths (BYPASS, only-if-cached 504). Split from X-Cache so operators
+	// can distinguish where a HIT was served from without scraping the
+	// storage layer.
+	XCacheSource = "X-Cache-Source"
+
 	// XBouineHost — stored on cached objects to record the request Host
 	// at storage time. Used by ban/purge predicates and the dashboard.
 	XBouineHost = "X-Bouine-Host"

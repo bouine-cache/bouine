@@ -15,11 +15,11 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		Key:        api.Key(0xDEADBEEFCAFE),
 		VaryKey:    "accept-encoding=gzip",
 		StatusCode: http.StatusOK,
-		Header: http.Header{
+		Header: header.FromHTTP(http.Header{
 			header.ContentType:  {"application/json"},
 			header.CacheControl: {"public", "max-age=600"},
 			header.Vary:         {"Accept-Encoding"},
-		},
+		}),
 		Body:                 []byte("the quick brown fox jumps over the lazy dog"),
 		BodySize:             43,
 		StoredAt:             time.Unix(1_700_000_000, 123).UTC(),
@@ -55,18 +55,19 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	if len(got.SurrogateKeys) != 2 || got.SurrogateKeys[0] != "product-42" {
 		t.Errorf("surrogate keys mismatch: %v", got.SurrogateKeys)
 	}
-	for k, want := range orig.Header {
-		if g := got.Header[k]; len(g) != len(want) {
-			t.Errorf("header %q: got %v want %v", k, g, want)
+	orig.Header.Range(func(k, want string) bool {
+		if g := got.Header.Get(k); g != want {
+			t.Errorf("header %q: got %q want %q", k, g, want)
 		}
-	}
+		return true
+	})
 }
 
 func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 	// Zero LastModified, empty body, no surrogate keys, single header.
 	orig := &api.Object{
 		StatusCode: http.StatusNoContent,
-		Header:     http.Header{header.XCache: {"MISS"}},
+		Header:     header.FromHTTP(http.Header{header.XCache: {"MISS"}}),
 		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
 	}
 	got, err := decodeObject(encodeObject(orig))
@@ -89,7 +90,7 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 		"empty":       {},
 		"legacy json": []byte(`{"key":1,"status_code":200}`),
 		"bad version": {0xFE, 0x01, 0x02},
-		"truncated":   encodeObject(&api.Object{Header: http.Header{"A": {"b"}}, Body: []byte("xx")})[:4],
+		"truncated":   encodeObject(&api.Object{Header: header.FromHTTP(http.Header{"A": {"b"}}), Body: []byte("xx")})[:4],
 	}
 	for name, blob := range cases {
 		if _, err := decodeObject(blob); err == nil {

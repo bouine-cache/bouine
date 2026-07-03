@@ -56,7 +56,7 @@ func ComputeAge(obj *api.Object, now time.Time) time.Duration {
 // malformed values per RFC 9110 §5.6.1. Invalid, negative, or
 // non-integer values (e.g. floats like "7200.0") return 0.
 // Values > 2^31 are treated as stale (RFC 9111 §5.1).
-func parseOriginAge(h http.Header) time.Duration {
+func parseOriginAge(h headerGetter) time.Duration {
 	ageStr := strings.TrimSpace(h.Get(header.Age))
 	if ageStr == "" {
 		return 0
@@ -84,7 +84,7 @@ func parseOriginAge(h http.Header) time.Duration {
 // mergeHeaderValues joins all values of a header name into a single
 // comma-separated string. HTTP allows multiple headers with the same
 // name; Cache-Control especially may appear as multiple lines.
-func mergeHeaderValues(h http.Header, name string) string { //nolint:unparam // intentionally general
+func mergeHeaderValues(h headerGetter, name string) string { //nolint:unparam // intentionally general
 	vals := h.Values(name)
 	if len(vals) <= 1 {
 		return h.Get(name)

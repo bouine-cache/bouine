@@ -116,7 +116,7 @@ func TestServeRange_SingleRange(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     http.Header{header.ContentType: {"text/plain"}},
+		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:       []byte("Hello, World!"),
 		BodySize:   13,
 	}
@@ -148,7 +148,7 @@ func TestServeRange_SuffixRange(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     http.Header{},
+		Header:     header.Map{},
 		Body:       []byte("abcdefghij"),
 		BodySize:   10,
 	}
@@ -170,7 +170,7 @@ func TestServeRange_OpenEnded(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     http.Header{},
+		Header:     header.Map{},
 		Body:       []byte("abcde"),
 		BodySize:   5,
 	}
@@ -192,7 +192,7 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     http.Header{},
+		Header:     header.Map{},
 		Body:       []byte("ab"),
 		BodySize:   2,
 	}

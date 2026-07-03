@@ -22,7 +22,7 @@ func obj(key api.Key, bodySize int) *api.Object {
 	return &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     http.Header{header.ContentType: {"text/plain"}},
+		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:       make([]byte, bodySize),
 		BodySize:   int64(bodySize),
 		StoredAt:   time.Now(),
@@ -114,7 +114,7 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 	fresh := &api.Object{
 		Key:        KeyHash([]byte("fresh")),
 		StatusCode: 200,
-		Header:     http.Header{header.ContentType: {"text/plain"}},
+		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:       make([]byte, 100),
 		BodySize:   100,
 		StoredAt:   now,
@@ -123,7 +123,7 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 	expired := &api.Object{
 		Key:                  KeyHash([]byte("expired")),
 		StatusCode:           200,
-		Header:               http.Header{header.ContentType: {"text/plain"}},
+		Header:               header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:                 make([]byte, 100),
 		BodySize:             100,
 		StoredAt:             now.Add(-10 * time.Minute),
@@ -165,7 +165,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 	withinSWR := &api.Object{
 		Key:                  KeyHash([]byte("swr")),
 		StatusCode:           200,
-		Header:               http.Header{header.ContentType: {"text/plain"}},
+		Header:               header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:                 make([]byte, 100),
 		BodySize:             100,
 		StoredAt:             now.Add(-5 * time.Second),
@@ -175,7 +175,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 	withinSIE := &api.Object{
 		Key:          KeyHash([]byte("sie")),
 		StatusCode:   200,
-		Header:       http.Header{header.ContentType: {"text/plain"}},
+		Header:       header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:         make([]byte, 100),
 		BodySize:     100,
 		StoredAt:     now.Add(-5 * time.Second),
@@ -203,8 +203,8 @@ func TestObjSize_AccountsForHeaders(t *testing.T) {
 	}
 
 	bodyLen := int64(100)
-	objSmall := &api.Object{Body: make([]byte, bodyLen), Header: smallHeaders}
-	objBig := &api.Object{Body: make([]byte, bodyLen), Header: bigHeaders}
+	objSmall := &api.Object{Body: make([]byte, bodyLen), Header: header.FromHTTP(smallHeaders)}
+	objBig := &api.Object{Body: make([]byte, bodyLen), Header: header.FromHTTP(bigHeaders)}
 
 	sizeSmall := objSize(objSmall)
 	sizeBig := objSize(objBig)
@@ -251,7 +251,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
-			Header:     hdr,
+			Header:     header.FromHTTP(hdr),
 			Body:       make([]byte, 64),
 			BodySize:   64,
 			StoredAt:   time.Now(),

@@ -13,7 +13,7 @@ import (
 func freshObj(ttl time.Duration) *api.Object {
 	return &api.Object{
 		StatusCode:   200,
-		Header:       http.Header{header.CacheControl: {"max-age=60"}},
+		Header:       header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}}),
 		CacheControl: "max-age=60",
 		Body:         []byte("cached"),
 		BodySize:     6,

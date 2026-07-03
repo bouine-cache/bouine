@@ -82,7 +82,7 @@ func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
 		if skip[k] {
 			continue
 		}
-		stored.Header[k] = vals
+		stored.Header.SetValues(k, vals)
 	}
 }
 

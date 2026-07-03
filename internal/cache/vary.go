@@ -127,14 +127,13 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 	}
 
 	// Copy stored response headers (skip Content-Length; we replace it).
-	for k, vals := range obj.Header {
+	obj.Header.Range(func(k, v string) bool {
 		if strings.EqualFold(k, header.ContentLength) {
-			continue
+			return true
 		}
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
+		w.Header().Add(k, v)
+		return true
+	})
 
 	if stale {
 		w.Header()[header.XCache] = headerSTALE

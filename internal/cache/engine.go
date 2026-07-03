@@ -13,6 +13,14 @@ import (
 // functions (evalMiss, evalNoCache, freshWithRequestCC, evalStale,
 // revalidateOrMiss) live here. All other logic is in the sibling files.
 
+// headerGetter is the minimal read interface for HTTP headers. Both
+// http.Header and header.Map satisfy it, so functions that only
+// need Get/Values can accept either type without conversion.
+type headerGetter interface {
+	Get(key string) string
+	Values(key string) []string
+}
+
 // Decision is the outcome of the cache state machine.
 type Decision int
 

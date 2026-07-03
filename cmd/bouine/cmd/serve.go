@@ -42,7 +42,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 
-			return newEngine(cfg, configPath, logger).run(ctx)
+			return newRunner(newEngine(cfg, configPath, logger)).run(ctx)
 		},
 	}
 

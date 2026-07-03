@@ -2,8 +2,8 @@ package cmd
 
 // builder.go contains the wiring helpers that construct bouine subsystems
 // from configuration: buildStore, buildCluster, buildHandler, buildPools,
-// buildRouter, and the listenPort utility. Lifecycle orchestration (run,
-// startAdmin, startListeners, etc.) remains in engine.go.
+// buildRouter, and the listenPort utility. Lifecycle orchestration lives
+// in runner.go; type definitions and init helpers live in engine.go.
 
 import (
 	"context"

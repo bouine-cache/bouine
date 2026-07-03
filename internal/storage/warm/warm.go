@@ -167,6 +167,9 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	defer seg.mu.Unlock()
 
 	off := seg.size
+	if _, err := seg.f.Seek(off, io.SeekStart); err != nil {
+		return 0, 0, fmt.Errorf("warm: seek: %w", err)
+	}
 	if err := writeRecord(seg.f, magicLive, key, body); err != nil {
 		return 0, 0, fmt.Errorf("warm: write: %w", err)
 	}
@@ -193,6 +196,9 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 
+	if _, err := seg.f.Seek(seg.size, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("warm: seek: %w", err)
+	}
 	if err := writeRecord(seg.f, magicDead, key, nil); err != nil {
 		return 0, fmt.Errorf("warm: tombstone: %w", err)
 	}

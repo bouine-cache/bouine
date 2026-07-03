@@ -139,7 +139,14 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error)
 	}
 	loaded, decErr := decodeObject(body)
 	if decErr != nil {
-		return nil, decErr
+		// Unreadable blob (legacy codec version or corruption): evict
+		// durably so the next Put rewrites it in the current format.
+		// The warm tier has no TTL/LRU reaper, so without this the stale
+		// blob poisons lookups forever (issue #171).
+		t.logger.Warn("evicting undecodable warm blob",
+			"key", key, "error", decErr)
+		t.evictWarm(key)
+		return nil, nil
 	}
 	// Re-derive transient fields not serialised to disk (tagged json:"-").
 	// These fields exist purely for hit-path performance; recalculating them
@@ -201,17 +208,51 @@ func (t *TieredStore) Delete(ctx context.Context, key api.Key) error {
 	if err := t.hot.Delete(ctx, key); err != nil {
 		return err
 	}
-	if t.warm != nil {
-		segID, err := t.warm.Delete(uint64(key))
-		if err != nil {
-			return err
+	return t.evictWarmErr(key)
+}
+
+// evictWarm removes a key from the warm tier and appends a WAL delete
+// record so the eviction survives restart. Best-effort: errors are
+// logged, not returned, because callers (Get on decode failure) treat
+// warm eviction as a hint to miss-and-refetch, not a hard failure.
+func (t *TieredStore) evictWarm(key api.Key) {
+	if t.warm == nil {
+		return
+	}
+	segID, err := t.warm.Delete(uint64(key))
+	if err != nil {
+		t.logger.Warn("warm evict failed on decode error",
+			"key", key, "error", err)
+		return
+	}
+	if t.wal != nil {
+		if err := t.warm.SyncSegment(segID); err != nil {
+			t.logger.Warn("warm sync failed on decode error",
+				"key", key, "error", err)
+			return
 		}
-		if t.wal != nil {
-			if err := t.warm.SyncSegment(segID); err != nil {
-				return fmt.Errorf("warm: sync before wal append: %w", err)
-			}
-			return t.wal.Append(wal.DeleteEntry(uint64(key)))
+		if err := t.wal.Append(wal.DeleteEntry(uint64(key))); err != nil {
+			t.logger.Warn("wal append failed on decode error",
+				"key", key, "error", err)
 		}
+	}
+}
+
+// evictWarmErr is the error-returning variant used by Delete, where a
+// warm eviction failure is a real error the caller must see.
+func (t *TieredStore) evictWarmErr(key api.Key) error {
+	if t.warm == nil {
+		return nil
+	}
+	segID, err := t.warm.Delete(uint64(key))
+	if err != nil {
+		return err
+	}
+	if t.wal != nil {
+		if err := t.warm.SyncSegment(segID); err != nil {
+			return fmt.Errorf("warm: sync before wal append: %w", err)
+		}
+		return t.wal.Append(wal.DeleteEntry(uint64(key)))
 	}
 	return nil
 }

@@ -341,6 +341,204 @@ func TestTieredStore_ImplementsKeyLister(t *testing.T) {
 	}
 }
 
+// TestTiered_EvictsLegacyCodecBlobOnGet reproduces issue #171: a warm-tier
+// blob written by codec v1 (≤ v0.1.17) is unreadable after the v0.1.18
+// codec bump. Get must return a clean miss (nil, nil), evict the blob
+// durably (warm tombstone + WAL delete), and the heal must survive
+// restart. A subsequent Put of a v2 object for the same key must be
+// readable.
+func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	newStore := func() *TieredStore {
+		ts, err := NewTieredStore(TieredConfig{
+			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:        walPath,
+			BodyThreshold: 512,
+		})
+		if err != nil {
+			t.Fatalf("NewTieredStore: %v", err)
+		}
+		return ts
+	}
+
+	ts1 := newStore()
+	k := KeyHash([]byte("legacy-codec-key"))
+	// Inject a blob whose version byte is 1 (legacy). warm.Put writes
+	// the record and sets the in-memory index; we also append a WAL
+	// PutEntry so the durability of the eviction can be tested after
+	// reopen.
+	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
+	segID, offset, err := ts1.warm.Put(uint64(k), legacyBlob)
+	if err != nil {
+		t.Fatalf("warm.Put: %v", err)
+	}
+	if err := ts1.wal.Append(wal.PutEntry(uint64(k), int32(segID), offset)); err != nil { //nolint:gosec // test
+		t.Fatalf("wal.Append: %v", err)
+	}
+
+	// Get must treat the undecodable blob as a miss, not an error.
+	got, err := ts1.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get: expected nil error for legacy blob, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Get: expected nil (miss) for legacy blob, got object")
+	}
+
+	// The warm-tier index must no longer contain the key: warm.Get
+	// returns nil after the tombstone + index removal.
+	if body, _ := ts1.warm.Get(uint64(k)); body != nil {
+		t.Fatalf("expected warm.Get to return nil after eviction, got %d bytes", len(body))
+	}
+
+	// A fresh Put of a v2 object for the same key must be readable
+	// from the warm tier after hot eviction.
+	fresh := bigObj(k, 1024)
+	if err := ts1.Put(ctx, k, fresh); err != nil {
+		t.Fatalf("Put fresh: %v", err)
+	}
+	if err := ts1.hot.Delete(ctx, k); err != nil {
+		t.Fatalf("hot.Delete: %v", err)
+	}
+	gotFresh, err := ts1.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get fresh from warm: %v", err)
+	}
+	if gotFresh == nil || gotFresh.StatusCode != 200 {
+		t.Fatalf("expected fresh object from warm tier, got %v", gotFresh)
+	}
+
+	// The heal must survive restart: WAL replay processes the Put
+	// (legacy), the Delete (eviction), then the Put (fresh). The key
+	// must resolve to the fresh v2 blob, not the legacy one.
+	if err := ts1.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ts2 := newStore()
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+	// Evict from hot so Get falls through to warm.
+	_ = ts2.hot.Delete(ctx, k)
+	got2, err := ts2.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get after reopen: expected nil error, got %v", err)
+	}
+	if got2 == nil || got2.StatusCode != 200 {
+		t.Fatalf("expected fresh object from warm tier after reopen, got %v", got2)
+	}
+}
+
+// TestTiered_EvictsCorruptBlobOnGet verifies that a warm-tier blob whose
+// record frame is valid but whose encoded content is malformed (errCorrupt
+// from decodeObject) is also evicted on Get, not propagated as an error.
+func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
+	t.Parallel()
+	ts := tieredStore(t, true)
+	ctx := context.Background()
+	k := KeyHash([]byte("corrupt-codec-key"))
+
+	// A blob that starts with the current version byte but is truncated
+	// mid-metadata: decodeObject will set errCorrupt.
+	corruptBlob := encodeObject(&api.Object{
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{"A": {"b"}}),
+		Body:       []byte("xx"),
+	})[:4]
+	if _, _, err := ts.warm.Put(uint64(k), corruptBlob); err != nil {
+		t.Fatalf("warm.Put: %v", err)
+	}
+
+	got, err := ts.Get(ctx, k)
+	if err != nil {
+		t.Fatalf("Get: expected nil error for corrupt blob, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Get: expected nil (miss) for corrupt blob, got object")
+	}
+	if body, _ := ts.warm.Get(uint64(k)); body != nil {
+		t.Fatalf("expected warm.Get to return nil after corrupt eviction, got %d bytes", len(body))
+	}
+}
+
+// TestTiered_EvictsLegacyBlobAfterReopen is the production scenario from
+// issue #171: v0.1.17 writes a codec-v1 blob, the process restarts into
+// v0.1.18, and the first Get must evict the undecodable blob. This tests
+// the reopen path (segment file offset is restored from stat, not from
+// the write cursor) to catch the warm.Put seek bug.
+func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	cfg := TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:        walPath,
+		BodyThreshold: 512,
+	}
+
+	// Phase 1: write a legitimate large object so the segment has real
+	// data at a non-zero offset, then also inject a legacy codec-v1
+	// blob. Close.
+	ts1, err := NewTieredStore(cfg)
+	if err != nil {
+		t.Fatalf("ts1: %v", err)
+	}
+	goodKey := KeyHash([]byte("good-object"))
+	if err := ts1.Put(ctx, goodKey, bigObj(goodKey, 1024)); err != nil {
+		t.Fatalf("Put good: %v", err)
+	}
+	legacyKey := KeyHash([]byte("legacy-after-reopen"))
+	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
+	segID, offset, err := ts1.warm.Put(uint64(legacyKey), legacyBlob)
+	if err != nil {
+		t.Fatalf("warm.Put legacy: %v", err)
+	}
+	if err := ts1.wal.Append(wal.PutEntry(uint64(legacyKey), int32(segID), offset)); err != nil { //nolint:gosec // test
+		t.Fatalf("wal.Append: %v", err)
+	}
+	if err := ts1.Close(ctx); err != nil {
+		t.Fatalf("ts1.Close: %v", err)
+	}
+
+	// Phase 2: reopen. WAL replay re-indexes both keys. Get on the
+	// legacy key must evict it (clean miss). Get on the good key must
+	// still return the valid object (the O_APPEND fix prevents the
+	// tombstone write from corrupting it).
+	ts2, err := NewTieredStore(cfg)
+	if err != nil {
+		t.Fatalf("ts2: %v", err)
+	}
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+
+	// Evict good key from hot so Get falls through to warm for both.
+	_ = ts2.hot.Delete(ctx, goodKey)
+	_ = ts2.hot.Delete(ctx, legacyKey)
+
+	gotLegacy, err := ts2.Get(ctx, legacyKey)
+	if err != nil {
+		t.Fatalf("Get legacy after reopen: expected nil error, got %v", err)
+	}
+	if gotLegacy != nil {
+		t.Fatalf("expected miss for legacy blob after reopen, got object")
+	}
+
+	gotGood, err := ts2.Get(ctx, goodKey)
+	if err != nil {
+		t.Fatalf("Get good after reopen: %v", err)
+	}
+	if gotGood == nil || gotGood.StatusCode != 200 {
+		t.Fatalf("expected good object to survive legacy eviction, got %v", gotGood)
+	}
+}
+
 // TestTiered_TornWriteReplayReturnsMiss reproduces the bug from issue #157:
 // the WAL entry is fsynced but the segment data is not. On restart, WAL
 // replay rebuilds the index pointing at a torn offset. Get must return a

@@ -212,6 +212,8 @@ type Handler struct {
 	refreshSem          chan struct{}
 	refreshMargin       time.Duration
 	refreshTimeout      time.Duration
+	refreshMetrics      observability.RefreshMetricsForRoute
+	routeName           string
 	done                chan struct{}
 	closeOnce           sync.Once
 	refreshWg           sync.WaitGroup
@@ -326,6 +328,11 @@ type HandlerConfig struct {
 	RefreshTimeout time.Duration
 	// RefreshConcurrency bounds concurrent background refresh fetches.
 	RefreshConcurrency int
+	// RouteName labels refresh metrics. Set from the route's config name.
+	RouteName string
+	// RefreshMetrics records background refresh activity. Nil when the
+	// feature is disabled or metrics are not configured.
+	RefreshMetrics *observability.RefreshMetrics
 }
 
 // NewHandler creates a caching handler.
@@ -355,6 +362,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshBeforeExpiry: cfg.RefreshBeforeExpiry,
 		refreshMargin:       cfg.RefreshMargin,
 		refreshTimeout:      cfg.RefreshTimeout,
+		routeName:           cfg.RouteName,
 		done:                make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
@@ -382,6 +390,19 @@ func NewHandler(cfg HandlerConfig) *Handler {
 			h.lookupForRefresh,
 		)
 		h.scheduler.Start()
+		if cfg.RefreshMetrics != nil && cfg.RouteName != "" {
+			h.refreshMetrics = cfg.RefreshMetrics.ForRoute(cfg.RouteName)
+		} else {
+			h.refreshMetrics = observability.RefreshMetricsForRoute{
+				IncTotal:        func(string) {},
+				IncErrors:       func(string) {},
+				IncSkips:        func(string) {},
+				IncInFlight:     func() {},
+				DecInFlight:     func() {},
+				SetScheduled:    func(float64) {},
+				SetRegistrySize: func(float64) {},
+			}
+		}
 	}
 
 	return h
@@ -446,26 +467,31 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 		if h.refreshRegistry != nil {
 			h.refreshRegistry.Unregister(key)
 		}
+		h.refreshMetrics.IncSkips("not_found")
 		return
 	}
 	if !obj.Fresh(time.Now()) {
 		if h.refreshRegistry != nil {
 			h.refreshRegistry.Unregister(key)
 		}
+		h.refreshMetrics.IncSkips("stale")
 		return
 	}
 
 	select {
 	case h.refreshSem <- struct{}{}:
 	default:
+		h.refreshMetrics.IncSkips("semaphore_full")
 		return
 	}
 
 	h.refreshWg.Add(1)
+	h.refreshMetrics.IncInFlight()
 	go func() {
 		defer func() {
 			h.refreshWg.Done()
 			<-h.refreshSem
+			h.refreshMetrics.DecInFlight()
 		}()
 
 		bgCtx, bgCancel := context.WithTimeout(
@@ -495,12 +521,14 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *api.Object) {
 	entry := h.refreshRegistry.Lookup(key)
 	if entry == nil {
+		h.refreshMetrics.IncSkips("not_registered")
 		return
 	}
 
 	u, err := url.Parse(entry.url)
 	if err != nil {
 		h.refreshRegistry.Unregister(key)
+		h.refreshMetrics.IncSkips("bad_url")
 		return
 	}
 
@@ -515,6 +543,8 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	res := h.collapsedFetch(req, key)
 	if res.Err != nil {
+		h.refreshMetrics.IncTotal("error")
+		h.refreshMetrics.IncErrors(errorType(res.Err))
 		remaining := time.Until(stale.StoredAt.Add(stale.TTL))
 		if remaining <= 0 {
 			return
@@ -536,19 +566,61 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
 		h.storeAndReplicate(ctx, key, refreshed, req)
+		h.refreshMetrics.IncTotal("304")
 		return
 	}
 
 	if IsCacheableWithDefault(res.StatusCode, req.Header, res.Header, h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
+			h.refreshMetrics.IncSkips("set_cookie")
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
+			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
 		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		h.storeAndReplicate(ctx, key, obj, req)
+		h.refreshMetrics.IncTotal("200")
+		return
 	}
+	h.refreshMetrics.IncSkips("uncacheable")
+}
+
+// errorType classifies a background refresh error for the
+// bouine_refresh_errors_total metric. Coarse categories are sufficient
+// for alerting and dashboards; the full error is logged.
+func errorType(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline"):
+		return "timeout"
+	case strings.Contains(s, "connection") || strings.Contains(s, "dial") || strings.Contains(s, "EOF"):
+		return "connection"
+	default:
+		return "other"
+	}
+}
+
+// RefreshStats returns the current scheduler heap size and registry size
+// for gauge metrics. Returns zeros when refresh-before-expiry is disabled.
+func (h *Handler) RefreshStats() (scheduled, registry int) {
+	if h.scheduler != nil {
+		scheduled = h.scheduler.Len()
+	}
+	if h.refreshRegistry != nil {
+		registry = h.refreshRegistry.Len()
+	}
+	return
+}
+
+// RouteName returns the route name assigned to this handler, or empty
+// when unset. Used by the engine to label refresh gauge metrics.
+func (h *Handler) RouteName() string {
+	return h.routeName
 }
 
 // buildKey constructs the cache key, applying strip_query_params when

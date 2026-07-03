@@ -32,6 +32,13 @@ type DataPlaneMetrics struct {
 	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
 	CFPurgeDuration *prometheus.HistogramVec // labels: operation
 	CFPurgeSkipped  *prometheus.CounterVec   // labels: reason
+	// Refresh-before-expiry metrics. Nil when no route enables the feature.
+	RefreshTotal        *prometheus.CounterVec // labels: route, result
+	RefreshErrorsTotal  *prometheus.CounterVec // labels: route, error_type
+	RefreshSkipsTotal   *prometheus.CounterVec // labels: route, reason
+	RefreshInFlight     *prometheus.GaugeVec   // labels: route
+	RefreshScheduled    *prometheus.GaugeVec   // labels: route
+	RefreshRegistrySize *prometheus.GaugeVec   // labels: route
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -94,10 +101,49 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "hot_store_evictions_total",
 		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
 	})
+	m.initRefreshMetrics()
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
-		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions)
+		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
+		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
+		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize)
 	return m
+}
+
+// initRefreshMetrics creates the refresh-before-expiry collectors on m.
+// Called from NewDataPlaneMetrics; extracted to keep that function under
+// the funlen limit.
+func (m *DataPlaneMetrics) initRefreshMetrics() {
+	m.RefreshTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "refresh_total",
+		Help:      "Background refresh fetches by result (304, 200, error).",
+	}, []string{"route", "result"})
+	m.RefreshErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "refresh_errors_total",
+		Help:      "Failed background refresh fetches by error type.",
+	}, []string{"route", "error_type"})
+	m.RefreshSkipsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "refresh_skips_total",
+		Help:      "Skipped background refreshes by reason (evicted, stale, semaphore_full, not_found, negative).",
+	}, []string{"route", "reason"})
+	m.RefreshInFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "refresh_in_flight",
+		Help:      "Current in-flight background refresh goroutines.",
+	}, []string{"route"})
+	m.RefreshScheduled = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "refresh_scheduled",
+		Help:      "Entries currently in the refresh scheduler heap.",
+	}, []string{"route"})
+	m.RefreshRegistrySize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "refresh_registry_size",
+		Help:      "Entries currently in the refresh registry.",
+	}, []string{"route"})
 }
 
 // VaryCapHitsCount returns the current Vary cap hit counter value as int64.
@@ -125,6 +171,73 @@ func (m *DataPlaneMetrics) CFPurgeSkippedCount() int64 {
 		}
 	}
 	return total
+}
+
+// RefreshMetrics is the subset of data-plane metrics for the refresh-before-expiry
+// feature. Passed to cache.Handler so it can record background refresh activity
+// without a direct dependency on prometheus types.
+type RefreshMetrics struct {
+	Total        *prometheus.CounterVec // labels: route, result
+	Errors       *prometheus.CounterVec // labels: route, error_type
+	Skips        *prometheus.CounterVec // labels: route, reason
+	InFlight     *prometheus.GaugeVec   // labels: route
+	Scheduled    *prometheus.GaugeVec   // labels: route
+	RegistrySize *prometheus.GaugeVec   // labels: route
+}
+
+// RefreshMetricsForRoute returns nil-safe labelled metric accessors bound to
+// a specific route name. The handler calls these directly; each is a no-op
+// when the underlying vec is nil (feature disabled or no route opted in).
+type RefreshMetricsForRoute struct {
+	IncTotal        func(result string)
+	IncErrors       func(errorType string)
+	IncSkips        func(reason string)
+	IncInFlight     func()
+	DecInFlight     func()
+	SetScheduled    func(float64)
+	SetRegistrySize func(float64)
+}
+
+// ForRoute returns a RefreshMetricsForRoute bound to the given route label.
+// If m is nil or the underlying vecs are nil (metrics disabled), returns
+// no-op closures.
+func (m *RefreshMetrics) ForRoute(route string) RefreshMetricsForRoute {
+	if m == nil || m.Total == nil {
+		return RefreshMetricsForRoute{
+			IncTotal:        func(string) {},
+			IncErrors:       func(string) {},
+			IncSkips:        func(string) {},
+			IncInFlight:     func() {},
+			DecInFlight:     func() {},
+			SetScheduled:    func(float64) {},
+			SetRegistrySize: func(float64) {},
+		}
+	}
+	return RefreshMetricsForRoute{
+		IncTotal:        func(result string) { m.Total.WithLabelValues(route, result).Inc() },
+		IncErrors:       func(errType string) { m.Errors.WithLabelValues(route, errType).Inc() },
+		IncSkips:        func(reason string) { m.Skips.WithLabelValues(route, reason).Inc() },
+		IncInFlight:     func() { m.InFlight.WithLabelValues(route).Inc() },
+		DecInFlight:     func() { m.InFlight.WithLabelValues(route).Dec() },
+		SetScheduled:    func(v float64) { m.Scheduled.WithLabelValues(route).Set(v) },
+		SetRegistrySize: func(v float64) { m.RegistrySize.WithLabelValues(route).Set(v) },
+	}
+}
+
+// RefreshMetricsVec returns the refresh metrics as a RefreshMetrics struct
+// for passing to cache handlers. Returns nil if refresh metrics are nil.
+func (m *DataPlaneMetrics) RefreshMetricsVec() *RefreshMetrics {
+	if m == nil || m.RefreshTotal == nil {
+		return nil
+	}
+	return &RefreshMetrics{
+		Total:        m.RefreshTotal,
+		Errors:       m.RefreshErrorsTotal,
+		Skips:        m.RefreshSkipsTotal,
+		InFlight:     m.RefreshInFlight,
+		Scheduled:    m.RefreshScheduled,
+		RegistrySize: m.RefreshRegistrySize,
+	}
 }
 
 // statusStrings is a pre-allocated table of HTTP status code strings

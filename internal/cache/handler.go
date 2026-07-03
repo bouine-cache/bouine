@@ -51,7 +51,7 @@ const defaultRefreshConcurrency = 8
 // defaultRefreshTimeout bounds a single background refresh fetch. Since
 // there is no client request to inherit a context from, this timeout is
 // the only protection against a hung origin.
-const defaultRefreshTimeout = 30 * time.Second
+const defaultRefreshTimeout = 10 * time.Second
 
 // minRefreshTTL is the minimum TTL an object must have to be scheduled
 // for proactive refresh. Objects with shorter TTLs have a refresh

@@ -52,8 +52,10 @@ const (
 	Date = "Date"
 
 	// ETag — RFC 9110 §8.8.3. Identifier for a specific version of a
-	// resource.
-	ETag = "ETag"
+	// resource. Stored in canonical form ("Etag") to match Go's
+	// textproto.CanonicalMIMEHeaderKey so it can be used directly as an
+	// http.Header map key without .Set()/.Get() canonicalization.
+	ETag = "Etag"
 
 	// Expires — RFC 9110 §8.7.2 / RFC 9111 §4.2.1. Date/time after which
 	// the response is considered stale.

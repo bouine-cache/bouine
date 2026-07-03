@@ -216,7 +216,6 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
 			VaryCapHits:         rs.dpMetrics.VaryCapHits,
 			RefreshBeforeExpiry: rc.Cache.RefreshBeforeExpiry,
-			RefreshNegative:     rc.Cache.RefreshNegative,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {

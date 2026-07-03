@@ -169,18 +169,10 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 			return
 		default:
 		}
-		// Re-check budget per key: a single round's backfills can push
-		// the store over budget mid-loop.
-		if ae.store.OverBudget() {
-			ae.logger.Warn("anti-entropy: aborting backfill mid-round, local store over memory budget",
-				"peer", peer.Name, "repaired", repaired, "remaining", len(missing)-repaired)
-			break
-		}
 		if ae.backfillKey(ctx, peer, key) {
 			repaired++
 			// Record the backfilled key in localSet so subsequent peers
-			// in this round (and the per-key budget re-check above) see
-			// it as present.
+			// in this round see it as present.
 			localSet[key] = struct{}{}
 		}
 	}

@@ -14,13 +14,12 @@ import (
 // revalidateOrMiss) live here. All other logic is in the sibling files.
 
 // headerGetter is the minimal read interface for HTTP headers. Both
-// http.Header and header.Map satisfy it, so functions that only
-// need Get/Values can accept either type without conversion.
+// http.Header and header.Map satisfy it, so parseOriginAge can accept
+// either type without conversion.
 // Used as a generic type constraint, not a runtime interface, to avoid
 // boxing allocations when header.Map (48 bytes) is passed by value.
 type headerGetter interface {
 	Get(key string) string
-	Values(key string) []string
 }
 
 // Decision is the outcome of the cache state machine.
@@ -89,7 +88,7 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 	// helper; this one copy is the deliberate exception.
 	ccStr := obj.CacheControl
 	if ccStr == "" {
-		ccStr = mergeHeaderValues(obj.Header, header.CacheControl)
+		ccStr = obj.Header.Get(header.CacheControl)
 	}
 	respCC := ParseCacheControl(ccStr)
 
@@ -111,7 +110,7 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 func objDirectives(obj *api.Object) Directives {
 	cc := obj.CacheControl
 	if cc == "" {
-		cc = mergeHeaderValues(obj.Header, header.CacheControl)
+		cc = obj.Header.Get(header.CacheControl)
 	}
 	return ParseCacheControl(cc)
 }

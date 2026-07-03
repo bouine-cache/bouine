@@ -577,7 +577,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	refreshed.StoredAt = time.Now()
 	MergeHeaders304(&refreshed, res.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
-	refreshed.CacheControl = mergeHeaderValues(refreshed.Header, header.CacheControl)
+	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
 		refreshed.TTL = ttl
 	}

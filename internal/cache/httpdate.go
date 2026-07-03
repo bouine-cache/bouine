@@ -85,14 +85,9 @@ func parseOriginAge[H headerGetter](h H) time.Duration {
 // comma-separated string. HTTP allows multiple headers with the same
 // name; Cache-Control especially may appear as multiple lines.
 //
-// For http.Header this does two O(1) map lookups (Values + Get). For
-// header.Map, multi-value headers are already joined at store time, so
-// Values always returns a 1-element slice and the function falls through
-// to Get — a second linear scan of the entries slice. This is not a
-// benchmark regression (entries slices are typically 10-15 elements) and
-// the generic avoids interface boxing on the hit path, so the wasted
-// Values scan is accepted rather than specializing per type.
-func mergeHeaderValues[H headerGetter](h H, name string) string { //nolint:unparam // intentionally general
+// This is for http.Header only — header.Map joins multi-values at store
+// time, so callers with a header.Map should use Get directly.
+func mergeHeaderValues(h http.Header, name string) string {
 	vals := h.Values(name)
 	if len(vals) <= 1 {
 		return h.Get(name)

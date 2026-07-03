@@ -42,6 +42,27 @@ import (
 	"github.com/thylong/bouine/pkg/header"
 )
 
+// defaultRefreshConcurrency bounds concurrent background refresh fetches
+// per route. Distinct from bgRevalSem (256, shared) and fetchSem (32,
+// per-handler foreground). Refresh fetches are typically 304s (no body),
+// so memory pressure is minimal.
+const defaultRefreshConcurrency = 8
+
+// defaultRefreshTimeout bounds a single background refresh fetch. Since
+// there is no client request to inherit a context from, this timeout is
+// the only protection against a hung origin.
+const defaultRefreshTimeout = 30 * time.Second
+
+// minRefreshTTL is the minimum TTL an object must have to be scheduled
+// for proactive refresh. Objects with shorter TTLs have a refresh
+// window too tight for a network round-trip.
+const minRefreshTTL = 5 * time.Second
+
+// refreshGetTimeout bounds the store.Get call in triggerBgRefresh.
+// The Get is a freshness check — if the warm tier disk is slow, skip
+// the refresh (the object will expire and the client path handles it).
+const refreshGetTimeout = 5 * time.Second
+
 // defaultMaxResponseBytes is the hard cap on response body buffering
 // when the operator has not configured max_response_bytes. It prevents
 // a single oversized origin response from exhausting memory before the
@@ -181,6 +202,20 @@ type Handler struct {
 	fetchSem         chan struct{}   // bounds concurrent foreground origin fetches
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
+
+	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
+	// a background scheduler fires conditional revalidation at
+	// TTL - margin, keeping objects perpetually fresh.
+	refreshBeforeExpiry bool
+	refreshRegistry     *refreshRegistry
+	scheduler           *RefreshScheduler
+	refreshSem          chan struct{}
+	refreshMargin       time.Duration
+	refreshTimeout      time.Duration
+	refreshNegative     bool
+	routeName           string
+	done                chan struct{}
+	refreshWg           sync.WaitGroup
 	// variantSets tracks the live variant store keys per primary key to
 	// enforce MaxVariants cap. Entries are removed when the handler observes
 	// their eviction via store probes on the cap path, on explicit Delete,
@@ -281,32 +316,53 @@ type HandlerConfig struct {
 	// stored locally. Used in full cluster mode to broadcast the object
 	// to all peers via gossip. Nil in strong and eventual modes.
 	ReplicateFn func(ctx context.Context, obj *api.Object)
+
+	// RefreshBeforeExpiry enables proactive background conditional
+	// revalidation. A background timer fires at TTL - margin.
+	RefreshBeforeExpiry bool
+	// RefreshMargin is the duration before TTL expiry at which the
+	// background refresh fires.
+	RefreshMargin time.Duration
+	// RefreshTimeout bounds a single background refresh fetch.
+	RefreshTimeout time.Duration
+	// RefreshConcurrency bounds concurrent background refresh fetches.
+	RefreshConcurrency int
+	// RefreshNegative controls whether negative-cached objects are refreshed.
+	RefreshNegative bool
+	// RouteName is the route's name from config, used for metrics labels.
+	RouteName string
 }
 
 // NewHandler creates a caching handler.
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{
-		upstream:         cfg.Upstream,
-		store:            cfg.Store,
-		logger:           cfg.Logger,
-		negativeTTL:      cfg.NegativeTTL,
-		jitterPercent:    cfg.JitterPercent,
-		stayinAlive:      cfg.StayinAlive,
-		defaultTTL:       cfg.DefaultTTL,
-		overrideTTL:      cfg.OverrideTTL,
-		defaultSWR:       cfg.DefaultSWR,
-		defaultSIE:       cfg.DefaultSIE,
-		variantSets:      make(map[api.Key]map[api.Key]struct{}),
-		VaryCapHits:      cfg.VaryCapHits,
-		ownerFn:          cfg.OwnerFn,
-		peerFetch:        cfg.PeerFetch,
-		replicateFn:      cfg.ReplicateFn,
-		allowSetCookie:   cfg.AllowSetCookie,
-		maxObjectSize:    cfg.MaxObjectSize,
-		maxResponseBytes: cfg.MaxResponseBytes,
-		stripQueryParams: cfg.StripQueryParams,
-		excludeHeaders:   cfg.ExcludeHeaders,
+		upstream:            cfg.Upstream,
+		store:               cfg.Store,
+		logger:              cfg.Logger,
+		negativeTTL:         cfg.NegativeTTL,
+		jitterPercent:       cfg.JitterPercent,
+		stayinAlive:         cfg.StayinAlive,
+		defaultTTL:          cfg.DefaultTTL,
+		overrideTTL:         cfg.OverrideTTL,
+		defaultSWR:          cfg.DefaultSWR,
+		defaultSIE:          cfg.DefaultSIE,
+		variantSets:         make(map[api.Key]map[api.Key]struct{}),
+		VaryCapHits:         cfg.VaryCapHits,
+		ownerFn:             cfg.OwnerFn,
+		peerFetch:           cfg.PeerFetch,
+		replicateFn:         cfg.ReplicateFn,
+		allowSetCookie:      cfg.AllowSetCookie,
+		maxObjectSize:       cfg.MaxObjectSize,
+		maxResponseBytes:    cfg.MaxResponseBytes,
+		stripQueryParams:    cfg.StripQueryParams,
+		excludeHeaders:      cfg.ExcludeHeaders,
+		refreshBeforeExpiry: cfg.RefreshBeforeExpiry,
+		refreshMargin:       cfg.RefreshMargin,
+		refreshTimeout:      cfg.RefreshTimeout,
+		refreshNegative:     cfg.RefreshNegative,
+		routeName:           cfg.RouteName,
+		done:                make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
@@ -316,7 +372,169 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		conc = defaultFetchConcurrency
 	}
 	h.fetchSem = make(chan struct{}, conc)
+
+	// Wire refresh-before-expiry.
+	if h.refreshBeforeExpiry {
+		if h.refreshTimeout <= 0 {
+			h.refreshTimeout = defaultRefreshTimeout
+		}
+		rc := cfg.RefreshConcurrency
+		if rc <= 0 {
+			rc = defaultRefreshConcurrency
+		}
+		h.refreshSem = make(chan struct{}, rc)
+		h.refreshRegistry = newRefreshRegistry()
+		h.scheduler = NewRefreshScheduler(
+			h.triggerBgRefresh,
+			h.lookupForRefresh,
+		)
+		h.scheduler.Start()
+	}
+
 	return h
+}
+
+// Close drains in-flight refresh goroutines and stops the scheduler.
+// Called during engine shutdown before store.Close() to prevent
+// use-after-close panics.
+func (h *Handler) Close(ctx context.Context) error {
+	close(h.done)
+	if h.scheduler != nil {
+		h.scheduler.Stop()
+	}
+
+	if h.refreshSem != nil {
+		done := make(chan struct{})
+		go func() {
+			h.refreshWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// lookupForRefresh returns the live object for key, or nil if the
+// key is gone or stale. Used by the scheduler's compaction pass.
+func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
+	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
+	defer cancel()
+	obj, _, err := h.store.Get(ctx, key)
+	if err != nil || obj == nil {
+		return nil
+	}
+	if !obj.Fresh(time.Now()) {
+		return nil
+	}
+	return obj
+}
+
+// triggerBgRefresh is called by the scheduler when a key's refreshAt
+// has elapsed. It checks if the object is still fresh in the store,
+// then spawns a background goroutine to perform the conditional fetch.
+func (h *Handler) triggerBgRefresh(key api.Key) {
+	select {
+	case <-h.done:
+		return
+	default:
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
+	obj, _, err := h.store.Get(ctx, key)
+	cancel()
+	if err != nil || obj == nil {
+		if h.refreshRegistry != nil {
+			h.refreshRegistry.Unregister(key)
+		}
+		return
+	}
+	if !obj.Fresh(time.Now()) {
+		return
+	}
+
+	select {
+	case h.refreshSem <- struct{}{}:
+	default:
+		return
+	}
+
+	h.refreshWg.Add(1)
+	go func() {
+		defer func() {
+			h.refreshWg.Done()
+			<-h.refreshSem
+		}()
+
+		bgCtx, bgCancel := context.WithTimeout(
+			context.WithoutCancel(context.Background()),
+			h.refreshTimeout,
+		)
+		defer bgCancel()
+
+		h.doBackgroundRefresh(bgCtx, key, obj)
+	}()
+}
+
+// doBackgroundRefresh performs a conditional fetch to refresh the
+// object before its TTL expires. On 304, the TTL is refreshed in
+// place. On 200, the object is replaced. On error, the entry is
+// re-scheduled with backoff.
+func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *api.Object) {
+	entry := h.refreshRegistry.Lookup(key)
+	if entry == nil {
+		return
+	}
+
+	u, err := url.Parse(entry.url)
+	if err != nil {
+		h.refreshRegistry.Unregister(key)
+		return
+	}
+
+	req := &http.Request{
+		Method: entry.method,
+		URL:    u,
+		Header: entry.header.Clone(),
+		Host:   u.Host,
+	}
+	req = req.WithContext(ctx)
+	ConditionalHeaders(req, stale)
+
+	res := h.collapsedFetch(req, key)
+	if res.Err != nil {
+		remaining := time.Until(stale.StoredAt.Add(stale.TTL))
+		if remaining <= 0 {
+			return
+		}
+		delay := min(h.refreshMargin, remaining/2)
+		if delay < time.Second {
+			delay = time.Second
+		}
+		h.scheduler.Schedule(key, time.Now().Add(delay))
+		return
+	}
+
+	if res.StatusCode == http.StatusNotModified {
+		refreshed := h.refreshFrom304(stale, res)
+		h.storeAndReplicate(ctx, key, refreshed, req)
+		return
+	}
+
+	if IsCacheableWithDefault(res.StatusCode, req.Header, res.Header, h.negativeTTL, h.defaultTTL) {
+		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
+			return
+		}
+		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
+			return
+		}
+		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
+		h.storeAndReplicate(ctx, key, obj, req)
+	}
 }
 
 // buildKey constructs the cache key, applying strip_query_params when
@@ -659,7 +877,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(r.Context(), key, refreshed)
+		h.storeAndReplicate(r.Context(), key, refreshed, r)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
 	}
@@ -731,7 +949,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(ctx, key, refreshed)
+		h.storeAndReplicate(ctx, key, refreshed, r)
 		return
 	}
 
@@ -743,7 +961,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 			return
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(ctx, key, obj)
+		h.storeAndReplicate(ctx, key, obj, r)
 	}
 }
 
@@ -793,10 +1011,10 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(r.Context(), storeKey, obj)
+		h.storeAndReplicate(r.Context(), storeKey, obj, r)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			h.storeAndReplicate(r.Context(), primaryKey, primaryObj)
+			h.storeAndReplicate(r.Context(), primaryKey, primaryObj, r)
 		}
 	}
 }
@@ -917,6 +1135,9 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		h.variantMu.Lock()
 		delete(h.variantSets, key)
 		h.variantMu.Unlock()
+		if h.refreshRegistry != nil {
+			h.refreshRegistry.Unregister(key)
+		}
 
 		// Also evict Content-Location and Location URLs (RFC 9111
 		// §4.4). These are URI references (RFC 9110 §8.7) and may be
@@ -960,7 +1181,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-	h.storeAndReplicate(r.Context(), key, obj)
+	h.storeAndReplicate(r.Context(), key, obj, getReq)
 }
 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
@@ -995,12 +1216,23 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 }
 
 // storeAndReplicate stores obj under key and, if replicateFn is set,
-// broadcasts it to all peers. Every path that stores a cacheable object
-// must go through this helper so replication is never skipped.
-func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.Object) {
+// broadcasts it to all peers. When refresh-before-expiry is enabled,
+// it also registers the key in the refresh registry and schedules a
+// background refresh at TTL - margin. Every path that stores a
+// cacheable object must go through this helper so replication and
+// refresh scheduling are never skipped.
+func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.Object, r *http.Request) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.replicateFn != nil {
 		h.replicateFn(ctx, obj)
+	}
+	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
+		var varyHeader string
+		if obj.Header.Len() > 0 {
+			varyHeader = obj.Header.Get(header.Vary)
+		}
+		h.refreshRegistry.Register(key, r, varyHeader)
+		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 	}
 }
 

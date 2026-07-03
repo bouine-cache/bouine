@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -201,6 +202,24 @@ func validateRouteCache(i int, rc RouteCache) error {
 	}
 	if rc.MaxFetchConcurrency < 0 {
 		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, rc.MaxFetchConcurrency)
+	}
+	return validateRefreshConfig(i, rc)
+}
+
+func validateRefreshConfig(i int, rc RouteCache) error {
+	if rc.RefreshBeforeExpiry {
+		if rc.TTLDefault <= 0 && rc.TTLOverride <= 0 {
+			return fmt.Errorf("config: route %d refresh_before_expiry requires ttl_default or ttl_override > 0", i)
+		}
+	}
+	if rc.RefreshMarginPercent < 0 || rc.RefreshMarginPercent > 50 {
+		return fmt.Errorf("config: route %d refresh_margin_percent must be 0-50, got %d", i, rc.RefreshMarginPercent)
+	}
+	if rc.RefreshConcurrency < 0 || rc.RefreshConcurrency > 64 {
+		return fmt.Errorf("config: route %d refresh_concurrency must be 0-64, got %d", i, rc.RefreshConcurrency)
+	}
+	if rc.RefreshTimeout < 0 || rc.RefreshTimeout > 120*time.Second {
+		return fmt.Errorf("config: route %d refresh_timeout must be 0-120s, got %v", i, rc.RefreshTimeout)
 	}
 	return nil
 }

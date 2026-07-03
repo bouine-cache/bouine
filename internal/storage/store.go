@@ -23,8 +23,7 @@ import (
 //
 // Stable.
 type Store interface {
-	Get(ctx context.Context, key api.Key) (*api.Object, error)
-	GetWithSource(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
+	Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
 	Put(ctx context.Context, key api.Key, obj *api.Object) error
 	Delete(ctx context.Context, key api.Key) error
 	Ban(ctx context.Context, predicate api.BanExpr) (int, error)

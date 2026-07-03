@@ -7,7 +7,7 @@ import (
 	"github.com/thylong/bouine/pkg/api"
 )
 
-func TestHotStore_GetWithSource_Hot(t *testing.T) {
+func TestHotStore_Get_Hot(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	k := KeyHash([]byte("source-hot"))
@@ -17,9 +17,9 @@ func TestHotStore_GetWithSource_Hot(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 
-	got, src, err := s.GetWithSource(context.Background(), k)
+	got, src, err := s.Get(context.Background(), k)
 	if err != nil {
-		t.Fatalf("GetWithSource: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected hit")
@@ -29,14 +29,14 @@ func TestHotStore_GetWithSource_Hot(t *testing.T) {
 	}
 }
 
-func TestHotStore_GetWithSource_Miss(t *testing.T) {
+func TestHotStore_Get_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	k := KeyHash([]byte("source-miss"))
 
-	got, src, err := s.GetWithSource(context.Background(), k)
+	got, src, err := s.Get(context.Background(), k)
 	if err != nil {
-		t.Fatalf("GetWithSource: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got != nil {
 		t.Fatal("expected nil on miss")
@@ -46,7 +46,7 @@ func TestHotStore_GetWithSource_Miss(t *testing.T) {
 	}
 }
 
-func TestTieredStore_GetWithSource_Hot(t *testing.T) {
+func TestTieredStore_Get_Hot(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, false)
 	k := KeyHash([]byte("tiered-hot"))
@@ -56,9 +56,9 @@ func TestTieredStore_GetWithSource_Hot(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 
-	got, src, err := ts.GetWithSource(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k)
 	if err != nil {
-		t.Fatalf("GetWithSource: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected hit")
@@ -68,7 +68,7 @@ func TestTieredStore_GetWithSource_Hot(t *testing.T) {
 	}
 }
 
-func TestTieredStore_GetWithSource_Warm(t *testing.T) {
+func TestTieredStore_Get_Warm(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)
 	k := KeyHash([]byte("tiered-warm"))
@@ -83,9 +83,9 @@ func TestTieredStore_GetWithSource_Warm(t *testing.T) {
 		t.Fatalf("delete from hot: %v", err)
 	}
 
-	got, src, err := ts.GetWithSource(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k)
 	if err != nil {
-		t.Fatalf("GetWithSource: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected warm hit")
@@ -96,9 +96,9 @@ func TestTieredStore_GetWithSource_Warm(t *testing.T) {
 
 	// After warm hit, object is promoted to hot — second Get should
 	// report SourceHot.
-	got2, src2, err := ts.GetWithSource(context.Background(), k)
+	got2, src2, err := ts.Get(context.Background(), k)
 	if err != nil {
-		t.Fatalf("second GetWithSource: %v", err)
+		t.Fatalf("second Get: %v", err)
 	}
 	if got2 == nil {
 		t.Fatal("expected hot hit after promotion")
@@ -108,14 +108,14 @@ func TestTieredStore_GetWithSource_Warm(t *testing.T) {
 	}
 }
 
-func TestTieredStore_GetWithSource_Miss(t *testing.T) {
+func TestTieredStore_Get_Miss(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, false)
 	k := KeyHash([]byte("tiered-miss"))
 
-	got, src, err := ts.GetWithSource(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k)
 	if err != nil {
-		t.Fatalf("GetWithSource: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	if got != nil {
 		t.Fatal("expected nil on miss")
@@ -125,7 +125,7 @@ func TestTieredStore_GetWithSource_Miss(t *testing.T) {
 	}
 }
 
-func TestHotStore_Get_DelegatesToGetWithSource(t *testing.T) {
+func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	k := KeyHash([]byte("delegate"))
@@ -135,7 +135,7 @@ func TestHotStore_Get_DelegatesToGetWithSource(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 
-	got, err := s.Get(context.Background(), k)
+	got, _, err := s.Get(context.Background(), k)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

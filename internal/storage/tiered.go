@@ -118,17 +118,10 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 
 // Get looks up the hot tier first. On a miss, the warm tier is
 // consulted and the object is promoted back into the hot tier so
-// the next hit is served from RAM.
-func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, error) {
-	obj, _, err := t.GetWithSource(ctx, key)
-	return obj, err
-}
-
-// GetWithSource is the source-aware variant of Get. It returns
-// api.SourceHot for a hot-tier hit and api.SourceWarm for a warm-tier
-// hit (the object is promoted to hot on warm-tier access).
-func (t *TieredStore) GetWithSource(ctx context.Context, key api.Key) (*api.Object, api.Source, error) {
-	obj, src, err := t.hot.GetWithSource(ctx, key)
+// the next hit is served from RAM. Returns api.SourceHot or
+// api.SourceWarm depending on which tier served the hit.
+func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error) {
+	obj, src, err := t.hot.Get(ctx, key)
 	if err != nil {
 		return nil, "", err
 	}

@@ -40,7 +40,7 @@ func TestHotStore_PutGet(t *testing.T) {
 	if err := s.Put(context.Background(), k, o); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	got, err := s.Get(context.Background(), k)
+	got, _, err := s.Get(context.Background(), k)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, err := s.Get(context.Background(), 999)
+	got, _, err := s.Get(context.Background(), 999)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestHotStore_Delete(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_ = s.Delete(context.Background(), k)
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got != nil {
 		t.Fatal("expected miss after delete")
 	}
@@ -146,11 +146,11 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 	if after.HotEntries != 1 {
 		t.Fatalf("entries after reap = %d, want 1 (fresh only)", after.HotEntries)
 	}
-	got, _ := s.Get(ctx, expired.Key)
+	got, _, _ := s.Get(ctx, expired.Key)
 	if got != nil {
 		t.Fatal("expired entry should have been reaped")
 	}
-	got, _ = s.Get(ctx, fresh.Key)
+	got, _, _ = s.Get(ctx, fresh.Key)
 	if got == nil {
 		t.Fatal("fresh entry should still be present")
 	}
@@ -277,7 +277,7 @@ func TestHotStore_Replace(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 100))
 	_ = s.Put(context.Background(), k, obj(k, 200))
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got == nil {
 		t.Fatal("expected hit")
 	}
@@ -302,7 +302,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 			for i := range 1000 {
 				k := api.Key(base*1000 + i)
 				_ = s.Put(context.Background(), k, obj(k, 64))
-				_, _ = s.Get(context.Background(), k)
+				_, _, _ = s.Get(context.Background(), k)
 			}
 		}(g)
 	}
@@ -319,8 +319,8 @@ func TestHotStore_Stats(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
-	_, _ = s.Get(context.Background(), k)
-	_, _ = s.Get(context.Background(), 12345) // miss
+	_, _, _ = s.Get(context.Background(), k)
+	_, _, _ = s.Get(context.Background(), 12345) // miss
 
 	st := s.Stats()
 	if st.HotEntries != 1 {
@@ -388,10 +388,10 @@ func TestHotStore_EvictPreferWarm(t *testing.T) {
 	// k2 triggers eviction. k1 (warm) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
-	if got, _ := s.Get(ctx, k1); got != nil {
+	if got, _, _ := s.Get(ctx, k1); got != nil {
 		t.Error("k1 (warm-backed) should have been evicted first")
 	}
-	if got, _ := s.Get(ctx, k2); got == nil {
+	if got, _, _ := s.Get(ctx, k2); got == nil {
 		t.Error("k2 (hot-only, newly inserted) should exist")
 	}
 }
@@ -411,7 +411,7 @@ func TestHotStore_EvictPreferWarm_PreservesVisitedBit(t *testing.T) {
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
 	// Access k1 to set visited=true.
-	_, _ = s.Get(ctx, k1)
+	_, _, _ = s.Get(ctx, k1)
 
 	// Mark k2 as warm-backed.
 	s.SetWarm(k2)
@@ -421,10 +421,10 @@ func TestHotStore_EvictPreferWarm_PreservesVisitedBit(t *testing.T) {
 	k3 := KeyHash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	if got, _ := s.Get(ctx, k1); got == nil {
+	if got, _, _ := s.Get(ctx, k1); got == nil {
 		t.Error("k1 (hot-only, visited) should survive — visited bit preserved")
 	}
-	if got, _ := s.Get(ctx, k2); got != nil {
+	if got, _, _ := s.Get(ctx, k2); got != nil {
 		t.Error("k2 (warm-backed) should have been evicted")
 	}
 }
@@ -445,7 +445,7 @@ func TestHotStore_EvictFallbackNoWarm(t *testing.T) {
 	}
 
 	// k3 must have been inserted (eviction loop allowed it).
-	if _, err := s.Get(ctx, k3); err != nil {
+	if _, _, err := s.Get(ctx, k3); err != nil {
 		t.Fatal("k3 should exist:", err)
 	}
 }
@@ -527,7 +527,7 @@ func TestHotOverflowLatency(t *testing.T) {
 					continue
 				}
 				start := time.Now()
-				_, _ = s.Get(ctx, k)
+				_, _, _ = s.Get(ctx, k)
 				local = append(local, time.Since(start))
 			}
 			mu.Lock()
@@ -618,7 +618,7 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 		t.Fatalf("ban count = %d, want 1", count)
 	}
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got != nil {
 		t.Fatal("expected miss after ban")
 	}
@@ -643,7 +643,7 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 		t.Fatalf("ban count = %d, want 1", count)
 	}
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got != nil {
 		t.Fatal("expected miss after ban")
 	}
@@ -674,7 +674,7 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 	o.StoredAt = banTime.Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got != nil {
 		t.Fatal("expected miss from lazy ban on slow path")
 	}
@@ -693,7 +693,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	o.StoredAt = time.Now().Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got == nil {
 		t.Fatal("expected hit before ban")
 	}
@@ -708,7 +708,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 		t.Fatalf("ban: %v", err)
 	}
 
-	got, _ = s.Get(context.Background(), k)
+	got, _, _ = s.Get(context.Background(), k)
 	if got != nil {
 		t.Fatal("expected miss from lazy ban on fast path")
 	}
@@ -736,7 +736,7 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 	o.StoredAt = banTime.Add(1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k)
 	if got == nil {
 		t.Fatal("expected hit — object stored after ban should be exempt")
 	}

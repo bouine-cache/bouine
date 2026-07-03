@@ -20,8 +20,8 @@ type stubStore struct {
 	objects map[api.Key]*api.Object
 }
 
-func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
-	return s.objects[key], nil
+func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
+	return s.objects[key], "", nil
 }
 
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *httptest.ResponseRecorder {

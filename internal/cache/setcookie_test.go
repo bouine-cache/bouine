@@ -175,7 +175,7 @@ func TestSetCookie_DefaultBlocksEvenWithExplicitFreshness(t *testing.T) {
 
 	// Verify the object was NOT stored.
 	key := BuildKey(httptest.NewRequest("GET", url, nil))
-	obj, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)
+	obj, _, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)
 	if obj != nil {
 		t.Fatal("response with Set-Cookie must NOT be stored when allow_set_cookie is false")
 	}

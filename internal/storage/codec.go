@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/thylong/bouine/pkg/api"
-	headerpkg "github.com/thylong/bouine/pkg/header"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // objCodecVersion is the warm-tier object encoding version. It is the
@@ -95,7 +95,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	obj.ETag = r.str()
 
 	if nh := r.count(); nh > 0 {
-		hm := headerpkg.NewMap(min(nh, 32))
+		hm := header.NewMap(min(nh, 32))
 		for range nh {
 			k := r.str()
 			v := r.str()
@@ -103,7 +103,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 		}
 		obj.Header = hm
 	} else {
-		obj.Header = headerpkg.Map{}
+		obj.Header = header.Map{}
 	}
 
 	if nsk := r.count(); nsk > 0 {

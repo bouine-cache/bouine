@@ -1,0 +1,35 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "bouine.fullname" . }}
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ include "bouine.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.cpuTrigger }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: {{ .Values.autoscaling.cpuTrigger.targetType | default "Utilization" }}
+          {{- if eq .Values.autoscaling.cpuTrigger.targetType "AverageValue" }}
+          averageValue: {{ .Values.autoscaling.cpuTrigger.averageValue }}
+          {{- else }}
+          averageUtilization: {{ .Values.autoscaling.cpuTrigger.averageUtilization }}
+          {{- end }}
+    {{- end }}
+  behavior:
+    scaleDown:
+      stabilizationSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds | default 300 }}
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+{{- end }}

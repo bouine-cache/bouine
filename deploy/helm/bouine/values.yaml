@@ -127,6 +127,13 @@ cloudflare:
 #           key: token
 extraEnv: []
 
+startupProbe:
+  httpGet:
+    path: /readyz
+    port: admin
+  periodSeconds: 5
+  failureThreshold: 60  # 5 minutes max warmup for anti-entropy
+
 readinessProbe:
   httpGet:
     path: /readyz
@@ -140,6 +147,19 @@ livenessProbe:
     port: admin
   periodSeconds: 10
   failureThreshold: 5
+
+# Horizontal Pod Autoscaler. CPU-only — memory-based HPA is not
+# recommended in full cluster mode where every pod stores every
+# object (adding pods increases total memory, not reduces it).
+# Disabled by default. Enable in per-environment values.
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 6
+  cpuTrigger:
+    targetType: Utilization
+    averageUtilization: 70
+  scaleDownStabilizationSeconds: 300
 
 # Volume for the warm tier.
 warmVolume:

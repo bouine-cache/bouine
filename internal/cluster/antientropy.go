@@ -35,10 +35,11 @@ type Backfiller interface {
 }
 
 // Storer writes objects to the local store and reports memory pressure.
-// Implemented by storage.Store. OverBudget is consulted before backfill
-// so anti-entropy does not fight the eviction policy (#175): backfilling
-// into an over-budget hot tier causes SIEVE to evict the new keys, which
-// then look "missing" again next round, creating a self-sustaining loop.
+// Implemented by *storage.TieredStore and *storage.HotStore. OverBudget is
+// consulted before backfill so anti-entropy does not fight the eviction
+// policy (#175): backfilling into an over-budget hot tier causes SIEVE to
+// evict the new keys, which then look "missing" again next round, creating
+// a self-sustaining loop.
 type Storer interface {
 	Put(ctx context.Context, key api.Key, obj *api.Object) error
 	OverBudget() bool
@@ -104,6 +105,20 @@ func (ae *AntiEntropy) loop(ctx context.Context) {
 }
 
 func (ae *AntiEntropy) reconcile(ctx context.Context) {
+	// Skip the entire round when the local store is already over its memory
+	// budget. Anti-entropy should heal drift, not fight the eviction policy:
+	// backfilling into an over-budget hot tier causes SIEVE to evict the new
+	// keys, which then look "missing" again next round (#175). Checking here
+	// avoids N wasted peer key-set fetches when the store is over budget for
+	// a sustained period (the common case under memory pressure). The
+	// per-peer check in reconcileWithPeer still guards the case where peer 1's
+	// backfill pushes the store over budget mid-round.
+	if ae.store.OverBudget() {
+		ae.logger.Warn("anti-entropy: skipping round, local store over memory budget")
+		ae.metrics.SetAntiEntropyKeysRepaired(0)
+		return
+	}
+
 	localKeys := ae.keys.Keys()
 	localSet := make(map[api.Key]struct{}, len(localKeys))
 	for _, k := range localKeys {
@@ -148,10 +163,10 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 		missing = missing[:ae.cfg.BackfillLimit]
 	}
 
-	// Skip backfill when the local store is over its memory budget.
-	// Anti-entropy should heal drift, not fight the eviction policy:
-	// backfilling into an over-budget hot tier causes SIEVE to evict
-	// the new keys, which then look "missing" again next round (#175).
+	// Mid-round guard: a prior peer's backfill in this round may have pushed
+	// the store over budget. Stop backfilling from subsequent peers rather
+	// than feeding SIEVE more keys to evict (#175). The top-of-reconcile
+	// guard handles the sustained-pressure case; this handles the transition.
 	if ae.store.OverBudget() {
 		ae.logger.Warn("anti-entropy: skipping backfill, local store over memory budget",
 			"peer", peer.Name, "missing", len(missing))

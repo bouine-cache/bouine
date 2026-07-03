@@ -175,7 +175,7 @@ func (h Map) Has(key string) bool {
 // AppendEntry adds a key-value pair without checking for duplicates.
 // Intended for bulk construction from a known-unique source (e.g. the
 // binary codec decoder). The key is canonicalized and interned.
-// Entries are appended in source order; call sortEntries after the
+// Entries are appended in source order; call SortEntries after the
 // bulk construction loop to restore canonical-key order.
 func (h *Map) AppendEntry(key, value string) {
 	h.values = append(h.values, value)
@@ -315,5 +315,6 @@ func (h *Map) UnmarshalJSON(data []byte) error {
 			off: len(h.values) - 1,
 		})
 	}
+	h.SortEntries()
 	return nil
 }

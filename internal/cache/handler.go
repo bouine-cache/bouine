@@ -638,7 +638,6 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 			return
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		obj.Header.Del(header.SetCookie)
 		h.storeAndReplicate(ctx, key, obj)
 	}
 }
@@ -688,11 +687,9 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		obj.Header.Del(header.SetCookie)
 		h.storeAndReplicate(r.Context(), storeKey, obj)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			primaryObj.Header.Del(header.SetCookie)
 			h.storeAndReplicate(r.Context(), primaryKey, primaryObj)
 		}
 	}
@@ -851,7 +848,6 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-	obj.Header.Del(header.SetCookie)
 	h.storeAndReplicate(r.Context(), key, obj)
 }
 

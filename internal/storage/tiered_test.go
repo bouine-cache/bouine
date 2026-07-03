@@ -356,9 +356,9 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 }
 
 // TestTieredStore_OverBudget verifies the OverBudget contract: it must
-// report true when and only when Stats().HotBytes exceeds the configured
-// MaxBytes. Anti-entropy uses this to skip backfill under memory pressure,
-// preventing the eviction ↔ backfill feedback loop (#175).
+// report false when the hot tier is within its byte budget and true when
+// it exceeds it. Anti-entropy uses this to skip backfill under memory
+// pressure, preventing the eviction ↔ backfill feedback loop (#175).
 func TestTieredStore_OverBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -370,30 +370,34 @@ func TestTieredStore_OverBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTieredStore: %v", err)
 	}
-	t.Cleanup(func() { _ = ts.Close(ctx) })
 
 	// Empty store is not over budget.
 	if ts.OverBudget() {
 		t.Fatal("OverBudget = true on empty store")
 	}
 
-	// Put a single object larger than maxBytes. With NumShards=1 and an
-	// empty shard, inline eviction has nothing to evict, so the store is
-	// transiently over budget until the background sweeper reclaims.
-	k := KeyHash([]byte("overbudget"))
-	if err := ts.Put(ctx, k, bigObj(k, maxBytes*2)); err != nil {
-		t.Fatalf("Put: %v", err)
+	// Under-budget store is not over budget.
+	k := KeyHash([]byte("small"))
+	if err := ts.Put(ctx, k, bigObj(k, 256)); err != nil {
+		t.Fatalf("Put small: %v", err)
+	}
+	if ts.OverBudget() {
+		t.Fatalf("OverBudget = true with %d bytes under %d max", 256, maxBytes)
 	}
 
-	// OverBudget must agree with the byte-level comparison at the same
-	// instant. The sweeper may or may not have reclaimed by now; either
-	// way, the boolean must match the bytes.
-	st := ts.Stats()
-	got := ts.OverBudget()
-	want := st.HotBytes > maxBytes
-	if got != want {
-		t.Fatalf("OverBudget = %v, want %v (HotBytes=%d, MaxBytes=%d)",
-			got, want, st.HotBytes, maxBytes)
+	// Stop the sweeper so the overshoot from an oversized object is
+	// deterministic. The sweeper would otherwise evict the oversized
+	// object before we can observe OverBudget. Closing done stops both
+	// the sweeper and reaper goroutines; we skip Close in cleanup to
+	// avoid a double-close on done.
+	close(ts.hot.done)
+
+	overK := KeyHash([]byte("oversized"))
+	if err := ts.Put(ctx, overK, bigObj(overK, maxBytes*2)); err != nil {
+		t.Fatalf("Put oversized: %v", err)
+	}
+	if !ts.OverBudget() {
+		t.Fatalf("OverBudget = false after putting %d bytes with %d max", maxBytes*2, maxBytes)
 	}
 }
 

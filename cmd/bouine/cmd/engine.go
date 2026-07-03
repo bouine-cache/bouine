@@ -260,11 +260,20 @@ func (e *engine) initCluster(
 			e.logger.Warn("anti-entropy disabled: store does not implement KeyLister",
 				"mode", e.cfg.Cluster.Mode)
 		} else {
-			ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
-				Interval:      e.cfg.Cluster.AntiEntropyInterval,
-				BackfillLimit: e.cfg.Cluster.BackfillLimit,
-				Logger:        e.logger,
-			}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, store, clusterNode.Members, clusterMetrics)
+			// Storer is a cluster-layer interface (Put + OverBudget); the
+			// concrete store implements it, but storage.Store itself does
+			// not advertise OverBudget since only the cluster layer needs it.
+			storer, ok := any(store).(cluster.Storer)
+			if !ok {
+				e.logger.Warn("anti-entropy disabled: store does not implement Storer",
+					"mode", e.cfg.Cluster.Mode)
+			} else {
+				ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
+					Interval:      e.cfg.Cluster.AntiEntropyInterval,
+					BackfillLimit: e.cfg.Cluster.BackfillLimit,
+					Logger:        e.logger,
+				}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, storer, clusterNode.Members, clusterMetrics)
+			}
 		}
 	}
 

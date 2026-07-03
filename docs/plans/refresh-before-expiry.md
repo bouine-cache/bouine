@@ -107,7 +107,7 @@ equivalent: `proxy_cache_background_update on` +
 | D6 | Separate per-Handler `refreshSem` (not package-level `bgRevalSem`) | Background refresh should not compete with SWR revalidation for semaphore slots. `refreshSem` (default 8) is a per-Handler field, distinct from `bgRevalSem` (package-level, 256, shared across all handlers) and `fetchSem` (per-Handler, 32 foreground). Total worst-case concurrent origin connections: 32 + 256 + 8 = 296. In practice refresh fetches are 304s (no body), so memory pressure is minimal. **Do not consolidate `refreshSem` into a package-level var** — a high-traffic refresh route would starve a low-traffic refresh route. Unlike `bgRevalSem` (shared, best-effort drop), `refreshSem` is per-route to enforce per-route bounds. |
 | D7 | Minimum TTL threshold: 5s | Objects with TTL < 5s are not scheduled. The refresh window (10% of 5s = 0.5s) is too tight for a network round-trip. These objects fall through to normal SWR/miss handling. |
 | D8 | No refresh on Ban / Delete / Put-replace | The scheduler lazily detects these via `store.Get` returning nil. No explicit notification needed. |
-| D9 | No refresh of negative-cached objects (404s) by default | Re-fetching 404s proactively is surprising and wastes origin capacity. `refresh_negative` config field (default false) controls this independently. |
+| D9 | No refresh of negative-cached objects (404s) | Re-fetching 404s proactively is surprising and wastes origin capacity. Negative-cached objects are never scheduled. |
 | D10 | Cluster-aware: only key owner refreshes (strong mode) | Same as the always-warm design. In strong mode, only the consistent-hash owner schedules refreshes. In eventual mode, each node refreshes independently. In full mode, only the original-storing node refreshes. |
 | D11 | `refreshAt` computed as `StoredAt + TTL − margin` | Uses the same `StoredAt` and `TTL` fields that `Fresh()` uses. After a 304 refresh, `refreshFrom304` updates `StoredAt = now` and recomputes `TTL`, so re-scheduling with the new `StoredAt + TTL − margin` is correct. |
 
@@ -451,7 +451,7 @@ not store-level — it's handler-level. No shared state to clean up.
 //
 // Requires caching to be enabled. Objects with TTL < 5s are not
 // scheduled (too tight for a network round-trip). Negative-cached
-// objects (404s) are not refreshed unless refresh_negative is set.
+// objects (404s) are not refreshed.
 //
 // Composes with SWR: if a refresh fails and the object expires, SWR
 // serves stale content while the next client request triggers
@@ -474,13 +474,6 @@ RefreshConcurrency int `yaml:"refresh_concurrency,omitempty" json:"refresh_concu
 // context from, this timeout is the only protection against a hung
 // origin. Default 30s. Range 5s–120s.
 RefreshTimeout time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
-
-// RefreshNegative controls whether negative-cached objects (404,
-// 405, 410, 501) are proactively refreshed. Default false —
-// negative objects expire and are re-fetched on the next client
-// request. Set to true for routes where 404s are expensive and
-// should be kept warm.
-RefreshNegative bool `yaml:"refresh_negative,omitempty" json:"refresh_negative,omitempty"`
 ```
 
 **Validation** (`internal/config/loader.go`):
@@ -530,7 +523,7 @@ risk, zero eviction-path risk.
 - `Handler` struct: add `refreshBeforeExpiry bool`,
   `refreshRegistry *refreshRegistry`, `scheduler *RefreshScheduler`,
   `refreshSem chan struct{}`, `refreshMargin time.Duration`,
-  `refreshTimeout time.Duration`, `refreshNegative bool`,
+  `refreshTimeout time.Duration`,
   `done chan struct{}`, `refreshWg sync.WaitGroup`,
   `handlerID uint64`, `routeName string`
 - `storeAndReplicate`: change signature to `(ctx, key, obj, r *http.Request)`,
@@ -565,7 +558,7 @@ See §9 (Test Plan).
    - Compute `refreshMargin = TTL * marginPercent / 100` (using
      `TTLDefault` or `TTLOverride` as the TTL basis)
    - Set `HandlerConfig.RefreshMargin`, `RefreshConcurrency`,
-     `RefreshTimeout`, `RefreshNegative`
+     `RefreshTimeout`
 2. **Shutdown:** The engine's shutdown sequence must call
    `handler.Close(ctx)` for every handler **before** `store.Close(ctx)`.
    Add a `handlers []io.Closer` slice to `runState` or iterate the
@@ -806,7 +799,6 @@ request headers only. Lazy cancellation via `store.Get` on pop.
 | No new triggers after Close | `handler_test.go` | `triggerBgRefresh` returns early after `done` closed |
 | RefreshTimeout context cancels fetch | `handler_test.go` | Origin hangs → context deadline → error re-schedule |
 | Negative objects not refreshed | `handler_test.go` | 404 with NegativeTTL → not scheduled |
-| RefreshNegative=true schedules 404s | `handler_test.go` | 404 with NegativeTTL → scheduled |
 | Min TTL threshold (5s) not scheduled | `handler_test.go` | Object with TTL=3s → not scheduled |
 | Store.Get nil on pop → unregister | `handler_test.go` | Evicted key → registry entry removed |
 | Config validation | `loader_test.go` | refresh_without_caching → error; margin 0 → error; margin 51 → error |

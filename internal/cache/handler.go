@@ -212,7 +212,6 @@ type Handler struct {
 	refreshSem          chan struct{}
 	refreshMargin       time.Duration
 	refreshTimeout      time.Duration
-	refreshNegative     bool
 	done                chan struct{}
 	closeOnce           sync.Once
 	refreshWg           sync.WaitGroup
@@ -327,8 +326,6 @@ type HandlerConfig struct {
 	RefreshTimeout time.Duration
 	// RefreshConcurrency bounds concurrent background refresh fetches.
 	RefreshConcurrency int
-	// RefreshNegative controls whether negative-cached objects are refreshed.
-	RefreshNegative bool
 }
 
 // NewHandler creates a caching handler.
@@ -358,7 +355,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshBeforeExpiry: cfg.RefreshBeforeExpiry,
 		refreshMargin:       cfg.RefreshMargin,
 		refreshTimeout:      cfg.RefreshTimeout,
-		refreshNegative:     cfg.RefreshNegative,
 		done:                make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
@@ -1245,7 +1241,9 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 		h.replicateFn(ctx, obj)
 	}
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
-		if !h.refreshNegative && IsNegativeCacheable(obj.StatusCode) {
+		// Skip negative-cached objects (404/405/410/501) — refreshing
+		// them proactively is surprising and wastes origin capacity.
+		if IsNegativeCacheable(obj.StatusCode) {
 			return
 		}
 		// In strong cluster mode, only the key owner schedules

@@ -48,6 +48,6 @@ chokepoint for all cacheable stores.
 - Up to `refreshConcurrency` (8) refresh goroutines per route.
 - `Handler` gains `Close(ctx) error` and a `done` channel.
 - `storeAndReplicate` signature changes to include `*http.Request`.
-- New config fields (5) with validation.
+- New config fields (4) with validation.
 - Zero storage-layer changes.
 - Zero hit-path impact.

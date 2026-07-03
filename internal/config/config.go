@@ -296,8 +296,8 @@ type RouteCache struct {
 	// clients always see cache hits. On 200, the object is replaced.
 	//
 	// Requires caching to be enabled. Objects with TTL < 5s are not
-	// scheduled. Negative-cached objects are not refreshed unless
-	// refresh_negative is set.
+	// scheduled. Negative-cached objects (404/405/410/501) are not
+	// refreshed.
 	RefreshBeforeExpiry bool `yaml:"refresh_before_expiry,omitempty" json:"refresh_before_expiry,omitempty"`
 	// RefreshMarginPercent controls when the background refresh fires,
 	// as a percentage of TTL. Default 10 (fire at 90% of TTL). Range 1-50.
@@ -308,9 +308,6 @@ type RouteCache struct {
 	// RefreshTimeout is the maximum duration for a single background
 	// refresh fetch. Default 30s. Range 5s-120s.
 	RefreshTimeout time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
-	// RefreshNegative controls whether negative-cached objects (404,
-	// 405, 410, 501) are proactively refreshed. Default false.
-	RefreshNegative bool `yaml:"refresh_negative,omitempty" json:"refresh_negative,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

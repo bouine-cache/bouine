@@ -59,6 +59,7 @@ type runState struct {
 	headerRing   *observability.OriginHeaderRing
 	snapshotPath string
 	token        string
+	handlers     []*cache.Handler // refresh-enabled handlers, closed before store on shutdown
 
 	clusterNode    *cluster.Cluster
 	peerFetcher    *cluster.PeerFetcher
@@ -646,6 +647,18 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 		}
 		return wg.Wait()
 	})
+	// Close refresh-enabled handlers before the store to prevent
+	// in-flight background refresh goroutines from calling store.Put
+	// on a closed store.
+	if len(rs.handlers) > 0 {
+		rs.seq.AddStep("drain-refresh-handlers", 10*time.Second, func(ctx context.Context) error {
+			var wg errgroup.Group
+			for _, h := range rs.handlers {
+				wg.Go(func() error { return h.Close(ctx) })
+			}
+			return wg.Wait()
+		})
+	}
 	rs.seq.AddStep("flush-store", 10*time.Second, func(ctx context.Context) error {
 		return rs.store.Close(ctx)
 	})

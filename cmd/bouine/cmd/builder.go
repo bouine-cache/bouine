@@ -173,6 +173,9 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 //   - In full mode, ReplicateFn is set so after every cacheable fill the object
 //     is broadcast to all peers via gossip.
 //   - In eventual mode neither is set; every node caches independently.
+//
+// Handlers with refresh-before-expiry enabled are collected into rs.handlers
+// so the engine can Close them before store.Close during shutdown.
 func (e *engine) buildRouter(rs *runState) *server.Router {
 	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
@@ -187,28 +190,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 				continue
 			}
 			consecutive5xx = pc.Health.Passive.Consecutive5xx
-			dialTimeout := pc.Connect.Timeout
-			if dialTimeout <= 0 {
-				dialTimeout = 10 * time.Second
-			}
-			keepAlive := pc.Connect.KeepAlive
-			if keepAlive <= 0 {
-				keepAlive = 30 * time.Second
-			}
-			base := &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout:   dialTimeout,
-					KeepAlive: keepAlive,
-				}).DialContext,
-				MaxIdleConnsPerHost: 64,
-				IdleConnTimeout:     90 * time.Second,
-				ForceAttemptHTTP2:   true,
-			}
-			if pc.Connect.HedgeTimeout > 0 {
-				transport = &origin.HedgedTransport{Inner: base, Timeout: pc.Connect.HedgeTimeout}
-			} else {
-				transport = base
-			}
+			transport = buildTransport(pc)
 			break
 		}
 		upstream := p.Handler(consecutive5xx, transport)
@@ -233,7 +215,11 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			StripQueryParams:    buildStripSet(rc.Cache.Key.StripQueryParams),
 			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
 			VaryCapHits:         rs.dpMetrics.VaryCapHits,
+			RefreshBeforeExpiry: rc.Cache.RefreshBeforeExpiry,
+			RefreshNegative:     rc.Cache.RefreshNegative,
+			RouteName:           rc.Name,
 		}
+		applyRefreshConfig(&cfg, rc.Cache)
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
 				owner := rs.clusterNode.Owner(key)
@@ -247,6 +233,9 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			cfg.ReplicateFn = rs.broadcaster.BroadcastReplicate
 		}
 		cached := cache.NewHandler(cfg)
+		if cfg.RefreshBeforeExpiry {
+			rs.handlers = append(rs.handlers, cached)
+		}
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached)
 	}
 	return router
@@ -302,4 +291,50 @@ func buildExcludeHeaderSet(headers []string) map[string]bool {
 		m[strings.ToLower(h)] = true
 	}
 	return m
+}
+
+// applyRefreshConfig sets the refresh-before-expiry timing fields on
+// the handler config from the route's cache policy. Called only when
+// RefreshBeforeExpiry is true.
+func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
+	if !rc.RefreshBeforeExpiry {
+		return
+	}
+	ttlBasis := rc.TTLOverride
+	if ttlBasis <= 0 {
+		ttlBasis = rc.TTLDefault
+	}
+	marginPct := rc.RefreshMarginPercent
+	if marginPct <= 0 {
+		marginPct = 10
+	}
+	cfg.RefreshMargin = ttlBasis * time.Duration(marginPct) / 100
+	cfg.RefreshTimeout = rc.RefreshTimeout
+	cfg.RefreshConcurrency = rc.RefreshConcurrency
+}
+
+// buildTransport constructs the HTTP transport for an upstream pool,
+// applying dial timeout, keep-alive, and optional hedge settings.
+func buildTransport(pc config.UpstreamPool) http.RoundTripper {
+	dialTimeout := pc.Connect.Timeout
+	if dialTimeout <= 0 {
+		dialTimeout = 10 * time.Second
+	}
+	keepAlive := pc.Connect.KeepAlive
+	if keepAlive <= 0 {
+		keepAlive = 30 * time.Second
+	}
+	base := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   dialTimeout,
+			KeepAlive: keepAlive,
+		}).DialContext,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
+	if pc.Connect.HedgeTimeout > 0 {
+		return &origin.HedgedTransport{Inner: base, Timeout: pc.Connect.HedgeTimeout}
+	}
+	return base
 }

@@ -289,6 +289,28 @@ type RouteCache struct {
 	// fetches block until a slot frees or the request context is
 	// cancelled. Zero (default) applies a safe built-in limit (64).
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
+	// RefreshBeforeExpiry enables proactive background conditional
+	// revalidation. A background timer fires at TTL - margin, performing
+	// a conditional fetch (If-None-Match / If-Modified-Since). On 304,
+	// the TTL is refreshed in place — the object never expires and
+	// clients always see cache hits. On 200, the object is replaced.
+	//
+	// Requires caching to be enabled. Objects with TTL < 5s are not
+	// scheduled. Negative-cached objects are not refreshed unless
+	// refresh_negative is set.
+	RefreshBeforeExpiry bool `yaml:"refresh_before_expiry,omitempty" json:"refresh_before_expiry,omitempty"`
+	// RefreshMarginPercent controls when the background refresh fires,
+	// as a percentage of TTL. Default 10 (fire at 90% of TTL). Range 1-50.
+	RefreshMarginPercent int `yaml:"refresh_margin_percent,omitempty" json:"refresh_margin_percent,omitempty"`
+	// RefreshConcurrency bounds concurrent background refresh fetches
+	// per route. Default 8. Zero means use the default. Range 1-64.
+	RefreshConcurrency int `yaml:"refresh_concurrency,omitempty" json:"refresh_concurrency,omitempty"`
+	// RefreshTimeout is the maximum duration for a single background
+	// refresh fetch. Default 30s. Range 5s-120s.
+	RefreshTimeout time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
+	// RefreshNegative controls whether negative-cached objects (404,
+	// 405, 410, 501) are proactively refreshed. Default false.
+	RefreshNegative bool `yaml:"refresh_negative,omitempty" json:"refresh_negative,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

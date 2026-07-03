@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,12 +34,47 @@ func (m *mockBackfiller) Fetch(_ context.Context, _ api.PeerInfo, req api.PeerFe
 }
 
 type mockStorer struct {
-	puts atomic.Int32
+	puts       atomic.Int32
+	overBudget atomic.Bool
+	backfilled sync.Map // map[api.Key]struct{}
+	onPut      func(api.Key)
 }
 
-func (m *mockStorer) Put(_ context.Context, _ api.Key, _ *api.Object) error {
+func (m *mockStorer) Put(_ context.Context, key api.Key, _ *api.Object) error {
 	m.puts.Add(1)
+	m.backfilled.Store(key, struct{}{})
+	if m.onPut != nil {
+		m.onPut(key)
+	}
 	return nil
+}
+
+func (m *mockStorer) OverBudget() bool {
+	return m.overBudget.Load()
+}
+
+// dynamicKeySource models a real store's key set: it reflects both the
+// initial local keys and any keys added via Put (via add), so the next
+// anti-entropy round sees backfilled keys as present.
+type dynamicKeySource struct {
+	mu   sync.Mutex
+	keys map[api.Key]struct{}
+}
+
+func (d *dynamicKeySource) Keys() []api.Key {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]api.Key, 0, len(d.keys))
+	for k := range d.keys {
+		out = append(out, k)
+	}
+	return out
+}
+
+func (d *dynamicKeySource) add(k api.Key) {
+	d.mu.Lock()
+	d.keys[k] = struct{}{}
+	d.mu.Unlock()
 }
 
 func TestPeerKeysHandler_ServesKeySet(t *testing.T) {
@@ -287,6 +323,67 @@ func TestAntiEntropy_FetchFailureCounter(t *testing.T) {
 	}
 }
 
+// TestAntiEntropy_AbortsBackfillMidRoundWhenOverBudget covers the
+// per-key OverBudget re-check inside the backfill loop (#175): a
+// single round's backfills can push the store over budget mid-loop,
+// and the reconciler must abort the remaining keys rather than
+// continuing to fill.
+func TestAntiEntropy_AbortsBackfillMidRoundWhenOverBudget(t *testing.T) {
+	t.Parallel()
+	localKeys := []api.Key{1}
+	peerKeys := []api.Key{1, 2, 3, 4}
+	objs := map[api.Key]*api.Object{
+		2: {Key: 2, Body: []byte("b")},
+		3: {Key: 3, Body: []byte("c")},
+		4: {Key: 4, Body: []byte("d")},
+	}
+
+	peer := api.PeerInfo{Name: "peer-1"}
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			buf, _ := EncodeKeySet("peer-1", peerKeys)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			var req api.PeerFetchRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if obj, ok := objs[req.Key]; ok {
+				_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer peerSrv.Close()
+	peer.AdminAddr = peerSrv.Listener.Addr().String()
+
+	bf := &mockBackfiller{objs: objs}
+	ks := &mockKeySource{keys: localKeys}
+	st := &mockStorer{}
+	// Flip over-budget after the first backfill so the mid-loop check
+	// fires on the second key.
+	var putsBeforeOver atomic.Int32
+	st.onPut = func(_ api.Key) {
+		if putsBeforeOver.Add(1) >= 1 {
+			st.overBudget.Store(true)
+		}
+	}
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:      time.Hour, // single round; we call reconcile directly
+		FetchTimeout:  2 * time.Second,
+		BackfillLimit: 0,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
+
+	ae.reconcile(context.Background())
+
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("store puts = %d, want 1 (first backfill ok, then mid-round abort)", got)
+	}
+}
+
 func TestKeysToUint64(t *testing.T) {
 	t.Parallel()
 	keys := []api.Key{1, 2, 3}
@@ -328,5 +425,133 @@ func TestAntiEntropy_StreamingDecodeLargeKeySet(t *testing.T) {
 	}
 	if len(keys) != len(largeKeySet) {
 		t.Fatalf("keys = %d, want %d", len(keys), len(largeKeySet))
+	}
+}
+
+// TestAntiEntropy_SkipsBackfillWhenOverBudget reproduces issue #175:
+// when the local store is over its memory budget, anti-entropy must
+// skip backfill instead of fighting the eviction policy. Without this
+// guard, backfilled keys re-overfill the hot tier and SIEVE evicts them
+// again, creating a self-sustaining feedback loop.
+func TestAntiEntropy_SkipsBackfillWhenOverBudget(t *testing.T) {
+	t.Parallel()
+	localKeys := []api.Key{1}
+	peerKeys := []api.Key{1, 2, 3}
+	obj2 := &api.Object{Key: 2, Body: []byte("b")}
+	obj3 := &api.Object{Key: 3, Body: []byte("c")}
+
+	peer := api.PeerInfo{Name: "peer-1"}
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			buf, _ := EncodeKeySet("peer-1", peerKeys)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			var req api.PeerFetchRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if obj, ok := map[api.Key]*api.Object{2: obj2, 3: obj3}[req.Key]; ok {
+				_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer peerSrv.Close()
+	peer.AdminAddr = peerSrv.Listener.Addr().String()
+
+	bf := &mockBackfiller{objs: map[api.Key]*api.Object{2: obj2, 3: obj3}}
+	ks := &mockKeySource{keys: localKeys}
+	st := &mockStorer{}
+	st.overBudget.Store(true) // store is over budget
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:      50 * time.Millisecond,
+		FetchTimeout:  2 * time.Second,
+		BackfillLimit: 0,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	if got := bf.calls.Load(); got != 0 {
+		t.Fatalf("backfill fetch calls = %d, want 0 (over-budget store must skip backfill)", got)
+	}
+	if got := st.puts.Load(); got != 0 {
+		t.Fatalf("store puts = %d, want 0 (over-budget store must skip backfill)", got)
+	}
+}
+
+// TestAntiEntropy_NoDuplicateBackfillAcrossPeers reproduces issue #175
+// secondary amplification: reconcile() built localSet once then looped
+// over all peers, so keys backfilled from peer 1 were not reflected when
+// reconciling with peer 2 — the same keys got backfilled N times per
+// round. The fix refreshes localSet with backfilled keys after each peer.
+func TestAntiEntropy_NoDuplicateBackfillAcrossPeers(t *testing.T) {
+	t.Parallel()
+	// dynamicKeySource models the real store: Keys() reflects both the
+	// initial local keys and any keys backfilled via Put, so the next
+	// round's localSet includes them (as a real TieredStore.Keys() would).
+	ks := &dynamicKeySource{keys: map[api.Key]struct{}{1: {}}}
+	obj2 := &api.Object{Key: 2, Body: []byte("b")}
+
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			buf, _ := EncodeKeySet("peer", []api.Key{1, 2})
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj2})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer peerSrv.Close()
+	addr := peerSrv.Listener.Addr().String()
+
+	peers := []api.PeerInfo{
+		{Name: "peer-1", AdminAddr: addr},
+		{Name: "peer-2", AdminAddr: addr},
+	}
+
+	bf := &mockBackfiller{objs: map[api.Key]*api.Object{2: obj2}}
+	st := &mockStorer{}
+	// Wire the storer to record backfills into the key source so the
+	// next round sees them as present (mirrors TieredStore.Keys()).
+	st.onPut = func(key api.Key) { ks.add(key) }
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:      50 * time.Millisecond,
+		FetchTimeout:  2 * time.Second,
+		BackfillLimit: 0,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return peers }, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ae.Start(ctx)
+
+	// Wait for at least one backfill, then a full round to confirm no
+	// duplicate from peer 2 in the same round.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if st.puts.Load() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // allow a couple more rounds
+	cancel()
+
+	// Key 2 should be backfilled at most once per round (not once per
+	// peer). With the key source reflecting backfills, only the first
+	// round backfills key 2; subsequent rounds see it as present.
+	if got := st.puts.Load(); got > 1 {
+		t.Fatalf("store puts = %d, want <= 1 (key 2 must not be backfilled once per peer per round, and not re-backfilled once owned)", got)
 	}
 }

@@ -584,6 +584,13 @@ func (h *HotStore) Close(_ context.Context) error {
 	return nil
 }
 
+// OverBudget reports whether the hot tier exceeds its configured byte
+// budget. Used by anti-entropy to skip backfill under memory pressure
+// (#175) and by TieredStore.OverBudget.
+func (h *HotStore) OverBudget() bool {
+	return h.Stats().HotBytes > h.maxBytes
+}
+
 // SetWarm marks the entry for key as having a warm-tier backup. If the
 // entry doesn't exist, this is a no-op. Warm-backed entries are evicted
 // first under memory pressure.

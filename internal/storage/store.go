@@ -30,6 +30,10 @@ type Store interface {
 	Delete(ctx context.Context, key api.Key) error
 	Ban(ctx context.Context, predicate api.BanExpr) (int, error)
 	Stats() api.Stats
+	// OverBudget reports whether the hot tier exceeds its configured byte
+	// budget. Used by anti-entropy to skip backfill under memory pressure
+	// and avoid fighting the eviction policy (#175).
+	OverBudget() bool
 	Close(ctx context.Context) error
 }
 

@@ -34,9 +34,14 @@ type Backfiller interface {
 	Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error)
 }
 
-// Storer writes objects to the local store. Implemented by storage.Store.
+// Storer writes objects to the local store and reports memory pressure.
+// Implemented by storage.Store. OverBudget is consulted before backfill
+// so anti-entropy does not fight the eviction policy (#175): backfilling
+// into an over-budget hot tier causes SIEVE to evict the new keys, which
+// then look "missing" again next round, creating a self-sustaining loop.
 type Storer interface {
 	Put(ctx context.Context, key api.Key, obj *api.Object) error
+	OverBudget() bool
 }
 
 // AntiEntropy runs periodic object-set reconciliation between peers in full
@@ -109,6 +114,11 @@ func (ae *AntiEntropy) reconcile(ctx context.Context) {
 		if peer.Name == ae.node {
 			continue
 		}
+		// reconcileWithPeer mutates localSet, adding keys it backfills
+		// from this peer so subsequent peers in the same round see them
+		// as present. Without this, a key backfilled from peer 1 is
+		// still "missing" when diffing against peer 2, so it gets
+		// backfilled once per peer per round (#175).
 		ae.reconcileWithPeer(ctx, peer, localSet)
 	}
 }
@@ -138,6 +148,17 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 		missing = missing[:ae.cfg.BackfillLimit]
 	}
 
+	// Skip backfill when the local store is over its memory budget.
+	// Anti-entropy should heal drift, not fight the eviction policy:
+	// backfilling into an over-budget hot tier causes SIEVE to evict
+	// the new keys, which then look "missing" again next round (#175).
+	if ae.store.OverBudget() {
+		ae.logger.Warn("anti-entropy: skipping backfill, local store over memory budget",
+			"peer", peer.Name, "missing", len(missing))
+		ae.metrics.SetAntiEntropyKeysRepaired(0)
+		return
+	}
+
 	ae.logger.Debug("anti-entropy: backfilling", "peer", peer.Name, "missing", len(missing))
 
 	start := time.Now()
@@ -148,8 +169,19 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 			return
 		default:
 		}
+		// Re-check budget per key: a single round's backfills can push
+		// the store over budget mid-loop.
+		if ae.store.OverBudget() {
+			ae.logger.Warn("anti-entropy: aborting backfill mid-round, local store over memory budget",
+				"peer", peer.Name, "repaired", repaired, "remaining", len(missing)-repaired)
+			break
+		}
 		if ae.backfillKey(ctx, peer, key) {
 			repaired++
+			// Record the backfilled key in localSet so subsequent peers
+			// in this round (and the per-key budget re-check above) see
+			// it as present.
+			localSet[key] = struct{}{}
 		}
 	}
 
@@ -209,7 +241,7 @@ func (ae *AntiEntropy) backfillKey(ctx context.Context, peer api.PeerInfo, key a
 	if err != nil || obj == nil {
 		return false
 	}
-	if err := ae.store.Put(ctx, key, obj); err != nil {
+	if err := ae.store.Put(bfCtx, key, obj); err != nil {
 		ae.logger.Debug("anti-entropy: store backfilled", "peer", peer.Name, "key", key, "error", err)
 		return false
 	}

@@ -19,9 +19,7 @@ import (
 // ~200 B/entry at 1.24M entries. Keys are stored in canonical MIME form
 // (http.CanonicalHeaderKey) and lookups are case-insensitive.
 //
-// Multi-value headers are joined with ", " at store time (RFC 9110 §5.2
-// permits this for all headers except Set-Cookie, which callers must
-// strip or preserve based on the configured caching policy).
+// Multi-value headers are joined with ", " at store time (RFC 9110 §5.2).
 //
 // The flat values design allows WriteTo to populate an http.Header
 // (map[string][]string) without any per-header allocations on the hit
@@ -68,12 +66,6 @@ func InternKey(key string) string {
 // FromHTTP converts an http.Header into a Map. The resulting Map
 // does not share any underlying storage with h. Multi-value headers are
 // joined with ", " per RFC 9110 §5.2.
-//
-// Set-Cookie is joined like any other multi-value header, which is
-// non-conformant per RFC 9110 §5.2. Callers that need to exclude
-// Set-Cookie (the default caching policy) must Del it after conversion.
-// This keeps the policy decision at the caller, not inside a generic
-// conversion function.
 //
 // Entries are sorted by canonical key so that Range and the binary
 // codec produce deterministic output without per-call allocation.

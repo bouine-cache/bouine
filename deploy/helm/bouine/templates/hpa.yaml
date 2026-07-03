@@ -27,7 +27,7 @@ spec:
     {{- end }}
   behavior:
     scaleDown:
-      stabilizationSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds | default 300 }}
+      stabilizationWindowSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds | default 300 }}
       policies:
         - type: Pods
           value: 1

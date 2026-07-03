@@ -47,7 +47,7 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 
 	// Retrieve the stored object and assert TTL = override (±jitter; jitter=0 here).
 	key := BuildKey(req)
-	obj, err := h.store.Get(req.Context(), key)
+	obj, _, err := h.store.Get(req.Context(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestOverrideTTL_ZeroDisabled(t *testing.T) {
 	h.ServeHTTP(rr, req)
 
 	key := BuildKey(req)
-	obj, err := h.store.Get(req.Context(), key)
+	obj, _, err := h.store.Get(req.Context(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
 	key := BuildKey(req)
-	obj, _ := h.store.Get(req.Context(), key)
+	obj, _, _ := h.store.Get(req.Context(), key)
 	if obj == nil {
 		t.Fatal("object not stored")
 	}
@@ -215,7 +215,7 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
 	key := BuildKey(req)
-	obj, _ := h.store.Get(req.Context(), key)
+	obj, _, _ := h.store.Get(req.Context(), key)
 	if obj == nil {
 		t.Fatal("object not stored")
 	}
@@ -268,7 +268,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 	// Manually set StoredAt far in the past so Evaluate sees the object as
 	// expired (past override TTL) and triggers revalidation.
 	key := BuildKey(httptest.NewRequest("GET", url, nil))
-	obj, _ := h.store.Get(context.Background(), key)
+	obj, _, _ := h.store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored after phase 0")
 	}
@@ -281,7 +281,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// After the 304, the object must still carry the override TTL.
-	after, _ := h.store.Get(context.Background(), key)
+	after, _, _ := h.store.Get(context.Background(), key)
 	if after == nil {
 		t.Fatal("object missing after 304 revalidation")
 	}

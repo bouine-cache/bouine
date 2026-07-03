@@ -335,7 +335,7 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil))
-	obj, _ := h.store.Get(context.Background(), key)
+	obj, _, _ := h.store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored")
 	}

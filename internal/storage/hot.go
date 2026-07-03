@@ -204,18 +204,14 @@ func (h *HotStore) shard(key api.Key) *shard {
 // Get looks up a key in the hot tier. Returns nil, nil on miss (not
 // an error — a miss is a normal control-flow outcome).
 //
+// Get looks up key in the hot tier. Returns the object, api.SourceHot
+// on a hit, or nil + empty source on a miss. Bans are checked lazily.
+//
 // Fast path (visited bit already set): acquires only a read lock,
 // avoiding write-lock contention under concurrent read-heavy workloads.
 // Slow path (visited=false, i.e. first access after eviction hand sweep):
 // upgrades to a write lock to set the bit.
-func (h *HotStore) Get(ctx context.Context, key api.Key) (*api.Object, error) {
-	obj, _, err := h.GetWithSource(ctx, key)
-	return obj, err
-}
-
-// GetWithSource is the source-aware variant of Get. It always returns
-// api.SourceHot for a hit because the hot tier is the in-RAM L0 tier.
-func (h *HotStore) GetWithSource(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
+func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
 	s := h.shard(key)
 
 	// Fast path: read lock. If the entry exists and its visited bit is

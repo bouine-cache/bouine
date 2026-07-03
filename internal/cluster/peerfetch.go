@@ -226,7 +226,7 @@ type PeerFetchHandler struct {
 // PeerStore is the minimal storage interface needed by peer fetch.
 // It is satisfied by storage.Store.
 type PeerStore interface {
-	Get(ctx context.Context, key api.Key) (*api.Object, error)
+	Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
 }
 
 // NewPeerFetchHandler creates a peer-fetch handler backed by store.
@@ -269,7 +269,7 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, err := h.store.Get(r.Context(), req.Key)
+	obj, _, err := h.store.Get(r.Context(), req.Key)
 	if err != nil || obj == nil {
 		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
 		w.WriteHeader(http.StatusNotFound)

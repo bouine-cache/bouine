@@ -412,7 +412,7 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key ap
 // the storage tier that served the object.
 func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object, api.Source) {
 	key := h.buildKey(r)
-	obj, src, err := h.store.GetWithSource(r.Context(), key)
+	obj, src, err := h.store.Get(r.Context(), key)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "key", key, "error", err)
 	}
@@ -423,7 +423,7 @@ func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object, api.Source) {
 	if vk == key {
 		return key, obj, src
 	}
-	vobj, vsrc, verr := h.store.GetWithSource(r.Context(), vk)
+	vobj, vsrc, verr := h.store.Get(r.Context(), vk)
 	if verr == nil && vobj != nil {
 		return vk, vobj, vsrc
 	}
@@ -758,7 +758,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	if len(set) > 0 {
 		h.variantMu.Unlock()
 		probeCtx := context.WithoutCancel(reqCtx)
-		pkObj, _ := h.store.Get(probeCtx, primaryKey)
+		pkObj, _, _ := h.store.Get(probeCtx, primaryKey)
 		h.variantMu.Lock()
 		set = h.variantSets[primaryKey]
 		if set == nil {
@@ -785,7 +785,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	probeCtx := context.WithoutCancel(reqCtx)
 	dead := make([]api.Key, 0, len(keys))
 	for _, k := range keys {
-		obj, _ := h.store.Get(probeCtx, k)
+		obj, _, _ := h.store.Get(probeCtx, k)
 		if obj == nil {
 			dead = append(dead, k)
 		}

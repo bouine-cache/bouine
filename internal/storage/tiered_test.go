@@ -63,7 +63,7 @@ func TestTiered_HotOnly(t *testing.T) {
 	if err := ts.Put(context.Background(), k, o); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	got, err := ts.Get(context.Background(), k)
+	got, _, err := ts.Get(context.Background(), k)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	}
 
 	// Should be in hot tier.
-	got, err := ts.Get(context.Background(), k)
+	got, _, err := ts.Get(context.Background(), k)
 	if err != nil || got == nil {
 		t.Fatalf("get: err=%v got=%v", err, got)
 	}
@@ -110,7 +110,7 @@ func TestTiered_DeleteBothTiers(t *testing.T) {
 	_ = ts.Put(context.Background(), k, o)
 	_ = ts.Delete(context.Background(), k)
 
-	got, _ := ts.Get(context.Background(), k)
+	got, _, _ := ts.Get(context.Background(), k)
 	if got != nil {
 		t.Fatal("expected miss after delete")
 	}
@@ -202,7 +202,7 @@ func TestTiered_WarmGet(t *testing.T) {
 	if err := ts1.hot.Delete(ctx, k); err != nil {
 		t.Fatalf("hot delete: %v", err)
 	}
-	got, err := ts1.Get(ctx, k)
+	got, _, err := ts1.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get after hot eviction: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestTiered_WarmGet(t *testing.T) {
 	ts2 := newStore()
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 	// Hot tier is empty after reopen.
-	got2, err := ts2.Get(ctx, k)
+	got2, _, err := ts2.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get after reopen: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	}
 
 	// Get must treat the undecodable blob as a miss, not an error.
-	got, err := ts1.Get(ctx, k)
+	got, _, err := ts1.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get: expected nil error for legacy blob, got %v", err)
 	}
@@ -406,7 +406,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	if err := ts1.hot.Delete(ctx, k); err != nil {
 		t.Fatalf("hot.Delete: %v", err)
 	}
-	gotFresh, err := ts1.Get(ctx, k)
+	gotFresh, _, err := ts1.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get fresh from warm: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 	// Evict from hot so Get falls through to warm.
 	_ = ts2.hot.Delete(ctx, k)
-	got2, err := ts2.Get(ctx, k)
+	got2, _, err := ts2.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get after reopen: expected nil error, got %v", err)
 	}
@@ -453,7 +453,7 @@ func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
 		t.Fatalf("warm.Put: %v", err)
 	}
 
-	got, err := ts.Get(ctx, k)
+	got, _, err := ts.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get: expected nil error for corrupt blob, got %v", err)
 	}
@@ -522,7 +522,7 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 	_ = ts2.hot.Delete(ctx, goodKey)
 	_ = ts2.hot.Delete(ctx, legacyKey)
 
-	gotLegacy, err := ts2.Get(ctx, legacyKey)
+	gotLegacy, _, err := ts2.Get(ctx, legacyKey)
 	if err != nil {
 		t.Fatalf("Get legacy after reopen: expected nil error, got %v", err)
 	}
@@ -530,7 +530,7 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 		t.Fatalf("expected miss for legacy blob after reopen, got object")
 	}
 
-	gotGood, err := ts2.Get(ctx, goodKey)
+	gotGood, _, err := ts2.Get(ctx, goodKey)
 	if err != nil {
 		t.Fatalf("Get good after reopen: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 
-	got, err := ts2.Get(ctx, k)
+	got, _, err := ts2.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get after torn write replay: expected nil error, got %v", err)
 	}
@@ -629,7 +629,7 @@ func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 
 	_ = ts2.hot.Delete(ctx, k)
-	got, err := ts2.Get(ctx, k)
+	got, _, err := ts2.Get(ctx, k)
 	if err != nil {
 		t.Fatalf("Get after reopen: %v", err)
 	}

@@ -492,7 +492,7 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil))
-	obj, _ := h.store.Get(context.Background(), key)
+	obj, _, _ := h.store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored after seed")
 	}
@@ -675,7 +675,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	_ = store.Delete(context.Background(), primaryKey)
 	_ = store.Delete(context.Background(), storeKey)
 
-	pkObj, _ := store.Get(context.Background(), primaryKey)
+	pkObj, _, _ := store.Get(context.Background(), primaryKey)
 	if pkObj != nil {
 		t.Fatal("primary key should be gone from store")
 	}
@@ -946,7 +946,7 @@ func TestHandler_ReplicateOnForegroundRevalidate(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil))
-	obj, _ := store.Get(context.Background(), key)
+	obj, _, _ := store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored after initial fill")
 	}
@@ -996,7 +996,7 @@ func TestHandler_ReplicateOnBackgroundSWR(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil))
-	obj, _ := store.Get(context.Background(), key)
+	obj, _, _ := store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored after initial fill")
 	}

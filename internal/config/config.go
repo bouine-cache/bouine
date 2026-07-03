@@ -306,7 +306,7 @@ type RouteCache struct {
 	// per route. Default 8. Zero means use the default. Range 1-64.
 	RefreshConcurrency int `yaml:"refresh_concurrency,omitempty" json:"refresh_concurrency,omitempty"`
 	// RefreshTimeout is the maximum duration for a single background
-	// refresh fetch. Default 30s. Range 5s-120s.
+	// refresh fetch. Default 10s. Range 5s-120s.
 	RefreshTimeout time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`

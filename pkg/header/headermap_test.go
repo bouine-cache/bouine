@@ -129,6 +129,36 @@ func TestMap_Range(t *testing.T) {
 	}
 }
 
+func TestMap_Range_CanonicalKeyOrder(t *testing.T) {
+	// FromHTTP inherits Go map iteration order, which is randomized per
+	// call. Range must produce a stable, canonical-key-sorted order so that
+	// the binary codec (which encodes via Range) emits deterministic bytes
+	// for logically identical objects.
+	src := http.Header{}
+	src.Set("Vary", "Accept-Encoding")
+	src.Set("Content-Type", "text/html")
+	src.Set("Age", "0")
+	src.Set("Cache-Control", "public")
+
+	hm := FromHTTP(src)
+
+	var keys []string
+	hm.Range(func(key, value string) bool {
+		keys = append(keys, key)
+		return true
+	})
+
+	want := []string{"Age", "Cache-Control", "Content-Type", "Vary"}
+	if len(keys) != len(want) {
+		t.Fatalf("Range visited %d keys, want %d: %v", len(keys), len(want), keys)
+	}
+	for i, k := range keys {
+		if k != want[i] {
+			t.Errorf("Range order[%d] = %q, want %q (full: %v)", i, k, want[i], keys)
+		}
+	}
+}
+
 func TestMap_Range_StopEarly(t *testing.T) {
 	h := Map{}
 	h.Set("A", "1")
@@ -143,6 +173,28 @@ func TestMap_Range_StopEarly(t *testing.T) {
 
 	if count != 1 {
 		t.Errorf("Range with early stop visited %d entries, want 1", count)
+	}
+}
+
+func TestMap_FromHTTP_StripsSetCookie(t *testing.T) {
+	// Set-Cookie is non-conformant to join (RFC 9110 §5.2), so FromHTTP
+	// must drop it during construction rather than relying on callers to
+	// Del it afterwards.
+	src := http.Header{}
+	src.Set("Content-Type", "text/html")
+	src.Add("Set-Cookie", "session=abc; Path=/")
+	src.Add("Set-Cookie", "tracking=xyz; Path=/")
+
+	hm := FromHTTP(src)
+
+	if hm.Has("Set-Cookie") {
+		t.Error("FromHTTP retained Set-Cookie; should be stripped")
+	}
+	if hm.Len() != 1 {
+		t.Errorf("FromHTTP Len = %d, want 1 (only Content-Type)", hm.Len())
+	}
+	if got := hm.Get("Content-Type"); got != "text/html" {
+		t.Errorf("Get(Content-Type) = %q, want %q", got, "text/html")
 	}
 }
 

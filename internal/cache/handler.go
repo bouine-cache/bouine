@@ -18,10 +18,13 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -65,6 +68,12 @@ var (
 	headerSTALE       = []string{"STALE"}
 	headerBYPASS      = []string{"BYPASS"}
 	headerREVALIDATED = []string{"REVALIDATED"}
+
+	// headerETag is the canonical form of the ETag header key.
+	// http.CanonicalMIMEHeaderKey("ETag") returns "Etag", so direct map
+	// assignment must use this — not header.ETag — to match what .Set()
+	// would produce and what .Get() looks up.
+	headerETag = "Etag"
 
 	// Pre-allocated X-Cache-Source header values (zero-alloc hit path).
 	sourceHot    = []string{string(api.SourceHot)}
@@ -438,7 +447,7 @@ func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj 
 		return false
 	}
 	if obj.ETag != "" {
-		w.Header()[header.ETag] = []string{obj.ETag}
+		w.Header()[headerETag] = []string{obj.ETag}
 	}
 	// Direct map assignment avoids http.CanonicalMIMEHeaderKey alloc
 	// from .Set() on the hit path.
@@ -446,6 +455,64 @@ func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj 
 	w.Header()[header.XCacheSource] = sourceSlice(src)
 	w.WriteHeader(http.StatusNotModified)
 	return true
+}
+
+// headerGuard wraps an http.ResponseWriter for the BYPASS path, where
+// the upstream handler writes directly to the client. It overwrites
+// bouine's attribution headers (X-Cache, X-Cache-Source) at WriteHeader
+// time so an origin-supplied value cannot spoof the source metric label
+// or the X-Cache result. All optional interfaces (Flusher, Hijacker,
+// ReaderFrom) are delegated to preserve streaming and zero-copy paths.
+type headerGuard struct {
+	http.ResponseWriter
+	cache   []string // X-Cache value (always set)
+	written bool
+}
+
+func (g *headerGuard) WriteHeader(code int) {
+	if g.written {
+		return
+	}
+	g.written = true
+	h := g.Header()
+	delete(h, header.XCache)
+	delete(h, header.XCacheSource)
+	h[header.XCache] = g.cache
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *headerGuard) Write(b []byte) (int, error) {
+	if !g.written {
+		g.WriteHeader(http.StatusOK)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *headerGuard) Flush() {
+	if !g.written {
+		g.WriteHeader(http.StatusOK)
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (g *headerGuard) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := g.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, responsewriter.ErrNotSupported
+	}
+	return h.Hijack()
+}
+
+func (g *headerGuard) ReadFrom(src io.Reader) (int64, error) {
+	if !g.written {
+		g.WriteHeader(http.StatusOK)
+	}
+	if rf, ok := g.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(struct{ io.Writer }{g}, src)
 }
 
 func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
@@ -457,10 +524,15 @@ func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		return
 	}
-	w.Header()[header.XCache] = headerBYPASS
-	// Source is empty for BYPASS — origin contact is not attributed to
-	// a cache tier.
-	h.upstream.ServeHTTP(w, r)
+	// Wrap the writer so the upstream cannot clobber bouine's X-Cache
+	// (BYPASS) or inject an X-Cache-Source that would spoof the source
+	// metric label. Source is empty for BYPASS — origin contact is not
+	// attributed to a cache tier.
+	guard := &headerGuard{
+		ResponseWriter: w,
+		cache:          headerBYPASS,
+	}
+	h.upstream.ServeHTTP(guard, r)
 }
 
 // stripNoCacheFields removes headers named in a `no-cache="…"` field list
@@ -814,11 +886,6 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 }
 
 func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
-	// POST/PUT/DELETE proxies to the upstream — the upstream was
-	// contacted, so source="origin" is the correct attribution even
-	// though no cache read occurred.
-	w.Header()[header.XCacheSource] = sourceOrigin
-
 	// Capture the upstream response first — only invalidate on success
 	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
 	// indicates a server error).
@@ -830,16 +897,20 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
 			"key", h.buildKey(r), "limit", h.maxResponseBytes)
 		w.Header()[header.XCache] = headerMISS
+		w.Header()[header.XCacheSource] = sourceOrigin
 		http.Error(w, "upstream response too large", http.StatusBadGateway)
 		return
 	}
 
-	// Write the captured response to the client.
+	// Write the captured response to the client. Overwrite bouine's
+	// attribution headers AFTER the copy so an origin-supplied
+	// X-Cache-Source cannot spoof the source metric label.
 	dst := w.Header()
 	for k, vals := range rec.header {
 		dst[k] = vals
 	}
 	dst[header.XCache] = headerMISS
+	dst[header.XCacheSource] = sourceOrigin
 	w.WriteHeader(rec.statusCode)
 	_, _ = w.Write(rec.body.Bytes())
 

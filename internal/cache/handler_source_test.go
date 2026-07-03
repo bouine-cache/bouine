@@ -199,3 +199,82 @@ func TestHandler_XCacheSource_Range_Hot(t *testing.T) {
 		t.Fatalf("range source = %q, want %q", got, api.SourceHot)
 	}
 }
+
+// TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention verifies
+// that an origin-supplied X-Cache-Source header cannot override bouine's
+// source=origin attribution on the POST/PUT/DELETE proxy path.
+func TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
+	t.Parallel()
+	// Upstream attempts to spoof the source label by sending
+	// X-Cache-Source: hot.
+	spoofUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.XCacheSource, "hot")
+		w.Header().Set(header.XCache, "HIT")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	})
+	h := testHandler(t, spoofUpstream)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/spoof", strings.NewReader("data")))
+
+	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourceOrigin) {
+		t.Fatalf("origin spoof: X-Cache-Source = %q, want %q (origin must overwrite spoofed value)", got, api.SourceOrigin)
+	}
+	if got := rr.Header().Get(header.XCache); got != "MISS" {
+		t.Fatalf("origin spoof: X-Cache = %q, want MISS", got)
+	}
+}
+
+// TestHandler_XCacheSource_Bypass_SpoofPrevention verifies that an
+// origin-supplied X-Cache-Source header is stripped on the BYPASS path,
+// preventing metric label spoofing when the upstream writes directly to
+// the client.
+func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
+	t.Parallel()
+	spoofUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.XCacheSource, "hot")
+		w.Header().Set(header.XCache, "HIT")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	})
+	h := testHandler(t, spoofUpstream)
+
+	req := httptest.NewRequest("GET", "http://example.com/bypass-spoof", nil)
+	req.Header.Set(header.CacheControl, "no-store")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get(header.XCache); got != "BYPASS" {
+		t.Fatalf("bypass spoof: X-Cache = %q, want BYPASS", got)
+	}
+	if got := rr.Header().Get(header.XCacheSource); got != "" {
+		t.Fatalf("bypass spoof: X-Cache-Source = %q, want empty (origin spoof must be stripped)", got)
+	}
+}
+
+// TestHandler_Conditional304_ETagCanonical verifies that the ETag header
+// on a 304 response is stored under the canonical key so that
+// http.Header.Get can find it.
+func TestHandler_Conditional304_ETagCanonical(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+
+	// Populate cache.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://example.com/etag304", nil))
+
+	// Conditional GET → 304
+	req := httptest.NewRequest("GET", "http://example.com/etag304", nil)
+	req.Header.Set(header.IfNoneMatch, `"v1"`)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 304 {
+		t.Fatalf("status = %d, want 304", rr.Code)
+	}
+	// Header.Get canonicalises the key — this will fail if the header
+	// was stored under a non-canonical key like "ETag" instead of "Etag".
+	if got := rr.Header().Get(header.ETag); got != `"v1"` {
+		t.Fatalf("ETag = %q, want %q (header must be stored under canonical key)", got, `"v1"`)
+	}
+}

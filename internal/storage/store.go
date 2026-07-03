@@ -21,7 +21,9 @@ import (
 // Store is the cache storage interface consumed by the cache
 // engine.
 //
-// Stable.
+// Unstable. The Get signature changed in #174 to return api.Source
+// alongside the object; the interface may change again as the storage
+// tier gains capabilities. Callers depend on this at their own risk.
 type Store interface {
 	Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
 	Put(ctx context.Context, key api.Key, obj *api.Object) error

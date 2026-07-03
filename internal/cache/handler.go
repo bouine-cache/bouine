@@ -69,12 +69,6 @@ var (
 	headerBYPASS      = []string{"BYPASS"}
 	headerREVALIDATED = []string{"REVALIDATED"}
 
-	// headerETag is the canonical form of the ETag header key.
-	// http.CanonicalMIMEHeaderKey("ETag") returns "Etag", so direct map
-	// assignment must use this — not header.ETag — to match what .Set()
-	// would produce and what .Get() looks up.
-	headerETag = "Etag"
-
 	// Pre-allocated X-Cache-Source header values (zero-alloc hit path).
 	sourceHot    = []string{string(api.SourceHot)}
 	sourceWarm   = []string{string(api.SourceWarm)}
@@ -447,7 +441,7 @@ func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj 
 		return false
 	}
 	if obj.ETag != "" {
-		w.Header()[headerETag] = []string{obj.ETag}
+		w.Header()[header.ETag] = []string{obj.ETag}
 	}
 	// Direct map assignment avoids http.CanonicalMIMEHeaderKey alloc
 	// from .Set() on the hit path.

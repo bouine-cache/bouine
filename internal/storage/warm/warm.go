@@ -365,6 +365,20 @@ func (s *Store) Stats() (entries, bytes int64) {
 	return s.stats.entries.Load(), s.stats.bytes.Load()
 }
 
+// Keys returns all keys present in the warm-tier index. The returned
+// slice is unsorted; callers that need determinism must sort it. Used by
+// TieredStore.Keys() to report the union of hot + warm keys so that
+// anti-entropy knows which keys the node owns, not just which are in RAM.
+func (s *Store) Keys() []uint64 {
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	keys := make([]uint64, 0, len(s.index))
+	for k := range s.index {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // Sync flushes all open segment files to stable storage. Used by Close
 // and available for checkpoint-style callers. Hot-path callers (Put,
 // Delete) should use SyncSegment instead to avoid syncing unrelated

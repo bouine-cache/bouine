@@ -250,12 +250,52 @@ func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 	return t.hot.Ban(ctx, expr)
 }
 
-// Keys returns all hot-tier cache keys. Used by the anti-entropy
-// reconciler in full cluster mode to compute the diff against peer key
-// sets. Only hot-tier keys are reported; warm-tier-only keys (evicted
-// from RAM) are not included.
+// Keys returns the union of hot-tier and warm-tier cache keys. Used by
+// the anti-entropy reconciler in full cluster mode to compute the diff
+// against peer key sets. Reporting only hot-tier keys (as this method
+// once did) caused a feedback loop with SIEVE eviction: evicted
+// warm-backed keys were seen as "missing" and backfilled via Put,
+// re-overfilling the hot tier. The union reports keys the node *owns*,
+// not just those currently in RAM (#175).
 func (t *TieredStore) Keys() []api.Key {
-	return t.hot.Keys()
+	hotKeys := t.hot.Keys()
+	if t.warm == nil {
+		return hotKeys
+	}
+	warmKeys := t.warm.Keys()
+	// Fast path: nothing in warm (common during cold start or ephemeral).
+	if len(warmKeys) == 0 {
+		return hotKeys
+	}
+	seen := make(map[api.Key]struct{}, len(hotKeys)+len(warmKeys))
+	out := make([]api.Key, 0, len(hotKeys)+len(warmKeys))
+	for _, k := range hotKeys {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	for _, k := range warmKeys {
+		kk := api.Key(k)
+		if _, ok := seen[kk]; ok {
+			continue
+		}
+		seen[kk] = struct{}{}
+		out = append(out, kk)
+	}
+	return out
+}
+
+// OverBudget reports whether the hot tier is over its configured byte
+// budget. Anti-entropy consults this before backfilling to avoid
+// fighting the eviction policy: backfilling into an already-full hot
+// tier causes SIEVE to evict the newly inserted keys, which then look
+// "missing" again next round — the self-sustaining loop from #175.
+// The warm tier is not budget-checked here because it is append-only
+// disk storage with its own compaction path.
+func (t *TieredStore) OverBudget() bool {
+	return t.hot.OverBudget()
 }
 
 // Stats merges hot + warm stats.

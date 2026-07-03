@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/thylong/bouine/internal/observability/responsewriter"
+	"github.com/thylong/bouine/pkg/api"
 	"github.com/thylong/bouine/pkg/header"
 )
 
@@ -41,7 +42,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Namespace: "bouine",
 			Name:      "requests_total",
 			Help:      "Total number of requests processed by the data plane.",
-		}, []string{"method", "status", "cache_result", "route"}),
+		}, []string{"method", "status", "cache_result", "source", "route"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace:                       "bouine",
 			Name:                            "request_duration_seconds",
@@ -50,12 +51,12 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			NativeHistogramBucketFactor:     1.1,
 			NativeHistogramMaxBucketNumber:  100,
 			NativeHistogramMinResetDuration: 15 * time.Minute,
-		}, []string{"method", "status", "cache_result", "route"}),
+		}, []string{"method", "status", "cache_result", "source", "route"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "response_bytes_total",
 			Help:      "Total bytes written in responses.",
-		}, []string{"method", "route"}),
+		}, []string{"method", "cache_result", "source", "route"}),
 		VaryCapHits: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "vary_cap_hits_total",
@@ -181,13 +182,14 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		}
 		// cache_result: normalise X-Cache to HIT/MISS/STALE/REVALIDATED/BYPASS.
 		cacheResult := normaliseCacheResult(w.Header().Get(header.XCache))
+		source := normaliseSource(w.Header().Get(header.XCacheSource))
 
-		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, route).Inc()
+		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, source, route).Inc()
 
 		// Attach an exemplar when a trace is active so Grafana can link
 		// high-latency histogram buckets directly to the matching trace.
 		dur := time.Since(start).Seconds()
-		obs := m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, route)
+		obs := m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, source, route)
 		if span := trace.SpanFromContext(r.Context()); span.SpanContext().IsValid() {
 			if eo, ok := obs.(prometheus.ExemplarObserver); ok {
 				eo.ObserveWithExemplar(dur, prometheus.Labels{
@@ -200,7 +202,7 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 			obs.Observe(dur)
 		}
 
-		m.ResponseBytesOut.WithLabelValues(r.Method, route).
+		m.ResponseBytesOut.WithLabelValues(r.Method, cacheResult, source, route).
 			Add(float64(sw.Bytes))
 
 		// Update ring buffers for the dashboard (if enabled).
@@ -230,5 +232,17 @@ func normaliseCacheResult(xCache string) string {
 		return "MISS"
 	default:
 		return xCache
+	}
+}
+
+// normaliseSource maps X-Cache-Source header values to a stable Prometheus
+// label. Empty string is preserved (BYPASS, only-if-cached 504). Unknown
+// values default to empty for forward-compatibility.
+func normaliseSource(xCacheSource string) string {
+	switch xCacheSource {
+	case string(api.SourceHot), string(api.SourceWarm), string(api.SourcePeer), string(api.SourceOrigin):
+		return xCacheSource
+	default:
+		return ""
 	}
 }

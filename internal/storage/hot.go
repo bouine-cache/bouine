@@ -208,7 +208,14 @@ func (h *HotStore) shard(key api.Key) *shard {
 // avoiding write-lock contention under concurrent read-heavy workloads.
 // Slow path (visited=false, i.e. first access after eviction hand sweep):
 // upgrades to a write lock to set the bit.
-func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
+func (h *HotStore) Get(ctx context.Context, key api.Key) (*api.Object, error) {
+	obj, _, err := h.GetWithSource(ctx, key)
+	return obj, err
+}
+
+// GetWithSource is the source-aware variant of Get. It always returns
+// api.SourceHot for a hit because the hot tier is the in-RAM L0 tier.
+func (h *HotStore) GetWithSource(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
 	s := h.shard(key)
 
 	// Fast path: read lock. If the entry exists and its visited bit is
@@ -221,16 +228,16 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 		if h.matchesActiveBan(obj) {
 			h.evictBanned(s, key, obj)
 			h.stats.misses.Add(1)
-			return nil, nil
+			return nil, "", nil
 		}
 		h.stats.hits.Add(1)
-		return obj, nil
+		return obj, api.SourceHot, nil
 	}
 	s.mu.RUnlock()
 
 	if e == nil {
 		h.stats.misses.Add(1)
-		return nil, nil
+		return nil, "", nil
 	}
 
 	// Slow path: visited bit is false. Upgrade to write lock, re-check
@@ -249,15 +256,15 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, error) {
 
 	if obj == nil {
 		h.stats.misses.Add(1)
-		return nil, nil
+		return nil, "", nil
 	}
 	if h.matchesActiveBan(obj) {
 		h.evictBanned(s, key, obj)
 		h.stats.misses.Add(1)
-		return nil, nil
+		return nil, "", nil
 	}
 	h.stats.hits.Add(1)
-	return obj, nil
+	return obj, api.SourceHot, nil
 }
 
 // evictBanned removes a ban-matching entry from the shard. It re-checks

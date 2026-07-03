@@ -125,7 +125,7 @@ func TestServeRange_SingleRange(t *testing.T) {
 	r.Header.Set(header.Range, "bytes=0-4")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj, false)
+	ok := ServeRange(rr, r, obj, false, api.SourceHot)
 	if !ok {
 		t.Fatal("expected range served")
 	}
@@ -157,7 +157,7 @@ func TestServeRange_SuffixRange(t *testing.T) {
 	r.Header.Set(header.Range, "bytes=-3")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj, false)
+	ok := ServeRange(rr, r, obj, false, api.SourceHot)
 	if !ok {
 		t.Fatal("expected range served")
 	}
@@ -179,7 +179,7 @@ func TestServeRange_OpenEnded(t *testing.T) {
 	r.Header.Set(header.Range, "bytes=3-")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj, false)
+	ok := ServeRange(rr, r, obj, false, api.SourceHot)
 	if !ok {
 		t.Fatal("expected range served")
 	}
@@ -201,7 +201,7 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 	r.Header.Set(header.Range, "bytes=5-10")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj, false)
+	ok := ServeRange(rr, r, obj, false, api.SourceHot)
 	if !ok {
 		t.Fatal("expected range handled (416)")
 	}
@@ -216,7 +216,7 @@ func TestServeRange_NoRangeHeader(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj, false)
+	ok := ServeRange(rr, r, obj, false, api.SourceHot)
 	if ok {
 		t.Fatal("no Range header should return false")
 	}
@@ -229,7 +229,7 @@ func TestServeRange_MultiRange(t *testing.T) {
 	r.Header.Set(header.Range, "bytes=0-1, 3-4")
 	rr := httptest.NewRecorder()
 
-	ok := ServeRange(rr, r, obj, false)
+	ok := ServeRange(rr, r, obj, false, api.SourceHot)
 	if !ok {
 		t.Fatal("multi-range should be served as multipart/byteranges")
 	}

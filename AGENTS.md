@@ -382,7 +382,8 @@ make hooks           # install pre-commit hooks into .git/hooks
 
 ### 14.2 CI pipeline (stages)
 
-1. `vet` + `lint` + `govulncheck`.
+1. `lint` + `govulncheck`. (`go vet` is a subset of `golangci-lint`'s
+   `govet` linter, already enabled in `.golangci.yaml`.)
 2. `unit` (with `-race`, per-OS matrix linux/amd64, linux/arm64,
    darwin/arm64).
 3. `coverage` gate.

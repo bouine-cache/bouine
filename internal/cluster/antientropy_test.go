@@ -12,7 +12,16 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
+)
+
+// Compile-time assertions that the concrete stores satisfy cluster.Storer.
+// If OverBudget is removed from either store, this fails at build time
+// instead of silently disabling anti-entropy at runtime.
+var (
+	_ Storer = (*storage.TieredStore)(nil)
+	_ Storer = (*storage.HotStore)(nil)
 )
 
 type mockKeySource struct {
@@ -484,5 +493,80 @@ func TestAntiEntropy_NoDuplicateBackfillAcrossPeers(t *testing.T) {
 	ae.reconcile(context.Background())
 	if got := st.puts.Load(); got != 1 {
 		t.Fatalf("store puts after 2nd round = %d, want 1 (key 2 already owned, must not re-backfill)", got)
+	}
+}
+
+// TestAntiEntropy_MidRoundOverBudgetGuard tests the per-peer OverBudget
+// check inside reconcileWithPeer: the store starts under budget, peer 1's
+// backfill pushes it over budget (via onPut), and peer 2's backfill must
+// be skipped by the mid-round guard even though the top-of-reconcile guard
+// did not fire.
+func TestAntiEntropy_MidRoundOverBudgetGuard(t *testing.T) {
+	t.Parallel()
+
+	ks := &dynamicKeySource{keys: map[api.Key]struct{}{1: {}}}
+	obj2 := &api.Object{Key: 2, Body: []byte("b")}
+	obj3 := &api.Object{Key: 3, Body: []byte("c")}
+
+	// peerSrv1 returns keys {1, 2}; peerSrv2 returns {1, 2, 3}.
+	peerSrv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			buf, _ := EncodeKeySet("peer-1", []api.Key{1, 2})
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj2})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer peerSrv1.Close()
+
+	peerSrv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			buf, _ := EncodeKeySet("peer-2", []api.Key{1, 2, 3})
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj3})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer peerSrv2.Close()
+
+	peers := []api.PeerInfo{
+		{Name: "peer-1", AdminAddr: peerSrv1.Listener.Addr().String()},
+		{Name: "peer-2", AdminAddr: peerSrv2.Listener.Addr().String()},
+	}
+
+	bf := &mockBackfiller{objs: map[api.Key]*api.Object{2: obj2, 3: obj3}}
+	st := &mockStorer{}
+	// Start under budget. Flip to over-budget when the first key is Put.
+	st.onPut = func(key api.Key) {
+		ks.add(key)
+		st.overBudget.Store(true)
+	}
+
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:      time.Hour,
+		FetchTimeout:  2 * time.Second,
+		BackfillLimit: 0,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return peers }, nil)
+
+	ae.reconcile(context.Background())
+
+	// Peer 1 backfilled key 2 (1 put). The onPut hook flipped overBudget
+	// to true. Peer 2 has key 3 missing, but the mid-round guard must
+	// skip its backfill.
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("store puts = %d, want 1 (peer-1 backfill only; peer-2 skipped by mid-round guard)", got)
+	}
+	if got := bf.calls.Load(); got != 1 {
+		t.Fatalf("backfill fetch calls = %d, want 1 (peer-2 fetch skipped by mid-round guard)", got)
 	}
 }

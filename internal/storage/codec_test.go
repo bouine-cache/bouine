@@ -85,6 +85,36 @@ func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 	}
 }
 
+func TestEncodeIsDeterministicAcrossMapIteration(t *testing.T) {
+	// FromHTTP inherits Go map iteration order (randomized per call), but
+	// Range must sort entries by canonical key so encodeObject emits
+	// identical bytes for logically identical objects. This matters for
+	// anti-entropy checksums and any future content-addressing on the
+	// warm tier.
+	base := http.Header{
+		header.ContentType:  {"application/json"},
+		header.CacheControl: {"public, max-age=600"},
+		header.Vary:         {"Accept-Encoding"},
+		header.Age:          {"42"},
+	}
+	prev := encodeObject(&api.Object{
+		StatusCode: http.StatusOK,
+		Header:     header.FromHTTP(base),
+		Body:       []byte("deterministic payload"),
+	})
+	for range 20 {
+		blob := encodeObject(&api.Object{
+			StatusCode: http.StatusOK,
+			Header:     header.FromHTTP(base),
+			Body:       []byte("deterministic payload"),
+		})
+		if !bytes.Equal(blob, prev) {
+			t.Fatalf("encodeObject not deterministic\nprev=%x\ncurr=%x", prev, blob)
+		}
+		prev = blob
+	}
+}
+
 func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":       {},

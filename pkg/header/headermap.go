@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/textproto"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -19,10 +20,10 @@ import (
 // (http.CanonicalHeaderKey) and lookups are case-insensitive.
 //
 // Multi-value headers are joined with ", " at store time (RFC 9110 §5.2
-// permits this for all headers except Set-Cookie, which is stripped before
-// storage). This means Values always returns a single-element slice for
-// stored objects, but the method is retained for interface compatibility
-// with http.Header.
+// permits this for all headers except Set-Cookie, which FromHTTP drops
+// during conversion). This means Values always returns a single-element
+// slice for stored objects, but the method is retained for interface
+// compatibility with http.Header.
 //
 // The flat values design allows WriteTo to populate an http.Header
 // (map[string][]string) without any per-header allocations on the hit
@@ -68,8 +69,14 @@ func InternKey(key string) string {
 
 // FromHTTP converts an http.Header into a Map. The resulting Map
 // does not share any underlying storage with h. Multi-value headers are
-// joined with ", " per RFC 9110 §5.2 (Set-Cookie must be stripped before
-// calling this — the join would corrupt multiple Set-Cookie values).
+// joined with ", " per RFC 9110 §5.2.
+//
+// Set-Cookie is dropped during conversion: joining multiple Set-Cookie
+// values with ", " is non-conformant per RFC 9110 §5.2 (it changes the
+// cookie semantics), so the header is skipped by construction rather than
+// relying on every caller to Del it afterwards. Callers that need to
+// preserve Set-Cookie (e.g. when allowSetCookie is configured) must use
+// SetValues on the resulting Map.
 func FromHTTP(h http.Header) Map {
 	if len(h) == 0 {
 		return Map{}
@@ -79,7 +86,7 @@ func FromHTTP(h http.Header) Map {
 		values:  make([]string, 0, len(h)),
 	}
 	for k, vals := range h {
-		if len(vals) == 0 {
+		if k == SetCookie || len(vals) == 0 {
 			continue
 		}
 		var v string
@@ -146,6 +153,12 @@ func (h *Map) SetValues(key string, vals []string) {
 // present. The value slot in the values slice is orphaned (not reclaimed)
 // to avoid shifting offsets of other entries; this is acceptable because
 // Del is only called on the store path, not the hit path.
+//
+// Because the orphaned value string is not reclaimed, objSize (which
+// counts active entries via Len, not len(values)) underestimates the
+// true memory footprint by one string header + value bytes per Del.
+// This is bounded by the number of Del calls per object and not worth
+// reclaiming for.
 func (h *Map) Del(key string) {
 	ck := http.CanonicalHeaderKey(key)
 	for i := range h.entries {
@@ -238,8 +251,30 @@ func (h Map) WriteTo(dst http.Header) {
 // Range iterates over all headers in canonical-key order, calling f for
 // each. If f returns false, iteration stops. This replaces
 // `for k, vs := range obj.Header` loops.
+//
+// The sort is over a temporary index slice so the iteration order is
+// deterministic regardless of how the Map was constructed (FromHTTP
+// inherits Go map iteration order; AppendEntry preserves wire order).
+// Deterministic Range output makes the binary codec produce stable bytes
+// for logically identical objects, which anti-entropy checksums rely on.
+// Range is not on the hit path, so the allocation is acceptable.
 func (h Map) Range(f func(key string, value string) bool) {
-	for i := range h.entries {
+	if len(h.entries) <= 1 {
+		for i := range h.entries {
+			if !f(h.entries[i].key, h.values[h.entries[i].off]) {
+				return
+			}
+		}
+		return
+	}
+	idx := make([]int, len(h.entries))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(i, j int) bool {
+		return h.entries[idx[i]].key < h.entries[idx[j]].key
+	})
+	for _, i := range idx {
 		if !f(h.entries[i].key, h.values[h.entries[i].off]) {
 			return
 		}

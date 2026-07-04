@@ -202,15 +202,37 @@ type ConnectPolicy struct {
 }
 
 // Route declares a host/path match and its per-request behaviour.
+// A route must specify exactly one of Pool or Static.Root — the former
+// proxies to an upstream pool, the latter serves files from a local
+// directory.
 type Route struct {
 	// Name is the human-readable route label used in Prometheus metrics and
 	// the operator dashboard. Defaults to host:path_prefix when empty.
 	Name     string        `yaml:"name,omitempty" json:"name,omitempty"`
 	Match    RouteMatch    `yaml:"match,omitempty" json:"match,omitempty"`
 	Pool     string        `yaml:"pool,omitempty" json:"pool,omitempty"`
+	Static   StaticConfig  `yaml:"static,omitempty" json:"static,omitempty"`
 	Cache    RouteCache    `yaml:"cache,omitempty" json:"cache,omitempty"`
 	Request  RouteRequest  `yaml:"request,omitempty" json:"request,omitempty"`
 	Response RouteResponse `yaml:"response,omitempty" json:"response,omitempty"`
+}
+
+// StaticConfig configures a route to serve files from a local directory
+// instead of proxying to an upstream pool. The directory is resolved and
+// symlink-evaluated once at startup; per-request path traversal is
+// prevented by path.Clean + filepath.Rel containment check.
+type StaticConfig struct {
+	// Root is the absolute path to the directory from which files are
+	// served. Must be non-empty when the route has no Pool. Symlinks in
+	// Root are resolved once at startup.
+	Root string `yaml:"root,omitempty" json:"root,omitempty"`
+	// Index files tried (in order) when the request path maps to a
+	// directory. If none match, bouine returns 404. Entries must not
+	// contain "/".
+	Index []string `yaml:"index,omitempty" json:"index,omitempty"`
+	// MaxFileSize is the per-file size cap. Files larger than this are
+	// rejected with 413. Zero (default) applies a 10 MiB limit.
+	MaxFileSize ByteSize `yaml:"max_file_size,omitempty" json:"max_file_size,omitempty"`
 }
 
 // RouteMatch is the predicate for selecting a route.

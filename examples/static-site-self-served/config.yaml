@@ -1,0 +1,35 @@
+# Self-served static site (no upstream pool)
+#
+# bouine serves files directly from disk. No separate origin server
+# needed. Cache is off by default for static routes — the OS page
+# cache handles hot caching. Enable cache explicitly for cluster
+# replication or TTL-based eviction.
+
+listen:
+  http: ":80"
+  admin: ":9000"
+
+storage:
+  hot_max_bytes: 512Mo
+  eviction: sieve
+
+routes:
+  - name: assets
+    match: { path_prefix: /assets/ }
+    static:
+      root: /var/www/assets
+      max_file_size: 50Mo
+    request:
+      strip_prefix: /assets/
+    response:
+      header_set:
+        X-Content-Type-Options: nosniff
+        Cache-Control: public, max-age=86400
+  - name: root
+    match: {}
+    static:
+      root: /var/www/html
+      index: [index.html]
+    response:
+      header_set:
+        X-Content-Type-Options: nosniff

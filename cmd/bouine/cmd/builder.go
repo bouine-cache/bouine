@@ -21,6 +21,7 @@ import (
 	"github.com/thylong/bouine/internal/observability/tracing"
 	"github.com/thylong/bouine/internal/origin"
 	"github.com/thylong/bouine/internal/server"
+	"github.com/thylong/bouine/internal/staticfile"
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/internal/storage/warm"
 	"github.com/thylong/bouine/pkg/api"
@@ -179,6 +180,10 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 func (e *engine) buildRouter(rs *runState) *server.Router {
 	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
+		if rc.Static.Root != "" {
+			e.buildStaticRoute(router, rs, rc)
+			continue
+		}
 		p := rs.pools[rc.Pool]
 		if p == nil {
 			continue
@@ -237,6 +242,78 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached)
 	}
 	return router
+}
+
+// buildStaticRoute wires a route that serves files from a local directory
+// instead of proxying to an upstream pool. When cache is explicitly enabled
+// for the route, the static handler is wrapped in a cache.Handler so cached
+// objects benefit from the same TTL, SWR, SIE, eviction, and cluster
+// replication as proxied responses. When cache is not explicitly enabled
+// (default for static routes), the static handler serves directly from disk
+// and the OS page cache provides the hot caching layer.
+func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route) {
+	sh, err := staticfile.New(staticfile.Config{
+		Root:       rc.Static.Root,
+		IndexFiles: rc.Static.Index,
+		MaxBytes:   rc.Static.MaxFileSize.Bytes(),
+		Logger:     e.logger,
+		RouteLabel: rc.Name,
+	})
+	if err != nil {
+		e.logger.Error("static route init failed, skipping", "route", rc.Name, "error", err)
+		return
+	}
+
+	var handler http.Handler = sh
+
+	// Apply strip_prefix if configured (reuses the same mechanism as
+	// proxied routes — one place, one behavior).
+	if rc.Request.StripPrefix != "" {
+		handler = stripPrefixHandler(rc.Request.StripPrefix, handler)
+	}
+
+	// Wrap in cache handler only when cache is explicitly enabled.
+	cacheEnabled := rc.Cache.Enabled != nil && *rc.Cache.Enabled
+	if cacheEnabled {
+		cfg := cache.HandlerConfig{
+			Upstream:            handler,
+			Store:               rs.store,
+			Logger:              e.logger,
+			NegativeTTL:         rc.Cache.NegativeTTL,
+			JitterPercent:       rc.Cache.JitterPercent,
+			StayinAlive:         rc.Cache.StayinAlive,
+			DefaultTTL:          rc.Cache.TTLDefault,
+			OverrideTTL:         rc.Cache.TTLOverride,
+			DefaultSWR:          rc.Cache.StaleWhileRevalidate,
+			DefaultSIE:          rc.Cache.StaleIfError,
+			MaxObjectSize:       rc.Cache.MaxObjectSize.Bytes(),
+			MaxResponseBytes:    rc.Cache.MaxResponseBytes.Bytes(),
+			MaxFetchConcurrency: rc.Cache.MaxFetchConcurrency,
+			StripQueryParams:    buildStripSet(rc.Cache.Key.StripQueryParams),
+			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
+			VaryCapHits:         rs.dpMetrics.VaryCapHits,
+		}
+		applyRefreshConfig(&cfg, rc.Cache)
+		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
+			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
+				owner := rs.clusterNode.Owner(key)
+				return owner, rs.clusterNode.IsLocal(key)
+			}
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			}
+		}
+		if rs.broadcaster != nil && e.cfg.Cluster.Mode == config.ClusterModeFull {
+			cfg.ReplicateFn = rs.broadcaster.BroadcastReplicate
+		}
+		cached := cache.NewHandler(cfg)
+		if cfg.RefreshBeforeExpiry {
+			rs.handlers = append(rs.handlers, cached)
+		}
+		handler = cached
+	}
+
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, handler)
 }
 
 // stripPrefixHandler strips the given prefix from r.URL.Path before

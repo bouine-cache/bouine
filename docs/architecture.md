@@ -97,6 +97,7 @@ surface that serves ≤ 10 RPS.
 /internal/storage            L2 — RAM tier, mmap tier, eviction, WAL
 /internal/storage/sieve      SIEVE eviction implementation
 /internal/origin             L4 — upstream pool, health, hedge, breaker
+/internal/staticfile        L4 — local file serving (alternative to upstream pool)
 /internal/cluster            L5 — memberlist gossip, consistent hash, peer fetch
 /internal/admin              L6 — net/http admin: purge, ban, refresh, config
 /internal/dashboard          L6 — embedded operator dashboard (templ + htmx)

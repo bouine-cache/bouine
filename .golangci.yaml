@@ -146,6 +146,16 @@ linters:
             - github.com/thylong/bouine/pkg/api
             - github.com/thylong/bouine/pkg/header
             - golang.org/x/sync
+        staticfile-L4:
+          list-mode: strict
+          files: ["**/internal/staticfile/**"]
+          allow:
+            - $gostd
+            - github.com/thylong/bouine/internal/staticfile
+            - github.com/thylong/bouine/internal/observability
+            - github.com/thylong/bouine/pkg/header
+            - github.com/cespare/xxhash/v2
+            - github.com/prometheus/client_golang
         cluster-L5:
           list-mode: strict
           files: ["**/internal/cluster/**"]

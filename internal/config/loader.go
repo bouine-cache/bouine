@@ -157,13 +157,26 @@ func (s *Storage) ResolveHotMaxBytes(goMemLimit string) {
 }
 
 // validateRoute checks a single route entry and normalises its fields.
+// A route must specify exactly one of Pool or Static.Root.
 func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	r := &c.Routes[i]
-	if r.Pool == "" {
-		return fmt.Errorf("config: route %d has no pool", i)
+	hasPool := r.Pool != ""
+	hasStatic := r.Static.Root != ""
+	if hasPool && hasStatic {
+		return fmt.Errorf("config: route %d has both pool and static.root — specify exactly one", i)
 	}
-	if _, ok := pools[r.Pool]; !ok {
-		return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
+	if !hasPool && !hasStatic {
+		return fmt.Errorf("config: route %d has no pool or static.root", i)
+	}
+	if hasPool {
+		if _, ok := pools[r.Pool]; !ok {
+			return fmt.Errorf("config: route %d references unknown pool %q", i, r.Pool)
+		}
+	}
+	if hasStatic {
+		if err := validateStatic(i, r.Static); err != nil {
+			return err
+		}
 	}
 	for j, m := range r.Match.Methods {
 		up := strings.ToUpper(strings.TrimSpace(m))
@@ -176,6 +189,22 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 		return fmt.Errorf("config: route %d strip_prefix must start with '/', got %q", i, sp)
 	}
 	return validateRouteCache(i, r.Cache)
+}
+
+// validateStatic validates a StaticConfig block.
+func validateStatic(i int, sc StaticConfig) error {
+	if !filepath.IsAbs(sc.Root) {
+		return fmt.Errorf("config: route %d static.root must be an absolute path, got %q", i, sc.Root)
+	}
+	if sc.MaxFileSize < 0 {
+		return fmt.Errorf("config: route %d static.max_file_size must be >= 0, got %s", i, sc.MaxFileSize)
+	}
+	for j, idx := range sc.Index {
+		if strings.Contains(idx, "/") {
+			return fmt.Errorf("config: route %d static.index[%d] must not contain '/', got %q", i, j, idx)
+		}
+	}
+	return nil
 }
 
 func validateRouteCache(i int, rc RouteCache) error {

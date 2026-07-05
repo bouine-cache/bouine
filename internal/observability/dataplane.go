@@ -89,7 +89,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
 		Name:      "hot_store_bytes",
-		Help:      "Current estimated bytes used by the hot in-memory cache tier (body + headers + struct + map overhead).",
+		Help:      "Estimated bytes used by the hot in-memory cache tier for eviction budgeting (body + headers + struct + map overhead). Not a runtime memory metric; for heap usage see go_memstats_heap_alloc_bytes.",
 	})
 	m.HotStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",

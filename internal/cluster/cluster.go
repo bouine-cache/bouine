@@ -125,7 +125,8 @@ func New(cfg Config) (*Cluster, error) {
 
 	mlCfg := memberlist.DefaultLANConfig()
 	mlCfg.Name = cfg.NodeName
-	mlCfg.Logger = nil // suppress memberlist's stdlib logger; we use slog
+	// Bridge memberlist's stdlib log output into slog so gossip diagnostics are structured.
+	mlCfg.LogOutput = newSlogAdapter(c.logger)
 	mlCfg.Delegate = c
 	mlCfg.Events = c
 	// Use the configured PushPullInterval if set (integration tests use

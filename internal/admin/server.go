@@ -14,7 +14,9 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -91,6 +93,10 @@ type Config struct {
 	DashboardHandler http.Handler
 	// FaviconHandler, if non-nil, serves /favicon/* assets (no auth required).
 	FaviconHandler http.Handler
+	// PprofEnabled mounts net/http/pprof under /debug/pprof/* on the
+	// admin port. Routes are auth-exempt; admin port is network-isolated.
+	// Default false.
+	PprofEnabled bool
 }
 
 // Server is the admin HTTP server with lifecycle methods matching the
@@ -124,6 +130,16 @@ func New(cfg Config) *Server {
 			IdleTimeout:       30 * time.Second,
 		},
 	}
+	// pprof profile captures (e.g. /debug/pprof/profile?seconds=30) can
+	// run longer than the default 5s WriteTimeout. When pprof is enabled,
+	// the write deadline is disabled for ALL admin endpoints, not just
+	// pprof — this is the standard tradeoff for pprof-on-admin. Mitigated
+	// by ReadHeaderTimeout=5s, IdleTimeout=30s, rate limiting, and K8s
+	// NetworkPolicy isolation of the admin port.
+	if cfg.PprofEnabled {
+		s.inner.WriteTimeout = 0
+	}
+
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.version)
@@ -204,6 +220,22 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.PeerMetricsHandler != nil {
 		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
+	}
+	if cfg.PprofEnabled {
+		// Register pprof handlers explicitly on our own mux. Importing
+		// net/http/pprof also registers on http.DefaultServeMux via init(),
+		// but bouine never serves DefaultServeMux, so that registration is
+		// dead code in this process.
+		mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+		mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+		mux.Handle("GET /debug/pprof/heap", pprof.Handler("heap"))
+		mux.Handle("GET /debug/pprof/goroutine", pprof.Handler("goroutine"))
+		mux.Handle("GET /debug/pprof/block", pprof.Handler("block"))
+		mux.Handle("GET /debug/pprof/mutex", pprof.Handler("mutex"))
+		mux.Handle("GET /debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	}
 }
 
@@ -490,6 +522,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}()
 		if exempt[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// pprof endpoints are auth-exempt so operators and bench harnesses
+		// can capture profiles without a bearer token. The admin port is
+		// network-isolated in production.
+		if s.cfg.PprofEnabled && strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
 			next.ServeHTTP(w, r)
 			return
 		}

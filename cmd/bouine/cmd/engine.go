@@ -417,6 +417,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 		ReadyFn:            rs.seq.IsReady,
 		MaxBatchSize:       e.cfg.Admin.MaxBatchSize,
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
+		PprofEnabled:       e.cfg.Admin.PprofEnabled,
 		OnPurged:           rs.cfProp.PropagateForPurge,
 		OnRefreshed:        rs.cfProp.PropagateForRefresh,
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {

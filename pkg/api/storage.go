@@ -156,8 +156,11 @@ type BanExpr struct {
 type Stats struct {
 	// HotEntries is the number of objects in the hot tier.
 	HotEntries int64 `json:"hot_entries"`
-	// HotBytes is the total bytes used by hot-tier objects (bodies +
-	// overhead).
+	// HotBytes is an estimated byte footprint of hot-tier objects used
+	// for eviction budgeting. It is NOT a runtime memory metric; it
+	// cannot see Go allocator size-class rounding, non-cache heap
+	// consumers, or GC fragmentation. For actual heap usage, use
+	// go_memstats_heap_alloc_bytes (see docs/runbook/40-memory-accounting.md).
 	HotBytes int64 `json:"hot_bytes"`
 	// WarmEntries is the number of objects in the warm tier.
 	WarmEntries int64 `json:"warm_entries"`

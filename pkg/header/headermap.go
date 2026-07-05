@@ -146,11 +146,9 @@ func (h *Map) SetValues(key string, vals []string) {
 // to avoid shifting offsets of other entries; this is acceptable because
 // Del is only called on the store path, not the hit path.
 //
-// Because the orphaned value string is not reclaimed, objSize (which
-// counts active entries via Len, not len(values)) underestimates the
-// true memory footprint by one string header + value bytes per Del.
-// This is bounded by the number of Del calls per object and not worth
-// reclaiming for.
+// Orphaned value slots are counted by Footprint (valueSlots and
+// valueBytes include them), so objSize accounts for their memory cost
+// even though they are no longer reachable via Range.
 func (h *Map) Del(key string) {
 	ck := http.CanonicalHeaderKey(key)
 	for i := range h.entries {
@@ -229,6 +227,19 @@ func NewMap(n int) Map {
 // Len returns the number of distinct header keys.
 func (h Map) Len() int {
 	return len(h.entries)
+}
+
+// Footprint returns the heap footprint components of the Map for eviction
+// accounting by internal/storage.objSize. entries is the number of active
+// header keys; valueSlots is len(values) including slots orphaned by Del;
+// valueBytes is the total byte length of all value strings (active +
+// orphaned). Used for eviction budgeting only; not a runtime memory metric.
+func (h Map) Footprint() (entries, valueSlots, valueBytes int) {
+	var n int
+	for i := range h.values {
+		n += len(h.values[i])
+	}
+	return len(h.entries), len(h.values), n
 }
 
 // Clone returns a shallow copy of the Map. The entry and values slices

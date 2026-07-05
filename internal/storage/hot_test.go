@@ -235,6 +235,88 @@ func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 	}
 }
 
+func TestObjSize_MapOverheadConstant(t *testing.T) {
+	t.Parallel()
+	// 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry.
+	// The hmap struct header (~96 B) is negligible at 1M+ entries.
+	if mapPerEntryOverhead != 22 {
+		t.Errorf("mapPerEntryOverhead = %d, want 22 (Go runtime bucket overhead)", mapPerEntryOverhead)
+	}
+}
+
+func TestObjSize_OrphanedValuesCounted(t *testing.T) {
+	t.Parallel()
+	hdr := header.FromHTTP(http.Header{
+		"Content-Type": {"text/html"},
+		"Set-Cookie":   {"session=abc"},
+		"X-Custom":     {"value1"},
+	})
+	hdr.Del("Set-Cookie")
+
+	obj := &api.Object{
+		Body:   []byte("hello"),
+		Header: hdr,
+	}
+	size := objSize(obj)
+
+	// Build a version without the orphan for comparison.
+	hdrClean := header.FromHTTP(http.Header{
+		"Content-Type": {"text/html"},
+		"X-Custom":     {"value1"},
+	})
+	objClean := &api.Object{
+		Body:   []byte("hello"),
+		Header: hdrClean,
+	}
+	sizeClean := objSize(objClean)
+
+	// The orphaned object should be larger because it counts the
+	// orphaned value slot's string header (16 B) and data bytes
+	// (len("session=abc") = 11).
+	if size <= sizeClean {
+		t.Fatalf("orphaned size = %d, clean size = %d — orphaned value not counted",
+			size, sizeClean)
+	}
+	delta := size - sizeClean
+	// Expected delta: headerValueHeader(16) + len("session=abc")(11) = 27.
+	if delta != 27 {
+		t.Errorf("delta = %d, want 27 (16 B string header + 11 B orphaned value data)", delta)
+	}
+}
+
+func TestObjSize_ExactValue(t *testing.T) {
+	t.Parallel()
+	hdr := header.FromHTTP(http.Header{
+		"Content-Type": {"text/html"},
+		"X-Custom":     {"val"},
+	})
+	obj := &api.Object{
+		Body:          []byte("hello"),
+		Header:        hdr,
+		VaryKey:       "V1",
+		ETag:          "E1",
+		CacheControl:  "public",
+		SurrogateKeys: []string{"s1", "s2"},
+	}
+
+	// Pin every component:
+	// body: 5
+	// objectStructSize: 256, hotEntrySize: 24, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// headerEntriesSlice: 24, headerValuesSlice: 24
+	// headerEntrySize * 2: 48
+	// headerValueHeader * 2: 32
+	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
+	// VaryKey: 2, ETag: 2, CacheControl: 6
+	// SurrogateKeys: 2 + 2 = 4
+	want := int64(5) + 256 + 24 + 32 + 22 +
+		24 + 24 + 48 + 32 + 12 +
+		2 + 2 + 6 + 4
+	got := objSize(obj)
+	if got != want {
+		t.Errorf("objSize = %d, want %d (exact value mismatch)", got, want)
+	}
+}
+
 func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	t.Parallel()
 	const budget = 1 << 16 // 64 KiB

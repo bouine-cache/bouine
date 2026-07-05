@@ -285,3 +285,46 @@ func TestMap_JSONRoundTrip(t *testing.T) {
 		return true
 	})
 }
+
+func TestMap_Footprint_NoOrphans(t *testing.T) {
+	t.Parallel()
+	h := NewMap(3)
+	h.Set("Content-Type", "text/html")
+	h.Set("Cache-Control", "public")
+	h.Set("X-Custom", "value1")
+
+	entries, valueSlots, valueBytes := h.Footprint()
+	if entries != 3 {
+		t.Errorf("entries = %d, want 3", entries)
+	}
+	if valueSlots != 3 {
+		t.Errorf("valueSlots = %d, want 3", valueSlots)
+	}
+	wantBytes := len("text/html") + len("public") + len("value1")
+	if valueBytes != wantBytes {
+		t.Errorf("valueBytes = %d, want %d", valueBytes, wantBytes)
+	}
+}
+
+func TestMap_Footprint_WithOrphanedDel(t *testing.T) {
+	t.Parallel()
+	h := NewMap(3)
+	h.Set("Content-Type", "text/html")
+	h.Set("Set-Cookie", "session=abc")
+	h.Set("X-Custom", "value1")
+	h.Del("Set-Cookie")
+
+	entries, valueSlots, valueBytes := h.Footprint()
+	if entries != 2 {
+		t.Errorf("entries = %d, want 2 (after Del)", entries)
+	}
+	// Del orphans the value slot — valueSlots should still be 3.
+	if valueSlots != 3 {
+		t.Errorf("valueSlots = %d, want 3 (Del orphans the slot)", valueSlots)
+	}
+	// valueBytes should include the orphaned "session=abc" bytes.
+	wantBytes := len("text/html") + len("session=abc") + len("value1")
+	if valueBytes != wantBytes {
+		t.Errorf("valueBytes = %d, want %d (orphaned value data must be counted)", valueBytes, wantBytes)
+	}
+}

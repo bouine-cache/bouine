@@ -666,7 +666,7 @@ const (
 	objectStructSize    int64 = 256
 	hotEntrySize        int64 = 24
 	sieveEntrySize      int64 = 32
-	mapPerEntryOverhead int64 = 50
+	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
 	headerEntriesSlice int64 = 24 // []headerEntry slice header
 	headerValuesSlice  int64 = 24 // []string slice header
@@ -678,13 +678,14 @@ func objSize(obj *api.Object) int64 {
 	size := int64(len(obj.Body)) +
 		objectStructSize + hotEntrySize + sieveEntrySize + mapPerEntryOverhead
 
-	// Map: two slice headers + per-entry overhead (headerEntry 24B + value string header 16B).
-	n := int64(obj.Header.Len())
-	size += headerEntriesSlice + headerValuesSlice + (headerEntrySize+headerValueHeader)*n
-	obj.Header.Range(func(k, v string) bool {
-		size += int64(len(v))
-		return true
-	})
+	// Map: two slice headers + per-entry overhead (headerEntry 24B + value
+	// string header 16B) + value data bytes. Footprint counts orphaned value
+	// slots from Del so objSize accounts for their heap cost.
+	entries, valueSlots, valueBytes := obj.Header.Footprint()
+	size += headerEntriesSlice + headerValuesSlice +
+		headerEntrySize*int64(entries) +
+		headerValueHeader*int64(valueSlots) +
+		int64(valueBytes)
 
 	size += int64(len(obj.VaryKey))
 	size += int64(len(obj.ETag))

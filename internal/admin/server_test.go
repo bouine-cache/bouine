@@ -431,3 +431,102 @@ func TestRateLimit_PostRejected(t *testing.T) {
 		t.Fatalf("GET during rate limit: got %d, want 200", status)
 	}
 }
+
+// --- pprof tests ---
+
+func TestPprof_DisabledByDefault(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	// With auth, the route is not registered → mux returns 404.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/debug/pprof/heap", nil)
+	req.Header.Set(header.Authorization, "Bearer secret")
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("pprof disabled: got %d, want 404", rr.Code)
+	}
+}
+
+func TestPprof_Enabled_HeapDebug(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PprofEnabled: true,
+	})
+	code, body := get(t, s, "/debug/pprof/heap?debug=1")
+	if code != http.StatusOK {
+		t.Fatalf("heap pprof: got %d, want 200", code)
+	}
+	if !bytes.Contains(body, []byte("heap")) {
+		t.Fatalf("heap pprof: body does not contain 'heap': %s", body[:min(len(body), 200)])
+	}
+}
+
+func TestPprof_NoAuthRequired(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Token:        "secret",
+		PprofEnabled: true,
+	})
+	// No Authorization header — pprof must still be reachable.
+	code, _ := get(t, s, "/debug/pprof/heap?debug=1")
+	if code != http.StatusOK {
+		t.Fatalf("pprof without auth: got %d, want 200", code)
+	}
+}
+
+func TestPprof_GoroutineDebug(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PprofEnabled: true,
+	})
+	code, body := get(t, s, "/debug/pprof/goroutine?debug=1")
+	if code != http.StatusOK {
+		t.Fatalf("goroutine pprof: got %d, want 200", code)
+	}
+	if !bytes.Contains(body, []byte("goroutine")) {
+		t.Fatalf("goroutine pprof: body does not contain 'goroutine': %s", body[:min(len(body), 200)])
+	}
+}
+
+func TestPprof_Index(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PprofEnabled: true,
+	})
+	code, body := get(t, s, "/debug/pprof/")
+	if code != http.StatusOK {
+		t.Fatalf("pprof index: got %d, want 200", code)
+	}
+	if !bytes.Contains(body, []byte("pprof")) {
+		t.Fatalf("pprof index: body does not contain 'pprof': %s", body[:min(len(body), 200)])
+	}
+}
+
+// TestPprof_AuthStillEnforcedOnOtherEndpoints proves the auth exemption
+// is scoped to /debug/pprof/* only — non-pprof write endpoints still
+// require the bearer token when pprof is enabled.
+func TestPprof_AuthStillEnforcedOnOtherEndpoints(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:        "secret",
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn:      func(_ api.Key) error { return nil },
+		PprofEnabled: true,
+	})
+	// POST /v1/purge without token → must still get 401, not 200.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
+		bytes.NewBufferString(`{"url":"https://a.com/"}`))
+	req.Header.Set(header.ContentType, "application/json")
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("purge without auth (pprof enabled): got %d, want 401", rr.Code)
+	}
+}

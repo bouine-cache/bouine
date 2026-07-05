@@ -341,7 +341,7 @@ L1 owns sockets, TLS, and ALPN. L1 pipeline stages (configurable, ordered):
 | `GET /v1/stats` | JSON snapshot of counters |
 | `GET /healthz` `/readyz` | K8s probes |
 | `GET /metrics` | Prometheus |
-| `GET /debug/pprof/*` | pprof |
+| `GET /debug/pprof/*` | pprof (opt-in via `admin.pprof_enabled`, auth-exempt) |
 | `GET /dashboard/*` | Embedded operator dashboard |
 
 All write endpoints require a bearer token or mTLS.
@@ -434,7 +434,9 @@ routes:
   `cache.lookup`, `origin.fetch`, `cluster.peerfetch`).
 - **Logs** — `slog` JSON, sampled access log with cache result + key hash;
   structured error log unsampled.
-- **Profiling** — `pprof` mounted on admin port behind auth.
+- **Profiling** — `pprof` mounted on admin port, auth-exempt, opt-in via
+  `admin.pprof_enabled` config flag (default false). The admin port is network-isolated
+  via K8s NetworkPolicy in production.
 - **Self-test** — `/debug/cachecheck?url=...` shows the decision tree the
   engine would take for a given request.
 

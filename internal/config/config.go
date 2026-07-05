@@ -428,6 +428,10 @@ type AdminConfig struct {
 	// RateLimitPerSecond caps the number of write requests per second
 	// on the admin API. Zero (default) disables rate limiting.
 	RateLimitPerSecond int `yaml:"rate_limit_per_second,omitempty" json:"rate_limit_per_second,omitempty"`
+	// PprofEnabled enables net/http/pprof handlers under /debug/pprof/* on the
+	// admin port. The routes are auth-exempt; the admin port is expected
+	// to be network-isolated in production. Default is false.
+	PprofEnabled bool `yaml:"pprof_enabled,omitempty" json:"pprof_enabled,omitempty"`
 }
 
 // ByteSize is a typed size in bytes, parsed from strings like "2Go"

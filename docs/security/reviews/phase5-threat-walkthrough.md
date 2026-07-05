@@ -44,7 +44,7 @@ are reclassified in `threat-model.md` and itemised here for honesty:
 | T34 | Prefetch concurrency caps | Prefetcher not implemented. → 🔵 deferred |
 | T39 | QUIC address validation | HTTP/3 not implemented. → 🔵 deferred |
 | T42 | VCL shim has no eval | VCL shim not implemented. → 🔵 deferred (`§17.4`) |
-| T46 | "Pprof behind admin auth" | pprof is **not mounted** in the current admin server → no pprof exposure at all (safer than claimed). → ✅ (by absence) |
+| T46 | "Pprof behind admin auth" | pprof is mounted on the admin port, auth-exempt by design (operators and bench harnesses fetch profiles without a bearer token). Opt-in via `admin.pprof_enabled` config flag (default false). Admin port is network-isolated via K8s NetworkPolicy. → ✅ (opt-in flag + network isolation) |
 | T47, T49, T50 | AI pipeline controls | AI layer not implemented. → 🔵 deferred |
 
 ## Per-threat status (current)

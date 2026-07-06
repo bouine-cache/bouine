@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-07-06
-- **Deciders**: @thylong
+- **Deciders**: @chrisdupin
 - **Phase**: phase 4.5 (hardening)
 
 ## Context

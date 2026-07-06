@@ -634,3 +634,16 @@ func TestCluster_ChurnThreshold_OutOfRangeRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestCluster_ChurnThreshold_BoundariesAccepted(t *testing.T) {
+	t.Parallel()
+	for _, v := range []float64{0, 0.5, 1.0} {
+		cfg := Config{
+			Listen:  Listen{Admin: ":9000"},
+			Cluster: Cluster{Enabled: true, Mode: ClusterModeFull, ChurnThreshold: v},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("churn_threshold %v should be accepted, got: %v", v, err)
+		}
+	}
+}

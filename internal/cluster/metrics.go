@@ -43,6 +43,11 @@ type Metrics struct {
 	AntiEntropyKeysRepaired prometheus.Gauge
 	// AntiEntropyFetchFailures counts peer key-set fetch failures.
 	AntiEntropyFetchFailures prometheus.Counter
+	// AntiEntropyCooldownSkips counts keys skipped as "missing" because
+	// they were within their backfill cooldown window (#187). Non-zero
+	// indicates SIEVE is evicting freshly-backfilled keys before the next
+	// round; sustained growth suggests the hot tier is undersized.
+	AntiEntropyCooldownSkips prometheus.Counter
 	// OnReplicationBytes, if set, is invoked on every replication byte
 	// record with the direction ("sent"/"received") and byte count. Used
 	// to feed the dashboard's replication ring without coupling the
@@ -117,6 +122,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_anti_entropy_fetch_failures_total",
 			Help:      "Anti-entropy peer key-set fetch failures.",
 		}),
+		AntiEntropyCooldownSkips: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_anti_entropy_cooldown_skips_total",
+			Help:      "Keys skipped as missing by anti-entropy because they were within their backfill cooldown window.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -130,6 +140,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.AntiEntropyRepaired,
 		m.AntiEntropyKeysRepaired,
 		m.AntiEntropyFetchFailures,
+		m.AntiEntropyCooldownSkips,
 	)
 	return m
 }
@@ -250,4 +261,22 @@ func (m *Metrics) IncAntiEntropyFetchFailure() {
 		return
 	}
 	m.AntiEntropyFetchFailures.Inc()
+}
+
+// AddAntiEntropyCooldownSkips adds n to the cooldown-skips counter, which
+// tracks keys skipped as "missing" because they were within their backfill
+// cooldown window (#187).
+func (m *Metrics) AddAntiEntropyCooldownSkips(n float64) {
+	if m == nil || m.AntiEntropyCooldownSkips == nil {
+		return
+	}
+	m.AntiEntropyCooldownSkips.Add(n)
+}
+
+// IncAntiEntropyCooldownSkip increments the cooldown-skips counter by one.
+func (m *Metrics) IncAntiEntropyCooldownSkip() {
+	if m == nil || m.AntiEntropyCooldownSkips == nil {
+		return
+	}
+	m.AntiEntropyCooldownSkips.Inc()
 }

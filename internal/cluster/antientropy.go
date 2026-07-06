@@ -18,6 +18,17 @@ type AntiEntropyConfig struct {
 	// BackfillLimit caps the number of keys backfilled per peer per round.
 	// 0 means no limit.
 	BackfillLimit int
+	// BackfillCooldown suppresses re-backfill of a key for this window
+	// after it was last backfilled. SIEVE evicts freshly-backfilled keys
+	// (low priority: just inserted, never served) before the next round,
+	// so without a cooldown the same keys are "missing" again every round
+	// and the reconciler re-fetches them — a self-sustaining storm (#187).
+	// The cooldown skips a key as "missing" for this duration after a
+	// successful backfill, giving SIEVE time to either promote the key
+	// (once it is served) or for the operator to grow the hot tier.
+	// 0 disables the cooldown (back-compat). The recommended value is 5m
+	// (≤ 10 rounds at the default 30s interval).
+	BackfillCooldown time.Duration
 	// FetchTimeout bounds each peer-fetch during backfill. Default 2s.
 	FetchTimeout time.Duration
 	// Logger is the structured logger.
@@ -59,6 +70,18 @@ type AntiEntropy struct {
 	peers   func() []api.PeerInfo
 	metrics *Metrics
 	logger  observability.Logger
+
+	// now returns the current time. Defaults to time.Now; overridden in
+	// tests to make the cooldown deterministic (AGENTS.md §8: no
+	// time.Now() in tests). Only accessed from the reconcile goroutine.
+	now func() time.Time
+	// cooldown maps a backfilled key to the time until which it must be
+	// skipped as "missing" by future reconcile rounds (#187). Pruned at
+	// the top of each round to bound memory. Only accessed from the
+	// single reconcile goroutine started by Start, so no mutex is
+	// needed; tests call reconcile directly without running Start
+	// concurrently.
+	cooldown map[api.Key]time.Time
 }
 
 // NewAntiEntropy creates a reconciler. peers returns the current peer list
@@ -75,14 +98,16 @@ func NewAntiEntropy(cfg AntiEntropyConfig, node string, keys KeySource, fetch Ba
 	}
 	logger := cfg.Logger
 	return &AntiEntropy{
-		cfg:     cfg,
-		node:    node,
-		keys:    keys,
-		fetch:   fetch,
-		store:   store,
-		peers:   peers,
-		metrics: metrics,
-		logger:  logger,
+		cfg:      cfg,
+		node:     node,
+		keys:     keys,
+		fetch:    fetch,
+		store:    store,
+		peers:    peers,
+		metrics:  metrics,
+		logger:   logger,
+		now:      time.Now,
+		cooldown: make(map[api.Key]time.Time),
 	}
 }
 
@@ -119,6 +144,11 @@ func (ae *AntiEntropy) reconcile(ctx context.Context) {
 		return
 	}
 
+	// Prune expired cooldown entries at the top of each round to bound
+	// memory. The cooldown map is only mutated from this goroutine, so no
+	// lock is needed.
+	ae.pruneCooldown()
+
 	localKeys := ae.keys.Keys()
 	localSet := make(map[api.Key]struct{}, len(localKeys))
 	for _, k := range localKeys {
@@ -147,11 +177,15 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 
 	ae.metrics.IncAntiEntropyReconcile()
 
-	var missing []api.Key
-	for _, key := range peerKeys {
-		if _, ok := localSet[key]; !ok {
-			missing = append(missing, key)
-		}
+	missing, cooldownSkips := ae.missingKeys(peerKeys, localSet)
+
+	if cooldownSkips > 0 {
+		ae.metrics.AddAntiEntropyCooldownSkips(float64(cooldownSkips))
+		ae.logger.Debug("anti-entropy: cooldown skipped missing keys",
+			"peer", peer.Name,
+			"skipped", cooldownSkips,
+			"missing_after_cooldown", len(missing),
+		)
 	}
 
 	if len(missing) == 0 {
@@ -189,6 +223,10 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 			// Record the backfilled key in localSet so subsequent peers
 			// in this round see it as present.
 			localSet[key] = struct{}{}
+			// Record the key in the cooldown map so it is skipped as
+			// "missing" for BackfillCooldown. This is a no-op when the
+			// cooldown is disabled (0), preserving back-compat.
+			ae.recordBackfill(key)
 		}
 	}
 
@@ -200,6 +238,65 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 		"backfilled_count", repaired,
 		"dur_ms", time.Since(start).Milliseconds(),
 	)
+}
+
+// pruneCooldown removes expired entries from the cooldown map. Called once
+// per reconcile round to bound memory. No-op when the cooldown is disabled
+// or the map is empty. Only called from the reconcile goroutine.
+func (ae *AntiEntropy) pruneCooldown() {
+	if ae.cfg.BackfillCooldown <= 0 || len(ae.cooldown) == 0 {
+		return
+	}
+	now := ae.now()
+	for k, exp := range ae.cooldown {
+		if !now.Before(exp) {
+			delete(ae.cooldown, k)
+		}
+	}
+}
+
+// inCooldown reports whether key is within its backfill cooldown window and
+// must be skipped as "missing" this round. No-op when BackfillCooldown is 0
+// (disabled, back-compat). O(1) map lookup.
+func (ae *AntiEntropy) inCooldown(key api.Key) bool {
+	if ae.cfg.BackfillCooldown <= 0 {
+		return false
+	}
+	expiry, ok := ae.cooldown[key]
+	if !ok {
+		return false
+	}
+	return ae.now().Before(expiry)
+}
+
+// recordBackfill marks key as recently backfilled so it is skipped for
+// BackfillCooldown. No-op when the cooldown is disabled.
+func (ae *AntiEntropy) recordBackfill(key api.Key) {
+	if ae.cfg.BackfillCooldown <= 0 {
+		return
+	}
+	ae.cooldown[key] = ae.now().Add(ae.cfg.BackfillCooldown)
+}
+
+// missingKeys computes the keys present in peerKeys but absent from
+// localSet, skipping any that are within their backfill cooldown window
+// (#187). The cooldown check is applied here — before the missing list is
+// built — so the peer-fetch RPC is never issued for cooled-down keys, not
+// merely skipped at store time. Returns the missing list and the number of
+// keys skipped by cooldown. The cooldown check is O(1) per key (one map
+// lookup).
+func (ae *AntiEntropy) missingKeys(peerKeys []api.Key, localSet map[api.Key]struct{}) (missing []api.Key, cooldownSkips int) {
+	for _, key := range peerKeys {
+		if _, ok := localSet[key]; ok {
+			continue
+		}
+		if ae.inCooldown(key) {
+			cooldownSkips++
+			continue
+		}
+		missing = append(missing, key)
+	}
+	return missing, cooldownSkips
 }
 
 func (ae *AntiEntropy) fetchPeerKeys(ctx context.Context, peer api.PeerInfo) ([]api.Key, bool) {

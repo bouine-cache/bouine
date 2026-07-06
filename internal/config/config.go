@@ -126,6 +126,15 @@ type Cluster struct {
 	// 1000) to prevent thundering herd when a new pod joins a cluster
 	// with many cached objects.
 	BackfillLimit int `yaml:"backfill_limit,omitempty" json:"backfill_limit,omitempty"`
+	// BackfillCooldown suppresses re-backfill of a key for this window
+	// after it was last backfilled. SIEVE evicts freshly-backfilled keys
+	// (low priority: just inserted, never served) before the next round,
+	// so without a cooldown the same keys are "missing" again every round
+	// and the reconciler re-fetches them — a self-sustaining storm (#187).
+	// 0 (default) disables the cooldown for back-compat. The recommended
+	// value is 5m (≤ 10 rounds at the default 30s interval). Has no
+	// effect in strong or eventual mode.
+	BackfillCooldown time.Duration `yaml:"backfill_cooldown,omitempty" json:"backfill_cooldown,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

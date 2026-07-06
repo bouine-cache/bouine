@@ -143,7 +143,7 @@ type Cluster struct {
 	// SIEVE). When the evicted-to-backfilled ratio exceeds this threshold
 	// the round is skipped the same way OverBudget skips: log a warning,
 	// set keys-repaired to 0, return. 0 (default) disables churn detection
-	// for back-compat. The threshold is a float in (0, 1]; a reasonable
+	// for back-compat. The threshold is a float in [0, 1]; a reasonable
 	// default is 0.5 (skip when more than half of recent backfills were
 	// evicted). Requires BackfillCooldown > 0 — the cooldown map is the
 	// window over which churn is measured. Has no effect in strong or

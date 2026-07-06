@@ -277,6 +277,11 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 // requires no storage-layer changes — it reuses the cooldown map from PR
 // #191 and the local key set that reconcile already computes.
 //
+// Note: "absent from localSet" also counts keys removed by purge or ban,
+// not just SIEVE eviction. This is harmless — a purged key should not be
+// re-backfilled, so counting it as "evicted" only makes the detector more
+// conservative (more likely to skip), which is the safe direction.
+//
 // No-op when ChurnThreshold is 0 (disabled, back-compat) or
 // BackfillCooldown is 0 (no cooldown map to measure over). Returns false
 // when the cooldown map is empty (nothing backfilled recently). Only

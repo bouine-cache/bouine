@@ -309,8 +309,8 @@ func (c *Config) validateCluster() error {
 	if c.Cluster.ChurnThreshold < 0 || c.Cluster.ChurnThreshold > 1 {
 		return fmt.Errorf("config: cluster.churn_threshold must be in [0, 1], got %v", c.Cluster.ChurnThreshold)
 	}
-	if c.Storage.WarmSyncInterval < 0 {
-		return fmt.Errorf("config: storage.warm_sync_interval must be >= 0, got %v", c.Storage.WarmSyncInterval)
+	if c.Storage.WarmSyncInterval < -1 {
+		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
 	}
 	if c.Storage.WarmSyncBatchSize < 0 {
 		return fmt.Errorf("config: storage.warm_sync_batch_size must be >= 0, got %v", c.Storage.WarmSyncBatchSize)

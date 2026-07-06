@@ -27,7 +27,7 @@ config:
     warm_dir: /var/lib/bouine
     warm_max_bytes: 20GiB
     eviction: sieve
-    # warm_sync_interval: 60s  # uncomment to sync small objects to warm
+    warm_sync_interval: 60s  # hot→warm background sync (default); set to -1 to disable
     # warm_sync_batch_size: 5000
     # body_threshold: 64KiB
   cluster:

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaults_AdminListenerEnabled(t *testing.T) {
@@ -539,5 +540,50 @@ func TestValidate_HotMaxBytesRatioOutOfRange(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestCluster_BackfillCooldown_ParsesFromYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+cluster:
+  enabled: true
+  mode: full
+  backfill_cooldown: 5m
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Cluster.BackfillCooldown != 5*time.Minute {
+		t.Fatalf("backfill_cooldown = %v, want 5m", cfg.Cluster.BackfillCooldown)
+	}
+}
+
+func TestCluster_BackfillCooldown_DefaultsToZero(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: ClusterModeFull}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.Cluster.BackfillCooldown != 0 {
+		t.Fatalf("default backfill_cooldown = %v, want 0 (disabled by default)", cfg.Cluster.BackfillCooldown)
+	}
+}
+
+func TestCluster_BackfillCooldown_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000"},
+		Cluster: Cluster{Enabled: true, Mode: ClusterModeFull, BackfillCooldown: -1 * time.Minute},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative backfill_cooldown")
+	}
+	if !strings.Contains(err.Error(), "backfill_cooldown") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -294,6 +294,9 @@ func (c *Config) validateCluster() error {
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong
 	}
+	if c.Cluster.BackfillCooldown < 0 {
+		return fmt.Errorf("config: cluster.backfill_cooldown must be >= 0, got %v", c.Cluster.BackfillCooldown)
+	}
 	return nil
 }
 

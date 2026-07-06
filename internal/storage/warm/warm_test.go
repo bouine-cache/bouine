@@ -486,6 +486,7 @@ func BenchmarkGet(b *testing.B) {
 	}
 
 	b.ResetTimer()
+	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		i := uint64(0)
 		for pb.Next() {
@@ -494,6 +495,49 @@ func BenchmarkGet(b *testing.B) {
 			i++
 		}
 	})
+}
+
+// BenchmarkReadRecordAt isolates the readRecordAt allocation path
+// (issue #187, fix #4). The header and footer buffers are pooled via
+// sync.Pool; the body is not (it's aliased by decodeObject and returned
+// in Record.Body). This benchmark verifies the pool eliminates the
+// two fixed-size allocations per read.
+func BenchmarkReadRecordAt(b *testing.B) {
+	dir := b.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := []byte(fmt.Sprintf("bench-body-padding-to-256-bytes" +
+		"------------------------------------------------------------" +
+		"------------------------------------------------------------" +
+		"------------------------------------------------------------" +
+		"----------------------------------------------"))
+	segID, off, err := s.Put(1, body)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	s.mu.RLock()
+	seg := s.segs[segID]
+	s.mu.RUnlock()
+	if seg == nil {
+		b.Fatalf("segment %d not found", segID)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		rec, err := readRecordAt(seg.f, off, segID)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if rec.Key != 1 {
+			b.Fatalf("key=%d, want 1", rec.Key)
+		}
+	}
 }
 
 func TestStore_CompactStreamsLiveRecords(t *testing.T) {

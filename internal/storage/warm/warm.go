@@ -45,6 +45,26 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
+// recordHdrPool pools the fixed-size 16-byte header buffer used by
+// readRecordAt. The header is read, parsed, and discarded on every
+// warm-tier read; without pooling this is a per-call heap allocation
+// on the peer-fetch hot path (issue #187, fix #4).
+var recordHdrPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, headerLen)
+		return &buf
+	},
+}
+
+// recordFootPool pools the fixed-size 4-byte footer buffer used by
+// readRecordAt. Same rationale as recordHdrPool.
+var recordFootPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, footerLen)
+		return &buf
+	},
+}
+
 // ErrTornRecord indicates a partial trailing record — the segment was
 // truncated mid-write (torn write). Callers should treat the affected
 // index entry as stale (drop it, return a miss) rather than surfacing
@@ -533,7 +553,9 @@ func writeRecord(w io.Writer, magic uint32, key uint64, body []byte) error {
 }
 
 func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
-	hdr := make([]byte, headerLen)
+	hdrPtr := recordHdrPool.Get().(*[]byte)
+	hdr := *hdrPtr
+	defer recordHdrPool.Put(hdrPtr)
 	if _, err := f.ReadAt(hdr, offset); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, ErrTornRecord
@@ -556,7 +578,9 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 		}
 	}
 
-	footBuf := make([]byte, footerLen)
+	footPtr := recordFootPool.Get().(*[]byte)
+	footBuf := *footPtr
+	defer recordFootPool.Put(footPtr)
 	if _, err := f.ReadAt(footBuf, offset+headerLen+int64(bodyLen)); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, ErrTornRecord

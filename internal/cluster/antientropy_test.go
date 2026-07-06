@@ -14,6 +14,7 @@ import (
 
 	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
+	"github.com/thylong/bouine/pkg/header"
 )
 
 // Compile-time assertions that the concrete stores satisfy cluster.Storer.
@@ -140,7 +141,8 @@ func TestAntiEntropy_ReconcileBackfillsAndStores(t *testing.T) {
 			var req api.PeerFetchRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			if obj, ok := map[api.Key]*api.Object{4: obj4, 5: obj5}[req.Key]; ok {
-				_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
+				w.Header().Set(header.ContentType, "application/octet-stream")
+				_, _ = w.Write(storage.EncodeObject(obj))
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
@@ -401,7 +403,8 @@ func TestAntiEntropy_SkipsBackfillWhenOverBudget(t *testing.T) {
 			var req api.PeerFetchRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			if obj, ok := map[api.Key]*api.Object{2: obj2, 3: obj3}[req.Key]; ok {
-				_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
+				w.Header().Set(header.ContentType, "application/octet-stream")
+				_, _ = w.Write(storage.EncodeObject(obj))
 				return
 			}
 		}
@@ -453,7 +456,8 @@ func TestAntiEntropy_NoDuplicateBackfillAcrossPeers(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/v1/peer/fetch" {
-			_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj2})
+			w.Header().Set(header.ContentType, "application/octet-stream")
+			_, _ = w.Write(storage.EncodeObject(obj2))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -517,7 +521,8 @@ func TestAntiEntropy_MidRoundOverBudgetGuard(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/v1/peer/fetch" {
-			_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj2})
+			w.Header().Set(header.ContentType, "application/octet-stream")
+			_, _ = w.Write(storage.EncodeObject(obj2))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -532,7 +537,8 @@ func TestAntiEntropy_MidRoundOverBudgetGuard(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/v1/peer/fetch" {
-			_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj3})
+			w.Header().Set(header.ContentType, "application/octet-stream")
+			_, _ = w.Write(storage.EncodeObject(obj3))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

@@ -24,6 +24,29 @@ const objCodecVersion byte = 2
 // which still propagate as hard errors.
 var errCorrupt = errors.New("storage: corrupt object blob")
 
+// EncodeObject is the exported form of encodeObject. It serialises an
+// Object into the compact binary form used by the warm tier and the
+// peer-fetch wire protocol (issue #187): a varint-framed metadata header
+// followed by the raw body bytes. The body is written last and
+// length-prefixed so the decoder can alias it directly out of the
+// backing blob without a copy.
+//
+// Stable.
+func EncodeObject(obj *api.Object) []byte {
+	return encodeObject(obj)
+}
+
+// DecodeObject is the exported form of decodeObject. The returned
+// Object's Body aliases blob (no copy); callers must treat blob as
+// immutable for the object's lifetime. BodySize is set to the inline
+// body length. The transient CacheControl / OriginAge fields are left
+// zero for the caller to re-derive from the headers.
+//
+// Stable.
+func DecodeObject(blob []byte) (*api.Object, error) {
+	return decodeObject(blob)
+}
+
 // encodeObject serialises an Object into the compact binary form used by
 // the warm tier: a varint-framed metadata header followed by the raw
 // body bytes. This replaces json.Marshal, which base64-encoded the body

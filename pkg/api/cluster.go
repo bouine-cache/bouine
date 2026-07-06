@@ -106,16 +106,6 @@ type PeerFetchRequest struct {
 	Hops int `json:"hops"`
 }
 
-// PeerFetchResponse is the HTTP response body for a peer cache lookup.
-//
-// Stable.
-type PeerFetchResponse struct {
-	// Hit is true when the peer has the object.
-	Hit bool `json:"hit"`
-	// Object is non-nil when Hit is true.
-	Object *Object `json:"object,omitempty"`
-}
-
 // KeySet is the anti-entropy key-set exchange payload. It carries the
 // complete list of cache keys a node holds, so peers can compute the
 // diff and backfill missing objects. Keys are uint64 hashes.

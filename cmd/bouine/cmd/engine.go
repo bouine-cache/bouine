@@ -256,27 +256,7 @@ func (e *engine) initCluster(
 				return store.Put(ctx, obj.Key, obj)
 			},
 		})
-		keyLister, ok := any(store).(storage.KeyLister)
-		if !ok {
-			e.logger.Warn("anti-entropy disabled: store does not implement KeyLister",
-				"mode", e.cfg.Cluster.Mode)
-		} else {
-			// Storer is a cluster-layer interface (Put + OverBudget); the
-			// concrete store implements it, but storage.Store itself does
-			// not advertise OverBudget since only the cluster layer needs it.
-			storer, ok := any(store).(cluster.Storer)
-			if !ok {
-				e.logger.Warn("anti-entropy disabled: store does not implement Storer",
-					"mode", e.cfg.Cluster.Mode)
-			} else {
-				ae = cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
-					Interval:         e.cfg.Cluster.AntiEntropyInterval,
-					BackfillLimit:    e.cfg.Cluster.BackfillLimit,
-					BackfillCooldown: e.cfg.Cluster.BackfillCooldown,
-					Logger:           e.logger,
-				}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, storer, clusterNode.Members, clusterMetrics)
-			}
-		}
+		ae = e.initAntiEntropy(store, peerFetcher, clusterNode.Members, clusterMetrics)
 	}
 
 	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
@@ -288,6 +268,33 @@ func (e *engine) initCluster(
 	}
 
 	return clusterNode, peerFetcher, broadcaster, clusterNode.Members, ae, clusterMetrics
+}
+
+// initAntiEntropy creates the anti-entropy reconciler for full cluster mode.
+// Returns nil with a warning log if the store does not implement the
+// required cluster.Storer or storage.KeyLister interfaces.
+func (e *engine) initAntiEntropy(store storage.Store, peerFetcher *cluster.PeerFetcher, members func() []api.PeerInfo, clusterMetrics *cluster.Metrics) *cluster.AntiEntropy {
+	keyLister, ok := any(store).(storage.KeyLister)
+	if !ok {
+		e.logger.Warn("anti-entropy disabled: store does not implement KeyLister",
+			"mode", e.cfg.Cluster.Mode)
+		return nil
+	}
+	// Storer is a cluster-layer interface (Put + OverBudget); the
+	// concrete store implements it, but storage.Store itself does
+	// not advertise OverBudget since only the cluster layer needs it.
+	storer, ok := any(store).(cluster.Storer)
+	if !ok {
+		e.logger.Warn("anti-entropy disabled: store does not implement Storer",
+			"mode", e.cfg.Cluster.Mode)
+		return nil
+	}
+	return cluster.NewAntiEntropy(cluster.AntiEntropyConfig{
+		Interval:         e.cfg.Cluster.AntiEntropyInterval,
+		BackfillLimit:    e.cfg.Cluster.BackfillLimit,
+		BackfillCooldown: e.cfg.Cluster.BackfillCooldown,
+		Logger:           e.logger,
+	}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, storer, members, clusterMetrics)
 }
 
 func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics, closeCtx context.Context) *cfPropagator {

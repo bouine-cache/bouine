@@ -115,8 +115,9 @@ type Store struct {
 }
 
 type warmStats struct {
-	entries atomic.Int64
-	bytes   atomic.Int64
+	entries        atomic.Int64
+	bytes          atomic.Int64
+	staleSelfHeals atomic.Int64
 }
 
 // Config configures the warm store.
@@ -261,7 +262,15 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 		}
 	}
 	if seg == nil {
-		return nil, fmt.Errorf("warm: segment %d not found", loc.segID)
+		// The index entry points at a segment that is no longer in
+		// s.segs. This happens when a Put writes to a segment and
+		// updates the index after Compact has swapped the segment set
+		// (issue #193): the record is gone (unlinked inode) and the
+		// index entry is stale. Self-heal the same way the torn-record
+		// path below does — drop the entry and treat it as a miss so
+		// the caller refetches instead of spamming WARN logs forever.
+		s.dropStaleIndex(key, loc)
+		return nil, nil
 	}
 
 	seg.mu.Lock()
@@ -270,9 +279,7 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
-			s.idxMu.Lock()
-			delete(s.index, key)
-			s.idxMu.Unlock()
+			s.dropStaleIndex(key, loc)
 			return nil, nil
 		}
 		return nil, err
@@ -388,6 +395,30 @@ func (s *Store) Scan(fn func(Record) error) error {
 // Stats returns warm-tier counters.
 func (s *Store) Stats() (entries, bytes int64) {
 	return s.stats.entries.Load(), s.stats.bytes.Load()
+}
+
+// SelfHeals returns the number of stale index entries dropped by the
+// Get self-heal paths (segment-not-found and torn-record). Operators
+// can poll this to detect segment-management bugs or disk faults that
+// drop segments for reasons other than Compact — the self-heal turns
+// those into silent misses, so this counter is the only signal.
+func (s *Store) SelfHeals() int64 {
+	return s.stats.staleSelfHeals.Load()
+}
+
+// dropStaleIndex removes the index entry for key iff it still points
+// at the stale location (segID, offset). This is a compare-and-delete:
+// re-reading under the write lock prevents a concurrent Put from having
+// its valid entry nuked by a self-heal that read a stale entry before
+// the Put landed (the TOCTOU window between idxMu.RUnlock and idxMu.Lock
+// in Get).
+func (s *Store) dropStaleIndex(key uint64, stale warmLoc) {
+	s.idxMu.Lock()
+	if cur, ok := s.index[key]; ok && cur == stale {
+		delete(s.index, key)
+		s.stats.staleSelfHeals.Add(1)
+	}
+	s.idxMu.Unlock()
 }
 
 // Keys returns all keys present in the warm-tier index. The returned

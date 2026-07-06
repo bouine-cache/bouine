@@ -830,3 +830,184 @@ func TestTornRecord_CompactSucceeds(t *testing.T) {
 		}
 	}
 }
+
+// TestGet_StaleSegmentSelfHeals reproduces issue #193: an index entry
+// pointing at a segment that no longer exists (e.g. because Compact
+// swapped the segment set while a Put was mid-flight). Get must treat
+// this as a miss and delete the stale entry so subsequent lookups
+// don't keep hitting the same error.
+func TestGet_StaleSegmentSelfHeals(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	// Populate the store so there is at least one real segment, then
+	// inject an index entry pointing at a segment ID that does not
+	// exist in s.segs (mimicking the Put/Compact race from #193).
+	if _, _, err := s.Put(1, []byte("real")); err != nil {
+		t.Fatalf("Put real: %v", err)
+	}
+	const staleKey = uint64(99)
+	s.SetIndex(staleKey, 9999, 0)
+
+	got, err := s.Get(staleKey)
+	if err != nil {
+		t.Fatalf("Get stale key: expected nil error, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Get stale key: expected nil (miss), got %q", got)
+	}
+
+	s.idxMu.RLock()
+	_, ok := s.index[staleKey]
+	s.idxMu.RUnlock()
+	if ok {
+		t.Fatal("stale index entry should be dropped after segment-not-found Get")
+	}
+
+	// The self-heal counter must reflect the drop.
+	if n := s.SelfHeals(); n != 1 {
+		t.Fatalf("SelfHeals after stale Get = %d, want 1", n)
+	}
+
+	// A second Get must also be a clean miss — no error, no entry, and
+	// must not re-increment the counter (no entry to drop).
+	if _, err := s.Get(staleKey); err != nil {
+		t.Fatalf("second Get stale key: expected nil error, got %v", err)
+	}
+	if n := s.SelfHeals(); n != 1 {
+		t.Fatalf("SelfHeals after second stale Get = %d, want 1", n)
+	}
+}
+
+// TestGet_StaleSegmentConcurrentCompact verifies that Get never returns
+// a "segment not found" error when racing with Compact. The self-heal
+// path turns stale entries into misses instead of errors, so the only
+// acceptable outcomes under concurrency are a value or nil.
+func TestGet_StaleSegmentConcurrentCompact(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write enough live records to make compaction worthwhile, plus a
+	// batch of tombstones so Compact actually reclaims space.
+	for i := range 500 {
+		if _, _, err := s.Put(uint64(i), []byte(fmt.Sprintf("body-%d", i))); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	for i := range 250 {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	// Inject a stale entry pointing at a non-existent segment (mimics
+	// the Put/Compact race from #193 where Put writes an index entry
+	// for a segment that Compact has already unlinked).
+	const staleKey = uint64(7777)
+	s.SetIndex(staleKey, 9999, 0)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.Compact(); err != nil {
+			t.Errorf("Compact: %v", err)
+		}
+	}()
+
+	// Hammer Get on the stale key while Compact runs. Every call must
+	// either return nil (miss, possibly already self-healed) or the
+	// empty miss path — never an error.
+	for range 200 {
+		got, err := s.Get(staleKey)
+		if err != nil {
+			t.Fatalf("Get stale key under Compact: expected nil error, got %v", err)
+		}
+		if got != nil {
+			t.Fatalf("Get stale key under Compact: expected nil (miss), got %q", got)
+		}
+	}
+
+	wg.Wait()
+
+	// After Compact finishes, the stale entry must be gone.
+	got, err := s.Get(staleKey)
+	if err != nil {
+		t.Fatalf("Get stale key after Compact: expected nil error, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Get stale key after Compact: expected nil (miss), got %q", got)
+	}
+	s.idxMu.RLock()
+	_, ok := s.index[staleKey]
+	s.idxMu.RUnlock()
+	if ok {
+		t.Fatal("stale index entry should be dropped after concurrent Compact")
+	}
+}
+
+// TestGet_DropStaleIndexDoesNotClobberConcurrentPut verifies the
+// compare-and-delete in dropStaleIndex: if a concurrent Put writes a
+// valid entry for the same key between Get's idxMu.RUnlock and the
+// idxMu.Lock in the self-heal path, the valid entry must survive.
+// Without the compare-and-delete, the self-heal would delete the valid
+// entry and the key would become a permanent miss.
+func TestGet_DropStaleIndexDoesNotClobberConcurrentPut(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	// Write a real record so there is a valid segment, then inject a
+	// stale entry for a key that points at a non-existent segment.
+	if _, _, err := s.Put(1, []byte("real")); err != nil {
+		t.Fatalf("Put real: %v", err)
+	}
+	const key = uint64(42)
+	s.SetIndex(key, 9999, 0)
+
+	// Simulate the TOCTOU window: read the stale loc, then have a
+	// concurrent Put write a valid entry before the self-heal runs.
+	// We do this by calling Get in a goroutine and racing a Put, but
+	// to make it deterministic we directly exercise dropStaleIndex
+	// with the stale loc after the Put has landed.
+	staleLoc := warmLoc{segID: 9999, offset: 0}
+
+	// Write a valid record for the same key.
+	validBody := []byte("valid-after-compact")
+	if _, _, err := s.Put(key, validBody); err != nil {
+		t.Fatalf("Put valid: %v", err)
+	}
+
+	// Now call dropStaleIndex with the *old* stale location. The
+	// entry now points at the valid Put, so the compare-and-delete
+	// must NOT delete it.
+	s.dropStaleIndex(key, staleLoc)
+
+	s.idxMu.RLock()
+	loc, ok := s.index[key]
+	s.idxMu.RUnlock()
+	if !ok {
+		t.Fatal("valid index entry was clobbered by dropStaleIndex with stale loc")
+	}
+	if loc.segID == 9999 {
+		t.Fatal("dropStaleIndex deleted the valid entry — compare-and-delete is broken")
+	}
+
+	// The valid entry must still serve.
+	got, err := s.Get(key)
+	if err != nil {
+		t.Fatalf("Get after dropStaleIndex: %v", err)
+	}
+	if string(got) != "valid-after-compact" {
+		t.Fatalf("Get = %q, want %q", got, "valid-after-compact")
+	}
+
+	// The self-heal counter must NOT have incremented — nothing was dropped.
+	if n := s.SelfHeals(); n != 0 {
+		t.Fatalf("SelfHeals = %d, want 0 (no stale entry was dropped)", n)
+	}
+}

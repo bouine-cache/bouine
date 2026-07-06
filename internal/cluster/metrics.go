@@ -48,6 +48,12 @@ type Metrics struct {
 	// indicates SIEVE is evicting freshly-backfilled keys before the next
 	// round; sustained growth suggests the hot tier is undersized.
 	AntiEntropyCooldownSkips prometheus.Counter
+	// AntiEntropyChurnSkips counts anti-entropy rounds skipped because
+	// SIEVE was evicting recently-backfilled keys faster than the
+	// reconciler was inserting them (#187, fix #5). Sustained increments
+	// indicate the hot tier is undersized for the working set — backfill
+	// is wasted work until the tier grows or the working set shrinks.
+	AntiEntropyChurnSkips prometheus.Counter
 	// OnReplicationBytes, if set, is invoked on every replication byte
 	// record with the direction ("sent"/"received") and byte count. Used
 	// to feed the dashboard's replication ring without coupling the
@@ -127,6 +133,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_anti_entropy_cooldown_skips_total",
 			Help:      "Keys skipped as missing by anti-entropy because they were within their backfill cooldown window.",
 		}),
+		AntiEntropyChurnSkips: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_anti_entropy_churn_skips_total",
+			Help:      "Anti-entropy rounds skipped because SIEVE was evicting recently-backfilled keys faster than the reconciler inserted them.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -141,6 +152,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.AntiEntropyKeysRepaired,
 		m.AntiEntropyFetchFailures,
 		m.AntiEntropyCooldownSkips,
+		m.AntiEntropyChurnSkips,
 	)
 	return m
 }
@@ -271,4 +283,14 @@ func (m *Metrics) AddAntiEntropyCooldownSkips(n float64) {
 		return
 	}
 	m.AntiEntropyCooldownSkips.Add(n)
+}
+
+// IncAntiEntropyChurnSkip increments the churn-skips counter, which tracks
+// anti-entropy rounds skipped because SIEVE was evicting recently-backfilled
+// keys faster than the reconciler inserted them (#187, fix #5).
+func (m *Metrics) IncAntiEntropyChurnSkip() {
+	if m == nil || m.AntiEntropyChurnSkips == nil {
+		return
+	}
+	m.AntiEntropyChurnSkips.Inc()
 }

@@ -29,6 +29,16 @@ type AntiEntropyConfig struct {
 	// 0 disables the cooldown (back-compat). The recommended value is 5m
 	// (≤ 10 rounds at the default 30s interval).
 	BackfillCooldown time.Duration
+	// ChurnThreshold detects SIEVE evicting recently-backfilled keys faster
+	// than the reconciler inserts them (#187, fix #5). At the top of each
+	// round the reconciler counts cooldown keys (recently backfilled) that
+	// are absent from the local key set (evicted by SIEVE); when the
+	// evicted-to-backfilled ratio exceeds this threshold the round is
+	// skipped. 0 disables churn detection (back-compat). Requires
+	// BackfillCooldown > 0 — the cooldown map is the measurement window.
+	// A reasonable default is 0.5 (skip when more than half of recent
+	// backfills were evicted).
+	ChurnThreshold float64
 	// FetchTimeout bounds each peer-fetch during backfill. Default 2s.
 	FetchTimeout time.Duration
 	// Logger is the structured logger.
@@ -155,6 +165,20 @@ func (ae *AntiEntropy) reconcile(ctx context.Context) {
 		localSet[k] = struct{}{}
 	}
 
+	// Churn guard: skip the entire round when SIEVE is evicting recently-
+	// backfilled keys faster than the reconciler is inserting them (#187,
+	// fix #5). A key that is in the cooldown map (recently backfilled) but
+	// absent from the local key set was evicted by SIEVE before the next
+	// round. When the evicted-to-backfilled ratio exceeds ChurnThreshold,
+	// every new key we backfill will also be evicted — backfill is wasted
+	// work. This catches the under-budget case that OverBudget misses.
+	// No-op when ChurnThreshold is 0 (disabled) or the cooldown map is
+	// empty (nothing backfilled recently).
+	if ae.detectChurn(localSet) {
+		ae.metrics.SetAntiEntropyKeysRepaired(0)
+		return
+	}
+
 	for _, peer := range ae.peers() {
 		if peer.Name == ae.node {
 			continue
@@ -238,6 +262,51 @@ func (ae *AntiEntropy) reconcileWithPeer(ctx context.Context, peer api.PeerInfo,
 		"backfilled_count", repaired,
 		"dur_ms", time.Since(start).Milliseconds(),
 	)
+}
+
+// detectChurn reports whether SIEVE is evicting recently-backfilled keys
+// faster than the reconciler is inserting them (#187, fix #5). A key in the
+// cooldown map (recently backfilled) that is absent from localSet was
+// evicted by SIEVE before the next round. When the evicted-to-backfilled
+// ratio exceeds ChurnThreshold, backfill is wasted work — every new key
+// will also be evicted — and the round is skipped.
+//
+// The cooldown map is the measurement window: its size is the number of
+// keys backfilled in the last BackfillCooldown duration, and the keys in
+// it that are absent from localSet are the ones SIEVE evicted. This
+// requires no storage-layer changes — it reuses the cooldown map from PR
+// #191 and the local key set that reconcile already computes.
+//
+// No-op when ChurnThreshold is 0 (disabled, back-compat) or
+// BackfillCooldown is 0 (no cooldown map to measure over). Returns false
+// when the cooldown map is empty (nothing backfilled recently). Only
+// called from the reconcile goroutine.
+func (ae *AntiEntropy) detectChurn(localSet map[api.Key]struct{}) bool {
+	if ae.cfg.ChurnThreshold <= 0 || ae.cfg.BackfillCooldown <= 0 {
+		return false
+	}
+	total := len(ae.cooldown)
+	if total == 0 {
+		return false
+	}
+	evicted := 0
+	for key := range ae.cooldown {
+		if _, ok := localSet[key]; !ok {
+			evicted++
+		}
+	}
+	ratio := float64(evicted) / float64(total)
+	if ratio > ae.cfg.ChurnThreshold {
+		ae.logger.Warn("anti-entropy: skipping round, SIEVE evicting backfilled keys faster than insertion",
+			"backfilled_in_window", total,
+			"evicted", evicted,
+			"ratio", ratio,
+			"threshold", ae.cfg.ChurnThreshold,
+		)
+		ae.metrics.IncAntiEntropyChurnSkip()
+		return true
+	}
+	return false
 }
 
 // pruneCooldown removes expired entries from the cooldown map. Called once

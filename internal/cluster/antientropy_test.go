@@ -87,6 +87,12 @@ func (d *dynamicKeySource) add(k api.Key) {
 	d.mu.Unlock()
 }
 
+func (d *dynamicKeySource) remove(k api.Key) {
+	d.mu.Lock()
+	delete(d.keys, k)
+	d.mu.Unlock()
+}
+
 func TestPeerKeysHandler_ServesKeySet(t *testing.T) {
 	t.Parallel()
 	keys := []api.Key{1, 2, 3}
@@ -880,5 +886,249 @@ func BenchmarkReconcileWithCooldown(b *testing.B) {
 		if skips != n {
 			b.Fatalf("skips = %d, want %d", skips, n)
 		}
+	}
+}
+
+// mutablePeerKeys wraps a mutex-guarded slice of keys so the peer key-set
+// HTTP handler can return a different set each round (simulating a new key
+// appearing on the peer between rounds).
+type mutablePeerKeys struct {
+	mu   sync.Mutex
+	keys []api.Key
+}
+
+func (m *mutablePeerKeys) set(keys []api.Key) {
+	m.mu.Lock()
+	m.keys = keys
+	m.mu.Unlock()
+}
+
+func (m *mutablePeerKeys) get() []api.Key {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]api.Key, len(m.keys))
+	copy(out, m.keys)
+	return out
+}
+
+// newChurnAE builds an AntiEntropy with a fake clock, a dynamic local key
+// source (so tests can add/remove keys to simulate SIEVE eviction and
+// promotion), and a mutable peer key set (so a new key can appear on the
+// peer between rounds). The storer's onPut hook adds backfilled keys to
+// the local key source, mirroring a real TieredStore.Keys(). The cooldown
+// is fixed at 5m — the churn tests do not advance the clock, so the exact
+// duration is irrelevant; what matters is which keys are in the cooldown
+// map and which are in the local key set.
+func newChurnAE(t *testing.T, localKeys, peerKeys []api.Key, churnThreshold float64, m *Metrics) (*AntiEntropy, *mockBackfiller, *mockStorer, *dynamicKeySource, *mutablePeerKeys, func()) {
+	t.Helper()
+	objs := map[api.Key]*api.Object{}
+	for _, k := range peerKeys {
+		objs[k] = &api.Object{Key: k, Body: []byte("x")}
+	}
+	mpk := &mutablePeerKeys{keys: peerKeys}
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/peer/keys" {
+			buf, _ := EncodeKeySet("peer-1", mpk.get())
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(buf)
+			return
+		}
+		if r.URL.Path == "/v1/peer/fetch" {
+			var req api.PeerFetchRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if obj, ok := objs[req.Key]; ok {
+				w.Header().Set(header.ContentType, "application/octet-stream")
+				_, _ = w.Write(storage.EncodeObject(obj))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	peer := api.PeerInfo{Name: "peer-1", AdminAddr: peerSrv.Listener.Addr().String()}
+	bf := &mockBackfiller{objs: objs}
+	ks := &dynamicKeySource{keys: make(map[api.Key]struct{}, len(localKeys))}
+	for _, k := range localKeys {
+		ks.keys[k] = struct{}{}
+	}
+	st := &mockStorer{}
+	st.onPut = func(key api.Key) { ks.add(key) }
+	ae := NewAntiEntropy(AntiEntropyConfig{
+		Interval:         time.Hour, // reconcile called directly
+		FetchTimeout:     2 * time.Second,
+		BackfillCooldown: 5 * time.Minute,
+		ChurnThreshold:   churnThreshold,
+	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, m)
+	fc := &fakeClock{now: time.Unix(1_000_000, 0)}
+	ae.now = fc.Now
+	return ae, bf, st, ks, mpk, peerSrv.Close
+}
+
+// gatherChurnSkips reads the churn-skips counter from a registry.
+func gatherChurnSkips(t *testing.T, reg *prometheus.Registry) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == "bouine_cluster_anti_entropy_churn_skips_total" {
+			var v float64
+			for _, s := range mf.GetMetric() {
+				v += s.GetCounter().GetValue()
+			}
+			return v
+		}
+	}
+	return 0
+}
+
+// TestAntiEntropy_ChurnDetectedSkipsRound covers case (a): a key
+// backfilled in round 1 is evicted by SIEVE before round 2 (absent from
+// the local key set while still in cooldown). With ChurnThreshold = 0.5
+// the evicted-to-backfilled ratio is 1.0 > 0.5, so the round is skipped —
+// no peer-fetch, no store Put, churn-skips counter incremented.
+func TestAntiEntropy_ChurnDetectedSkipsRound(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	// static local keys (key 2 never local — SIEVE evicted it).
+	ae, bf, st, ks, _, closeFn := newChurnAE(t, []api.Key{1}, []api.Key{1, 2}, 0.5, m)
+	defer closeFn()
+
+	// Round 1: key 2 is missing, gets backfilled. onPut adds it to ks,
+	// but we immediately remove it to simulate SIEVE eviction.
+	ae.reconcile(context.Background())
+	if got := bf.calls.Load(); got != 1 {
+		t.Fatalf("round 1 fetch calls = %d, want 1", got)
+	}
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("round 1 puts = %d, want 1", got)
+	}
+	ks.remove(api.Key(2)) // simulate SIEVE evicting the freshly-backfilled key
+
+	// Round 2: key 2 is in cooldown but absent from local keys (evicted).
+	// Churn is detected (ratio 1.0 > 0.5) → round skipped.
+	ae.reconcile(context.Background())
+	if got := bf.calls.Load(); got != 1 {
+		t.Fatalf("round 2 fetch calls = %d, want 1 (churn must skip round)", got)
+	}
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("round 2 puts = %d, want 1 (churn must skip round)", got)
+	}
+	if got := gatherChurnSkips(t, reg); got != 1 {
+		t.Fatalf("churn_skips_total = %v, want 1", got)
+	}
+}
+
+// TestAntiEntropy_NoChurnBackfillProceeds covers case (b): when backfilled
+// keys survive in the hot tier (present in the local key set), the
+// evicted-to-backfilled ratio is 0 and churn is not detected. A new
+// missing key is backfilled normally.
+func TestAntiEntropy_NoChurnBackfillProceeds(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	ae, bf, st, _, mpk, closeFn := newChurnAE(t, []api.Key{1}, []api.Key{1, 2}, 0.5, m)
+	defer closeFn()
+
+	// Round 1: backfill key 2. onPut adds it to the key source (survives).
+	ae.reconcile(context.Background())
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("round 1 puts = %d, want 1", got)
+	}
+
+	// Round 2: key 2 is in cooldown AND in local keys (survived). Ratio 0
+	// → no churn. Add key 3 to the peer and backfiller; it is missing and
+	// not in cooldown, so it gets backfilled.
+	mpk.set([]api.Key{1, 2, 3})
+	bf.objs[3] = &api.Object{Key: 3, Body: []byte("c")}
+	ae.reconcile(context.Background())
+	if got := st.puts.Load(); got != 2 {
+		t.Fatalf("round 2 puts = %d, want 2 (no churn, key 3 backfilled)", got)
+	}
+	if got := bf.calls.Load(); got != 2 {
+		t.Fatalf("round 2 fetch calls = %d, want 2", got)
+	}
+	if got := gatherChurnSkips(t, reg); got != 0 {
+		t.Fatalf("churn_skips_total = %v, want 0 (no churn detected)", got)
+	}
+}
+
+// TestAntiEntropy_ChurnThresholdZeroDisabled covers case (c): with
+// ChurnThreshold = 0 churn detection is disabled (back-compat). Even when
+// all backfilled keys are evicted (ratio 1.0), the round is not skipped by
+// the churn guard — the cooldown guard handles the per-key skip instead.
+func TestAntiEntropy_ChurnThresholdZeroDisabled(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	ae, bf, st, ks, _, closeFn := newChurnAE(t, []api.Key{1}, []api.Key{1, 2}, 0, m)
+	defer closeFn()
+
+	ae.reconcile(context.Background())
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("round 1 puts = %d, want 1", got)
+	}
+	ks.remove(api.Key(2)) // SIEVE evicts key 2
+
+	// Round 2: key 2 is in cooldown, absent from local keys. Churn is
+	// disabled (threshold 0), so the churn guard does not skip. The
+	// cooldown guard skips key 2 per-key (no re-fetch).
+	ae.reconcile(context.Background())
+	if got := bf.calls.Load(); got != 1 {
+		t.Fatalf("round 2 fetch calls = %d, want 1 (cooldown skips key 2, churn guard disabled)", got)
+	}
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("round 2 puts = %d, want 1 (cooldown skips key 2)", got)
+	}
+	if got := gatherChurnSkips(t, reg); got != 0 {
+		t.Fatalf("churn_skips_total = %v, want 0 (churn disabled)", got)
+	}
+}
+
+// TestAntiEntropy_ChurnStopsBackfillResumes covers case (d): churn is
+// detected in round 2 (key evicted while in cooldown), but once the key
+// survives (promoted/served, re-added to the local key set), churn is no
+// longer detected and backfill resumes for new missing keys.
+func TestAntiEntropy_ChurnStopsBackfillResumes(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	ae, bf, st, ks, mpk, closeFn := newChurnAE(t, []api.Key{1}, []api.Key{1, 2}, 0.5, m)
+	defer closeFn()
+
+	// Round 1: backfill key 2, then SIEVE evicts it.
+	ae.reconcile(context.Background())
+	ks.remove(api.Key(2))
+
+	// Round 2: churn detected (ratio 1.0 > 0.5) → round skipped.
+	ae.reconcile(context.Background())
+	if got := st.puts.Load(); got != 1 {
+		t.Fatalf("round 2 puts = %d, want 1 (churn skip)", got)
+	}
+	if got := gatherChurnSkips(t, reg); got != 1 {
+		t.Fatalf("churn_skips_total = %v, want 1 after round 2", got)
+	}
+
+	// Simulate key 2 being promoted (served → visited bit set → survives
+	// SIEVE). Re-add it to the local key set. Add key 3 to the peer and
+	// to the backfiller's object map so it can be fetched.
+	ks.add(api.Key(2))
+	mpk.set([]api.Key{1, 2, 3})
+	bf.objs[3] = &api.Object{Key: 3, Body: []byte("c")}
+
+	// Round 3: key 2 is in cooldown AND in local keys (survived). Ratio 0
+	// → no churn. Key 3 is missing and not in cooldown → backfilled.
+	ae.reconcile(context.Background())
+	if got := st.puts.Load(); got != 2 {
+		t.Fatalf("round 3 puts = %d, want 2 (churn stopped, key 3 backfilled)", got)
+	}
+	if got := bf.calls.Load(); got != 2 {
+		t.Fatalf("round 3 fetch calls = %d, want 2 (key 3 fetched)", got)
+	}
+	if got := gatherChurnSkips(t, reg); got != 1 {
+		t.Fatalf("churn_skips_total = %v, want 1 (no new churn skip in round 3)", got)
 	}
 }

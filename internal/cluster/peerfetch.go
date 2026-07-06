@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/thylong/bouine/internal/observability"
+	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 	"github.com/thylong/bouine/pkg/header"
 )
@@ -40,10 +41,9 @@ const (
 )
 
 // maxPeerFetchBytes caps the response body read from a peer during
-// JSON decode. A compromised peer could send an arbitrarily large
-// payload; without a limit json.Decoder buffers unbounded data on
-// the heap. The Object body is base64-encoded (~33% inflation), so
-// this allows roughly 48 MiB of raw body bytes.
+// binary decode. A compromised peer could send an arbitrarily large
+// payload; without a limit io.ReadAll buffers unbounded data on
+// the heap. This is the total encoded payload limit (metadata + body).
 const maxPeerFetchBytes int64 = 64 << 20
 
 // PeerFetcher issues cache-lookup RPCs to peer nodes.
@@ -121,6 +121,9 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 
 // buildPeerRequest constructs the HTTP request for a peer-fetch RPC.
 // Extracted from Fetch to keep complexity under gocyclo/funlen limits.
+// The request body is JSON by design: 3 fields (key, vary_key, hops),
+// trivially small. Only the response carries a full Object and needs
+// the binary codec.
 func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) (*http.Request, error) {
 	fetchAddr := peer.AdminAddr
 	if fetchAddr == "" {
@@ -187,19 +190,16 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 		return nil, fmt.Errorf("peer fetch %s: status %d", peer.Addr, resp.StatusCode)
 	}
 
-	var fetchResp api.PeerFetchResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, f.maxBodyBytes)).Decode(&fetchResp); err != nil {
+	// Binary object codec — no JSON, no base64, no reflection (issue #187).
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, f.maxBodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("peer fetch read: %w", err)
+	}
+	obj, err := storage.DecodeObject(respBody)
+	if err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)
 	}
-	if !fetchResp.Hit {
-		f.misses.Add(1)
-		if f.pMisses != nil {
-			f.pMisses.Inc()
-		}
-		f.logger.Info("peer fetch miss",
-			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
-		return nil, nil
-	}
+
 	f.hits.Add(1)
 	if f.pHits != nil {
 		f.pHits.Inc()
@@ -213,7 +213,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	f.logger.Info("peer fetch hit",
 		"key", req.Key, "peer", peer.Addr, "hops", req.Hops,
 		"dur_ms", latMs)
-	return fetchResp.Object, nil
+	return obj, nil
 }
 
 // PeerFetchHandler returns an http.Handler that serves peer-fetch
@@ -277,6 +277,6 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
-	w.Header().Set(header.ContentType, "application/json")
-	_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: obj})
+	w.Header().Set(header.ContentType, "application/octet-stream")
+	_, _ = w.Write(storage.EncodeObject(obj))
 }

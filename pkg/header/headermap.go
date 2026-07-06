@@ -27,8 +27,10 @@ import (
 // assigned by reference into the destination map.
 //
 // Map implements json.Marshaler/Unmarshaler so api.Object serializes
-// to the same JSON wire format as when Header was http.Header — the cluster
-// gossip protocol and peer-fetch HTTP API are unaffected.
+// to the same JSON wire format as when Header was http.Header — the
+// cluster gossip replication protocol and admin API are unaffected.
+// The peer-fetch HTTP API now uses the binary object codec (issue #187),
+// which calls Header.Range directly without going through JSON.
 type Map struct {
 	entries []headerEntry
 	values  []string

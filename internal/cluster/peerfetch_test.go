@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thylong/bouine/internal/storage"
 	"github.com/thylong/bouine/pkg/api"
 	"github.com/thylong/bouine/pkg/header"
 )
@@ -51,12 +52,104 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("hit: status=%d", rr.Code)
 	}
-	var resp api.PeerFetchResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	obj, err := storage.DecodeObject(rr.Body.Bytes())
+	if err != nil {
+		t.Fatalf("binary decode: %v", err)
 	}
-	if !resp.Hit || resp.Object == nil {
-		t.Fatal("expected hit with object")
+	if obj.Key != key || obj.StatusCode != 200 {
+		t.Fatalf("decoded mismatch: key=%d status=%d", obj.Key, obj.StatusCode)
+	}
+}
+
+// TestPeerFetchHandler_BinaryWireProtocol pins that the handler
+// responds with the binary object codec (application/octet-stream),
+// not JSON. This is the single biggest allocation win from issue #187:
+// the JSON path base64-encoded the body and allocated a
+// map[string][]string per header on every peer fetch.
+func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
+	t.Parallel()
+	key := api.Key(42)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("cached-body"),
+		ETag:       `"abc"`,
+	}
+	obj.Header = header.NewMap(1)
+	obj.Header.AppendEntry("Content-Type", "text/plain")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
+	h := NewPeerFetchHandler(store)
+	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+
+	if rr.Code != 200 {
+		t.Fatalf("hit: status=%d", rr.Code)
+	}
+	if ct := rr.Header().Get(header.ContentType); ct != "application/octet-stream" {
+		t.Fatalf("content-type=%q, want application/octet-stream", ct)
+	}
+
+	decoded, err := storage.DecodeObject(rr.Body.Bytes())
+	if err != nil {
+		t.Fatalf("binary decode: %v", err)
+	}
+	if decoded.Key != obj.Key || decoded.StatusCode != obj.StatusCode {
+		t.Fatalf("decoded mismatch: key=%d status=%d", decoded.Key, decoded.StatusCode)
+	}
+	if string(decoded.Body) != "cached-body" {
+		t.Fatalf("body=%q, want %q", decoded.Body, "cached-body")
+	}
+	if decoded.ETag != obj.ETag {
+		t.Fatalf("etag=%q, want %q", decoded.ETag, obj.ETag)
+	}
+	if decoded.Header.Len() != 1 {
+		t.Fatalf("header entries=%d, want 1", decoded.Header.Len())
+	}
+}
+
+// TestPeerFetcher_BinaryRoundTrip verifies the full client→server
+// round-trip uses the binary codec with zero JSON on the response path.
+func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
+	t.Parallel()
+	key := api.Key(7)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("roundtrip"),
+	}
+	obj.Header = header.NewMap(1)
+	obj.Header.AppendEntry("X-Custom", "value")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != PeerFetchPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req api.PeerFetchRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Key != key {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(storage.EncodeObject(obj))
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	got, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: key})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected hit object")
+	}
+	if got.Key != key || string(got.Body) != "roundtrip" {
+		t.Fatalf("got key=%d body=%q", got.Key, got.Body)
+	}
+	if got.Header.Len() != 1 {
+		t.Fatalf("header entries=%d, want 1", got.Header.Len())
 	}
 }
 
@@ -94,11 +187,8 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	const delay = 5 * time.Millisecond // > 1ms so it survives Milliseconds() truncation
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(delay)
-		w.Header().Set(header.ContentType, "application/json")
-		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{
-			Hit:    true,
-			Object: &api.Object{Key: 1, StatusCode: 200, Body: []byte("cached")},
-		})
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: 1, StatusCode: 200, Body: []byte("cached")}))
 	}))
 	defer srv.Close()
 
@@ -137,16 +227,14 @@ func TestPeerFetcher_HopLimitReached(t *testing.T) {
 
 func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	t.Parallel()
-	validResp, err := json.Marshal(api.PeerFetchResponse{
-		Hit:    true,
-		Object: &api.Object{Key: 1, StatusCode: 200, Body: bytes.Repeat([]byte("A"), 4096)},
+	validResp := storage.EncodeObject(&api.Object{
+		Key:        1,
+		StatusCode: 200,
+		Body:       bytes.Repeat([]byte("A"), 4096),
 	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "application/json")
+		w.Header().Set(header.ContentType, "application/octet-stream")
 		_, _ = w.Write(validResp)
 	}))
 	defer srv.Close()
@@ -179,11 +267,8 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 		inFlight.Add(-1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{
-			Hit:    true,
-			Object: &api.Object{Key: 1, StatusCode: 200, Body: []byte("x")},
-		})
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: 1, StatusCode: 200, Body: []byte("x")}))
 	}))
 	defer srv.Close()
 
@@ -211,8 +296,8 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	block := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-block
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.PeerFetchResponse{Hit: true, Object: &api.Object{Key: 1}})
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: 1}))
 	}))
 	defer srv.Close()
 	defer close(block)

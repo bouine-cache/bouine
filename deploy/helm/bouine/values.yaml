@@ -151,9 +151,17 @@ livenessProbe:
   periodSeconds: 10
   failureThreshold: 5
 
-# Horizontal Pod Autoscaler. CPU-only — memory-based HPA is not
-# recommended in full cluster mode where every pod stores every
-# object (adding pods increases total memory, not reduces it).
+# Horizontal Pod Autoscaler. Supports CPU and/or RPS-based scaling.
+# Memory-based HPA is not recommended in full cluster mode where
+# every pod stores every object (adding pods increases total memory,
+# not reduces it).
+#
+# RPS-based scaling uses a Pods custom metric
+# (bouine_requests_per_second) exposed via a Prometheus adapter.
+# It is more stable than CPU for a cache because misses are I/O-bound,
+# not CPU-bound, and eviction churn produces CPU noise unrelated to
+# real traffic. When both rpsTrigger and cpuTrigger are enabled, the
+# HPA scales on whichever metric demands more pods.
 # Disabled by default. Enable in per-environment values.
 autoscaling:
   enabled: false
@@ -162,6 +170,10 @@ autoscaling:
   cpuTrigger:
     targetType: Utilization
     averageUtilization: 70
+  # rpsTrigger:
+  #   metricName: bouine_requests_per_second
+  #   averageValue: "100"
+  scaleUpStabilizationSeconds: 120
   scaleDownStabilizationSeconds: 300
 
 # Volume for the warm tier.

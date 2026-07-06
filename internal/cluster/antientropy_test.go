@@ -598,13 +598,12 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 // newCooldownAE builds an AntiEntropy with a fake clock and a single
-// in-process peer that serves peerKeys and fetches obj2. The key source is
-// static (mockKeySource) so backfilled keys never appear local next round —
-// modelling SIEVE evicting the freshly-backfilled key before the next round
-// (#187).
+// in-process peer that serves peerKeys and fetches the corresponding
+// objects. The key source is static (mockKeySource) so backfilled keys
+// never appear local next round — modelling SIEVE evicting the
+// freshly-backfilled key before the next round (#187).
 func newCooldownAE(t *testing.T, localKeys, peerKeys []api.Key, cooldown time.Duration, m *Metrics) (*AntiEntropy, *fakeClock, *mockBackfiller, *mockStorer, func()) {
 	t.Helper()
-	obj2 := &api.Object{Key: 2, Body: []byte("b")}
 	objs := map[api.Key]*api.Object{}
 	for _, k := range peerKeys {
 		objs[k] = &api.Object{Key: k, Body: []byte("x")}
@@ -640,9 +639,6 @@ func newCooldownAE(t *testing.T, localKeys, peerKeys []api.Key, cooldown time.Du
 	}, "local", ks, bf, st, func() []api.PeerInfo { return []api.PeerInfo{peer} }, m)
 	fc := &fakeClock{now: time.Unix(1_000_000, 0)}
 	ae.now = fc.Now
-	// keep obj2 referenced so gofmt/unused linters stay quiet in scopes
-	// that only inspect eviction behaviour.
-	_ = obj2
 	return ae, fc, bf, st, peerSrv.Close
 }
 

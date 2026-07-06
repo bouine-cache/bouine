@@ -1173,6 +1173,12 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 // conditional requests (If-None-Match), so background refreshes succeed
 // without generating full 200 responses.
 func testRefreshHandler(t *testing.T, minHits int) *Handler {
+	return testRefreshHandlerWithPersist(t, minHits, 0)
+}
+
+// testRefreshHandlerWithPersist creates a Handler with refresh-before-expiry
+// enabled, the given min-hits threshold and persist cycles.
+func testRefreshHandlerWithPersist(t *testing.T, minHits, persistCycles int) *Handler {
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
@@ -1189,16 +1195,17 @@ func testRefreshHandler(t *testing.T, minHits int) *Handler {
 		_, _ = io.WriteString(w, "body")
 	})
 	h := NewHandler(HandlerConfig{
-		Upstream:            upstream,
-		Store:               store,
-		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		DefaultTTL:          60 * time.Second,
-		RefreshBeforeExpiry: true,
-		RefreshMargin:       6 * time.Second,
-		RefreshTimeout:      5 * time.Second,
-		RefreshConcurrency:  4,
-		RefreshMinHits:      minHits,
-		RouteName:           "test",
+		Upstream:             upstream,
+		Store:                store,
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DefaultTTL:           60 * time.Second,
+		RefreshBeforeExpiry:  true,
+		RefreshMargin:        6 * time.Second,
+		RefreshTimeout:       5 * time.Second,
+		RefreshConcurrency:   4,
+		RefreshMinHits:       minHits,
+		RefreshPersistCycles: persistCycles,
+		RouteName:            "test",
 	})
 	return h
 }
@@ -1347,5 +1354,167 @@ func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
 	}
 	if refreshed.Hits < staleHits {
 		t.Fatalf("hit count lost after 200 refresh: got %d, want >= %d", refreshed.Hits, staleHits)
+	}
+}
+
+func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandlerWithPersist(t, 2, 3)
+	defer h.Close(context.Background())
+
+	url := "http://example.com/persist"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	// Clear initial scheduler entry.
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	key := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
+	}
+	// After Get, Hits=1 (visited bit flip). With minHits=2, the gate
+	// would block. But persist=3 should keep it alive for 3 more cycles.
+	// We pass the same obj to each doBackgroundRefresh — the 304 path
+	// copies stale.Hits, so Hits stays 1 < minHits=2 across all cycles.
+
+	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 1 {
+		t.Fatalf("after 1st persist refresh: expected 1 scheduled, got %d", scheduled)
+	}
+
+	// Clear scheduler to detect next re-schedule.
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	// Refresh 2: persist=2 → decrement to 1, re-schedule.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 1 {
+		t.Fatalf("after 2nd persist refresh: expected 1 scheduled, got %d", scheduled)
+	}
+
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	// Refresh 3: persist=1 → decrement to 0, re-schedule.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 1 {
+		t.Fatalf("after 3rd persist refresh: expected 1 scheduled, got %d", scheduled)
+	}
+
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	// Refresh 4: persist=0 → gate blocks, no re-schedule.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 0 {
+		t.Fatalf("after persist exhausted: expected 0 scheduled, got %d", scheduled)
+	}
+}
+
+func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandlerWithPersist(t, 1, 3)
+	defer h.Close(context.Background())
+
+	url := "http://example.com/reset"
+	// MISS then HIT → Hits=1 >= minHits=1 → popular.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	// Clear scheduler.
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	key := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
+	}
+	if obj.Hits < 1 {
+		t.Fatalf("expected >= 1 hits, got %d", obj.Hits)
+	}
+
+	// Popular refresh: Hits >= minHits → re-scheduled, persist reset to 3.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 1 {
+		t.Fatalf("popular refresh should re-schedule, got %d", scheduled)
+	}
+
+	// Consume one persist cycle to verify reset worked.
+	// Need an unpopular refresh: get obj with Hits still >= 1 won't trigger
+	// the gate. Instead, verify the registry entry has persist=3 by
+	// doing 3 unpopular refreshes (need to reset Hits to 0 somehow).
+	// Since the 304 path carries over Hits, we can't easily get Hits=0
+	// after a popular refresh. Instead, verify the entry is still registered.
+	entry := h.refreshRegistry.Lookup(key)
+	if entry == nil {
+		t.Fatal("registry entry should exist after popular refresh")
+	}
+	if entry.persistCycles != 3 {
+		t.Fatalf("persist should be reset to 3 after popular refresh, got %d", entry.persistCycles)
+	}
+}
+
+func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
+	t.Parallel()
+	// persist=0 means the gate works as before (no persistence).
+	h := testRefreshHandlerWithPersist(t, 2, 0)
+	defer h.Close(context.Background())
+
+	url := "http://example.com/no-persist"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	key := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
+	}
+	if obj.Hits != 1 {
+		t.Fatalf("expected 1 hit, got %d", obj.Hits)
+	}
+
+	// Hits=1 < minHits=2, persist=0 → gate blocks immediately.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 0 {
+		t.Fatalf("with persist=0, gate should block immediately, got %d scheduled", scheduled)
+	}
+}
+
+func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
+	t.Parallel()
+	r := newRefreshRegistry()
+	key := api.Key(42)
+
+	// Key not registered → DecrementPersist returns false.
+	if r.DecrementPersist(key) {
+		t.Fatal("DecrementPersist should return false for unregistered key")
+	}
+
+	req := httptest.NewRequest("GET", "http://example.com/test", nil)
+	r.Register(key, req, "", 2)
+
+	// persist=2 → decrement to 1.
+	if !r.DecrementPersist(key) {
+		t.Fatal("DecrementPersist should return true with persist=2")
+	}
+	// persist=1 → decrement to 0.
+	if !r.DecrementPersist(key) {
+		t.Fatal("DecrementPersist should return true with persist=1")
+	}
+	// persist=0 → returns false.
+	if r.DecrementPersist(key) {
+		t.Fatal("DecrementPersist should return false when persist exhausted")
 	}
 }

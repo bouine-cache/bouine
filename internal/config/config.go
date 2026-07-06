@@ -379,6 +379,14 @@ type RouteCache struct {
 	// The first TTL window always gets one refresh cycle; the gate
 	// only applies on re-scheduling after a refresh completes.
 	RefreshMinHits int `yaml:"refresh_min_hits,omitempty" json:"refresh_min_hits,omitempty"`
+	// RefreshPersistCycles is the number of additional TTL cycles to
+	// keep refreshing an object after the popularity gate
+	// (refresh_min_hits) would block re-scheduling. Each background
+	// refresh that finds Hits < minHits decrements the counter; any
+	// popular refresh (Hits >= minHits) resets it to the configured
+	// value. Zero (default) disables persistence — the gate kills
+	// re-scheduling immediately. Requires refresh_min_hits > 0.
+	RefreshPersistCycles int `yaml:"refresh_persist_cycles,omitempty" json:"refresh_persist_cycles,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

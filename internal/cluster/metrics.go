@@ -272,11 +272,3 @@ func (m *Metrics) AddAntiEntropyCooldownSkips(n float64) {
 	}
 	m.AntiEntropyCooldownSkips.Add(n)
 }
-
-// IncAntiEntropyCooldownSkip increments the cooldown-skips counter by one.
-func (m *Metrics) IncAntiEntropyCooldownSkip() {
-	if m == nil || m.AntiEntropyCooldownSkips == nil {
-		return
-	}
-	m.AntiEntropyCooldownSkips.Inc()
-}

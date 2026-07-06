@@ -872,7 +872,7 @@ func BenchmarkReconcileWithCooldown(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		missing, skips := ae.missingKeys(peerKeys, localSet)
 		if len(missing) != 0 {
 			b.Fatalf("missing = %d, want 0 (all cooled down)", len(missing))

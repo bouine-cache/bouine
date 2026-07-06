@@ -27,6 +27,7 @@ type TieredStore struct {
 	hot    *HotStore
 	warm   *warm.Store
 	wal    *wal.Log
+	walMu  sync.Mutex // guards wal field access during rewriteWAL vs concurrent Append/AppendBatch
 	logger observability.Logger
 
 	// bodyThreshold: objects with Body <= this stay hot-only.
@@ -71,7 +72,9 @@ type TieredConfig struct {
 	// Default: 64 KiB.
 	BodyThreshold int64
 	// WarmSyncInterval controls how often hot→warm background sync runs.
-	// Default 60s. Set to 0 to disable.
+	// Set to 0 to disable (warm tier only stores objects above body_threshold).
+	// Operators should set this explicitly (e.g. 60s) when they want
+	// small objects to survive restarts.
 	WarmSyncInterval time.Duration
 	// WarmSyncBatchSize caps entries written to warm per sync cycle.
 	// Default 5000.
@@ -306,7 +309,10 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 		if err := t.warm.SyncSegment(segID); err != nil {
 			return fmt.Errorf("warm: sync before wal append: %w", err)
 		}
-		return t.wal.Append(wal.DeleteEntry(uint64(key)))
+		t.walMu.Lock()
+		err := t.wal.Append(wal.DeleteEntry(uint64(key)))
+		t.walMu.Unlock()
+		return err
 	}
 	return nil
 }
@@ -405,19 +411,18 @@ func (t *TieredStore) compactLoop() {
 // warmSyncLoop periodically batches hot-only entries into the warm tier
 // so they survive restarts. It also drains the tombstone queue to remove
 // warm copies of evicted (unpopular) entries. Terminates when done is closed.
+//
+//nolint:contextcheck // creates its own context tied to t.done — no parent ctx available at construction time
 func (t *TieredStore) warmSyncLoop() {
 	defer t.syncWg.Done()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		<-t.done
-		cancel()
-	}()
 	ticker := time.NewTicker(t.warmSyncInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-t.done:
+			cancel()
 			return
 		case <-ticker.C:
 			t.runWarmSyncCycle(ctx)
@@ -444,7 +449,10 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 			t.logger.Warn("warm sync: warm sync failed", "error", err)
 		}
 		if t.wal != nil {
-			if err := t.wal.AppendBatch(walEntries); err != nil {
+			t.walMu.Lock()
+			err := t.wal.AppendBatch(walEntries)
+			t.walMu.Unlock()
+			if err != nil {
 				t.logger.Warn("warm sync: wal batch append failed", "error", err)
 			}
 		}
@@ -489,7 +497,12 @@ func (t *TieredStore) collectHotOnlyKeys() []api.Key {
 }
 
 // drainTombstones removes all pending tombstone keys from the warm tier
-// and collects WAL delete entries. Returns the number of keys tombstoned.
+// and collects WAL delete entries. The warm tier is synced once after
+// all tombstones are processed (by the caller's warm.Sync call), and the
+// WAL delete entries are appended in a single batch. If a crash occurs
+// between warm.Sync and wal.AppendBatch, the tombstoned keys could be
+// resurrected on restart — but rebuildIndexFromScan honours tombstones
+// in segment order, so the fallback path self-corrects.
 func (t *TieredStore) drainTombstones(walEntries *[]wal.Entry) int {
 	tombstoned := 0
 	for {
@@ -533,17 +546,18 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 }
 
 // rebuildIndexFromScan rebuilds the warm-tier index by scanning all
-// segment records. Used as a startup fallback when WAL replay produces
-// an empty index but segments contain live records.
+// segment records in append order. Tombstones remove the key from the
+// index so deleted keys are not resurrected after WAL loss.
 func (t *TieredStore) rebuildIndexFromScan() error {
 	if t.warm == nil {
 		return nil
 	}
 	return t.warm.Scan(func(r warm.Record) error {
 		if r.IsTomb {
-			return nil
+			t.warm.DelIndex(r.Key)
+		} else {
+			t.warm.SetIndex(r.Key, r.SegID, r.Offset)
 		}
-		t.warm.SetIndex(r.Key, r.SegID, r.Offset)
 		return nil
 	})
 }
@@ -552,6 +566,8 @@ func (t *TieredStore) rebuildIndexFromScan() error {
 // entries, then atomically replaces the old WAL file. Called after a
 // successful warm-tier compaction so the WAL stays bounded.
 func (t *TieredStore) rewriteWAL() error {
+	t.walMu.Lock()
+	defer t.walMu.Unlock()
 	if t.wal == nil || t.walPath == "" {
 		return nil
 	}
@@ -598,11 +614,13 @@ func (t *TieredStore) Close(ctx context.Context) error {
 	t.compactWg.Wait()
 	t.syncWg.Wait()
 
+	t.walMu.Lock()
 	if t.wal != nil {
 		if err := t.wal.Close(); err != nil {
 			t.logger.Warn("wal close error", "error", err)
 		}
 	}
+	t.walMu.Unlock()
 	if t.warm != nil {
 		if err := t.warm.Close(); err != nil {
 			t.logger.Warn("warm close error", "error", err)

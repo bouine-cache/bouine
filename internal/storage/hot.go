@@ -335,6 +335,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 
 	// Remove old entry if replacing.
 	if old, exists := s.entries[key]; exists {
+		h.notifyEvict(key, old)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.sieve)
 		if old.hasWarm {

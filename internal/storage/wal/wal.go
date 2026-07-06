@@ -123,10 +123,12 @@ func Replay(path string, fn func(Entry) error) error {
 
 // AppendBatch writes multiple entries to the WAL and syncs once. Use
 // for batch writes where per-entry durability is not required — the
-// entire batch is atomic: either all entries are durable or none are
-// (the file is fsynced once after all writes). Existing callers that
-// need per-entry durability continue to use Append (which syncs per
-// entry).
+// batch is flushed with a single fsync after all writes. On partial
+// failure (Write error on entry N), entries 0..N-1 may already be in
+// the file buffer and the file is not truncated; callers that need
+// all-or-nothing semantics must use a temp file + rename. Existing
+// callers that need per-entry durability continue to use Append (which
+// syncs per entry).
 func (l *Log) AppendBatch(entries []Entry) error {
 	if len(entries) == 0 {
 		return nil

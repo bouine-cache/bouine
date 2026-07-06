@@ -1420,12 +1420,13 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	t.Parallel()
-	h := testRefreshHandlerWithPersist(t, 1, 3)
+	// Use minHits=2, persist=2 so we can have an unpopular phase (Hits=1)
+	// and then a popular phase (Hits=2 after a client HIT).
+	h := testRefreshHandlerWithPersist(t, 2, 2)
 	defer h.Close(context.Background())
 
 	url := "http://example.com/reset"
-	// MISS then HIT → Hits=1 >= minHits=1 → popular.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	// MISS → Hits=1 (visited bit flip). Registered with persist=2.
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// Clear scheduler.
@@ -1438,28 +1439,48 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 1 {
-		t.Fatalf("expected >= 1 hits, got %d", obj.Hits)
+	if obj.Hits != 1 {
+		t.Fatalf("expected 1 hit after MISS, got %d", obj.Hits)
 	}
 
-	// Popular refresh: Hits >= minHits → re-scheduled, persist reset to 3.
+	// Unpopular refresh: Hits=1 < minHits=2 → persist 2→1, re-scheduled.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+	if scheduled := h.scheduler.Len(); scheduled != 1 {
+		t.Fatalf("persist should re-schedule, got %d", scheduled)
+	}
+	entry := h.refreshRegistry.Lookup(key)
+	if entry == nil || entry.persistCycles != 1 {
+		t.Fatalf("after unpopular refresh: persist should be 1, got %v", entry)
+	}
+
+	// Client HIT → Hits=2 >= minHits=2 → popular.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	// Re-read obj to get updated Hits.
+	obj, _, err = h.store.Get(context.Background(), key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get after HIT: obj=%v err=%v", obj, err)
+	}
+	if obj.Hits < 2 {
+		t.Fatalf("expected >= 2 hits after HIT, got %d", obj.Hits)
+	}
+
+	// Clear scheduler.
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	// Popular refresh: Hits >= minHits → Register called → persist RESET to 2.
 	h.doBackgroundRefresh(context.Background(), key, obj)
 	if scheduled := h.scheduler.Len(); scheduled != 1 {
 		t.Fatalf("popular refresh should re-schedule, got %d", scheduled)
 	}
-
-	// Consume one persist cycle to verify reset worked.
-	// Need an unpopular refresh: get obj with Hits still >= 1 won't trigger
-	// the gate. Instead, verify the registry entry has persist=3 by
-	// doing 3 unpopular refreshes (need to reset Hits to 0 somehow).
-	// Since the 304 path carries over Hits, we can't easily get Hits=0
-	// after a popular refresh. Instead, verify the entry is still registered.
-	entry := h.refreshRegistry.Lookup(key)
+	entry = h.refreshRegistry.Lookup(key)
 	if entry == nil {
 		t.Fatal("registry entry should exist after popular refresh")
 	}
-	if entry.persistCycles != 3 {
-		t.Fatalf("persist should be reset to 3 after popular refresh, got %d", entry.persistCycles)
+	if entry.persistCycles != 2 {
+		t.Fatalf("persist should be reset to 2 after popular refresh, got %d", entry.persistCycles)
 	}
 }
 

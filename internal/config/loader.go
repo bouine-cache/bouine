@@ -256,6 +256,9 @@ func validateRefreshConfig(i int, rc RouteCache) error {
 	if rc.RefreshPersistCycles < 0 {
 		return fmt.Errorf("config: route %d refresh_persist_cycles must be >= 0, got %d", i, rc.RefreshPersistCycles)
 	}
+	if rc.RefreshPersistCycles > 0 && rc.RefreshMinHits <= 0 {
+		return fmt.Errorf("config: route %d refresh_persist_cycles requires refresh_min_hits > 0", i)
+	}
 	return nil
 }
 

@@ -103,8 +103,9 @@ func (r *refreshRegistry) Len() int {
 }
 
 // DecrementPersist decrements the persist counter for key and returns
-// true if the key still has persist budget remaining. Returns false if
-// the key is not registered or its persist counter is already zero.
+// true if the counter was positive before decrementing (i.e. the object
+// had remaining persist budget and one cycle was consumed). Returns false
+// if the key is not registered or its persist counter is already zero.
 // Used by the refresh popularity gate to keep objects alive for N
 // additional TTL cycles after the last access.
 func (r *refreshRegistry) DecrementPersist(key api.Key) bool {

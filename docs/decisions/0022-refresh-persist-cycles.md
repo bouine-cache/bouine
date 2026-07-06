@@ -120,3 +120,10 @@ origin-validated within one TTL cycle.
 - **Negative**: The refresh registry holds entries for up to N×TTL
   after last access. With 100k entries at ~300 bytes each, this is
   ~30 MB — bounded and acceptable.
+- **Negative**: During persist cycles, the registry entry's request
+  headers are frozen from the original `Register` call — `storeAndReplicate`
+  returns before reaching `Register` on the persist path. If the origin
+  changes its `Vary` header mid-persist (e.g. adds `Accept-Language`),
+  subsequent conditional GETs won't carry the new Vary-matched headers
+  until the object becomes popular again and triggers a fresh `Register`.
+  This is an edge case in practice but is a known limitation.

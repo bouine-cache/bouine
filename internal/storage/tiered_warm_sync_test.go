@@ -45,7 +45,7 @@ func TestWarmSync_WritesHotOnlyEntriesToWarm(t *testing.T) {
 		t.Fatalf("warm should be empty before sync, got %d keys", len(keys))
 	}
 
-	ts.runWarmSyncCycle()
+	ts.runWarmSyncCycle(context.Background())
 
 	// Verify warm now has the entries.
 	if keys := ts.warm.Keys(); len(keys) != 10 {
@@ -66,7 +66,7 @@ func TestWarmSync_SkipsWarmBackedEntries(t *testing.T) {
 		t.Fatalf("expected 1 warm key from large Put, got %d", warmKeysBefore)
 	}
 
-	ts.runWarmSyncCycle()
+	ts.runWarmSyncCycle(context.Background())
 
 	warmKeysAfter := len(ts.warm.Keys())
 	if warmKeysAfter != warmKeysBefore {
@@ -84,13 +84,13 @@ func TestWarmSync_RespectsBatchSize(t *testing.T) {
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 
-	ts.runWarmSyncCycle()
+	ts.runWarmSyncCycle(context.Background())
 	if keys := ts.warm.Keys(); len(keys) != 3 {
 		t.Fatalf("expected 3 warm keys (batch size), got %d", len(keys))
 	}
 
 	// Second cycle should sync more.
-	ts.runWarmSyncCycle()
+	ts.runWarmSyncCycle(context.Background())
 	if keys := ts.warm.Keys(); len(keys) != 6 {
 		t.Fatalf("expected 6 warm keys after 2 cycles, got %d", len(keys))
 	}
@@ -118,14 +118,14 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	}
 
 	// Drain tombstones and verify the original key was tombstoned.
-	ts.runWarmSyncCycle()
+	ts.runWarmSyncCycle(context.Background())
 
 	// The key 400 should have been tombstoned (if it was evicted from
 	// hot by SIEVE). SIEVE may have kept it — the tombstone path is
 	// only triggered when a hasWarm entry is evicted. We verify the
 	// sync cycle ran without error; the tombstone correctness is
 	// verified by the OnEvict callback test.
-	ts.runWarmSyncCycle()
+	ts.runWarmSyncCycle(context.Background())
 }
 
 func TestWarmSync_TombstoneQueueOverflowNonBlocking(t *testing.T) {
@@ -141,7 +141,7 @@ func TestWarmSync_TombstoneQueueOverflowNonBlocking(t *testing.T) {
 	// runWarmSyncCycle should drain the queue without blocking.
 	done := make(chan struct{})
 	go func() {
-		ts.runWarmSyncCycle()
+		ts.runWarmSyncCycle(context.Background())
 		close(done)
 	}()
 
@@ -207,7 +207,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		k := api.Key(700 + i)
 		_ = ts1.Put(context.Background(), k, obj(k, 100))
 	}
-	ts1.runWarmSyncCycle()
+	ts1.runWarmSyncCycle(context.Background())
 	_ = ts1.Close(context.Background())
 
 	// Reopen — warm should have the entries from the previous run.

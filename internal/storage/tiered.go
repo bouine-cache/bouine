@@ -407,6 +407,12 @@ func (t *TieredStore) compactLoop() {
 // warm copies of evicted (unpopular) entries. Terminates when done is closed.
 func (t *TieredStore) warmSyncLoop() {
 	defer t.syncWg.Done()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-t.done
+		cancel()
+	}()
 	ticker := time.NewTicker(t.warmSyncInterval)
 	defer ticker.Stop()
 	for {
@@ -414,7 +420,7 @@ func (t *TieredStore) warmSyncLoop() {
 		case <-t.done:
 			return
 		case <-ticker.C:
-			t.runWarmSyncCycle()
+			t.runWarmSyncCycle(ctx)
 		}
 	}
 }
@@ -422,11 +428,10 @@ func (t *TieredStore) warmSyncLoop() {
 // runWarmSyncCycle performs one warm sync cycle: drain tombstones, then
 // batch-write hot-only entries to warm. All writes are batched with a
 // single warm.Sync and a single WAL AppendBatch to minimise fsync.
-func (t *TieredStore) runWarmSyncCycle() {
+func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	if t.warm == nil {
 		return
 	}
-	ctx := context.Background()
 	start := time.Now()
 
 	var walEntries []wal.Entry

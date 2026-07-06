@@ -66,6 +66,9 @@ type HotStore struct {
 	reaperInterval time.Duration
 	// done is closed by Close() to stop all background goroutines.
 	done chan struct{}
+	// onEvict is called when a warm-backed entry is evicted. Set via
+	// HotConfig.OnEvict. See HotConfig.OnEvict for the constraint.
+	onEvict func(key api.Key)
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
@@ -156,6 +159,17 @@ type HotConfig struct {
 	// Logger receives eviction records. Defaults to a SampledLogger
 	// wrapping slog.Default().
 	Logger observability.Logger
+	// OnEvict is called when a warm-backed entry (hasWarm == true) is
+	// evicted from the hot tier. The key should be tombstoned in the
+	// warm tier so stale unpopular objects are not served after
+	// restart.
+	//
+	// CONSTRAINT: This callback is invoked while the shard write lock
+	// is held. It MUST NOT block, perform I/O, or call back into
+	// HotStore. It may only enqueue the key for async processing.
+	// Violating this constraint stalls all readers and writers on the
+	// shard.
+	OnEvict func(key api.Key)
 }
 
 // NewHotStore creates a sharded in-memory store and starts the
@@ -189,6 +203,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		reaperInterval: reaperInterval,
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
+		onEvict:        cfg.OnEvict,
 	}
 	go h.sweeper()
 	if cfg.ReaperInterval >= 0 {
@@ -261,12 +276,22 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	return obj, api.SourceHot, nil
 }
 
+// notifyEvict fires the OnEvict callback for a warm-backed entry being
+// evicted. Called while the shard write lock is held — the callback
+// MUST NOT block or perform I/O.
+func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry) {
+	if h.onEvict != nil && entry.hasWarm {
+		h.onEvict(key)
+	}
+}
+
 // evictBanned removes a ban-matching entry from the shard. It re-checks
 // that the current entry is still the same object pointer to avoid
 // evicting a replacement that arrived between the unlock and re-lock.
 func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 	s.mu.Lock()
 	if cur, ok := s.entries[key]; ok && cur.obj == obj {
+		h.notifyEvict(key, cur)
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.sieve)
 		delete(s.entries, key)
@@ -298,6 +323,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		}
 		if old, exists := s.entries[evKey]; exists {
 			recordEviction(&logs, evKey, old, "inline_overshoot")
+			h.notifyEvict(evKey, old)
 			s.bytes -= objSize(old.obj)
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
@@ -374,6 +400,7 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
 			recordEviction(&logs, key, e, "expired")
+			h.notifyEvict(key, e)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
@@ -403,6 +430,7 @@ func (h *HotStore) sweeper() {
 				}
 				if old, exists := s.entries[evKey]; exists {
 					recordEviction(&logs, evKey, old, "sweeper_overshoot")
+					h.notifyEvict(evKey, old)
 					s.bytes -= objSize(old.obj)
 					delete(s.entries, evKey)
 					h.stats.evictions.Add(1)

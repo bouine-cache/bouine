@@ -27,6 +27,9 @@ config:
     warm_dir: /var/lib/bouine
     warm_max_bytes: 20GiB
     eviction: sieve
+    # warm_sync_interval: 60s  # uncomment to sync small objects to warm
+    # warm_sync_batch_size: 5000
+    # body_threshold: 64KiB
   cluster:
     enabled: true
     join: []  # populated from headless service DNS

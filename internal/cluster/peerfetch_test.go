@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -212,6 +213,138 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	}
 }
 
+// TestPeerFetcher_BinaryRoundTrip_TimeFields pins that the binary codec
+// round-trips the time.Duration and time.Time fields that ADR-0015 flags
+// as a risk (the time.Time zero-value edge case). The storage codec's own
+// tests cover the codec in isolation; this test pins the wire-format
+// contract that peer-fetch depends on.
+func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
+	t.Parallel()
+	key := api.Key(9)
+	storedAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	lastMod := time.Date(2026, 7, 5, 8, 30, 0, 0, time.UTC)
+	obj := &api.Object{
+		Key:                  key,
+		StatusCode:           200,
+		Body:                 []byte("timebody"),
+		TTL:                  30 * time.Second,
+		StaleWhileRevalidate: 10 * time.Second,
+		StaleIfError:         60 * time.Second,
+		StoredAt:             storedAt,
+		LastModified:         lastMod,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != PeerFetchPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req api.PeerFetchRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Key != key {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(storage.EncodeObject(obj))
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	got, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: key})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected hit object")
+	}
+	if got.TTL != obj.TTL {
+		t.Fatalf("TTL=%v, want %v", got.TTL, obj.TTL)
+	}
+	if got.StaleWhileRevalidate != obj.StaleWhileRevalidate {
+		t.Fatalf("SWR=%v, want %v", got.StaleWhileRevalidate, obj.StaleWhileRevalidate)
+	}
+	if got.StaleIfError != obj.StaleIfError {
+		t.Fatalf("SIE=%v, want %v", got.StaleIfError, obj.StaleIfError)
+	}
+	if !got.StoredAt.Equal(obj.StoredAt) {
+		t.Fatalf("StoredAt=%v, want %v", got.StoredAt, obj.StoredAt)
+	}
+	if !got.LastModified.Equal(obj.LastModified) {
+		t.Fatalf("LastModified=%v, want %v", got.LastModified, obj.LastModified)
+	}
+}
+
+// TestPeerFetcher_BinaryRoundTrip_ZeroTimes pins the zero-value time.Time
+// edge case: a zero StoredAt or LastModified must round-trip as zero, not
+// as a garbage instant. ADR-0015 calls this out as a risk.
+func TestPeerFetcher_BinaryRoundTrip_ZeroTimes(t *testing.T) {
+	t.Parallel()
+	key := api.Key(10)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("zerobody"),
+		// StoredAt and LastModified left zero.
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(storage.EncodeObject(obj))
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	got, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: key})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected hit object")
+	}
+	if !got.StoredAt.IsZero() {
+		t.Fatalf("StoredAt=%v, want zero", got.StoredAt)
+	}
+	if !got.LastModified.IsZero() {
+		t.Fatalf("LastModified=%v, want zero", got.LastModified)
+	}
+}
+
+// TestPeerFetcher_MissIncrementsCounter pins that a 404 response
+// increments the misses counter. The pre-#187 code had a dead increment
+// (the !fetchResp.Hit branch was unreachable because the handler always
+// sent 404 for misses); the binary cutover moved the increment into the
+// 404 branch. This test prevents regressions of that fix.
+func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerFetchRequest{Key: 1})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if obj != nil {
+		t.Fatal("expected nil object on miss")
+	}
+	hits, misses, _, _, _ := f.PeerFetchStats()
+	if hits != 0 {
+		t.Fatalf("hits=%d, want 0", hits)
+	}
+	if misses != 1 {
+		t.Fatalf("misses=%d, want 1", misses)
+	}
+}
+
 func TestPeerFetcher_HopLimitReached(t *testing.T) {
 	t.Parallel()
 	f := NewPeerFetcher(nil, nil)
@@ -325,4 +458,84 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// BenchmarkPeerFetchHandler_ServeHTTP measures the handler encode path:
+// store.Get → storage.EncodeObject → ResponseWriter.Write. This is the
+// hot path that issue #187 targeted. The body is 4 KiB with 10 headers,
+// matching the PR's throwaway benchmark setup so results are comparable.
+func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
+	key := api.Key(1)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       bytes.Repeat([]byte("A"), 4096),
+		ETag:       `"benchmark-etag"`,
+	}
+	obj.Header = header.NewMap(10)
+	for i := range 10 {
+		obj.Header.AppendEntry(
+			"X-Benchmark-Header-"+strconv.Itoa(i),
+			"value-"+strconv.Itoa(i),
+		)
+	}
+	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
+	h := NewPeerFetchHandler(store)
+
+	reqBody, _ := json.Marshal(api.PeerFetchRequest{Key: key})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		rr := httptest.NewRecorder()
+		r, _ := http.NewRequestWithContext(context.Background(),
+			http.MethodPost, PeerFetchPath, bytes.NewReader(reqBody))
+		r.Header.Set(header.ContentType, "application/json")
+		h.ServeHTTP(rr, r)
+		if rr.Code != 200 {
+			b.Fatalf("status=%d", rr.Code)
+		}
+	}
+}
+
+// BenchmarkPeerFetcher_Fetch measures the full client→server round-trip:
+// HTTP request → handler encode → HTTP transport → client read →
+// storage.DecodeObject. This is the end-to-end path that the binary
+// codec replaces the JSON tower on.
+func BenchmarkPeerFetcher_Fetch(b *testing.B) {
+	key := api.Key(1)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       bytes.Repeat([]byte("A"), 4096),
+		ETag:       `"benchmark-etag"`,
+	}
+	obj.Header = header.NewMap(10)
+	for i := range 10 {
+		obj.Header.AppendEntry(
+			"X-Benchmark-Header-"+strconv.Itoa(i),
+			"value-"+strconv.Itoa(i),
+		)
+	}
+	encoded := storage.EncodeObject(obj)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "application/octet-stream")
+		_, _ = w.Write(encoded)
+	}))
+	defer srv.Close()
+
+	f := NewPeerFetcher(nil, nil)
+	peer := api.PeerInfo{AdminAddr: srv.Listener.Addr().String()}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		got, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: key})
+		if err != nil {
+			b.Fatalf("fetch: %v", err)
+		}
+		if got == nil || got.Key != key {
+			b.Fatalf("unexpected result: %+v", got)
+		}
+	}
 }

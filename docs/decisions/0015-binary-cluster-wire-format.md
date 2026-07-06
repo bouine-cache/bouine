@@ -99,16 +99,19 @@ negative that does not invert cleanly).
 
 ### Hard cutover
 
-No JSON fallback. `ClusterProtocolVersion` bumped from `"1"` to `"2"`.
+No JSON fallback. `ClusterProtocolVersion` bumped from `"1"` to `"2"`
+for the gossip KeySet/Purge/Ban cutover, then to `"3"` for the
+peer-fetch response format cutover (JSON → binary storage codec,
+issue #187).
 All nodes in a cluster must upgrade together — a mixed-version cluster
-will have v2 nodes that cannot decode v1 JSON gossip and vice versa.
-This is acceptable for bouine's target deployment model (small clusters,
-coordinated rolling restarts).
+will have nodes that cannot decode each other's gossip or peer-fetch
+responses. This is acceptable for bouine's target deployment model
+(small clusters, coordinated rolling restarts).
 
 ### Layering
 
-The binary codec lives in `internal/cluster/codec.go`. The admin server
-(L4) does not import the cluster package (L3) — instead,
+The binary codec lives in `internal/cluster/codec.go` (L5). The admin
+server (L4) does not import the cluster package (L5) — instead,
 `NewPeerPurgeHandler` and `NewPeerBanHandler` are `http.Handler`
 constructors in the cluster package, wired into the admin mux the same
 way `PeerKeysHandler` and `PeerFetchHandler` already were.
@@ -118,11 +121,13 @@ The peer-fetch response codec (`storage.EncodeObject` /
 package (L5) imports it directly — L5→L2 is an allowed dependency. This
 couples the peer-fetch wire format to the storage object codec version
 byte (`objCodecVersion`). The coupling is intentional: peer-fetch
-responses carry the same bytes the warm tier stores, so a version bump
-in the storage codec is a wire-format change for peer-fetch too. A
-future refactor could extract a shared `ObjectCodec` interface in the
-cluster package to decouple the two, but the current design favours
-zero-copy translation over indirection.
+responses carry the same `*api.Object` that the warm tier stores, so
+reusing the storage codec eliminates the binary→JSON→binary translation
+tower (fewer copies and allocations, though not literally zero-copy —
+`EncodeObject` allocates a fresh buffer and `Fetch` buffers the
+response via `io.ReadAll`). A future refactor could extract a shared
+`ObjectCodec` interface in the cluster package to decouple the two;
+the current design favours fewer copies over indirection.
 
 ## Consequences
 

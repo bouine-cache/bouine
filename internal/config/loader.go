@@ -250,6 +250,9 @@ func validateRefreshConfig(i int, rc RouteCache) error {
 	if rc.RefreshTimeout < 0 || rc.RefreshTimeout > 120*time.Second {
 		return fmt.Errorf("config: route %d refresh_timeout must be 0-120s, got %v", i, rc.RefreshTimeout)
 	}
+	if rc.RefreshMinHits < 0 {
+		return fmt.Errorf("config: route %d refresh_min_hits must be >= 0, got %d", i, rc.RefreshMinHits)
+	}
 	return nil
 }
 

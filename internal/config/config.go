@@ -353,6 +353,16 @@ type RouteCache struct {
 	// RefreshTimeout is the maximum duration for a single background
 	// refresh fetch. Default 10s. Range 5s-120s.
 	RefreshTimeout time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
+	// RefreshMinHits is the minimum number of cache hits an object must
+	// accumulate during its TTL window to qualify for re-scheduling
+	// after a background refresh. Zero (default) disables the gate —
+	// every cached object is refreshed regardless of access frequency.
+	// When set to N > 0, only objects hit at least N times are
+	// re-scheduled; unpopular long-tail objects expire naturally,
+	// reducing origin traffic on routes with many distinct paths.
+	// The first TTL window always gets one refresh cycle; the gate
+	// only applies on re-scheduling after a refresh completes.
+	RefreshMinHits int `yaml:"refresh_min_hits,omitempty" json:"refresh_min_hits,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

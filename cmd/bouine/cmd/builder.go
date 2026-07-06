@@ -388,6 +388,7 @@ func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
 	cfg.RefreshMargin = ttlBasis * time.Duration(marginPct) / 100
 	cfg.RefreshTimeout = rc.RefreshTimeout
 	cfg.RefreshConcurrency = rc.RefreshConcurrency
+	cfg.RefreshMinHits = rc.RefreshMinHits
 }
 
 // buildTransport constructs the HTTP transport for an upstream pool,

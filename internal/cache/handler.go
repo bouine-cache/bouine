@@ -212,6 +212,7 @@ type Handler struct {
 	refreshSem          chan struct{}
 	refreshMargin       time.Duration
 	refreshTimeout      time.Duration
+	refreshMinHits      int
 	refreshMetrics      observability.RefreshMetricsForRoute
 	routeName           string
 	done                chan struct{}
@@ -328,6 +329,10 @@ type HandlerConfig struct {
 	RefreshTimeout time.Duration
 	// RefreshConcurrency bounds concurrent background refresh fetches.
 	RefreshConcurrency int
+	// RefreshMinHits is the minimum cache hits required during a TTL
+	// window for an object to be re-scheduled after a background
+	// refresh. Zero disables the gate.
+	RefreshMinHits int
 	// RouteName labels refresh metrics. Set from the route's config name.
 	RouteName string
 	// RefreshMetrics records background refresh activity. Nil when the
@@ -362,6 +367,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshBeforeExpiry: cfg.RefreshBeforeExpiry,
 		refreshMargin:       cfg.RefreshMargin,
 		refreshTimeout:      cfg.RefreshTimeout,
+		refreshMinHits:      cfg.RefreshMinHits,
 		routeName:           cfg.RouteName,
 		done:                make(chan struct{}),
 	}
@@ -565,7 +571,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(ctx, key, refreshed, req)
+		h.storeAndReplicate(ctx, key, refreshed, req, true)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
@@ -580,7 +586,8 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			return
 		}
 		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(ctx, key, obj, req)
+		obj.Hits = stale.Hits
+		h.storeAndReplicate(ctx, key, obj, req, true)
 		h.refreshMetrics.IncTotal("200")
 		return
 	}
@@ -963,7 +970,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(r.Context(), key, refreshed, r)
+		h.storeAndReplicate(r.Context(), key, refreshed, r, false)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
 	}
@@ -984,6 +991,9 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	refreshed := *stale
 	refreshed.Header = stale.Header.Clone()
 	refreshed.StoredAt = time.Now()
+	// Preserve hit count from the previous TTL window so the
+	// refresh_min_hits gate can evaluate popularity on re-schedule.
+	refreshed.Hits = stale.Hits
 	MergeHeaders304(&refreshed, res.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
@@ -1035,7 +1045,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(ctx, key, refreshed, r)
+		h.storeAndReplicate(ctx, key, refreshed, r, false)
 		return
 	}
 
@@ -1047,7 +1057,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 			return
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(ctx, key, obj, r)
+		h.storeAndReplicate(ctx, key, obj, r, false)
 	}
 }
 
@@ -1097,10 +1107,10 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(r.Context(), storeKey, obj, r)
+		h.storeAndReplicate(r.Context(), storeKey, obj, r, false)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			h.storeAndReplicate(r.Context(), primaryKey, primaryObj, r)
+			h.storeAndReplicate(r.Context(), primaryKey, primaryObj, r, false)
 		}
 	}
 }
@@ -1267,7 +1277,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-	h.storeAndReplicate(r.Context(), key, obj, getReq)
+	h.storeAndReplicate(r.Context(), key, obj, getReq, false)
 }
 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
@@ -1307,7 +1317,14 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 // background refresh at TTL - margin. Every path that stores a
 // cacheable object must go through this helper so replication and
 // refresh scheduling are never skipped.
-func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.Object, r *http.Request) {
+//
+// isRefresh is true when the call originates from a background refresh
+// (doBackgroundRefresh). It enables the refresh_min_hits gate: if the
+// object accumulated fewer hits than refreshMinHits during its previous
+// TTL window, it is not re-scheduled and expires naturally. Foreground
+// stores pass false to ensure every object gets at least one refresh
+// cycle.
+func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.replicateFn != nil {
 		h.replicateFn(ctx, obj)
@@ -1325,6 +1342,18 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 			if _, isLocal := h.ownerFn(key); !isLocal {
 				return
 			}
+		}
+		// Popularity gate: skip re-scheduling for objects that were
+		// not accessed enough during their previous TTL window. Only
+		// applies to background refresh re-stores, not initial stores.
+		// Unregister the stale registry entry — the object stays in
+		// the cache but won't be refreshed, so the entry is dead weight.
+		if isRefresh && h.refreshMinHits > 0 && obj.Hits < uint64(h.refreshMinHits) {
+			if h.refreshRegistry != nil {
+				h.refreshRegistry.Unregister(key)
+			}
+			h.refreshMetrics.IncSkips("below_min_hits")
+			return
 		}
 		var varyHeader string
 		if obj.Header.Len() > 0 {

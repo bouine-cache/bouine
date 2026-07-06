@@ -1167,3 +1167,185 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 		t.Fatalf("max concurrent origin fetches = %d, want <= %d", got, maxConc)
 	}
 }
+
+// testRefreshHandler creates a Handler with refresh-before-expiry enabled
+// and the given min-hits threshold. The upstream returns 304 for
+// conditional requests (If-None-Match), so background refreshes succeed
+// without generating full 200 responses.
+func testRefreshHandler(t *testing.T, minHits int) *Handler {
+	t.Helper()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+	})
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if etag := r.Header.Get("If-None-Match"); etag == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+	h := NewHandler(HandlerConfig{
+		Upstream:            upstream,
+		Store:               store,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DefaultTTL:          60 * time.Second,
+		RefreshBeforeExpiry: true,
+		RefreshMargin:       6 * time.Second,
+		RefreshTimeout:      5 * time.Second,
+		RefreshConcurrency:  4,
+		RefreshMinHits:      minHits,
+		RouteName:           "test",
+	})
+	return h
+}
+
+func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 2)
+	defer h.Close(context.Background())
+
+	// Store an object via foreground path (isRefresh=false → always
+	// schedules regardless of min-hits).
+	req := httptest.NewRequest("GET", "http://example.com/page", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	// The initial store scheduled 1 entry. Stop the scheduler to clear
+	// it, then create a fresh one so we can detect whether the refresh
+	// re-schedules.
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	ctx := context.Background()
+	key := h.buildKey(httptest.NewRequest("GET", "http://example.com/page", nil))
+	obj, _, err := h.store.Get(ctx, key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
+	}
+	// After the test's Get, Hits=1 (first access, slow path). With
+	// minHits=2, the gate should block re-scheduling.
+	if obj.Hits != 1 {
+		t.Fatalf("expected 1 hit after Get, got %d", obj.Hits)
+	}
+	h.doBackgroundRefresh(ctx, key, obj)
+
+	// After refresh with Hits=1 < minHits=2, the object should NOT be
+	// re-scheduled. The scheduler should still be empty.
+	scheduled := h.scheduler.Len()
+	if scheduled != 0 {
+		t.Fatalf("expected 0 scheduled entries after unpopular refresh, got %d", scheduled)
+	}
+}
+
+func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	defer h.Close(context.Background())
+
+	// Store (MISS) then access (HIT → Hits=1 on slow path).
+	// The test's store.Get will use the fast path (visited=true),
+	// so Hits stays at 1.
+	url := "http://example.com/popular"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	// Clear the initial scheduler entry to detect re-scheduling.
+	h.scheduler.Stop()
+	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
+	h.scheduler.Start()
+
+	key := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
+	}
+	if obj.Hits < 1 {
+		t.Fatalf("expected >= 1 hits, got %d", obj.Hits)
+	}
+
+	// Simulate a background refresh. Since Hits >= refreshMinHits (1),
+	// the object should be re-scheduled.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+
+	scheduled := h.scheduler.Len()
+	if scheduled != 1 {
+		t.Fatalf("expected 1 scheduled entry after popular refresh, got %d", scheduled)
+	}
+}
+
+func TestRefreshMinHits_InitialStoreAlwaysSchedules(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 10) // high threshold
+	defer h.Close(context.Background())
+
+	// A foreground store (isRefresh=false) must schedule even though
+	// Hits == 0 < refreshMinHits (10). Every object gets one chance.
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/first-chance", nil))
+
+	scheduled := h.scheduler.Len()
+	if scheduled != 1 {
+		t.Fatalf("initial store should schedule 1 entry, got %d", scheduled)
+	}
+}
+
+func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+	})
+	// Upstream always returns 200 (never 304), so the 200 refresh
+	// path is exercised.
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+	h := NewHandler(HandlerConfig{
+		Upstream:            upstream,
+		Store:               store,
+		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DefaultTTL:          60 * time.Second,
+		RefreshBeforeExpiry: true,
+		RefreshMargin:       6 * time.Second,
+		RefreshTimeout:      5 * time.Second,
+		RefreshConcurrency:  4,
+		RefreshMinHits:      0,
+		RouteName:           "test",
+	})
+	defer h.Close(context.Background())
+
+	// Store (MISS) then access (HIT → Hits=1).
+	url := "http://example.com/hits"
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+
+	key := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key)
+	if err != nil || obj == nil {
+		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
+	}
+	if obj.Hits < 1 {
+		t.Fatalf("expected >= 1 hit before refresh, got %d", obj.Hits)
+	}
+	staleHits := obj.Hits
+
+	// doBackgroundRefresh triggers a 200 (upstream never returns 304).
+	// The refreshed object should carry over the hit count.
+	h.doBackgroundRefresh(context.Background(), key, obj)
+
+	// Verify the stored object preserved the hit count.
+	refreshed, _, err := h.store.Get(context.Background(), key)
+	if err != nil || refreshed == nil {
+		t.Fatalf("store.Get after refresh: obj=%v err=%v", refreshed, err)
+	}
+	if refreshed.Hits < staleHits {
+		t.Fatalf("hit count lost after 200 refresh: got %d, want >= %d", refreshed.Hits, staleHits)
+	}
+}

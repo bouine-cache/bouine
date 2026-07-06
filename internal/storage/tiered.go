@@ -129,42 +129,8 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	}
 
 	if cfg.WALDir != "" {
-		ts.walPath = cfg.WALDir
-		l, err := wal.Open(cfg.WALDir)
-		if err != nil {
+		if err := ts.initWAL(cfg.WALDir); err != nil {
 			return nil, err
-		}
-		ts.wal = l
-
-		// Replay WAL to rebuild the warm-tier in-memory index so
-		// Get() can locate objects on disk without a full segment scan.
-		if ts.warm != nil {
-			if rErr := wal.Replay(cfg.WALDir, func(e wal.Entry) error {
-				switch {
-				case e.IsPut():
-					ts.warm.SetIndex(e.Key, int(e.SegID), e.Offset)
-				case e.IsDelete():
-					ts.warm.DelIndex(e.Key)
-				}
-				return nil
-			}); rErr != nil {
-				ts.logger.Warn("wal replay failed; warm-tier index may be incomplete",
-					"error", rErr)
-			}
-			// Fallback: if WAL replay produced an empty index but
-			// warm segments contain records, rebuild from segment
-			// scan. Protects against WAL loss/corruption.
-			if entries, _ := ts.warm.Stats(); entries == 0 {
-				ts.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
-				if err := ts.rebuildIndexFromScan(); err != nil {
-					ts.logger.Warn("segment scan index rebuild failed",
-						"error", err)
-				}
-			}
-			if err := ts.warm.RecomputeStats(); err != nil {
-				ts.logger.Warn("warm-tier stats recompute failed; counters may be stale",
-					"error", err)
-			}
 		}
 	}
 
@@ -175,6 +141,46 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	}
 
 	return ts, nil
+}
+
+// initWAL opens the WAL, replays it to rebuild the warm-tier index, and
+// falls back to a segment scan if the replayed index is empty. Extracted
+// from NewTieredStore to keep cyclomatic complexity under the linter limit.
+func (t *TieredStore) initWAL(walDir string) error {
+	t.walPath = walDir
+	l, err := wal.Open(walDir)
+	if err != nil {
+		return err
+	}
+	t.wal = l
+	if t.warm == nil {
+		return nil
+	}
+	if rErr := wal.Replay(walDir, func(e wal.Entry) error {
+		switch {
+		case e.IsPut():
+			t.warm.SetIndex(e.Key, int(e.SegID), e.Offset)
+		case e.IsDelete():
+			t.warm.DelIndex(e.Key)
+		}
+		return nil
+	}); rErr != nil {
+		t.logger.Warn("wal replay failed; warm-tier index may be incomplete",
+			"error", rErr)
+	}
+	// Fallback: if WAL replay produced an empty index but warm segments
+	// contain records, rebuild from segment scan.
+	if entries, _ := t.warm.Stats(); entries == 0 {
+		t.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
+		if err := t.rebuildIndexFromScan(); err != nil {
+			t.logger.Warn("segment scan index rebuild failed", "error", err)
+		}
+	}
+	if err := t.warm.RecomputeStats(); err != nil {
+		t.logger.Warn("warm-tier stats recompute failed; counters may be stale",
+			"error", err)
+	}
+	return nil
 }
 
 // Get looks up the hot tier first. On a miss, the warm tier is
@@ -420,12 +426,13 @@ func (t *TieredStore) runWarmSyncCycle() {
 	if t.warm == nil {
 		return
 	}
+	ctx := context.Background()
 	start := time.Now()
 
 	var walEntries []wal.Entry
 	tombstoned := t.drainTombstones(&walEntries)
 	hotOnlyKeys := t.collectHotOnlyKeys()
-	synced, skipped := t.writeHotOnlyToWarm(hotOnlyKeys, &walEntries)
+	synced, skipped := t.writeHotOnlyToWarm(ctx, hotOnlyKeys, &walEntries)
 
 	if len(walEntries) > 0 {
 		if err := t.warm.Sync(); err != nil {
@@ -498,9 +505,9 @@ func (t *TieredStore) drainTombstones(walEntries *[]wal.Entry) int {
 
 // writeHotOnlyToWarm writes the given hot-only keys to the warm tier and
 // collects WAL put entries. Returns synced count and skipped count.
-func (t *TieredStore) writeHotOnlyToWarm(hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped int) {
+func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped int) {
 	for _, key := range hotOnlyKeys {
-		obj, _, err := t.hot.Get(context.Background(), key)
+		obj, _, err := t.hot.Get(ctx, key)
 		if err != nil || obj == nil {
 			skipped++
 			continue

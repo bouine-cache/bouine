@@ -108,37 +108,8 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_broadcast_failures_total",
 			Help:      "HTTP fan-out failures by invalidation type and reason. Gossip provides redundant delivery.",
 		}, []string{"type", "reason"}),
-		AntiEntropyReconcile: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine",
-			Name:      "cluster_anti_entropy_reconcile_total",
-			Help:      "Anti-entropy reconciliation rounds completed.",
-		}),
-		AntiEntropyRepaired: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine",
-			Name:      "cluster_anti_entropy_repaired_total",
-			Help:      "Cache keys backfilled by the anti-entropy reconciler.",
-		}),
-		AntiEntropyKeysRepaired: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "bouine",
-			Name:      "cluster_anti_entropy_keys_repaired",
-			Help:      "Keys repaired in the last anti-entropy round.",
-		}),
-		AntiEntropyFetchFailures: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine",
-			Name:      "cluster_anti_entropy_fetch_failures_total",
-			Help:      "Anti-entropy peer key-set fetch failures.",
-		}),
-		AntiEntropyCooldownSkips: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine",
-			Name:      "cluster_anti_entropy_cooldown_skips_total",
-			Help:      "Keys skipped as missing by anti-entropy because they were within their backfill cooldown window.",
-		}),
-		AntiEntropyChurnSkips: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine",
-			Name:      "cluster_anti_entropy_churn_skips_total",
-			Help:      "Anti-entropy rounds skipped because SIEVE was evicting recently-backfilled keys faster than the reconciler inserted them.",
-		}),
 	}
+	m.initAntiEntropyMetrics()
 	reg.MustRegister(
 		m.ModeInfo,
 		m.InvalidationsGossip,
@@ -155,6 +126,41 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.AntiEntropyChurnSkips,
 	)
 	return m
+}
+
+// initAntiEntropyMetrics creates the anti-entropy counters and gauges on
+// m. Extracted from RegisterMetrics to keep it under the funlen limit.
+func (m *Metrics) initAntiEntropyMetrics() {
+	m.AntiEntropyReconcile = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cluster_anti_entropy_reconcile_total",
+		Help:      "Anti-entropy reconciliation rounds completed.",
+	})
+	m.AntiEntropyRepaired = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cluster_anti_entropy_repaired_total",
+		Help:      "Cache keys backfilled by the anti-entropy reconciler.",
+	})
+	m.AntiEntropyKeysRepaired = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "cluster_anti_entropy_keys_repaired",
+		Help:      "Keys repaired in the last anti-entropy round.",
+	})
+	m.AntiEntropyFetchFailures = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cluster_anti_entropy_fetch_failures_total",
+		Help:      "Anti-entropy peer key-set fetch failures.",
+	})
+	m.AntiEntropyCooldownSkips = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cluster_anti_entropy_cooldown_skips_total",
+		Help:      "Keys skipped as missing by anti-entropy because they were within their backfill cooldown window.",
+	})
+	m.AntiEntropyChurnSkips = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cluster_anti_entropy_churn_skips_total",
+		Help:      "Anti-entropy rounds skipped because SIEVE was evicting recently-backfilled keys faster than the reconciler inserted them.",
+	})
 }
 
 // SetMode sets the cluster_mode_info gauge to 1 for the given mode

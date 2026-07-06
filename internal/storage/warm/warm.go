@@ -49,6 +49,11 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 // readRecordAt. The header is read, parsed, and discarded on every
 // warm-tier read; without pooling this is a per-call heap allocation
 // on the peer-fetch hot path (issue #187, fix #4).
+//
+// Package-level mutable state (AGENTS.md §2.3 exception): sync.Pool is
+// concurrency-safe and matches the existing crcTable pattern. A per-store
+// pool would add indirection without benefit since all stores share the
+// same fixed buffer sizes.
 var recordHdrPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, headerLen)

@@ -31,7 +31,11 @@ const (
 	// negotiation during rolling upgrades.
 	ClusterVersionHeader = header.XBouineClusterVersion
 	// ClusterProtocolVersion is the current protocol version.
-	ClusterProtocolVersion = "2"
+	// Bumped to "3" in issue #187: the peer-fetch response format
+	// changed from JSON to the binary storage codec. A mixed v2/v3
+	// cluster fails detectably on version-mismatch instead of
+	// silently producing codec decode errors.
+	ClusterProtocolVersion = "3"
 	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
 	peerFetchTimeout = 500 * time.Millisecond
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
@@ -182,6 +186,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
+		f.misses.Add(1)
+		if f.pMisses != nil {
+			f.pMisses.Inc()
+		}
 		f.logger.Info("peer fetch miss",
 			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
 		return nil, nil // peer miss
@@ -191,6 +199,12 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 
 	// Binary object codec — no JSON, no base64, no reflection (issue #187).
+	// The full response is buffered into memory before decode. With
+	// defaultPeerFetchConcurrency = 4 and maxPeerFetchBytes = 64 MiB, a
+	// worst-case fan-out holds up to 256 MiB of transient allocation. In
+	// practice peer-fetch responses are small (cached objects << 64 KiB);
+	// the body-last varint framing in the codec would allow a future
+	// streaming decode, but that refactor is out of scope for #187.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, f.maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("peer fetch read: %w", err)

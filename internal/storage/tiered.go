@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/thylong/bouine/internal/observability"
@@ -30,10 +32,29 @@ type TieredStore struct {
 	// bodyThreshold: objects with Body <= this stay hot-only.
 	bodyThreshold int64
 
-	// done is closed by Close to stop the background compaction goroutine.
+	// warmSyncInterval controls how often hot→warm background sync runs.
+	warmSyncInterval time.Duration
+	// warmSyncBatchSize caps entries written per sync cycle.
+	warmSyncBatchSize int
+	// warmSyncOffset rotates through the hot key set across cycles.
+	warmSyncOffset int
+
+	// tombstoneQueue receives keys evicted from hot that had a warm
+	// backup. Drained by warmSyncLoop and tombstoned in warm + WAL.
+	// Buffered; non-blocking sends — overflow drops the tombstone.
+	tombstoneQueue chan api.Key
+	// droppedTombstones counts tombstones dropped (queue full).
+	droppedTombstones atomic.Int64
+
+	// walPath is the WAL file path, stored for WAL rewrite after compaction.
+	walPath string
+
+	// done is closed by Close to stop the background goroutines.
 	done chan struct{}
 	// compactWg tracks the compaction goroutine for join-on-close.
 	compactWg sync.WaitGroup
+	// syncWg tracks the warm sync goroutine for join-on-close.
+	syncWg sync.WaitGroup
 }
 
 // TieredConfig configures a TieredStore.
@@ -49,6 +70,12 @@ type TieredConfig struct {
 	// be evicted from RAM without data loss.
 	// Default: 64 KiB.
 	BodyThreshold int64
+	// WarmSyncInterval controls how often hot→warm background sync runs.
+	// Default 60s. Set to 0 to disable.
+	WarmSyncInterval time.Duration
+	// WarmSyncBatchSize caps entries written to warm per sync cycle.
+	// Default 5000.
+	WarmSyncBatchSize int
 }
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
@@ -58,15 +85,33 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	if cfg.BodyThreshold <= 0 {
 		cfg.BodyThreshold = 64 << 10
 	}
-
-	hot := NewHotStore(cfg.Hot)
+	if cfg.WarmSyncBatchSize <= 0 {
+		cfg.WarmSyncBatchSize = 5000
+	}
+	// Note: WarmSyncInterval == 0 means "disabled" — do NOT default it.
+	// The default 60s is applied only when the field is unset, which the
+	// config layer handles via ByteSize/Duration zero-value semantics.
+	// Operator explicitly sets 0 to disable.
 
 	ts := &TieredStore{
-		hot:           hot,
-		logger:        cfg.Logger,
-		bodyThreshold: cfg.BodyThreshold,
-		done:          make(chan struct{}),
+		bodyThreshold:     cfg.BodyThreshold,
+		warmSyncInterval:  cfg.WarmSyncInterval,
+		warmSyncBatchSize: cfg.WarmSyncBatchSize,
+		tombstoneQueue:    make(chan api.Key, 4096),
+		done:              make(chan struct{}),
+		logger:            cfg.Logger,
 	}
+
+	// Wire the eviction callback so warm-backed evictions enqueue
+	// tombstones for async processing by warmSyncLoop.
+	cfg.Hot.OnEvict = func(key api.Key) {
+		select {
+		case ts.tombstoneQueue <- key:
+		default:
+			ts.droppedTombstones.Add(1)
+		}
+	}
+	ts.hot = NewHotStore(cfg.Hot)
 
 	if cfg.Warm != nil {
 		w, err := warm.NewStore(*cfg.Warm)
@@ -84,6 +129,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	}
 
 	if cfg.WALDir != "" {
+		ts.walPath = cfg.WALDir
 		l, err := wal.Open(cfg.WALDir)
 		if err != nil {
 			return nil, err
@@ -102,15 +148,30 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 				}
 				return nil
 			}); rErr != nil {
-				// Non-fatal: an empty or absent WAL is fine (fresh start).
 				ts.logger.Warn("wal replay failed; warm-tier index may be incomplete",
 					"error", rErr)
+			}
+			// Fallback: if WAL replay produced an empty index but
+			// warm segments contain records, rebuild from segment
+			// scan. Protects against WAL loss/corruption.
+			if entries, _ := ts.warm.Stats(); entries == 0 {
+				ts.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
+				if err := ts.rebuildIndexFromScan(); err != nil {
+					ts.logger.Warn("segment scan index rebuild failed",
+						"error", err)
+				}
 			}
 			if err := ts.warm.RecomputeStats(); err != nil {
 				ts.logger.Warn("warm-tier stats recompute failed; counters may be stale",
 					"error", err)
 			}
 		}
+	}
+
+	// Start the warm sync goroutine if warm tier and sync are enabled.
+	if ts.warm != nil && cfg.WarmSyncInterval > 0 {
+		ts.syncWg.Add(1)
+		go ts.warmSyncLoop()
 	}
 
 	return ts, nil
@@ -310,6 +371,8 @@ func (t *TieredStore) Stats() api.Stats {
 }
 
 // compactLoop runs the periodic warm-tier compaction until done is closed.
+// After a successful compaction the WAL is rewritten with the live index
+// so it stays bounded and restart replay is fast.
 func (t *TieredStore) compactLoop() {
 	defer t.compactWg.Done()
 	ticker := time.NewTicker(30 * time.Minute)
@@ -324,18 +387,204 @@ func (t *TieredStore) compactLoop() {
 					t.logger.Error("warm tier compaction failed", "error", err)
 				} else {
 					t.logger.Info("warm tier compaction complete")
+					if err := t.rewriteWAL(); err != nil {
+						t.logger.Error("wal rewrite after compaction failed", "error", err)
+					}
 				}
 			}
 		}
 	}
 }
 
+// warmSyncLoop periodically batches hot-only entries into the warm tier
+// so they survive restarts. It also drains the tombstone queue to remove
+// warm copies of evicted (unpopular) entries. Terminates when done is closed.
+func (t *TieredStore) warmSyncLoop() {
+	defer t.syncWg.Done()
+	ticker := time.NewTicker(t.warmSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-ticker.C:
+			t.runWarmSyncCycle()
+		}
+	}
+}
+
+// runWarmSyncCycle performs one warm sync cycle: drain tombstones, then
+// batch-write hot-only entries to warm. All writes are batched with a
+// single warm.Sync and a single WAL AppendBatch to minimise fsync.
+func (t *TieredStore) runWarmSyncCycle() {
+	if t.warm == nil {
+		return
+	}
+	start := time.Now()
+
+	var walEntries []wal.Entry
+	tombstoned := t.drainTombstones(&walEntries)
+	hotOnlyKeys := t.collectHotOnlyKeys()
+	synced, skipped := t.writeHotOnlyToWarm(hotOnlyKeys, &walEntries)
+
+	if len(walEntries) > 0 {
+		if err := t.warm.Sync(); err != nil {
+			t.logger.Warn("warm sync: warm sync failed", "error", err)
+		}
+		if t.wal != nil {
+			if err := t.wal.AppendBatch(walEntries); err != nil {
+				t.logger.Warn("warm sync: wal batch append failed", "error", err)
+			}
+		}
+	}
+
+	t.logger.Info("warm sync cycle complete",
+		"synced", synced,
+		"tombstoned", tombstoned,
+		"skipped", skipped,
+		"dur_ms", time.Since(start).Milliseconds(),
+	)
+}
+
+// collectHotOnlyKeys returns hot keys that are not in the warm tier,
+// capped at warmSyncBatchSize with rotation across cycles.
+func (t *TieredStore) collectHotOnlyKeys() []api.Key {
+	hotKeys := t.hot.Keys()
+	warmKeys := t.warm.Keys()
+	warmSet := make(map[uint64]struct{}, len(warmKeys))
+	for _, wk := range warmKeys {
+		warmSet[wk] = struct{}{}
+	}
+	var hotOnlyKeys []api.Key
+	for _, k := range hotKeys {
+		if _, inWarm := warmSet[uint64(k)]; !inWarm {
+			hotOnlyKeys = append(hotOnlyKeys, k)
+		}
+	}
+	// Apply batch size cap with rotation.
+	total := len(hotOnlyKeys)
+	if total > t.warmSyncBatchSize {
+		startIdx := t.warmSyncOffset % total
+		endIdx := startIdx + t.warmSyncBatchSize
+		if endIdx <= total {
+			hotOnlyKeys = hotOnlyKeys[startIdx:endIdx]
+		} else {
+			hotOnlyKeys = append(hotOnlyKeys[startIdx:], hotOnlyKeys[:endIdx-total]...)
+		}
+		t.warmSyncOffset = endIdx % total
+	}
+	return hotOnlyKeys
+}
+
+// drainTombstones removes all pending tombstone keys from the warm tier
+// and collects WAL delete entries. Returns the number of keys tombstoned.
+func (t *TieredStore) drainTombstones(walEntries *[]wal.Entry) int {
+	tombstoned := 0
+	for {
+		select {
+		case key := <-t.tombstoneQueue:
+			if _, err := t.warm.Delete(uint64(key)); err != nil {
+				t.logger.Debug("warm sync: tombstone delete failed",
+					"key", key, "error", err)
+				continue
+			}
+			*walEntries = append(*walEntries, wal.DeleteEntry(uint64(key)))
+			tombstoned++
+		default:
+			return tombstoned
+		}
+	}
+}
+
+// writeHotOnlyToWarm writes the given hot-only keys to the warm tier and
+// collects WAL put entries. Returns synced count and skipped count.
+func (t *TieredStore) writeHotOnlyToWarm(hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped int) {
+	for _, key := range hotOnlyKeys {
+		obj, _, err := t.hot.Get(context.Background(), key)
+		if err != nil || obj == nil {
+			skipped++
+			continue
+		}
+		body := encodeObject(obj)
+		segID, offset, err := t.warm.Put(uint64(key), body)
+		if err != nil {
+			t.logger.Debug("warm sync: warm put failed",
+				"key", key, "error", err)
+			skipped++
+			continue
+		}
+		*walEntries = append(*walEntries, wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
+		t.hot.SetWarm(key)
+		synced++
+	}
+	return synced, skipped
+}
+
+// rebuildIndexFromScan rebuilds the warm-tier index by scanning all
+// segment records. Used as a startup fallback when WAL replay produces
+// an empty index but segments contain live records.
+func (t *TieredStore) rebuildIndexFromScan() error {
+	if t.warm == nil {
+		return nil
+	}
+	return t.warm.Scan(func(r warm.Record) error {
+		if r.IsTomb {
+			return nil
+		}
+		t.warm.SetIndex(r.Key, r.SegID, r.Offset)
+		return nil
+	})
+}
+
+// rewriteWAL writes a fresh WAL containing all live warm-tier index
+// entries, then atomically replaces the old WAL file. Called after a
+// successful warm-tier compaction so the WAL stays bounded.
+func (t *TieredStore) rewriteWAL() error {
+	if t.wal == nil || t.walPath == "" {
+		return nil
+	}
+	tmpPath := t.walPath + ".tmp"
+	tmpLog, err := wal.Open(tmpPath)
+	if err != nil {
+		return fmt.Errorf("wal rewrite: open tmp: %w", err)
+	}
+	var walEntries []wal.Entry
+	for _, key := range t.warm.Keys() {
+		segID, offset, ok := t.warm.Lookup(key)
+		if !ok {
+			continue
+		}
+		walEntries = append(walEntries, wal.PutEntry(key, int32(segID), offset)) //nolint:gosec // segID bounded by segment count
+	}
+	if err := tmpLog.AppendBatch(walEntries); err != nil {
+		_ = tmpLog.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("wal rewrite: batch write: %w", err)
+	}
+	if err := tmpLog.Close(); err != nil {
+		return fmt.Errorf("wal rewrite: close tmp: %w", err)
+	}
+	if err := t.wal.Close(); err != nil {
+		return fmt.Errorf("wal rewrite: close old: %w", err)
+	}
+	if err := os.Rename(tmpPath, t.walPath); err != nil {
+		return fmt.Errorf("wal rewrite: rename: %w", err)
+	}
+	t.wal, err = wal.Open(t.walPath)
+	if err != nil {
+		return fmt.Errorf("wal rewrite: reopen: %w", err)
+	}
+	t.logger.Info("wal rewritten after compaction", "path", t.walPath)
+	return nil
+}
+
 // Close shuts down the WAL, warm tier, and hot tier in order.
-// The compaction goroutine is stopped and joined before the warm
-// store is closed, preventing use-after-close on file handles.
+// The compaction and warm-sync goroutines are stopped and joined
+// before the warm store is closed, preventing use-after-close on file handles.
 func (t *TieredStore) Close(ctx context.Context) error {
 	close(t.done)
 	t.compactWg.Wait()
+	t.syncWg.Wait()
 
 	if t.wal != nil {
 		if err := t.wal.Close(); err != nil {

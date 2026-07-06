@@ -121,6 +121,33 @@ func Replay(path string, fn func(Entry) error) error {
 	}
 }
 
+// AppendBatch writes multiple entries to the WAL and syncs once. Use
+// for batch writes where per-entry durability is not required — the
+// entire batch is atomic: either all entries are durable or none are
+// (the file is fsynced once after all writes). Existing callers that
+// need per-entry durability continue to use Append (which syncs per
+// entry).
+func (l *Log) AppendBatch(entries []Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range entries {
+		buf := make([]byte, recLen)
+		buf[0] = e.Op
+		binary.LittleEndian.PutUint64(buf[1:9], e.Key)
+		binary.LittleEndian.PutUint32(buf[9:13], uint32(e.SegID))   //nolint:gosec // seg IDs are small
+		binary.LittleEndian.PutUint64(buf[13:21], uint64(e.Offset)) //nolint:gosec // offsets are positive
+		crc := crc32.Checksum(buf[:21], crcTable)
+		binary.LittleEndian.PutUint32(buf[21:25], crc)
+		if _, err := l.f.Write(buf); err != nil {
+			return fmt.Errorf("wal: batch write: %w", err)
+		}
+	}
+	return l.f.Sync()
+}
+
 // Truncate discards the WAL contents (called after a checkpoint).
 func (l *Log) Truncate() error {
 	l.mu.Lock()

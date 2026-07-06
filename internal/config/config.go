@@ -84,6 +84,22 @@ type Storage struct {
 	WarmDir          string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
 	WarmMaxBytes     ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
 	Eviction         string   `yaml:"eviction,omitempty" json:"eviction,omitempty"`
+	// BodyThreshold controls the hot/warm admission boundary during
+	// normal operation. Objects with BodySize > this value are written
+	// to warm on every Put (with fsync). Objects below this value are
+	// written to warm only by the background sync loop. Default 64 KiB.
+	// Set to 0 to write all objects to warm on every Put (high disk I/O).
+	BodyThreshold ByteSize `yaml:"body_threshold,omitempty" json:"body_threshold,omitempty"`
+	// WarmSyncInterval controls how often the hot→warm background sync
+	// runs. Set to 0 to disable (warm tier only stores objects above
+	// body_threshold). Operators should set this explicitly (e.g. 60s)
+	// when they want small objects to survive restarts. Only effective
+	// when warm_dir is configured.
+	WarmSyncInterval time.Duration `yaml:"warm_sync_interval,omitempty" json:"warm_sync_interval,omitempty"`
+	// WarmSyncBatchSize caps the number of entries written to warm per
+	// sync cycle. Default 5000. When the hot working set exceeds this,
+	// entries are rotated across cycles.
+	WarmSyncBatchSize int `yaml:"warm_sync_batch_size,omitempty" json:"warm_sync_batch_size,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

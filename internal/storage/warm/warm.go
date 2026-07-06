@@ -298,6 +298,19 @@ func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 	s.idxMu.Unlock()
 }
 
+// Lookup returns the segment ID and offset for a key in the warm-tier
+// index, or ok=false if the key is absent. Used by TieredStore to
+// rewrite the WAL after warm-tier compaction without scanning segments.
+func (s *Store) Lookup(key uint64) (segID int, offset int64, ok bool) {
+	s.idxMu.RLock()
+	loc, exists := s.index[key]
+	s.idxMu.RUnlock()
+	if !exists {
+		return 0, 0, false
+	}
+	return loc.segID, loc.offset, true
+}
+
 // DelIndex removes a key from the index. Called during WAL replay for
 // delete entries so keys deleted before the last checkpoint are not
 // served from the warm tier.

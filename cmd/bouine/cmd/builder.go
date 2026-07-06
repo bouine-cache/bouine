@@ -35,13 +35,13 @@ func (e *engine) buildStore() (storage.Store, error) {
 		return storage.NewHotStore(hotCfg), nil
 	}
 	return storage.NewTieredStore(storage.TieredConfig{
-		Hot: hotCfg,
-		Warm: &warm.Config{
-			Dir:      e.cfg.Storage.WarmDir,
-			MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(),
-		},
-		WALDir: e.cfg.Storage.WarmDir + "/bouine.wal",
-		Logger: e.logger,
+		Hot:               hotCfg,
+		Warm:              &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes()},
+		WALDir:            e.cfg.Storage.WarmDir + "/bouine.wal",
+		BodyThreshold:     e.cfg.Storage.BodyThreshold.Bytes(),
+		WarmSyncInterval:  e.cfg.Storage.WarmSyncInterval,
+		WarmSyncBatchSize: e.cfg.Storage.WarmSyncBatchSize,
+		Logger:            e.logger,
 	})
 }
 

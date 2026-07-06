@@ -22,7 +22,7 @@ func TestRefreshRegistryRegisterLookup(t *testing.T) {
 	}
 
 	key := api.Key(42)
-	r.Register(key, req, "")
+	r.Register(key, req, "", 0)
 
 	entry := r.Lookup(key)
 	if entry == nil {
@@ -59,7 +59,7 @@ func TestRefreshRegistryVaryHeaders(t *testing.T) {
 	}
 
 	key := api.Key(99)
-	r.Register(key, req, "Accept, Accept-Language")
+	r.Register(key, req, "Accept, Accept-Language", 0)
 
 	entry := r.Lookup(key)
 	if entry == nil {
@@ -89,7 +89,7 @@ func TestRefreshRegistryUnregister(t *testing.T) {
 	}
 
 	key := api.Key(1)
-	r.Register(key, req, "")
+	r.Register(key, req, "", 0)
 	if r.Len() != 1 {
 		t.Fatalf("Len = %d, want 1", r.Len())
 	}
@@ -117,7 +117,7 @@ func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
 	}
 
 	key := api.Key(77)
-	r.Register(key, req, "")
+	r.Register(key, req, "", 0)
 
 	// Mutate the original request header after registration.
 	req.Header.Set("Accept-Encoding", "br")
@@ -143,7 +143,7 @@ func TestRefreshRegistryLen(t *testing.T) {
 	}
 
 	for i := range 5 {
-		r.Register(api.Key(i), req, "")
+		r.Register(api.Key(i), req, "", 0)
 	}
 	if r.Len() != 5 {
 		t.Fatalf("Len = %d, want 5", r.Len())

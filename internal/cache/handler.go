@@ -206,18 +206,19 @@ type Handler struct {
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
-	refreshBeforeExpiry bool
-	refreshRegistry     *refreshRegistry
-	scheduler           *RefreshScheduler
-	refreshSem          chan struct{}
-	refreshMargin       time.Duration
-	refreshTimeout      time.Duration
-	refreshMinHits      int
-	refreshMetrics      observability.RefreshMetricsForRoute
-	routeName           string
-	done                chan struct{}
-	closeOnce           sync.Once
-	refreshWg           sync.WaitGroup
+	refreshBeforeExpiry  bool
+	refreshRegistry      *refreshRegistry
+	scheduler            *RefreshScheduler
+	refreshSem           chan struct{}
+	refreshMargin        time.Duration
+	refreshTimeout       time.Duration
+	refreshMinHits       int
+	refreshPersistCycles int
+	refreshMetrics       observability.RefreshMetricsForRoute
+	routeName            string
+	done                 chan struct{}
+	closeOnce            sync.Once
+	refreshWg            sync.WaitGroup
 	// variantSets tracks the live variant store keys per primary key to
 	// enforce MaxVariants cap. Entries are removed when the handler observes
 	// their eviction via store probes on the cap path, on explicit Delete,
@@ -333,6 +334,14 @@ type HandlerConfig struct {
 	// window for an object to be re-scheduled after a background
 	// refresh. Zero disables the gate.
 	RefreshMinHits int
+	// RefreshPersistCycles is the number of additional TTL cycles to
+	// keep refreshing an object after the popularity gate (refresh_min_hits)
+	// would block. Each background refresh that finds Hits < minHits
+	// decrements the counter. Any popular refresh (Hits >= minHits)
+	// resets it. Zero (default) disables persistence — the gate kills
+	// re-scheduling immediately. Requires refresh_min_hits > 0 to take
+	// effect.
+	RefreshPersistCycles int
 	// RouteName labels refresh metrics. Set from the route's config name.
 	RouteName string
 	// RefreshMetrics records background refresh activity. Nil when the
@@ -344,32 +353,33 @@ type HandlerConfig struct {
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{
-		upstream:            cfg.Upstream,
-		store:               cfg.Store,
-		logger:              cfg.Logger,
-		negativeTTL:         cfg.NegativeTTL,
-		jitterPercent:       cfg.JitterPercent,
-		stayinAlive:         cfg.StayinAlive,
-		defaultTTL:          cfg.DefaultTTL,
-		overrideTTL:         cfg.OverrideTTL,
-		defaultSWR:          cfg.DefaultSWR,
-		defaultSIE:          cfg.DefaultSIE,
-		variantSets:         make(map[api.Key]map[api.Key]struct{}),
-		VaryCapHits:         cfg.VaryCapHits,
-		ownerFn:             cfg.OwnerFn,
-		peerFetch:           cfg.PeerFetch,
-		replicateFn:         cfg.ReplicateFn,
-		allowSetCookie:      cfg.AllowSetCookie,
-		maxObjectSize:       cfg.MaxObjectSize,
-		maxResponseBytes:    cfg.MaxResponseBytes,
-		stripQueryParams:    cfg.StripQueryParams,
-		excludeHeaders:      cfg.ExcludeHeaders,
-		refreshBeforeExpiry: cfg.RefreshBeforeExpiry,
-		refreshMargin:       cfg.RefreshMargin,
-		refreshTimeout:      cfg.RefreshTimeout,
-		refreshMinHits:      cfg.RefreshMinHits,
-		routeName:           cfg.RouteName,
-		done:                make(chan struct{}),
+		upstream:             cfg.Upstream,
+		store:                cfg.Store,
+		logger:               cfg.Logger,
+		negativeTTL:          cfg.NegativeTTL,
+		jitterPercent:        cfg.JitterPercent,
+		stayinAlive:          cfg.StayinAlive,
+		defaultTTL:           cfg.DefaultTTL,
+		overrideTTL:          cfg.OverrideTTL,
+		defaultSWR:           cfg.DefaultSWR,
+		defaultSIE:           cfg.DefaultSIE,
+		variantSets:          make(map[api.Key]map[api.Key]struct{}),
+		VaryCapHits:          cfg.VaryCapHits,
+		ownerFn:              cfg.OwnerFn,
+		peerFetch:            cfg.PeerFetch,
+		replicateFn:          cfg.ReplicateFn,
+		allowSetCookie:       cfg.AllowSetCookie,
+		maxObjectSize:        cfg.MaxObjectSize,
+		maxResponseBytes:     cfg.MaxResponseBytes,
+		stripQueryParams:     cfg.StripQueryParams,
+		excludeHeaders:       cfg.ExcludeHeaders,
+		refreshBeforeExpiry:  cfg.RefreshBeforeExpiry,
+		refreshMargin:        cfg.RefreshMargin,
+		refreshTimeout:       cfg.RefreshTimeout,
+		refreshMinHits:       cfg.RefreshMinHits,
+		refreshPersistCycles: cfg.RefreshPersistCycles,
+		routeName:            cfg.RouteName,
+		done:                 make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
@@ -1349,6 +1359,16 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 		// Unregister the stale registry entry — the object stays in
 		// the cache but won't be refreshed, so the entry is dead weight.
 		if isRefresh && h.refreshMinHits > 0 && obj.Hits < uint64(h.refreshMinHits) {
+			// Persist: if the object has remaining persist cycles, keep
+			// it alive for more TTL windows. This bridges the gap
+			// between short TTL and long inter-access times without
+			// increasing the TTL itself. Each cycle decrements the
+			// counter; a popular refresh (Hits >= minHits) resets it.
+			if h.refreshPersistCycles > 0 && h.refreshRegistry.DecrementPersist(key) {
+				h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
+				h.refreshMetrics.IncSkips("persist_cycle")
+				return
+			}
 			if h.refreshRegistry != nil {
 				h.refreshRegistry.Unregister(key)
 			}
@@ -1359,7 +1379,7 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 		if obj.Header.Len() > 0 {
 			varyHeader = obj.Header.Get(header.Vary)
 		}
-		h.refreshRegistry.Register(key, r, varyHeader)
+		h.refreshRegistry.Register(key, r, varyHeader, h.refreshPersistCycles)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 	}
 }

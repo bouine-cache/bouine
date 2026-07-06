@@ -389,6 +389,7 @@ func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
 	cfg.RefreshTimeout = rc.RefreshTimeout
 	cfg.RefreshConcurrency = rc.RefreshConcurrency
 	cfg.RefreshMinHits = rc.RefreshMinHits
+	cfg.RefreshPersistCycles = rc.RefreshPersistCycles
 }
 
 // buildTransport constructs the HTTP transport for an upstream pool,

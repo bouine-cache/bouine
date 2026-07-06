@@ -16,9 +16,10 @@ import (
 // negotiation). This reduces per-entry memory from ~1.3 KB (all
 // headers) to ~200–450 B (0–3 headers).
 type refreshEntry struct {
-	url    string      // compact: "https://host/path?query"
-	method string      // GET or HEAD
-	header http.Header // snapshot of Vary-relevant request headers only
+	url           string      // compact: "https://host/path?query"
+	method        string      // GET or HEAD
+	header        http.Header // snapshot of Vary-relevant request headers only
+	persistCycles int         // remaining grace refresh cycles when the popularity gate would block
 }
 
 // refreshRegistry maps cache keys to the request info needed to
@@ -41,7 +42,7 @@ func newRefreshRegistry() *refreshRegistry {
 // (from the response's Vary header, plus Accept-Encoding) are kept.
 // The header map is cloned — storing a reference to r.Header would
 // race with the HTTP server's request pooling.
-func (r *refreshRegistry) Register(key api.Key, req *http.Request, varyHeader string) {
+func (r *refreshRegistry) Register(key api.Key, req *http.Request, varyHeader string, persistCycles int) {
 	saved := http.Header{}
 
 	// Always store Accept-Encoding for content negotiation.
@@ -72,9 +73,10 @@ func (r *refreshRegistry) Register(key api.Key, req *http.Request, varyHeader st
 
 	r.mu.Lock()
 	r.entries[key] = &refreshEntry{
-		url:    req.URL.String(),
-		method: req.Method,
-		header: saved,
+		url:           req.URL.String(),
+		method:        req.Method,
+		header:        saved,
+		persistCycles: persistCycles,
 	}
 	r.mu.Unlock()
 }
@@ -98,4 +100,20 @@ func (r *refreshRegistry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.entries)
+}
+
+// DecrementPersist decrements the persist counter for key and returns
+// true if the key still has persist budget remaining. Returns false if
+// the key is not registered or its persist counter is already zero.
+// Used by the refresh popularity gate to keep objects alive for N
+// additional TTL cycles after the last access.
+func (r *refreshRegistry) DecrementPersist(key api.Key) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[key]
+	if !ok || entry.persistCycles <= 0 {
+		return false
+	}
+	entry.persistCycles--
+	return true
 }

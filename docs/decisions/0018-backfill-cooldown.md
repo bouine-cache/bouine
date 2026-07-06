@@ -77,7 +77,7 @@ sustained SIEVE eviction pressure to operators.
   not alternative. The cooldown prevents the storm before it starts;
   the churn detector would catch the case where the hot tier is
   actively evicting backfilled keys faster than they are inserted.
-  Tracked as a separate PR.
+  Implemented in ADR-0019.
 
 - **Set a non-zero `BackfillLimit` default (fix #1)**: complementary.
   `BackfillLimit` caps the storm volume per round; the cooldown breaks

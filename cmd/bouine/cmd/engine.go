@@ -293,6 +293,7 @@ func (e *engine) initAntiEntropy(store storage.Store, peerFetcher *cluster.PeerF
 		Interval:         e.cfg.Cluster.AntiEntropyInterval,
 		BackfillLimit:    e.cfg.Cluster.BackfillLimit,
 		BackfillCooldown: e.cfg.Cluster.BackfillCooldown,
+		ChurnThreshold:   e.cfg.Cluster.ChurnThreshold,
 		Logger:           e.logger,
 	}, e.cfg.Cluster.NodeName, keyLister, peerFetcher, storer, members, clusterMetrics)
 }

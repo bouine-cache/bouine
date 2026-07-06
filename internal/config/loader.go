@@ -297,6 +297,9 @@ func (c *Config) validateCluster() error {
 	if c.Cluster.BackfillCooldown < 0 {
 		return fmt.Errorf("config: cluster.backfill_cooldown must be >= 0, got %v", c.Cluster.BackfillCooldown)
 	}
+	if c.Cluster.ChurnThreshold < 0 || c.Cluster.ChurnThreshold > 1 {
+		return fmt.Errorf("config: cluster.churn_threshold must be in [0, 1], got %v", c.Cluster.ChurnThreshold)
+	}
 	return nil
 }
 

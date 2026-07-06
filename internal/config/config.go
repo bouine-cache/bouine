@@ -135,6 +135,20 @@ type Cluster struct {
 	// value is 5m (≤ 10 rounds at the default 30s interval). Has no
 	// effect in strong or eventual mode.
 	BackfillCooldown time.Duration `yaml:"backfill_cooldown,omitempty" json:"backfill_cooldown,omitempty"`
+	// ChurnThreshold detects SIEVE evicting recently-backfilled keys faster
+	// than anti-entropy inserts them — the condition that turns backfill
+	// into a self-sustaining storm under budget (#187, fix #5). At the top
+	// of each round the reconciler counts cooldown keys (recently
+	// backfilled) that are absent from the local key set (evicted by
+	// SIEVE). When the evicted-to-backfilled ratio exceeds this threshold
+	// the round is skipped the same way OverBudget skips: log a warning,
+	// set keys-repaired to 0, return. 0 (default) disables churn detection
+	// for back-compat. The threshold is a float in (0, 1]; a reasonable
+	// default is 0.5 (skip when more than half of recent backfills were
+	// evicted). Requires BackfillCooldown > 0 — the cooldown map is the
+	// window over which churn is measured. Has no effect in strong or
+	// eventual mode.
+	ChurnThreshold float64 `yaml:"churn_threshold,omitempty" json:"churn_threshold,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

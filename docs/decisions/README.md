@@ -41,3 +41,10 @@ field to `Superseded by ADR-NNNN`.
 | 0010   | Helm chart lint in pre-commit and pre-push hooks     | Accepted |
 | 0011   | Per-route TTL override decoupled from upstream Cache-Control | Accepted |
 | 0012   | Block caching of Set-Cookie responses by default     | Accepted |
+| 0013   | ttl_default makes no-freshness responses cacheable   | Accepted |
+| 0014   | Anti-entropy reconciliation for full cluster mode    | Accepted |
+| 0015   | Binary wire format for cluster key replication       | Accepted |
+| 0016   | Refresh-Before-Expiry Per Route                      | Accepted |
+| 0017   | Static file serving routes                           | Accepted |
+| 0018   | Backfill cooldown for anti-entropy reconciler        | Accepted |
+| 0019   | Churn detection for anti-entropy backfill            | Accepted |

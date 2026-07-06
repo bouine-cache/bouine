@@ -587,3 +587,50 @@ func TestCluster_BackfillCooldown_NegativeRejected(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestCluster_ChurnThreshold_ParsesFromYAML(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+listen:
+  admin: ":9000"
+cluster:
+  enabled: true
+  mode: full
+  churn_threshold: 0.5
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Cluster.ChurnThreshold != 0.5 {
+		t.Fatalf("churn_threshold = %v, want 0.5", cfg.Cluster.ChurnThreshold)
+	}
+}
+
+func TestCluster_ChurnThreshold_DefaultsToZero(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: ClusterModeFull}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if cfg.Cluster.ChurnThreshold != 0 {
+		t.Fatalf("default churn_threshold = %v, want 0 (disabled by default)", cfg.Cluster.ChurnThreshold)
+	}
+}
+
+func TestCluster_ChurnThreshold_OutOfRangeRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []float64{-0.1, 1.1, 2.0} {
+		cfg := Config{
+			Listen:  Listen{Admin: ":9000"},
+			Cluster: Cluster{Enabled: true, Mode: ClusterModeFull, ChurnThreshold: v},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("expected error for churn_threshold %v", v)
+		}
+		if !strings.Contains(err.Error(), "churn_threshold") {
+			t.Fatalf("unexpected error for %v: %v", v, err)
+		}
+	}
+}

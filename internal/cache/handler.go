@@ -1366,7 +1366,7 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 			// counter; a popular refresh (Hits >= minHits) resets it.
 			if h.refreshPersistCycles > 0 && h.refreshRegistry.DecrementPersist(key) {
 				h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
-				h.refreshMetrics.IncSkips("persist_cycle")
+				h.refreshMetrics.IncTotal("persist_cycle")
 				return
 			}
 			if h.refreshRegistry != nil {

@@ -21,7 +21,7 @@ func tieredStoreWithSync(t *testing.T, batchSize int) *TieredStore {
 		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            filepath.Join(dir, "index.wal"),
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0, // disabled — we call runWarmSyncCycle manually
+		WarmSyncInterval:  -1, // disabled — we call runWarmSyncCycle manually
 		WarmSyncBatchSize: batchSize,
 	})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            filepath.Join(dir, "index.wal"),
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0, // disabled — manual cycle
+		WarmSyncInterval:  -1, // disabled — manual cycle
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            walPath,
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0, // disabled — we call cycle manually
+		WarmSyncInterval:  -1, // disabled — we call cycle manually
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {
@@ -238,7 +238,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            walPath,
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0,
+		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {
@@ -263,7 +263,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 	}
 }
 
-func TestWarmSync_WarmSyncIntervalZeroDisablesSync(t *testing.T) {
+func TestWarmSync_WarmSyncIntervalNegativeOneDisablesSync(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
@@ -271,7 +271,7 @@ func TestWarmSync_WarmSyncIntervalZeroDisablesSync(t *testing.T) {
 		Warm:             &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:           filepath.Join(dir, "index.wal"),
 		BodyThreshold:    1024,
-		WarmSyncInterval: 0, // disabled
+		WarmSyncInterval: -1, // explicitly disabled
 	})
 	if err != nil {
 		t.Fatalf("NewTieredStore: %v", err)
@@ -302,7 +302,7 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            walPath,
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0,
+		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {
@@ -325,7 +325,7 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            walPath,
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0,
+		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {
@@ -352,7 +352,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            walPath,
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0,
+		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {
@@ -378,7 +378,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
 		WALDir:            walPath,
 		BodyThreshold:     1024,
-		WarmSyncInterval:  0,
+		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
 	if err != nil {

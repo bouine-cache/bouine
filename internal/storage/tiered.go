@@ -91,14 +91,21 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	if cfg.WarmSyncBatchSize <= 0 {
 		cfg.WarmSyncBatchSize = 5000
 	}
-	// Note: WarmSyncInterval == 0 means "disabled" — do NOT default it.
-	// The default 60s is applied only when the field is unset, which the
-	// config layer handles via ByteSize/Duration zero-value semantics.
-	// Operator explicitly sets 0 to disable.
+	// WarmSyncInterval defaults to 60s when unset (0). Operators can
+	// explicitly disable by setting -1. A value of 0 is treated as
+	// "use the default" because Go's zero-value Duration can't
+	// distinguish unset from explicitly-zero in YAML.
+	if cfg.WarmSyncInterval == 0 {
+		cfg.WarmSyncInterval = 60 * time.Second
+	}
+	warmSyncInterval := cfg.WarmSyncInterval
+	if warmSyncInterval < 0 {
+		warmSyncInterval = 0 // -1 means disabled
+	}
 
 	ts := &TieredStore{
 		bodyThreshold:     cfg.BodyThreshold,
-		warmSyncInterval:  cfg.WarmSyncInterval,
+		warmSyncInterval:  warmSyncInterval,
 		warmSyncBatchSize: cfg.WarmSyncBatchSize,
 		tombstoneQueue:    make(chan api.Key, 4096),
 		done:              make(chan struct{}),
@@ -138,7 +145,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	}
 
 	// Start the warm sync goroutine if warm tier and sync are enabled.
-	if ts.warm != nil && cfg.WarmSyncInterval > 0 {
+	if ts.warm != nil && warmSyncInterval > 0 {
 		ts.syncWg.Add(1)
 		go ts.warmSyncLoop()
 	}

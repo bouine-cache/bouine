@@ -75,7 +75,7 @@ against all WAL loss scenarios.
 | Field | Default | Effect |
 |-------|---------|--------|
 | `body_threshold` | 64 KiB | Objects above this go to warm on every Put |
-| `warm_sync_interval` | 0 (disabled) | Hot→warm sync cycle period; set to e.g. 60s to enable |
+| `warm_sync_interval` | 60s | Hot→warm sync cycle period; -1 = disabled |
 | `warm_sync_batch_size` | 5000 | Max entries per sync cycle |
 
 ## Consequences

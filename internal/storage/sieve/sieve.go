@@ -101,8 +101,16 @@ func (l *List[K]) Access(key K, lookup func(K) *Entry[K]) (*Entry[K], bool) {
 // Evict removes and returns the key of the evicted entry. The caller
 // must delete the corresponding data from the shard map.
 //
+// The caller MUST hold a write lock that excludes concurrent
+// MarkVisited callers. Without this, a racing MarkVisited could set
+// every visited bit to true between the hand's read and advance,
+// making the loop revisit the same entries indefinitely.
+//
 // Returns the evicted key and true, or the zero value and false if
-// the list is empty.
+// the list is empty or no evictable entry is found within two full
+// sweeps (a defensive bound; one sweep clears all visited bits, so
+// the second sweep must find an evictable entry under the write-lock
+// invariant).
 func (l *List[K]) Evict() (K, bool) {
 	if l.len == 0 {
 		var zero K
@@ -114,11 +122,17 @@ func (l *List[K]) Evict() (K, bool) {
 		l.hand = l.tail
 	}
 
-	for {
+	// Bound the scan at two full sweeps. After one sweep every visited
+	// bit has been cleared, so the second sweep must find an evictable
+	// entry. The bound is a safety net: under the caller's write lock
+	// no concurrent MarkVisited can re-set bits, so the second sweep
+	// always succeeds. If it somehow doesn't (list mutated between
+	// probes — a bug), we return false instead of looping forever.
+	maxProbes := l.len * 2
+	for range maxProbes {
 		cur := l.hand
 		if cur == nil {
-			// Wrapped around with no evictable entry (shouldn't happen
-			// unless every entry was just visited). Reset hand to tail.
+			// Wrapped around: reset hand to tail.
 			l.hand = l.tail
 			cur = l.hand
 			if cur == nil {
@@ -143,6 +157,12 @@ func (l *List[K]) Evict() (K, bool) {
 			l.hand = l.tail
 		}
 	}
+
+	// Defensive: two full sweeps without a victim means every entry
+	// was visited and the write-lock invariant was violated. Return
+	// false rather than spinning.
+	var zero K
+	return zero, false
 }
 
 // Remove explicitly removes an entry from the list (for Delete

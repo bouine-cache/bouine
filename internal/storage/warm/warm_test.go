@@ -1140,3 +1140,132 @@ func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestDelete_UpdatesStats(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := []byte("hello warm tier")
+	for i := 0; i < 5; i++ {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	entriesBefore, bytesBefore := s.Stats()
+	if entriesBefore != 5 {
+		t.Fatalf("entries before delete = %d, want 5", entriesBefore)
+	}
+	// Each record: headerLen(16) + len(body) + footerLen(4) = 35 bytes.
+	wantBytes := int64(5 * (headerLen + len(body) + footerLen))
+	if bytesBefore != wantBytes {
+		t.Fatalf("bytes before delete = %d, want %d", bytesBefore, wantBytes)
+	}
+
+	// Delete keys 0, 1, 2.
+	for i := 0; i < 3; i++ {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	entriesAfter, bytesAfter := s.Stats()
+	if entriesAfter != 2 {
+		t.Fatalf("entries after delete = %d, want 2", entriesAfter)
+	}
+	wantBytesAfter := int64(2 * (headerLen + len(body) + footerLen))
+	if bytesAfter != wantBytesAfter {
+		t.Fatalf("bytes after delete = %d, want %d", bytesAfter, wantBytesAfter)
+	}
+
+	// Delete remaining keys so the store is empty.
+	for i := 3; i < 5; i++ {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	entriesEmpty, bytesEmpty := s.Stats()
+	if entriesEmpty != 0 {
+		t.Fatalf("entries after deleting all = %d, want 0", entriesEmpty)
+	}
+	if bytesEmpty != 0 {
+		t.Fatalf("bytes after deleting all = %d, want 0", bytesEmpty)
+	}
+}
+
+func TestDelete_NonExistentKey_NoStatChange(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Put one key.
+	if _, _, err := s.Put(42, []byte("data")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	entriesBefore, bytesBefore := s.Stats()
+
+	// Delete a key that was never put — should not change stats.
+	if _, err := s.Delete(999); err != nil {
+		t.Fatalf("Delete non-existent: %v", err)
+	}
+
+	entriesAfter, bytesAfter := s.Stats()
+	if entriesAfter != entriesBefore {
+		t.Fatalf("entries changed from %d to %d after deleting non-existent key",
+			entriesBefore, entriesAfter)
+	}
+	if bytesAfter != bytesBefore {
+		t.Fatalf("bytes changed from %d to %d after deleting non-existent key",
+			bytesBefore, bytesAfter)
+	}
+}
+
+func TestStats_AccurateAfterDeleteWithoutRecompute(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Put two keys with different body sizes.
+	bodyA := []byte("AAAA")     // 4 bytes
+	bodyB := []byte("BBBBBBBB") // 8 bytes
+
+	if _, _, err := s.Put(1, bodyA); err != nil {
+		t.Fatalf("Put A: %v", err)
+	}
+
+	if _, _, err := s.Put(2, bodyB); err != nil {
+		t.Fatalf("Put B: %v", err)
+	}
+
+	// Delete key 1. Stats must reflect only key 2's bytes.
+	if _, err := s.Delete(1); err != nil {
+		t.Fatalf("Delete 1: %v", err)
+	}
+
+	entries, bytes := s.Stats()
+	if entries != 1 {
+		t.Fatalf("entries = %d, want 1", entries)
+	}
+	wantBytes := int64(headerLen + len(bodyB) + footerLen)
+	if bytes != wantBytes {
+		t.Fatalf("bytes = %d, want %d (only key 2)", bytes, wantBytes)
+	}
+}

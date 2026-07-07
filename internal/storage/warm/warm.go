@@ -336,6 +336,17 @@ func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 	s.idxMu.Unlock()
 }
 
+// IndexLen returns the number of entries currently in the warm-tier
+// index. Unlike Stats(), which returns atomic counters that are only
+// updated by Put/Delete/RecomputeStats, IndexLen reads the actual map
+// size, so it reflects the true index state immediately after WAL
+// replay (where SetIndex populates the map without touching counters).
+func (s *Store) IndexLen() int {
+	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
+	return len(s.index)
+}
+
 // Lookup returns the segment ID and offset for a key in the warm-tier
 // index, or ok=false if the key is absent. Used by TieredStore to
 // rewrite the WAL after warm-tier compaction without scanning segments.

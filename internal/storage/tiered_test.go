@@ -782,11 +782,14 @@ func truncateLastSegmentRecord(t *testing.T, warmDir string) {
 	}
 }
 
-// TestTiered_WALCheckpointOnClose verifies that Close writes a WAL
-// checkpoint so the next restart can replay the WAL instead of falling
-// back to a full segment scan. This is critical for startup time on
-// large warm tiers.
-func TestTiered_WALCheckpointOnClose(t *testing.T) {
+// TestTiered_WALReplayRestoresIndex verifies that after a close/reopen
+// cycle, WAL replay correctly populates the warm-tier index so all
+// entries are servable via Get. This is the real startup path: Put
+// appends to the WAL, Close flushes the warm tier, and reopen replays
+// the WAL to restore the index. The fix was in initWAL checking
+// IndexLen (actual map size) instead of Stats (atomic counters that
+// stay zero after replay) to decide whether a segment scan is needed.
+func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	warmDir := filepath.Join(dir, "warm")
@@ -808,38 +811,38 @@ func TestTiered_WALCheckpointOnClose(t *testing.T) {
 
 	// Write objects to the warm tier.
 	ts1 := newStore()
+	keys := make([]api.Key, 10)
 	for i := range 10 {
-		k := KeyHash([]byte(fmt.Sprintf("checkpoint-key-%d", i)))
+		k := KeyHash([]byte(fmt.Sprintf("replay-key-%d", i)))
+		keys[i] = k
 		if err := ts1.Put(ctx, k, bigObj(k, 1024)); err != nil {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
-	st1 := ts1.Stats()
-	if st1.WarmEntries != 10 {
-		t.Fatalf("before close: warm entries = %d, want 10", st1.WarmEntries)
-	}
-	_ = ts1.Close(ctx)
-
-	// The WAL file should contain a checkpoint (all 10 live entries).
-	// Count entries in the WAL file.
-	var walEntries int
-	if err := wal.Replay(walPath, func(e wal.Entry) error {
-		if e.IsPut() {
-			walEntries++
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("WAL replay after close: %v", err)
-	}
-	if walEntries != 10 {
-		t.Fatalf("WAL checkpoint should contain 10 Put entries, got %d", walEntries)
+	if err := ts1.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen: WAL replay should restore all 10 entries without segment scan.
+	// Reopen: WAL replay should restore all 10 entries.
 	ts2 := newStore()
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
+
 	st2 := ts2.Stats()
 	if st2.WarmEntries != 10 {
 		t.Fatalf("after reopen: warm entries = %d, want 10", st2.WarmEntries)
+	}
+
+	// Verify every entry is servable from warm tier (hot tier is empty on reopen).
+	for i, k := range keys {
+		obj, src, err := ts2.Get(ctx, k)
+		if err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+		if obj == nil {
+			t.Fatalf("Get %d: nil object", i)
+		}
+		if src != api.SourceWarm {
+			t.Fatalf("Get %d: source = %s, want %s", i, src, api.SourceWarm)
+		}
 	}
 }

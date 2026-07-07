@@ -38,7 +38,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/thylong/bouine/internal/storage/sieve"
-	"github.com/thylong/bouine/pkg/api"
 )
 
 const (
@@ -654,12 +653,11 @@ func (s *Store) Keys() []uint64 {
 // every hot-tier removal path to match this lifecycle; the paired
 // Protect+SetBacked + Delete-on-hot-eviction lifecycle is simpler
 // and already correct.
-func (s *Store) Protect(key api.Key) {
-	k := uint64(key)
+func (s *Store) Protect(key uint64) {
 	s.idxMu.Lock()
-	if loc, ok := s.index[k]; ok {
+	if loc, ok := s.index[key]; ok {
 		loc.protected = true
-		s.index[k] = loc
+		s.index[key] = loc
 	}
 	s.idxMu.Unlock()
 }
@@ -1175,7 +1173,7 @@ func (s *Store) Compact() error {
 	dir := s.dir
 	compactDir := filepath.Join(dir, ".compact")
 	_ = os.RemoveAll(compactDir) // stale dir from a previous failed run
-	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: s.maxBytes, SegMax: s.segMax})
+	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: 0, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}

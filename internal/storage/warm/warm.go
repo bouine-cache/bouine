@@ -190,11 +190,17 @@ func (s *Store) openExisting() error {
 
 // Put appends a record to the active segment. Returns the segment ID
 // and offset.
+//
+// maxBytes is enforced on Put only. Delete appends tombstones without
+// a budget check; tombstones are reclaimed by compaction. This means
+// diskBytes can transiently exceed maxBytes after deletes, and the
+// next Put will be rejected until compaction reclaims the dead space.
 func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error) {
+	recSize := int64(headerLen + len(body) + footerLen)
+
 	// Enforce total disk budget before appending. maxBytes == 0 means
 	// no limit (backward compatible with the default).
 	if s.maxBytes > 0 {
-		recSize := int64(headerLen + len(body) + footerLen)
 		if s.diskBytes()+recSize > s.maxBytes {
 			s.stats.overBudget.Add(1)
 			return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
@@ -216,7 +222,6 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	if err := writeRecord(seg.f, magicLive, key, body); err != nil {
 		return 0, 0, fmt.Errorf("warm: write: %w", err)
 	}
-	recSize := int64(headerLen + len(body) + footerLen)
 	seg.size += recSize
 	s.stats.entries.Add(1)
 	s.stats.bytes.Add(recSize)

@@ -1,9 +1,10 @@
 // Package warm implements the L1 warm-tier disk storage for bouine.
 //
-// The warm tier stores cache objects in append-only segmented files
-// backed by mmap. Each segment is a fixed-size file (default 64 MiB)
-// containing a sequence of records. Each record has a CRC32C footer
-// for integrity validation.
+// The warm tier stores cache objects in append-only segmented files.
+// Each segment is a fixed-size file (default 64 MiB) containing a
+// sequence of records. Segment files are read via mmap during scans
+// (startup, compaction); writes use regular file I/O. Each record has
+// a CRC32C footer for integrity validation.
 //
 // Record layout (little-endian):
 //
@@ -33,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -741,8 +744,78 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 	if err != nil {
 		return err
 	}
+	size := info.Size()
+	if size == 0 {
+		return nil
+	}
+
+	// mmap the segment file for sequential scan. This eliminates
+	// per-record pread syscalls (3 per record with the old ReadAt
+	// approach) and turns the scan into a memory traversal at
+	// ~10-20 GiB/s instead of ~130 MiB/s.
+	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		// Fall back to ReadAt if mmap fails (e.g. unsupported FS).
+		return scanSegmentReadAt(f, segID, size, fn)
+	}
+	defer func() { _ = unix.Munmap(data) }()
+
+	offset := 0
+	for offset < len(data) {
+		if offset+headerLen > len(data) {
+			return nil // torn trailing header
+		}
+		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
+		key := binary.LittleEndian.Uint64(data[offset+4 : offset+12])
+		bodyLen := int(binary.LittleEndian.Uint32(data[offset+12 : offset+16]))
+
+		recEnd := offset + headerLen + bodyLen + footerLen
+		if recEnd > len(data) {
+			return nil // torn trailing record
+		}
+
+		// CRC is computed over the mmap data directly — no copy needed
+		// for the checksum itself.
+		storedCRC := binary.LittleEndian.Uint32(data[offset+headerLen+bodyLen : recEnd])
+		crc := crc32.New(crcTable)
+		_, _ = crc.Write(data[offset : offset+headerLen])
+		if bodyLen > 0 {
+			_, _ = crc.Write(data[offset+headerLen : offset+headerLen+bodyLen])
+		}
+		if crc.Sum32() != storedCRC {
+			return fmt.Errorf("warm: CRC mismatch at seg %d offset %d", segID, offset)
+		}
+
+		// Copy body out of the mmap region. The callback may retain
+		// the body beyond the scan (e.g. Compact writes it to a new
+		// segment), so we cannot reference the mmap data directly —
+		// it is unmapped after scanSegment returns.
+		var body []byte
+		if bodyLen > 0 {
+			body = make([]byte, bodyLen)
+			copy(body, data[offset+headerLen:offset+headerLen+bodyLen])
+		}
+
+		rec := Record{
+			Key:    key,
+			Body:   body,
+			IsTomb: magic == magicDead,
+			Offset: int64(offset),
+			SegID:  segID,
+		}
+		if err := fn(rec); err != nil {
+			return err
+		}
+		offset = recEnd
+	}
+	return nil
+}
+
+// scanSegmentReadAt is the fallback scan implementation using ReadAt,
+// used when mmap is not available or fails.
+func scanSegmentReadAt(f *os.File, segID int, size int64, fn func(Record) error) error {
 	offset := int64(0)
-	for offset < info.Size() {
+	for offset < size {
 		rec, err := readRecordAt(f, offset, segID)
 		if err != nil {
 			if errors.Is(err, ErrTornRecord) {

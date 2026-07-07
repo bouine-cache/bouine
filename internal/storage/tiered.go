@@ -316,7 +316,7 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		t.hot.SetBacked(key)
 		// Mark the warm entry as protected so warm-tier eviction
 		// skips it (the hot tier will re-sync it if evicted from warm).
-		t.warm.Protect(uint64(key))
+		t.warm.Protect(key)
 		if t.wal != nil {
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
@@ -625,7 +625,7 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 		}
 		*walEntries = append(*walEntries, wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
 		t.hot.SetBacked(key)
-		t.warm.Protect(uint64(key))
+		t.warm.Protect(key)
 		synced++
 	}
 	return synced, skipped

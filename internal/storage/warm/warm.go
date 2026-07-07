@@ -348,7 +348,9 @@ func (s *Store) Lookup(key uint64) (segID int, offset int64, ok bool) {
 
 // DelIndex removes a key from the index. Called during WAL replay for
 // delete entries so keys deleted before the last checkpoint are not
-// served from the warm tier.
+// served from the warm tier. Does not update stats counters; callers
+// must run RecomputeStats after replay to restore accurate entries and
+// bytes. Using DelIndex outside of replay will cause stats drift.
 func (s *Store) DelIndex(key uint64) {
 	s.idxMu.Lock()
 	delete(s.index, key)
@@ -370,11 +372,7 @@ func (s *Store) RecomputeStats() error {
 	}
 	s.idxMu.RUnlock()
 
-	type sizeUpdate struct {
-		key  uint64
-		size int64
-	}
-	var updates []sizeUpdate
+	sizeUpdates := make(map[uint64]int64)
 	var entries, bytes int64
 	if err := s.Scan(func(r Record) error {
 		if r.IsTomb {
@@ -388,7 +386,7 @@ func (s *Store) RecomputeStats() error {
 		entries++
 		bytes += recSize
 		if loc.size == 0 {
-			updates = append(updates, sizeUpdate{key: r.Key, size: recSize})
+			sizeUpdates[r.Key] = recSize
 		}
 		return nil
 	}); err != nil {
@@ -400,12 +398,12 @@ func (s *Store) RecomputeStats() error {
 	// Backfill size into index entries that were created by SetIndex
 	// (WAL replay) with size=0 so future Delete calls subtract the
 	// correct byte count.
-	if len(updates) > 0 {
+	if len(sizeUpdates) > 0 {
 		s.idxMu.Lock()
-		for _, u := range updates {
-			if loc, ok := s.index[u.key]; ok && loc.size == 0 {
-				loc.size = u.size
-				s.index[u.key] = loc
+		for key, sz := range sizeUpdates {
+			if loc, ok := s.index[key]; ok && loc.size == 0 {
+				loc.size = sz
+				s.index[key] = loc
 			}
 		}
 		s.idxMu.Unlock()
@@ -489,6 +487,10 @@ func (s *Store) dropStaleIndex(key uint64, stale warmLoc) {
 	s.idxMu.Lock()
 	if cur, ok := s.index[key]; ok && cur == stale {
 		delete(s.index, key)
+		s.stats.entries.Add(-1)
+		if cur.size > 0 {
+			s.stats.bytes.Add(-cur.size)
+		}
 		s.stats.staleSelfHeals.Add(1)
 	}
 	s.idxMu.Unlock()

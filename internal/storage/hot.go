@@ -66,7 +66,7 @@ type HotStore struct {
 	reaperInterval time.Duration
 	// done is closed by Close() to stop all background goroutines.
 	done chan struct{}
-	// onEvict is called when a warm-backed entry is evicted. Set via
+	// onEvict is called when a backed entry is evicted. Set via
 	// HotConfig.OnEvict. See HotConfig.OnEvict for the constraint.
 	onEvict func(key api.Key)
 }
@@ -78,46 +78,46 @@ type activeBan struct {
 }
 
 type shard struct {
-	mu        sync.RWMutex
-	entries   map[api.Key]*hotEntry
-	evict     *sieve.List[api.Key]
-	bytes     int64
-	warmCount int64 // entries with warm backup (cheap to evict)
+	mu          sync.RWMutex
+	entries     map[api.Key]*hotEntry
+	evict       *sieve.List[api.Key]
+	bytes       int64
+	backedCount int64 // entries with a backup (cheap to evict)
 }
 
 type hotEntry struct {
 	obj   *api.Object
 	sieve *sieve.Entry[api.Key]
-	// hasWarm is true when the object also exists in the warm tier.
+	// hasBackup is true when the object also exists in a slower tier.
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
-	hasWarm bool
+	hasBackup bool
 }
 
 // evictionLog is a deferred log record collected under the shard lock
-// and flushed after the lock is released. Warm-backed evictions are
-// Info (sampled by key); evictions without warm backup are Warn
+// and flushed after the lock is released. Backed evictions are
+// Info (sampled by key); evictions without a backup are Warn
 // (never sampled — signals potential data loss).
 type evictionLog struct {
-	key     api.Key
-	reason  string
-	hadWarm bool
-	size    int64
-	varyKey string
+	key       api.Key
+	reason    string
+	hadBackup bool
+	size      int64
+	varyKey   string
 }
 
 func (h *HotStore) flushEvictionLogs(logs []evictionLog) {
 	for _, e := range logs {
 		attrs := []any{
 			"reason", e.reason,
-			"had_warm_backup", e.hadWarm,
+			"had_backup", e.hadBackup,
 			"size_bytes", e.size,
 			"key", e.key,
 		}
 		if e.varyKey != "" {
 			attrs = append(attrs, "vary_key", e.varyKey)
 		}
-		if e.hadWarm {
+		if e.hadBackup {
 			h.logger.Info("evicted from hot store", attrs...)
 		} else {
 			h.logger.Warn("evicted from hot store", attrs...)
@@ -130,11 +130,11 @@ func recordEviction(logs *[]evictionLog, key api.Key, entry *hotEntry, reason st
 		return
 	}
 	*logs = append(*logs, evictionLog{
-		key:     key,
-		reason:  reason,
-		hadWarm: entry.hasWarm,
-		size:    objSize(entry.obj),
-		varyKey: entry.obj.VaryKey,
+		key:       key,
+		reason:    reason,
+		hadBackup: entry.hasBackup,
+		size:      objSize(entry.obj),
+		varyKey:   entry.obj.VaryKey,
 	})
 }
 
@@ -159,9 +159,9 @@ type HotConfig struct {
 	// Logger receives eviction records. Defaults to a SampledLogger
 	// wrapping slog.Default().
 	Logger observability.Logger
-	// OnEvict is called when a warm-backed entry (hasWarm == true) is
+	// OnEvict is called when a backed entry (hasBackup == true) is
 	// evicted from the hot tier. The key should be tombstoned in the
-	// warm tier so stale unpopular objects are not served after
+	// backup tier so stale unpopular objects are not served after
 	// restart.
 	//
 	// CONSTRAINT: This callback is invoked while the shard write lock
@@ -276,11 +276,11 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	return obj, api.SourceHot, nil
 }
 
-// notifyEvict fires the OnEvict callback for a warm-backed entry being
+// notifyEvict fires the OnEvict callback for a backed entry being
 // evicted. Called while the shard write lock is held — the callback
 // MUST NOT block or perform I/O.
 func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry) {
-	if h.onEvict != nil && entry.hasWarm {
+	if h.onEvict != nil && entry.hasBackup {
 		h.onEvict(key)
 	}
 }
@@ -302,8 +302,8 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 
 // Put stores an object. If the shard is over budget, SIEVE eviction
 // runs inline for up to inlineEvictCap victims, then signals the
-// background sweeper for any remaining overshoot. Entries with warm-tier
-// backups are evicted first (cheap: recoverable from disk).
+// background sweeper for any remaining overshoot. Entries with a backup
+// are evicted first (cheap: recoverable from disk).
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
@@ -317,7 +317,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		if s.bytes+size <= perShardMax || s.evict.Len() == 0 {
 			break
 		}
-		evKey, ok := s.evictPreferWarm()
+		evKey, ok := s.evictPreferBacked()
 		if !ok {
 			break
 		}
@@ -338,8 +338,8 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		h.notifyEvict(key, old)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.sieve)
-		if old.hasWarm {
-			s.warmCount--
+		if old.hasBackup {
+			s.backedCount--
 		}
 	}
 
@@ -425,7 +425,7 @@ func (h *HotStore) sweeper() {
 			var logs []evictionLog
 			s.mu.Lock()
 			for s.bytes > perShardMax && s.evict.Len() > 0 {
-				evKey, ok := s.evictPreferWarm()
+				evKey, ok := s.evictPreferBacked()
 				if !ok {
 					break
 				}
@@ -620,40 +620,40 @@ func (h *HotStore) OverBudget() bool {
 	return h.Stats().HotBytes > h.maxBytes
 }
 
-// SetWarm marks the entry for key as having a warm-tier backup. If the
-// entry doesn't exist, this is a no-op. Warm-backed entries are evicted
+// SetBacked marks the entry for key as having a backup in a slower tier.
+// If the entry doesn't exist, this is a no-op. Backed entries are evicted
 // first under memory pressure.
-func (h *HotStore) SetWarm(key api.Key) {
+func (h *HotStore) SetBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key]; ok && !e.hasWarm {
-		e.hasWarm = true
-		s.warmCount++
+	if e, ok := s.entries[key]; ok && !e.hasBackup {
+		e.hasBackup = true
+		s.backedCount++
 	}
 }
 
-// ClearWarm unmarks the entry for key as having a warm-tier backup. Called
-// when the warm tier evicts the key so the hot tier stops preferring it
+// ClearBacked unmarks the entry for key as having a backup. Called
+// when the backup tier evicts the key so the hot tier stops preferring it
 // for eviction (it's no longer cheap to evict — there's no disk backup).
-func (h *HotStore) ClearWarm(key api.Key) {
+func (h *HotStore) ClearBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key]; ok && e.hasWarm {
-		e.hasWarm = false
-		s.warmCount--
+	if e, ok := s.entries[key]; ok && e.hasBackup {
+		e.hasBackup = false
+		s.backedCount--
 	}
 }
 
-// evictPreferWarm selects and removes an entry from the SIEVE list,
-// preferring entries with warm-tier backups. It tries up to maxSkips
+// evictPreferBacked selects and removes an entry from the SIEVE list,
+// preferring entries with a backup. It tries up to maxSkips
 // SIEVE evictions, deferring hot-only entries back into the list.
-// If no warm-backed entries are found, falls back to standard eviction.
+// If no backed entries are found, falls back to standard eviction.
 const maxEvictSkips = 4
 
-func (s *shard) evictPreferWarm() (key api.Key, ok bool) {
-	if s.warmCount == 0 {
+func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
+	if s.backedCount == 0 {
 		return s.evict.Evict()
 	}
 	for range maxEvictSkips {
@@ -662,8 +662,8 @@ func (s *shard) evictPreferWarm() (key api.Key, ok bool) {
 			return k, false
 		}
 		if he, exists := s.entries[k]; exists {
-			if he.hasWarm {
-				s.warmCount--
+			if he.hasBackup {
+				s.backedCount--
 				return k, true
 			}
 			// Hot-only entry: defer it back to the head without

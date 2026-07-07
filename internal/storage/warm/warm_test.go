@@ -577,7 +577,7 @@ func BenchmarkWarmEvict_OverBudgetPut(b *testing.B) {
 	b.ReportAllocs()
 	for i := range b.N {
 		// Each Put evicts one entry to make room. Keys cycle above
-		// the seed range so they are non-hot-resident victims.
+		// the seed range so they are non-protected victims.
 		if _, _, err := s.Put(uint64(1000+i), body); err != nil {
 			b.Fatal(err)
 		}
@@ -1114,14 +1114,14 @@ func TestPut_OverBudget(t *testing.T) {
 	}
 	// 4 records × 120 = 480 live bytes. One more 120-byte record would
 	// push live bytes to 600 > 512, but eviction frees 120 bytes first
-	// (360 + 120 = 480 ≤ 512). Mark all as hot-resident to prevent
+	// (360 + 120 = 480 ≤ 512). Mark all as protected to prevent
 	// eviction, forcing ErrOverBudget.
 	for i := 0; i < 4; i++ {
-		s.MarkHotResident(uint64(i))
+		s.Protect(uint64(i))
 	}
 	_, _, err = s.Put(99, smallBody)
 	if !errors.Is(err, ErrOverBudget) {
-		t.Fatalf("Put over budget with all hot-resident: err=%v, want ErrOverBudget", err)
+		t.Fatalf("Put over budget with all protected: err=%v, want ErrOverBudget", err)
 	}
 }
 
@@ -1565,7 +1565,7 @@ func TestEvict_TombstonesEvictedKey(t *testing.T) {
 	}
 }
 
-func TestEvict_SkipsHotResidentEntries(t *testing.T) {
+func TestEvict_SkipsProtectedEntries(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1581,29 +1581,29 @@ func TestEvict_SkipsHotResidentEntries(t *testing.T) {
 		}
 	}
 
-	// Mark keys 0 and 1 as hot-resident (in hot tier).
-	s.MarkHotResident(0)
-	s.MarkHotResident(1)
+	// Mark keys 0 and 1 as protected (in hot tier).
+	s.Protect(0)
+	s.Protect(1)
 
 	// Access all so SIEVE visited bits are set — the only differentiator
-	// is hot-residency.
+	// is protection.
 	for i := range 4 {
 		if _, err := s.Get(uint64(i)); err != nil {
 			t.Fatalf("Get %d: %v", i, err)
 		}
 	}
 
-	// evictOne should skip hot-resident entries and pick a cold one.
+	// evictOne should skip protected entries and pick a cold one.
 	evicted, ok := s.evictOne()
 	if !ok {
 		t.Fatal("evictOne returned false")
 	}
 	if evicted == 0 || evicted == 1 {
-		t.Fatalf("evicted hot-resident key %d, should have skipped it", evicted)
+		t.Fatalf("evicted protected key %d, should have skipped it", evicted)
 	}
 }
 
-func TestEvict_AllHotResidentReturnsFalse(t *testing.T) {
+func TestEvict_AllProtectedReturnsFalse(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1618,13 +1618,13 @@ func TestEvict_AllHotResidentReturnsFalse(t *testing.T) {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
-	// All hot-resident — evictOne skips them and returns false within
+	// All protected — evictOne skips them and returns false within
 	// the skip budget rather than scanning the whole list under idxMu.
 	for i := range 3 {
-		s.MarkHotResident(uint64(i))
+		s.Protect(uint64(i))
 	}
 	if _, ok := s.evictOne(); ok {
-		t.Fatal("evictOne returned true with all entries hot-resident, want false")
+		t.Fatal("evictOne returned true with all entries protected, want false")
 	}
 	// Entries must still be present and accounted for.
 	entries, _ := s.Stats()
@@ -1785,7 +1785,7 @@ func TestEvict_ConcurrentEvictAndPutPreservesData(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	// Seed with 50 entries, none hot-resident so evictOne can pick them.
+	// Seed with 50 entries, none protected so evictOne can pick them.
 	for i := range 50 {
 		if _, _, err := s.Put(uint64(i), []byte("seed")); err != nil {
 			t.Fatalf("Put %d: %v", i, err)

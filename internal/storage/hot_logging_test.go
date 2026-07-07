@@ -52,7 +52,7 @@ func parseLogRecords(t *testing.T, mu *sync.Mutex, buf *bytes.Buffer) []map[stri
 	return records
 }
 
-func TestEvictionLogging_WarmBacked(t *testing.T) {
+func TestEvictionLogging_Backed(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var buf bytes.Buffer
@@ -74,7 +74,7 @@ func TestEvictionLogging_WarmBacked(t *testing.T) {
 		Key: 2, Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
-	h.SetWarm(api.Key(1))
+	h.SetBacked(api.Key(1))
 	_ = h.Put(ctx, api.Key(3), &api.Object{
 		Key: 3, Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
@@ -84,16 +84,16 @@ func TestEvictionLogging_WarmBacked(t *testing.T) {
 	records := parseLogRecords(t, &mu, &buf)
 	found := false
 	for _, rec := range records {
-		if rec["msg"] == "evicted from hot store" && rec["had_warm_backup"] == true {
+		if rec["msg"] == "evicted from hot store" && rec["had_backup"] == true {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected a warm-backed eviction log at Info level")
+		t.Fatal("expected a backed eviction log at Info level")
 	}
 }
 
-func TestEvictionLogging_NoWarmBackup(t *testing.T) {
+func TestEvictionLogging_NoBackup(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var buf bytes.Buffer
@@ -122,12 +122,12 @@ func TestEvictionLogging_NoWarmBackup(t *testing.T) {
 	records := parseLogRecords(t, &mu, &buf)
 	found := false
 	for _, rec := range records {
-		if rec["msg"] == "evicted from hot store" && rec["had_warm_backup"] == false {
+		if rec["msg"] == "evicted from hot store" && rec["had_backup"] == false {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected a no-warm-backup eviction log at Warn level")
+		t.Fatal("expected a no-backup eviction log at Warn level")
 	}
 }
 

@@ -1241,7 +1241,16 @@ func (s *Store) Compact() error {
 	}
 	s.idxMu.Unlock()
 	s.stats.entries.Store(int64(len(newIndex)))
-	s.stats.bytes.Store(fresh.stats.bytes.Load())
+	// Recompute stats.bytes from the new index. The fresh store (NewStore)
+	// doesn't run RecomputeStats, so its stats.bytes is 0 — using it would
+	// leave evictToFit blind (it gates on stats.bytes == 0 → no eviction).
+	// Every entry's size was set by compactSegments, so summing the index
+	// gives the correct live-bytes count without a segment scan.
+	var liveBytes int64
+	for _, loc := range newIndex {
+		liveBytes += loc.size
+	}
+	s.stats.bytes.Store(liveBytes)
 	// Retain the grown buffer for the next compaction cycle.
 	s.compactKeysBuf = orderedKeys
 	return nil

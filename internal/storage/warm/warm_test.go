@@ -2022,3 +2022,90 @@ func TestPut_OverwriteDoesNotInflateStats(t *testing.T) {
 		t.Fatalf("bytes = %d, want %d (overwrite should not inflate bytes)", bytes, wantBytes)
 	}
 }
+
+// TestCompact_RestoresStatsBytes is a regression test for the bug where
+// Compact set stats.bytes from fresh.stats.bytes.Load() — but the fresh
+// store (NewStore) doesn't run RecomputeStats, so its stats.bytes is 0.
+// This left evictToFit blind after compaction (stats.bytes == 0 means
+// no eviction until the budget is far exceeded). The fix computes
+// liveBytes from the rebuilt index, where every entry's size was set
+// by compactSegments.
+func TestCompact_RestoresStatsBytes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100)
+	for i := range 50 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	// Delete half to create tombstones so compaction has work to do.
+	for i := range 25 {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	entriesBefore, bytesBefore := s.Stats()
+	if entriesBefore != 25 {
+		t.Fatalf("entries before compact = %d, want 25", entriesBefore)
+	}
+	wantBytes := int64(25 * (headerLen + len(body) + footerLen))
+	if bytesBefore != wantBytes {
+		t.Fatalf("bytes before compact = %d, want %d", bytesBefore, wantBytes)
+	}
+
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	// After compact: entries must match, and stats.bytes must be
+	// recomputed from the index (not 0).
+	entries, bytes := s.Stats()
+	if entries != 25 {
+		t.Fatalf("entries after compact = %d, want 25", entries)
+	}
+	if bytes != wantBytes {
+		t.Fatalf("bytes after compact = %d, want %d (Compact must recompute stats.bytes from index)", bytes, wantBytes)
+	}
+
+	// evictToFit must work after compact — if stats.bytes were 0,
+	// the budget check would pass for any recSize and eviction
+	// wouldn't fire until the tier is massively over budget.
+	// Verify by checking that a Put that would exceed budget triggers
+	// eviction (not rejection). We need a small budget for this:
+	s2, err := NewStore(Config{Dir: t.TempDir(), MaxBytes: 4 << 10, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore s2: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	smallBody := make([]byte, 50) // 70 bytes per record, ~58 in 4 KiB
+	for i := range 40 {
+		if _, _, err := s2.Put(uint64(i), smallBody); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	if err := s2.Compact(); err != nil {
+		t.Fatalf("Compact s2: %v", err)
+	}
+	_, bytesAfterCompact := s2.Stats()
+	if bytesAfterCompact == 0 {
+		t.Fatal("stats.bytes = 0 after compact — evictToFit would be blind")
+	}
+	// A new Put should trigger eviction, not be rejected outright.
+	// If stats.bytes were 0, the budget check (0 + 70 <= 4096) would
+	// pass and no eviction would fire — the tier would grow unbounded.
+	for i := 40; i < 100; i++ {
+		if _, _, err := s2.Put(uint64(i), smallBody); err != nil {
+			t.Fatalf("Put %d after compact: %v (evictToFit should evict, not reject)", i, err)
+		}
+	}
+}

@@ -28,10 +28,6 @@ type DataPlaneMetrics struct {
 	HotStoreBytes     prometheus.Gauge
 	HotStoreEntries   prometheus.Gauge
 	HotStoreEvictions prometheus.Counter
-	// Warm-tier storage gauges — updated on every Stats() poll by the engine.
-	WarmStoreBytes     prometheus.Gauge
-	WarmStoreEntries   prometheus.Gauge
-	WarmStoreSelfHeals prometheus.Counter
 	// Cloudflare propagation counters.
 	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
 	CFPurgeDuration *prometheus.HistogramVec // labels: operation
@@ -105,26 +101,10 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "hot_store_evictions_total",
 		Help:      "Total number of objects evicted from the hot tier by SIEVE since boot.",
 	})
-	m.WarmStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "warm_store_bytes",
-		Help:      "Total bytes used by warm-tier disk segments (append-only, pre-compaction).",
-	})
-	m.WarmStoreEntries = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "warm_store_entries",
-		Help:      "Current number of objects stored in the warm (L1) disk tier.",
-	})
-	m.WarmStoreSelfHeals = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "warm_store_self_heals_total",
-		Help:      "Total stale warm-tier index entries dropped by the self-heal path since boot. A non-zero rate indicates segment-management bugs or disk faults.",
-	})
 	m.initRefreshMetrics()
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
-		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize)
 	return m

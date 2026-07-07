@@ -403,7 +403,6 @@ func (t *TieredStore) Stats() api.Stats {
 		wEnt, wBytes := t.warm.Stats()
 		st.WarmEntries = wEnt
 		st.WarmBytes = wBytes
-		st.WarmSelfHeals = t.warm.SelfHeals()
 	}
 	return st
 }

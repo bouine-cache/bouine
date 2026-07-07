@@ -76,6 +76,12 @@ var recordFootPool = sync.Pool{
 // a hard error, mirroring wal.Replay's handling of partial records.
 var ErrTornRecord = errors.New("warm: torn trailing record")
 
+// ErrOverBudget indicates that appending a record would push total
+// disk bytes across the configured MaxBytes limit. Callers can handle
+// this by evicting objects, triggering compaction, or simply skipping
+// the warm-tier write (the hot tier already holds the object).
+var ErrOverBudget = errors.New("warm: over maxBytes budget")
+
 // Record is a single warm-tier entry read from a segment.
 type Record struct {
 	Key    uint64
@@ -118,6 +124,7 @@ type warmStats struct {
 	entries        atomic.Int64
 	bytes          atomic.Int64
 	staleSelfHeals atomic.Int64
+	overBudget     atomic.Int64
 }
 
 // Config configures the warm store.
@@ -184,6 +191,16 @@ func (s *Store) openExisting() error {
 // Put appends a record to the active segment. Returns the segment ID
 // and offset.
 func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error) {
+	// Enforce total disk budget before appending. maxBytes == 0 means
+	// no limit (backward compatible with the default).
+	if s.maxBytes > 0 {
+		recSize := int64(headerLen + len(body) + footerLen)
+		if s.diskBytes()+recSize > s.maxBytes {
+			s.stats.overBudget.Add(1)
+			return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
+		}
+	}
+
 	seg, err := s.activeSeg()
 	if err != nil {
 		return 0, 0, err
@@ -419,6 +436,14 @@ func (s *Store) SelfHeals() int64 {
 	return s.stats.staleSelfHeals.Load()
 }
 
+// OverBudgetRejections returns the number of Put calls rejected
+// because the total disk footprint would exceed MaxBytes. Operators
+// can poll this to detect a full warm tier and trigger compaction
+// or eviction to reclaim space.
+func (s *Store) OverBudgetRejections() int64 {
+	return s.stats.overBudget.Load()
+}
+
 // dropStaleIndex removes the index entry for key iff it still points
 // at the stale location (segID, offset). This is a compare-and-delete:
 // re-reading under the write lock prevents a concurrent Put from having
@@ -502,6 +527,24 @@ func (s *Store) Close() error {
 	}
 	s.segs = nil
 	return firstErr
+}
+
+// diskBytes returns the total on-disk size of all segments. This is
+// the sum of each segment's current file size, not stats.bytes (which
+// only counts live record bytes and is reduced by tombstones and
+// compaction). The total disk footprint is the correct figure for
+// MaxBytes enforcement because the OS sees the file sizes, not the
+// logical live-byte count.
+func (s *Store) diskBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var total int64
+	for _, seg := range s.segs {
+		seg.mu.Lock()
+		total += seg.size
+		seg.mu.Unlock()
+	}
+	return total
 }
 
 func (s *Store) activeSeg() (*Segment, error) {
@@ -725,7 +768,12 @@ func (s *Store) Compact() error {
 	dir := s.dir
 	compactDir := filepath.Join(dir, ".compact")
 	_ = os.RemoveAll(compactDir) // stale dir from a previous failed run
-	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: s.maxBytes, SegMax: s.segMax})
+	// The temp store has no budget limit: compaction writes all live
+	// records before swapping, and the live set is necessarily smaller
+	// than the current on-disk footprint. Applying the budget here
+	// would cause compaction to fail with ErrOverBudget once the store
+	// approaches maxBytes — the exact moment compaction is needed most.
+	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: 0, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}

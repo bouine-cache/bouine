@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -266,6 +267,14 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		body := encodeObject(obj)
 		segID, offset, err := t.warm.Put(uint64(key), body) //nolint:gosec // segID fits int32
 		if err != nil {
+			if errors.Is(err, warm.ErrOverBudget) {
+				// Hot tier already holds the object; warm-tier
+				// rejection is non-fatal. Log and continue so the
+				// caller sees a successful Put.
+				t.logger.Debug("warm tier over budget, skipping warm write",
+					"key", key)
+				return nil
+			}
 			return err
 		}
 		// Mark the hot entry as having a warm backup so eviction

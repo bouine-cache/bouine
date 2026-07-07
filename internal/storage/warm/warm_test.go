@@ -1,6 +1,7 @@
 package warm
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1009,5 +1010,157 @@ func TestGet_DropStaleIndexDoesNotClobberConcurrentPut(t *testing.T) {
 	// The self-heal counter must NOT have incremented — nothing was dropped.
 	if n := s.SelfHeals(); n != 0 {
 		t.Fatalf("SelfHeals = %d, want 0 (no stale entry was dropped)", n)
+	}
+}
+
+func TestPut_OverBudget(t *testing.T) {
+	t.Parallel()
+
+	// Small budget so we can exceed it quickly.
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// A record is headerLen(16) + len(body) + footerLen(4) = 20 + len(body).
+	// With a 512-byte budget we can fit several small records but not
+	// arbitrarily many.
+	smallBody := make([]byte, 100) // 120 bytes per record
+	for i := 0; i < 4; i++ {
+		if _, _, err := s.Put(uint64(i), smallBody); err != nil {
+			t.Fatalf("Put %d under budget: %v", i, err)
+		}
+	}
+	// 4 records × 120 = 480 bytes. One more 120-byte record would
+	// push us to 600 > 512. This Put must fail with ErrOverBudget.
+	_, _, err = s.Put(99, smallBody)
+	if !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("Put over budget: err=%v, want ErrOverBudget", err)
+	}
+}
+
+func TestPut_UnderBudgetSucceeds(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1024, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100) // 120 bytes per record
+	for i := 0; i < 8; i++ {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d under budget: %v", i, err)
+		}
+	}
+	// 8 × 120 = 960 < 1024. All should succeed.
+	got, err := s.Get(7)
+	if err != nil {
+		t.Fatalf("Get 7: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get 7: expected data, got nil")
+	}
+}
+
+func TestPut_MaxBytesZeroDisablesEnforcement(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// With maxBytes == 0 there is no limit. Writing many records
+	// must not return ErrOverBudget.
+	body := make([]byte, 100)
+	for i := 0; i < 100; i++ {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d with maxBytes=0: %v", i, err)
+		}
+	}
+}
+
+func TestPut_OverBudgetIncrementsCounter(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100) // 120 bytes per record
+	// Fill up to budget: 2 records = 240 bytes, 3rd would be 360 > 256.
+	for i := 0; i < 2; i++ {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d under budget: %v", i, err)
+		}
+	}
+	if n := s.OverBudgetRejections(); n != 0 {
+		t.Fatalf("OverBudgetRejections before rejection = %d, want 0", n)
+	}
+
+	// This Put must be rejected.
+	_, _, err = s.Put(99, body)
+	if !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("Put over budget: err=%v, want ErrOverBudget", err)
+	}
+	if n := s.OverBudgetRejections(); n != 1 {
+		t.Fatalf("OverBudgetRejections = %d, want 1", n)
+	}
+}
+
+func TestCompact_SucceedsAtMaxBytes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Tight budget: enough for the live data but compaction's temp
+	// store must not inherit this limit.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 4096, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write enough records to approach the budget, then delete half
+	// to create tombstones. Compaction must succeed despite the
+	// store being near maxBytes.
+	body := []byte("compact-me-padding-to-128-bytes----------------" +
+		"------------------------------------------------" +
+		"------------------------------------------------")
+	for i := range 20 {
+		segID, off, err := s.Put(uint64(i), body)
+		if err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+		s.SetIndex(uint64(i), segID, off)
+	}
+	for i := range 10 {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact at maxBytes: %v", err)
+	}
+
+	// Verify live keys survived.
+	for i := 10; i < 20; i++ {
+		got, err := s.Get(uint64(i))
+		if err != nil {
+			t.Fatalf("Get %d after compact: %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("key %d: expected live after compact, got nil", i)
+		}
 	}
 }

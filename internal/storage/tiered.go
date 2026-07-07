@@ -48,6 +48,16 @@ type TieredStore struct {
 	// droppedTombstones counts tombstones dropped (queue full).
 	droppedTombstones atomic.Int64
 
+	// warmEvictQueue receives keys evicted from the warm tier by its
+	// eviction policy. Drained by warmSyncLoop to append WAL delete
+	// entries so warm eviction survives restart. The hot tier's
+	// hasWarm flag is cleared immediately in the callback (no I/O).
+	// Buffered; non-blocking sends — overflow drops the WAL entry (the
+	// tombstone is already on disk; the WAL is a fast-replay optimization).
+	warmEvictQueue chan api.Key
+	// droppedWarmEvicts counts warm-eviction WAL entries dropped.
+	droppedWarmEvicts atomic.Int64
+
 	// walPath is the WAL file path, stored for WAL rewrite after compaction.
 	walPath string
 
@@ -109,6 +119,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		warmSyncInterval:  warmSyncInterval,
 		warmSyncBatchSize: cfg.WarmSyncBatchSize,
 		tombstoneQueue:    make(chan api.Key, 4096),
+		warmEvictQueue:    make(chan api.Key, 4096),
 		done:              make(chan struct{}),
 		logger:            cfg.Logger,
 	}
@@ -128,6 +139,20 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		w, err := warm.NewStore(*cfg.Warm)
 		if err != nil {
 			return nil, err
+		}
+		// Wire warm-tier eviction callback: clear hasWarm on the hot
+		// entry immediately (no I/O), and enqueue a WAL delete entry
+		// for async persistence. Crash recovery relies on
+		// rebuildIndexFromScan honoring tombstones in segment order —
+		// the WAL delete is a fast-replay optimization, not the sole
+		// durability guarantee.
+		w.OnEvict = func(key uint64) {
+			ts.hot.ClearWarm(api.Key(key))
+			select {
+			case ts.warmEvictQueue <- api.Key(key):
+			default:
+				ts.droppedWarmEvicts.Add(1)
+			}
 		}
 		ts.warm = w
 	}
@@ -289,6 +314,9 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		// Mark the hot entry as having a warm backup so eviction
 		// can prefer it under memory pressure.
 		t.hot.SetWarm(key)
+		// Mark the warm entry as hot-resident so warm-tier eviction
+		// skips it (the hot tier will re-sync it if evicted from warm).
+		t.warm.SetHotResident(uint64(key), true)
 		if t.wal != nil {
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
@@ -456,9 +484,10 @@ func (t *TieredStore) warmSyncLoop() {
 	}
 }
 
-// runWarmSyncCycle performs one warm sync cycle: drain tombstones, then
-// batch-write hot-only entries to warm. All writes are batched with a
-// single warm.Sync and a single WAL AppendBatch to minimise fsync.
+// runWarmSyncCycle performs one warm sync cycle: drain tombstones and warm
+// eviction WAL entries, then batch-write hot-only entries to warm. All
+// writes are batched with a single warm.Sync and a single WAL AppendBatch
+// to minimise fsync.
 func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	if t.warm == nil {
 		return
@@ -467,6 +496,7 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 
 	var walEntries []wal.Entry
 	tombstoned := t.drainTombstones(&walEntries)
+	warmEvicted := t.drainWarmEvicts(&walEntries)
 	hotOnlyKeys := t.collectHotOnlyKeys()
 	synced, skipped := t.writeHotOnlyToWarm(ctx, hotOnlyKeys, &walEntries)
 
@@ -487,6 +517,7 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	t.logger.Info("warm sync cycle complete",
 		"synced", synced,
 		"tombstoned", tombstoned,
+		"warm_evicted", warmEvicted,
 		"skipped", skipped,
 		"dur_ms", time.Since(start).Milliseconds(),
 	)
@@ -547,6 +578,23 @@ func (t *TieredStore) drainTombstones(walEntries *[]wal.Entry) int {
 	}
 }
 
+// drainWarmEvicts appends WAL delete entries for keys evicted by the warm
+// tier's eviction policy. The tombstone is already on disk (Evict calls
+// Delete internally); the WAL entry ensures the eviction survives restart
+// so replay doesn't resurrect the evicted key.
+func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
+	evicted := 0
+	for {
+		select {
+		case key := <-t.warmEvictQueue:
+			*walEntries = append(*walEntries, wal.DeleteEntry(uint64(key)))
+			evicted++
+		default:
+			return evicted
+		}
+	}
+}
+
 // writeHotOnlyToWarm writes the given hot-only keys to the warm tier and
 // collects WAL put entries. Returns synced count and skipped count.
 func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped int) {
@@ -566,6 +614,7 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 		}
 		*walEntries = append(*walEntries, wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
 		t.hot.SetWarm(key)
+		t.warm.SetHotResident(uint64(key), true)
 		synced++
 	}
 	return synced, skipped

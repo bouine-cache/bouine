@@ -23,7 +23,6 @@
 package warm
 
 import (
-	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -31,7 +30,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -150,6 +148,12 @@ type Store struct {
 	// inserts at head, Evict sweeps from the hand. This scales to
 	// millions of entries without the O(n) scan of a timestamp-based LRU.
 	evictList *sieve.List[uint64]
+	// compactKeysBuf is a reusable buffer for collecting keys in append
+	// order during compaction. Compaction runs on a single goroutine
+	// (compactLoop), so no synchronization is needed. The buffer grows
+	// to fit the steady-state key count and is reused across compaction
+	// cycles, avoiding a per-compaction allocation of ~16 MB at 2M keys.
+	compactKeysBuf []uint64
 	// OnEvict is called with the evicted key after evictOne removes the
 	// entry from the warm index and writes the tombstone. The acceleration
 	// tier uses this to clear hasBackup on the corresponding hot entry so
@@ -634,12 +638,18 @@ func (s *Store) Keys() []uint64 {
 // acceleration tier would immediately re-sync. If the key is not in
 // the warm index this is a no-op.
 //
-// There is deliberately no Unprotect: the flag is cleared only by
-// deletion (hot-tier eviction tombstones the warm entry, or warm
-// eviction removes the index entry). A standalone unprotect would need
-// to be wired into every hot-tier removal path to avoid stranding warm
-// entries as permanently protected; the delete-based lifecycle is
-// simpler and already correct.
+// There is deliberately no Unprotect. The invariant that prevents
+// stranded protected entries is: Protect is always called together
+// with hot.SetBacked (see TieredStore.Put and writeHotOnlyToWarm in
+// tiered.go). When the hot tier evicts a backed entry, its OnEvict
+// callback enqueues a tombstone, and drainTombstones calls warm.Delete
+// — which removes the warm entry entirely, clearing protected as a
+// side effect. So a protected warm entry is always backed by a live
+// hot entry, and the hot entry's eviction path always deletes the
+// warm entry. A standalone Unprotect would need to be wired into
+// every hot-tier removal path to match this lifecycle; the paired
+// Protect+SetBacked + Delete-on-hot-eviction lifecycle is simpler
+// and already correct.
 func (s *Store) Protect(key uint64) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
@@ -861,12 +871,12 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
-// diskBytes returns the total on-disk size of all segments. This is
-// the sum of each segment's current file size, not stats.bytes (which
-// only counts live record bytes and is reduced by tombstones and
-// compaction). The total disk footprint is the correct figure for
-// MaxBytes enforcement because the OS sees the file sizes, not the
-// logical live-byte count.
+// diskBytes returns the total on-disk size of all segment files. This
+// includes live records, tombstones, and superseded (overwritten) keys.
+// Put does NOT gate on diskBytes — it gates on stats.bytes (live record
+// bytes) so eviction can free space before the Put. diskBytes is used by
+// NeedsCompaction to compute the dead-space ratio and by tests to verify
+// tombstones push the on-disk size past the budget.
 func (s *Store) diskBytes() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -944,7 +954,9 @@ func segName(id int) string {
 }
 
 func writeRecord(w io.Writer, magic uint32, key uint64, body []byte) error {
-	hdr := make([]byte, headerLen)
+	hdrPtr := recordHdrPool.Get().(*[]byte)
+	hdr := *hdrPtr
+	defer recordHdrPool.Put(hdrPtr)
 	binary.LittleEndian.PutUint32(hdr[0:4], magic)
 	binary.LittleEndian.PutUint64(hdr[4:12], key)
 	binary.LittleEndian.PutUint32(hdr[12:16], uint32(len(body))) //nolint:gosec // body capped by segment size
@@ -959,7 +971,9 @@ func writeRecord(w io.Writer, magic uint32, key uint64, body []byte) error {
 		}
 	}
 
-	foot := make([]byte, footerLen)
+	footPtr := recordFootPool.Get().(*[]byte)
+	foot := *footPtr
+	defer recordFootPool.Put(footPtr)
 	binary.LittleEndian.PutUint32(foot, crc.Sum32())
 
 	if _, err := w.Write(hdr); err != nil {
@@ -1137,18 +1151,11 @@ func (s *Store) NeedsCompaction() bool {
 	// Estimate dead bytes as (total disk bytes) minus (live entry sizes).
 	// A rough proxy: if live entries are < 70% of total segment capacity,
 	// compaction is beneficial.
-	diskBytes := int64(0)
-	s.mu.RLock()
-	for _, seg := range s.segs {
-		seg.mu.Lock()
-		diskBytes += seg.size
-		seg.mu.Unlock()
-	}
-	s.mu.RUnlock()
-	if diskBytes == 0 {
+	disk := s.diskBytes()
+	if disk == 0 {
 		return false
 	}
-	liveFraction := float64(total) / float64(diskBytes)
+	liveFraction := float64(total) / float64(disk)
 	return liveFraction < (1 - CompactionThreshold)
 }
 
@@ -1174,7 +1181,7 @@ func (s *Store) Compact() error {
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}
-	newIndex, written, err := s.compactSegments(tmp, idxSnap, compactDir)
+	newIndex, orderedKeys, written, err := s.compactSegments(tmp, idxSnap, compactDir, s.compactKeysBuf)
 	if err != nil {
 		return err
 	}
@@ -1213,42 +1220,30 @@ func (s *Store) Compact() error {
 		_ = seg.f.Close()
 	}
 	s.segs = fresh.segs
-	// Replace the index and rebuild the SIEVE list in append order
-	// (by segID, offset). Map iteration is randomized, so naively
-	// iterating s.index would produce a random SIEVE tail — defeating
-	// the aging property where the tail holds the oldest entries.
-	// Sorting by (segID, offset) preserves the on-disk append order
-	// that compaction produced. All rebuilt entries start with
-	// visited=false — the first eviction sweep after compaction will
-	// prefer the tail (oldest) entries, which is the desired behavior.
+	// Replace the index and rebuild the SIEVE list in append order.
+	// compactSegments returns keys in the order records were written to
+	// the new store (by segID then offset), so we can build the SIEVE list
+	// directly — no O(n log n) sort needed. The SIEVE tail holds the
+	// oldest entries (first written), preserving the aging property.
+	// All rebuilt entries start with visited=false — the first eviction
+	// sweep after compaction will prefer the tail (oldest) entries.
 	s.idxMu.Lock()
 	s.index = newIndex
 	// Clear the old SIEVE list in-place, returning entries to the pool.
 	// The rebuilt list reuses the same pool, avoiding a multi-MB
 	// allocation spike on compaction with millions of entries.
 	s.evictList.Clear()
-	type keyedLoc struct {
-		key uint64
-		loc warmLoc
-	}
-	ordered := make([]keyedLoc, 0, len(s.index))
-	for k, loc := range s.index {
-		ordered = append(ordered, keyedLoc{k, loc})
-	}
-	slices.SortFunc(ordered, func(a, b keyedLoc) int {
-		if a.loc.segID != b.loc.segID {
-			return cmp.Compare(a.loc.segID, b.loc.segID)
-		}
-		return cmp.Compare(a.loc.offset, b.loc.offset)
-	})
-	for _, kl := range ordered {
-		e, _ := s.evictList.Access(kl.key, func(uint64) *sieve.Entry[uint64] { return nil })
-		kl.loc.sieve = e
-		s.index[kl.key] = kl.loc
+	for _, key := range orderedKeys {
+		e, _ := s.evictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
+		loc := s.index[key]
+		loc.sieve = e
+		s.index[key] = loc
 	}
 	s.idxMu.Unlock()
 	s.stats.entries.Store(int64(len(newIndex)))
 	s.stats.bytes.Store(fresh.stats.bytes.Load())
+	// Retain the grown buffer for the next compaction cycle.
+	s.compactKeysBuf = orderedKeys
 	return nil
 }
 
@@ -1293,14 +1288,19 @@ type pendingRec struct {
 }
 
 // compactSegments scans each source segment for live records and writes
-// them to tmp, returning the new index and count. Segment locks are held
-// only during the scan, not during cross-store writes.
-func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactDir string) (map[uint64]warmLoc, int, error) {
+// them to tmp, returning the new index, the keys in append order (by
+// segID then offset — the order records were written to the new store),
+// and the count. Segment locks are held only during the scan, not
+// during cross-store writes. The ordered keys are appended to keysBuf
+// (reset to zero length on entry), which the caller provides — typically
+// a reusable buffer on the Store — to avoid a per-compaction allocation.
+func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactDir string, keysBuf []uint64) (map[uint64]warmLoc, []uint64, int, error) {
 	s.mu.RLock()
 	segs := make([]*Segment, len(s.segs))
 	copy(segs, s.segs)
 	s.mu.RUnlock()
 
+	orderedKeys := keysBuf[:0]
 	newIndex := make(map[uint64]warmLoc, len(idxSnap))
 	written := 0
 	for _, seg := range segs {
@@ -1321,19 +1321,19 @@ func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactD
 		if scanErr != nil {
 			_ = tmp.Close()
 			_ = os.RemoveAll(compactDir)
-			return nil, 0, fmt.Errorf("compact: scan: %w", scanErr)
+			return nil, nil, 0, fmt.Errorf("compact: scan: %w", scanErr)
 		}
 		for _, p := range pending {
 			segID, offset, wErr := tmp.Put(p.key, p.body)
 			if wErr != nil {
 				_ = tmp.Close()
 				_ = os.RemoveAll(compactDir)
-				return nil, 0, fmt.Errorf("compact: write: %w", wErr)
+				return nil, nil, 0, fmt.Errorf("compact: write: %w", wErr)
 			}
 			recSize := int64(headerLen + len(p.body) + footerLen)
 			// Preserve protected from the pre-compaction index. The SIEVE
-			// list is rebuilt in Compact after the index is replaced, so
-			// the sieve pointer is left nil here and set during rebuild.
+			// list is rebuilt in Compact from orderedKeys, so the sieve
+			// pointer is left nil here and set during rebuild.
 			old := idxSnap[p.key]
 			newIndex[p.key] = warmLoc{
 				segID:     segID,
@@ -1341,8 +1341,9 @@ func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactD
 				size:      recSize,
 				protected: old.protected,
 			}
+			orderedKeys = append(orderedKeys, p.key)
 			written++
 		}
 	}
-	return newIndex, written, nil
+	return newIndex, orderedKeys, written, nil
 }

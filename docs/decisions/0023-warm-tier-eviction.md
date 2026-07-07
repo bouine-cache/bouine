@@ -22,14 +22,14 @@ SIEVE implementation — the index is a `map[uint64]warmLoc` that can embed
 a `*sieve.Entry[uint64]` pointer alongside the segment location.
 
 Issue #204 requires: evict live entries when over budget, tombstone
-	evicted keys, clear hot-tier `hasBackup`, and avoid evicting entries that
-	are also in the hot tier.
+evicted keys, clear hot-tier `hasBackup`, and avoid evicting entries that
+are also in the hot tier.
 
-	Code-symbol mapping (see plan `docs/plans/decouple-hot-warm-naming.md`):
-	`Protect` = "mark as hot-resident", `ClearBacked` = "clear warm-backup flag".
-	This ADR keeps the architectural terms ("hot tier" / "warm tier") when
-	describing the system, and uses the current code names (`protected`,
-	`Protect`, `hasBackup`, `ClearBacked`) when naming fields or methods.
+Code-symbol mapping (see plan `docs/plans/decouple-hot-warm-naming.md`):
+`Protect` = "mark as hot-resident", `ClearBacked` = "clear warm-backup flag".
+This ADR keeps the architectural terms ("hot tier" / "warm tier") when
+describing the system, and uses the current code names (`protected`,
+`Protect`, `hasBackup`, `ClearBacked`) when naming fields or methods.
 
 The warm tier is expected to hold several million keys at steady state.
 This rules out an O(n) timestamp-scan LRU: scanning millions of map

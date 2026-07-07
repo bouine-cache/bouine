@@ -70,7 +70,7 @@ func TestWarmSync_SkipsWarmBackedEntries(t *testing.T) {
 
 	warmKeysAfter := len(ts.warm.Keys())
 	if warmKeysAfter != warmKeysBefore {
-		t.Fatalf("warm key count changed: %d → %d (should skip warm-backed)",
+		t.Fatalf("warm key count changed: %d → %d (should skip backed)",
 			warmKeysBefore, warmKeysAfter)
 	}
 }
@@ -98,7 +98,7 @@ func TestWarmSync_RespectsBatchSize(t *testing.T) {
 
 func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	t.Parallel()
-	// Use a very small hot tier so the warm-backed entry is evicted
+	// Use a very small hot tier so the backed entry is evicted
 	// by SIEVE when we fill with competing entries.
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
@@ -114,7 +114,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
-	// Put a large object (goes to warm on Put, marks hasWarm).
+	// Put a large object (goes to warm on Put, marks hasBackup).
 	k := api.Key(400)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
@@ -124,13 +124,13 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	}
 
 	// Fill with many large entries to force SIEVE eviction of k.
-	// evictPreferWarm targets warm-backed entries first.
+	// evictPreferBacked targets backed entries first.
 	for i := range 50 {
 		k2 := api.Key(500 + i)
 		_ = ts.Put(context.Background(), k2, bigObj(k2, 2000))
 	}
 
-	// Drain tombstones — evicted warm-backed keys should be removed
+	// Drain tombstones — evicted backed keys should be removed
 	// from the warm tier.
 	ts.runWarmSyncCycle(context.Background())
 
@@ -409,7 +409,7 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	t.Parallel()
 	ts := tieredStoreWithSync(t, 100)
 
-	// Put a large object — goes to warm, marks hasWarm.
+	// Put a large object — goes to warm, marks hasBackup.
 	k := api.Key(1100)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
@@ -418,7 +418,7 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	}
 
 	// Replace with a small object — below bodyThreshold, does not
-	// write to warm. The old warm-backed entry is replaced in hot,
+	// write to warm. The old backed entry is replaced in hot,
 	// notifyEvict should enqueue a tombstone for the old warm copy.
 	_ = ts.Put(context.Background(), k, obj(k, 100))
 
@@ -442,7 +442,7 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 // TestOnEvictCallback verifies that the OnEvict callback fires when a
 // warm-backed entry is evicted from the hot tier. Uses a single shard
 // with a tiny memory budget so the warm-backed entry is guaranteed to
-// be evicted by evictPreferWarm before hot-only entries.
+// be evicted by evictPreferBacked before hot-only entries.
 func TestOnEvictCallback(t *testing.T) {
 	t.Parallel()
 
@@ -460,14 +460,14 @@ func TestOnEvictCallback(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
-	// Put entry and mark as warm-backed.
+	// Put entry and mark as backed.
 	k1 := api.Key(1000)
 	_ = s.Put(context.Background(), k1, obj(k1, 100))
-	s.SetWarm(k1)
+	s.SetBacked(k1)
 
 	// Fill with many other entries to force SIEVE to evict k1.
-	// evictPreferWarm evicts warm-backed entries first (up to 4 skips),
-	// so with warmCount > 0, k1 is guaranteed to be among the first
+	// evictPreferBacked evicts backed entries first (up to 4 skips),
+	// so with backedCount > 0, k1 is guaranteed to be among the first
 	// evicted.
 	for i := range 200 {
 		k2 := api.Key(2000 + i)
@@ -482,7 +482,7 @@ func TestOnEvictCallback(t *testing.T) {
 	mu.Unlock()
 
 	if !found {
-		t.Fatalf("OnEvict did not fire for warm-backed key %d (evicted %d total)",
+		t.Fatalf("OnEvict did not fire for backed key %d (evicted %d total)",
 			k1, len(evictedKeys))
 	}
 }

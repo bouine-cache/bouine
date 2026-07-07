@@ -48,10 +48,10 @@ const (
 	headerLen        = 4 + 8 + 4  // magic + key + body_len
 	footerLen        = 4          // crc32c
 	segExt           = ".seg"
-	// maxWarmEvictSkips bounds the number of hot-resident entries SIEVE
-	// may skip while searching for a non-hot-resident victim. This keeps
+	// maxWarmEvictSkips bounds the number of protected entries SIEVE
+	// may skip while searching for a non-protected victim. This keeps
 	// eviction O(1) worst case under idxMu even when most entries are
-	// hot-resident (the steady state once the warm sync loop has marked
+	// protected (the steady state once the warm sync loop has marked
 	// the majority of entries). Mirrors the hot tier's maxEvictSkips.
 	maxWarmEvictSkips = 16
 )
@@ -92,7 +92,7 @@ var ErrTornRecord = errors.New("warm: torn trailing record")
 // ErrOverBudget indicates that appending a record would push total
 // disk bytes across the configured MaxBytes limit. Callers can handle
 // this by evicting objects, triggering compaction, or simply skipping
-// the warm-tier write (the hot tier already holds the object).
+// the warm-tier write (the acceleration tier already holds the object).
 var ErrOverBudget = errors.New("warm: over maxBytes budget")
 
 // Record is a single warm-tier entry read from a segment.
@@ -123,15 +123,15 @@ type Segment struct {
 // on the SIEVE entry is set atomically by Get under idxMu.RLock — no
 // write lock needed for access tracking.
 //
-// hotResident marks entries that also live in the hot tier (L0). Evict
-// skips these to avoid evicting a warm copy that the hot tier would
-// immediately re-sync — wasting I/O on both tiers.
+// protected marks entries that also live in a faster tier. Evict
+// skips these to avoid evicting a warm copy that the acceleration
+// tier would immediately re-sync — wasting I/O on both tiers.
 type warmLoc struct {
-	segID       int
-	offset      int64
-	size        int64
-	sieve       *sieve.Entry[uint64]
-	hotResident bool
+	segID     int
+	offset    int64
+	size      int64
+	sieve     *sieve.Entry[uint64]
+	protected bool
 }
 
 // Store is the warm-tier disk store.
@@ -151,16 +151,16 @@ type Store struct {
 	// millions of entries without the O(n) scan of a timestamp-based LRU.
 	evictList *sieve.List[uint64]
 	// OnEvict is called with the evicted key after evictOne removes the
-	// entry from the warm index and writes the tombstone. The hot tier uses
-	// this to clear hasWarm on the corresponding hot entry so it is no
-	// longer preferred for hot-tier eviction.
+	// entry from the warm index and writes the tombstone. The acceleration
+	// tier uses this to clear hasBackup on the corresponding hot entry so
+	// it is no longer preferred for hot-tier eviction.
 	//
 	// CONSTRAINT: MUST NOT block or perform I/O. The callback runs UNDER
 	// idxMu (and seg.mu) — firing it under the locks closes the race where
 	// a concurrent Put for the victim key re-inserts a live record and
-	// sets hasWarm=true, only to have a late OnEvict clobber hasWarm back
-	// to false and permanently strand the warm entry as hotResident.
-	// ClearWarm (the only current callback) is O(1) and lock-only, so
+	// sets hasBackup=true, only to have a late OnEvict clobber hasBackup
+	// back to false and permanently strand the warm entry as protected.
+	// ClearBacked (the only current callback) is O(1) and lock-only, so
 	// holding idxMu across it adds no I/O latency.
 	OnEvict func(key uint64)
 }
@@ -582,9 +582,9 @@ func (s *Store) SelfHeals() int64 {
 // in Get).
 //
 // Only segID and offset are compared — not the full struct — because
-// the SIEVE visited bit and hotResident may have changed between the
+// the SIEVE visited bit and protected may have changed between the
 // caller's RLock read and this Lock write (a concurrent Get sets visited,
-// a concurrent SetHotResident updates hotResident). Those changes are
+// a concurrent Protect updates protected). Those changes are
 // benign: the entry is stale because the segment is gone, and identity
 // is fully determined by (segID, offset).
 func (s *Store) dropStaleIndex(key uint64, stale warmLoc) {
@@ -617,21 +617,21 @@ func (s *Store) Keys() []uint64 {
 	return keys
 }
 
-// MarkHotResident marks a warm-tier entry as also living in the hot
-// tier (L0). Evict skips hot-resident entries to avoid evicting a warm
-// copy that the hot tier would immediately re-sync. If the key is not
-// in the warm index this is a no-op.
+// Protect marks a warm-tier entry as also living in a faster tier.
+// Evict skips protected entries to avoid evicting a warm copy that the
+// acceleration tier would immediately re-sync. If the key is not in
+// the warm index this is a no-op.
 //
-// There is deliberately no UnmarkHotResident: the flag is cleared only
-// by deletion (hot-tier eviction tombstones the warm entry, or warm
-// eviction removes the index entry). A standalone unmark would need to
-// be wired into every hot-tier removal path to avoid stranding warm
-// entries as permanently hotResident; the delete-based lifecycle is
+// There is deliberately no Unprotect: the flag is cleared only by
+// deletion (hot-tier eviction tombstones the warm entry, or warm
+// eviction removes the index entry). A standalone unprotect would need
+// to be wired into every hot-tier removal path to avoid stranding warm
+// entries as permanently protected; the delete-based lifecycle is
 // simpler and already correct.
-func (s *Store) MarkHotResident(key uint64) {
+func (s *Store) Protect(key uint64) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
-		loc.hotResident = true
+		loc.protected = true
 		s.index[key] = loc
 	}
 	s.idxMu.Unlock()
@@ -640,16 +640,16 @@ func (s *Store) MarkHotResident(key uint64) {
 // evictToFit attempts to evict entries until the given record size fits
 // within the live-bytes budget (stats.bytes). Returns nil if space was
 // freed, or ErrOverBudget if eviction cannot free enough space (empty
-// index or all visible entries hot-resident within the skip budget).
+// index or all visible entries protected within the skip budget).
 // Evicted entries are tombstoned; actual disk space is reclaimed at the
 // next compaction. The budget is checked against live bytes, not
 // diskBytes (total segment file sizes), because tombstones increase
 // diskBytes — only compaction can shrink the files.
 //
-// Only non-hot-resident entries are evicted on the Put path: evicting a
-// hot-resident warm entry is wasteful because the hot tier will re-sync
-// it on the next warm sync cycle. If no non-hot-resident victim is found
-// within maxWarmEvictSkips SIEVE probes, the Put is rejected with
+// Only non-protected entries are evicted on the Put path: evicting a
+// protected warm entry is wasteful because the acceleration tier will
+// re-sync it on the next warm sync cycle. If no non-protected victim is
+// found within maxWarmEvictSkips SIEVE probes, the Put is rejected with
 // ErrOverBudget rather than scanning the whole list under idxMu.
 func (s *Store) evictToFit(recSize int64) error {
 	if s.maxBytes <= 0 {
@@ -671,22 +671,22 @@ func (s *Store) evictToFit(recSize int64) error {
 	}
 }
 
-// evictOne picks a non-hot-resident victim via SIEVE, writes a tombstone
-// for it, removes it from the index, and fires OnEvict. Hot-resident
+// evictOne picks a non-protected victim via SIEVE, writes a tombstone
+// for it, removes it from the index, and fires OnEvict. Protected
 // entries are given a second chance (re-inserted at the SIEVE list head
 // with visited=true). The scan is bounded by maxWarmEvictSkips so the
-// worst case is O(1) under idxMu even when most entries are hot-resident.
-// Returns the evicted key and true, or 0 and false if no non-hot-resident
+// worst case is O(1) under idxMu even when most entries are protected.
+// Returns the evicted key and true, or 0 and false if no non-protected
 // victim was found within the skip budget or the index is empty.
 //
 // Lock ordering matches Put/Delete: activeSeg → seg.mu → idxMu. Both
 // seg.mu and idxMu are held across the tombstone write, the index
 // removal, AND the OnEvict callback. Firing the callback under the
 // locks closes the race where a concurrent Put for the victim key
-// re-inserts a live record and sets hasWarm=true on the hot entry,
-// only to have the late OnEvict clobber hasWarm back to false —
-// permanently stranding the warm entry as hotResident and making it
-// un-evictable. ClearWarm is O(1) and lock-only, so the extra hold
+// re-inserts a live record and sets hasBackup=true on the hot entry,
+// only to have the late OnEvict clobber hasBackup back to false —
+// permanently stranding the warm entry as protected and making it
+// un-evictable. ClearBacked is O(1) and lock-only, so the extra hold
 // time is negligible.
 func (s *Store) evictOne() (uint64, bool) {
 	seg, err := s.activeSeg()
@@ -738,10 +738,10 @@ func (s *Store) evictOne() (uint64, bool) {
 		s.stats.bytes.Add(-victimLoc.size)
 	}
 	// Fire OnEvict under idxMu (and seg.mu) so a concurrent Put for
-	// victimKey cannot re-insert a live record and set hasWarm=true
-	// before ClearWarm runs — that would clobber hasWarm on a genuinely
-	// warm-backed hot entry, stranding the warm copy as permanently
-	// hotResident and un-evictable. ClearWarm is O(1) lock-only.
+	// victimKey cannot re-insert a live record and set hasBackup=true
+	// before ClearBacked runs — that would clobber hasBackup on a genuinely
+	// backed hot entry, stranding the warm copy as permanently
+	// protected and un-evictable. ClearBacked is O(1) lock-only.
 	if callback := s.OnEvict; callback != nil {
 		callback(victimKey)
 	}
@@ -751,8 +751,8 @@ func (s *Store) evictOne() (uint64, bool) {
 }
 
 // pickEvictVictim sweeps the SIEVE list (bounded by maxWarmEvictSkips)
-// for a non-hot-resident victim. Hot-resident entries are re-inserted
-// at the head with visited=true (second chance). idxMu must be held.
+// for a non-protected victim. Protected entries are re-inserted at the
+// head with visited=true (second chance). idxMu must be held.
 func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 	for range maxWarmEvictSkips {
 		cand, ok := s.evictList.Evict()
@@ -767,8 +767,8 @@ func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 			// idxMu. Skip the orphaned candidate and continue.
 			continue
 		}
-		if candLoc.hotResident {
-			// Give the hot-resident entry a second chance: re-insert
+		if candLoc.protected {
+			// Give the protected entry a second chance: re-insert
 			// at head with visited=true. The hand will clear visited
 			// on a future sweep and reconsider it.
 			e, _ := s.evictList.Access(cand, func(uint64) *sieve.Entry[uint64] { return nil })
@@ -1315,15 +1315,15 @@ func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactD
 				return nil, 0, fmt.Errorf("compact: write: %w", wErr)
 			}
 			recSize := int64(headerLen + len(p.body) + footerLen)
-			// Preserve hotResident from the pre-compaction index. The SIEVE
+			// Preserve protected from the pre-compaction index. The SIEVE
 			// list is rebuilt in Compact after the index is replaced, so
 			// the sieve pointer is left nil here and set during rebuild.
 			old := idxSnap[p.key]
 			newIndex[p.key] = warmLoc{
-				segID:       segID,
-				offset:      offset,
-				size:        recSize,
-				hotResident: old.hotResident,
+				segID:     segID,
+				offset:    offset,
+				size:      recSize,
+				protected: old.protected,
 			}
 			written++
 		}

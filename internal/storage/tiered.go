@@ -51,7 +51,7 @@ type TieredStore struct {
 	// warmEvictQueue receives keys evicted from the warm tier by its
 	// eviction policy. Drained by warmSyncLoop to append WAL delete
 	// entries so warm eviction survives restart. The hot tier's
-	// hasWarm flag is cleared immediately in the callback (no I/O).
+	// hasBackup flag is cleared immediately in the callback (no I/O).
 	// Buffered; non-blocking sends — overflow drops the WAL entry (the
 	// tombstone is already on disk; the WAL is a fast-replay optimization).
 	warmEvictQueue chan api.Key
@@ -124,7 +124,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		logger:            cfg.Logger,
 	}
 
-	// Wire the eviction callback so warm-backed evictions enqueue
+	// Wire the eviction callback so backed evictions enqueue
 	// tombstones for async processing by warmSyncLoop.
 	cfg.Hot.OnEvict = func(key api.Key) {
 		select {
@@ -140,14 +140,14 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Wire warm-tier eviction callback: clear hasWarm on the hot
+		// Wire warm-tier eviction callback: clear the backup flag on the hot
 		// entry immediately (no I/O), and enqueue a WAL delete entry
 		// for async persistence. Crash recovery relies on
 		// rebuildIndexFromScan honoring tombstones in segment order —
 		// the WAL delete is a fast-replay optimization, not the sole
 		// durability guarantee.
 		w.OnEvict = func(key uint64) {
-			ts.hot.ClearWarm(api.Key(key))
+			ts.hot.ClearBacked(api.Key(key))
 			select {
 			case ts.warmEvictQueue <- api.Key(key):
 			default:
@@ -311,12 +311,12 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 			}
 			return err
 		}
-		// Mark the hot entry as having a warm backup so eviction
+		// Mark the hot entry as having a backup so eviction
 		// can prefer it under memory pressure.
-		t.hot.SetWarm(key)
-		// Mark the warm entry as hot-resident so warm-tier eviction
+		t.hot.SetBacked(key)
+		// Mark the warm entry as protected so warm-tier eviction
 		// skips it (the hot tier will re-sync it if evicted from warm).
-		t.warm.MarkHotResident(uint64(key))
+		t.warm.Protect(uint64(key))
 		if t.wal != nil {
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
@@ -380,7 +380,7 @@ func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 // the anti-entropy reconciler in full cluster mode to compute the diff
 // against peer key sets. Reporting only hot-tier keys (as this method
 // once did) caused a feedback loop with SIEVE eviction: evicted
-// warm-backed keys were seen as "missing" and backfilled via Put,
+// backed keys were seen as "missing" and backfilled via Put,
 // re-overfilling the hot tier. The union reports keys the node *owns*,
 // not just those currently in RAM (#175).
 func (t *TieredStore) Keys() []api.Key {
@@ -623,8 +623,8 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 			continue
 		}
 		*walEntries = append(*walEntries, wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
-		t.hot.SetWarm(key)
-		t.warm.MarkHotResident(uint64(key))
+		t.hot.SetBacked(key)
+		t.warm.Protect(uint64(key))
 		synced++
 	}
 	return synced, skipped

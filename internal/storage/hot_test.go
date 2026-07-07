@@ -429,7 +429,7 @@ func TestKeyHash_Deterministic(t *testing.T) {
 	}
 }
 
-func TestHotStore_SetWarm(t *testing.T) {
+func TestHotStore_SetBacked(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
@@ -439,20 +439,20 @@ func TestHotStore_SetWarm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s.SetWarm(k)
+	s.SetBacked(k)
 
 	sh := &s.shards[uint64(k)&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasWarm {
-		t.Fatal("expected entry to be marked hasWarm after SetWarm")
+	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+		t.Fatal("expected entry to be marked hasBackup after SetBacked")
 	}
-	if sh.warmCount != 1 {
-		t.Fatalf("warmCount = %d, want 1", sh.warmCount)
+	if sh.backedCount != 1 {
+		t.Fatalf("backedCount = %d, want 1", sh.backedCount)
 	}
 }
 
-func TestHotStore_EvictPreferWarm(t *testing.T) {
+func TestHotStore_EvictPreferBacked(t *testing.T) {
 	t.Parallel()
 	// Single shard, 2 KiB budget. Each object is 1280 bytes (1024 body +
 	// 256 overhead), so the budget holds 1 entry; the 2nd Put forces
@@ -464,26 +464,26 @@ func TestHotStore_EvictPreferWarm(t *testing.T) {
 	k2 := KeyHash([]byte("b"))
 	_ = s.Put(ctx, k1, obj(k1, 1024))
 
-	// Mark k1 as warm-backed before k2 arrives.
-	s.SetWarm(k1)
+	// Mark k1 as backed before k2 arrives.
+	s.SetBacked(k1)
 
-	// k2 triggers eviction. k1 (warm) should be evicted, not k2.
+	// k2 triggers eviction. k1 (backed) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
 	if got, _, _ := s.Get(ctx, k1); got != nil {
-		t.Error("k1 (warm-backed) should have been evicted first")
+		t.Error("k1 (backed) should have been evicted first")
 	}
 	if got, _, _ := s.Get(ctx, k2); got == nil {
 		t.Error("k2 (hot-only, newly inserted) should exist")
 	}
 }
 
-func TestHotStore_EvictPreferWarm_PreservesVisitedBit(t *testing.T) {
+func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	t.Parallel()
 	// Single shard, 2 KiB budget. Insert k1 (hot-only) and access it to
-	// set visited=true. Then insert k2 (warm-backed). k2 should be
-	// evicted first because it's warm-backed. k1's visited bit should
-	// be preserved by the Defer path.
+	// set visited=true. Then insert k2 (backed). k2 should be evicted
+	// first because it's backed. k1's visited bit should be preserved
+	// by the Defer path.
 	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
 	ctx := context.Background()
 
@@ -495,10 +495,10 @@ func TestHotStore_EvictPreferWarm_PreservesVisitedBit(t *testing.T) {
 	// Access k1 to set visited=true.
 	_, _, _ = s.Get(ctx, k1)
 
-	// Mark k2 as warm-backed.
-	s.SetWarm(k2)
+	// Mark k2 as backed.
+	s.SetBacked(k2)
 
-	// k3 triggers eviction. k2 (warm) should be evicted, k1 (hot, visited)
+	// k3 triggers eviction. k2 (backed) should be evicted, k1 (hot, visited)
 	// should survive with its visited bit intact.
 	k3 := KeyHash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
@@ -507,11 +507,11 @@ func TestHotStore_EvictPreferWarm_PreservesVisitedBit(t *testing.T) {
 		t.Error("k1 (hot-only, visited) should survive — visited bit preserved")
 	}
 	if got, _, _ := s.Get(ctx, k2); got != nil {
-		t.Error("k2 (warm-backed) should have been evicted")
+		t.Error("k2 (backed) should have been evicted")
 	}
 }
 
-func TestHotStore_EvictFallbackNoWarm(t *testing.T) {
+func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
 	ctx := context.Background()
@@ -532,27 +532,27 @@ func TestHotStore_EvictFallbackNoWarm(t *testing.T) {
 	}
 }
 
-func TestHotStore_WarmCountConsistency(t *testing.T) {
+func TestHotStore_BackedCountConsistency(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
 	k := KeyHash([]byte("consistency"))
 	_ = s.Put(ctx, k, obj(k, 100))
-	s.SetWarm(k)
+	s.SetBacked(k)
 
-	// Overwrite with new entry; warm status resets.
+	// Overwrite with new entry; backed status resets.
 	_ = s.Put(ctx, k, obj(k, 200))
-	s.SetWarm(k)
+	s.SetBacked(k)
 
 	sh := &s.shards[uint64(k)&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasWarm {
-		t.Fatal("entry should have hasWarm after re-marking")
+	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+		t.Fatal("entry should have hasBackup after re-marking")
 	}
-	if sh.warmCount != 1 {
-		t.Fatalf("warmCount = %d, want 1 after re-mark", sh.warmCount)
+	if sh.backedCount != 1 {
+		t.Fatalf("backedCount = %d, want 1 after re-mark", sh.backedCount)
 	}
 }
 

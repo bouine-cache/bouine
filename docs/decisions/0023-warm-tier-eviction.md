@@ -71,51 +71,82 @@ We use **SIEVE** for warm-tier eviction, reusing `internal/storage/sieve`
   which either sets `visited=true` on an existing entry (overwrite) or
   inserts a new entry at the head with `visited=false`.
 
-- **Evict()**: `evictOne(skipHotResident)` calls `evictList.Evict()` to
-  get a candidate (O(1) amortized). If the candidate is hot-resident and
-  `skipHotResident` is true, the entry is re-inserted at the head with
-  `visited=true` (second chance) and the loop continues. The retry cap is
-  the list length, preventing infinite loops when all entries are
-  hot-resident. If all entries are hot-resident, `Evict()` falls back to
-  `evictOne(false)` which accepts any entry.
+- **Evict()**: `evictOne()` calls `evictList.Evict()` to get a
+  candidate (O(1) amortized). If the candidate is hot-resident, the
+  entry is re-inserted at the head with `visited=true` (second chance)
+  and the loop continues. The scan is bounded by `maxWarmEvictSkips`
+  (16) so the worst case is O(1) under `idxMu` even when most entries
+  are hot-resident (the steady state once the warm sync loop has
+  marked the majority). If no non-hot-resident victim is found within
+  the skip budget, `evictToFit` rejects the `Put` with `ErrOverBudget`
+  rather than scanning the whole list. There is no fallback to evicting
+  hot-resident entries on the `Put` path — evicting a hot-resident warm
+  entry is wasteful because the hot tier will re-sync it on the next
+  warm sync cycle.
 
-- **Put over budget**: `evictToFit` repeatedly calls `evictOne(true)`
-  (skip hot-resident) until `stats.bytes + recSize <= maxBytes`. Only
-  non-hot-resident entries are evicted on the Put path — evicting a
-  hot-resident warm entry is wasteful because the hot tier will re-sync
-  it on the next warm sync cycle.
+  Both `seg.mu` (active segment) and `idxMu` are held across the
+  tombstone write, the index removal, AND the `OnEvict` callback. This
+  closes the TOCTOU window where a concurrent `Put` for the victim key
+  could insert a new live record between the index removal and the
+  tombstone append — which would have the tombstone clobber the fresh
+  data. With both locks held, the on-disk order is
+  tombstone-then-any-future-live, which `rebuildIndexFromScan` honors on
+  replay. Firing `OnEvict` under the locks also closes a second race:
+  if the callback ran after unlock, a concurrent `Put` could re-insert
+  the key and set `hasWarm=true` on the hot entry, only to have the
+  late `ClearWarm` clobber it back to `false` — permanently stranding
+  the warm entry as `hotResident=true` and un-evictable.
+
+- **Put over budget**: `evictToFit` rejects early if `recSize > maxBytes`
+  (a record larger than the entire budget can never fit). Otherwise it
+  repeatedly calls `evictOne()` until `stats.bytes + recSize <= maxBytes`.
+  Only non-hot-resident entries are evicted on the Put path.
 
 - **Hot-resident flag**: `warmLoc.hotResident` marks entries that also
-  live in the hot tier. Set by `TieredStore` when `SetHotResident` is
-  called. The SIEVE list does not know about hot-residency — it is
-  checked at the warm-store level after SIEVE selects a candidate.
+  live in the hot tier. Set by `TieredStore` via `MarkHotResident(key)`.
+  There is deliberately no unmark API — the flag is cleared only by
+  deletion (hot-tier eviction tombstones the warm entry, or warm
+  eviction removes the index entry). The SIEVE list does not know about
+  hot-residency — it is checked at the warm-store level after SIEVE
+  selects a candidate.
 
 - **Delete**: `Delete` and `DelIndex` remove the entry from both the
   index and the SIEVE list (`evictList.Remove(loc.sieve)`) under
   `idxMu.Lock`.
 
 - **Compaction**: `Compact` rebuilds the SIEVE list from the compacted
-  index. All entries start with `visited=false` — the first eviction
-  sweep after compaction will prefer the tail (oldest) entries, which is
-  reasonable since compaction preserves append order. `hotResident` is
-  preserved from the pre-compaction index.
+  index, sorted by `(segID, offset)` to preserve the on-disk append
+  order. Map iteration is randomized, so naively iterating the index
+  would produce a random SIEVE tail — defeating the aging property where
+  the tail holds the oldest entries. All entries start with
+  `visited=false` — the first eviction sweep after compaction will
+  prefer the tail (oldest) entries. `hotResident` is preserved from the
+  pre-compaction index.
 
-- **Callback**: `Store.OnEvict(uint64)` is called after eviction.
-  `TieredStore` wires this to `HotStore.ClearWarm(key)` (clears `hasWarm`
-  so the hot tier stops preferring the entry for eviction) and enqueues
-  a WAL delete entry for async persistence.
+- **Callback**: `Store.OnEvict(uint64)` is called under `idxMu` and
+  `seg.mu` after eviction. `TieredStore` wires this to
+  `HotStore.ClearWarm(key)` (clears `hasWarm` so the hot tier stops
+  preferring the entry for eviction) and enqueues a WAL delete entry
+  for async persistence. Firing under the locks is safe because
+  `ClearWarm` is O(1) and lock-only (no I/O), and no code path holds
+  a hot shard lock while acquiring warm `idxMu`, so there is no
+  AB-BA deadlock risk.
 
 ## Consequences
 
 ### Positive
 - Reclaims space from live data under disk pressure.
 - O(1) eviction and access tracking — scales to millions of entries.
+  The skip scan is bounded by `maxWarmEvictSkips` (16), so even when all
+  entries are hot-resident the worst case is 16 SIEVE probes under
+  `idxMu`, not an O(n) list scan.
 - No write lock on `Get` — visited bit is set atomically under RLock.
 - SIEVE entries are pooled, minimizing allocation.
 - Consistent with hot-tier eviction algorithm.
 - Hot-resident flag prevents wasteful eviction of entries the hot tier
   will immediately re-sync.
-- WAL delete entries ensure evictions survive restart.
+- WAL delete entries ensure evictions survive restart (best-effort;
+  see crash-durability risk above).
 
 ### Negative / trade-offs
 - `*sieve.Entry` per warm entry: ~40 bytes per entry at scale (pointer in
@@ -134,11 +165,21 @@ We use **SIEVE** for warm-tier eviction, reusing `internal/storage/sieve`
 ### Risks
 - If `OnEvict` callback blocks, it stalls the `Put` path. Mitigated by the
   constraint (documented on `OnEvict`) that it must not block or do I/O —
-  it only enqueues to a buffered channel.
+  it only enqueues to a buffered channel and does an O(1) lock-only
+  `ClearWarm`. The callback runs under `idxMu` and `seg.mu`; the extra
+  hold time is one shard lock acquire.
 - If the warm sync cycle hasn't marked an entry as `hotResident` yet, it
   may be evicted even though it's in the hot tier. This is a transient
   state — the entry will be re-synced to warm on the next cycle. Not a
   correctness issue, just a minor efficiency loss.
+- **Crash durability**: the tombstone written by `evictOne` is in the
+  segment page cache but is not fsynced before the callback returns.
+  If the process crashes before the next warm sync cycle, both the
+  tombstone and the enqueued WAL delete may be lost. This is acceptable:
+  the resurrected entry is warm-only (the hot entry was cleared) and
+  will be re-evicted on the next over-budget `Put`. The WAL delete is a
+  fast-replay optimization; `rebuildIndexFromScan` honors tombstones in
+  segment order when the WAL is missing.
 
 ## Alternatives considered
 

@@ -468,6 +468,11 @@ func TestStore_ConcurrentGetPut(t *testing.T) {
 	wg.Wait()
 }
 
+// BenchmarkGet measures warm-tier Get latency. Since the SIEVE eviction
+// PR, every Get now does a second idxMu.RLock + map lookup + identity
+// re-check + atomic visited-bit store. This benchmark covers that added
+// cost — warm Get is off the hot path (L0 serves hits), but the overhead
+// is reported here so regressions are caught.
 func BenchmarkGet(b *testing.B) {
 	dir := b.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
@@ -540,6 +545,79 @@ func BenchmarkReadRecordAt(b *testing.B) {
 			b.Fatalf("key=%d, want 1", rec.Key)
 		}
 	}
+}
+
+// BenchmarkWarmEvict_OverBudgetPut measures the cost of the eviction
+// path on over-budget Puts. Each Put in this benchmark triggers
+// evictToFit → evictOne, which writes a tombstone and removes a victim
+// under seg.mu + idxMu. This is the path the PR adds; it is NOT on the
+// hot path (only fires when live bytes exceed maxBytes), but the
+// benchmark proves the cost is bounded and reports allocs/op so
+// regressions are caught.
+func BenchmarkWarmEvict_OverBudgetPut(b *testing.B) {
+	dir := b.TempDir()
+	// Small budget so every Put after warm-up triggers eviction.
+	// Each record = 120 bytes (16 header + 100 body + 4 footer).
+	// Budget 6000 bytes ≈ 50 live records.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 6000, SegMax: 1 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := make([]byte, 100)
+	// Fill to budget with 50 entries.
+	for i := range 50 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := range b.N {
+		// Each Put evicts one entry to make room. Keys cycle above
+		// the seed range so they are non-hot-resident victims.
+		if _, _, err := s.Put(uint64(1000+i), body); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkWarmEvict_ConcurrentPutGet measures the latency impact of
+// eviction on concurrent Get operations. Eviction holds idxMu briefly
+// (bounded by maxWarmEvictSkips); this benchmark verifies Gets are not
+// starved when eviction runs on the write path.
+func BenchmarkWarmEvict_ConcurrentPutGet(b *testing.B) {
+	dir := b.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 12000, SegMax: 1 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := make([]byte, 100)
+	for i := range 100 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		i := uint64(0)
+		for pb.Next() {
+			if i%4 == 0 {
+				// Write path: triggers eviction (over budget).
+				_, _, _ = s.Put(uint64(1000+i), body)
+			} else {
+				// Read path: concurrent Get.
+				_, _ = s.Get(i % 100)
+			}
+			i++
+		}
+	})
 }
 
 func TestStore_CompactStreamsLiveRecords(t *testing.T) {
@@ -1039,7 +1117,7 @@ func TestPut_OverBudget(t *testing.T) {
 	// (360 + 120 = 480 ≤ 512). Mark all as hot-resident to prevent
 	// eviction, forcing ErrOverBudget.
 	for i := 0; i < 4; i++ {
-		s.SetHotResident(uint64(i), true)
+		s.MarkHotResident(uint64(i))
 	}
 	_, _, err = s.Put(99, smallBody)
 	if !errors.Is(err, ErrOverBudget) {
@@ -1377,9 +1455,9 @@ func TestEvict_FreesSpaceUnderPressure(t *testing.T) {
 	}
 
 	// Evict one entry.
-	evicted, ok := s.Evict()
+	evicted, ok := s.evictOne()
 	if !ok {
-		t.Fatal("Evict returned false, expected to evict one entry")
+		t.Fatal("evictOne returned false, expected to evict one entry")
 	}
 	if evicted != 3 {
 		t.Fatalf("evicted key = %d, want 3 (coldest/never-accessed)", evicted)
@@ -1432,9 +1510,9 @@ func TestEvict_PrefersLeastRecentlyAccessed(t *testing.T) {
 
 	// Evict should select key 0 (tail, first to have its visited bit
 	// cleared and be evicted on the next sweep).
-	evicted, ok := s.Evict()
+	evicted, ok := s.evictOne()
 	if !ok {
-		t.Fatal("Evict returned false")
+		t.Fatal("evictOne returned false")
 	}
 	if evicted != 0 {
 		t.Fatalf("evicted = %d, want 0 (tail after visited-bit sweep)", evicted)
@@ -1445,9 +1523,9 @@ func TestEvict_EmptyStoreReturnsFalse(t *testing.T) {
 	t.Parallel()
 	s := tmpStore(t)
 
-	_, ok := s.Evict()
+	_, ok := s.evictOne()
 	if ok {
-		t.Fatal("Evict on empty store should return false")
+		t.Fatal("evictOne on empty store should return false")
 	}
 }
 
@@ -1464,9 +1542,9 @@ func TestEvict_TombstonesEvictedKey(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	evicted, ok := s.Evict()
+	evicted, ok := s.evictOne()
 	if !ok {
-		t.Fatal("Evict returned false")
+		t.Fatal("evictOne returned false")
 	}
 	if evicted != 42 {
 		t.Fatalf("evicted = %d, want 42", evicted)
@@ -1504,8 +1582,8 @@ func TestEvict_SkipsHotResidentEntries(t *testing.T) {
 	}
 
 	// Mark keys 0 and 1 as hot-resident (in hot tier).
-	s.SetHotResident(0, true)
-	s.SetHotResident(1, true)
+	s.MarkHotResident(0)
+	s.MarkHotResident(1)
 
 	// Access all so SIEVE visited bits are set — the only differentiator
 	// is hot-residency.
@@ -1515,17 +1593,17 @@ func TestEvict_SkipsHotResidentEntries(t *testing.T) {
 		}
 	}
 
-	// Evict should skip hot-resident entries and pick a cold one.
-	evicted, ok := s.Evict()
+	// evictOne should skip hot-resident entries and pick a cold one.
+	evicted, ok := s.evictOne()
 	if !ok {
-		t.Fatal("Evict returned false")
+		t.Fatal("evictOne returned false")
 	}
 	if evicted == 0 || evicted == 1 {
 		t.Fatalf("evicted hot-resident key %d, should have skipped it", evicted)
 	}
 }
 
-func TestEvict_AllHotResidentFallsBackToColdest(t *testing.T) {
+func TestEvict_AllHotResidentReturnsFalse(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1540,29 +1618,18 @@ func TestEvict_AllHotResidentFallsBackToColdest(t *testing.T) {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 	}
-
-	// All hot-resident — Evict must still evict one via fallback.
-	s.SetHotResident(0, true)
-	s.SetHotResident(1, true)
-	s.SetHotResident(2, true)
-
-	// Access only key 0 so SIEVE gives it a visited bit. The SIEVE
-	// sweep will skip visited entries, clear their bits, and evict the
-	// first unvisited one after a full sweep.
-	if _, err := s.Get(0); err != nil {
-		t.Fatalf("Get 0: %v", err)
+	// All hot-resident — evictOne skips them and returns false within
+	// the skip budget rather than scanning the whole list under idxMu.
+	for i := range 3 {
+		s.MarkHotResident(uint64(i))
 	}
-
-	evicted, ok := s.Evict()
-	if !ok {
-		t.Fatal("Evict returned false even with entries")
+	if _, ok := s.evictOne(); ok {
+		t.Fatal("evictOne returned true with all entries hot-resident, want false")
 	}
-	// With all entries hot-resident, evictOne(true) re-inserts all at
-	// head with visited=true. The fallback evictOne(false) sweeps and
-	// evicts the tail after clearing visited bits. The tail at that
-	// point is the first re-inserted entry, which corresponds to key 1.
-	if evicted != 1 {
-		t.Fatalf("evicted = %d, want 1 (SIEVE fallback after all hot-resident)", evicted)
+	// Entries must still be present and accounted for.
+	entries, _ := s.Stats()
+	if entries != 3 {
+		t.Fatalf("entries after failed evict = %d, want 3", entries)
 	}
 }
 
@@ -1638,9 +1705,9 @@ func TestEvict_CallbackNotifiesHotTier(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	got, ok := s.Evict()
+	got, ok := s.evictOne()
 	if !ok {
-		t.Fatal("Evict returned false")
+		t.Fatal("evictOne returned false")
 	}
 	if got != 42 {
 		t.Fatalf("evicted = %d, want 42", got)
@@ -1672,7 +1739,7 @@ func TestEvict_ConcurrentEvictAndGet(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 50 {
-			if k, ok := s.Evict(); ok {
+			if k, ok := s.evictOne(); ok {
 				evictedKeys.Store(k, struct{}{})
 			}
 		}
@@ -1698,6 +1765,70 @@ func TestEvict_ConcurrentEvictAndGet(t *testing.T) {
 	for _, k := range idxKeys {
 		if _, evicted := evictedKeys.Load(k); evicted {
 			t.Fatalf("key %d was evicted but is still in the index", k)
+		}
+	}
+}
+
+// TestEvict_ConcurrentEvictAndPutPreservesData exercises the TOCTOU fix
+// in evictOne: a concurrent Put for a key that evictOne just selected as
+// its victim must NOT have its fresh live record tombstoned. Before the
+// fix, evictOne released idxMu between the index removal and the
+// tombstone write, so a racing Put could insert a new live record that
+// the tombstone then clobbered — silent data loss.
+func TestEvict_ConcurrentEvictAndPutPreservesData(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Seed with 50 entries, none hot-resident so evictOne can pick them.
+	for i := range 50 {
+		if _, _, err := s.Put(uint64(i), []byte("seed")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 50 {
+			_, _ = s.evictOne()
+		}
+	}()
+	// Concurrent Puts reusing the same key space — this is the race:
+	// a Put for a key that evictOne just selected must not have its
+	// fresh record tombstoned by the eviction.
+	go func() {
+		defer wg.Done()
+		for i := range 50 {
+			if _, _, err := s.Put(uint64(i), []byte("fresh")); err != nil {
+				t.Errorf("Put %d: %v", i, err)
+			}
+		}
+	}()
+	wg.Wait()
+
+	// Invariant: every key in the index must be readable with a
+	// non-nil body. A key whose live record was tombstoned by the
+	// eviction race (the TOCTOU this test targets) would return nil
+	// here while still present in the index — silent data loss.
+	//
+	// We do not assert stats.entries == len(index): Put increments
+	// stats.entries unconditionally even on overwrite, which is a
+	// pre-existing stats drift unrelated to this change.
+	idxKeys := s.Keys()
+	for _, k := range idxKeys {
+		body, err := s.Get(k)
+		if err != nil {
+			t.Fatalf("Get %d: %v", k, err)
+		}
+		if body == nil {
+			t.Fatalf("key %d in index but Get returned nil (tombstoned by eviction race)", k)
 		}
 	}
 }
@@ -1822,4 +1953,3 @@ func BenchmarkScanSegment(b *testing.B) {
 		}
 	}
 }
-

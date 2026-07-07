@@ -316,7 +316,7 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		t.hot.SetWarm(key)
 		// Mark the warm entry as hot-resident so warm-tier eviction
 		// skips it (the hot tier will re-sync it if evicted from warm).
-		t.warm.SetHotResident(uint64(key), true)
+		t.warm.MarkHotResident(uint64(key))
 		if t.wal != nil {
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
@@ -514,13 +514,24 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 		}
 	}
 
+	droppedTomb := t.droppedTombstones.Swap(0)
+	droppedEvict := t.droppedWarmEvicts.Swap(0)
+
 	t.logger.Info("warm sync cycle complete",
 		"synced", synced,
 		"tombstoned", tombstoned,
 		"warm_evicted", warmEvicted,
 		"skipped", skipped,
+		"dropped_tombstones", droppedTomb,
+		"dropped_warm_evicts", droppedEvict,
 		"dur_ms", time.Since(start).Milliseconds(),
 	)
+	if droppedTomb > 0 || droppedEvict > 0 {
+		t.logger.Warn("warm sync: eviction/tombstone WAL entries dropped (queue full)",
+			"dropped_tombstones", droppedTomb,
+			"dropped_warm_evicts", droppedEvict,
+			"note", "evicted keys rely on rebuildIndexFromScan tombstones for durability; dropped WAL deletes delay replay recovery")
+	}
 }
 
 // collectHotOnlyKeys returns hot keys that are not in the warm tier,
@@ -614,7 +625,7 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 		}
 		*walEntries = append(*walEntries, wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
 		t.hot.SetWarm(key)
-		t.warm.SetHotResident(uint64(key), true)
+		t.warm.MarkHotResident(uint64(key))
 		synced++
 	}
 	return synced, skipped

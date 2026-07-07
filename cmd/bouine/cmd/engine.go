@@ -333,13 +333,14 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx con
 		rs.rings.Start(rCtx, rs.snapshotPath)
 		return nil
 	})
-	// Poll hot-store stats every 15 s and update the Prometheus gauges.
-	// This keeps bouine_hot_store_bytes / _entries / _evictions_total current
-	// without adding per-request overhead.
+	// Poll hot-store and warm-store stats every 15 s and update the
+	// Prometheus gauges. This keeps bouine_hot_store_* and bouine_warm_store_*
+	// current without adding per-request overhead.
 	g.Go("store-metrics", func(rCtx context.Context) error {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		var lastEvictions int64
+		var lastWarmSelfHeals int64
 		for {
 			select {
 			case <-rCtx.Done():
@@ -353,6 +354,13 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx con
 				if delta > 0 {
 					rs.dpMetrics.HotStoreEvictions.Add(float64(delta))
 					lastEvictions = s.Evictions
+				}
+				rs.dpMetrics.WarmStoreBytes.Set(float64(s.WarmBytes))
+				rs.dpMetrics.WarmStoreEntries.Set(float64(s.WarmEntries))
+				warmHealDelta := s.WarmSelfHeals - lastWarmSelfHeals
+				if warmHealDelta > 0 {
+					rs.dpMetrics.WarmStoreSelfHeals.Add(float64(warmHealDelta))
+					lastWarmSelfHeals = s.WarmSelfHeals
 				}
 				// Refresh gauges: poll scheduler heap and registry sizes.
 				for _, h := range rs.handlers {

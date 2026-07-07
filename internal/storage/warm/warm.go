@@ -773,11 +773,10 @@ func (s *Store) Compact() error {
 	dir := s.dir
 	compactDir := filepath.Join(dir, ".compact")
 	_ = os.RemoveAll(compactDir) // stale dir from a previous failed run
-	// The temp store has no budget limit: compaction writes all live
-	// records before swapping, and the live set is necessarily smaller
-	// than the current on-disk footprint. Applying the budget here
-	// would cause compaction to fail with ErrOverBudget once the store
-	// approaches maxBytes — the exact moment compaction is needed most.
+	// The temp store has no budget limit as defense-in-depth: live
+	// records are a subset of the source and always fit under maxBytes
+	// today, but exempting the temp store avoids coupling compaction
+	// correctness to the budget invariant.
 	tmp, err := NewStore(Config{Dir: compactDir, MaxBytes: 0, SegMax: s.segMax})
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)

@@ -101,10 +101,13 @@ type Segment struct {
 	maxBytes int64
 }
 
-// warmLoc is the in-memory index entry for a warm-tier object.
+// warmLoc is the in-memory index entry for a warm-tier object. The
+// size field stores the on-disk record size (headerLen + body + footerLen)
+// so Delete can subtract it from stats.bytes without re-reading the record.
 type warmLoc struct {
 	segID  int
 	offset int64
+	size   int64
 }
 
 // Store is the warm-tier disk store.
@@ -225,7 +228,7 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	s.stats.bytes.Add(recSize)
 
 	s.idxMu.Lock()
-	s.index[key] = warmLoc{segID: seg.ID, offset: off}
+	s.index[key] = warmLoc{segID: seg.ID, offset: off, size: recSize}
 	s.idxMu.Unlock()
 
 	return seg.ID, off, nil
@@ -251,8 +254,18 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 	recSize := int64(headerLen + footerLen)
 	seg.size += recSize
 
+	// Decrement stats counters for the deleted entry. The index entry
+	// holds the on-disk record size so we can subtract it without
+	// re-reading the record from disk.
 	s.idxMu.Lock()
-	delete(s.index, key)
+	loc, existed := s.index[key]
+	if existed {
+		delete(s.index, key)
+		s.stats.entries.Add(-1)
+		if loc.size > 0 {
+			s.stats.bytes.Add(-loc.size)
+		}
+	}
 	s.idxMu.Unlock()
 	return seg.ID, nil
 }
@@ -311,7 +324,9 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 }
 
 // SetIndex adds or replaces an index entry. Called during WAL replay
-// on startup to rebuild the index from persisted write history.
+// on startup to rebuild the index from persisted write history. The
+// size is set to 0 because the WAL does not record record sizes;
+// RecomputeStats fills it in by scanning segments after replay.
 func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 	s.idxMu.Lock()
 	s.index[key] = warmLoc{segID: segID, offset: offset}
@@ -342,9 +357,11 @@ func (s *Store) DelIndex(key uint64) {
 
 // RecomputeStats scans all segments and recounts live entries and bytes
 // from the current index. Called after WAL replay to restore the stats
-// counters that are not persisted in the WAL. Returns an error if the
-// underlying scan fails; the stats counters are left unchanged in that
-// case so callers do not act on partial data.
+// counters that are not persisted in the WAL. It also backfills the
+// size field in each warmLoc so that subsequent Delete calls can
+// subtract the correct record size from stats.bytes. Returns an error
+// if the underlying scan fails; the stats counters and index are left
+// unchanged in that case so callers do not act on partial data.
 func (s *Store) RecomputeStats() error {
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))
@@ -353,6 +370,11 @@ func (s *Store) RecomputeStats() error {
 	}
 	s.idxMu.RUnlock()
 
+	type sizeUpdate struct {
+		key  uint64
+		size int64
+	}
+	var updates []sizeUpdate
 	var entries, bytes int64
 	if err := s.Scan(func(r Record) error {
 		if r.IsTomb {
@@ -362,14 +384,32 @@ func (s *Store) RecomputeStats() error {
 		if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
 			return nil
 		}
+		recSize := int64(headerLen + len(r.Body) + footerLen)
 		entries++
-		bytes += int64(headerLen + len(r.Body) + footerLen)
+		bytes += recSize
+		if loc.size == 0 {
+			updates = append(updates, sizeUpdate{key: r.Key, size: recSize})
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("warm: recompute stats: %w", err)
 	}
 	s.stats.entries.Store(entries)
 	s.stats.bytes.Store(bytes)
+
+	// Backfill size into index entries that were created by SetIndex
+	// (WAL replay) with size=0 so future Delete calls subtract the
+	// correct byte count.
+	if len(updates) > 0 {
+		s.idxMu.Lock()
+		for _, u := range updates {
+			if loc, ok := s.index[u.key]; ok && loc.size == 0 {
+				loc.size = u.size
+				s.index[u.key] = loc
+			}
+		}
+		s.idxMu.Unlock()
+	}
 	return nil
 }
 
@@ -892,7 +932,8 @@ func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactD
 				_ = os.RemoveAll(compactDir)
 				return nil, 0, fmt.Errorf("compact: write: %w", wErr)
 			}
-			newIndex[p.key] = warmLoc{segID: segID, offset: offset}
+			recSize := int64(headerLen + len(p.body) + footerLen)
+			newIndex[p.key] = warmLoc{segID: segID, offset: offset, size: recSize}
 			written++
 		}
 	}

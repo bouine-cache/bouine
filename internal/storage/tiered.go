@@ -624,7 +624,9 @@ func (t *TieredStore) rewriteWAL() error {
 	t.wal = nil // prevent double-close in Close() if rename fails
 	if err := os.Rename(tmpPath, t.walPath); err != nil {
 		// Rename failed: old WAL file is still at t.walPath but closed.
-		// Reopen so the WAL remains usable for subsequent appends and Close.
+		// Clean up the leaked tmp file, then reopen the old WAL so it
+		// remains usable for subsequent appends and Close.
+		_ = os.Remove(tmpPath)
 		reopened, reopenErr := wal.Open(t.walPath)
 		if reopenErr != nil {
 			return fmt.Errorf("wal rewrite: rename: %w; reopen old WAL: %v", err, reopenErr)

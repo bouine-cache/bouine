@@ -1269,3 +1269,50 @@ func TestStats_AccurateAfterDeleteWithoutRecompute(t *testing.T) {
 		t.Fatalf("bytes = %d, want %d (only key 2)", bytes, wantBytes)
 	}
 }
+
+func TestDelete_SetIndexEntry_SkipsBytesDecrement(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Put a real record so Put sets up stats with a non-zero size.
+	body := []byte("real record data")
+	segID, off, err := s.Put(1, body)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Simulate a WAL-replayed entry via SetIndex — size is 0.
+	s.SetIndex(2, segID, off)
+
+	// Stats reflect only the Put (SetIndex does not touch stats).
+	entriesBefore, bytesBefore := s.Stats()
+	if entriesBefore != 1 {
+		t.Fatalf("entries before = %d, want 1", entriesBefore)
+	}
+	wantBytes := int64(headerLen + len(body) + footerLen)
+	if bytesBefore != wantBytes {
+		t.Fatalf("bytes before = %d, want %d", bytesBefore, wantBytes)
+	}
+
+	// Delete the SetIndex entry (size=0). entries must decrement but
+	// bytes must NOT change because loc.size is 0 — the size is unknown
+	// until RecomputeStats backfills it.
+	if _, err := s.Delete(2); err != nil {
+		t.Fatalf("Delete SetIndex entry: %v", err)
+	}
+
+	entriesAfter, bytesAfter := s.Stats()
+	if entriesAfter != 0 {
+		t.Fatalf("entries after = %d, want 0", entriesAfter)
+	}
+	if bytesAfter != bytesBefore {
+		t.Fatalf("bytes after = %d, want %d (unchanged because size=0)",
+			bytesAfter, bytesBefore)
+	}
+}

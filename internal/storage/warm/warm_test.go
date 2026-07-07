@@ -1818,9 +1818,10 @@ func TestEvict_ConcurrentEvictAndPutPreservesData(t *testing.T) {
 	// eviction race (the TOCTOU this test targets) would return nil
 	// here while still present in the index — silent data loss.
 	//
-	// We do not assert stats.entries == len(index): Put increments
-	// stats.entries unconditionally even on overwrite, which is a
-	// pre-existing stats drift unrelated to this change.
+	// We do not assert stats.entries == len(index): concurrent
+	// evictOne + Put on the same key can race on the entries counter
+	// (evict decrements, Put may or may not increment depending on
+	// timing), so the counter may be off by the number of races.
 	idxKeys := s.Keys()
 	for _, k := range idxKeys {
 		body, err := s.Get(k)
@@ -1951,5 +1952,73 @@ func BenchmarkScanSegment(b *testing.B) {
 		if count != numRecords {
 			b.Fatalf("count = %d, want %d", count, numRecords)
 		}
+	}
+}
+
+// TestDelete_RemovesSIEVEEntry is a regression test for the BLOCKER
+// where Delete removed the index map entry but left the SIEVE list
+// entry orphaned. Orphaned entries waste eviction skip probes and
+// can cause ErrOverBudget even when live non-protected victims exist.
+func TestDelete_RemovesSIEVEEntry(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := range 10 {
+		if _, _, err := s.Put(uint64(i), []byte("data")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Delete all entries — the SIEVE list must be empty after this.
+	for i := range 10 {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	s.idxMu.RLock()
+	listLen := s.evictList.Len()
+	s.idxMu.RUnlock()
+	if listLen != 0 {
+		t.Fatalf("SIEVE list has %d orphaned entries after deleting all keys, want 0", listLen)
+	}
+}
+
+// TestPut_OverwriteDoesNotInflateStats is a regression test for the
+// stats drift where Put on an existing key incremented stats.bytes
+// and stats.entries without subtracting the old entry's size. After
+// N overwrites of the same key, stats.bytes counted N × record_size
+// for a single live record, causing evictToFit to evict unnecessarily.
+func TestPut_OverwriteDoesNotInflateStats(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100) // 120 bytes per record
+	// Overwrite the same key 5 times.
+	for range 5 {
+		if _, _, err := s.Put(42, body); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	entries, bytes := s.Stats()
+	if entries != 1 {
+		t.Fatalf("entries = %d, want 1 (overwrite should not increment entries)", entries)
+	}
+	wantBytes := int64(headerLen + len(body) + footerLen)
+	if bytes != wantBytes {
+		t.Fatalf("bytes = %d, want %d (overwrite should not inflate bytes)", bytes, wantBytes)
 	}
 }

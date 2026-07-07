@@ -418,8 +418,8 @@ func (t *TieredStore) Keys() []api.Key {
 // fighting the eviction policy: backfilling into an already-full hot
 // tier causes SIEVE to evict the newly inserted keys, which then look
 // "missing" again next round — the self-sustaining loop from #175.
-// The warm tier is not budget-checked here because it is append-only
-// disk storage with its own compaction path.
+// The warm tier is not budget-checked here because it has its own
+// eviction policy (SIEVE) and compaction path — see warm.evictToFit.
 func (t *TieredStore) OverBudget() bool {
 	return t.hot.OverBudget()
 }

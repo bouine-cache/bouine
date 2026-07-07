@@ -276,10 +276,19 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 		return 0, 0, fmt.Errorf("warm: write: %w", err)
 	}
 	seg.size += recSize
-	s.stats.entries.Add(1)
-	s.stats.bytes.Add(recSize)
 
 	s.idxMu.Lock()
+	// Subtract the old entry's bytes on overwrite so stats.bytes
+	// reflects only live records. Without this, repeated overwrites
+	// inflate the counter and evictToFit evicts unnecessarily.
+	if old, ok := s.index[key]; ok {
+		if old.size > 0 {
+			s.stats.bytes.Add(-old.size)
+		}
+	} else {
+		s.stats.entries.Add(1)
+	}
+	s.stats.bytes.Add(recSize)
 	// Insert into the SIEVE list. If the key already exists (overwrite),
 	// reuse the existing entry and mark it visited. Otherwise, insert a
 	// new entry at head with visited=false.
@@ -321,6 +330,9 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 	s.idxMu.Lock()
 	loc, existed := s.index[key]
 	if existed {
+		if loc.sieve != nil {
+			s.evictList.Remove(loc.sieve)
+		}
 		delete(s.index, key)
 		s.stats.entries.Add(-1)
 		if loc.size > 0 {
@@ -761,10 +773,11 @@ func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 		}
 		candLoc, exists := s.index[cand]
 		if !exists {
-			// Defensive: all delete paths remove the SIEVE entry
-			// under idxMu before deleting the index map entry, so
-			// this branch should not be reachable while we hold
-			// idxMu. Skip the orphaned candidate and continue.
+			// Defensive: Delete, DelIndex, dropStaleIndex, and evictOne
+			// all remove the SIEVE entry under idxMu before deleting the
+			// index map entry, so an orphaned SIEVE entry should not be
+			// reachable while we hold idxMu. Skip it and continue rather
+			// than panicking — a bug here degrades eviction efficiency, not correctness.
 			continue
 		}
 		if candLoc.protected {
@@ -1210,7 +1223,10 @@ func (s *Store) Compact() error {
 	// prefer the tail (oldest) entries, which is the desired behavior.
 	s.idxMu.Lock()
 	s.index = newIndex
-	s.evictList = sieve.NewList[uint64]()
+	// Clear the old SIEVE list in-place, returning entries to the pool.
+	// The rebuilt list reuses the same pool, avoiding a multi-MB
+	// allocation spike on compaction with millions of entries.
+	s.evictList.Clear()
 	type keyedLoc struct {
 		key uint64
 		loc warmLoc

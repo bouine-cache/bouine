@@ -48,3 +48,7 @@ field to `Superseded by ADR-NNNN`.
 | 0017   | Static file serving routes                           | Accepted |
 | 0018   | Backfill cooldown for anti-entropy reconciler        | Accepted |
 | 0019   | Churn detection for anti-entropy backfill            | Accepted |
+| 0020   | Hot-to-warm sync                                     | Accepted |
+| 0021   | Refresh popularity gate                               | Accepted |
+| 0022   | Refresh persist cycles                               | Accepted |
+| 0023   | Warm-tier eviction (LRU by last-access timestamp)   | Accepted |

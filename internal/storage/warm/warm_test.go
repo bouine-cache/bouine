@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -1033,11 +1034,16 @@ func TestPut_OverBudget(t *testing.T) {
 			t.Fatalf("Put %d under budget: %v", i, err)
 		}
 	}
-	// 4 records × 120 = 480 bytes. One more 120-byte record would
-	// push us to 600 > 512. This Put must fail with ErrOverBudget.
+	// 4 records × 120 = 480 live bytes. One more 120-byte record would
+	// push live bytes to 600 > 512, but eviction frees 120 bytes first
+	// (360 + 120 = 480 ≤ 512). Mark all as hot-resident to prevent
+	// eviction, forcing ErrOverBudget.
+	for i := 0; i < 4; i++ {
+		s.SetHotResident(uint64(i), true)
+	}
 	_, _, err = s.Put(99, smallBody)
 	if !errors.Is(err, ErrOverBudget) {
-		t.Fatalf("Put over budget: err=%v, want ErrOverBudget", err)
+		t.Fatalf("Put over budget with all hot-resident: err=%v, want ErrOverBudget", err)
 	}
 }
 
@@ -1111,13 +1117,16 @@ func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	}
 	// Delete 15 keys. Each Delete appends a 20-byte tombstone with
 	// no budget check, pushing diskBytes to 3600 + 15*20 = 3900 > maxBytes.
+	// Put no longer gates on diskBytes (it uses stats.bytes), so this
+	// does not cause Put rejection — but it does affect NeedsCompaction,
+	// which compares live bytes to diskBytes for the dead-space ratio.
 	for i := 0; i < 15; i++ {
 		if _, err := s.Delete(uint64(i)); err != nil {
 			t.Fatalf("Delete %d: %v", i, err)
 		}
 	}
-	// Verify diskBytes now exceeds maxBytes — this is the real
-	// operational scenario: tombstones accumulate past the budget.
+	// Verify diskBytes exceeds maxBytes: tombstones accumulate past the
+	// budget on disk even though live bytes (stats.bytes) are under it.
 	if db := s.diskBytes(); db <= maxBytes {
 		t.Fatalf("diskBytes = %d, want > %d (tombstones should push past budget)", db, maxBytes)
 	}
@@ -1337,6 +1346,362 @@ func TestDelete_SetIndexEntry_SkipsBytesDecrement(t *testing.T) {
 	}
 }
 
+func TestEvict_FreesSpaceUnderPressure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Each record = headerLen(16) + 100 + footerLen(4) = 120 bytes.
+	body := make([]byte, 100)
+	for i := range 4 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	// 4 * 120 = 480 bytes. Access keys 0-2 so SIEVE marks them visited,
+	// leave key 3 unvisited (never accessed after Put).
+	for i := range 3 {
+		if _, err := s.Get(uint64(i)); err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+	}
+
+	entriesBefore, bytesBefore := s.Stats()
+	if entriesBefore != 4 {
+		t.Fatalf("entries before evict = %d, want 4", entriesBefore)
+	}
+
+	// Evict one entry.
+	evicted, ok := s.Evict()
+	if !ok {
+		t.Fatal("Evict returned false, expected to evict one entry")
+	}
+	if evicted != 3 {
+		t.Fatalf("evicted key = %d, want 3 (coldest/never-accessed)", evicted)
+	}
+
+	entriesAfter, bytesAfter := s.Stats()
+	if entriesAfter != 3 {
+		t.Fatalf("entries after evict = %d, want 3", entriesAfter)
+	}
+	if bytesAfter >= bytesBefore {
+		t.Fatalf("bytes after evict = %d, should be < %d", bytesAfter, bytesBefore)
+	}
+
+	// Evicted key must be gone from the index.
+	got, err := s.Get(3)
+	if err != nil {
+		t.Fatalf("Get evicted key: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil for evicted key, got %q", got)
+	}
+}
+
+func TestEvict_PrefersLeastRecentlyAccessed(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// SIEVE: entries are inserted at head, so key 0 is at tail.
+	// Accessing all sets visited=true on every entry. Evict sweeps from
+	// the tail, clearing visited bits; after one full sweep all bits are
+	// clear and the tail (key 0) is evicted.
+	for i := range 5 {
+		if _, _, err := s.Put(uint64(i), []byte("data")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Access all so every entry gets a visited bit.
+	for i := range 5 {
+		if _, err := s.Get(uint64(i)); err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+	}
+
+	// Evict should select key 0 (tail, first to have its visited bit
+	// cleared and be evicted on the next sweep).
+	evicted, ok := s.Evict()
+	if !ok {
+		t.Fatal("Evict returned false")
+	}
+	if evicted != 0 {
+		t.Fatalf("evicted = %d, want 0 (tail after visited-bit sweep)", evicted)
+	}
+}
+
+func TestEvict_EmptyStoreReturnsFalse(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	_, ok := s.Evict()
+	if ok {
+		t.Fatal("Evict on empty store should return false")
+	}
+}
+
+func TestEvict_TombstonesEvictedKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if _, _, err := s.Put(42, []byte("evict-me")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	evicted, ok := s.Evict()
+	if !ok {
+		t.Fatal("Evict returned false")
+	}
+	if evicted != 42 {
+		t.Fatalf("evicted = %d, want 42", evicted)
+	}
+
+	// Verify a tombstone was written for the key.
+	var tombCount int
+	if err := s.Scan(func(r Record) error {
+		if r.IsTomb && r.Key == 42 {
+			tombCount++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if tombCount != 1 {
+		t.Fatalf("expected 1 tombstone for key 42, got %d", tombCount)
+	}
+}
+
+func TestEvict_SkipsHotResidentEntries(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := range 4 {
+		if _, _, err := s.Put(uint64(i), []byte("data")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Mark keys 0 and 1 as hot-resident (in hot tier).
+	s.SetHotResident(0, true)
+	s.SetHotResident(1, true)
+
+	// Access all so SIEVE visited bits are set — the only differentiator
+	// is hot-residency.
+	for i := range 4 {
+		if _, err := s.Get(uint64(i)); err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+	}
+
+	// Evict should skip hot-resident entries and pick a cold one.
+	evicted, ok := s.Evict()
+	if !ok {
+		t.Fatal("Evict returned false")
+	}
+	if evicted == 0 || evicted == 1 {
+		t.Fatalf("evicted hot-resident key %d, should have skipped it", evicted)
+	}
+}
+
+func TestEvict_AllHotResidentFallsBackToColdest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := range 3 {
+		if _, _, err := s.Put(uint64(i), []byte("data")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// All hot-resident — Evict must still evict one via fallback.
+	s.SetHotResident(0, true)
+	s.SetHotResident(1, true)
+	s.SetHotResident(2, true)
+
+	// Access only key 0 so SIEVE gives it a visited bit. The SIEVE
+	// sweep will skip visited entries, clear their bits, and evict the
+	// first unvisited one after a full sweep.
+	if _, err := s.Get(0); err != nil {
+		t.Fatalf("Get 0: %v", err)
+	}
+
+	evicted, ok := s.Evict()
+	if !ok {
+		t.Fatal("Evict returned false even with entries")
+	}
+	// With all entries hot-resident, evictOne(true) re-inserts all at
+	// head with visited=true. The fallback evictOne(false) sweeps and
+	// evicts the tail after clearing visited bits. The tail at that
+	// point is the first re-inserted entry, which corresponds to key 1.
+	if evicted != 1 {
+		t.Fatalf("evicted = %d, want 1 (SIEVE fallback after all hot-resident)", evicted)
+	}
+}
+
+func TestPut_EvictsBeforeRejectingOverBudget(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Each record = 120 bytes. 4 records = 480 live bytes.
+	body := make([]byte, 100)
+	for i := range 4 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Access keys 0-2 so SIEVE marks them visited. Key 3 (unvisited,
+	// at the tail) is the eviction victim.
+	for i := range 3 {
+		if _, err := s.Get(uint64(i)); err != nil {
+			t.Fatalf("Get %d: %v", i, err)
+		}
+	}
+
+	// Put a 5th key: live bytes 480 + 120 = 600 > 512, but Evict can
+	// free 120 live bytes (480 - 120 + 120 = 480 <= 512). This should
+	// succeed, not return ErrOverBudget.
+	_, _, err = s.Put(99, body)
+	if err != nil {
+		t.Fatalf("Put with eviction should succeed, got: %v", err)
+	}
+
+	// Key 3 (coldest) should be evicted.
+	got, err := s.Get(3)
+	if err != nil {
+		t.Fatalf("Get 3 after eviction: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("key 3 should have been evicted, got %q", got)
+	}
+
+	// Key 99 should be present.
+	got, err = s.Get(99)
+	if err != nil {
+		t.Fatalf("Get 99 after put-with-evict: %v", err)
+	}
+	if got == nil {
+		t.Fatal("key 99 should exist")
+	}
+}
+
+func TestEvict_CallbackNotifiesHotTier(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var evicted atomic.Int64
+	s.OnEvict = func(key uint64) {
+		evicted.Store(int64(key))
+	}
+
+	if _, _, err := s.Put(42, []byte("data")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, ok := s.Evict()
+	if !ok {
+		t.Fatal("Evict returned false")
+	}
+	if got != 42 {
+		t.Fatalf("evicted = %d, want 42", got)
+	}
+	if evicted.Load() != 42 {
+		t.Fatalf("OnEvict callback not called or wrong key: got %d, want 42", evicted.Load())
+	}
+}
+
+func TestEvict_ConcurrentEvictAndGet(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := range 100 {
+		if _, _, err := s.Put(uint64(i), []byte("data")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	var evictedKeys sync.Map
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 50 {
+			if k, ok := s.Evict(); ok {
+				evictedKeys.Store(k, struct{}{})
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range 100 {
+			_, _ = s.Get(uint64(i))
+		}
+	}()
+	wg.Wait()
+
+	// Verify invariants: every evicted key must be absent from the
+	// index, and stats.entries must equal the number of keys still
+	// in the index.
+	entries, _ := s.Stats()
+	idxKeys := s.Keys()
+	if entries != int64(len(idxKeys)) {
+		t.Fatalf("stats.entries = %d, but index has %d keys", entries, len(idxKeys))
+	}
+
+	// Every evicted key must be absent from the index.
+	for _, k := range idxKeys {
+		if _, evicted := evictedKeys.Load(k); evicted {
+			t.Fatalf("key %d was evicted but is still in the index", k)
+		}
+	}
+}
+
 func TestScanSegment_MmapCorrectness(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1457,3 +1822,4 @@ func BenchmarkScanSegment(b *testing.B) {
 		}
 	}
 }
+

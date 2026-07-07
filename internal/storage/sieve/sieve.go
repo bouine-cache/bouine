@@ -58,6 +58,22 @@ func NewList[K comparable]() *List[K] {
 	return l
 }
 
+// Clear removes all entries from the list, returning them to the pool.
+// The hand, head, and tail are reset to nil and len to 0. Use this to
+// rebuild a list in-place (e.g. during compaction) without allocating a
+// fresh List and losing the pooled entries.
+func (l *List[K]) Clear() {
+	for l.head != nil {
+		e := l.head
+		l.head = e.next
+		l.pool.Put(e)
+	}
+	l.head = nil
+	l.tail = nil
+	l.hand = nil
+	l.len = 0
+}
+
 // Len returns the number of entries.
 func (l *List[K]) Len() int { return l.len }
 

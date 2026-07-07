@@ -361,9 +361,9 @@ func (s *Store) DelIndex(key uint64) {
 // from the current index. Called after WAL replay to restore the stats
 // counters that are not persisted in the WAL. It also backfills the
 // size field in each warmLoc so that subsequent Delete calls can
-// subtract the correct record size from stats.bytes. Returns an error
-// if the underlying scan fails; the stats counters and index are left
-// unchanged in that case so callers do not act on partial data.
+// subtract the correct record size from stats.bytes. On scan error the
+// stats counters are not updated and the index backfill is skipped, so
+// callers do not act on partial data.
 func (s *Store) RecomputeStats() error {
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))

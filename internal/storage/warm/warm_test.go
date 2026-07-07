@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/thylong/bouine/pkg/api"
 )
 
 func tmpStore(t *testing.T) *Store {
@@ -1117,7 +1119,7 @@ func TestPut_OverBudget(t *testing.T) {
 	// (360 + 120 = 480 ≤ 512). Mark all as protected to prevent
 	// eviction, forcing ErrOverBudget.
 	for i := 0; i < 4; i++ {
-		s.Protect(uint64(i))
+		s.Protect(api.Key(i))
 	}
 	_, _, err = s.Put(99, smallBody)
 	if !errors.Is(err, ErrOverBudget) {
@@ -1621,7 +1623,7 @@ func TestEvict_AllProtectedReturnsFalse(t *testing.T) {
 	// All protected — evictOne skips them and returns false within
 	// the skip budget rather than scanning the whole list under idxMu.
 	for i := range 3 {
-		s.Protect(uint64(i))
+		s.Protect(api.Key(i))
 	}
 	if _, ok := s.evictOne(); ok {
 		t.Fatal("evictOne returned true with all entries protected, want false")

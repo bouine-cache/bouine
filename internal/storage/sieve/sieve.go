@@ -33,8 +33,8 @@ type Entry[K comparable] struct {
 func (e *Entry[K]) Visited() bool { return e.visited.Load() }
 
 // MarkVisited sets the visited bit to true. Safe to call under a read
-// lock — the underlying store is atomic.Bool. Used by warm-tier Get to
-// record access without upgrading to a write lock.
+// lock — the underlying store is atomic.Bool. Callers that hold only a
+// read lock can record access without upgrading to a write lock.
 func (e *Entry[K]) MarkVisited() { e.visited.Store(true) }
 
 // List is a SIEVE eviction list. It is NOT goroutine-safe; the caller

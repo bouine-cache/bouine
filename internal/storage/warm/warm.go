@@ -38,6 +38,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/thylong/bouine/internal/storage/sieve"
+	"github.com/thylong/bouine/pkg/api"
 )
 
 const (
@@ -145,8 +146,7 @@ type Store struct {
 	index    map[uint64]warmLoc
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
-	// inserts at head, Evict sweeps from the hand. This scales to
-	// millions of entries without the O(n) scan of a timestamp-based LRU.
+	// inserts at head, Evict sweeps from the hand.
 	evictList *sieve.List[uint64]
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
@@ -295,7 +295,8 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	s.stats.bytes.Add(recSize)
 	// Insert into the SIEVE list. If the key already exists (overwrite),
 	// reuse the existing entry and mark it visited. Otherwise, insert a
-	// new entry at head with visited=false.
+	// new entry at head with visited=false. The bool return (newly
+	// inserted) is discarded — the entry pointer is sufficient.
 	e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
 		if loc, ok := s.index[k]; ok {
 			return loc.sieve
@@ -406,10 +407,10 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 	// Re-check identity (segID + offset) to avoid marking a stale entry
 	// that was evicted and reused between the initial RLock and now.
 	s.idxMu.RLock()
+	defer s.idxMu.RUnlock()
 	if cur, ok := s.index[key]; ok && cur.segID == loc.segID && cur.offset == loc.offset && cur.sieve != nil {
 		cur.sieve.MarkVisited()
 	}
-	s.idxMu.RUnlock()
 
 	return rec.Body, nil
 }
@@ -418,8 +419,12 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 // on startup to rebuild the index from persisted write history. The
 // size is set to 0 because the WAL does not record record sizes;
 // RecomputeStats fills it in by scanning segments after replay.
+//
+// The SIEVE Access call mirrors Put: the bool return (newly inserted) is
+// discarded — the entry pointer is sufficient for the index.
 func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 	s.idxMu.Lock()
+	defer s.idxMu.Unlock()
 	e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
 		if loc, ok := s.index[k]; ok {
 			return loc.sieve
@@ -427,7 +432,6 @@ func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 		return nil
 	})
 	s.index[key] = warmLoc{segID: segID, offset: offset, sieve: e}
-	s.idxMu.Unlock()
 }
 
 // IndexLen returns the number of entries currently in the warm-tier
@@ -650,11 +654,12 @@ func (s *Store) Keys() []uint64 {
 // every hot-tier removal path to match this lifecycle; the paired
 // Protect+SetBacked + Delete-on-hot-eviction lifecycle is simpler
 // and already correct.
-func (s *Store) Protect(key uint64) {
+func (s *Store) Protect(key api.Key) {
+	k := uint64(key)
 	s.idxMu.Lock()
-	if loc, ok := s.index[key]; ok {
+	if loc, ok := s.index[k]; ok {
 		loc.protected = true
-		s.index[key] = loc
+		s.index[k] = loc
 	}
 	s.idxMu.Unlock()
 }
@@ -717,18 +722,16 @@ func (s *Store) evictOne() (uint64, bool) {
 	}
 
 	seg.mu.Lock()
+	defer seg.mu.Unlock()
 	s.idxMu.Lock()
+	defer s.idxMu.Unlock()
 
 	if s.evictList.Len() == 0 {
-		s.idxMu.Unlock()
-		seg.mu.Unlock()
 		return 0, false
 	}
 
 	victimKey, victimLoc, found := s.pickEvictVictim()
 	if !found {
-		s.idxMu.Unlock()
-		seg.mu.Unlock()
 		return 0, false
 	}
 
@@ -737,17 +740,14 @@ func (s *Store) evictOne() (uint64, bool) {
 	// new live record between this tombstone and the index removal
 	// below — the on-disk order is tombstone-then-future-live, which
 	// rebuildIndexFromScan honors (tombstone applied first, then the
-	// later live record wins).
+	// later live record wins). On failure, restore the SIEVE entry and
+	// index entry so the victim is not lost.
 	if _, err := seg.f.Seek(seg.size, io.SeekStart); err != nil {
 		s.restoreSIEVEEntry(victimKey, victimLoc)
-		s.idxMu.Unlock()
-		seg.mu.Unlock()
 		return 0, false
 	}
 	if err := writeRecord(seg.f, magicDead, victimKey, nil); err != nil {
 		s.restoreSIEVEEntry(victimKey, victimLoc)
-		s.idxMu.Unlock()
-		seg.mu.Unlock()
 		return 0, false
 	}
 	seg.size += int64(headerLen + footerLen)
@@ -767,8 +767,6 @@ func (s *Store) evictOne() (uint64, bool) {
 	if callback := s.OnEvict; callback != nil {
 		callback(victimKey)
 	}
-	s.idxMu.Unlock()
-	seg.mu.Unlock()
 	return victimKey, true
 }
 

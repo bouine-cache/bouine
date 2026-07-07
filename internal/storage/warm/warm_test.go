@@ -1336,3 +1336,124 @@ func TestDelete_SetIndexEntry_SkipsBytesDecrement(t *testing.T) {
 			bytesAfter)
 	}
 }
+
+func TestScanSegment_MmapCorrectness(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	const numRecords = 1000
+	for i := range numRecords {
+		body := []byte(fmt.Sprintf("body-%d-padding", i))
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	var count int
+	var lastKey uint64
+	err = s.Scan(func(r Record) error {
+		if r.IsTomb {
+			return nil
+		}
+		count++
+		lastKey = r.Key
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if count != numRecords {
+		t.Fatalf("expected %d records, got %d", numRecords, count)
+	}
+	if lastKey != numRecords-1 {
+		t.Fatalf("last key = %d, want %d", lastKey, numRecords-1)
+	}
+}
+
+func TestScanSegment_MmapTornTrailing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for i := range 10 {
+		if _, _, err := s.Put(uint64(i), []byte("body")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Truncate the last segment to simulate a torn write.
+	s.mu.RLock()
+	seg := s.segs[len(s.segs)-1]
+	s.mu.RUnlock()
+	seg.mu.Lock()
+	info, _ := seg.f.Stat()
+	seg.mu.Unlock()
+	if info.Size() > 0 {
+		if err := os.Truncate(seg.Path, info.Size()-2); err != nil {
+			t.Fatalf("Truncate: %v", err)
+		}
+	}
+
+	// Scan should skip the torn trailing record, not error.
+	var count int
+	err = s.Scan(func(r Record) error {
+		if !r.IsTomb {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Scan with torn trailing record: %v", err)
+	}
+	// At least some records should be intact (exact count depends on
+	// where the truncation falls).
+	if count == 0 {
+		t.Fatal("expected at least 1 intact record, got 0")
+	}
+}
+
+func BenchmarkScanSegment(b *testing.B) {
+	dir := b.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := make([]byte, 256)
+	for i := range body {
+		body[i] = byte(i)
+	}
+	const numRecords = 5000
+	for i := range numRecords {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		var count int
+		if err := s.Scan(func(r Record) error {
+			if !r.IsTomb {
+				count++
+			}
+			return nil
+		}); err != nil {
+			b.Fatal(err)
+		}
+		if count != numRecords {
+			b.Fatalf("count = %d, want %d", count, numRecords)
+		}
+	}
+}

@@ -781,3 +781,65 @@ func truncateLastSegmentRecord(t *testing.T, warmDir string) {
 		t.Fatalf("truncate: %v", err)
 	}
 }
+
+// TestTiered_WALCheckpointOnClose verifies that Close writes a WAL
+// checkpoint so the next restart can replay the WAL instead of falling
+// back to a full segment scan. This is critical for startup time on
+// large warm tiers.
+func TestTiered_WALCheckpointOnClose(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	walPath := filepath.Join(dir, "index.wal")
+	ctx := context.Background()
+
+	newStore := func() *TieredStore {
+		ts, err := NewTieredStore(TieredConfig{
+			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:        walPath,
+			BodyThreshold: 512,
+		})
+		if err != nil {
+			t.Fatalf("NewTieredStore: %v", err)
+		}
+		return ts
+	}
+
+	// Write objects to the warm tier.
+	ts1 := newStore()
+	for i := range 10 {
+		k := KeyHash([]byte(fmt.Sprintf("checkpoint-key-%d", i)))
+		if err := ts1.Put(ctx, k, bigObj(k, 1024)); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	st1 := ts1.Stats()
+	if st1.WarmEntries != 10 {
+		t.Fatalf("before close: warm entries = %d, want 10", st1.WarmEntries)
+	}
+	_ = ts1.Close(ctx)
+
+	// The WAL file should contain a checkpoint (all 10 live entries).
+	// Count entries in the WAL file.
+	var walEntries int
+	if err := wal.Replay(walPath, func(e wal.Entry) error {
+		if e.IsPut() {
+			walEntries++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WAL replay after close: %v", err)
+	}
+	if walEntries != 10 {
+		t.Fatalf("WAL checkpoint should contain 10 Put entries, got %d", walEntries)
+	}
+
+	// Reopen: WAL replay should restore all 10 entries without segment scan.
+	ts2 := newStore()
+	t.Cleanup(func() { _ = ts2.Close(ctx) })
+	st2 := ts2.Stats()
+	if st2.WarmEntries != 10 {
+		t.Fatalf("after reopen: warm entries = %d, want 10", st2.WarmEntries)
+	}
+}

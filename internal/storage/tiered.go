@@ -630,6 +630,18 @@ func (t *TieredStore) Close(ctx context.Context) error {
 	t.compactWg.Wait()
 	t.syncWg.Wait()
 
+	// Write a WAL checkpoint before closing so the next restart can
+	// replay the WAL instead of falling back to a full segment scan.
+	// The checkpoint is only useful if the warm tier has live entries;
+	// an empty warm tier means there is nothing to replay.
+	if t.warm != nil {
+		if entries, _ := t.warm.Stats(); entries > 0 {
+			if err := t.rewriteWAL(); err != nil {
+				t.logger.Warn("wal checkpoint on close failed; next restart will use segment scan", "error", err)
+			}
+		}
+	}
+
 	t.walMu.Lock()
 	if t.wal != nil {
 		if err := t.wal.Close(); err != nil {

@@ -23,6 +23,7 @@
 package warm
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -30,13 +31,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/thylong/bouine/internal/storage/sieve"
 	"golang.org/x/sys/unix"
+
+	"github.com/thylong/bouine/internal/storage/sieve"
 )
 
 const (
@@ -45,6 +48,12 @@ const (
 	headerLen        = 4 + 8 + 4  // magic + key + body_len
 	footerLen        = 4          // crc32c
 	segExt           = ".seg"
+	// maxWarmEvictSkips bounds the number of hot-resident entries SIEVE
+	// may skip while searching for a non-hot-resident victim. This keeps
+	// eviction O(1) worst case under idxMu even when most entries are
+	// hot-resident (the steady state once the warm sync loop has marked
+	// the majority of entries). Mirrors the hot tier's maxEvictSkips.
+	maxWarmEvictSkips = 16
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -141,13 +150,18 @@ type Store struct {
 	// inserts at head, Evict sweeps from the hand. This scales to
 	// millions of entries without the O(n) scan of a timestamp-based LRU.
 	evictList *sieve.List[uint64]
-	// OnEvict is called with the evicted key after Evict removes the
-	// entry from the warm tier and writes the tombstone. The hot tier uses
+	// OnEvict is called with the evicted key after evictOne removes the
+	// entry from the warm index and writes the tombstone. The hot tier uses
 	// this to clear hasWarm on the corresponding hot entry so it is no
 	// longer preferred for hot-tier eviction.
 	//
-	// CONSTRAINT: MUST NOT block or perform I/O. The callback runs outside
-	// idxMu but on the Put path — blocking stalls the writer.
+	// CONSTRAINT: MUST NOT block or perform I/O. The callback runs UNDER
+	// idxMu (and seg.mu) — firing it under the locks closes the race where
+	// a concurrent Put for the victim key re-inserts a live record and
+	// sets hasWarm=true, only to have a late OnEvict clobber hasWarm back
+	// to false and permanently strand the warm entry as hotResident.
+	// ClearWarm (the only current callback) is O(1) and lock-only, so
+	// holding idxMu across it adds no I/O latency.
 	OnEvict func(key uint64)
 }
 
@@ -603,38 +617,30 @@ func (s *Store) Keys() []uint64 {
 	return keys
 }
 
-// SetHotResident marks or unmarks a warm-tier entry as also living in the
-// hot tier (L0). Evict skips hot-resident entries to avoid evicting a warm
-// copy that the hot tier would immediately re-sync. If the key is not in
-// the warm index this is a no-op.
-func (s *Store) SetHotResident(key uint64, resident bool) {
+// MarkHotResident marks a warm-tier entry as also living in the hot
+// tier (L0). Evict skips hot-resident entries to avoid evicting a warm
+// copy that the hot tier would immediately re-sync. If the key is not
+// in the warm index this is a no-op.
+//
+// There is deliberately no UnmarkHotResident: the flag is cleared only
+// by deletion (hot-tier eviction tombstones the warm entry, or warm
+// eviction removes the index entry). A standalone unmark would need to
+// be wired into every hot-tier removal path to avoid stranding warm
+// entries as permanently hotResident; the delete-based lifecycle is
+// simpler and already correct.
+func (s *Store) MarkHotResident(key uint64) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
-		loc.hotResident = resident
+		loc.hotResident = true
 		s.index[key] = loc
 	}
 	s.idxMu.Unlock()
 }
 
-// Evict selects an entry for eviction using the SIEVE algorithm,
-// writes a tombstone for it (via Delete), removes it from the index,
-// and fires OnEvict if set. Space is reclaimed at the next compaction
-// (tombstones don't shrink the segment file).
-//
-// Hot-resident entries are skipped first. If all entries are
-// hot-resident, falls back to evicting any entry. Returns the evicted
-// key and true, or 0 and false if the index is empty.
-func (s *Store) Evict() (uint64, bool) {
-	if k, ok := s.evictOne(true); ok {
-		return k, true
-	}
-	return s.evictOne(false)
-}
-
 // evictToFit attempts to evict entries until the given record size fits
 // within the live-bytes budget (stats.bytes). Returns nil if space was
 // freed, or ErrOverBudget if eviction cannot free enough space (empty
-// index or all entries hot-resident and live bytes still over budget).
+// index or all visible entries hot-resident within the skip budget).
 // Evicted entries are tombstoned; actual disk space is reclaimed at the
 // next compaction. The budget is checked against live bytes, not
 // diskBytes (total segment file sizes), because tombstones increase
@@ -642,80 +648,87 @@ func (s *Store) Evict() (uint64, bool) {
 //
 // Only non-hot-resident entries are evicted on the Put path: evicting a
 // hot-resident warm entry is wasteful because the hot tier will re-sync
-// it on the next warm sync cycle.
+// it on the next warm sync cycle. If no non-hot-resident victim is found
+// within maxWarmEvictSkips SIEVE probes, the Put is rejected with
+// ErrOverBudget rather than scanning the whole list under idxMu.
 func (s *Store) evictToFit(recSize int64) error {
 	if s.maxBytes <= 0 {
 		return nil
+	}
+	// A record larger than the entire budget can never fit, even with
+	// an empty tier. Reject early to avoid evicting the whole warm tier
+	// for nothing.
+	if recSize > s.maxBytes {
+		return ErrOverBudget
 	}
 	for {
 		if s.stats.bytes.Load()+recSize <= s.maxBytes {
 			return nil
 		}
-		if _, ok := s.evictOne(true); !ok {
+		if _, ok := s.evictOne(); !ok {
 			return ErrOverBudget
 		}
 	}
 }
 
-// evictOne picks a victim via SIEVE, removes it from the index, writes a
-// tombstone, and fires OnEvict. If skipHotResident is true, hot-resident
+// evictOne picks a non-hot-resident victim via SIEVE, writes a tombstone
+// for it, removes it from the index, and fires OnEvict. Hot-resident
 // entries are given a second chance (re-inserted at the SIEVE list head
-// with visited=true). If all entries are hot-resident and skipHotResident
-// is true, returns false.
+// with visited=true). The scan is bounded by maxWarmEvictSkips so the
+// worst case is O(1) under idxMu even when most entries are hot-resident.
+// Returns the evicted key and true, or 0 and false if no non-hot-resident
+// victim was found within the skip budget or the index is empty.
 //
-// SIEVE provides O(1) eviction: the hand sweeps from the tail, clearing
-// visited bits and giving second chances, until it finds an unvisited
-// entry. Hot-resident entries that SIEVE selects are re-inserted at the
-// head with visited=true, giving them a full sweep before reconsideration.
-// The retry cap is the list length, preventing infinite loops when all
-// entries are hot-resident.
-func (s *Store) evictOne(skipHotResident bool) (uint64, bool) {
+// Lock ordering matches Put/Delete: activeSeg → seg.mu → idxMu. Both
+// seg.mu and idxMu are held across the tombstone write, the index
+// removal, AND the OnEvict callback. Firing the callback under the
+// locks closes the race where a concurrent Put for the victim key
+// re-inserts a live record and sets hasWarm=true on the hot entry,
+// only to have the late OnEvict clobber hasWarm back to false —
+// permanently stranding the warm entry as hotResident and making it
+// un-evictable. ClearWarm is O(1) and lock-only, so the extra hold
+// time is negligible.
+func (s *Store) evictOne() (uint64, bool) {
+	seg, err := s.activeSeg()
+	if err != nil {
+		return 0, false
+	}
+
+	seg.mu.Lock()
 	s.idxMu.Lock()
 
-	listLen := s.evictList.Len()
-	if listLen == 0 {
+	if s.evictList.Len() == 0 {
 		s.idxMu.Unlock()
+		seg.mu.Unlock()
 		return 0, false
 	}
 
-	var victimKey uint64
-	var victimLoc warmLoc
-	found := false
-
-	for range listLen {
-		key, ok := s.evictList.Evict()
-		if !ok {
-			break
-		}
-		loc, exists := s.index[key]
-		if !exists {
-			// Stale SIEVE entry: the key was deleted from the index
-			// but the SIEVE entry was not removed (can happen if the
-			// delete path races). SIEVE already removed it from the
-			// list; just continue to the next candidate.
-			continue
-		}
-		if skipHotResident && loc.hotResident {
-			// Give the hot-resident entry a second chance: re-insert
-			// at head with visited=true. On the next full sweep the
-			// hand will clear visited, and if still hot-resident on
-			// the sweep after that, the entry becomes eligible.
-			e, _ := s.evictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
-			e.MarkVisited()
-			loc.sieve = e
-			s.index[key] = loc
-			continue
-		}
-		victimKey = key
-		victimLoc = loc
-		found = true
-		break
-	}
-
+	victimKey, victimLoc, found := s.pickEvictVictim()
 	if !found {
 		s.idxMu.Unlock()
+		seg.mu.Unlock()
 		return 0, false
 	}
+
+	// Write the tombstone to the active segment. Both seg.mu and idxMu
+	// are held, so a concurrent Put for victimKey cannot interleave a
+	// new live record between this tombstone and the index removal
+	// below — the on-disk order is tombstone-then-future-live, which
+	// rebuildIndexFromScan honors (tombstone applied first, then the
+	// later live record wins).
+	if _, err := seg.f.Seek(seg.size, io.SeekStart); err != nil {
+		s.restoreSIEVEEntry(victimKey, victimLoc)
+		s.idxMu.Unlock()
+		seg.mu.Unlock()
+		return 0, false
+	}
+	if err := writeRecord(seg.f, magicDead, victimKey, nil); err != nil {
+		s.restoreSIEVEEntry(victimKey, victimLoc)
+		s.idxMu.Unlock()
+		seg.mu.Unlock()
+		return 0, false
+	}
+	seg.size += int64(headerLen + footerLen)
 
 	// Remove from index and decrement stats. The SIEVE entry was
 	// already removed by Evict() and returned to the pool.
@@ -724,31 +737,59 @@ func (s *Store) evictOne(skipHotResident bool) (uint64, bool) {
 	if victimLoc.size > 0 {
 		s.stats.bytes.Add(-victimLoc.size)
 	}
-	callback := s.OnEvict
-	s.idxMu.Unlock()
-
-	// Write tombstone outside the lock. Delete will not find the key
-	// in the index (already removed), so it only appends the tombstone
-	// record — no double stats decrement.
-	if _, err := s.Delete(victimKey); err != nil {
-		// Tombstone write failed: restore the index entry and re-insert
-		// into the SIEVE list so the data is not orphaned.
-		s.idxMu.Lock()
-		e, _ := s.evictList.Access(victimKey, func(uint64) *sieve.Entry[uint64] { return nil })
-		victimLoc.sieve = e
-		s.index[victimKey] = victimLoc
-		s.stats.entries.Add(1)
-		if victimLoc.size > 0 {
-			s.stats.bytes.Add(victimLoc.size)
-		}
-		s.idxMu.Unlock()
-		return 0, false
-	}
-
-	if callback != nil {
+	// Fire OnEvict under idxMu (and seg.mu) so a concurrent Put for
+	// victimKey cannot re-insert a live record and set hasWarm=true
+	// before ClearWarm runs — that would clobber hasWarm on a genuinely
+	// warm-backed hot entry, stranding the warm copy as permanently
+	// hotResident and un-evictable. ClearWarm is O(1) lock-only.
+	if callback := s.OnEvict; callback != nil {
 		callback(victimKey)
 	}
+	s.idxMu.Unlock()
+	seg.mu.Unlock()
 	return victimKey, true
+}
+
+// pickEvictVictim sweeps the SIEVE list (bounded by maxWarmEvictSkips)
+// for a non-hot-resident victim. Hot-resident entries are re-inserted
+// at the head with visited=true (second chance). idxMu must be held.
+func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
+	for range maxWarmEvictSkips {
+		cand, ok := s.evictList.Evict()
+		if !ok {
+			return 0, warmLoc{}, false
+		}
+		candLoc, exists := s.index[cand]
+		if !exists {
+			// Defensive: all delete paths remove the SIEVE entry
+			// under idxMu before deleting the index map entry, so
+			// this branch should not be reachable while we hold
+			// idxMu. Skip the orphaned candidate and continue.
+			continue
+		}
+		if candLoc.hotResident {
+			// Give the hot-resident entry a second chance: re-insert
+			// at head with visited=true. The hand will clear visited
+			// on a future sweep and reconsider it.
+			e, _ := s.evictList.Access(cand, func(uint64) *sieve.Entry[uint64] { return nil })
+			e.MarkVisited()
+			candLoc.sieve = e
+			s.index[cand] = candLoc
+			continue
+		}
+		return cand, candLoc, true
+	}
+	return 0, warmLoc{}, false
+}
+
+// restoreSIEVEEntry re-inserts a victim into the SIEVE list and restores
+// its index entry after a failed tombstone write. idxMu must be held.
+// The SIEVE entry was removed by Evict(), so a fresh entry is inserted
+// at the head with visited=false; the next Get will re-mark it.
+func (s *Store) restoreSIEVEEntry(key uint64, loc warmLoc) {
+	e, _ := s.evictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
+	loc.sieve = e
+	s.index[key] = loc
 }
 
 // Sync flushes all open segment files to stable storage. Used by Close
@@ -1159,19 +1200,35 @@ func (s *Store) Compact() error {
 		_ = seg.f.Close()
 	}
 	s.segs = fresh.segs
-	// Replace the index and rebuild the SIEVE list from the compacted
-	// entries. Compaction rewrites all live records to fresh segments,
-	// so stale SIEVE entries (for tombstoned/overwritten keys) are gone.
-	// All rebuilt entries start with visited=false — the first eviction
-	// sweep after compaction will prefer the tail (oldest) entries, which
-	// is reasonable since compaction preserves append order.
+	// Replace the index and rebuild the SIEVE list in append order
+	// (by segID, offset). Map iteration is randomized, so naively
+	// iterating s.index would produce a random SIEVE tail — defeating
+	// the aging property where the tail holds the oldest entries.
+	// Sorting by (segID, offset) preserves the on-disk append order
+	// that compaction produced. All rebuilt entries start with
+	// visited=false — the first eviction sweep after compaction will
+	// prefer the tail (oldest) entries, which is the desired behavior.
 	s.idxMu.Lock()
 	s.index = newIndex
 	s.evictList = sieve.NewList[uint64]()
+	type keyedLoc struct {
+		key uint64
+		loc warmLoc
+	}
+	ordered := make([]keyedLoc, 0, len(s.index))
 	for k, loc := range s.index {
-		e, _ := s.evictList.Access(k, func(uint64) *sieve.Entry[uint64] { return nil })
-		loc.sieve = e
-		s.index[k] = loc
+		ordered = append(ordered, keyedLoc{k, loc})
+	}
+	slices.SortFunc(ordered, func(a, b keyedLoc) int {
+		if a.loc.segID != b.loc.segID {
+			return cmp.Compare(a.loc.segID, b.loc.segID)
+		}
+		return cmp.Compare(a.loc.offset, b.loc.offset)
+	})
+	for _, kl := range ordered {
+		e, _ := s.evictList.Access(kl.key, func(uint64) *sieve.Entry[uint64] { return nil })
+		kl.loc.sieve = e
+		s.index[kl.key] = kl.loc
 	}
 	s.idxMu.Unlock()
 	s.stats.entries.Store(int64(len(newIndex)))

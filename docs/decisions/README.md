@@ -51,4 +51,4 @@ field to `Superseded by ADR-NNNN`.
 | 0020   | Hot-to-warm sync                                     | Accepted |
 | 0021   | Refresh popularity gate                               | Accepted |
 | 0022   | Refresh persist cycles                               | Accepted |
-| 0023   | Warm-tier eviction (LRU by last-access timestamp)   | Accepted |
+| 0023   | Warm-tier eviction (SIEVE)                            | Accepted |

@@ -1154,9 +1154,8 @@ func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	}
 
 	// Compaction must succeed even though diskBytes > maxBytes.
-	// The temp store uses MaxBytes: 0 (defense-in-depth) so the
-	// live records (15 * 120 = 1800 bytes, well under maxBytes)
-	// are written without rejection.
+	// Live records (15 * 120 = 1800 bytes, well under maxBytes)
+	// fit in the temp store regardless of its budget setting.
 	if err := s.Compact(); err != nil {
 		t.Fatalf("Compact with diskBytes > maxBytes: %v", err)
 	}

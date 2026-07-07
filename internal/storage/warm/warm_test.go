@@ -1087,37 +1087,6 @@ func TestPut_MaxBytesZeroDisablesEnforcement(t *testing.T) {
 	}
 }
 
-func TestPut_OverBudgetIncrementsCounter(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	s, err := NewStore(Config{Dir: dir, MaxBytes: 256, SegMax: 1 << 20})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-
-	body := make([]byte, 100) // 120 bytes per record
-	// Fill up to budget: 2 records = 240 bytes, 3rd would be 360 > 256.
-	for i := 0; i < 2; i++ {
-		if _, _, err := s.Put(uint64(i), body); err != nil {
-			t.Fatalf("Put %d under budget: %v", i, err)
-		}
-	}
-	if n := s.OverBudgetRejections(); n != 0 {
-		t.Fatalf("OverBudgetRejections before rejection = %d, want 0", n)
-	}
-
-	// This Put must be rejected.
-	_, _, err = s.Put(99, body)
-	if !errors.Is(err, ErrOverBudget) {
-		t.Fatalf("Put over budget: err=%v, want ErrOverBudget", err)
-	}
-	if n := s.OverBudgetRejections(); n != 1 {
-		t.Fatalf("OverBudgetRejections = %d, want 1", n)
-	}
-}
-
 func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	t.Parallel()
 

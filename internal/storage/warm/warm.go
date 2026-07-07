@@ -124,7 +124,6 @@ type warmStats struct {
 	entries        atomic.Int64
 	bytes          atomic.Int64
 	staleSelfHeals atomic.Int64
-	overBudget     atomic.Int64
 }
 
 // Config configures the warm store.
@@ -202,7 +201,6 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	// no limit (backward compatible with the default).
 	if s.maxBytes > 0 {
 		if s.diskBytes()+recSize > s.maxBytes {
-			s.stats.overBudget.Add(1)
 			return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
 		}
 	}
@@ -439,14 +437,6 @@ func (s *Store) Stats() (entries, bytes int64) {
 // those into silent misses, so this counter is the only signal.
 func (s *Store) SelfHeals() int64 {
 	return s.stats.staleSelfHeals.Load()
-}
-
-// OverBudgetRejections returns the number of Put calls rejected
-// because the total disk footprint would exceed MaxBytes. Operators
-// can poll this to detect a full warm tier and trigger compaction
-// or eviction to reclaim space.
-func (s *Store) OverBudgetRejections() int64 {
-	return s.stats.overBudget.Load()
 }
 
 // dropStaleIndex removes the index entry for key iff it still points

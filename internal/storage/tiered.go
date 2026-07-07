@@ -167,7 +167,7 @@ func (t *TieredStore) initWAL(walDir string) error {
 	if t.warm == nil {
 		return nil
 	}
-	if rErr := wal.Replay(walDir, func(e wal.Entry) error {
+	rErr := wal.Replay(walDir, func(e wal.Entry) error {
 		switch {
 		case e.IsPut():
 			t.warm.SetIndex(e.Key, int(e.SegID), e.Offset)
@@ -175,14 +175,23 @@ func (t *TieredStore) initWAL(walDir string) error {
 			t.warm.DelIndex(e.Key)
 		}
 		return nil
-	}); rErr != nil {
+	})
+	if rErr != nil {
 		t.logger.Warn("wal replay failed; warm-tier index may be incomplete",
 			"error", rErr)
 	}
-	// Fallback: if WAL replay produced an empty index but warm segments
-	// contain records, rebuild from segment scan.
-	if entries, _ := t.warm.Stats(); entries == 0 {
-		t.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
+	// Fallback: if WAL replay failed or produced an empty index,
+	// rebuild from segment scan. We check IndexLen (the actual map
+	// size) rather than Stats() because SetIndex populates the map
+	// without touching the stats counters — Stats() always returns 0
+	// after replay, which caused a redundant full scan on every restart.
+	needRebuild := rErr != nil || t.warm.IndexLen() == 0
+	if needRebuild {
+		if rErr != nil {
+			t.logger.Warn("rebuilding index from segment scan after WAL replay error")
+		} else {
+			t.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
+		}
 		if err := t.rebuildIndexFromScan(); err != nil {
 			t.logger.Warn("segment scan index rebuild failed", "error", err)
 		}
@@ -609,9 +618,18 @@ func (t *TieredStore) rewriteWAL() error {
 		return fmt.Errorf("wal rewrite: close tmp: %w", err)
 	}
 	if err := t.wal.Close(); err != nil {
+		t.wal = nil
 		return fmt.Errorf("wal rewrite: close old: %w", err)
 	}
+	t.wal = nil // prevent double-close in Close() if rename fails
 	if err := os.Rename(tmpPath, t.walPath); err != nil {
+		// Rename failed: old WAL file is still at t.walPath but closed.
+		// Reopen so the WAL remains usable for subsequent appends and Close.
+		reopened, reopenErr := wal.Open(t.walPath)
+		if reopenErr != nil {
+			return fmt.Errorf("wal rewrite: rename: %w; reopen old WAL: %v", err, reopenErr)
+		}
+		t.wal = reopened
 		return fmt.Errorf("wal rewrite: rename: %w", err)
 	}
 	t.wal, err = wal.Open(t.walPath)
@@ -629,18 +647,6 @@ func (t *TieredStore) Close(ctx context.Context) error {
 	close(t.done)
 	t.compactWg.Wait()
 	t.syncWg.Wait()
-
-	// Write a WAL checkpoint before closing so the next restart can
-	// replay the WAL instead of falling back to a full segment scan.
-	// The checkpoint is only useful if the warm tier has live entries;
-	// an empty warm tier means there is nothing to replay.
-	if t.warm != nil {
-		if entries, _ := t.warm.Stats(); entries > 0 {
-			if err := t.rewriteWAL(); err != nil {
-				t.logger.Warn("wal checkpoint on close failed; next restart will use segment scan", "error", err)
-			}
-		}
-	}
 
 	t.walMu.Lock()
 	if t.wal != nil {

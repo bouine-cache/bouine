@@ -166,10 +166,6 @@ type Stats struct {
 	WarmEntries int64 `json:"warm_entries"`
 	// WarmBytes is the total bytes used by warm-tier segments.
 	WarmBytes int64 `json:"warm_bytes"`
-	// WarmSelfHeals is the number of stale warm-tier index entries
-	// dropped by the self-heal path since boot. A non-zero rate
-	// indicates segment-management bugs or disk faults.
-	WarmSelfHeals int64 `json:"warm_self_heals"`
 	// Hits is the total cache hits since boot.
 	Hits int64 `json:"hits"`
 	// Misses is the total cache misses since boot.

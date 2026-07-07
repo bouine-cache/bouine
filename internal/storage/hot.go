@@ -633,6 +633,19 @@ func (h *HotStore) SetWarm(key api.Key) {
 	}
 }
 
+// ClearWarm unmarks the entry for key as having a warm-tier backup. Called
+// when the warm tier evicts the key so the hot tier stops preferring it
+// for eviction (it's no longer cheap to evict — there's no disk backup).
+func (h *HotStore) ClearWarm(key api.Key) {
+	s := h.shard(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[key]; ok && e.hasWarm {
+		e.hasWarm = false
+		s.warmCount--
+	}
+}
+
 // evictPreferWarm selects and removes an entry from the SIEVE list,
 // preferring entries with warm-tier backups. It tries up to maxSkips
 // SIEVE evictions, deferring hot-only entries back into the list.

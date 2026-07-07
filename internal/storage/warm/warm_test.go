@@ -1118,43 +1118,51 @@ func TestPut_OverBudgetIncrementsCounter(t *testing.T) {
 	}
 }
 
-func TestCompact_SucceedsAtMaxBytes(t *testing.T) {
+func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	t.Parallel()
 
+	// Each live record: headerLen(16) + 100 body + footerLen(4) = 120 bytes.
+	// Each tombstone: headerLen(16) + footerLen(4) = 20 bytes.
+	const maxBytes = int64(3600)
 	dir := t.TempDir()
-	// Tight budget: enough for the live data but compaction's temp
-	// store must not inherit this limit.
-	s, err := NewStore(Config{Dir: dir, MaxBytes: 4096, SegMax: 1 << 20})
+	s, err := NewStore(Config{Dir: dir, MaxBytes: maxBytes, SegMax: 1 << 20})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	// Write enough records to approach the budget, then delete half
-	// to create tombstones. Compaction must succeed despite the
-	// store being near maxBytes.
-	body := []byte("compact-me-padding-to-128-bytes----------------" +
-		"------------------------------------------------" +
-		"------------------------------------------------")
-	for i := range 20 {
+	body := make([]byte, 100) // 120 bytes per record
+	// Write 30 live records (3600 bytes = exactly maxBytes).
+	for i := 0; i < 30; i++ {
 		segID, off, err := s.Put(uint64(i), body)
 		if err != nil {
 			t.Fatalf("Put %d: %v", i, err)
 		}
 		s.SetIndex(uint64(i), segID, off)
 	}
-	for i := range 10 {
+	// Delete 15 keys. Each Delete appends a 20-byte tombstone with
+	// no budget check, pushing diskBytes to 3600 + 15*20 = 3900 > maxBytes.
+	for i := 0; i < 15; i++ {
 		if _, err := s.Delete(uint64(i)); err != nil {
 			t.Fatalf("Delete %d: %v", i, err)
 		}
 	}
+	// Verify diskBytes now exceeds maxBytes — this is the real
+	// operational scenario: tombstones accumulate past the budget.
+	if db := s.diskBytes(); db <= maxBytes {
+		t.Fatalf("diskBytes = %d, want > %d (tombstones should push past budget)", db, maxBytes)
+	}
 
+	// Compaction must succeed even though diskBytes > maxBytes.
+	// The temp store uses MaxBytes: 0 (defense-in-depth) so the
+	// live records (15 * 120 = 1800 bytes, well under maxBytes)
+	// are written without rejection.
 	if err := s.Compact(); err != nil {
-		t.Fatalf("Compact at maxBytes: %v", err)
+		t.Fatalf("Compact with diskBytes > maxBytes: %v", err)
 	}
 
 	// Verify live keys survived.
-	for i := 10; i < 20; i++ {
+	for i := 15; i < 30; i++ {
 		got, err := s.Get(uint64(i))
 		if err != nil {
 			t.Fatalf("Get %d after compact: %v", i, err)

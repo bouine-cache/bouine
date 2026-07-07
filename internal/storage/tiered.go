@@ -269,9 +269,9 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		if err != nil {
 			if errors.Is(err, warm.ErrOverBudget) {
 				// Hot tier already holds the object; warm-tier
-				// rejection is non-fatal. Log and continue so the
-				// caller sees a successful Put.
-				t.logger.Debug("warm tier over budget, skipping warm write",
+				// rejection is non-fatal. The object won't survive
+				// a restart, so log at Warn for operator visibility.
+				t.logger.Warn("warm tier over budget, skipping warm write",
 					"key", key)
 				return nil
 			}

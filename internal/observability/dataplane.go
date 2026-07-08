@@ -79,22 +79,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Help:      "Number of Vary variant storage attempts rejected because MaxVariants was exceeded.",
 		}),
 	}
-	m.CFPurgeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "cloudflare_purge_total",
-		Help:      "Cloudflare cache invalidation API calls by operation and status.",
-	}, []string{"operation", "status"})
-	m.CFPurgeDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "bouine",
-		Name:      "cloudflare_purge_duration_seconds",
-		Help:      "Latency of Cloudflare cache invalidation API calls.",
-		Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
-	}, []string{"operation"})
-	m.CFPurgeSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "cloudflare_purge_skipped_total",
-		Help:      "Invalidations not forwarded to Cloudflare (disabled or incompatible regex).",
-	}, []string{"reason"})
+	m.initCFPurgeMetrics()
 	m.HotStoreBytes = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
 		Name:      "hot_store_bytes",
@@ -125,6 +110,44 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "warm_store_self_heals_total",
 		Help:      "Total stale warm-tier index entries dropped by the self-heal path since boot. A non-zero rate indicates segment-management bugs or disk faults.",
 	})
+	m.initRefreshMetrics()
+	m.initWALMetrics()
+	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
+		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
+		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
+		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
+		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
+		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
+		m.WALDroppedEntries, m.WALLastSyncTimestamp)
+	return m
+}
+
+// initCFPurgeMetrics creates the Cloudflare purge collectors on m.
+// Called from NewDataPlaneMetrics; extracted to keep that function under
+// the funlen limit.
+func (m *DataPlaneMetrics) initCFPurgeMetrics() {
+	m.CFPurgeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_purge_total",
+		Help:      "Cloudflare cache invalidation API calls by operation and status.",
+	}, []string{"operation", "status"})
+	m.CFPurgeDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_purge_duration_seconds",
+		Help:      "Latency of Cloudflare cache invalidation API calls.",
+		Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
+	}, []string{"operation"})
+	m.CFPurgeSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_purge_skipped_total",
+		Help:      "Invalidations not forwarded to Cloudflare (disabled or incompatible regex).",
+	}, []string{"reason"})
+}
+
+// initWALMetrics creates the async-WAL collectors on m.
+// Called from NewDataPlaneMetrics; extracted to keep that function under
+// the funlen limit.
+func (m *DataPlaneMetrics) initWALMetrics() {
 	m.WALDroppedEntries = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "bouine",
 		Name:      "wal_dropped_entries_total",
@@ -135,15 +158,6 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "wal_last_sync_timestamp_seconds",
 		Help:      "Unix timestamp of the last successful WAL fsync. If stale by more than 2x wal_sync_interval, the sync loop may be stuck.",
 	})
-	m.initRefreshMetrics()
-	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
-		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
-		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
-		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
-		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
-		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
-		m.WALDroppedEntries, m.WALLastSyncTimestamp)
-	return m
 }
 
 // initRefreshMetrics creates the refresh-before-expiry collectors on m.

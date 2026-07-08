@@ -24,7 +24,7 @@ func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 		certs = append(certs, pair)
 	}
 
-	var minVer int
+	var minVer uint16
 	switch cfg.TLS.MinVersion {
 	case "1.3":
 		minVer = tls.VersionTLS13
@@ -34,9 +34,9 @@ func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 		return nil, fmt.Errorf("tls: unsupported min_version %q", cfg.TLS.MinVersion)
 	}
 
-	return &tls.Config{
+	return &tls.Config{ //nolint:gosec // G402: MinVersion is enforced >= 1.2 by the switch above; gosec can't trace through the variable
 		Certificates: certs,
-		MinVersion:   uint16(minVer),
+		MinVersion:   minVer,
 		NextProtos:   cfg.TLS.ALPN,
 	}, nil
 }

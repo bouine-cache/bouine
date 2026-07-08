@@ -62,6 +62,7 @@ func (sa *sessionAuth) valid(cookie string) bool {
 // LoginHandler renders the login form (GET) and processes it (POST).
 func (sa *sessionAuth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
 		submitted := r.FormValue("token")
 		if !hmac.Equal([]byte(submitted), []byte(sa.token)) {
 			http.Error(w, "invalid token", http.StatusUnauthorized)

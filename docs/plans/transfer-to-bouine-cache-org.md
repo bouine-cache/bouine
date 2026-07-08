@@ -1,6 +1,6 @@
 # PLAN_TRANSFER_ORG.md — Transfer to `bouine-cache` GitHub Organization
 
-One-time plan to transfer `thylong/bouine` and `thylong/bouine-documentation`
+One-time plan to transfer `bouine-cache/bouine` and `bouine-cache/bouine-documentation`
 to the `https://github.com/bouine-cache` organization, update the Go module
 path, Docker Hub image, Artifact Hub listing, Helm chart metadata, CI
 workflows, documentation site, and all downstream references — without
@@ -13,14 +13,14 @@ Scope spans two repos:
 
 | Repo | Current | Target |
 |------|---------|--------|
-| `thylong/bouine` | `github.com/thylong/bouine` | `github.com/bouine-cache/bouine` |
-| `thylong/bouine-documentation` | `github.com/thylong/bouine-documentation` | `github.com/bouine-cache/bouine-documentation` |
+| `bouine-cache/bouine` | `github.com/bouine-cache/bouine` | `github.com/bouine-cache/bouine` |
+| `bouine-cache/bouine-documentation` | `github.com/bouine-cache/bouine-documentation` | `github.com/bouine-cache/bouine-documentation` |
 
 External surfaces — current vs target:
 
 | Surface | Current | Target |
 |---------|---------|--------|
-| Docker Hub image | `docker.io/thylong/bouine` | `docker.io/bouinecache/bouine` (§D1) |
+| Docker Hub image | `docker.io/bouine-cache/bouine` | `docker.io/bouinecache/bouine` (§D1) |
 | Helm chart repo | `https://charts.thylong.com` (gh-pages) | `https://charts.bouine.org` (§D2) |
 | Artifact Hub listing | repo `bouine`, ID `ef3bdb5e-…` | re-register with new chart URL (§D3) |
 | Docs site | `https://bouine.thylong.com` (k3s) | `https://bouine.org` (§D4) |
@@ -34,13 +34,13 @@ Execute phases in order. Each has explicit exit criteria.
 
 ### D1 — Docker Hub image name → `bouinecache/bouine`
 
-GitHub transfers `thylong/bouine` → `bouine-cache/bouine` automatically and
+GitHub transfers `bouine-cache/bouine` → `bouine-cache/bouine` automatically and
 sets up redirects. Docker Hub does **not** support cross-account transfers.
 
 **Decision: create `bouinecache` Docker Hub account.** ✅ Done.
 - New image: `docker.io/bouinecache/bouine`
 - Docker Hub org `bouinecache` and repo `bouine` created.
-- Old `thylong/bouine` stays as a redirect (manual: retag + push, or leave
+- Old `bouine-cache/bouine` stays as a redirect (manual: retag + push, or leave
   stale with a deprecation notice).
 - Cleanest for long-term, org-owned ownership.
 
@@ -51,7 +51,7 @@ docs `docker pull` / `docker run` commands.
 ### D2 — Helm chart repository URL → `charts.bouine.org`
 
 `charts.thylong.com` is a custom domain CNAME'd to the `gh-pages` branch of
-`thylong/bouine`. After transfer, `gh-pages` lives at
+`bouine-cache/bouine`. After transfer, `gh-pages` lives at
 `bouine-cache.github.io/bouine` unless a custom domain is configured.
 
 **Decision: use `charts.bouine.org` as the GitHub Pages custom domain.**
@@ -124,18 +124,18 @@ of GitHub. The transfer is an opportunity to move to the branded domain.
         record, depending on Cloudflare setup).
 - [ ] **Full backup of both repos** (mirror clones):
       ```bash
-      git clone --mirror git@github.com:thylong/bouine.git               ~/backups/bouine-pre-transfer.git
-      git clone --mirror git@github.com:thylong/bouine-documentation.git ~/backups/bouine-doc-pre-transfer.git
+      git clone --mirror git@github.com:bouine-cache/bouine.git               ~/backups/bouine-pre-transfer.git
+      git clone --mirror git@github.com:bouine-cache/bouine-documentation.git ~/backups/bouine-doc-pre-transfer.git
       ```
-- [ ] **Snapshot the current `gh-pages` branch** of `thylong/bouine`
+- [ ] **Snapshot the current `gh-pages` branch** of `bouine-cache/bouine`
       (the Helm chart repo). This is the Artifact Hub source.
 - [ ] **Record current state:**
-      - Go module path: `github.com/thylong/bouine`
-      - Docker image: `docker.io/thylong/bouine`
+      - Go module path: `github.com/bouine-cache/bouine`
+      - Docker image: `docker.io/bouine-cache/bouine`
       - Chart repo: `https://charts.thylong.com`
       - Artifact Hub repo ID: `ef3bdb5e-36fd-470e-856a-46288c8c248b`
       - Docs site: `https://bouine.thylong.com`
-      - Reference count: ~394 `github.com/thylong/bouine` refs in bouine,
+      - Reference count: ~394 `github.com/bouine-cache/bouine` refs in bouine,
         ~35 in bouine-documentation (content + config + generated public/).
 
 **Exit:** org created, Docker Hub account created, `bouine.org` DNS
@@ -151,15 +151,15 @@ set up automatic redirects from the old URL.
 ### 1.1 Transfer `bouine`
 
 - [ ] GitHub → Settings → Danger Zone → Transfer ownership.
-      From: `thylong/bouine` → To: `bouine-cache/bouine`.
-- [ ] Verify redirect: `git ls-remote git@github.com:thylong/bouine.git`
+      From: `bouine-cache/bouine` → To: `bouine-cache/bouine`.
+- [ ] Verify redirect: `git ls-remote git@github.com:bouine-cache/bouine.git`
       still resolves (HTTP 301 to the new location).
 - [ ] Verify all branches survived: `main`, `gh-pages`, `rewrite`.
 - [ ] Verify tags survived: `v0.1.5` through `v0.1.9`.
 
 ### 1.2 Transfer `bouine-documentation`
 
-- [ ] Transfer `thylong/bouine-documentation` → `bouine-cache/bouine-documentation`.
+- [ ] Transfer `bouine-cache/bouine-documentation` → `bouine-cache/bouine-documentation`.
 - [ ] Verify redirect works.
 
 ### 1.3 Update local remotes
@@ -198,14 +198,14 @@ at `charts.bouine.org`.
 
 ## Phase 2 — Update Go module path (bouine)
 
-The module path changes from `github.com/thylong/bouine` to
+The module path changes from `github.com/bouine-cache/bouine` to
 `github.com/bouine-cache/bouine`. This is a mechanical find-and-replace
 across **114 Go files** plus config files.
 
 ### 2.1 go.mod
 
 ```diff
--module github.com/thylong/bouine
+-module github.com/bouine-cache/bouine
 +module github.com/bouine-cache/bouine
 ```
 
@@ -214,15 +214,15 @@ across **114 Go files** plus config files.
 ```bash
 # Run from repo root
 find . -name "*.go" -not -path "./vendor/*" -exec \
-  sed -i '' 's|github.com/thylong/bouine|github.com/bouine-cache/bouine|g' {} +
+  sed -i '' 's|github.com/bouine-cache/bouine|github.com/bouine-cache/bouine|g' {} +
 ```
 
 ### 2.3 Dockerfile (ldflags)
 
 ```diff
--      -X github.com/thylong/bouine/internal/buildinfo.Version=${VERSION} \
--      -X github.com/thylong/bouine/internal/buildinfo.Commit=${COMMIT} \
--      -X github.com/thylong/bouine/internal/buildinfo.Date=${DATE}" \
+-      -X github.com/bouine-cache/bouine/internal/buildinfo.Version=${VERSION} \
+-      -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=${COMMIT} \
+-      -X github.com/bouine-cache/bouine/internal/buildinfo.Date=${DATE}" \
 +      -X github.com/bouine-cache/bouine/internal/buildinfo.Version=${VERSION} \
 +      -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=${COMMIT} \
 +      -X github.com/bouine-cache/bouine/internal/buildinfo.Date=${DATE}" \
@@ -231,9 +231,9 @@ find . -name "*.go" -not -path "./vendor/*" -exec \
 ### 2.4 Makefile (ldflags)
 
 ```diff
--                 -X github.com/thylong/bouine/internal/buildinfo.Version=$(VERSION) \
--                 -X github.com/thylong/bouine/internal/buildinfo.Commit=$(COMMIT) \
--                 -X github.com/thylong/bouine/internal/buildinfo.Date=$(DATE)
+-                 -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$(VERSION) \
+-                 -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=$(COMMIT) \
+-                 -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(DATE)
 +                 -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$(VERSION) \
 +                 -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=$(COMMIT) \
 +                 -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(DATE)
@@ -242,19 +242,19 @@ find . -name "*.go" -not -path "./vendor/*" -exec \
 ### 2.5 `.golangci.yaml`
 
 Three categories of references:
-1. `goimports.local-prefixes`: `github.com/thylong/bouine` → `github.com/bouine-cache/bouine`
-2. `depguard` allowed-deps lists: ~50 lines of `github.com/thylong/bouine/...`
+1. `goimports.local-prefixes`: `github.com/bouine-cache/bouine` → `github.com/bouine-cache/bouine`
+2. `depguard` allowed-deps lists: ~50 lines of `github.com/bouine-cache/bouine/...`
 3. Any other module-path references.
 
 ```bash
-sed -i '' 's|github.com/thylong/bouine|github.com/bouine-cache/bouine|g' .golangci.yaml
+sed -i '' 's|github.com/bouine-cache/bouine|github.com/bouine-cache/bouine|g' .golangci.yaml
 ```
 
 ### 2.6 `lint/depguard.yaml`
 
 Same mechanical replacement:
 ```bash
-sed -i '' 's|github.com/thylong/bouine|github.com/bouine-cache/bouine|g' lint/depguard.yaml
+sed -i '' 's|github.com/bouine-cache/bouine|github.com/bouine-cache/bouine|g' lint/depguard.yaml
 ```
 
 ### 2.7 Verify the build
@@ -276,12 +276,12 @@ make lint
 ### 3.1 `.github/workflows/release.yml`
 
 - [ ] `DOCKER_IMAGE` env var → `bouinecache/bouine`.
-- [ ] ldflags `-X github.com/thylong/bouine/...` → `-X github.com/bouine-cache/bouine/...`
+- [ ] ldflags `-X github.com/bouine-cache/bouine/...` → `-X github.com/bouine-cache/bouine/...`
       (two occurrences in the multi-arch build step).
 
 ```diff
 -env:
--  DOCKER_IMAGE: thylong/bouine
+-  DOCKER_IMAGE: bouine-cache/bouine
 +env:
 +  DOCKER_IMAGE: bouinecache/bouine
 ```
@@ -301,7 +301,7 @@ make lint
 ### 3.4 `.github/workflows/auto-rebase.yml`
 
 ```diff
--    if: github.repository == 'thylong/bouine'
+-    if: github.repository == 'bouine-cache/bouine'
 +    if: github.repository == 'bouine-cache/bouine'
 ```
 
@@ -316,7 +316,7 @@ push to `main`.
 - [x] Create a new repo `bouinecache/bouine` (public). ✅ Done.
 - [ ] Generate an access token; add to GitHub Actions secrets on
       `bouine-cache/bouine` as `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`.
-- [ ] Optional: on the old `thylong/bouine` Docker Hub repo, add a
+- [ ] Optional: on the old `bouine-cache/bouine` Docker Hub repo, add a
       deprecation notice in the README pointing to `bouinecache/bouine`.
 - [ ] Update all references (see Phase 5 and Phase 6 below).
 
@@ -330,12 +330,12 @@ can push (verify with a test tag or a dry-run).
 ### 5.1 `deploy/helm/bouine/Chart.yaml`
 
 ```diff
--icon: https://raw.githubusercontent.com/thylong/bouine/main/web/dashboard/logo.png
+-icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/web/dashboard/logo.png
 +icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/web/dashboard/logo.png
 ...
--home: https://github.com/thylong/bouine
+-home: https://github.com/bouine-cache/bouine
 -sources:
--  - https://github.com/thylong/bouine
+-  - https://github.com/bouine-cache/bouine
 +home: https://github.com/bouine-cache/bouine
 +sources:
 +  - https://github.com/bouine-cache/bouine
@@ -352,17 +352,17 @@ Artifact Hub annotations:
 ```diff
      artifacthub.io/links: |
        - name: source
--        url: https://github.com/thylong/bouine
+-        url: https://github.com/bouine-cache/bouine
 +        url: https://github.com/bouine-cache/bouine
        - name: documentation
 -        url: https://bouine.thylong.com
 +        url: https://bouine.org
        - name: container image
--        url: https://hub.docker.com/r/thylong/bouine
+-        url: https://hub.docker.com/r/bouine-cache/bouine
 +        url: https://hub.docker.com/r/bouinecache/bouine
      artifacthub.io/images: |
        - name: bouine
--        image: docker.io/thylong/bouine:latest
+-        image: docker.io/bouine-cache/bouine:latest
 +        image: docker.io/bouinecache/bouine:latest
 ```
 
@@ -379,7 +379,7 @@ already published):
 
 ```diff
  image:
--  repository: thylong/bouine
+-  repository: bouine-cache/bouine
 +  repository: bouinecache/bouine
    tag: ""
 ```
@@ -450,10 +450,10 @@ shows the new version under the `bouine` org with correct metadata.
 ### 6.1 `README.md`
 
 ```diff
--  <a href="https://github.com/thylong/bouine/actions/workflows/ci.yml"><img src="https://github.com/thylong/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
--  <a href="https://github.com/thylong/bouine/actions/workflows/release.yml"><img src="https://github.com/thylong/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
--  <a href="https://github.com/thylong/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/thylong/bouine" alt="Latest Release"></a>
--  <a href="https://hub.docker.com/r/thylong/bouine"><img src="https://img.shields.io/docker/v/thylong/bouine?logoColor=blue&color=blue" alt="Docker"></a>
+-  <a href="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+-  <a href="https://github.com/bouine-cache/bouine/actions/workflows/release.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+-  <a href="https://github.com/bouine-cache/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/bouine-cache/bouine" alt="Latest Release"></a>
+-  <a href="https://hub.docker.com/r/bouine-cache/bouine"><img src="https://img.shields.io/docker/v/bouine-cache/bouine?logoColor=blue&color=blue" alt="Docker"></a>
 +  <a href="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
 +  <a href="https://github.com/bouine-cache/bouine/actions/workflows/release.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
 +  <a href="https://github.com/bouine-cache/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/bouine-cache/bouine" alt="Latest Release"></a>
@@ -462,7 +462,7 @@ shows the new version under the `bouine` org with correct metadata.
 
 Clone instructions:
 ```diff
--git clone https://github.com/thylong/bouine.git
+-git clone https://github.com/bouine-cache/bouine.git
 +git clone https://github.com/bouine-cache/bouine.git
 ```
 
@@ -475,14 +475,14 @@ Docs link:
 ### 6.2 `CONTRIBUTING.md`
 
 ```diff
--git clone https://github.com/thylong/bouine.git
+-git clone https://github.com/bouine-cache/bouine.git
 +git clone https://github.com/bouine-cache/bouine.git
 ```
 
 ### 6.3 `SECURITY.md`
 
 ```diff
--[Private vulnerability reporting](https://github.com/thylong/bouine/security/advisories/new)
+-[Private vulnerability reporting](https://github.com/bouine-cache/bouine/security/advisories/new)
 +[Private vulnerability reporting](https://github.com/bouine-cache/bouine/security/advisories/new)
 ```
 
@@ -497,7 +497,7 @@ or update to a generic namespace if desired (not blocking).
 This is a historical document. Add a note at the top pointing to this
 plan for the org transfer. Do not rewrite it.
 
-**Exit:** no `thylong/bouine` references remain in bouine's user-facing
+**Exit:** no `bouine-cache/bouine` references remain in bouine's user-facing
 docs (except historical plan documents).
 
 ---
@@ -510,25 +510,25 @@ docs (except historical plan documents).
 -baseURL = 'https://bouine.thylong.com/'
 +baseURL = 'https://bouine.org/'
 ...
--    docsRepo = 'https://github.com/thylong/bouine-documentation'
+-    docsRepo = 'https://github.com/bouine-cache/bouine-documentation'
 +    docsRepo = 'https://github.com/bouine-cache/bouine-documentation'
 ...
--      sameAs = ['https://github.com/thylong/bouine', 'https://hub.docker.com/r/thylong/bouine']
+-      sameAs = ['https://github.com/bouine-cache/bouine', 'https://hub.docker.com/r/bouine-cache/bouine']
 +      sameAs = ['https://github.com/bouine-cache/bouine', 'https://hub.docker.com/r/bouinecache/bouine']
 ...
--    url = 'https://github.com/thylong/bouine'
+-    url = 'https://github.com/bouine-cache/bouine'
 +    url = 'https://github.com/bouine-cache/bouine'
 ```
 
 ### 7.2 `README.md`
 
 ```diff
--Source for the [bouine](https://github.com/thylong/bouine) documentation site
+-Source for the [bouine](https://github.com/bouine-cache/bouine) documentation site
 -at **https://bouine.thylong.com**.
 +Source for the [bouine](https://github.com/bouine-cache/bouine) documentation site
 +at **https://bouine.org**.
 ...
--git clone git@github.com:thylong/bouine-documentation.git
+-git clone git@github.com:bouine-cache/bouine-documentation.git
 +git clone git@github.com:bouine-cache/bouine-documentation.git
 ```
 
@@ -565,10 +565,10 @@ updating:
 ```bash
 # From bouine-documentation root
 find content/ -name "*.md" -exec \
-  sed -i '' 's|github.com/thylong/bouine|github.com/bouine-cache/bouine|g' {} +
+  sed -i '' 's|github.com/bouine-cache/bouine|github.com/bouine-cache/bouine|g' {} +
 # Docker image
 find content/ -name "*.md" -exec \
-  sed -i '' 's|thylong/bouine|bouinecache/bouine|g' {} +
+  sed -i '' 's|bouine-cache/bouine|bouinecache/bouine|g' {} +
 # Chart repo URL
 find content/ -name "*.md" -exec \
   sed -i '' 's|charts.thylong.com|charts.bouine.org|g' {} +
@@ -600,7 +600,7 @@ npm run build
 Check for broken links (the Hugo build will warn on dead internal links).
 Manually verify a few external links (GitHub repo, Docker Hub, chart repo).
 
-**Exit:** `npm run build` succeeds, no `thylong/bouine` GitHub URLs or
+**Exit:** `npm run build` succeeds, no `bouine-cache/bouine` GitHub URLs or
 `thylong.com` domain references remain in `content/` or `hugo.toml`,
 `public/` regenerated.
 
@@ -666,7 +666,7 @@ through Cloudflare. `https://bouine.thylong.com` redirects to
 
 ### 9.3 User-facing checks
 
-- [ ] `git clone https://github.com/thylong/bouine.git` still works
+- [ ] `git clone https://github.com/bouine-cache/bouine.git` still works
       (redirect). Verify it lands on `bouine-cache/bouine`.
 - [ ] `docker pull bouinecache/bouine:latest` works.
 - [ ] `helm repo add bouine https://charts.bouine.org && helm install bouine bouine/bouine`
@@ -685,7 +685,7 @@ through Cloudflare. `https://bouine.thylong.com` redirects to
       go mod init test
       go get github.com/bouine-cache/bouine@latest
       ```
-      Verify it resolves. Old `go get github.com/thylong/bouine` should
+      Verify it resolves. Old `go get github.com/bouine-cache/bouine` should
       also work via GitHub redirect + Go's vanity path resolution, but
       the canonical path is now `bouine-cache/bouine`.
 
@@ -696,12 +696,12 @@ through Cloudflare. `https://bouine.thylong.com` redirects to
 ## Phase 10 — Cleanup
 
 - [ ] Remove old GitHub secrets from `thylong` account (if any remain).
-- [ ] Mark old Docker Hub `thylong/bouine` as deprecated.
+- [ ] Mark old Docker Hub `bouine-cache/bouine` as deprecated.
 - [ ] After 30 days of stable redirect, remove `bouine.thylong.com` from
       the IngressRoute (keep the Cloudflare redirect rule indefinitely).
 - [ ] After 30 days, remove the old `charts.thylong.com` listing on
       Artifact Hub (or leave with deprecation notice).
-- [ ] Update any external links pointing to `thylong/bouine`:
+- [ ] Update any external links pointing to `bouine-cache/bouine`:
       - Personal GitHub profile pinned repos
       - Social media / blog posts
       - Any monitoring dashboards that reference the repo URL

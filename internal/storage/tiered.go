@@ -198,7 +198,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 // from NewTieredStore to keep cyclomatic complexity under the linter limit.
 func (t *TieredStore) initWAL(walDir string) error {
 	t.walPath = walDir
-	l, err := wal.Open(walDir)
+	l, err := wal.OpenAsync(walDir, t.walSyncInterval)
 	if err != nil {
 		return err
 	}
@@ -741,6 +741,14 @@ func (t *TieredStore) Close(ctx context.Context) error {
 
 	t.walMu.Lock()
 	if t.wal != nil {
+		lastSync := t.wal.LastSyncTime()
+		if !lastSync.IsZero() && time.Since(lastSync) > 2*t.walSyncInterval {
+			t.logger.Warn("wal sync loop appears stuck before close",
+				"last_sync_ago", time.Since(lastSync))
+		}
+		if err := t.wal.Sync(); err != nil {
+			t.logger.Warn("wal sync on close failed", "error", err)
+		}
 		if err := t.wal.Close(); err != nil {
 			t.logger.Warn("wal close error", "error", err)
 		}

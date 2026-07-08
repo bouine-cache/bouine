@@ -90,10 +90,9 @@ type Log struct {
 	path string
 
 	// Async-mode fields. nil/zero when opened with Open (sync mode).
-	syncCh       chan []byte // buffered 4096; carries encoded entries
-	flushCh      chan struct{}
+	syncCh       chan []byte        // buffered 4096; carries encoded entries
+	flushCh      chan chan struct{} // per-caller done channels for Sync()
 	stopCh       chan struct{}
-	syncDone     chan struct{} // signaled by sync loop after each fsync
 	syncInterval time.Duration
 	dropped      atomic.Int64
 	lastSync     atomic.Int64 // Unix nanoseconds; 0 = never synced
@@ -131,9 +130,8 @@ func OpenAsync(path string, syncInterval time.Duration) (*Log, error) {
 		return l, nil
 	}
 	l.syncCh = make(chan []byte, syncChSize)
-	l.flushCh = make(chan struct{}, 1)
+	l.flushCh = make(chan chan struct{}, 1)
 	l.stopCh = make(chan struct{})
-	l.syncDone = make(chan struct{})
 	l.syncWg.Add(1)
 	go l.walSyncLoop()
 	return l, nil
@@ -189,13 +187,15 @@ func (l *Log) Enqueue(e Entry) error {
 	case l.syncCh <- buf:
 	default:
 		l.dropped.Add(1)
+		entryBufPool.Put(&buf)
 	}
 	return nil
 }
 
 // EnqueueBatch enqueues multiple entries for async fsync. Each entry is
 // sent individually with non-blocking sends. If the channel fills
-// mid-batch, the remaining entries are dropped (counter incremented).
+// mid-batch, the remaining entries are dropped (counter incremented)
+// and their buffers returned to the pool.
 //
 // On a sync-only log (syncCh == nil), falls back to synchronous
 // AppendBatch.
@@ -210,6 +210,7 @@ func (l *Log) EnqueueBatch(entries []Entry) {
 		case l.syncCh <- buf:
 		default:
 			l.dropped.Add(1)
+			entryBufPool.Put(&buf)
 		}
 	}
 }
@@ -217,8 +218,10 @@ func (l *Log) EnqueueBatch(entries []Entry) {
 // walSyncLoop drains the sync channel, writes all pending entries to
 // the file under l.mu, and fsyncs once per cycle. Triggered by:
 //   - tick.C  — periodic batching (every syncInterval)
-//   - flushCh — immediate flush requested by Sync()
-//   - stopCh  — Close() signals shutdown; loop drains + fsyncs, then exits
+//   - flushCh — immediate flush requested by Sync() (carries a
+//     per-caller done channel that is closed once the flush completes)
+//   - stopCh  — Close() signals shutdown; loop drains + fsyncs, closes
+//     any pending flush done channels, then exits.
 func (l *Log) walSyncLoop() {
 	defer l.syncWg.Done()
 	ticker := time.NewTicker(l.syncInterval)
@@ -226,27 +229,30 @@ func (l *Log) walSyncLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			l.drainAndSync()
-		case <-l.flushCh:
-			l.drainAndSync()
-			// Signal Sync() callers that the flush cycle completed.
-			// Unbuffered: at most one Sync() is waiting at a time
-			// (Close holds walMu). Non-blocking send in case no one
-			// is waiting.
-			select {
-			case l.syncDone <- struct{}{}:
-			default:
-			}
+			l.drainAndSync(nil)
+		case done := <-l.flushCh:
+			l.drainAndSync(done)
 		case <-l.stopCh:
-			l.drainAndSync()
-			return
+			l.drainAndSync(nil)
+			// Close any flush requests that arrived during shutdown
+			// so Sync() callers blocked on <-done don't deadlock.
+			for {
+				select {
+				case done := <-l.flushCh:
+					close(done)
+				default:
+					return
+				}
+			}
 		}
 	}
 }
 
 // drainAndSync drains all pending entries from syncCh and writes them
-// to the file in a single batch under l.mu, then fsyncs once.
-func (l *Log) drainAndSync() {
+// to the file in a single batch under l.mu, then fsyncs once. If done
+// is non-nil it is closed after the flush completes (or after the
+// channel is found empty) so the requesting Sync() caller unblocks.
+func (l *Log) drainAndSync(done chan struct{}) {
 	var batch [][]byte
 	for {
 		select {
@@ -258,30 +264,47 @@ func (l *Log) drainAndSync() {
 	}
 write:
 	if len(batch) == 0 {
-		l.lastSync.Store(time.Now().UnixNano())
+		if done != nil {
+			close(done)
+		}
 		return
 	}
 	l.mu.Lock()
+	written := 0
+	var writeErr error
 	for _, buf := range batch {
 		if _, err := l.f.Write(buf); err != nil {
-			// On write error, stop the loop — the WAL is broken.
-			// Subsequent Enqueue calls will continue to fill the
-			// channel (dropping when full); the error surfaces on
-			// the next Sync() or Close().
-			l.mu.Unlock()
-			return
+			writeErr = err
+			break
 		}
-		// Return buffer to pool after successful write.
+		written++
 		entryBufPool.Put(&buf)
 	}
-	_ = l.f.Sync()
+	if writeErr == nil {
+		_ = l.f.Sync()
+		l.lastSync.Store(time.Now().UnixNano())
+	} else {
+		// Write failed: entries from batch[written:] were drained from
+		// the channel but never persisted. Count them as dropped so the
+		// operator metric reflects the loss and return their buffers to
+		// the pool. LastSyncTime is left stale — the runbook tells
+		// operators to alert when it lags past 2x sync_interval.
+		l.dropped.Add(int64(len(batch) - written))
+		for _, buf := range batch[written:] {
+			entryBufPool.Put(&buf)
+		}
+	}
 	l.mu.Unlock()
-	l.lastSync.Store(time.Now().UnixNano())
+	if done != nil {
+		close(done)
+	}
 }
 
 // Sync triggers an immediate flush of pending entries and waits for
 // the sync loop to complete the fsync. Blocks until the sync loop
-// signals completion via syncDone.
+// closes the per-call done channel. Safe to call concurrently; callers
+// are serialized by the buffered flushCh. Returns nil if the sync loop
+// has already exited (Close in progress or complete).
 //
 // On a sync-only log (syncCh == nil), this is a no-op (Append already
 // fsyncs synchronously).
@@ -289,14 +312,18 @@ func (l *Log) Sync() error {
 	if l.syncCh == nil {
 		return nil
 	}
-	// Non-blocking send to flushCh (buffered=1, latches the request).
+	done := make(chan struct{})
 	select {
-	case l.flushCh <- struct{}{}:
-	default:
+	case l.flushCh <- done:
+	case <-l.stopCh:
+		return nil
 	}
-	// Wait for the sync loop to complete the flush cycle.
-	<-l.syncDone
-	return nil
+	select {
+	case <-done:
+		return nil
+	case <-l.stopCh:
+		return nil
+	}
 }
 
 // DroppedEntries returns the number of WAL entries dropped because the

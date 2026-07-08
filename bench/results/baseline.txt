@@ -15,7 +15,7 @@
 2026/06/07 18:10:12 WARN vary cap exceeded, skipping variant storage primary_key=3441938378762230195 cap=64
 goos: darwin
 goarch: arm64
-pkg: github.com/thylong/bouine/internal/cache
+pkg: github.com/bouine-cache/bouine/internal/cache
 cpu: Apple M5
 BenchmarkHandler_CacheHit-10     	 1412496	       836.3 ns/op	    2576 B/op	      13 allocs/op
 BenchmarkHandler_CacheHit-10     	 1457968	       826.0 ns/op	    2576 B/op	      13 allocs/op
@@ -38,10 +38,10 @@ BenchmarkEvaluate_Hit-10         	29376153	        41.01 ns/op	       0 B/op	   
 BenchmarkEvaluate_Hit-10         	28642551	        41.10 ns/op	       0 B/op	       0 allocs/op
 BenchmarkEvaluate_Hit-10         	29211056	        40.96 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/thylong/bouine/internal/cache	24.543s
+ok  	github.com/bouine-cache/bouine/internal/cache	24.543s
 goos: darwin
 goarch: arm64
-pkg: github.com/thylong/bouine/internal/storage
+pkg: github.com/bouine-cache/bouine/internal/storage
 cpu: Apple M5
 BenchmarkHotStore_Get_Hit-10           	256289618	         4.623 ns/op	       0 B/op	       0 allocs/op
 BenchmarkHotStore_Get_Hit-10           	263159241	         4.501 ns/op	       0 B/op	       0 allocs/op
@@ -89,10 +89,10 @@ BenchmarkHotMixed_80_20-10             	10884674	       124.6 ns/op	        84.0
 BenchmarkHotMixed_80_20-10             	11169414	       123.6 ns/op	        84.00 get-p50-ns	     13833 get-p99-ns	     44625 get-p999-ns	     399 B/op	       1 allocs/op
 BenchmarkHotMixed_80_20-10             	10996638	       125.8 ns/op	        84.00 get-p50-ns	     14375 get-p99-ns	     45750 get-p999-ns	     399 B/op	       1 allocs/op
 PASS
-ok  	github.com/thylong/bouine/internal/storage	115.920s
+ok  	github.com/bouine-cache/bouine/internal/storage	115.920s
 PASS
-ok  	github.com/thylong/bouine/internal/storage/sieve	0.419s
+ok  	github.com/bouine-cache/bouine/internal/storage/sieve	0.419s
 PASS
-ok  	github.com/thylong/bouine/internal/storage/wal	0.526s
+ok  	github.com/bouine-cache/bouine/internal/storage/wal	0.526s
 PASS
-ok  	github.com/thylong/bouine/internal/storage/warm	0.359s
+ok  	github.com/bouine-cache/bouine/internal/storage/warm	0.359s

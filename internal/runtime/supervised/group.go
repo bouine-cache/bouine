@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability"
 
 	"golang.org/x/sync/errgroup"
 )

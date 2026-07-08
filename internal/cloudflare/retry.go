@@ -11,7 +11,7 @@ import (
 
 	cfsdk "github.com/cloudflare/cloudflare-go/v4"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 const (

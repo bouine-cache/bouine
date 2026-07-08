@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // Client is the bouine admin API client.

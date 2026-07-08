@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 const (

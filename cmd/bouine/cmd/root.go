@@ -4,7 +4,7 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/thylong/bouine/internal/buildinfo"
+	"github.com/bouine-cache/bouine/internal/buildinfo"
 )
 
 // Root returns the root Cobra command. It is the only exported entry

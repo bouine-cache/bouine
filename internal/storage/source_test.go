@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestHotStore_Get_Hot(t *testing.T) {

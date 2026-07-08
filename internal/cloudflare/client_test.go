@@ -11,8 +11,8 @@ import (
 	"github.com/cloudflare/cloudflare-go/v4/cache"
 	"github.com/cloudflare/cloudflare-go/v4/option"
 
-	cf "github.com/thylong/bouine/internal/cloudflare"
-	"github.com/thylong/bouine/pkg/header"
+	cf "github.com/bouine-cache/bouine/internal/cloudflare"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // fakePurger records calls and returns a pre-set sequence of errors.

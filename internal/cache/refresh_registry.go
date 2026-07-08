@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // refreshEntry stores the minimal request information needed to

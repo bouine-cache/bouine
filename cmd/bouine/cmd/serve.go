@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability"
 )
 
 func newServeCmd() *cobra.Command {

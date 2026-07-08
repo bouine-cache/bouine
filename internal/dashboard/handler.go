@@ -13,13 +13,13 @@ import (
 	"github.com/a-h/templ"
 	"gopkg.in/yaml.v3"
 
-	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/dashboard/insights"
-	"github.com/thylong/bouine/internal/dashboard/templates"
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/internal/origin"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/dashboard/insights"
+	"github.com/bouine-cache/bouine/internal/dashboard/templates"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // Config controls the dashboard server.

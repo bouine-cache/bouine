@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability"
 )
 
 // Sequencer runs an ordered series of shutdown steps, each with a

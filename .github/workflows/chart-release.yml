@@ -1,7 +1,7 @@
 name: Chart Release
 
 # Packages the Helm chart in deploy/helm/bouine and publishes it to a
-# GitHub Pages Helm repository (https://charts.thylong.com), which
+# GitHub Pages Helm repository (https://charts.bouine.org), which
 # Artifact Hub indexes. Runs automatically on every release tag so the
 # chart version tracks the app release (Chart.yaml `version` must be bumped
 # alongside `appVersion` before tagging — chart-releaser skips versions it
@@ -44,7 +44,7 @@ jobs:
           # refreshes index.yaml from the packaged charts.
           skip_existing: true
           # Host the packaged .tgz files on the gh-pages branch (served by
-          # Pages at charts.thylong.com) instead of as GitHub release assets.
+          # Pages at charts.bouine.org) instead of as GitHub release assets.
           # Release assets on a private repo are not anonymously downloadable,
           # which breaks `helm install` and Artifact Hub indexing.
           packages_with_index: true

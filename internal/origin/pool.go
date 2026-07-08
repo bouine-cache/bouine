@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability"
 )
 
 // Pool is a named set of upstream targets with round-robin selection

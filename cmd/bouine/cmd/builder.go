@@ -14,17 +14,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thylong/bouine/internal/cache"
-	"github.com/thylong/bouine/internal/cluster"
-	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability/accesslog"
-	"github.com/thylong/bouine/internal/observability/tracing"
-	"github.com/thylong/bouine/internal/origin"
-	"github.com/thylong/bouine/internal/server"
-	"github.com/thylong/bouine/internal/staticfile"
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/internal/storage/warm"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/cache"
+	"github.com/bouine-cache/bouine/internal/cluster"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability/accesslog"
+	"github.com/bouine-cache/bouine/internal/observability/tracing"
+	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/internal/server"
+	"github.com/bouine-cache/bouine/internal/staticfile"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is

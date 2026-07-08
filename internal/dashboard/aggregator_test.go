@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *httptest.Server {

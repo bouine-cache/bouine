@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/bouineapi"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/bouineapi"
 )
 
 func newPurgeCmd() *cobra.Command {

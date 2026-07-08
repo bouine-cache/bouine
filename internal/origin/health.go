@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability"
 )
 
 // ActiveHealthChecker runs periodic HTTP probes against every target

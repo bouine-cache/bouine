@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // objCodecVersion is the warm-tier object encoding version. It is the

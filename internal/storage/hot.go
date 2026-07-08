@@ -11,10 +11,10 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/internal/storage/sieve"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // inlineEvictCap is the maximum number of entries evicted synchronously

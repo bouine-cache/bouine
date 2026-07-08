@@ -4,11 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/internal/origin"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func baseConfig() *config.Config {

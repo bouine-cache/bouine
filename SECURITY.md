@@ -25,7 +25,7 @@ reproduce on a supported version.
 **Do not open a public GitHub issue for security reports.**
 
 Report privately via GitHub's
-[Private vulnerability reporting](https://github.com/thylong/bouine/security/advisories/new)
+[Private vulnerability reporting](https://github.com/bouine-cache/bouine/security/advisories/new)
 — it creates a tracked, embargoed advisory and is the only supported
 channel. (No security email alias is published; GitHub PVR keeps reports
 and fixes in one place.)

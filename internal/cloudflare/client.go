@@ -15,7 +15,7 @@ import (
 	"github.com/cloudflare/cloudflare-go/v4/cache"
 	"github.com/cloudflare/cloudflare-go/v4/option"
 
-	"github.com/thylong/bouine/internal/observability/tracing"
+	"github.com/bouine-cache/bouine/internal/observability/tracing"
 )
 
 const defaultTimeout = 10 * time.Second

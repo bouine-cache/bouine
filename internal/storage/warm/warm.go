@@ -37,7 +37,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/thylong/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/internal/storage/sieve"
 )
 
 const (

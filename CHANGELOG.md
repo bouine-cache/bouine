@@ -103,5 +103,5 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/thylong/bouine/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/thylong/bouine/releases/tag/v1.0.0
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/bouine-cache/bouine/releases/tag/v1.0.0

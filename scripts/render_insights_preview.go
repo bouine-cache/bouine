@@ -9,7 +9,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/thylong/bouine/internal/dashboard/templates"
+	"github.com/bouine-cache/bouine/internal/dashboard/templates"
 )
 
 func main() {

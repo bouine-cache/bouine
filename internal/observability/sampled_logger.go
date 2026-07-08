@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // DefaultKeySampleRate is the default 1-in-N sampling rate for

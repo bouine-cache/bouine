@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability"
 )
 
 // slogAdapter bridges memberlist's stdlib *log.Logger output into slog,

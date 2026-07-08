@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/thylong/bouine/internal/staticfile"
+	"github.com/bouine-cache/bouine/internal/staticfile"
 )
 
 func setupBenchDir(b *testing.B, size int) string {

@@ -13,9 +13,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/thylong/bouine/internal/storage/sieve"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func obj(key api.Key, bodySize int) *api.Object {

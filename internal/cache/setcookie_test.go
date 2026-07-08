@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func newSetCookieHandler(t *testing.T, upstream http.Handler, allow bool) *Handler {

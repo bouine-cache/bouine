@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/cmd/bouine/cmd"
-	"github.com/thylong/bouine/internal/cluster"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/cmd/bouine/cmd"
+	"github.com/bouine-cache/bouine/internal/cluster"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func BenchmarkHotStore_Get_Hit(b *testing.B) {

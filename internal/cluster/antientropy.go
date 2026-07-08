@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // AntiEntropyConfig configures the anti-entropy reconciler.

@@ -9,8 +9,8 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // MaxVariants is the default cap on stored variants per primary key.

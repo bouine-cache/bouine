@@ -8,9 +8,9 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/thylong/bouine/internal/observability/responsewriter"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // DataPlaneMetrics holds the RED counters for the data-plane pipeline.

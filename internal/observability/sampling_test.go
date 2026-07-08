@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestSampledByKeyDeterminism(t *testing.T) {

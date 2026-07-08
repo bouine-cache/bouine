@@ -8,7 +8,7 @@ body:
         Thank you for taking the time to report a bug.
 
         **Do not use this template for security issues.** Follow
-        [`SECURITY.md`](https://github.com/thylong/bouine/blob/main/SECURITY.md)
+        [`SECURITY.md`](https://github.com/bouine-cache/bouine/blob/main/SECURITY.md)
         instead.
   - type: input
     id: version

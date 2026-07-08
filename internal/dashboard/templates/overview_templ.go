@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // Overview renders the main dashboard page.

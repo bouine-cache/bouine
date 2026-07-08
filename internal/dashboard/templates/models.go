@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // ── Layout ──────────────────────────────────────────────────────────

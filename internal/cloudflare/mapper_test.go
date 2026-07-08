@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	cf "github.com/thylong/bouine/internal/cloudflare"
+	cf "github.com/bouine-cache/bouine/internal/cloudflare"
 )
 
 func TestMapURL(t *testing.T) {

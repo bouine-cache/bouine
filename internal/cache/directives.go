@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // Directives holds the parsed Cache-Control directives from either a

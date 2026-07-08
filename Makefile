@@ -13,9 +13,9 @@ VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || ech
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE          ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS       := -s -w \
-                 -X github.com/thylong/bouine/internal/buildinfo.Version=$(VERSION) \
-                 -X github.com/thylong/bouine/internal/buildinfo.Commit=$(COMMIT) \
-                 -X github.com/thylong/bouine/internal/buildinfo.Date=$(DATE)
+                 -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$(VERSION) \
+                 -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=$(COMMIT) \
+                 -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(DATE)
 
 .PHONY: help
 help: ## Show this help.

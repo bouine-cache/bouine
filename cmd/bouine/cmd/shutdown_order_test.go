@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/runtime/shutdown"
-	"github.com/thylong/bouine/internal/server"
+	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
+	"github.com/bouine-cache/bouine/internal/server"
 
 	"golang.org/x/sync/errgroup"
 )

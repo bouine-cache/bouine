@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func newMaxResponseBytesHandler(t *testing.T, upstream http.Handler, maxBytes int64) *Handler {

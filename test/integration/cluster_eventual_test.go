@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/test/integration/driver"
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // Eventual mode: every node caches independently, no peer fetch, gossip invalidation.

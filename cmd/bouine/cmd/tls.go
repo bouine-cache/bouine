@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/thylong/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/config"
 )
 
 // buildTLSConfig translates the config.TLS section into a *tls.Config.

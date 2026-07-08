@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // muWriter is a thread-safe bytes.Buffer wrapper for slog output.

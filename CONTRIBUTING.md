@@ -38,7 +38,7 @@ contributors.
 ## Setting up
 
 ```bash
-git clone https://github.com/thylong/bouine.git
+git clone https://github.com/bouine-cache/bouine.git
 cd bouine
 make hooks      # installs pre-commit + commit-msg hooks (mandatory)
 make build      # builds ./bin/bouine

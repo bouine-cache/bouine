@@ -3,7 +3,7 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/thylong/bouine/internal/buildinfo"
+	"github.com/bouine-cache/bouine/internal/buildinfo"
 )
 
 func newVersionCmd() *cobra.Command {

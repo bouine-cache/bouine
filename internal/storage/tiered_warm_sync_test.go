@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/storage/warm"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func tieredStoreWithSync(t *testing.T, batchSize int) *TieredStore {

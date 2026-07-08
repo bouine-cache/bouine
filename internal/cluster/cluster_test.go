@@ -9,8 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func defaultConfig(t *testing.T, name, addr string) Config {

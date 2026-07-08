@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/storage/wal"
-	"github.com/thylong/bouine/internal/storage/warm"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage/wal"
+	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func tieredStore(t *testing.T, withWarm bool) *TieredStore {

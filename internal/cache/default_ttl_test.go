@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // newDefaultTTLHandler builds a Handler with DefaultTTL set, backed by an

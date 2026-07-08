@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/testutil/tlsutil"
+	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
 
 // waitForPort polls until addr accepts TCP connections or the 3s timeout expires.

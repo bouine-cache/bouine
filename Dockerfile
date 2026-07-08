@@ -24,9 +24,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
     -ldflags "-s -w \
-      -X github.com/thylong/bouine/internal/buildinfo.Version=${VERSION} \
-      -X github.com/thylong/bouine/internal/buildinfo.Commit=${COMMIT} \
-      -X github.com/thylong/bouine/internal/buildinfo.Date=${DATE}" \
+      -X github.com/bouine-cache/bouine/internal/buildinfo.Version=${VERSION} \
+      -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=${COMMIT} \
+      -X github.com/bouine-cache/bouine/internal/buildinfo.Date=${DATE}" \
     -o /bouine ./cmd/bouine
 
 # ---- Final stage ----

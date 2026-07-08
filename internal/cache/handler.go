@@ -34,12 +34,12 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/internal/observability/responsewriter"
-	"github.com/thylong/bouine/internal/observability/tracing"
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
+	"github.com/bouine-cache/bouine/internal/observability/tracing"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // defaultRefreshConcurrency bounds concurrent background refresh fetches

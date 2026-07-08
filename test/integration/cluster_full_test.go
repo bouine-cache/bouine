@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/cache"
-	"github.com/thylong/bouine/internal/cluster"
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/test/integration/driver"
+	"github.com/bouine-cache/bouine/internal/cache"
+	"github.com/bouine-cache/bouine/internal/cluster"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // Full replication mode: every node holds a copy of every cached object.

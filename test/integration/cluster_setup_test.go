@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/thylong/bouine/test/integration/driver"
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // Shared cluster stacks: one per consistency mode, started once.

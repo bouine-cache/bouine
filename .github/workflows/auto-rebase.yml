@@ -23,7 +23,7 @@ jobs:
   rebase:
     name: Rebase open PRs onto main
     runs-on: ubuntu-latest
-    if: github.repository == 'thylong/bouine'
+    if: github.repository == "bouine-cache/bouine"
     steps:
       - name: Update PR branches
         env:

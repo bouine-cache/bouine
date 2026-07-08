@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/internal/observability/responsewriter"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // Middleware wraps an http.Handler and emits a structured access log

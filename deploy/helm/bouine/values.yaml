@@ -3,7 +3,7 @@
 replicaCount: 3
 
 image:
-  repository: thylong/bouine
+  repository: bouinecache/bouine
   tag: ""  # defaults to appVersion
   pullPolicy: IfNotPresent
 

@@ -13,7 +13,7 @@ permissions:
 
 env:
   GO_VERSION: "1.26.4"
-  DOCKER_IMAGE: thylong/bouine
+  DOCKER_IMAGE: bouinecache/bouine
 
 jobs:
   binaries:
@@ -53,9 +53,9 @@ jobs:
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
               -trimpath \
               -ldflags "-s -w \
-                -X github.com/thylong/bouine/internal/buildinfo.Version=$VERSION \
-                -X github.com/thylong/bouine/internal/buildinfo.Commit=$GITHUB_SHA \
-                -X github.com/thylong/bouine/internal/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$VERSION \
+                -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=$GITHUB_SHA \
+                -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               -o "dist/${bin}" ./cmd/bouine
           done
           cd dist

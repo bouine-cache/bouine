@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // chunkedOrigin returns an upstream that writes a body of bodySize bytes in

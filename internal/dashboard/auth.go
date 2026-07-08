@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 const (

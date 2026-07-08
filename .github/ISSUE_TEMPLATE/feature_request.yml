@@ -7,14 +7,14 @@ body:
       value: |
         Thanks for proposing a feature. Before filing, please check:
 
-        - The current phase in [`PLAN.md`](https://github.com/thylong/bouine/blob/main/PLAN.md).
+        - The current phase in [`PLAN.md`](https://github.com/bouine-cache/bouine/blob/main/PLAN.md).
           Features outside the current phase are normally deferred.
         - The deferred-features list in
-          [`PLAN.md §18`](https://github.com/thylong/bouine/blob/main/PLAN.md#18-out-of-scope--future-roadmap-post-v10).
+          [`PLAN.md §18`](https://github.com/bouine-cache/bouine/blob/main/PLAN.md#18-out-of-scope--future-roadmap-post-v10).
           If your request is already there, comment on the related issue
           instead of opening a new one.
         - The threat model in
-          [`docs/security/threat-model.md`](https://github.com/thylong/bouine/blob/main/docs/security/threat-model.md)
+          [`docs/security/threat-model.md`](https://github.com/bouine-cache/bouine/blob/main/docs/security/threat-model.md)
           if your feature has security implications.
   - type: textarea
     id: problem
@@ -29,7 +29,7 @@ body:
       label: Proposed solution
       description: |
         Sketch the design. If it touches multiple layers, identify them
-        (see [`AGENTS.md §3`](https://github.com/thylong/bouine/blob/main/AGENTS.md)).
+        (see [`AGENTS.md §3`](https://github.com/bouine-cache/bouine/blob/main/AGENTS.md)).
     validations:
       required: true
   - type: textarea

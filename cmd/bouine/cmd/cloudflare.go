@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thylong/bouine/internal/admin"
-	bouinecf "github.com/thylong/bouine/internal/cloudflare"
-	"github.com/thylong/bouine/internal/config"
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/admin"
+	bouinecf "github.com/bouine-cache/bouine/internal/cloudflare"
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // cfPropagator bridges bouine invalidation operations (purge/ban/refresh)

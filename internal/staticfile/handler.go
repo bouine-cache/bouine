@@ -16,8 +16,8 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // defaultMaxFileSize is the per-file size cap when MaxFileSize is zero.

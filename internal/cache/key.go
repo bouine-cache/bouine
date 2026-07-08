@@ -9,7 +9,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // BuildKeyFromURL computes the canonical cache key from a raw URL

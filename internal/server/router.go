@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // Router is the data-plane HTTP handler. It matches an incoming request

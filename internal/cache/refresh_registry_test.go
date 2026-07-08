@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestRefreshRegistryRegisterLookup(t *testing.T) {

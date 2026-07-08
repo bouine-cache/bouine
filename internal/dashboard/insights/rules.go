@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thylong/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/config"
 )
 
 func init() {

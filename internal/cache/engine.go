@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // engine.go implements the RFC 9111 cache state machine.

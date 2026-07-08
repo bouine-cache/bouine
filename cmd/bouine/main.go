@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/thylong/bouine/cmd/bouine/cmd"
+	"github.com/bouine-cache/bouine/cmd/bouine/cmd"
 )
 
 func main() {

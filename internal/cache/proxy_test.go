@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {

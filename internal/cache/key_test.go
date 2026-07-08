@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestBuildKey_Deterministic(t *testing.T) {

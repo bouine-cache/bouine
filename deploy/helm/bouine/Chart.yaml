@@ -2,9 +2,9 @@ apiVersion: v2
 name: bouine
 description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
-icon: https://raw.githubusercontent.com/thylong/bouine/main/web/dashboard/logo.png
+version: 0.2.0
+appVersion: "0.2.0"
+icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/web/dashboard/logo.png
 keywords:
   - cache
   - reverse-proxy
@@ -13,22 +13,22 @@ keywords:
   - kubernetes
   - golang
   - cdn
-home: https://github.com/thylong/bouine
+home: https://github.com/bouine-cache/bouine
 sources:
-  - https://github.com/thylong/bouine
+  - https://github.com/bouine-cache/bouine
 maintainers:
-  - name: thylong
-    url: https://github.com/thylong
+  - name: bouine-cache
+    url: https://github.com/bouine-cache
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/category: integration-delivery
   artifacthub.io/links: |
     - name: source
-      url: https://github.com/thylong/bouine
+      url: https://github.com/bouine-cache/bouine
     - name: documentation
-      url: https://bouine.thylong.com
+      url: https://bouine.org
     - name: container image
-      url: https://hub.docker.com/r/thylong/bouine
+      url: https://hub.docker.com/r/bouinecache/bouine
   artifacthub.io/images: |
     - name: bouine
-      image: docker.io/thylong/bouine:latest
+      image: docker.io/bouinecache/bouine:latest

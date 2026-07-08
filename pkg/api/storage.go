@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // Key is the canonical cache key. It is a plain uint64 xxhash digest

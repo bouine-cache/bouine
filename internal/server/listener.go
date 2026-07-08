@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/internal/observability/tracing"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability/tracing"
 )
 
 // ListenerConfig controls a single listener.

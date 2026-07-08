@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // httpdate.go provides HTTP date parsing, age computation, heuristic

@@ -13,7 +13,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // Cluster renders the peer health table, ring stats, circular ring SVG, and peer fetch stats.

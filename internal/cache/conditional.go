@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/thylong/bouine/pkg/api"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // conditional.go handles conditional request matching (304 / If-None-Match

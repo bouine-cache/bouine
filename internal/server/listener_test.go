@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/internal/testutil/tlsutil"
+	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
 
 func waitForAddr(t *testing.T, l *Listener, timeout time.Duration) {

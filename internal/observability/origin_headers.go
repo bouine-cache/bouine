@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 const originHeaderRingCap = 1000

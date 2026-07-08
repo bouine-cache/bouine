@@ -1,4 +1,4 @@
-module github.com/thylong/bouine
+module github.com/bouine-cache/bouine
 
 go 1.26.4
 

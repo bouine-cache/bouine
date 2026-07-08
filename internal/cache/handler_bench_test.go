@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thylong/bouine/internal/storage"
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func BenchmarkHandler_CacheHit(b *testing.B) {

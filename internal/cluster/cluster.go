@@ -12,8 +12,8 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/hashicorp/memberlist"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // Config controls the cluster membership layer.

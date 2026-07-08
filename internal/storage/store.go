@@ -15,7 +15,7 @@ package storage
 import (
 	"context"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // Store is the cache storage interface consumed by the cache

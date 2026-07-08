@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/thylong/bouine/internal/storage/warm"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // BenchmarkWarmSync_CacheSurvivalRate measures how many cache entries

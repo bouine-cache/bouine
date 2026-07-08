@@ -31,11 +31,11 @@ rules:
     files: ["**/internal/server/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/server
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/internal/buildinfo
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/server
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/internal/buildinfo
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - golang.org/x/net
       - golang.org/x/sync
       - golang.org/x/sys
@@ -46,10 +46,10 @@ rules:
     files: ["**/internal/storage/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/storage
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/storage
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - github.com/cespare/xxhash/v2
       - golang.org/x/sys
 
@@ -59,12 +59,12 @@ rules:
     files: ["**/internal/cache/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/cache
-      - github.com/thylong/bouine/internal/storage
-      - github.com/thylong/bouine/internal/origin
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/cache
+      - github.com/bouine-cache/bouine/internal/storage
+      - github.com/bouine-cache/bouine/internal/origin
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - github.com/cespare/xxhash/v2
       - golang.org/x/sync
 
@@ -74,10 +74,10 @@ rules:
     files: ["**/internal/origin/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/origin
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/origin
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - golang.org/x/sync
 
   # L5 may depend on L2, L3, L7.
@@ -86,12 +86,12 @@ rules:
     files: ["**/internal/cluster/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/cluster
-      - github.com/thylong/bouine/internal/cache
-      - github.com/thylong/bouine/internal/storage
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/cluster
+      - github.com/bouine-cache/bouine/internal/cache
+      - github.com/bouine-cache/bouine/internal/storage
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - github.com/hashicorp/memberlist
       - golang.org/x/sync
 
@@ -101,15 +101,15 @@ rules:
     files: ["**/internal/admin/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/admin
-      - github.com/thylong/bouine/internal/cache
-      - github.com/thylong/bouine/internal/storage
-      - github.com/thylong/bouine/internal/cluster
-      - github.com/thylong/bouine/internal/config
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/internal/buildinfo
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/admin
+      - github.com/bouine-cache/bouine/internal/cache
+      - github.com/bouine-cache/bouine/internal/storage
+      - github.com/bouine-cache/bouine/internal/cluster
+      - github.com/bouine-cache/bouine/internal/config
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/internal/buildinfo
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - github.com/prometheus/client_golang
 
   # L7 is a leaf — only stdlib and telemetry libs.
@@ -118,9 +118,9 @@ rules:
     files: ["**/internal/observability/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - github.com/prometheus/client_golang
       - go.opentelemetry.io/otel
 
@@ -130,11 +130,11 @@ rules:
     files: ["**/internal/ai/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/ai
-      - github.com/thylong/bouine/internal/admin
-      - github.com/thylong/bouine/internal/observability
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/ai
+      - github.com/bouine-cache/bouine/internal/admin
+      - github.com/bouine-cache/bouine/internal/observability
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
 
   # pkg/api and pkg/bouineapi are leaves. They import nothing from
   # internal/*.
@@ -145,9 +145,9 @@ rules:
       - "**/pkg/bouineapi/**"
     allow:
       - $gostd
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/bouineapi
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/bouineapi
+      - github.com/bouine-cache/bouine/pkg/header
 
   # internal/config is a leaf. It defines the configuration tree;
   # importing higher-layer packages would create a cycle.
@@ -156,9 +156,9 @@ rules:
     files: ["**/internal/config/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/config
-      - github.com/thylong/bouine/pkg/api
-      - github.com/thylong/bouine/pkg/header
+      - github.com/bouine-cache/bouine/internal/config
+      - github.com/bouine-cache/bouine/pkg/api
+      - github.com/bouine-cache/bouine/pkg/header
       - gopkg.in/yaml.v3
 
   # internal/runtime/* hosts process-wide primitives (supervised
@@ -168,8 +168,8 @@ rules:
     files: ["**/internal/runtime/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/runtime
-      - github.com/thylong/bouine/pkg/api
+      - github.com/bouine-cache/bouine/internal/runtime
+      - github.com/bouine-cache/bouine/pkg/api
       - golang.org/x/sync
 
   # internal/testutil/* is for _test.go files only. It is also a leaf
@@ -179,7 +179,7 @@ rules:
     files: ["**/internal/testutil/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/testutil
+      - github.com/bouine-cache/bouine/internal/testutil
 
   # internal/buildinfo is link-time metadata — leaf.
   buildinfo:
@@ -187,4 +187,4 @@ rules:
     files: ["**/internal/buildinfo/**"]
     allow:
       - $gostd
-      - github.com/thylong/bouine/internal/buildinfo
+      - github.com/bouine-cache/bouine/internal/buildinfo

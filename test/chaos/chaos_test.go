@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/test/integration/driver"
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // TestChaos_PeerKill kills a node mid-traffic and verifies surviving

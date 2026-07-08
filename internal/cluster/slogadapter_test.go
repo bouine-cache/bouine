@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/thylong/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability"
 )
 
 // captureLogger builds a SampledLogger (sampleRate=0 → no sampling) writing

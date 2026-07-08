@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thylong/bouine/internal/observability"
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestHandler_ClusterWithStoreData(t *testing.T) {

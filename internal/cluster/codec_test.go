@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thylong/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestEncodeDecodeKeySet_RoundTrip(t *testing.T) {

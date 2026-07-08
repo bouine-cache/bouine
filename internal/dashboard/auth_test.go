@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestSessionAuth_SignAndValidate(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/thylong/bouine/pkg/header"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestOriginHeaderRing_SampleAndAudit(t *testing.T) {

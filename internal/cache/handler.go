@@ -926,7 +926,7 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	h.writeAndMaybeStore(w, r, key, res)
+	h.writeAndMaybeStore(w, r, res)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -947,7 +947,7 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(w, r, key, res)
+	h.writeAndMaybeStore(w, r, res)
 }
 
 func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
@@ -985,7 +985,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		return
 	}
 
-	h.writeAndMaybeStore(w, r, key, res)
+	h.writeAndMaybeStore(w, r, res)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1074,7 +1074,6 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 func (h *Handler) writeAndMaybeStore(
 	w http.ResponseWriter,
 	r *http.Request,
-	_ api.Key,
 	res fetchResult,
 ) {
 	dst := w.Header()

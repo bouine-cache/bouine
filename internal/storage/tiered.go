@@ -28,7 +28,7 @@ type TieredStore struct {
 	hot    *HotStore
 	warm   *warm.Store
 	wal    *wal.Log
-	walMu  sync.Mutex // guards wal field access during rewriteWAL vs concurrent Append/AppendBatch
+	walMu  sync.Mutex // guards wal field access during rewriteWAL vs concurrent Enqueue/EnqueueBatch
 	logger observability.Logger
 
 	// bodyThreshold: objects with Body <= this stay hot-only.
@@ -40,6 +40,10 @@ type TieredStore struct {
 	warmSyncBatchSize int
 	// warmSyncOffset rotates through the hot key set across cycles.
 	warmSyncOffset int
+
+	// walSyncInterval controls the async WAL fsync batching interval.
+	// <= 0 means synchronous mode (per-entry fsync). See ADR-0024.
+	walSyncInterval time.Duration
 
 	// tombstoneQueue receives keys evicted from hot that had a warm
 	// backup. Drained by warmSyncLoop and tombstoned in warm + WAL.
@@ -90,6 +94,10 @@ type TieredConfig struct {
 	// WarmSyncBatchSize caps entries written to warm per sync cycle.
 	// Default 5000.
 	WarmSyncBatchSize int
+	// WALSyncInterval controls the async WAL fsync batching interval.
+	// Default 100ms. Set to -1 for synchronous mode (per-entry fsync,
+	// same as pre-ADR-0024 behavior). See ADR-0024.
+	WALSyncInterval time.Duration
 }
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
@@ -114,6 +122,11 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		warmSyncInterval = 0 // -1 means disabled
 	}
 
+	walSyncInterval := cfg.WALSyncInterval
+	if walSyncInterval == 0 {
+		walSyncInterval = wal.DefaultSyncInterval
+	}
+
 	ts := &TieredStore{
 		bodyThreshold:     cfg.BodyThreshold,
 		warmSyncInterval:  warmSyncInterval,
@@ -122,6 +135,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		warmEvictQueue:    make(chan api.Key, 4096),
 		done:              make(chan struct{}),
 		logger:            cfg.Logger,
+		walSyncInterval:   walSyncInterval,
 	}
 
 	// Wire the eviction callback so backed evictions enqueue
@@ -321,7 +335,10 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
 			}
-			return t.wal.Append(wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
+			t.walMu.Lock()
+			_ = t.wal.Enqueue(wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
+			t.walMu.Unlock()
+			return nil
 		}
 	}
 	return nil
@@ -363,9 +380,9 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 			return fmt.Errorf("warm: sync before wal append: %w", err)
 		}
 		t.walMu.Lock()
-		err := t.wal.Append(wal.DeleteEntry(uint64(key)))
+		_ = t.wal.Enqueue(wal.DeleteEntry(uint64(key)))
 		t.walMu.Unlock()
-		return err
+		return nil
 	}
 	return nil
 }
@@ -411,6 +428,20 @@ func (t *TieredStore) Keys() []api.Key {
 		out = append(out, k)
 	}
 	return out
+}
+
+// WALStats returns async WAL metrics for Prometheus export. The engine
+// polls this on the same ticker as Stats(). DroppedEntries is a delta
+// (counter reset to zero on read). LastSyncTime is the timestamp of the
+// last successful fsync. Returns zero values when WAL is not configured.
+func (t *TieredStore) WALStats() (dropped int64, lastSync time.Time) {
+	t.walMu.Lock()
+	w := t.wal
+	t.walMu.Unlock()
+	if w == nil {
+		return 0, time.Time{}
+	}
+	return w.DroppedEntries(), w.LastSyncTime()
 }
 
 // OverBudget reports whether the hot tier is over its configured byte
@@ -506,11 +537,8 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 		}
 		if t.wal != nil {
 			t.walMu.Lock()
-			err := t.wal.AppendBatch(walEntries)
+			t.wal.EnqueueBatch(walEntries)
 			t.walMu.Unlock()
-			if err != nil {
-				t.logger.Warn("warm sync: wal batch append failed", "error", err)
-			}
 		}
 	}
 
@@ -688,14 +716,14 @@ func (t *TieredStore) rewriteWAL() error {
 		// Clean up the leaked tmp file, then reopen the old WAL so it
 		// remains usable for subsequent appends and Close.
 		_ = os.Remove(tmpPath)
-		reopened, reopenErr := wal.Open(t.walPath)
+		reopened, reopenErr := wal.OpenAsync(t.walPath, t.walSyncInterval)
 		if reopenErr != nil {
 			return fmt.Errorf("wal rewrite: rename: %w; reopen old WAL: %v", err, reopenErr)
 		}
 		t.wal = reopened
 		return fmt.Errorf("wal rewrite: rename: %w", err)
 	}
-	t.wal, err = wal.Open(t.walPath)
+	t.wal, err = wal.OpenAsync(t.walPath, t.walSyncInterval)
 	if err != nil {
 		return fmt.Errorf("wal rewrite: reopen: %w", err)
 	}

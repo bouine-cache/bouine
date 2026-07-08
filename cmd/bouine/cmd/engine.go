@@ -362,6 +362,18 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx con
 					rs.dpMetrics.WarmStoreSelfHeals.Add(float64(warmHealDelta))
 					lastWarmSelfHeals = s.WarmSelfHeals
 				}
+				// WAL async metrics: poll dropped entries and last sync time.
+				if walStore, ok := rs.store.(interface {
+					WALStats() (int64, time.Time)
+				}); ok {
+					dropped, lastSync := walStore.WALStats()
+					if dropped > 0 {
+						rs.dpMetrics.WALDroppedEntries.Add(float64(dropped))
+					}
+					if !lastSync.IsZero() {
+						rs.dpMetrics.WALLastSyncTimestamp.Set(float64(lastSync.UnixNano()) / 1e9)
+					}
+				}
 				// Refresh gauges: poll scheduler heap and registry sizes.
 				for _, h := range rs.handlers {
 					scheduled, registry := h.RefreshStats()

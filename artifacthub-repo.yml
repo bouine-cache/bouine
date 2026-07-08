@@ -1,7 +1,7 @@
 # Artifact Hub repository metadata.
 #
 # This file is published to the root of the gh-pages Helm repository
-# (https://charts.thylong.com) by the chart-release workflow, where
+# (https://charts.bouine.org) by the chart-release workflow, where
 # Artifact Hub reads it to verify ownership of the repo.
 #
 # After adding the repository on https://artifacthub.io, the repositoryID
@@ -10,5 +10,5 @@
 #
 repositoryID: ef3bdb5e-36fd-470e-856a-46288c8c248b
 owners:
-  - name: thylong
-    email: theotime@protonmail.com
+  - name: bouine-cache
+    email: <new-contact-email>

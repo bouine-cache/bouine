@@ -971,8 +971,9 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 			return
 		}
 		// Serve stale unless the stored response demands revalidation.
-		cc := objDirectives(stale)
-		if !cc.MustRevalidate && !cc.ProxyRevalidate {
+		// Use the same gate as the miss path (staleFallbackAllowed) so the
+		// policy can't drift between the two stale-on-error sites.
+		if staleFallbackAllowed(stale) {
 			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}

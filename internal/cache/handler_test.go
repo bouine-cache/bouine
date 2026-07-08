@@ -463,6 +463,77 @@ func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
 	}
 }
 
+// TestHandler_Revalidate_5xx_StaleFallbackGateConsistency verifies that the
+// revalidate 5xx stale-fallback path uses the same gate as the miss path
+// (staleFallbackAllowed). A stored response carrying no-cache or s-maxage
+// must NOT be served stale on a 5xx — those directives require a successful
+// revalidation. This is a regression test for the divergent inline gate that
+// only checked must-revalidate/proxy-revalidate.
+func TestHandler_Revalidate_5xx_StaleFallbackGateConsistency(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cacheCtrl string
+	}{
+		{
+			name:      "no-cache stored response",
+			cacheCtrl: "no-cache", // respCC.NoCache triggers revalidate via evalNoCache
+		},
+		{
+			name:      "s-maxage=0 stored response",
+			cacheCtrl: "s-maxage=0", // SMaxAgeSet + stale triggers revalidate via evalStale
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				if calls == 1 {
+					w.Header().Set(header.CacheControl, tc.cacheCtrl)
+					w.Header().Set(header.ETag, `"v1"`)
+					w.WriteHeader(200)
+					_, _ = io.WriteString(w, "fresh-body")
+					return
+				}
+				// Revalidation: upstream returns 5xx.
+				w.WriteHeader(503)
+			})
+
+			h := testHandler(t, upstream)
+
+			// Seed cache.
+			seed := httptest.NewRecorder()
+			h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/gate", nil))
+			if seed.Code != 200 {
+				t.Fatalf("seed: status = %d", seed.Code)
+			}
+
+			// Second request triggers revalidation; upstream returns 5xx.
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "http://example.com/gate", nil)
+			h.ServeHTTP(rr, req)
+
+			// staleFallbackAllowed returns false for no-cache / s-maxage,
+			// so the 5xx must be forwarded to the client — not served stale.
+			if rr.Code != 503 {
+				t.Fatalf("revalidate 5xx: status = %d, want 503 (stale must NOT be served for %s)",
+					rr.Code, tc.cacheCtrl)
+			}
+			if rr.Header().Get(header.XCache) != "MISS" {
+				t.Fatalf("revalidate 5xx: X-Cache = %q, want MISS", rr.Header().Get(header.XCache))
+			}
+			if strings.Contains(rr.Body.String(), "fresh-body") {
+				t.Fatalf("revalidate 5xx: stale body served for %s, should be forwarded 5xx",
+					tc.cacheCtrl)
+			}
+		})
+	}
+}
+
 // TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency verifies that when
 // the upstream is slow and returns 5xx, the stale object's Age header is
 // computed from the request-start timestamp, not from a second time.Now()

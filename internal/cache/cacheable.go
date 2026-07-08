@@ -10,11 +10,6 @@ import (
 // cacheable.go contains the cache storage eligibility functions.
 // IsCacheable is the main entry point; the rest are helpers.
 
-// cdnCacheControl returns the effective Cache-Control directives for a
-// shared cache (CDN tier) per RFC 9211. When CDN-Cache-Control is
-// present it takes precedence over Cache-Control for all shared-cache
-// decisions; otherwise Cache-Control is used.
-// If the CDN-CC value contains unknown or invalid token types (per
 // isCDNCCCharForbidden reports whether b is a character that is not allowed
 // in a CDN-Cache-Control value (non-token chars per RFC 9213 §2 / RFC 7230 §3.2.6).
 func isCDNCCCharForbidden(b byte) bool {
@@ -28,6 +23,11 @@ func hasMeaningfulCDNCCDirective(d Directives) bool {
 	return d.MaxAgeSet || d.SMaxAgeSet || d.NoStore || d.Private || d.NoCache
 }
 
+// cdnCacheControl returns the effective Cache-Control directives for a
+// shared cache (CDN tier) per RFC 9211. When CDN-Cache-Control is
+// present it takes precedence over Cache-Control for all shared-cache
+// decisions; otherwise Cache-Control is used.
+// If the CDN-CC value contains unknown or invalid token types (per
 // RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
 // list of tokens"), the header is treated as absent.
 func cdnCacheControl(respHeader http.Header) (Directives, bool) {

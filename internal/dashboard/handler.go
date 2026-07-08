@@ -446,6 +446,11 @@ const (
 	apdexToleratMS = 250 // bound index 7
 )
 
+// maxAdminFormBytes caps the request body for admin form handlers (login,
+// purge, ban, refresh, config reload). These accept only short tokens, URLs,
+// and regex patterns — 4 KiB is generous and prevents memory exhaustion.
+const maxAdminFormBytes = 4 << 10
+
 // apdexScore computes the Apdex index (0..1) from a latency histogram.
 func apdexScore(h observability.LatencyHistogram, total int64) float64 {
 	if total == 0 {
@@ -668,6 +673,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(header.ContentType, "text/html")
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
 
 	if h.cfg.ConfigPath == "" {
 		_, _ = fmt.Fprint(w, `<div class="flash-err">✗ Config path not configured</div>`)
@@ -714,6 +720,7 @@ func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "purge not configured")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
 	_ = r.ParseForm()
 	rawURL := r.FormValue("url")
 	if rawURL == "" {
@@ -741,6 +748,7 @@ func (h *Handler) apiBan(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "ban not configured")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
 	_ = r.ParseForm()
 	hostRegex := r.FormValue("host_regex")
 	pathRegex := r.FormValue("path_regex")
@@ -780,6 +788,7 @@ func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, "refresh not configured")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
 	_ = r.ParseForm()
 	rawURL := r.FormValue("url")
 	if rawURL == "" {

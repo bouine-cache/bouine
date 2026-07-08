@@ -203,7 +203,7 @@ func (c *Client) setAuth(req *http.Request) {
 }
 
 func (c *Client) doJSON(req *http.Request, out any) error {
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.httpClient().Do(req) //nolint:gosec // G704: req URL is built from the operator-configured BaseURL, not user input
 	if err != nil {
 		return err
 	}

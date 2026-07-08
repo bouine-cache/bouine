@@ -130,7 +130,7 @@ func init() {
 // value. Falls back to a fresh allocation only for ages ≥ 600s.
 func ageHeader(d time.Duration) []string {
 	secs := int(d.Seconds())
-	if uint(secs) < uint(len(ageHeaderCache)) {
+	if secs >= 0 && secs < len(ageHeaderCache) {
 		return ageHeaderCache[secs]
 	}
 	return []string{strconv.Itoa(secs)}

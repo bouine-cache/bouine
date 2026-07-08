@@ -139,8 +139,8 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 
 	clusterNode, peerFetcher, broadcaster, peersFn, ae, clusterMetrics := e.initCluster(ctx, store, rings)
 
-	cfCtx, cfCancel := context.WithCancel(context.Background())
-	cfProp := e.initCloudflare(dpMetrics, cfCtx) //nolint:contextcheck // detached lifecycle for CF async goroutines
+	cfCtx, cfCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cfCancel is stored in runState and called during shutdown
+	cfProp := e.initCloudflare(dpMetrics, cfCtx)                //nolint:contextcheck // detached lifecycle for CF async goroutines
 
 	headerRing := observability.NewOriginHeaderRing()
 	rings.HeaderRing = headerRing

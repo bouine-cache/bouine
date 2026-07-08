@@ -647,3 +647,29 @@ func TestCluster_ChurnThreshold_BoundariesAccepted(t *testing.T) {
 		}
 	}
 }
+
+func TestWALSyncInterval_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000"},
+		Storage: Storage{WALSyncInterval: -2 * time.Second},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for wal_sync_interval < -1")
+	}
+	if !strings.Contains(err.Error(), "wal_sync_interval") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWALSyncInterval_NegativeOneAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000"},
+		Storage: Storage{WALSyncInterval: -1},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("wal_sync_interval = -1 should be accepted, got: %v", err)
+	}
+}

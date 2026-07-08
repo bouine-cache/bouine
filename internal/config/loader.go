@@ -315,6 +315,9 @@ func (c *Config) validateCluster() error {
 	if c.Storage.WarmSyncBatchSize < 0 {
 		return fmt.Errorf("config: storage.warm_sync_batch_size must be >= 0, got %v", c.Storage.WarmSyncBatchSize)
 	}
+	if c.Storage.WALSyncInterval < -1 {
+		return fmt.Errorf("config: storage.wal_sync_interval must be >= -1 (-1 = synchronous mode), got %v", c.Storage.WALSyncInterval)
+	}
 	return nil
 }
 

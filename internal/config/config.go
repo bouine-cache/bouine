@@ -99,6 +99,12 @@ type Storage struct {
 	// sync cycle. Default 5000. When the hot working set exceeds this,
 	// entries are rotated across cycles.
 	WarmSyncBatchSize int `yaml:"warm_sync_batch_size,omitempty" json:"warm_sync_batch_size,omitempty"`
+	// WALSyncInterval controls the async WAL fsync batching interval.
+	// Default 100ms. Entries are enqueued to a bounded channel and
+	// fsynced in batches by a background goroutine. Set to -1 for
+	// synchronous mode (per-entry fsync, same as pre-ADR-0024 behavior).
+	// Only effective when warm_dir is configured. See ADR-0024.
+	WALSyncInterval time.Duration `yaml:"wal_sync_interval,omitempty" json:"wal_sync_interval,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

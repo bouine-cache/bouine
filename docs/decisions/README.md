@@ -52,3 +52,4 @@ field to `Superseded by ADR-NNNN`.
 | 0021   | Refresh popularity gate                               | Accepted |
 | 0022   | Refresh persist cycles                               | Accepted |
 | 0023   | Warm-tier eviction (SIEVE)                            | Accepted |
+| 0024   | Async WAL fsync for miss-path throughput              | Proposed |

@@ -43,6 +43,11 @@ type DataPlaneMetrics struct {
 	RefreshInFlight     *prometheus.GaugeVec   // labels: route
 	RefreshScheduled    *prometheus.GaugeVec   // labels: route
 	RefreshRegistrySize *prometheus.GaugeVec   // labels: route
+	// WAL async metrics. WALDroppedEntries is a counter; the engine
+	// polls the WAL log's DroppedEntries() and adds the delta.
+	// WALLastSyncTimestamp is a gauge set from the WAL log's LastSyncTime.
+	WALDroppedEntries    prometheus.Counter
+	WALLastSyncTimestamp prometheus.Gauge
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -120,13 +125,24 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "warm_store_self_heals_total",
 		Help:      "Total stale warm-tier index entries dropped by the self-heal path since boot. A non-zero rate indicates segment-management bugs or disk faults.",
 	})
+	m.WALDroppedEntries = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "wal_dropped_entries_total",
+		Help:      "WAL entries dropped because the async channel was full. Any non-zero rate means the sync interval is too long for the write rate, or the disk is too slow.",
+	})
+	m.WALLastSyncTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "wal_last_sync_timestamp_seconds",
+		Help:      "Unix timestamp of the last successful WAL fsync. If stale by more than 2x wal_sync_interval, the sync loop may be stuck.",
+	})
 	m.initRefreshMetrics()
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
-		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize)
+		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
+		m.WALDroppedEntries, m.WALLastSyncTimestamp)
 	return m
 }
 

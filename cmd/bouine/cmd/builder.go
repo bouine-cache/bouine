@@ -41,6 +41,7 @@ func (e *engine) buildStore() (storage.Store, error) {
 		BodyThreshold:     e.cfg.Storage.BodyThreshold.Bytes(),
 		WarmSyncInterval:  e.cfg.Storage.WarmSyncInterval,
 		WarmSyncBatchSize: e.cfg.Storage.WarmSyncBatchSize,
+		WALSyncInterval:   e.cfg.Storage.WALSyncInterval,
 		Logger:            e.logger,
 	})
 }

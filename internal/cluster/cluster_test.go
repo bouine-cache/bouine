@@ -200,7 +200,7 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 	}
 }
 
-func TestNotifyMsg_ReplicationEvent(t *testing.T) {
+func TestNotifyMsg_ReplicationEventIgnored(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
@@ -217,16 +217,18 @@ func TestNotifyMsg_ReplicationEvent(t *testing.T) {
 		},
 	})
 
+	// Replication moved from gossip to HTTP. Gossip replication messages
+	// (from old pods during rolling upgrade) must be ignored.
 	evt := api.ReplicationEvent{Type: api.GossipTypeReplication, Method: "GET", Issuer: "local"}
 	msg, _ := json.Marshal(evt)
 	c.NotifyMsg(msg)
 
-	if got := called.Load(); got != 1 {
-		t.Fatalf("StoreObject called %d times, want 1", got)
+	if got := called.Load(); got != 0 {
+		t.Fatalf("StoreObject called %d times, want 0 (replication moved to HTTP)", got)
 	}
 }
 
-func TestNotifyMsg_ReplicationTakesPrecedenceOverPurge(t *testing.T) {
+func TestNotifyMsg_ReplicationGossipDoesNotCallPurgeOrStore(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
@@ -249,8 +251,9 @@ func TestNotifyMsg_ReplicationTakesPrecedenceOverPurge(t *testing.T) {
 		},
 	})
 
-	// A Type-based replication event should dispatch to the replication handler
-	// even when both Invalidator and Replicator are configured.
+	// Replication moved from gossip to HTTP. A gossip replication message
+	// (from an old pod during rolling upgrade) must be ignored — neither
+	// PurgeFn nor StoreObject should be called.
 	evt := api.ReplicationEvent{Type: api.GossipTypeReplication, Method: "GET", Issuer: "local"}
 	msg, _ := json.Marshal(evt)
 	c.NotifyMsg(msg)
@@ -258,8 +261,8 @@ func TestNotifyMsg_ReplicationTakesPrecedenceOverPurge(t *testing.T) {
 	if purgeCalled.Load() != 0 {
 		t.Fatal("PurgeFn should not be called for replication event")
 	}
-	if replCalled.Load() != 1 {
-		t.Fatal("StoreObject should be called once")
+	if replCalled.Load() != 0 {
+		t.Fatal("StoreObject should not be called for gossip replication (moved to HTTP)")
 	}
 }
 
@@ -353,7 +356,7 @@ func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
 	}
 }
 
-func TestNotifyMsg_ReplicationCtxHasDeadline(t *testing.T) {
+func TestNotifyMsg_ReplicationGossipIgnored(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
@@ -362,10 +365,10 @@ func TestNotifyMsg_ReplicationCtxHasDeadline(t *testing.T) {
 	}
 	defer func() { _ = c.Leave(t.Context()) }()
 
-	var got atomic.Pointer[context.Context]
+	called := false
 	c.SetReplicator(Replicator{
-		StoreObject: func(ctx context.Context, _ *api.Object) error {
-			got.Store(&ctx)
+		StoreObject: func(_ context.Context, _ *api.Object) error {
+			called = true
 			return nil
 		},
 	})
@@ -373,12 +376,8 @@ func TestNotifyMsg_ReplicationCtxHasDeadline(t *testing.T) {
 	msg, _ := json.Marshal(evt)
 	c.NotifyMsg(msg)
 
-	ctx := *got.Load()
-	if ctx == nil {
-		t.Fatal("StoreObject not called")
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		t.Fatal("context passed to StoreObject has no deadline")
+	if called {
+		t.Fatal("StoreObject should not be called for gossip replication (moved to HTTP)")
 	}
 }
 

@@ -81,16 +81,19 @@ has a configuration drift — every pod must use the same mode.
 | Dashboard shows ring | No — shows per-node fill rates and replication throughput |
 | Peer-fetch metrics | Always zero |
 | Purge propagation | < 1 s via HTTP fan-out |
-| Replications sent/received | `bouine_cluster_replications_sent_total` and `_received_total` grow with cache fills |
+| Replications sent/received | `bouine_cluster_replications_sent_total` and `_received_total` grow with cache fills. `bouine_cluster_replications_dropped_total` should stay near 0. |
 | Node failure | No impact — every node holds a full replica |
 
 **When things go wrong:**
 
 - **Replication not reaching peers.** Check `bouine_cluster_replications_sent_total`
   on the fill node and `bouine_cluster_replications_received_total` on peers.
-  If sent > 0 but received = 0, the gossip queue may be full.
-  Check `bouine_cluster_replication_bytes_total` against the cluster bandwidth
-  budget (see [Memory and bandwidth budget](#memory-and-bandwidth-budget)).
+  If sent > 0 but received = 0, check:
+  - `bouine_cluster_replications_dropped_total` — if increasing, the semaphore
+    is full (cluster overloaded) or peer admin ports are unreachable.
+  - Network policy allows `POST /v1/peer/replicate` on the admin port.
+  - `bouine_cluster_replication_bytes_total` against the cluster bandwidth
+    budget (see [Memory and bandwidth budget](#memory-and-bandwidth-budget)).
 
 - **Memory pressure on individual nodes.** `full` mode stores the entire working
   set on every node. If `hot_max_bytes` is undersized, SIEVE eviction will
@@ -129,7 +132,8 @@ has a configuration drift — every pod must use the same mode.
 - Memory per node: N× the working set. Every node holds every cached object.
 - Bandwidth budget: `fills_per_second × avg_response_bytes × (cluster_size - 1)`.
   Example: 1 000 fills/s × 50 KiB × (5 - 1) = 200 MB/s per node.
-  This is manageable on data-center networks but may saturate WAN links.
+  Replication is via async HTTP POST (not gossip), so bandwidth is TCP
+  traffic on the admin port, not UDP gossip.
 
 **Budget validation test:**
 

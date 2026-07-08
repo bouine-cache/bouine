@@ -501,11 +501,12 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
 		}),
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store),
-		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
-		PeerKeysHandler:    e.buildPeerKeysHandler(rs.store),
-		DashboardHandler:   dashMux,
-		FaviconHandler:     webdash.FaviconHandler(),
+		PeerFetchHandler:     cluster.NewPeerFetchHandler(rs.store),
+		PeerReplicateHandler: e.buildPeerReplicateHandler(rs),
+		PeerMetricsHandler:   dashboard.PeerMetricsHandler(rs.rings),
+		PeerKeysHandler:      e.buildPeerKeysHandler(rs.store),
+		DashboardHandler:     dashMux,
+		FaviconHandler:       webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	g.Go("admin", srv.Serve)
@@ -518,6 +519,22 @@ func (e *engine) buildPeerKeysHandler(store storage.Store) http.Handler {
 		return nil
 	}
 	return cluster.NewPeerKeysHandler(keyLister, e.cfg.Cluster.NodeName)
+}
+
+// buildPeerReplicateHandler creates the handler for incoming replication
+// POSTs from peers in full cluster mode. Returns nil when cluster is
+// disabled or not in full mode, so the admin server skips mounting.
+func (e *engine) buildPeerReplicateHandler(rs *runState) http.Handler {
+	if rs.clusterNode == nil || e.cfg.Cluster.Mode != config.ClusterModeFull {
+		return nil
+	}
+	return cluster.NewPeerReplicateHandler(
+		func(storeCtx context.Context, obj *api.Object) error {
+			return rs.store.Put(storeCtx, obj.Key, obj)
+		},
+		rs.clusterMetrics,
+		e.logger,
+	)
 }
 
 // buildDashboard wires and returns the dashboard ServeMux.

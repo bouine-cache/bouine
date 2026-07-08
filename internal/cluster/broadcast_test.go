@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -162,60 +162,133 @@ func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 	}
 }
 
-func TestBroadcastReplicate_Full_EnqueuesGossip(t *testing.T) {
+func TestBroadcastReplicate_Full_SendsHTTP(t *testing.T) {
 	t.Parallel()
+
+	var receivedBodies [][]byte
+	var receivedHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/peer/replicate" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		receivedBodies = append(receivedBodies, body)
+		receivedHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "full"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
 
 	b := NewBroadcaster(c, nil)
-	obj := &api.Object{Key: api.Key(42)}
+	obj := &api.Object{Key: api.Key(42), StatusCode: 200, Body: []byte("hello")}
 	b.BroadcastReplicate(context.Background(), obj)
 
-	// Verify the gossip queue has a replication event.
+	// Wait for the async goroutine to complete.
+	b.waitForReplicationGoroutines()
+
+	if len(receivedBodies) != 1 {
+		t.Fatalf("expected 1 HTTP POST, got %d", len(receivedBodies))
+	}
+	if receivedHeaders.Get("Content-Type") != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", receivedHeaders.Get("Content-Type"))
+	}
+	if receivedHeaders.Get(header.BouineIssuer) != "node-0" {
+		t.Errorf("Bouine-Issuer = %q, want node-0", receivedHeaders.Get(header.BouineIssuer))
+	}
+
+	// Verify the gossip queue is NOT used for replication.
 	c.gossipMu.Lock()
 	msgs := len(c.gossipQueue)
 	c.gossipMu.Unlock()
-	if msgs != 1 {
-		t.Fatalf("expected 1 gossip message, got %d", msgs)
+	if msgs != 0 {
+		t.Fatalf("replication should not use gossip queue, got %d messages", msgs)
+	}
+
+	// Verify the body is a valid storage.EncodeObject blob.
+	decoded, err := storage.DecodeObject(receivedBodies[0])
+	if err != nil {
+		t.Fatalf("decode replicated body: %v", err)
+	}
+	if decoded.Key != api.Key(42) {
+		t.Errorf("decoded key = %d, want 42", decoded.Key)
+	}
+	if string(decoded.Body) != "hello" {
+		t.Errorf("decoded body = %q, want %q", decoded.Body, "hello")
 	}
 }
 
 func TestBroadcastReplicate_Eventual_Noop(t *testing.T) {
 	t.Parallel()
+	httpCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "eventual"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastReplicate(context.Background(), &api.Object{Key: api.Key(42)})
+	b.waitForReplicationGoroutines()
 
-	c.gossipMu.Lock()
-	msgs := len(c.gossipQueue)
-	c.gossipMu.Unlock()
-	if msgs != 0 {
-		t.Fatalf("eventual mode should not replicate, got %d gossip messages", msgs)
+	if httpCalled {
+		t.Fatal("eventual mode should not replicate via HTTP")
 	}
 }
 
 func TestBroadcastReplicate_Strong_Noop(t *testing.T) {
 	t.Parallel()
+	httpCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "strong"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastReplicate(context.Background(), &api.Object{Key: api.Key(42)})
+	b.waitForReplicationGoroutines()
 
-	c.gossipMu.Lock()
-	msgs := len(c.gossipQueue)
-	c.gossipMu.Unlock()
-	if msgs != 0 {
-		t.Fatalf("strong mode should not replicate, got %d gossip messages", msgs)
+	if httpCalled {
+		t.Fatal("strong mode should not replicate via HTTP")
 	}
 }
 
 func TestBroadcastReplicate_Full_BodyCopiedNotAliased(t *testing.T) {
 	t.Parallel()
+
+	var receivedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "full"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
 
 	b := NewBroadcaster(c, nil)
 
@@ -228,52 +301,49 @@ func TestBroadcastReplicate_Full_BodyCopiedNotAliased(t *testing.T) {
 		SurrogateKeys: []string{"tag-a", "tag-b"},
 	}
 	b.BroadcastReplicate(context.Background(), obj)
+	b.waitForReplicationGoroutines()
 
-	c.gossipMu.Lock()
-	msgs := append([]gossipBroadcast(nil), c.gossipQueue...)
-	c.gossipMu.Unlock()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 gossip message, got %d", len(msgs))
+	if receivedBody == nil {
+		t.Fatal("expected HTTP POST body, got nil")
 	}
 
-	var evt api.ReplicationEvent
-	if err := json.Unmarshal(msgs[0].data, &evt); err != nil {
-		t.Fatalf("unmarshal replication event: %v", err)
+	// Decode the binary body and verify the copy is independent of the caller's slices.
+	decoded, err := storage.DecodeObject(receivedBody)
+	if err != nil {
+		t.Fatalf("decode replicated body: %v", err)
 	}
-	if evt.Object == nil {
-		t.Fatal("replication event has nil object")
+	if string(decoded.Body) != string(originalBody) {
+		t.Fatalf("body mismatch after encode: got %q want %q", decoded.Body, originalBody)
 	}
-	if string(evt.Object.Body) != string(originalBody) {
-		t.Fatalf("body mismatch after marshal: got %q want %q", evt.Object.Body, originalBody)
+	if decoded.Header.Get("X-Test") != "v1" {
+		t.Fatalf("header mismatch: got %q", decoded.Header.Get("X-Test"))
 	}
 
-	// The queued payload is a marshaled snapshot. Mutating the
-	// caller's body and header after BroadcastReplicate returns must
-	// not change the already-queued bytes. This pins the contract
-	// that BroadcastReplicate does not defer marshaling or hold
-	// references to the caller's slices — a property the defensive
-	// copy inside the function guarantees even if the caller's Body
-	// aliases a sync.Pool buffer that could be reused.
+	// Mutating the caller's body and header after BroadcastReplicate returns
+	// must not change the already-sent bytes. The defensive copy inside the
+	// function guarantees this even if the caller's Body aliases a sync.Pool
+	// buffer that could be reused.
 	for i := range originalBody {
 		originalBody[i] = 'X'
 	}
 	obj.Header.Set("X-Test", "v2")
 	obj.SurrogateKeys[0] = "mutated"
 
-	var evt2 api.ReplicationEvent
-	if err := json.Unmarshal(msgs[0].data, &evt2); err != nil {
-		t.Fatalf("unmarshal after mutation: %v", err)
+	// Re-decode the already-received body — it must not have changed.
+	decoded2, err := storage.DecodeObject(receivedBody)
+	if err != nil {
+		t.Fatalf("re-decode after mutation: %v", err)
 	}
-	if string(evt2.Object.Body) != "the quick brown fox jumps over the lazy dog" {
-		t.Fatalf("queued payload observed caller body mutation: got %q", evt2.Object.Body)
+	if string(decoded2.Body) != "the quick brown fox jumps over the lazy dog" {
+		t.Fatalf("sent payload observed caller body mutation: got %q", decoded2.Body)
 	}
-	if evt2.Object.Header.Get("X-Test") != "v1" {
-		t.Fatalf("queued payload observed header mutation: got %q", evt2.Object.Header.Get("X-Test"))
+	if decoded2.Header.Get("X-Test") != "v1" {
+		t.Fatalf("sent payload observed header mutation: got %q", decoded2.Header.Get("X-Test"))
 	}
-	if len(evt2.Object.SurrogateKeys) != 2 ||
-		evt2.Object.SurrogateKeys[0] != "tag-a" ||
-		evt2.Object.SurrogateKeys[1] != "tag-b" {
-		t.Fatalf("queued payload observed surrogate-keys mutation: got %v", evt2.Object.SurrogateKeys)
+	if len(decoded2.SurrogateKeys) != 2 ||
+		decoded2.SurrogateKeys[0] != "tag-a" ||
+		decoded2.SurrogateKeys[1] != "tag-b" {
+		t.Fatalf("sent payload observed surrogate-keys mutation: got %v", decoded2.SurrogateKeys)
 	}
 }
 
@@ -382,4 +452,10 @@ func minimalCluster(_ *testing.T, _ string) *Cluster {
 		logger:  observability.NoopLogger{},
 		metrics: &Metrics{},
 	}
+}
+
+// waitForReplicationGoroutines blocks until all in-flight replication
+// goroutines have completed. Uses the WaitGroup tracking in Broadcaster.
+func (b *Broadcaster) waitForReplicationGoroutines() {
+	b.replWG.Wait()
 }

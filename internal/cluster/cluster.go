@@ -311,29 +311,11 @@ func (c *Cluster) handleJSONGossip(msg []byte) {
 	}
 	switch hdr.Type {
 	case api.GossipTypeReplication:
-		if c.rep.StoreObject != nil {
-			var evt api.ReplicationEvent
-			if err := json.Unmarshal(msg, &evt); err != nil {
-				c.logger.Warn("cluster: gossip replication unmarshal failed", "error", err)
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-			defer cancel()
-			err := c.rep.StoreObject(ctx, evt.Object)
-			if err != nil {
-				c.logger.Warn("cluster: gossip replication apply failed", "error", err)
-			} else {
-				c.metrics.IncReplicationReceived()
-				c.metrics.AddReplicationBytes("received", float64(len(msg)))
-				if evt.Object != nil {
-					c.logger.Info("received replication from peer",
-						"key", evt.Object.Key,
-						"issuer", evt.Issuer,
-						"seq", evt.Seq,
-					)
-				}
-			}
-		}
+		// Replication moved from gossip to HTTP (POST /v1/peer/replicate).
+		// Log a warning for backward compat during rolling upgrades — old
+		// pods still send replication via gossip. Anti-entropy heals any
+		// objects missed during the transition.
+		c.logger.Warn("cluster: received replication via gossip (deprecated, use HTTP), ignoring", "len", len(msg))
 	default:
 		c.logger.Debug("cluster: unrecognized gossip message", "type", hdr.Type, "len", len(msg))
 	}

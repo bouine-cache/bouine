@@ -66,19 +66,24 @@ Default: `strong` (preserves existing behaviour).
 - Same routing as `eventual`: `ownerFn = nil`, `peerFetch = nil`. Every
   node serves from local store; miss → origin.
 - **Active replication**: when a node stores a cacheable response, it
-  broadcasts the full `Object` to all peers via a new gossip message
-  type (`ReplicationEvent`). Peers receive it and store it in their
-  local hot tier, achieving full replication without each node making
-  its own origin request.
-- `Broadcaster` sends **both** invalidation events (purge/ban via
-  gossip) and **replication events** (full object gossip on fill).
-- `NotifyMsg` processes three message types: purge, ban, and replicate.
+  POSTs the full `Object` to all peers via HTTP (`POST /v1/peer/replicate`).
+  The body uses the binary `storage.EncodeObject` codec (same as
+  peer-fetch). Peers receive it and store it in their local hot tier,
+  achieving full replication without each node making its own origin
+  request. Replication is async (fire-and-forget with a bounded
+  semaphore) to avoid blocking the data path. Anti-entropy reconciles
+  any dropped replications.
+- `Broadcaster` sends invalidation events (purge/ban via gossip) and
+  **replication events** (full object via HTTP POST on fill).
+- `NotifyMsg` processes purge and ban gossip messages. Replication events
+  are no longer sent via gossip (moved to HTTP); gossip replication messages
+  from old pods during rolling upgrades are logged and ignored.
 - The ring is used for membership only; `Owner()` is never called for
   routing. Dashboard shows per-node fill rates instead of key ownership.
 - Memory: each node holds the entire working set. `hot_max_bytes` must
   be sized accordingly (at least the full working set).
-- Convergence: replication gossip arrives within the memberlist flush
-  interval (~1 s); invalidations same as `eventual`.
+- Convergence: replication HTTP POST arrives within ~50ms; invalidations
+  same as `eventual` (gossip, 1–5 s).
 
 ### Config schema change
 

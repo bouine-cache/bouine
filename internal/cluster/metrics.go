@@ -26,10 +26,15 @@ type Metrics struct {
 	// gossip (full mode only).
 	ReplicationsSent prometheus.Counter
 	// ReplicationsReceived tracks full-mode replication events received
-	// via gossip and stored locally (full mode only).
+	// via HTTP and stored locally (full mode only).
 	ReplicationsReceived prometheus.Counter
+	// ReplicationsDropped counts replication POSTs dropped because the
+	// semaphore was full or the peer POST failed (full mode only).
+	// Anti-entropy heals any gaps. Sustained growth indicates the cluster
+	// is overloaded or peers are unreachable.
+	ReplicationsDropped prometheus.Counter
 	// ReplicationBytes tracks the approximate byte size of replicated
-	// objects sent or received via gossip.
+	// objects sent or received via HTTP.
 	ReplicationBytes *prometheus.CounterVec
 	// BroadcastFailures counts HTTP fan-out failures by type (purge, ban),
 	// labelled by reason (dial, timeout, 5xx). Non-zero indicates peers
@@ -96,12 +101,17 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		ReplicationsReceived: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "cluster_replications_received_total",
-			Help:      "Cached objects received from peers via gossip and stored locally in full mode.",
+			Help:      "Cached objects received from peers via HTTP and stored locally in full mode.",
+		}),
+		ReplicationsDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_replications_dropped_total",
+			Help:      "Replication POSTs dropped because the semaphore was full or the peer POST failed. Anti-entropy heals any gaps.",
 		}),
 		ReplicationBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "cluster_replication_bytes_total",
-			Help:      "Approximate byte size of replicated objects sent or received via gossip.",
+			Help:      "Approximate byte size of replicated objects sent or received via HTTP.",
 		}, []string{"direction"}),
 		BroadcastFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
@@ -116,6 +126,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.InvalidationsHTTP,
 		m.ReplicationsSent,
 		m.ReplicationsReceived,
+		m.ReplicationsDropped,
 		m.ReplicationBytes,
 		m.BroadcastFailures,
 		m.AntiEntropyReconcile,
@@ -210,6 +221,14 @@ func (m *Metrics) IncReplicationReceived() {
 		return
 	}
 	m.ReplicationsReceived.Inc()
+}
+
+// IncReplicationDropped increments the replication-dropped counter.
+func (m *Metrics) IncReplicationDropped() {
+	if m == nil || m.ReplicationsDropped == nil {
+		return
+	}
+	m.ReplicationsDropped.Inc()
 }
 
 // AddReplicationBytes adds the given number of bytes to the

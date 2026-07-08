@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -69,7 +70,7 @@ func encodeObject(obj *api.Object) []byte {
 	buf = binary.AppendVarint(buf, int64(obj.StaleIfError))
 	buf = appendTime(buf, obj.StoredAt)
 	buf = appendTime(buf, obj.LastModified)
-	buf = binary.AppendUvarint(buf, obj.Hits)
+	buf = binary.AppendUvarint(buf, atomic.LoadUint64(&obj.Hits))
 	buf = appendString(buf, obj.ETag)
 
 	// Header map: count, then (key, value) per entry.

@@ -258,7 +258,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
 		})
-		e.obj.Hits++
+		atomic.AddUint64(&e.obj.Hits, 1)
 		obj = e.obj
 	}
 	s.mu.Unlock()

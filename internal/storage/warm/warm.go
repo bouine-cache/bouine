@@ -1055,7 +1055,7 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 	// per-record pread syscalls (3 per record with the old ReadAt
 	// approach) and turns the scan into a memory traversal at
 	// ~10-20 GiB/s instead of ~130 MiB/s.
-	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_SHARED)
+	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_SHARED) //nolint:gosec // fd is a small non-negative integer
 	if err != nil {
 		// Fall back to ReadAt if mmap fails (e.g. unsupported FS).
 		return scanSegmentReadAt(f, segID, size, fn)

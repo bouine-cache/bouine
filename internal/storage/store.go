@@ -30,6 +30,11 @@ type Store interface {
 	Delete(ctx context.Context, key api.Key) error
 	Ban(ctx context.Context, predicate api.BanExpr) (int, error)
 	Stats() api.Stats
+	// Hits returns the hot-tier access count for key, or 0 if the key is
+	// not resident in the hot tier. The count is local to this node and
+	// does not survive warm-tier round-trips. Used by the cache layer's
+	// refresh_min_hits popularity gate.
+	Hits(key api.Key) uint64
 	Close(ctx context.Context) error
 }
 

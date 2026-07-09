@@ -596,7 +596,6 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			return
 		}
 		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		obj.Hits = stale.Hits
 		h.storeAndReplicate(ctx, key, obj, req, true)
 		h.refreshMetrics.IncTotal("200")
 		return
@@ -1002,9 +1001,6 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	refreshed := *stale
 	refreshed.Header = stale.Header.Clone()
 	refreshed.StoredAt = time.Now()
-	// Preserve hit count from the previous TTL window so the
-	// refresh_min_hits gate can evaluate popularity on re-schedule.
-	refreshed.Hits = stale.Hits
 	MergeHeaders304(&refreshed, res.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
@@ -1358,7 +1354,7 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 		// applies to background refresh re-stores, not initial stores.
 		// Unregister the stale registry entry — the object stays in
 		// the cache but won't be refreshed, so the entry is dead weight.
-		if isRefresh && h.refreshMinHits > 0 && obj.Hits < uint64(h.refreshMinHits) {
+		if isRefresh && h.refreshMinHits > 0 && h.store.Hits(key) < uint64(h.refreshMinHits) {
 			// Persist: if the object has remaining persist cycles, keep
 			// it alive for more TTL windows. This bridges the gap
 			// between short TTL and long inter-access times without

@@ -475,6 +475,13 @@ func (t *TieredStore) OverBudget() bool {
 	return t.hot.OverBudget()
 }
 
+// Hits returns the hot-tier access count for key. Delegates to the hot
+// tier; warm-tier-only objects have no hit count (they were not being
+// served from hot).
+func (t *TieredStore) Hits(key api.Key) uint64 {
+	return t.hot.Hits(key)
+}
+
 // Stats merges hot + warm stats.
 func (t *TieredStore) Stats() api.Stats {
 	st := t.hot.Stats()

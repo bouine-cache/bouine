@@ -72,9 +72,6 @@ type Object struct {
 	// to post-v1.0, see §18).
 	SurrogateKeys []string `json:"surrogate_keys,omitempty"`
 
-	// Hits counts how many times this object has been served.
-	Hits uint64 `json:"hits"`
-
 	// CacheControl is the merged Cache-Control header from the origin
 	// response, stored verbatim at cache-fill time. Avoids re-reading the
 	// header map on every cache hit in Evaluate. Not serialized (it is

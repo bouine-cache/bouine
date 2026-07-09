@@ -50,8 +50,8 @@ func TestHotStore_PutGet(t *testing.T) {
 	if got.StatusCode != 200 {
 		t.Fatalf("status = %d", got.StatusCode)
 	}
-	if got.Hits != 1 {
-		t.Fatalf("hits = %d, want 1", got.Hits)
+	if s.Hits(k) != 1 {
+		t.Fatalf("hits = %d, want 1", s.Hits(k))
 	}
 	if src != api.SourceHot {
 		t.Fatalf("source = %q, want %q", src, api.SourceHot)
@@ -326,7 +326,7 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 256, hotEntrySize: 24, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// objectStructSize: 248, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32

@@ -29,7 +29,6 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		ETag:                 `"abc123"`,
 		LastModified:         time.Unix(1_699_000_000, 0).UTC(),
 		SurrogateKeys:        []string{"product-42", "category-7"},
-		Hits:                 99,
 	}
 
 	got, err := decodeObject(encodeObject(orig))
@@ -49,7 +48,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	if !got.StoredAt.Equal(orig.StoredAt) || !got.LastModified.Equal(orig.LastModified) {
 		t.Errorf("time fields mismatch: storedAt=%v lastMod=%v", got.StoredAt, got.LastModified)
 	}
-	if got.ETag != orig.ETag || got.Hits != orig.Hits {
+	if got.ETag != orig.ETag {
 		t.Errorf("etag/hits mismatch: %+v", got)
 	}
 	if len(got.SurrogateKeys) != 2 || got.SurrogateKeys[0] != "product-42" {

@@ -88,6 +88,11 @@ type shard struct {
 type hotEntry struct {
 	obj   *api.Object
 	sieve *sieve.Entry[api.Key]
+	// hits counts how many times this entry has been served from the
+	// hot tier. Mutated only under the shard write lock (in Get's slow
+	// path) and read under the shard read lock (in Hits). Not on
+	// api.Object — see Store.Hits.
+	hits uint64
 	// hasBackup is true when the object also exists in a slower tier.
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
@@ -258,7 +263,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
 		})
-		atomic.AddUint64(&e.obj.Hits, 1)
+		e.hits++
 		obj = e.obj
 	}
 	s.mu.Unlock()
@@ -274,6 +279,23 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	}
 	h.stats.hits.Add(1)
 	return obj, api.SourceHot, nil
+}
+
+// Hits returns the access count for the hot-tier entry at key, or 0 if
+// the key is not in the hot tier. Takes the shard read lock — safe to
+// call concurrently with Get. Used by the cache layer's refresh_min_hits
+// popularity gate, which runs on the miss/revalidation path, not the hit
+// path.
+func (h *HotStore) Hits(key api.Key) uint64 {
+	s := h.shard(key)
+	s.mu.RLock()
+	e := s.entries[key]
+	hits := uint64(0)
+	if e != nil {
+		hits = e.hits
+	}
+	s.mu.RUnlock()
+	return hits
 }
 
 // notifyEvict fires the OnEvict callback for a backed entry being
@@ -333,7 +355,9 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		stillOver = true
 	}
 
-	// Remove old entry if replacing.
+	// Remove old entry if replacing, preserving its hit count so the
+	// refresh_min_hits popularity gate survives TTL refreshes.
+	var preservedHits uint64
 	if old, exists := s.entries[key]; exists {
 		h.notifyEvict(key, old)
 		s.bytes -= objSize(old.obj)
@@ -341,12 +365,13 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		if old.hasBackup {
 			s.backedCount--
 		}
+		preservedHits = old.hits
 	}
 
 	se, _ := s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 		return nil // force insert
 	})
-	s.entries[key] = &hotEntry{obj: obj, sieve: se}
+	s.entries[key] = &hotEntry{obj: obj, sieve: se, hits: preservedHits}
 	s.bytes += size
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
@@ -705,8 +730,8 @@ func KeyHash(b []byte) api.Key {
 }
 
 const (
-	objectStructSize    int64 = 256
-	hotEntrySize        int64 = 24
+	objectStructSize    int64 = 248
+	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).

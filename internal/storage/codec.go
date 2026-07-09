@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -15,7 +14,9 @@ import (
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-const objCodecVersion byte = 2
+// Version 3 drops the Hits field: hit count is hot-tier-local metadata
+// that lives on hotEntry, not on the serialised object.
+const objCodecVersion byte = 3
 
 // errCorrupt is returned when an encoded object blob is truncated or
 // otherwise malformed. TieredStore.Get treats it as a durable eviction:
@@ -70,7 +71,6 @@ func encodeObject(obj *api.Object) []byte {
 	buf = binary.AppendVarint(buf, int64(obj.StaleIfError))
 	buf = appendTime(buf, obj.StoredAt)
 	buf = appendTime(buf, obj.LastModified)
-	buf = binary.AppendUvarint(buf, atomic.LoadUint64(&obj.Hits))
 	buf = appendString(buf, obj.ETag)
 
 	// Header map: count, then (key, value) per entry.
@@ -118,7 +118,6 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	obj.StaleIfError = time.Duration(r.varint())
 	obj.StoredAt = r.time()
 	obj.LastModified = r.time()
-	obj.Hits = r.uvarint()
 	obj.ETag = r.str()
 
 	if nh := r.count(); nh > 0 {

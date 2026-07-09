@@ -1277,8 +1277,8 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 	}
 	// After the test's Get, Hits=1 (first access, slow path). With
 	// minHits=2, the gate should block re-scheduling.
-	if obj.Hits != 1 {
-		t.Fatalf("expected 1 hit after Get, got %d", obj.Hits)
+	if h.store.Hits(key) != 1 {
+		t.Fatalf("expected 1 hit after Get, got %d", h.store.Hits(key))
 	}
 	h.doBackgroundRefresh(ctx, key, obj)
 
@@ -1312,8 +1312,8 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 1 {
-		t.Fatalf("expected >= 1 hits, got %d", obj.Hits)
+	if h.store.Hits(key) < 1 {
+		t.Fatalf("expected >= 1 hits, got %d", h.store.Hits(key))
 	}
 
 	// Simulate a background refresh. Since Hits >= refreshMinHits (1),
@@ -1380,10 +1380,10 @@ func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 1 {
-		t.Fatalf("expected >= 1 hit before refresh, got %d", obj.Hits)
+	if h.store.Hits(key) < 1 {
+		t.Fatalf("expected >= 1 hit before refresh, got %d", h.store.Hits(key))
 	}
-	staleHits := obj.Hits
+	staleHits := h.store.Hits(key)
 
 	// doBackgroundRefresh triggers a 200 (upstream never returns 304).
 	// The refreshed object should carry over the hit count.
@@ -1394,8 +1394,8 @@ func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
 	if err != nil || refreshed == nil {
 		t.Fatalf("store.Get after refresh: obj=%v err=%v", refreshed, err)
 	}
-	if refreshed.Hits < staleHits {
-		t.Fatalf("hit count lost after 200 refresh: got %d, want >= %d", refreshed.Hits, staleHits)
+	if h.store.Hits(key) < staleHits {
+		t.Fatalf("hit count lost after 200 refresh: got %d, want >= %d", h.store.Hits(key), staleHits)
 	}
 }
 
@@ -1421,6 +1421,7 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	// would block. But persist=3 should keep it alive for 3 more cycles.
 	// We pass the same obj to each doBackgroundRefresh — the 304 path
 	// copies stale.Hits, so Hits stays 1 < minHits=2 across all cycles.
+	// With Hits on hotEntry, Put preserves the count across replacements.
 
 	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj)
@@ -1481,8 +1482,8 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits != 1 {
-		t.Fatalf("expected 1 hit after MISS, got %d", obj.Hits)
+	if h.store.Hits(key) != 1 {
+		t.Fatalf("expected 1 hit after MISS, got %d", h.store.Hits(key))
 	}
 
 	// Unpopular refresh: Hits=1 < minHits=2 → persist 2→1, re-scheduled.
@@ -1503,8 +1504,8 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get after HIT: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 2 {
-		t.Fatalf("expected >= 2 hits after HIT, got %d", obj.Hits)
+	if h.store.Hits(key) < 2 {
+		t.Fatalf("expected >= 2 hits after HIT, got %d", h.store.Hits(key))
 	}
 
 	// Clear scheduler.
@@ -1544,8 +1545,8 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits != 1 {
-		t.Fatalf("expected 1 hit, got %d", obj.Hits)
+	if h.store.Hits(key) != 1 {
+		t.Fatalf("expected 1 hit, got %d", h.store.Hits(key))
 	}
 
 	// Hits=1 < minHits=2, persist=0 → gate blocks immediately.

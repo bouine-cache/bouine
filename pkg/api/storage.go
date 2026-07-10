@@ -166,6 +166,14 @@ type Stats struct {
 	WarmEntries int64 `json:"warm_entries"`
 	// WarmBytes is the total bytes used by warm-tier segments.
 	WarmBytes int64 `json:"warm_bytes"`
+	// WarmDiskBytes is the total on-disk size of all warm-tier segment
+	// files, including tombstones and superseded entries. Unlike
+	// WarmBytes (live record bytes), this reflects actual disk usage
+	// and only shrinks after compaction.
+	WarmDiskBytes int64 `json:"warm_disk_bytes"`
+	// WarmMaxBytes is the configured warm-tier byte budget. 0 means
+	// unlimited (no enforcement).
+	WarmMaxBytes int64 `json:"warm_max_bytes"`
 	// WarmSelfHeals is the number of stale warm-tier index entries
 	// dropped by the self-heal path since boot. A non-zero rate
 	// indicates segment-management bugs or disk faults.

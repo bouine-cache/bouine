@@ -15,7 +15,7 @@ record of *why* a choice was made, not just *what* the code does.
 
 `AGENTS.md §10` already mandates that ADRs are written for dependency
 additions, protocol/wire-format changes, eviction-algorithm changes,
-cluster-protocol changes, VCL-shim surface changes, and pre-commit
+cluster-protocol changes, VCL-shim surface changes, and prek
 hook changes. This ADR formalizes the practice itself so the process is
 authoritative.
 

@@ -87,9 +87,9 @@ These rules override autonomy. Break them and the change must be reverted.
    behavior. Same rule applies to the VCL shim.
 10. **Never expand scope.** If `PLAN.md` doesn't list a feature for the
     current phase, you may not add it. Open a discussion issue instead.
-11. **Never commit with `pre-commit` disabled or skipped.** Hooks must run
+11. **Never commit with `prek` disabled or skipped.** Hooks must run
     and pass locally before any commit. `git commit --no-verify`, `SKIP=`,
-    `PRE_COMMIT_ALLOW_NO_CONFIG=1`, and equivalent escape hatches are
+    `PREK_ALLOW_NO_CONFIG=1`, and equivalent escape hatches are
     forbidden. See §14.4.
 
 ---
@@ -361,7 +361,7 @@ Observability is a product feature, not an afterthought.
 ```
 make build           # binary to ./bin/bouine
 make test            # go test -race ./...
-make test-short      # go test -race -short ./... (pre-commit)
+make test-short      # go test -race -short ./... (prek)
 make lint            # golangci-lint run
 make vet             # go vet ./...
 make bench           # bench harness, writes bench/results/, diffs baseline
@@ -372,7 +372,7 @@ make soak            # long-running soak against a live cluster
 make govulncheck     # govulncheck ./...
 make ci              # lint + test-short + build + hooks-run (CI gate)
 make templ           # go generate ./internal/dashboard/templates/ (requires templ CLI)
-make hooks           # install pre-commit hooks into .git/hooks
+make hooks           # install prek hooks into .git/hooks
 ```
 
 > There is no JSON-schema generator or in-repo docs-site build: config is
@@ -401,25 +401,28 @@ make hooks           # install pre-commit hooks into .git/hooks
 - Tags follow `vMAJOR.MINOR.PATCH`. Release notes generated from commits.
 - Container images: distroless, non-root, multi-arch (amd64+arm64).
 
-### 14.4 Pre-commit hooks (mandatory)
+### 14.4 prek hooks (mandatory)
 
-`bouine` uses [`pre-commit`](https://pre-commit.com) to enforce the
-minimum quality bar on every commit. The hooks are the local mirror of
-the CI gates; they exist so problems are caught in seconds, not minutes.
+`bouine` uses [`prek`](https://github.com/j178/prek) (a fast, drop-in
+replacement for pre-commit) to enforce the minimum quality bar on every
+commit. The hooks are the local mirror of the CI gates; they exist so
+problems are caught in seconds, not minutes.
 
 **Setup is required**, not optional:
 
 ```
-pip install pre-commit            # or: brew install pre-commit
-pre-commit install                # installs the git hook
-pre-commit install --hook-type commit-msg   # Conventional Commits check
-make hooks                        # one-shot equivalent of the two above
+brew install prek                 # or: pip install prek, uv tool install prek
+prek install                       # installs the git hook
+prek install --hook-type commit-msg   # Conventional Commits check
+make hooks                         # one-shot equivalent of the two above
 ```
 
 The `.pre-commit-config.yaml` at the repo root is the single source of
-truth. It MUST register at minimum:
+truth. prek reads this file natively — no format change needed. It MUST
+register at minimum:
 
 - **YAML validation** — `check-yaml` from `pre-commit/pre-commit-hooks`
+  (prek runs its built-in Rust fast path for this hook automatically)
   for every `*.yaml` / `*.yml` file (config, Helm, GitHub Actions,
   fixtures). Multi-document files allowed where needed.
 - **Generic file hygiene** — `end-of-file-fixer`, `trailing-whitespace`,
@@ -427,7 +430,8 @@ truth. It MUST register at minimum:
   (cap 1 MiB; testdata fixtures excluded explicitly).
 - **Go formatting** — `gofmt -s` and `goimports` via the
   `golangci/golangci-lint` hook in `--fix` mode, or `dnephin/pre-commit-golang`
-  for `gofmt`/`goimports` standalone.
+  for `gofmt`/`goimports` standalone. (prek runs these hooks from the
+  same `.pre-commit-config.yaml`.)
 - **Go tests** — a local hook running
   `go test -race -count=1 -short ./...`. The `-short` flag is what keeps
   the hook usable; long benchmarks, fuzz, integration, and conformance
@@ -469,10 +473,11 @@ truth. It MUST register at minimum:
 
 - The hook config is versioned. Bumping hook versions follows the same
   PR review process as code; pin every revision (`rev: v1.2.3`).
-- CI re-runs `pre-commit run --all-files` as its first lint stage so a
+- CI re-runs `prek run --all-files` as its first lint stage so a
   bypassed local hook still fails the build.
 - Hooks must remain fast: the `pre-commit` stage budget is **30 s** on a
-  laptop. Anything slower moves to `pre-push` or CI.
+  laptop. Anything slower moves to `pre-push` or CI. (prek's built-in
+  Rust hooks and parallel execution help stay within this budget.)
 - New hooks require an ADR in `docs/decisions/` justifying the cost and
   scope.
 - Bypassing hooks (`--no-verify`, `SKIP=`) is forbidden (see §2.11). If a
@@ -555,7 +560,7 @@ For every task an agent starts, execute this loop. No shortcuts.
 
 Before declaring a change ready:
 
-- [ ] `pre-commit run --all-files` passes locally.
+- [ ] `prek run --all-files` passes locally.
 - [ ] Layer dependencies respected (`depguard` clean).
 - [ ] `make ci` green locally.
 - [ ] Tests added/updated; coverage not reduced.

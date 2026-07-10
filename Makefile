@@ -35,7 +35,7 @@ test: ## Run unit tests with the race detector.
 	$(GO) test -race -count=1 -timeout=60s -parallel=8 $(PKGS)
 
 .PHONY: test-short
-test-short: ## Run unit tests with -short (used by pre-commit).
+test-short: ## Run unit tests with -short (used by prek).
 	$(GO) test -race -count=1 -timeout=30s -short -parallel=8 $(PKGS)
 
 .PHONY: lint
@@ -115,19 +115,19 @@ templ: ## Regenerate dashboard _templ.go files from *.templ sources.
 	go generate ./internal/dashboard/templates/
 
 .PHONY: hooks
-hooks: ## Install pre-commit hooks (commit + commit-msg + pre-push).
-	@command -v pre-commit >/dev/null || { \
-		echo "pre-commit is required. Install with: pip install pre-commit"; \
+hooks: ## Install prek hooks (commit + commit-msg + pre-push).
+	@command -v prek >/dev/null || { \
+		echo "prek is required. Install with: brew install prek"; \
 		exit 1; \
 	}
-	pre-commit install
-	pre-commit install --hook-type commit-msg
-	pre-commit install --hook-type pre-push
-	@echo "pre-commit hooks installed."
+	prek install
+	prek install --hook-type commit-msg
+	prek install --hook-type pre-push
+	@echo "prek hooks installed."
 
 .PHONY: hooks-run
-hooks-run: ## Run pre-commit on all files (mirrors CI's first stage).
-	pre-commit run --all-files --show-diff-on-failure
+hooks-run: ## Run prek on all files (mirrors CI's first stage).
+	prek run --all-files --show-diff-on-failure
 
 .PHONY: govulncheck
 govulncheck: ## Run govulncheck.

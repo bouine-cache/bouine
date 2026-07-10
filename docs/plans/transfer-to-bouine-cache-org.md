@@ -651,7 +651,7 @@ through Cloudflare. `https://bouine.thylong.com` redirects to
 ### 9.1 CI pipeline
 
 - [ ] Push a trivial commit to `bouine-cache/bouine` `main`.
-- [ ] Verify CI runs: `pre-commit`, `lint`, `govulncheck`, `test`, `build`,
+- [ ] Verify CI runs: `prek`, `lint`, `govulncheck`, `test`, `build`,
       `bench`, `conformance` — all green.
 - [ ] Verify the `auto-rebase.yml` guard fires (repo name check).
 

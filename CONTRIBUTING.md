@@ -40,7 +40,7 @@ contributors.
 ```bash
 git clone https://github.com/bouine-cache/bouine.git
 cd bouine
-make hooks      # installs pre-commit + commit-msg hooks (mandatory)
+make hooks      # installs prek + commit-msg hooks (mandatory)
 make build      # builds ./bin/bouine
 make test       # go test -race ./...
 ```
@@ -48,14 +48,14 @@ make test       # go test -race ./...
 You need:
 
 - Go 1.26.x (toolchain pinned in `go.mod`).
-- `pre-commit` (`pip install pre-commit` or `brew install pre-commit`).
+- `prek` (`brew install prek`, `pip install prek`, or `uv tool install prek`).
 - Docker (for integration and conformance tests).
 - `golangci-lint`, `govulncheck`, `gitleaks` — installed by
   `make hooks` if absent, or via your package manager.
 
-`make hooks` is **mandatory**. Bypassing pre-commit (`--no-verify`,
+`make hooks` is **mandatory**. Bypassing prek (`--no-verify`,
 `SKIP=`) is forbidden by [`AGENTS.md §2.11`](AGENTS.md). CI re-runs
-`pre-commit run --all-files` as its first stage; bypassed local hooks
+`prek run --all-files` as its first stage; bypassed local hooks
 still fail the build.
 
 ---
@@ -85,7 +85,7 @@ For any non-trivial change:
 Mirrors [`AGENTS.md §17`](AGENTS.md). All boxes must be checked before
 review.
 
-- [ ] `pre-commit run --all-files` passes locally.
+- [ ] `prek run --all-files` passes locally.
 - [ ] Layer dependencies respected (`depguard` clean).
 - [ ] `make ci` is green locally.
 - [ ] Tests added or updated; coverage not reduced.
@@ -120,7 +120,7 @@ perf(storage): eliminate alloc on hot-tier lookup
 docs(threat-model): add T36 peer-fetch loop mitigation
 ```
 
-The `commit-msg` pre-commit hook validates the header. Release notes
+The `commit-msg` prek hook validates the header. Release notes
 are generated from these prefixes.
 
 ---

@@ -938,6 +938,18 @@ func (s *Store) MaxBytes() int64 {
 	return s.maxBytes
 }
 
+// OverBudget reports whether live entry bytes have reached the configured
+// maxBytes budget. The warm sync loop consults this before attempting
+// hot→warm promotion to avoid wasting I/O on Put calls that will return
+// ErrOverBudget (#205). maxBytes == 0 means unlimited, so OverBudget
+// always returns false.
+func (s *Store) OverBudget() bool {
+	if s.maxBytes <= 0 {
+		return false
+	}
+	return s.stats.bytes.Load() >= s.maxBytes
+}
+
 func (s *Store) activeSeg() (*Segment, error) {
 	s.mu.RLock()
 	if len(s.segs) > 0 {

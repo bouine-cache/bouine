@@ -549,8 +549,19 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	var walEntries []wal.Entry
 	tombstoned := t.drainTombstones(&walEntries)
 	warmEvicted := t.drainWarmEvicts(&walEntries)
-	hotOnlyKeys := t.collectHotOnlyKeys()
-	synced, skipped := t.writeHotOnlyToWarm(ctx, hotOnlyKeys, &walEntries)
+
+	// Skip promotion when the warm tier is over its byte budget — every
+	// Put would return ErrOverBudget, wasting I/O and log noise. Tombstone
+	// draining still runs because deletions free space, not consume it.
+	// Re-checked each cycle so promotion resumes as soon as eviction or
+	// compaction frees enough space (#205).
+	var synced, skipped, skippedOverBudget int
+	if t.warm.OverBudget() {
+		skippedOverBudget = len(t.collectHotOnlyKeys())
+	} else {
+		hotOnlyKeys := t.collectHotOnlyKeys()
+		synced, skipped, skippedOverBudget = t.writeHotOnlyToWarm(ctx, hotOnlyKeys, &walEntries)
+	}
 
 	if len(walEntries) > 0 {
 		if err := t.warm.Sync(); err != nil {
@@ -571,6 +582,7 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 		"tombstoned", tombstoned,
 		"warm_evicted", warmEvicted,
 		"skipped", skipped,
+		"skipped_over_budget", skippedOverBudget,
 		"dropped_tombstones", droppedTomb,
 		"dropped_warm_evicts", droppedEvict,
 		"dur_ms", time.Since(start).Milliseconds(),
@@ -656,8 +668,12 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 }
 
 // writeHotOnlyToWarm writes the given hot-only keys to the warm tier and
-// collects WAL put entries. Returns synced count and skipped count.
-func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped int) {
+// collects WAL put entries. Returns synced, skipped (non-budget errors),
+// and skippedOverBudget counts. When warm.Put returns ErrOverBudget the
+// loop stops immediately — the warm tier is full, so every subsequent Put
+// would also fail, wasting I/O. The caller logs the count so operators
+// see backpressure (#205).
+func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped, skippedOverBudget int) {
 	for _, key := range hotOnlyKeys {
 		obj, _, err := t.hot.Get(ctx, key)
 		if err != nil || obj == nil {
@@ -667,6 +683,14 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 		body := encodeObject(obj)
 		segID, offset, err := t.warm.Put(uint64(key), body)
 		if err != nil {
+			if errors.Is(err, warm.ErrOverBudget) {
+				skippedOverBudget = len(hotOnlyKeys) - synced - skipped
+				t.logger.Info("warm sync: warm put over budget, stopping promotion",
+					"key", key,
+					"skipped_over_budget", skippedOverBudget,
+				)
+				return synced, skipped, skippedOverBudget
+			}
 			t.logger.Debug("warm sync: warm put failed",
 				"key", key, "error", err)
 			skipped++
@@ -677,7 +701,7 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 		t.warm.Protect(uint64(key))
 		synced++
 	}
-	return synced, skipped
+	return synced, skipped, skippedOverBudget
 }
 
 // rebuildIndexFromScan rebuilds the warm-tier index by scanning all

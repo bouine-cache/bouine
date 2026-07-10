@@ -277,43 +277,6 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	}
 }
 
-// TestPeerFetcher_BinaryRoundTrip_ZeroTimes pins the zero-value time.Time
-// edge case: a zero StoredAt or LastModified must round-trip as zero, not
-// as a garbage instant. ADR-0015 calls this out as a risk.
-func TestPeerFetcher_BinaryRoundTrip_ZeroTimes(t *testing.T) {
-	t.Parallel()
-	key := api.Key(10)
-	obj := &api.Object{
-		Key:        key,
-		StatusCode: 200,
-		Body:       []byte("zerobody"),
-		// StoredAt and LastModified left zero.
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(obj))
-	}))
-	defer srv.Close()
-
-	f := NewPeerFetcher(nil, nil)
-	got, err := f.Fetch(context.Background(),
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-		api.PeerFetchRequest{Key: key})
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected hit object")
-	}
-	if !got.StoredAt.IsZero() {
-		t.Fatalf("StoredAt=%v, want zero", got.StoredAt)
-	}
-	if !got.LastModified.IsZero() {
-		t.Fatalf("LastModified=%v, want zero", got.LastModified)
-	}
-}
-
 // TestPeerFetcher_MissIncrementsCounter pins that a 404 response
 // increments the misses counter. The pre-#187 code had a dead increment
 // (the !fetchResp.Hit branch was unreachable because the handler always

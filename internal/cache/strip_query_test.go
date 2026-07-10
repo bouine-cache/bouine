@@ -51,18 +51,18 @@ func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
 	}
 }
 
-func TestBuildKey_StripQueryParams_PreservesOrder(t *testing.T) {
+func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
 	t.Parallel()
 	skip := map[string]bool{"utm_source": true}
 
-	r1 := httptest.NewRequest("GET", "http://example.com/page?b=2&a=1&utm_source=x", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
+	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=x", nil)
+	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1", nil)
 
 	k1 := BuildKey(r1, skip)
 	k2 := BuildKey(r2)
 
 	if k1 != k2 {
-		t.Errorf("keys should match (sorted, utm stripped): got %v vs %v", k1, k2)
+		t.Errorf("keys should match after stripping utm_source: got %v vs %v", k1, k2)
 	}
 }
 

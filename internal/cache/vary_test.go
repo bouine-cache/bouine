@@ -59,43 +59,6 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	}
 }
 
-func TestVariantKey_ExcludeHeader(t *testing.T) {
-	t.Parallel()
-	primary := api.Key(100)
-	exclude := map[string]bool{"x-request-id": true}
-	h1 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"abc"}}
-	h2 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"xyz"}}
-	// Origin varies on both Accept-Encoding and X-Request-Id, but we
-	// exclude X-Request-Id — so differing values should produce the
-	// same variant key.
-	k1 := VariantKey(primary, "Accept-Encoding, X-Request-Id", h1, exclude)
-	k2 := VariantKey(primary, "Accept-Encoding, X-Request-Id", h2, exclude)
-	if k1 != k2 {
-		t.Fatal("excluded header should not affect variant key")
-	}
-	if k1 == primary {
-		t.Fatal("non-excluded Vary field should still produce a variant key")
-	}
-}
-
-func TestVariantKey_ExcludeAllHeaders(t *testing.T) {
-	t.Parallel()
-	primary := api.Key(100)
-	exclude := map[string]bool{"x-request-id": true}
-	h1 := http.Header{"X-Request-Id": {"abc"}}
-	h2 := http.Header{"X-Request-Id": {"xyz"}}
-	// Origin varies only on X-Request-Id, which is excluded — variant
-	// key should collapse to primary for both.
-	k1 := VariantKey(primary, "X-Request-Id", h1, exclude)
-	k2 := VariantKey(primary, "X-Request-Id", h2, exclude)
-	if k1 != k2 {
-		t.Fatal("excluded-only Vary should produce same key")
-	}
-	if k1 != primary {
-		t.Fatal("excluding all Vary fields should collapse to primary key")
-	}
-}
-
 func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
@@ -109,6 +72,17 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	k2 := VariantKey(primary, "X-Request-ID", h2, exclude)
 	if k1 != k2 {
 		t.Fatal("exclude lookup should be case-insensitive")
+	}
+	if k1 != primary {
+		t.Fatal("excluding all Vary fields should collapse to primary key")
+	}
+
+	// Partial exclude: non-excluded Vary field must still produce a
+	// variant key distinct from primary.
+	hGzip := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-ID": {"abc"}}
+	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", hGzip, exclude)
+	if kPartial == primary {
+		t.Fatal("non-excluded Vary field should still produce a variant key")
 	}
 }
 

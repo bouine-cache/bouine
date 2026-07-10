@@ -17,16 +17,7 @@ import (
 
 // Full replication mode: every node holds a copy of every cached object.
 // No peer fetch; cached objects are broadcast to all peers via gossip on fill.
-
-func TestFull_ClusterFormation(t *testing.T) {
-	s := sharedCluster(t, "full")
-	for i, node := range s.Nodes {
-		peers := s.Peers(t, i)
-		if len(peers) != 3 {
-			t.Errorf("node %s: got %d peers, want 3", node.Name, len(peers))
-		}
-	}
-}
+// Cluster formation and single-node failure are tested in cluster_common_test.go.
 
 func TestFull_ReplicationOnFill(t *testing.T) {
 	s := sharedCluster(t, "full")
@@ -221,32 +212,4 @@ func TestFull_AntiEntropyReconcilesMissingKeys(t *testing.T) {
 		resp := s.GetWithHost(t, 1, path, crossNodeHost)
 		return resp.Header.Get("X-Cache") == "HIT"
 	})
-}
-
-// --- Destructive test: runs last in this file ---
-// KillNode leaves node 2 down on the shared cluster; tests after this
-// point see a 2-node cluster. All non-destructive tests must appear
-// above this line.
-
-func TestFull_SingleNodeFailure(t *testing.T) {
-	s := sharedCluster(t, "full")
-	path := "/hit?x=full-failure"
-
-	// Prime via node 0 and wait for replication to all nodes.
-	s.Get(t, 0, path)
-	driver.RetryUntil(t, driver.ReplicationDeadline, 500*time.Millisecond, func() bool {
-		return s.Get(t, 1, path).Header.Get("X-Cache") == "HIT" &&
-			s.Get(t, 2, path).Header.Get("X-Cache") == "HIT"
-	})
-
-	// Kill node 2. Nodes 0 and 1 hold full replicas and must still serve HITs.
-	s.KillNode(t, 2)
-	time.Sleep(2 * time.Second)
-
-	for _, n := range []int{0, 1} {
-		resp := s.Get(t, n, path)
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d after kill: status = %d", n, resp.StatusCode)
-		}
-	}
 }

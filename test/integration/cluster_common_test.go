@@ -1,0 +1,62 @@
+//go:build integration
+
+package integration_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/bouine-cache/bouine/test/integration/driver"
+)
+
+var clusterModes = []string{"strong", "eventual", "full"}
+
+// TestCluster_Formation verifies that all nodes report 3 peers for every
+// cluster mode. The mode is the only variable.
+func TestCluster_Formation(t *testing.T) {
+	for _, mode := range clusterModes {
+		t.Run(mode, func(t *testing.T) {
+			s := sharedCluster(t, mode)
+			for i, node := range s.Nodes {
+				peers := s.Peers(t, i)
+				if len(peers) != 3 {
+					t.Errorf("node %s: got %d peers, want 3", node.Name, len(peers))
+				}
+			}
+		})
+	}
+}
+
+// TestCluster_SingleNodeFailure verifies that killing one node leaves the
+// surviving nodes serving 200. Full mode additionally verifies HITs from
+// full replicas.
+func TestCluster_SingleNodeFailure(t *testing.T) {
+	for _, mode := range clusterModes {
+		t.Run(mode, func(t *testing.T) {
+			s := sharedCluster(t, mode)
+			path := "/hit?x=" + mode + "-failure"
+
+			if mode == "full" {
+				// Full mode: prime via node 0 and wait for replication.
+				s.Get(t, 0, path)
+				driver.RetryUntil(t, driver.ReplicationDeadline, 500*time.Millisecond, func() bool {
+					return s.Get(t, 1, path).Header.Get("X-Cache") == "HIT" &&
+						s.Get(t, 2, path).Header.Get("X-Cache") == "HIT"
+				})
+			} else {
+				s.Get(t, 0, path)
+				time.Sleep(200 * time.Millisecond)
+			}
+
+			s.KillNode(t, 2)
+			time.Sleep(2 * time.Second)
+
+			for _, n := range []int{0, 1} {
+				resp := s.Get(t, n, path)
+				if resp.StatusCode != 200 {
+					t.Errorf("node %d after kill: status = %d", n, resp.StatusCode)
+				}
+			}
+		})
+	}
+}

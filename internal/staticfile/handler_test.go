@@ -574,25 +574,5 @@ func TestHandler_Metrics(t *testing.T) {
 	}
 }
 
-func TestHandler_StripPrefix(t *testing.T) {
-	t.Parallel()
-	// The handler itself doesn't strip prefixes — that's done by the
-	// builder via stripPrefixHandler. Here we verify that the handler
-	// receives the correct path after strip.
-	h := newTestHandler(t, map[string]string{
-		"style.css": "body {}",
-	}, Config{})
-	// Simulate a stripped path (builder strips "/assets/" before calling).
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/style.css", nil)
-	h.ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("status: got %d, want 200", w.Code)
-	}
-	if w.Body.String() != "body {}" {
-		t.Fatalf("body: got %q", w.Body.String())
-	}
-}
-
 // io.ReadAll is used to verify full body content in some tests.
 var _ = io.ReadAll

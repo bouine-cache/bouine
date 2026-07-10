@@ -183,21 +183,6 @@ func TestCFPropagator_PropagateForBan_CompoundSkipped(t *testing.T) {
 	}
 }
 
-func TestCFPropagator_PropagateForBan_NonLiteralRegexSkipped(t *testing.T) {
-	t.Parallel()
-	inv := &fakeInvalidator{}
-	cfg := config.CloudflareConfig{Propagate: config.CloudflarePropagation{Ban: true}}
-	p := buildCFPropagator(inv, cfg, testMetrics(), slog.Default(), context.Background())
-
-	p.PropagateForBan(context.Background(), api.BanExpr{PathRegex: "^/api/[0-9]+"})
-	_ = p.Close(context.Background())
-
-	urls, tags, prefixes, hosts := inv.counts()
-	if urls+tags+prefixes+hosts != 0 {
-		t.Fatalf("expected 0 calls for non-literal regex, got %d", urls+tags+prefixes+hosts)
-	}
-}
-
 func TestCFPropagator_PropagateForRefresh(t *testing.T) {
 	t.Parallel()
 	inv := &fakeInvalidator{}

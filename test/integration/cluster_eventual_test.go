@@ -10,7 +10,6 @@ import (
 )
 
 // Eventual mode: every node caches independently, no peer fetch, gossip invalidation.
-// Cluster formation and single-node failure are tested in cluster_common_test.go.
 
 func TestEventual_IndependentCaching(t *testing.T) {
 	s := sharedCluster(t, "eventual")

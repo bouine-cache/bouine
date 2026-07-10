@@ -43,7 +43,17 @@ func TestCluster_SingleNodeFailure(t *testing.T) {
 					return s.Get(t, 1, path).Header.Get("X-Cache") == "HIT" &&
 						s.Get(t, 2, path).Header.Get("X-Cache") == "HIT"
 				})
+			} else if mode == "eventual" {
+				// Eventual mode: each node caches independently. Prime
+				// the survivor nodes (0 and 1) so they have a cached
+				// copy that survives the kill without an origin fetch.
+				for _, n := range []int{0, 1} {
+					s.Get(t, n, path)
+					time.Sleep(100 * time.Millisecond)
+					s.Get(t, n, path)
+				}
 			} else {
+				// Strong mode: prime via node 0 (owner caches it).
 				s.Get(t, 0, path)
 				time.Sleep(200 * time.Millisecond)
 			}

@@ -147,6 +147,23 @@ func TestTiered_LargeObjectReadPath(t *testing.T) {
 	}
 }
 
+func TestTieredStore_Get_Miss(t *testing.T) {
+	t.Parallel()
+	ts := tieredStore(t, false)
+	k := KeyHash([]byte("tiered-miss"))
+
+	got, src, err := ts.Get(context.Background(), k)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected nil on miss")
+	}
+	if src != "" {
+		t.Fatalf("source = %q, want empty", src)
+	}
+}
+
 func TestTiered_Stats_WarmDiskAndMaxBytes(t *testing.T) {
 	t.Parallel()
 	const maxBytes = 100 << 20

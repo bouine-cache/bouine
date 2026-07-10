@@ -112,7 +112,15 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	if err != nil {
 		return nil, func() {}, err
 	}
-	warmMetrics := warm.RegisterMetrics(e.metrics.Registry)
+	// Register warm-tier metrics only when a warm tier is configured.
+	// Without this gate, single-node / ephemeral deployments (WarmDir == "")
+	// would still expose bouine_warm_* collectors reporting a 0-byte
+	// "unlimited" budget, which misleads operators and alert rules into
+	// thinking a warm tier exists and is healthy.
+	var warmMetrics *warm.Metrics
+	if e.cfg.Storage.WarmDir != "" {
+		warmMetrics = warm.RegisterMetrics(e.metrics.Registry)
+	}
 	store, err := e.buildStore(warmMetrics)
 	if err != nil {
 		return nil, func() {}, err

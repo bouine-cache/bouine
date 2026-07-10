@@ -55,7 +55,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		OverBudget: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "warm_over_budget_total",
-			Help:      "Warm-tier Put rejections due to ErrOverBudget. A sustained rate means the warm tier is full and eviction cannot keep up.",
+			Help:      "Warm-tier Put rejections due to ErrOverBudget (either the record exceeds the total budget, or eviction could not free enough space).",
 		}),
 		Evictions: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",

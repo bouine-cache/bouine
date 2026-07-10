@@ -945,6 +945,20 @@ func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 	}
 }
 
+// warmRecordSize returns the on-disk byte footprint of a warm-tier record
+// with the given body length. Mirrors warm.headerLen (16) + bodyLen +
+// warm.footerLen (4). Kept in the test file because it is test-only — the
+// warm package does not export it and adding a public API just for tests
+// is not justified.
+func warmRecordSize(bodyLen int) int {
+	// Mirrors the warm package's unexported headerLen (4+8+4) and
+	// footerLen (4) constants. Kept here because exporting them just
+	// for tests is not justified.
+	const warmHeaderLen = 4 + 8 + 4 // magic + key + body_len
+	const warmFooterLen = 4         // crc32c
+	return warmHeaderLen + bodyLen + warmFooterLen
+}
+
 // TestWarmSync_SkipsPromotionWhenOverBudget verifies that the warm sync
 // loop skips hot→warm promotion when the warm tier is already over its
 // byte budget, instead of wasting I/O on Put calls that will return
@@ -955,10 +969,10 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	ctx := context.Background()
 
 	// Fill the warm tier to exactly the budget so OverBudget() returns true.
-	// Record size is computed via warm.RecordSize so the test doesn't
+	// Record size is computed via warmRecordSize so the test doesn't
 	// hardcode the internal header/footer layout.
 	const warmBodySize = 200
-	recSize := warm.RecordSize(warmBodySize)
+	recSize := warmRecordSize(warmBodySize)
 	const numFill = 3
 	warmMaxBytes := int64(numFill * recSize)
 
@@ -1032,10 +1046,10 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	// Compute the encoded body size for obj(k, 100) using the same key
 	// range as the actual hot-only objects below — the Key field is
 	// uvarint-encoded so key magnitude affects the encoded length.
-	// The warm record size is warm.RecordSize(len(encodedBody)).
+	// The warm record size is warmRecordSize(len(encodedBody)).
 	probeKey := api.Key(1000)
 	encodedBody := encodeObject(obj(probeKey, 100))
-	recSize := warm.RecordSize(len(encodedBody))
+	recSize := warmRecordSize(len(encodedBody))
 
 	// Budget for 2 records, leaving room for exactly 2 promotions.
 	// The 3rd Put will exceed the budget (2*recSize + recSize > budget)

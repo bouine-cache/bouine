@@ -5,7 +5,7 @@
 # TARGETOS / TARGETARCH: populated automatically by BuildKit from --platform;
 #   no defaults so the build fails loudly when called without a platform rather
 #   than silently producing an amd64 binary on an arm64 host.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-bookworm@sha256:5f68ec6805843bd3981a951ffada82a26a0bd2631045c8f7dba483fa868f5ec5 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed53c355c899582bbb2113 AS build
 
 ARG TARGETOS
 ARG TARGETARCH

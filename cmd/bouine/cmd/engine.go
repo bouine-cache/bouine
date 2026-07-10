@@ -25,6 +25,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/runtime/supervised"
 	"github.com/bouine-cache/bouine/internal/server"
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
 	webdash "github.com/bouine-cache/bouine/web/dashboard"
 
@@ -68,6 +69,8 @@ type runState struct {
 	antiEntropy    *cluster.AntiEntropy
 	clusterMetrics *cluster.Metrics
 
+	warmMetrics *warm.Metrics
+
 	cfProp    *cfPropagator
 	cfCancel  context.CancelFunc
 	seq       *shutdown.Sequencer
@@ -109,7 +112,8 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	if err != nil {
 		return nil, func() {}, err
 	}
-	store, err := e.buildStore()
+	warmMetrics := warm.RegisterMetrics(e.metrics.Registry)
+	store, err := e.buildStore(warmMetrics)
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -159,6 +163,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 		peersFn:        peersFn,
 		antiEntropy:    ae,
 		clusterMetrics: clusterMetrics,
+		warmMetrics:    warmMetrics,
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
 		seq:            shutdown.NewSequencer(e.logger),
@@ -357,6 +362,13 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx con
 				}
 				rs.dpMetrics.WarmStoreBytes.Set(float64(s.WarmBytes))
 				rs.dpMetrics.WarmStoreEntries.Set(float64(s.WarmEntries))
+				// Warm-tier disk-pressure gauge: disk_bytes reflects total
+				// segment file sizes (live + tombstones + superseded).
+				// max_bytes is set once at construction (never changes);
+				// only disk_bytes needs polling.
+				if rs.warmMetrics != nil {
+					rs.warmMetrics.SetDiskBytes(s.WarmDiskBytes)
+				}
 				warmHealDelta := s.WarmSelfHeals - lastWarmSelfHeals
 				if warmHealDelta > 0 {
 					rs.dpMetrics.WarmStoreSelfHeals.Add(float64(warmHealDelta))

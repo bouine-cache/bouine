@@ -166,6 +166,9 @@ type Store struct {
 	// ClearBacked (the only current callback) is O(1) and lock-only, so
 	// holding idxMu across it adds no I/O latency.
 	OnEvict func(key uint64)
+	// metrics receives warm-tier Prometheus collectors. Nil when the
+	// store is constructed without a registry (tests, single-node).
+	metrics *Metrics
 }
 
 type warmStats struct {
@@ -179,6 +182,9 @@ type Config struct {
 	Dir      string
 	MaxBytes int64
 	SegMax   int64 // per-segment max, default 64 MiB
+	// Metrics receives warm-tier Prometheus collectors. Nil disables
+	// metric collection (single-node mode without a registry).
+	Metrics *Metrics
 }
 
 // NewStore creates or opens a warm store in dir.
@@ -199,9 +205,14 @@ func NewStore(cfg Config) (*Store, error) {
 		segMax:    cfg.SegMax,
 		index:     make(map[uint64]warmLoc),
 		evictList: sieve.NewList[uint64](),
+		metrics:   cfg.Metrics,
 	}
 	if err := s.openExisting(); err != nil {
 		return nil, err
+	}
+	// Set the max_bytes gauge once at construction. 0 means unlimited.
+	if s.metrics != nil {
+		s.metrics.SetMaxBytes(cfg.MaxBytes)
 	}
 	return s, nil
 }
@@ -258,6 +269,7 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	if s.maxBytes > 0 {
 		if s.stats.bytes.Load()+recSize > s.maxBytes {
 			if evictErr := s.evictToFit(recSize); evictErr != nil {
+				s.metrics.IncOverBudget()
 				return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
 			}
 		}
@@ -765,6 +777,7 @@ func (s *Store) evictOne() (uint64, bool) {
 	if callback := s.OnEvict; callback != nil {
 		callback(victimKey)
 	}
+	s.metrics.IncEvictions()
 	return victimKey, true
 }
 
@@ -883,6 +896,21 @@ func (s *Store) diskBytes() int64 {
 		seg.mu.Unlock()
 	}
 	return total
+}
+
+// DiskBytes returns the total on-disk size of all warm-tier segment
+// files (live records + tombstones + superseded entries). Exposed for
+// the bouine_warm_disk_bytes Prometheus gauge. Unlike Stats() which
+// returns live bytes, this reflects actual disk usage.
+func (s *Store) DiskBytes() int64 {
+	return s.diskBytes()
+}
+
+// MaxBytes returns the configured warm-tier byte budget. 0 means
+// unlimited (no enforcement). Exposed for the bouine_warm_max_bytes
+// Prometheus gauge.
+func (s *Store) MaxBytes() int64 {
+	return s.maxBytes
 }
 
 func (s *Store) activeSeg() (*Segment, error) {
@@ -1163,6 +1191,7 @@ func (s *Store) NeedsCompaction() bool {
 // collected, the segment lock is released, and only then written to the
 // temp store. Peak heap is O(1 segment) instead of O(total live bytes).
 func (s *Store) Compact() error {
+	s.metrics.IncCompactionTriggered()
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))
 	for k, v := range s.index {

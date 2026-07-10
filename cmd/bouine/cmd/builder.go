@@ -29,7 +29,9 @@ import (
 
 // buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is
 // configured, or a plain HotStore for ephemeral/dev deployments.
-func (e *engine) buildStore() (storage.Store, error) {
+// warmMetrics, when non-nil, is injected into the warm store so it can
+// increment over-budget, eviction, and compaction counters inline.
+func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
 	hotCfg := storage.HotConfig{MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes()}
 	if e.cfg.Storage.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
@@ -43,6 +45,7 @@ func (e *engine) buildStore() (storage.Store, error) {
 		WarmSyncBatchSize: e.cfg.Storage.WarmSyncBatchSize,
 		WALSyncInterval:   e.cfg.Storage.WALSyncInterval,
 		Logger:            e.logger,
+		WarmMetrics:       warmMetrics,
 	})
 }
 

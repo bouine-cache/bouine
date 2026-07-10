@@ -80,6 +80,13 @@ type TieredConfig struct {
 	WALDir string       // empty = no WAL
 	Logger observability.Logger
 
+	// WarmMetrics holds the warm-tier Prometheus collectors. When non-nil
+	// and Warm is also set, the warm store increments the over-budget,
+	// eviction, and compaction counters inline. The caller is responsible
+	// for polling TieredStore.Stats() and calling SetDiskBytes on this
+	// handle to update the disk_bytes gauge.
+	WarmMetrics *warm.Metrics
+
 	// BodyThreshold controls the hot/warm admission boundary. Objects
 	// with BodySize <= this value stay in the hot tier only. Objects
 	// above this value are also written to the warm tier so they can
@@ -150,25 +157,9 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	ts.hot = NewHotStore(cfg.Hot)
 
 	if cfg.Warm != nil {
-		w, err := warm.NewStore(*cfg.Warm)
-		if err != nil {
+		if err := ts.initWarm(cfg.Warm, cfg.WarmMetrics); err != nil {
 			return nil, err
 		}
-		// Wire warm-tier eviction callback: clear the backup flag on the hot
-		// entry immediately (no I/O), and enqueue a WAL delete entry
-		// for async persistence. Crash recovery relies on
-		// rebuildIndexFromScan honoring tombstones in segment order —
-		// the WAL delete is a fast-replay optimization, not the sole
-		// durability guarantee.
-		w.OnEvict = func(key uint64) {
-			ts.hot.ClearBacked(api.Key(key))
-			select {
-			case ts.warmEvictQueue <- api.Key(key):
-			default:
-				ts.droppedWarmEvicts.Add(1)
-			}
-		}
-		ts.warm = w
 	}
 
 	// Background compaction: check every 30 minutes and compact if the
@@ -191,6 +182,34 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	}
 
 	return ts, nil
+}
+
+// initWarm opens the warm store, injects metrics, and wires the
+// eviction callback.
+func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
+	if metrics != nil {
+		cfg.Metrics = metrics
+	}
+	w, err := warm.NewStore(*cfg)
+	if err != nil {
+		return err
+	}
+	// Wire warm-tier eviction callback: clear the backup flag on the hot
+	// entry immediately (no I/O), and enqueue a WAL delete entry
+	// for async persistence. Crash recovery relies on
+	// rebuildIndexFromScan honoring tombstones in segment order —
+	// the WAL delete is a fast-replay optimization, not the sole
+	// durability guarantee.
+	w.OnEvict = func(key uint64) {
+		t.hot.ClearBacked(api.Key(key))
+		select {
+		case t.warmEvictQueue <- api.Key(key):
+		default:
+			t.droppedWarmEvicts.Add(1)
+		}
+	}
+	t.warm = w
+	return nil
 }
 
 // initWAL opens the WAL, replays it to rebuild the warm-tier index, and
@@ -462,6 +481,8 @@ func (t *TieredStore) Stats() api.Stats {
 		wEnt, wBytes := t.warm.Stats()
 		st.WarmEntries = wEnt
 		st.WarmBytes = wBytes
+		st.WarmDiskBytes = t.warm.DiskBytes()
+		st.WarmMaxBytes = t.warm.MaxBytes()
 		st.WarmSelfHeals = t.warm.SelfHeals()
 	}
 	return st

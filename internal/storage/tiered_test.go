@@ -101,6 +101,41 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	}
 }
 
+func TestTiered_Stats_WarmDiskAndMaxBytes(t *testing.T) {
+	t.Parallel()
+	const maxBytes = 100 << 20
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:          &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: maxBytes, SegMax: 1 << 20},
+		WALDir:        filepath.Join(dir, "index.wal"),
+		BodyThreshold: 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewTieredStore: %v", err)
+	}
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	// Put a large object so the warm tier has on-disk bytes.
+	k := KeyHash([]byte("disk-bytes"))
+	if err := ts.Put(context.Background(), k, bigObj(k, 2048)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	st := ts.Stats()
+	if st.WarmMaxBytes != maxBytes {
+		t.Errorf("WarmMaxBytes = %d, want %d", st.WarmMaxBytes, maxBytes)
+	}
+	if st.WarmDiskBytes <= 0 {
+		t.Errorf("WarmDiskBytes = %d, want > 0 after warm-tier write", st.WarmDiskBytes)
+	}
+	// disk_bytes must be >= live bytes (WarmBytes) because it includes
+	// tombstones and segment overhead; never less.
+	if st.WarmDiskBytes < st.WarmBytes {
+		t.Errorf("WarmDiskBytes = %d < WarmBytes = %d", st.WarmDiskBytes, st.WarmBytes)
+	}
+}
+
 func TestTiered_DeleteBothTiers(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)

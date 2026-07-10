@@ -40,15 +40,11 @@ jobs:
             linux/arm64
             darwin/amd64
             darwin/arm64
-            windows/amd64
-            windows/arm64
           )
           for os_arch in "${platforms[@]}"; do
             GOOS=${os_arch%/*}
             GOARCH=${os_arch#*/}
-            ext=""
-            [[ "$GOOS" == "windows" ]] && ext=".exe"
-            bin="bouine-${VERSION}-${GOOS}-${GOARCH}${ext}"
+            bin="bouine-${VERSION}-${GOOS}-${GOARCH}"
             echo ">> building $bin"
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
               -trimpath \

@@ -389,77 +389,48 @@ func testHandlerStayinAlive(t *testing.T, upstream http.Handler) *Handler {
 
 func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
 	t.Parallel()
-	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
-		if calls == 1 {
-			// First call: serve a cacheable response.
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "healthy-body")
-			return
-		}
-		// Subsequent calls: upstream is unhealthy.
-		w.WriteHeader(503)
-	})
-
-	h := testHandlerStayinAlive(t, upstream)
-
-	// Populate cache.
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest("GET", "http://example.com/sa", nil))
-	if rr1.Code != 200 {
-		t.Fatalf("populate: status = %d", rr1.Code)
+	cases := []struct {
+		name        string
+		errorStatus int
+		cachedBody  string
+	}{
+		{"503", 503, "healthy-body"},
+		{"500", 500, "alive-body"},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				if calls == 1 {
+					w.Header().Set(header.CacheControl, "max-age=1")
+					w.WriteHeader(200)
+					_, _ = io.WriteString(w, tc.cachedBody)
+					return
+				}
+				w.WriteHeader(tc.errorStatus)
+			})
 
-	// Expire the entry by manipulating nothing — just request again
-	// after expiry would require time travel; instead confirm that
-	// revalidation with 5xx triggers stayin-alive serving.
-	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", "http://example.com/sa", nil)
-	req2.Header.Set(header.CacheControl, "no-cache") // force revalidation
-	h.ServeHTTP(rr2, req2)
-	if rr2.Code != 200 {
-		t.Fatalf("stayin-alive: status = %d, want 200 (stale served)", rr2.Code)
-	}
-	body := rr2.Body.String()
-	if !strings.Contains(body, "healthy-body") {
-		t.Fatalf("stayin-alive: body = %q, want cached body", body)
-	}
-}
+			h := testHandlerStayinAlive(t, upstream)
 
-func TestHandler_StayinAlive_ServesStaleonError(t *testing.T) {
-	t.Parallel()
-	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
-		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "alive-body")
-			return
-		}
-		// Simulate connection error by hijacking; simplest: panic recover.
-		// Instead just return 500 to test the 5xx branch.
-		w.WriteHeader(500)
-	})
+			rr1 := httptest.NewRecorder()
+			h.ServeHTTP(rr1, httptest.NewRequest("GET", "http://example.com/sa", nil))
+			if rr1.Code != 200 {
+				t.Fatalf("populate: status = %d", rr1.Code)
+			}
 
-	h := testHandlerStayinAlive(t, upstream)
-
-	// Seed cache.
-	seed := httptest.NewRecorder()
-	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/err", nil))
-
-	// Force revalidation.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "http://example.com/err", nil)
-	req.Header.Set(header.CacheControl, "no-cache")
-	h.ServeHTTP(rr, req)
-	if rr.Code != 200 {
-		t.Fatalf("stayin-alive on 500: status = %d", rr.Code)
-	}
-	if !strings.Contains(rr.Body.String(), "alive-body") {
-		t.Fatalf("body = %q, want cached", rr.Body.String())
+			rr2 := httptest.NewRecorder()
+			req2 := httptest.NewRequest("GET", "http://example.com/sa", nil)
+			req2.Header.Set(header.CacheControl, "no-cache")
+			h.ServeHTTP(rr2, req2)
+			if rr2.Code != 200 {
+				t.Fatalf("stayin-alive: status = %d, want 200 (stale served)", rr2.Code)
+			}
+			if !strings.Contains(rr2.Body.String(), tc.cachedBody) {
+				t.Fatalf("stayin-alive: body = %q, want cached body", rr2.Body.String())
+			}
+		})
 	}
 }
 

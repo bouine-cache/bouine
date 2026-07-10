@@ -10,18 +10,7 @@ import (
 // Strong mode: consistent hash ring, peer fetch on miss, HTTP+gossip invalidation.
 //
 // Tests run against a shared 3-node cluster started once per binary.
-
-func TestStrong_ClusterFormation(t *testing.T) {
-	s := sharedCluster(t, "strong")
-
-	// Every node should report exactly 3 peers (including self).
-	for i, node := range s.Nodes {
-		peers := s.Peers(t, i)
-		if len(peers) != 3 {
-			t.Errorf("node %s: got %d peers, want 3", node.Name, len(peers))
-		}
-	}
-}
+// Cluster formation and single-node failure are tested in cluster_common_test.go.
 
 func TestStrong_MissThenHit(t *testing.T) {
 	s := sharedCluster(t, "strong")
@@ -143,27 +132,6 @@ func TestStrong_BanPropagation(t *testing.T) {
 		resp := s.Get(t, i, path)
 		if got := resp.Header.Get("X-Cache"); got == "HIT" {
 			t.Errorf("node %d after ban: X-Cache = HIT (expected MISS/banned)", i)
-		}
-	}
-}
-
-func TestStrong_SingleNodeFailure(t *testing.T) {
-	s := sharedCluster(t, "strong")
-
-	// Cache a key via node 0 (guaranteed to be alive throughout).
-	path := "/hit?x=strong-failure"
-	s.Get(t, 0, path)
-	time.Sleep(200 * time.Millisecond)
-
-	// Kill node 2 (last index) so nodes 0 and 1 remain for subsequent tests.
-	s.KillNode(t, 2)
-	time.Sleep(2 * time.Second) // wait for gossip to detect failure
-
-	// Nodes 0 and 1 must still be able to serve requests.
-	for _, i := range []int{0, 1} {
-		resp := s.Get(t, i, path)
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d after kill: status = %d", i, resp.StatusCode)
 		}
 	}
 }

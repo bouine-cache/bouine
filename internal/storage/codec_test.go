@@ -64,11 +64,13 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 }
 
 func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
-	// Zero LastModified, empty body, no surrogate keys, single header.
+	// Zero LastModified and zero StoredAt, empty body, no surrogate keys,
+	// single header.
 	orig := &api.Object{
 		StatusCode: http.StatusNoContent,
 		Header:     header.FromHTTP(http.Header{header.XCache: {"MISS"}}),
-		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
+		// StoredAt left zero to verify the time.Time zero-value
+		// round-trip (ADR-0015 risk).
 	}
 	got, err := decodeObject(encodeObject(orig))
 	if err != nil {
@@ -76,6 +78,9 @@ func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 	}
 	if !got.LastModified.IsZero() {
 		t.Errorf("LastModified should round-trip as zero, got %v", got.LastModified)
+	}
+	if !got.StoredAt.IsZero() {
+		t.Errorf("StoredAt should round-trip as zero, got %v", got.StoredAt)
 	}
 	if len(got.Body) != 0 || got.BodySize != 0 {
 		t.Errorf("empty body expected, got %q (size %d)", got.Body, got.BodySize)

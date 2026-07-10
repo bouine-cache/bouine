@@ -40,7 +40,7 @@ func TestHotStore_PutGet(t *testing.T) {
 	if err := s.Put(context.Background(), k, o); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	got, _, err := s.Get(context.Background(), k)
+	got, src, err := s.Get(context.Background(), k)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -53,18 +53,24 @@ func TestHotStore_PutGet(t *testing.T) {
 	if got.Hits != 1 {
 		t.Fatalf("hits = %d, want 1", got.Hits)
 	}
+	if src != api.SourceHot {
+		t.Fatalf("source = %q, want %q", src, api.SourceHot)
+	}
 }
 
 func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, _, err := s.Get(context.Background(), 999)
+	got, src, err := s.Get(context.Background(), 999)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got != nil {
 		t.Fatal("expected miss")
+	}
+	if src != "" {
+		t.Fatalf("source = %q, want empty", src)
 	}
 	st := s.Stats()
 	if st.Misses != 1 {

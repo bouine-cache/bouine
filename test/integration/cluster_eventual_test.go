@@ -10,16 +10,7 @@ import (
 )
 
 // Eventual mode: every node caches independently, no peer fetch, gossip invalidation.
-
-func TestEventual_ClusterFormation(t *testing.T) {
-	s := sharedCluster(t, "eventual")
-	for i, node := range s.Nodes {
-		peers := s.Peers(t, i)
-		if len(peers) != 3 {
-			t.Errorf("node %s: got %d peers, want 3", node.Name, len(peers))
-		}
-	}
-}
+// Cluster formation and single-node failure are tested in cluster_common_test.go.
 
 func TestEventual_IndependentCaching(t *testing.T) {
 	s := sharedCluster(t, "eventual")
@@ -111,22 +102,4 @@ func TestEventual_StaleDuringConvergence(t *testing.T) {
 		resp := s.GetWithHost(t, 1, path, crossNodeHost)
 		return resp.Header.Get("X-Cache") != "HIT"
 	})
-}
-
-func TestEventual_SingleNodeFailure(t *testing.T) {
-	s := sharedCluster(t, "eventual")
-	path := "/hit?x=eventual-failure"
-	for _, n := range []int{1, 2} {
-		s.Get(t, n, path)
-		time.Sleep(100 * time.Millisecond)
-		s.Get(t, n, path)
-	}
-	s.KillNode(t, 2)
-	time.Sleep(2 * time.Second)
-	for _, n := range []int{0, 1} {
-		resp := s.Get(t, n, path)
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d after kill node 2: status = %d", n, resp.StatusCode)
-		}
-	}
 }

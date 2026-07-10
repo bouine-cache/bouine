@@ -63,12 +63,15 @@ func TestTiered_HotOnly(t *testing.T) {
 	if err := ts.Put(context.Background(), k, o); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	got, _, err := ts.Get(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected hit")
+	}
+	if src != api.SourceHot {
+		t.Fatalf("source = %q, want %q", src, api.SourceHot)
 	}
 }
 
@@ -83,9 +86,12 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	}
 
 	// Should be in hot tier.
-	got, _, err := ts.Get(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k)
 	if err != nil || got == nil {
 		t.Fatalf("get: err=%v got=%v", err, got)
+	}
+	if src != api.SourceHot {
+		t.Fatalf("source = %q, want %q", src, api.SourceHot)
 	}
 
 	// Should also be in warm tier.
@@ -98,6 +104,46 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	st := ts.Stats()
 	if st.WarmEntries != 1 {
 		t.Fatalf("tiered stats warm entries = %d", st.WarmEntries)
+	}
+}
+
+func TestTiered_LargeObjectReadPath(t *testing.T) {
+	t.Parallel()
+	ts := tieredStore(t, true)
+	k := KeyHash([]byte("big-read"))
+	o := bigObj(k, 8192) // above 1024 threshold
+
+	if err := ts.Put(context.Background(), k, o); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// Evict from hot tier so the next Get falls through to warm.
+	if err := ts.hot.Delete(context.Background(), k); err != nil {
+		t.Fatalf("delete from hot: %v", err)
+	}
+
+	got, src, err := ts.Get(context.Background(), k)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected warm hit")
+	}
+	if src != api.SourceWarm {
+		t.Fatalf("source = %q, want %q", src, api.SourceWarm)
+	}
+
+	// After warm hit, object is promoted to hot — second Get should
+	// report SourceHot.
+	got2, src2, err := ts.Get(context.Background(), k)
+	if err != nil {
+		t.Fatalf("second Get: %v", err)
+	}
+	if got2 == nil {
+		t.Fatal("expected hot hit after promotion")
+	}
+	if src2 != api.SourceHot {
+		t.Fatalf("source after promotion = %q, want %q", src2, api.SourceHot)
 	}
 }
 

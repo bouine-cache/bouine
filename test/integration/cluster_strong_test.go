@@ -10,7 +10,6 @@ import (
 // Strong mode: consistent hash ring, peer fetch on miss, HTTP+gossip invalidation.
 //
 // Tests run against a shared 3-node cluster started once per binary.
-// Cluster formation and single-node failure are tested in cluster_common_test.go.
 
 func TestStrong_MissThenHit(t *testing.T) {
 	s := sharedCluster(t, "strong")

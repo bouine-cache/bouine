@@ -17,7 +17,6 @@ import (
 
 // Full replication mode: every node holds a copy of every cached object.
 // No peer fetch; cached objects are broadcast to all peers via gossip on fill.
-// Cluster formation and single-node failure are tested in cluster_common_test.go.
 
 func TestFull_ReplicationOnFill(t *testing.T) {
 	s := sharedCluster(t, "full")

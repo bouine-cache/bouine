@@ -556,8 +556,9 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	// Re-checked each cycle so promotion resumes as soon as eviction or
 	// compaction frees enough space (#205).
 	var synced, skipped, skippedOverBudget int
+	promotionSkipped := false
 	if t.warm.OverBudget() {
-		skippedOverBudget = len(t.collectHotOnlyKeys())
+		promotionSkipped = true
 	} else {
 		hotOnlyKeys := t.collectHotOnlyKeys()
 		synced, skipped, skippedOverBudget = t.writeHotOnlyToWarm(ctx, hotOnlyKeys, &walEntries)
@@ -582,6 +583,7 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 		"tombstoned", tombstoned,
 		"warm_evicted", warmEvicted,
 		"skipped", skipped,
+		"promotion_skipped", promotionSkipped,
 		"skipped_over_budget", skippedOverBudget,
 		"dropped_tombstones", droppedTomb,
 		"dropped_warm_evicts", droppedEvict,

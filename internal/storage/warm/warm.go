@@ -55,6 +55,14 @@ const (
 	maxWarmEvictSkips = 16
 )
 
+// RecordSize returns the on-disk byte footprint of a warm-tier record with
+// the given body length: headerLen + bodyLen + footerLen. Exported so callers
+// (e.g. tests) can compute exact record sizes without hardcoding the internal
+// header/footer layout.
+func RecordSize(bodyLen int) int {
+	return headerLen + bodyLen + footerLen
+}
+
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 // recordHdrPool pools the fixed-size 16-byte header buffer used by

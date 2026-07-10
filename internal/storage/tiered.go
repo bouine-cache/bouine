@@ -686,6 +686,8 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 		segID, offset, err := t.warm.Put(uint64(key), body)
 		if err != nil {
 			if errors.Is(err, warm.ErrOverBudget) {
+				// Remaining keys including this one — not yet
+				// counted in synced or skipped.
 				skippedOverBudget = len(hotOnlyKeys) - synced - skipped
 				t.logger.Info("warm sync: warm put over budget, stopping promotion",
 					"key", key,

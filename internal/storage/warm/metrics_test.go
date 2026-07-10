@@ -186,7 +186,7 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 	// DiskBytes should equal the sum of segment file sizes, which for 5
 	// records of 120 bytes each is 600 bytes.
 	got := s.DiskBytes()
-	want := int64(5 * (headerLen + len(body) + footerLen))
+	want := int64(5 * (HeaderLen + len(body) + FooterLen))
 	if got != want {
 		t.Errorf("DiskBytes = %d, want %d", got, want)
 	}

@@ -44,9 +44,15 @@ import (
 const (
 	magicLive uint32 = 0x424F5549 // "BOUI"
 	magicDead uint32 = 0x44454144 // "DEAD"
-	headerLen        = 4 + 8 + 4  // magic + key + body_len
-	footerLen        = 4          // crc32c
-	segExt           = ".seg"
+	// HeaderLen is the on-disk warm record header size in bytes
+	// (magic 4 + key 8 + body_len 4). It is part of the wire format
+	// and exported so tests and tooling can compute record sizes
+	// without duplicating the layout.
+	HeaderLen = 4 + 8 + 4
+	// FooterLen is the on-disk warm record footer size in bytes
+	// (crc32c). Exported alongside HeaderLen for the same reason.
+	FooterLen = 4
+	segExt    = ".seg"
 	// maxWarmEvictSkips bounds the number of protected entries SIEVE
 	// may skip while searching for a non-protected victim. This keeps
 	// eviction O(1) worst case under idxMu even when most entries are
@@ -68,7 +74,7 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 // same fixed buffer sizes.
 var recordHdrPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, headerLen)
+		buf := make([]byte, HeaderLen)
 		return &buf
 	},
 }
@@ -77,7 +83,7 @@ var recordHdrPool = sync.Pool{
 // readRecordAt. Same rationale as recordHdrPool.
 var recordFootPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, footerLen)
+		buf := make([]byte, FooterLen)
 		return &buf
 	},
 }
@@ -89,9 +95,10 @@ var recordFootPool = sync.Pool{
 var ErrTornRecord = errors.New("warm: torn trailing record")
 
 // ErrOverBudget indicates that appending a record would push total
-// disk bytes across the configured MaxBytes limit. Callers can handle
-// this by evicting objects, triggering compaction, or simply skipping
-// the warm-tier write (the acceleration tier already holds the object).
+// live entry bytes across the configured MaxBytes limit. Callers can
+// handle this by evicting objects, triggering compaction, or simply
+// skipping the warm-tier write (the acceleration tier already holds the
+// object).
 var ErrOverBudget = errors.New("warm: over maxBytes budget")
 
 // Record is a single warm-tier entry read from a segment.
@@ -114,7 +121,7 @@ type Segment struct {
 }
 
 // warmLoc is the in-memory index entry for a warm-tier object. The
-// size field stores the on-disk record size (headerLen + body + footerLen)
+// size field stores the on-disk record size (HeaderLen + body + FooterLen)
 // so Delete can subtract it from stats.bytes without re-reading the record.
 //
 // sieve points to the entry's node in the SIEVE eviction list. It is
@@ -280,7 +287,7 @@ func (s *Store) openExisting() error {
 // stats.bytes keeps the gate and the eviction loop on the same metric
 // so operators see a consistent story: if Put succeeds, live bytes fit.
 func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error) {
-	recSize := int64(headerLen + len(body) + footerLen)
+	recSize := int64(HeaderLen + len(body) + FooterLen)
 
 	// Enforce live-bytes budget before appending. maxBytes == 0 means
 	// no limit (backward compatible with the default). When over budget,
@@ -356,7 +363,7 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 	if err := writeRecord(seg.f, magicDead, key, nil); err != nil {
 		return 0, fmt.Errorf("warm: tombstone: %w", err)
 	}
-	recSize := int64(headerLen + footerLen)
+	recSize := int64(HeaderLen + FooterLen)
 	seg.size += recSize
 
 	// Decrement stats counters for the deleted entry. The index entry
@@ -534,7 +541,7 @@ func (s *Store) RecomputeStats() error {
 		if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
 			return nil
 		}
-		recSize := int64(headerLen + len(r.Body) + footerLen)
+		recSize := int64(HeaderLen + len(r.Body) + FooterLen)
 		entries++
 		bytes += recSize
 		if loc.size == 0 {
@@ -784,7 +791,7 @@ func (s *Store) evictOne() (uint64, bool) {
 		s.restoreSIEVEEntry(victimKey, victimLoc)
 		return 0, false
 	}
-	seg.size += int64(headerLen + footerLen)
+	seg.size += int64(HeaderLen + FooterLen)
 
 	// Remove from index and decrement stats. The SIEVE entry was
 	// already removed by Evict() and returned to the pool.
@@ -943,6 +950,12 @@ func (s *Store) MaxBytes() int64 {
 // hot→warm promotion to avoid wasting I/O on Put calls that will return
 // ErrOverBudget (#205). maxBytes == 0 means unlimited, so OverBudget
 // always returns false.
+//
+// This is an advisory, best-effort check: stats.bytes is read atomically
+// without holding any lock, so a concurrent eviction or self-heal may drop
+// live bytes below maxBytes between this call and the subsequent Put. The
+// Put path re-checks the budget under the index lock, so a false-positive
+// skip only delays promotion by one cycle.
 func (s *Store) OverBudget() bool {
 	if s.maxBytes <= 0 {
 		return false
@@ -1070,7 +1083,7 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 	var body []byte
 	if bodyLen > 0 {
 		body = make([]byte, bodyLen)
-		if _, err := f.ReadAt(body, offset+headerLen); err != nil {
+		if _, err := f.ReadAt(body, offset+HeaderLen); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, ErrTornRecord
 			}
@@ -1081,7 +1094,7 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 	footPtr := recordFootPool.Get().(*[]byte)
 	footBuf := *footPtr
 	defer recordFootPool.Put(footPtr)
-	if _, err := f.ReadAt(footBuf, offset+headerLen+int64(bodyLen)); err != nil {
+	if _, err := f.ReadAt(footBuf, offset+HeaderLen+int64(bodyLen)); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, ErrTornRecord
 		}
@@ -1133,25 +1146,25 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 
 	offset := 0
 	for offset < len(data) {
-		if offset+headerLen > len(data) {
+		if offset+HeaderLen > len(data) {
 			return nil // torn trailing header
 		}
 		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
 		key := binary.LittleEndian.Uint64(data[offset+4 : offset+12])
 		bodyLen := int(binary.LittleEndian.Uint32(data[offset+12 : offset+16]))
 
-		recEnd := offset + headerLen + bodyLen + footerLen
+		recEnd := offset + HeaderLen + bodyLen + FooterLen
 		if recEnd > len(data) {
 			return nil // torn trailing record
 		}
 
 		// CRC is computed over the mmap data directly — no copy needed
 		// for the checksum itself.
-		storedCRC := binary.LittleEndian.Uint32(data[offset+headerLen+bodyLen : recEnd])
+		storedCRC := binary.LittleEndian.Uint32(data[offset+HeaderLen+bodyLen : recEnd])
 		crc := crc32.New(crcTable)
-		_, _ = crc.Write(data[offset : offset+headerLen])
+		_, _ = crc.Write(data[offset : offset+HeaderLen])
 		if bodyLen > 0 {
-			_, _ = crc.Write(data[offset+headerLen : offset+headerLen+bodyLen])
+			_, _ = crc.Write(data[offset+HeaderLen : offset+HeaderLen+bodyLen])
 		}
 		if crc.Sum32() != storedCRC {
 			return fmt.Errorf("warm: CRC mismatch at seg %d offset %d", segID, offset)
@@ -1164,7 +1177,7 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 		var body []byte
 		if bodyLen > 0 {
 			body = make([]byte, bodyLen)
-			copy(body, data[offset+headerLen:offset+headerLen+bodyLen])
+			copy(body, data[offset+HeaderLen:offset+HeaderLen+bodyLen])
 		}
 
 		rec := Record{
@@ -1197,7 +1210,7 @@ func scanSegmentReadAt(f *os.File, segID int, size int64, fn func(Record) error)
 		if err := fn(*rec); err != nil {
 			return err
 		}
-		offset += int64(headerLen + len(rec.Body) + footerLen)
+		offset += int64(HeaderLen + len(rec.Body) + FooterLen)
 	}
 	return nil
 }
@@ -1406,7 +1419,7 @@ func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactD
 				_ = os.RemoveAll(compactDir)
 				return nil, nil, 0, fmt.Errorf("compact: write: %w", wErr)
 			}
-			recSize := int64(headerLen + len(p.body) + footerLen)
+			recSize := int64(HeaderLen + len(p.body) + FooterLen)
 			// Preserve protected from the pre-compaction index. The SIEVE
 			// list is rebuilt in Compact from orderedKeys, so the sieve
 			// pointer is left nil here and set during rebuild.

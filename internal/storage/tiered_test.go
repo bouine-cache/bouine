@@ -954,10 +954,14 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	// Small warm budget so we can reach it quickly. Each encoded object
-	// is headerLen(16) + body + footerLen(4) = 20 + body bytes on the warm
-	// tier. 3 records of 200-byte bodies = 660 bytes = exactly at budget.
-	const warmMaxBytes = 660
+	// Fill the warm tier to exactly the budget so OverBudget() returns true.
+	// Record size is computed via warm.RecordSize so the test doesn't
+	// hardcode the internal header/footer layout.
+	const warmBodySize = 200
+	recSize := warm.RecordSize(warmBodySize)
+	const numFill = 3
+	warmMaxBytes := int64(numFill * recSize)
+
 	ts, err := NewTieredStore(TieredConfig{
 		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
 		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
@@ -971,12 +975,8 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ts.Close(ctx) })
 
-	// Fill the warm tier to exactly the budget so OverBudget() returns true.
-	// Each record is headerLen(16) + body + footerLen(4) = 220 bytes on warm.
-	// With a 660-byte budget, 3 records = 660 bytes = exactly at budget.
-	// Protect all entries so the eviction policy can't free space.
-	const warmBodySize = 200 // 220 bytes per record on warm
-	const numFill = 3        // 3 * 220 = 660 = warmMaxBytes
+	// Fill the warm tier to exactly the budget. Protect all entries so
+	// the eviction policy can't free space.
 	for i := range numFill {
 		if _, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize)); err != nil {
 			t.Fatalf("warm.Put %d under budget: %v", i, err)
@@ -1013,9 +1013,82 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 
 	// The warm entry count should not have increased from the promotion
 	// (tombstone draining may have decreased it, but it should not have
-	// gone up). We started with 3 fill entries.
+	// gone up). We started with numFill fill entries.
 	warmEntries := ts.Stats().WarmEntries
-	if warmEntries > 3 {
-		t.Errorf("warm entries = %d, expected no promotion (should be <= 3)", warmEntries)
+	if warmEntries > numFill {
+		t.Errorf("warm entries = %d, expected no promotion (should be <= %d)", warmEntries, numFill)
+	}
+}
+
+// TestWarmSync_StopsPromotionMidCycleOnOverBudget verifies that
+// writeHotOnlyToWarm stops at the first ErrOverBudget when the warm tier
+// fills up mid-cycle: some keys are promoted, the rest are skipped, and
+// the skippedOverBudget count is correct (#205).
+func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Compute the encoded body size for obj(k, 100) using the same key
+	// range as the actual hot-only objects below — the Key field is
+	// uvarint-encoded so key magnitude affects the encoded length.
+	// The warm record size is warm.RecordSize(len(encodedBody)).
+	probeKey := api.Key(1000)
+	encodedBody := encodeObject(obj(probeKey, 100))
+	recSize := warm.RecordSize(len(encodedBody))
+
+	// Budget for 2 records, leaving room for exactly 2 promotions.
+	// The 3rd Put will exceed the budget (2*recSize + recSize > budget)
+	// and return ErrOverBudget since the fill entries are protected.
+	const fillCount = 2
+	warmMaxBytes := int64(fillCount * recSize)
+
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
+		WALDir:            filepath.Join(dir, "index.wal"),
+		BodyThreshold:     1 << 20, // everything stays hot-only
+		WarmSyncInterval:  -1,      // disabled — we call runWarmSyncCycle manually
+		WarmSyncBatchSize: 100,
+	})
+	if err != nil {
+		t.Fatalf("NewTieredStore: %v", err)
+	}
+	t.Cleanup(func() { _ = ts.Close(ctx) })
+
+	// Put 5 hot-only objects. The warm tier is empty so OverBudget() is
+	// false at cycle start — promotion will proceed until the budget
+	// is hit mid-cycle.
+	const numHotOnly = 5
+	for i := range numHotOnly {
+		k := api.Key(1000 + i)
+		if err := ts.Put(ctx, k, obj(k, 100)); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Run a sync cycle. The first fillCount keys should be promoted;
+	// the remaining keys should be skipped due to ErrOverBudget.
+	ts.runWarmSyncCycle(ctx)
+
+	// Verify exactly fillCount keys were promoted to warm.
+	promoted := 0
+	for i := range numHotOnly {
+		k := uint64(1000 + i)
+		if _, _, ok := ts.warm.Lookup(k); ok {
+			// Protect promoted entries so eviction doesn't remove
+			// them before we count.
+			ts.warm.Protect(k)
+			promoted++
+		}
+	}
+	if promoted != fillCount {
+		t.Fatalf("promoted = %d, want %d (budget allows exactly %d records)", promoted, fillCount, fillCount)
+	}
+
+	// The warm entry count should be exactly fillCount — no more, no less.
+	warmEntries := ts.Stats().WarmEntries
+	if warmEntries != fillCount {
+		t.Errorf("warm entries = %d, want %d (fillCount promoted, rest skipped over budget)", warmEntries, fillCount)
 	}
 }

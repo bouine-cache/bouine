@@ -12,9 +12,9 @@ Pages Helm repository on every release tag (`.github/workflows/chart-release.yml
 where Artifact Hub indexes it. A chart that fails `helm lint` would break
 the release workflow and ship a broken artifact to users.
 
-`AGENTS.md §14.4` mandates that the pre-commit configuration mirror the
+`AGENTS.md §14.4` mandates that the prek configuration mirror the
 CI gates so problems are caught locally in seconds, and that **adding or
-modifying a pre-commit hook requires an ADR**. The chart had no local
+modifying a prek hook requires an ADR**. The chart had no local
 lint gate; regressions to `Chart.yaml`, `values.yaml`, or the templates
 were only caught after a tag push.
 
@@ -43,7 +43,7 @@ or pushed.
 
 ### Risks
 - A future Helm major could change `helm lint` behavior. Mitigated by
-  CI re-running `pre-commit run --all-files` and by pinning Helm in the
+  CI re-running `prek run --all-files` and by pinning Helm in the
   release workflow via `azure/setup-helm`.
 
 ## Alternatives considered
@@ -56,6 +56,6 @@ or pushed.
 
 ## References
 
-- `AGENTS.md §14.4` (pre-commit hooks; ADR requirement for new hooks).
+- `AGENTS.md §14.4` (prek hooks; ADR requirement for new hooks).
 - `.github/workflows/chart-release.yml` (release-time chart publishing).
 - ADR-0006 (unify on `net/http`) — prior phase-level tooling decision.

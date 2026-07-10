@@ -28,7 +28,7 @@
 
 ## Checklist (mirrors AGENTS.md §17)
 
-- [ ] `pre-commit run --all-files` passes locally.
+- [ ] `prek run --all-files` passes locally.
 - [ ] Layer dependencies respected (`depguard` clean).
 - [ ] `make ci` is green locally.
 - [ ] Tests added/updated; coverage not reduced.

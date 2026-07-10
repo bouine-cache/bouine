@@ -11,7 +11,7 @@ An ADR is **required** when a change:
   observable to operators.
 - Changes the cluster protocol.
 - Touches the VCL shim's supported surface.
-- Adds or modifies a pre-commit hook.
+- Adds or modifies a prek hook.
 
 ADRs are immutable once accepted. To revisit a decision, write a new
 ADR that supersedes the old one and update the old one's `Status`
@@ -38,7 +38,7 @@ field to `Superseded by ADR-NNNN`.
 | 0007   | Cluster design — memberlist gossip + consistent hash | Accepted |
 | 0008   | Cluster mode: local cache + gossip invalidation      | Accepted |
 | 0009   | Cache state-machine hardening (RFC 9111 conformance) | Accepted |
-| 0010   | Helm chart lint in pre-commit and pre-push hooks     | Accepted |
+| 0010   | Helm chart lint in prek and pre-push hooks         | Accepted |
 | 0011   | Per-route TTL override decoupled from upstream Cache-Control | Accepted |
 | 0012   | Block caching of Set-Cookie responses by default     | Accepted |
 | 0013   | ttl_default makes no-freshness responses cacheable   | Accepted |

@@ -52,7 +52,7 @@ Kubernetes, multi-instance clustering, and first-class observability.
 git clone https://github.com/bouine-cache/bouine.git
 cd bouine
 
-# One-time setup: install pre-commit hooks (mandatory, see AGENTS.md §2.11).
+# One-time setup: install prek hooks (mandatory, see AGENTS.md §2.11).
 make hooks
 
 # Build, test, lint.

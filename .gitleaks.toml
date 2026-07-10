@@ -1,7 +1,7 @@
 # gitleaks configuration for bouine.
 #
 # Extends the upstream default ruleset and records vetted false positives so
-# full-history scans (`gitleaks detect --log-opts=--all`) and the pre-commit
+# full-history scans (`gitleaks detect --log-opts=--all`) and the prek
 # hook stay clean. Every allowlist entry MUST cite why it is safe.
 
 [extend]

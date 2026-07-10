@@ -1,15 +1,16 @@
-# Pre-commit configuration for bouine.
+# prek configuration for bouine.
 #
 # This file is the local mirror of CI's first stage. Every contributor
 # (human or AI) MUST run these hooks before each commit. Bypassing is
 # forbidden (AGENTS.md §2.11).
 #
+# prek is a drop-in replacement for pre-commit (same config format).
 # Setup:
-#   pip install pre-commit         # or: brew install pre-commit
+#   brew install prek              # or: pip install prek, uv tool install prek
 #   make hooks                     # installs commit + commit-msg + pre-push hooks
 #
 # Run on all files:
-#   pre-commit run --all-files
+#   prek run --all-files
 
 default_install_hook_types:
   - pre-commit

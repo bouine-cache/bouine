@@ -187,10 +187,11 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 // initWarm opens the warm store, injects metrics, and wires the
 // eviction callback.
 func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
+	warmCfg := *cfg
 	if metrics != nil {
-		cfg.Metrics = metrics
+		warmCfg.Metrics = metrics
 	}
-	w, err := warm.NewStore(*cfg)
+	w, err := warm.NewStore(warmCfg)
 	if err != nil {
 		return err
 	}

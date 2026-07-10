@@ -946,17 +946,10 @@ func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 }
 
 // warmRecordSize returns the on-disk byte footprint of a warm-tier record
-// with the given body length. Mirrors warm.headerLen (16) + bodyLen +
-// warm.footerLen (4). Kept in the test file because it is test-only — the
-// warm package does not export it and adding a public API just for tests
-// is not justified.
+// with the given body length, using the exported warm.HeaderLen and
+// warm.FooterLen constants so the test tracks the real on-disk format.
 func warmRecordSize(bodyLen int) int {
-	// Mirrors the warm package's unexported headerLen (4+8+4) and
-	// footerLen (4) constants. Kept here because exporting them just
-	// for tests is not justified.
-	const warmHeaderLen = 4 + 8 + 4 // magic + key + body_len
-	const warmFooterLen = 4         // crc32c
-	return warmHeaderLen + bodyLen + warmFooterLen
+	return warm.HeaderLen + bodyLen + warm.FooterLen
 }
 
 // TestWarmSync_SkipsPromotionWhenOverBudget verifies that the warm sync

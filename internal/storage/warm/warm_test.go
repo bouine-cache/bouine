@@ -125,7 +125,7 @@ func TestCRCCorruption(t *testing.T) {
 
 	seg.mu.Lock()
 	corrupt := []byte{0xFF}
-	if _, err := seg.f.WriteAt(corrupt, off+headerLen+2); err != nil {
+	if _, err := seg.f.WriteAt(corrupt, off+HeaderLen+2); err != nil {
 		seg.mu.Unlock()
 		t.Fatalf("corrupt: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRecomputeStats_ScanError(t *testing.T) {
 	s.mu.RUnlock()
 
 	seg.mu.Lock()
-	if _, err := seg.f.WriteAt([]byte{0xFF}, off+headerLen+2); err != nil {
+	if _, err := seg.f.WriteAt([]byte{0xFF}, off+HeaderLen+2); err != nil {
 		seg.mu.Unlock()
 		t.Fatalf("corrupt: %v", err)
 	}
@@ -763,7 +763,7 @@ func truncateLastRecord(t *testing.T, s *Store, segID int, lastOff int64) {
 	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
-	cutAt := lastOff + headerLen + 4 // header + partial body
+	cutAt := lastOff + HeaderLen + 4 // header + partial body
 	if err := seg.f.Truncate(cutAt); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -1103,7 +1103,7 @@ func TestPut_OverBudget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	// A record is headerLen(16) + len(body) + footerLen(4) = 20 + len(body).
+	// A record is HeaderLen(16) + len(body) + FooterLen(4) = 20 + len(body).
 	// With a 512-byte budget we can fit several small records but not
 	// arbitrarily many.
 	smallBody := make([]byte, 100) // 120 bytes per record
@@ -1174,8 +1174,8 @@ func TestPut_MaxBytesZeroDisablesEnforcement(t *testing.T) {
 func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	t.Parallel()
 
-	// Each live record: headerLen(16) + 100 body + footerLen(4) = 120 bytes.
-	// Each tombstone: headerLen(16) + footerLen(4) = 20 bytes.
+	// Each live record: HeaderLen(16) + 100 body + FooterLen(4) = 120 bytes.
+	// Each tombstone: HeaderLen(16) + FooterLen(4) = 20 bytes.
 	const maxBytes = int64(3600)
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: maxBytes, SegMax: 1 << 20})
@@ -1249,8 +1249,8 @@ func TestDelete_UpdatesStats(t *testing.T) {
 	if entriesBefore != 5 {
 		t.Fatalf("entries before delete = %d, want 5", entriesBefore)
 	}
-	// Each record: headerLen(16) + len(body) + footerLen(4) = 35 bytes.
-	wantBytes := int64(5 * (headerLen + len(body) + footerLen))
+	// Each record: HeaderLen(16) + len(body) + FooterLen(4) = 35 bytes.
+	wantBytes := int64(5 * (HeaderLen + len(body) + FooterLen))
 	if bytesBefore != wantBytes {
 		t.Fatalf("bytes before delete = %d, want %d", bytesBefore, wantBytes)
 	}
@@ -1266,7 +1266,7 @@ func TestDelete_UpdatesStats(t *testing.T) {
 	if entriesAfter != 2 {
 		t.Fatalf("entries after delete = %d, want 2", entriesAfter)
 	}
-	wantBytesAfter := int64(2 * (headerLen + len(body) + footerLen))
+	wantBytesAfter := int64(2 * (HeaderLen + len(body) + FooterLen))
 	if bytesAfter != wantBytesAfter {
 		t.Fatalf("bytes after delete = %d, want %d", bytesAfter, wantBytesAfter)
 	}
@@ -1351,7 +1351,7 @@ func TestStats_AccurateAfterDeleteWithoutRecompute(t *testing.T) {
 	if entries != 1 {
 		t.Fatalf("entries = %d, want 1", entries)
 	}
-	wantBytes := int64(headerLen + len(bodyB) + footerLen)
+	wantBytes := int64(HeaderLen + len(bodyB) + FooterLen)
 	if bytes != wantBytes {
 		t.Fatalf("bytes = %d, want %d (only key 2)", bytes, wantBytes)
 	}
@@ -1434,7 +1434,7 @@ func TestEvict_FreesSpaceUnderPressure(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	// Each record = headerLen(16) + 100 + footerLen(4) = 120 bytes.
+	// Each record = HeaderLen(16) + 100 + FooterLen(4) = 120 bytes.
 	body := make([]byte, 100)
 	for i := range 4 {
 		if _, _, err := s.Put(uint64(i), body); err != nil {
@@ -2017,7 +2017,7 @@ func TestPut_OverwriteDoesNotInflateStats(t *testing.T) {
 	if entries != 1 {
 		t.Fatalf("entries = %d, want 1 (overwrite should not increment entries)", entries)
 	}
-	wantBytes := int64(headerLen + len(body) + footerLen)
+	wantBytes := int64(HeaderLen + len(body) + FooterLen)
 	if bytes != wantBytes {
 		t.Fatalf("bytes = %d, want %d (overwrite should not inflate bytes)", bytes, wantBytes)
 	}
@@ -2057,7 +2057,7 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 	if entriesBefore != 25 {
 		t.Fatalf("entries before compact = %d, want 25", entriesBefore)
 	}
-	wantBytes := int64(25 * (headerLen + len(body) + footerLen))
+	wantBytes := int64(25 * (HeaderLen + len(body) + FooterLen))
 	if bytesBefore != wantBytes {
 		t.Fatalf("bytes before compact = %d, want %d", bytesBefore, wantBytes)
 	}

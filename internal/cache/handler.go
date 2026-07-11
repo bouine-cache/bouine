@@ -552,6 +552,8 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 		)
 		defer bgCancel()
 
+		// Cancel the refresh if the handler is shutting down so
+		// we don't call store.Put on a closed store.
 		go func() {
 			select {
 			case <-h.done:

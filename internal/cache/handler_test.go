@@ -1091,7 +1091,7 @@ func TestRefreshMinHits_InitialStoreAlwaysSchedules(t *testing.T) {
 	}
 }
 
-func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
+func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
@@ -1132,19 +1132,20 @@ func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
 	if obj.Hits < 1 {
 		t.Fatalf("expected >= 1 hit before refresh, got %d", obj.Hits)
 	}
-	staleHits := obj.Hits
 
 	// doBackgroundRefresh triggers a 200 (upstream never returns 304).
-	// The refreshed object should carry over the hit count.
+	// The refreshed object should have Hits reset to 0 (SIEVE signal).
+	// windowHits from the previous window is used for the popularity gate.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 
-	// Verify the stored object preserved the hit count.
+	// Verify the stored object has Hits reset (may be 1 from SIEVE slow path
+	// on the test's store.Get, but should not carry over the previous window's count).
 	refreshed, _, err := h.store.Get(context.Background(), key)
 	if err != nil || refreshed == nil {
 		t.Fatalf("store.Get after refresh: obj=%v err=%v", refreshed, err)
 	}
-	if refreshed.Hits < staleHits {
-		t.Fatalf("hit count lost after 200 refresh: got %d, want >= %d", refreshed.Hits, staleHits)
+	if refreshed.Hits > 1 {
+		t.Fatalf("hit count not reset after 200 refresh: got %d, want <= 1", refreshed.Hits)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -82,12 +83,28 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher 
 	return NewPeerFetcherWithLogger(tlsCfg, reg, nil)
 }
 
+// newClusterTransport builds a tuned *http.Transport for cluster-internal
+// RPCs (peer fetch, broadcast). The defaults leave MaxIdleConnsPerHost at
+// Go's default of 2, which causes TLS handshake storms under bursty miss
+// traffic. Setting it to 64 matches the origin pool and keeps idle
+// connections warm for reuse.
+func newClusterTransport(tlsCfg *tls.Config) *http.Transport {
+	return &http.Transport{
+		ForceAttemptHTTP2:   true,
+		TLSClientConfig:     tlsCfg,
+		MaxIdleConns:        512,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   2 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+}
+
 // NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
 func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger) *PeerFetcher {
-	transport := &http.Transport{
-		ForceAttemptHTTP2: true,
-		TLSClientConfig:   tlsCfg,
-	}
+	transport := newClusterTransport(tlsCfg)
 	f := &PeerFetcher{
 		client: &http.Client{
 			Transport: transport,

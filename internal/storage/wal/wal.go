@@ -20,11 +20,14 @@
 // # Async mode
 //
 // OpenAsync starts a background goroutine (walSyncLoop) that batches
-// channel-enqueued entries and fsyncs once per syncInterval (default
-// 100 ms). This eliminates the goroutine serialization caused by
-// holding l.mu across f.Sync() on every Append call (issue #220).
-// Callers use Enqueue/EnqueueBatch (non-blocking, drop-on-full) instead
-// of Append/AppendBatch. rebuildIndexFromScan is the durability backstop.
+// channel-enqueued entries and writes them to the O_DSYNC/O_SYNC file
+// descriptor once per syncInterval (default 100 ms). This eliminates
+// the goroutine serialization caused by holding l.mu across f.Sync()
+// on every Append call (issue #220). With O_DSYNC, each Write() is
+// already durable — the sync loop's role is to drain the channel and
+// update lastSyncTime. Callers use Enqueue/EnqueueBatch (non-blocking,
+// drop-on-full) instead of Append/AppendBatch. rebuildIndexFromScan is
+// the durability backstop.
 //
 // Open stays synchronous for tests and rewriteWAL tmp files.
 // Enqueue on a sync-only log (syncCh == nil) falls back to Append.
@@ -78,12 +81,13 @@ type Entry struct {
 	Offset int64
 }
 
-// Log is an append-only WAL file.
+// Log is an append-only WAL file opened with O_DSYNC (Linux) or O_SYNC
+// (other platforms), so every Write() is durable without explicit fsync.
 //
 // In synchronous mode (opened with Open), every Append/AppendBatch
-// fsyncs under l.mu. In async mode (opened with OpenAsync), the
-// walSyncLoop goroutine batches Enqueue'd entries and fsyncs once
-// per syncInterval.
+// write is immediately durable. In async mode (opened with OpenAsync),
+// the walSyncLoop goroutine batches Enqueue'd entries and writes them
+// once per syncInterval.
 type Log struct {
 	mu   sync.Mutex
 	f    *os.File
@@ -100,9 +104,10 @@ type Log struct {
 }
 
 // Open opens or creates a WAL file at path in synchronous mode.
-// Every Append/AppendBatch call fsyncs immediately.
+// Every Append/AppendBatch write is flushed to disk via O_DSYNC (Linux)
+// or O_SYNC (other platforms) — no explicit fsync is needed.
 func Open(path string) (*Log, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // operator-configured path
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND|syncFlag, 0o600) //nolint:gosec // operator-configured path
 	if err != nil {
 		return nil, fmt.Errorf("wal: open %s: %w", path, err)
 	}
@@ -110,13 +115,14 @@ func Open(path string) (*Log, error) {
 }
 
 // OpenAsync opens or creates a WAL file at path in async mode and starts
-// the walSyncLoop goroutine. Enqueue'd entries are batched and fsynced
-// once per syncInterval.
+// the walSyncLoop goroutine. Enqueue'd entries are batched and written
+// with O_DSYNC/O_SYNC, so every Write() is durable without explicit fsync.
+// The sync loop still updates lastSyncTime and handles flush requests.
 //
 // syncInterval <= 0 selects synchronous mode: Enqueue falls back to
 // Append (same as Open). The sync loop is not started.
 func OpenAsync(path string, syncInterval time.Duration) (*Log, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // operator-configured path
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND|syncFlag, 0o600) //nolint:gosec // operator-configured path
 	if err != nil {
 		return nil, fmt.Errorf("wal: open %s: %w", path, err)
 	}
@@ -150,7 +156,8 @@ func encodeEntry(e Entry) []byte {
 	return buf
 }
 
-// Append writes a single entry to the WAL. The write is fsynced.
+// Append writes a single entry to the WAL. The write is durable via
+// O_DSYNC/O_SYNC on the file descriptor — no explicit fsync needed.
 // Use for synchronous logs (opened with Open).
 func (l *Log) Append(e Entry) error {
 	buf := make([]byte, recLen)
@@ -168,7 +175,7 @@ func (l *Log) Append(e Entry) error {
 	if _, err := l.f.Write(buf); err != nil {
 		return fmt.Errorf("wal: write: %w", err)
 	}
-	return l.f.Sync()
+	return nil
 }
 
 // Enqueue encodes and enqueues a single entry for async fsync.
@@ -281,7 +288,6 @@ write:
 		entryBufPool.Put(&buf)
 	}
 	if writeErr == nil {
-		_ = l.f.Sync()
 		l.lastSync.Store(time.Now().UnixNano())
 	} else {
 		// Write failed: entries from batch[written:] were drained from
@@ -301,13 +307,15 @@ write:
 }
 
 // Sync triggers an immediate flush of pending entries and waits for
-// the sync loop to complete the fsync. Blocks until the sync loop
-// closes the per-call done channel. Safe to call concurrently; callers
-// are serialized by the buffered flushCh. Returns nil if the sync loop
-// has already exited (Close in progress or complete).
+// the sync loop to complete the drain. With O_DSYNC/O_SYNC on the file
+// descriptor, each Write() is already durable — Sync() ensures all
+// channel-enqueued entries have been written and updates lastSyncTime.
+// Blocks until the sync loop closes the per-call done channel. Safe to
+// call concurrently; callers are serialized by the buffered flushCh.
+// Returns nil if the sync loop has already exited (Close in progress).
 //
-// On a sync-only log (syncCh == nil), this is a no-op (Append already
-// fsyncs synchronously).
+// On a sync-only log (syncCh == nil), this is a no-op (Append writes
+// are already durable via the sync flag).
 func (l *Log) Sync() error {
 	if l.syncCh == nil {
 		return nil
@@ -411,7 +419,7 @@ func (l *Log) AppendBatch(entries []Entry) error {
 			return fmt.Errorf("wal: batch write: %w", err)
 		}
 	}
-	return l.f.Sync()
+	return nil
 }
 
 // Truncate discards the WAL contents (called after a checkpoint).

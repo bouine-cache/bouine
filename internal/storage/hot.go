@@ -100,6 +100,14 @@ type hotEntry struct {
 	windowHits atomic.Int64
 }
 
+// hotEntryPool reuses hotEntry structs across Put/Delete cycles to avoid
+// per-Put allocation. Reset on acquire; not returned to pool if the
+// entry's windowHits counter is non-zero (shouldn't happen since Delete
+// clears it, but defensive).
+var hotEntryPool = sync.Pool{
+	New: func() any { return new(hotEntry) },
+}
+
 // evictionLog is a deferred log record collected under the shard lock
 // and flushed after the lock is released. Backed evictions are
 // Info (sampled by key); evictions without a backup are Warn
@@ -304,6 +312,11 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 		s.evict.Remove(cur.sieve)
 		delete(s.entries, key)
 		h.stats.evictions.Add(1)
+		cur.obj = nil
+		cur.sieve = nil
+		cur.hasBackup = false
+		cur.windowHits.Store(0)
+		hotEntryPool.Put(cur)
 	}
 	s.mu.Unlock()
 }
@@ -335,13 +348,18 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 			s.bytes -= objSize(old.obj)
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
+			old.obj = nil
+			old.sieve = nil
+			old.hasBackup = false
+			old.windowHits.Store(0)
+			hotEntryPool.Put(old)
 		}
 	}
 	if s.bytes+size > perShardMax {
 		stillOver = true
 	}
 
-	// Remove old entry if replacing.
+	// Remove old entry if replacing, return to pool.
 	if old, exists := s.entries[key]; exists {
 		h.notifyEvict(key, old)
 		s.bytes -= objSize(old.obj)
@@ -349,12 +367,20 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		if old.hasBackup {
 			s.backedCount--
 		}
+		old.obj = nil
+		old.sieve = nil
+		old.hasBackup = false
+		old.windowHits.Store(0)
+		hotEntryPool.Put(old)
 	}
 
 	se, _ := s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 		return nil // force insert
 	})
-	s.entries[key] = &hotEntry{obj: obj, sieve: se}
+	e := hotEntryPool.Get().(*hotEntry)
+	e.obj = obj
+	e.sieve = se
+	s.entries[key] = e
 	s.bytes += size
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
@@ -414,6 +440,11 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
 			h.stats.evictions.Add(1)
+			e.obj = nil
+			e.sieve = nil
+			e.hasBackup = false
+			e.windowHits.Store(0)
+			hotEntryPool.Put(e)
 		}
 	}
 	s.mu.Unlock()
@@ -461,6 +492,11 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.sieve)
 		delete(s.entries, key)
+		e.obj = nil
+		e.sieve = nil
+		e.hasBackup = false
+		e.windowHits.Store(0)
+		hotEntryPool.Put(e)
 	}
 	return nil
 }
@@ -486,6 +522,11 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 				delete(s.entries, key)
 				h.stats.evictions.Add(1)
 				total++
+				e.obj = nil
+				e.sieve = nil
+				e.hasBackup = false
+				e.windowHits.Store(0)
+				hotEntryPool.Put(e)
 			}
 		}
 		s.mu.Unlock()

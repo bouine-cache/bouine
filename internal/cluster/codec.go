@@ -65,63 +65,6 @@ func readString(buf []byte, offset int) (string, int, error) {
 	return string(buf[offset : offset+n]), offset + n, nil
 }
 
-// EncodeKeySet serializes a KeySet into a single pre-sized byte slice.
-func EncodeKeySet(nodeName string, keys []api.Key) ([]byte, error) {
-	if len(nodeName) > maxStringLen {
-		return nil, errStringTooLong
-	}
-	hdrLen := binaryHdrLen + 2 + len(nodeName) + 4
-	total := hdrLen + len(keys)*8
-	buf := make([]byte, total)
-	buf[0] = binaryMagic
-	buf[1] = binaryVersion
-	off := 2
-	binary.LittleEndian.PutUint16(buf[off:], uint16(len(nodeName))) //nolint:gosec // bounded by maxStringLen check above
-	off += 2
-	copy(buf[off:], nodeName)
-	off += len(nodeName)
-	binary.LittleEndian.PutUint32(buf[off:], uint32(len(keys))) //nolint:gosec // key count bounded by available memory
-	off += 4
-	for _, k := range keys {
-		binary.LittleEndian.PutUint64(buf[off:], uint64(k))
-		off += 8
-	}
-	return buf, nil
-}
-
-// DecodeKeySet parses a binary KeySet from buf.
-func DecodeKeySet(buf []byte) (nodeName string, keys []api.Key, err error) {
-	if len(buf) < binaryHdrLen {
-		return "", nil, errShortFrame
-	}
-	if buf[0] != binaryMagic {
-		return "", nil, errBadMagic
-	}
-	if buf[1] != binaryVersion {
-		return "", nil, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
-	}
-	off := binaryHdrLen
-	nodeName, off, err = readString(buf, off)
-	if err != nil {
-		return "", nil, err
-	}
-	if off+4 > len(buf) {
-		return "", nil, errShortFrame
-	}
-	count := int(binary.LittleEndian.Uint32(buf[off:]))
-	off += 4
-	need := count * 8
-	if off+need > len(buf) {
-		return "", nil, errShortFrame
-	}
-	keys = make([]api.Key, count)
-	for i := range count {
-		keys[i] = api.Key(binary.LittleEndian.Uint64(buf[off:]))
-		off += 8
-	}
-	return nodeName, keys, nil
-}
-
 func purgePayloadLen(evt api.PurgeEvent) int {
 	return 8 + 2 + len(evt.VaryKey) + 2 + len(evt.Issuer) + 8 + 8
 }

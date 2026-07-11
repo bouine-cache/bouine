@@ -1,5 +1,7 @@
 # ADR-0014: Anti-entropy reconciliation for full cluster mode
 
+
+> **Superseded** by [ADR-0025](0025-remove-full-cluster-mode.md). Full cluster mode has been removed.
 - **Status**: Accepted
 - **Date**: 2026-06-29
 - **Deciders**: @thylong

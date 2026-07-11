@@ -243,10 +243,6 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
-	// replicateFn, if non-nil, is called after a cacheable response is
-	// stored locally. Used in full cluster mode to broadcast the object
-	// to all peers via gossip. Nil in strong and eventual modes.
-	replicateFn func(ctx context.Context, obj *api.Object)
 }
 
 // HandlerConfig configures a cache Handler.
@@ -328,10 +324,6 @@ type HandlerConfig struct {
 	// the key is owned by a remote peer. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
-	// ReplicateFn, if non-nil, is called after a cacheable response is
-	// stored locally. Used in full cluster mode to broadcast the object
-	// to all peers via gossip. Nil in strong and eventual modes.
-	ReplicateFn func(ctx context.Context, obj *api.Object)
 
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin.
@@ -380,7 +372,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		VaryCapHits:          cfg.VaryCapHits,
 		ownerFn:              cfg.OwnerFn,
 		peerFetch:            cfg.PeerFetch,
-		replicateFn:          cfg.ReplicateFn,
 		allowSetCookie:       cfg.AllowSetCookie,
 		maxObjectSize:        cfg.MaxObjectSize,
 		maxResponseBytes:     cfg.MaxResponseBytes,
@@ -598,7 +589,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(ctx, key, refreshed, req, true)
+		h.storeObject(ctx, key, refreshed, req, true)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
@@ -614,7 +605,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		}
 		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		obj.Hits = stale.Hits
-		h.storeAndReplicate(ctx, key, obj, req, true)
+		h.storeObject(ctx, key, obj, req, true)
 		h.refreshMetrics.IncTotal("200")
 		return
 	}
@@ -998,7 +989,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(r.Context(), key, refreshed, r, false)
+		h.storeObject(r.Context(), key, refreshed, r, false)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
 	}
@@ -1073,7 +1064,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeAndReplicate(ctx, key, refreshed, r, false)
+		h.storeObject(ctx, key, refreshed, r, false)
 		return
 	}
 
@@ -1085,7 +1076,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 			return
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(ctx, key, obj, r, false)
+		h.storeObject(ctx, key, obj, r, false)
 	}
 }
 
@@ -1134,10 +1125,10 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeAndReplicate(r.Context(), storeKey, obj, r, false)
+		h.storeObject(r.Context(), storeKey, obj, r, false)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			h.storeAndReplicate(r.Context(), primaryKey, primaryObj, r, false)
+			h.storeObject(r.Context(), primaryKey, primaryObj, r, false)
 		}
 	}
 }
@@ -1304,7 +1295,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-	h.storeAndReplicate(r.Context(), key, obj, getReq, false)
+	h.storeObject(r.Context(), key, obj, getReq, false)
 }
 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
@@ -1338,12 +1329,11 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 	return h.buildKey(locReq)
 }
 
-// storeAndReplicate stores obj under key and, if replicateFn is set,
-// broadcasts it to all peers. When refresh-before-expiry is enabled,
-// it also registers the key in the refresh registry and schedules a
-// background refresh at TTL - margin. Every path that stores a
-// cacheable object must go through this helper so replication and
-// refresh scheduling are never skipped.
+// storeObject stores obj under key. When refresh-before-expiry
+// is enabled, it also registers the key in the refresh registry and
+// schedules a background refresh at TTL - margin. Every path that
+// stores a cacheable object must go through this helper so refresh
+// scheduling is never skipped.
 //
 // isRefresh is true when the call originates from a background refresh
 // (doBackgroundRefresh). It enables the refresh_min_hits gate: if the
@@ -1351,11 +1341,8 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 // TTL window, it is not re-scheduled and expires naturally. Foreground
 // stores pass false to ensure every object gets at least one refresh
 // cycle.
-func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool) {
+func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool) {
 	_ = h.store.Put(ctx, key, obj)
-	if h.replicateFn != nil {
-		h.replicateFn(ctx, obj)
-	}
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
 		// Skip negative-cached objects (404/405/410/501) — refreshing
 		// them proactively is surprising and wastes origin capacity.

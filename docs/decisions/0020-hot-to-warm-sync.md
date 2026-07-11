@@ -117,7 +117,7 @@ against all WAL loss scenarios.
 ## References
 
 - Plan: `/tmp/warm-sync-plan.md`
-- ADR-0014: Anti-entropy reconciliation for full cluster mode
+- ADR-0014: Anti-entropy reconciliation for full cluster mode (superseded by ADR-0025)
 - `internal/storage/tiered.go`
 - `internal/storage/hot.go`
 - `internal/storage/wal/wal.go`

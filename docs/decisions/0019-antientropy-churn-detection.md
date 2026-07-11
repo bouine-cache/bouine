@@ -1,5 +1,7 @@
 # ADR-0019: Churn detection for anti-entropy backfill
 
+
+> **Superseded** by [ADR-0025](0025-remove-full-cluster-mode.md). Full cluster mode has been removed.
 - **Status**: Accepted
 - **Date**: 2026-07-06
 - **Deciders**: @chrisdupin

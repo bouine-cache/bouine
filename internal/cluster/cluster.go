@@ -44,7 +44,6 @@ type Config struct {
 	// Mode determines how cache keys are distributed across the cluster.
 	// "strong" uses a consistent hash ring with peer fetch on miss.
 	// "eventual" caches locally with no peer fetch; invalidation by gossip.
-	// "full" caches locally with full replication to all peers; gossip everything.
 	// Defaults to "strong" for backward compatibility.
 	Mode string
 	// PushPullInterval is the interval between memberlist push/pull sync
@@ -64,12 +63,6 @@ type Config struct {
 type Invalidator struct {
 	PurgeFn func(ctx context.Context, evt api.PurgeEvent) error
 	BanFn   func(ctx context.Context, evt api.BanEvent) error
-}
-
-// Replicator holds a callback for storing replicated objects received
-// via gossip in full mode. Set via SetReplicator after cluster creation.
-type Replicator struct {
-	StoreObject func(ctx context.Context, obj *api.Object) error
 }
 
 // Member holds runtime state about a peer node in the cluster.
@@ -95,7 +88,6 @@ type Cluster struct {
 	gossipMu    sync.Mutex
 	gossipQueue []gossipBroadcast
 	inv         Invalidator
-	rep         Replicator
 	metrics     *Metrics
 }
 
@@ -241,10 +233,10 @@ func (c *Cluster) NodeMeta(limit int) []byte {
 	return b
 }
 
-// NotifyMsg handles incoming gossip user messages (purge/ban/replication
-// events). Binary frames (purge/ban) are dispatched by the msgType byte;
-// JSON frames (replication) are dispatched by the "type" field. Malformed
-// or unrecognised payloads are logged and skipped.
+// NotifyMsg handles incoming gossip user messages (purge/ban events).
+// Binary frames (purge/ban) are dispatched by the msgType byte;
+// JSON frames are dispatched by the "type" field. Malformed or unrecognised
+// payloads are logged and skipped.
 func (c *Cluster) NotifyMsg(msg []byte) {
 	if IsBinaryFrame(msg) {
 		c.handleBinaryGossip(msg)
@@ -309,16 +301,7 @@ func (c *Cluster) handleJSONGossip(msg []byte) {
 		c.logger.Debug("cluster: malformed gossip message", "error", err)
 		return
 	}
-	switch hdr.Type {
-	case api.GossipTypeReplication:
-		// Replication moved from gossip to HTTP (POST /v1/peer/replicate).
-		// Log a warning for backward compat during rolling upgrades — old
-		// pods still send replication via gossip. Anti-entropy heals any
-		// objects missed during the transition.
-		c.logger.Warn("cluster: received replication via gossip (deprecated, use HTTP), ignoring", "len", len(msg))
-	default:
-		c.logger.Debug("cluster: unrecognized gossip message", "type", hdr.Type, "len", len(msg))
-	}
+	c.logger.Debug("cluster: unrecognized gossip message", "type", hdr.Type, "len", len(msg))
 }
 
 // QueueBroadcast enqueues a message for gossip delivery. The message is
@@ -368,10 +351,10 @@ type gossipBroadcast struct {
 	data []byte
 }
 
-// LocalState serialises the ring digest for anti-entropy. Peers
-// exchange digests on every full-state push/pull cycle; if digests
-// differ they re-reconcile their peer tables. The join flag is true
-// on the first sync after joining.
+// LocalState serialises the ring digest for peer reconciliation.
+// Peers exchange digests on every full-state push/pull cycle; if
+// digests differ they re-reconcile their peer tables. The join flag
+// is true on the first sync after joining.
 func (c *Cluster) LocalState(_ bool) []byte {
 	digest := c.Digest()
 	b, _ := json.Marshal(digest)
@@ -564,7 +547,7 @@ func (c *Cluster) Config() Config {
 	return c.cfg
 }
 
-// Mode returns the cluster consistency mode ("strong", "eventual", or "full").
+// Mode returns the cluster consistency mode ("strong" or "eventual").
 func (c *Cluster) Mode() string { return c.cfg.Mode }
 
 // SetMetrics registers cluster-level Prometheus counters. Must be called
@@ -574,7 +557,3 @@ func (c *Cluster) SetMetrics(m *Metrics) { c.metrics = m }
 // SetInvalidator registers callbacks for applying purge and ban events
 // received via gossip. Must be called before Join.
 func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
-
-// SetReplicator registers a callback for storing replicated objects
-// received via gossip in full mode. Must be called before Join.
-func (c *Cluster) SetReplicator(rep Replicator) { c.rep = rep }

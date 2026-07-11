@@ -45,7 +45,7 @@ routes:
 
 When cache is enabled, the static handler is wrapped in the cache handler
 as its "upstream." Cached objects benefit from TTL, SWR, SIE, eviction,
-and cluster replication (full mode) exactly like proxied responses.
+and cluster invalidation exactly like proxied responses.
 
 ## Security
 

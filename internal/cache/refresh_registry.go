@@ -24,7 +24,7 @@ type refreshEntry struct {
 
 // refreshRegistry maps cache keys to the request info needed to
 // reconstruct a background refresh fetch. It is populated on
-// storeAndReplicate when refresh-before-expiry is enabled, and
+// storeObject when refresh-before-expiry is enabled, and
 // cleaned up on explicit Delete, invalidateAndProxy, and when the
 // scheduler detects the object is gone from the store.
 type refreshRegistry struct {

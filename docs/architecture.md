@@ -268,10 +268,7 @@ bounds traversal depth (default 2).
 
 Writes are local-first; eventual replication is fire-and-forget to N-1
 replicas with hinted handoff in a bounded queue. Purges are broadcast via
-gossip. In `full` mode, anti-entropy reconciliation runs every 30s
-(configurable via `cluster.anti_entropy_interval`): each node exchanges its
-complete key set with peers via `GET /v1/peer/keys`, computes the diff,
-and backfills missing objects via the existing peer-fetch HTTP path. A
+gossip. A
 purge is monotonic — once a TTL marker is set, late writes for that key are
 rejected until TTL expires.
 
@@ -525,7 +522,7 @@ before `SIGTERM` to let LB state propagate.
 |------|------------|
 | mmap on macOS behaves differently from Linux prod | CI matrix: linux/amd64, linux/arm64, darwin/arm64. |
 | RFC 9111 edge cases drift | `cache-tests` in CI; blocks merge on regression. |
-| Cluster split-brain on purges | Monotonic purge tokens + anti-entropy reconciler. |
+| Cluster split-brain on purges | Monotonic purge tokens. |
 | Benchmark noise | `benchstat`, pinned self-hosted runner, N ≥ 10 samples. |
 | AI features creep into the hot path | Hard boundary: L8 only reads sampled telemetry, never writes to L2/L3. |
 | VCL shim becomes a maintenance sink | Hard-cap supported subset; fail loudly on unsupported constructs; deferred to post-v1.0. |

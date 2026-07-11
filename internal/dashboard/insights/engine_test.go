@@ -499,32 +499,6 @@ func TestRuleConfigClusterDisabledWithPeers(t *testing.T) {
 	}
 }
 
-func TestRuleConfigAntiEntropyDisabled(t *testing.T) {
-	t.Parallel()
-	cfg := baseConfig()
-	cfg.Cluster.Enabled = true
-	cfg.Cluster.Mode = config.ClusterModeFull
-	cfg.Cluster.AntiEntropyInterval = 0
-	data := InsightData{Config: cfg}
-	ins := ruleConfigAntiEntropyDisabled(data)
-	if ins == nil {
-		t.Fatal("expected insight for anti-entropy disabled in full mode")
-	}
-
-	cfg.Cluster.AntiEntropyInterval = 30 * time.Second
-	ins = ruleConfigAntiEntropyDisabled(data)
-	if ins != nil {
-		t.Fatal("expected no insight when anti-entropy enabled")
-	}
-
-	cfg.Cluster.Mode = config.ClusterModeEventual
-	cfg.Cluster.AntiEntropyInterval = 0
-	ins = ruleConfigAntiEntropyDisabled(data)
-	if ins != nil {
-		t.Fatal("expected no insight in non-full mode")
-	}
-}
-
 func TestRuleConfigPoolNoTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
@@ -810,64 +784,6 @@ func TestRuleCacheWarmEntriesZero(t *testing.T) {
 }
 
 // ── Tier 3 tests ─────────────────────────────────────────────────────
-
-func TestRuleClusterReplicationStalled(t *testing.T) {
-	t.Parallel()
-	cfg := baseConfig()
-	cfg.Cluster.Mode = config.ClusterModeFull
-	data := InsightData{
-		Config: cfg,
-		// 10 minutes ago — well beyond the 5-minute threshold.
-		ReplicationLastRecv: time.Now().Add(-10 * time.Minute).Unix(),
-	}
-	ins := ruleClusterReplicationStalled(data)
-	if ins == nil {
-		t.Fatal("expected insight for stalled replication")
-	}
-
-	data.ReplicationLastRecv = time.Now().Unix()
-	ins = ruleClusterReplicationStalled(data)
-	if ins != nil {
-		t.Fatal("expected no insight when replication recent")
-	}
-
-	data.ReplicationLastRecv = 0
-	ins = ruleClusterReplicationStalled(data)
-	if ins != nil {
-		t.Fatal("expected no insight when never received (0)")
-	}
-
-	cfg.Cluster.Mode = config.ClusterModeEventual
-	data.ReplicationLastRecv = time.Now().Add(-10 * time.Minute).Unix()
-	ins = ruleClusterReplicationStalled(data)
-	if ins != nil {
-		t.Fatal("expected no insight in non-full mode")
-	}
-}
-
-func TestRuleClusterNoReplicationTraffic(t *testing.T) {
-	t.Parallel()
-	cfg := baseConfig()
-	cfg.Cluster.Mode = config.ClusterModeFull
-	data := InsightData{Config: cfg, ReplicationBytes: 0}
-	ins := ruleClusterNoReplicationTraffic(data)
-	if ins == nil {
-		t.Fatal("expected insight for zero replication traffic in full mode")
-	}
-
-	data.ReplicationBytes = 1024
-	ins = ruleClusterNoReplicationTraffic(data)
-	if ins != nil {
-		t.Fatal("expected no insight when replication bytes > 0")
-	}
-
-	cfg.Cluster.Mode = config.ClusterModeEventual
-	data.ReplicationBytes = 0
-	ins = ruleClusterNoReplicationTraffic(data)
-	if ins != nil {
-		t.Fatal("expected no insight in non-full mode")
-	}
-}
 
 func TestRuleClusterBroadcastFailures(t *testing.T) {
 	t.Parallel()

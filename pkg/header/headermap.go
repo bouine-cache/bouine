@@ -279,7 +279,7 @@ func (h Map) WriteTo(dst http.Header) {
 // Entries are kept sorted at construction time (FromHTTP, decodeObject,
 // Set), so Range is a zero-allocation linear scan. Deterministic Range
 // output makes the binary codec produce stable bytes for logically
-// identical objects, which anti-entropy checksums rely on.
+// identical objects, which content-addressing and checksums rely on.
 func (h Map) Range(f func(key string, value string) bool) {
 	for i := range h.entries {
 		if !f(h.entries[i].key, h.values[h.entries[i].off]) {

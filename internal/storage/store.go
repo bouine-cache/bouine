@@ -34,7 +34,7 @@ type Store interface {
 }
 
 // KeyLister returns all cache keys in the store. Implemented by HotStore
-// and consumed by the anti-entropy reconciler in full cluster mode.
+// and TieredStore. Retained for future key-diff features.
 //
 // Unstable.
 type KeyLister interface {

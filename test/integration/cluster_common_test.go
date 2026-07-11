@@ -5,11 +5,9 @@ package integration_test
 import (
 	"testing"
 	"time"
-
-	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
-var clusterModes = []string{"strong", "eventual", "full"}
+var clusterModes = []string{"strong", "eventual"}
 
 // TestCluster_Formation verifies that all nodes report 3 peers for every
 // cluster mode. The mode is the only variable.
@@ -28,22 +26,14 @@ func TestCluster_Formation(t *testing.T) {
 }
 
 // TestCluster_SingleNodeFailure verifies that killing one node leaves the
-// surviving nodes serving 200. Full mode additionally verifies HITs from
-// full replicas.
+// surviving nodes serving 200.
 func TestCluster_SingleNodeFailure(t *testing.T) {
 	for _, mode := range clusterModes {
 		t.Run(mode, func(t *testing.T) {
 			s := sharedCluster(t, mode)
 			path := "/hit?x=" + mode + "-failure"
 
-			if mode == "full" {
-				// Full mode: prime via node 0 and wait for replication.
-				s.Get(t, 0, path)
-				driver.RetryUntil(t, driver.ReplicationDeadline, 500*time.Millisecond, func() bool {
-					return s.Get(t, 1, path).Header.Get("X-Cache") == "HIT" &&
-						s.Get(t, 2, path).Header.Get("X-Cache") == "HIT"
-				})
-			} else if mode == "eventual" {
+			if mode == "eventual" {
 				// Eventual mode: each node caches independently. Prime
 				// the survivor nodes (0 and 1) so they have a cached
 				// copy that survives the kill without an origin fetch.

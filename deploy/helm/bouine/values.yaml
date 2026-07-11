@@ -151,9 +151,7 @@ livenessProbe:
   periodSeconds: 10
   failureThreshold: 5
 
-# Horizontal Pod Autoscaler. CPU-only — memory-based HPA is not
-# recommended in full cluster mode where every pod stores every
-# object (adding pods increases total memory, not reduces it).
+# Horizontal Pod Autoscaler. CPU-only.
 # Disabled by default. Enable in per-environment values.
 autoscaling:
   enabled: false

@@ -175,8 +175,6 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 //
 //   - In strong mode, OwnerFn and PeerFetch are set so on a MISS the handler
 //     can route the request to the consistent-hash owner node.
-//   - In full mode, ReplicateFn is set so after every cacheable fill the object
-//     is broadcast to all peers via gossip.
 //   - In eventual mode neither is set; every node caches independently.
 //
 // Handlers with refresh-before-expiry enabled are collected into rs.handlers
@@ -238,9 +236,6 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
-		}
-		if rs.broadcaster != nil && e.cfg.Cluster.Mode == config.ClusterModeFull {
-			cfg.ReplicateFn = rs.broadcaster.BroadcastReplicate
 		}
 		cached := cache.NewHandler(cfg)
 		if cfg.RefreshBeforeExpiry {
@@ -310,9 +305,6 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
-		}
-		if rs.broadcaster != nil && e.cfg.Cluster.Mode == config.ClusterModeFull {
-			cfg.ReplicateFn = rs.broadcaster.BroadcastReplicate
 		}
 		cached := cache.NewHandler(cfg)
 		if cfg.RefreshBeforeExpiry {

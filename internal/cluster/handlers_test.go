@@ -1,76 +1,45 @@
 package cluster
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/bouine-cache/bouine/internal/observability"
-	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
-	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-func TestPeerReplicateHandler_DecodesAndStores(t *testing.T) {
+func TestPeerPurgeHandler_DecodesAndCalls(t *testing.T) {
 	t.Parallel()
+	var received api.PurgeEvent
+	handler := NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
+		received = evt
+		return nil
+	})
 
-	var storedObj *api.Object
-	handler := NewPeerReplicateHandler(
-		func(_ context.Context, obj *api.Object) error {
-			storedObj = obj
-			return nil
-		},
-		&Metrics{},
-		observability.NoopLogger{},
-	)
+	evt := api.PurgeEvent{Key: api.Key(42), Issuer: "node-0"}
+	body, _ := EncodePurgeHTTP(evt)
 
-	obj := &api.Object{
-		Key:        api.Key(99),
-		StatusCode: 200,
-		Body:       []byte("test body"),
-		Header:     header.FromHTTP(http.Header{"X-Custom": []string{"val"}}),
-	}
-	encoded := storage.EncodeObject(obj)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/replicate", bytesReader(encoded))
-	req.Header.Set(header.ContentType, "application/octet-stream")
-	req.Header.Set(header.BouineIssuer, "node-sender")
-	req.Header.Set(header.BouineSeq, "42")
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/purge", bytesReader(body))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
 	}
-	if storedObj == nil {
-		t.Fatal("object was not stored")
-	}
-	if storedObj.Key != api.Key(99) {
-		t.Errorf("stored key = %d, want 99", storedObj.Key)
-	}
-	if string(storedObj.Body) != "test body" {
-		t.Errorf("stored body = %q, want %q", storedObj.Body, "test body")
-	}
-	if storedObj.Header.Get("X-Custom") != "val" {
-		t.Errorf("stored header X-Custom = %q, want val", storedObj.Header.Get("X-Custom"))
+	if received.Key != api.Key(42) {
+		t.Errorf("key = %d, want 42", received.Key)
 	}
 }
 
-func TestPeerReplicateHandler_BadBody(t *testing.T) {
+func TestPeerPurgeHandler_BadBody(t *testing.T) {
 	t.Parallel()
+	handler := NewPeerPurgeHandler(func(api.PurgeEvent) error {
+		t.Fatal("should not be called")
+		return nil
+	})
 
-	handler := NewPeerReplicateHandler(
-		func(_ context.Context, _ *api.Object) error {
-			t.Fatal("should not be called on bad body")
-			return nil
-		},
-		&Metrics{},
-		observability.NoopLogger{},
-	)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/replicate", bytesReader([]byte("not a valid object")))
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/purge", bytesReader([]byte("bad")))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
@@ -79,30 +48,29 @@ func TestPeerReplicateHandler_BadBody(t *testing.T) {
 	}
 }
 
-func TestPeerReplicateHandler_StoreError(t *testing.T) {
+func TestPeerBanHandler_DecodesAndCalls(t *testing.T) {
 	t.Parallel()
+	var received api.BanEvent
+	handler := NewPeerBanHandler(func(evt api.BanEvent) error {
+		received = evt
+		return nil
+	})
 
-	handler := NewPeerReplicateHandler(
-		func(_ context.Context, _ *api.Object) error {
-			return context.DeadlineExceeded
-		},
-		&Metrics{},
-		observability.NoopLogger{},
-	)
+	evt := api.BanEvent{Issuer: "node-0", Predicate: api.BanExpr{HostRegex: "example.com"}}
+	body, _ := EncodeBanHTTP(evt)
 
-	obj := &api.Object{Key: api.Key(1), StatusCode: 200, Body: []byte("x")}
-	encoded := storage.EncodeObject(obj)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/replicate", bytesReader(encoded))
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/ban", bytesReader(body))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if received.Predicate.HostRegex != "example.com" {
+		t.Errorf("host_regex = %q, want example.com", received.Predicate.HostRegex)
 	}
 }
 
-// bytesReader wraps a []byte as an io.Reader for httptest.NewRequest.
 type byteReader struct {
 	data []byte
 	pos  int

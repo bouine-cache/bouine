@@ -413,10 +413,9 @@ func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 	return t.hot.Ban(ctx, expr)
 }
 
-// Keys returns the union of hot-tier and warm-tier cache keys. Used by
-// the anti-entropy reconciler in full cluster mode to compute the diff
-// against peer key sets. Reporting only hot-tier keys (as this method
-// once did) caused a feedback loop with SIEVE eviction: evicted
+// Keys returns the union of hot-tier and warm-tier cache keys.
+// Reporting only hot-tier keys (as this method once did) caused a
+// feedback loop with SIEVE eviction: evicted
 // backed keys were seen as "missing" and backfilled via Put,
 // re-overfilling the hot tier. The union reports keys the node *owns*,
 // not just those currently in RAM (#175).
@@ -465,8 +464,8 @@ func (t *TieredStore) WALStats() (dropped int64, lastSync time.Time) {
 }
 
 // OverBudget reports whether the hot tier is over its configured byte
-// budget. Anti-entropy consults this before backfilling to avoid
-// fighting the eviction policy: backfilling into an already-full hot
+// budget. TieredStore consults this before promoting warm→hot to avoid
+// fighting the eviction policy: promoting into an already-full hot
 // tier causes SIEVE to evict the newly inserted keys, which then look
 // "missing" again next round — the self-sustaining loop from #175.
 // The warm tier is not budget-checked here because it has its own

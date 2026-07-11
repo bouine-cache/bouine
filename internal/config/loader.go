@@ -306,25 +306,19 @@ func (c *Config) validateCluster() error {
 	if c.Cluster.Enabled {
 		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
 		switch c.Cluster.Mode {
-		case ClusterModeStrong, ClusterModeEventual, ClusterModeFull:
+		case ClusterModeStrong, ClusterModeEventual:
 			// valid
 		case "":
 			c.Cluster.Mode = ClusterModeStrong
 		default:
-			return fmt.Errorf("config: cluster.mode must be %q, %q, or %q, got %q",
-				ClusterModeStrong, ClusterModeEventual, ClusterModeFull, c.Cluster.Mode)
+			return fmt.Errorf("config: cluster.mode must be %q or %q, got %q (full mode has been removed; use strong with replicas >= 2 for redundancy)",
+				ClusterModeStrong, ClusterModeEventual, c.Cluster.Mode)
 		}
 	} else if c.Cluster.Mode != "" && c.Cluster.Mode != ClusterModeStrong {
 		return fmt.Errorf("config: cluster.mode %q requires cluster.enabled = true", c.Cluster.Mode)
 	}
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong
-	}
-	if c.Cluster.BackfillCooldown < 0 {
-		return fmt.Errorf("config: cluster.backfill_cooldown must be >= 0, got %v", c.Cluster.BackfillCooldown)
-	}
-	if c.Cluster.ChurnThreshold < 0 || c.Cluster.ChurnThreshold > 1 {
-		return fmt.Errorf("config: cluster.churn_threshold must be in [0, 1], got %v", c.Cluster.ChurnThreshold)
 	}
 	if c.Storage.WarmSyncInterval < -1 {
 		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)

@@ -1,7 +1,7 @@
 # 10 — Cluster consistency modes
 
-How to verify, diagnose, and switch between the three cluster consistency
-modes: `strong` (default), `eventual`, and `full`.
+How to verify, diagnose, and switch between the two cluster consistency
+modes: `strong` (default) and `eventual`.
 
 ---
 
@@ -157,7 +157,7 @@ and receiver sides.
 
 Mode changes require a full cluster restart. The procedure differs per mode:
 
-### From `strong` to `eventual` or `full`
+### From `strong` to `eventual`
 
 1. Update `cluster.mode` in your ConfigMap.
 2. Rolling restart all pods one by one (`kubectl rollout restart statefulset/bouine`).
@@ -165,24 +165,16 @@ Mode changes require a full cluster restart. The procedure differs per mode:
 
 No data migration needed — each node starts with an empty cache.
 
-### From `eventual` or `full` to `strong`
+### From `eventual` to `strong`
 
 1. Update `cluster.mode: strong` in your ConfigMap.
 2. Add `replicas` and `hop_limit` fields if missing.
 3. Rolling restart. The consistent-hash ring forms within seconds of all nodes
    joining.
-4. Cache state from `eventual`/`full` is **not preserved** — nodes start with
+4. Cache state from `eventual` is **not preserved** — nodes start with
    empty caches. Expect elevated miss rates for the first few minutes until
    caches warm up.
 
-### From `full` to `eventual`
-
-1. Update `cluster.mode: eventual`.
-2. Rolling restart.
-3. No data migration. Each node discards replicated objects and starts filling
-   independently from origin.
-
----
 
 ## Alerts
 
@@ -223,11 +215,8 @@ No data migration needed — each node starts with an empty cache.
 
 | Symptom | Mode | Probable cause | Check |
 |---------|------|---------------|-------|
-| Purge doesn't propagate | `strong`/`full` | Admin port unreachable | `bouine_cluster_invalidations_http_total` |
+| Purge doesn't propagate | `strong` | Admin port unreachable | `bouine_cluster_invalidations_http_total` |
 | Purge doesn't propagate | `eventual` | Gossip partition | `bouine_cluster_invalidations_gossip_total`, peers list |
 | Stale reads | `eventual` | Gossip convergence window | Wait 5 s, re-check. If persistent, check gossip. |
-| Stale reads | `full` | Replication not arriving | `bouine_cluster_replications_received_total` |
-| Low hit rate | `eventual` | Uneven node fill | Check per-node hit rates, consider `full` or `strong` |
-| High memory | `full` | Working set > hot_max_bytes | Increase `hot_max_bytes` or switch to `strong` |
-| High bandwidth | `full` | Fill rate × object size too high | Reduce cluster size or switch mode |
+| Low hit rate | `eventual` | Uneven node fill | Check per-node hit rates, consider `strong` |
 | Node join fails | all | DNS not resolving | `kubectl get endpoints`, verify `publishNotReadyAddresses` |

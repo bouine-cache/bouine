@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +20,14 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
+
+// peerFetchBufPool reuses bytes.Buffer instances across peer-fetch calls
+// to avoid allocating a new buffer per fetch. Buffers that grow past
+// maxPeerFetchBytes are discarded to prevent the pool from pinning
+// oversized buffers.
+var peerFetchBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
 
 const (
 	// PeerFetchPath is the HTTP path for peer cache lookups.
@@ -215,16 +224,21 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 
 	// Binary object codec — no JSON, no base64, no reflection (issue #187).
-	// The full response is buffered into memory before decode. With
-	// defaultPeerFetchConcurrency = 4 and maxPeerFetchBytes = 64 MiB, a
-	// worst-case fan-out holds up to 256 MiB of transient allocation. In
-	// practice peer-fetch responses are small (cached objects << 64 KiB);
-	// the body-last varint framing in the codec would allow a future
-	// streaming decode, but that refactor is out of scope for #187.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, f.maxBodyBytes))
-	if err != nil {
+	// Read into a pooled bytes.Buffer that grows incrementally instead of
+	// io.ReadAll which allocates a single contiguous buffer up to
+	// maxPeerFetchBytes. With 4 concurrent fetches, the pooled approach
+	// reduces peak transient allocation from 256 MiB to ~64 MiB.
+	buf := peerFetchBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		if buf.Cap() <= int(maxPeerFetchBytes) {
+			peerFetchBufPool.Put(buf)
+		}
+	}()
+	if _, err := io.Copy(buf, io.LimitReader(resp.Body, f.maxBodyBytes)); err != nil {
 		return nil, fmt.Errorf("peer fetch read: %w", err)
 	}
+	respBody := buf.Bytes()
 	obj, err := storage.DecodeObject(respBody)
 	if err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)

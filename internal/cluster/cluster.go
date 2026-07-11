@@ -313,10 +313,14 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 	c.gossipMu.Lock()
 	c.gossipQueue = append(c.gossipQueue, gossipBroadcast{data: msg})
 	c.gossipMu.Unlock()
-	// Wake the gossip loop so queued messages are delivered promptly.
-	// SendBestEffort broadcasts to a single peer; the gossip layer
-	// propagates to all members from there.
-	if c.ml != nil {
+	// In strong mode, HTTP fan-out is the primary invalidation delivery
+	// path. The direct SendBestEffort is redundant — memberlist's gossip
+	// protocol will propagate the message as a fallback. Skipping it
+	// halves invalidation network traffic in strong mode.
+	//
+	// In eventual mode, there is no HTTP fan-out, so the direct
+	// SendBestEffort remains the primary delivery path.
+	if c.ml != nil && c.cfg.Mode != "strong" {
 		for _, n := range c.ml.Members() {
 			_ = c.ml.SendBestEffort(n, msg)
 		}

@@ -412,7 +412,7 @@ func buildTransport(pc config.UpstreamPool) http.RoundTripper {
 	}
 	responseHeaderTimeout := pc.Connect.ResponseHeaderTimeout
 	if responseHeaderTimeout <= 0 {
-		responseHeaderTimeout = 30 * time.Second
+		responseHeaderTimeout = origin.DefaultResponseHeaderTimeout
 	}
 	base := &http.Transport{
 		DialContext: (&net.Dialer{

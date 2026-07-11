@@ -27,4 +27,5 @@ routes:
     pool: origin
     cache:
       negative_ttl: "5s"
+      stale_while_revalidate: "30s"
       jitter_percent: 5

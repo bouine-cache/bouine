@@ -235,6 +235,9 @@ func validateRouteCache(i int, rc RouteCache) error {
 	if rc.FetchTimeout < 0 {
 		return fmt.Errorf("config: route %d fetch_timeout must be >= 0, got %v", i, rc.FetchTimeout)
 	}
+	if rc.FetchTimeout > 5*time.Minute {
+		return fmt.Errorf("config: route %d fetch_timeout must be <= 5m (data plane safety-net WriteTimeout), got %v", i, rc.FetchTimeout)
+	}
 	return validateRefreshConfig(i, rc)
 }
 

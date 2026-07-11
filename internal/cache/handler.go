@@ -1449,6 +1449,17 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, outReq)
 
+	// Check the fetch context after ServeHTTP returns. If the deadline
+	// fired, the upstream either returned without writing (context-aware
+	// handler) or the ReverseProxy's ErrorHandler wrote a synthetic 502.
+	// In both cases, treat it as a fetch error rather than a real origin
+	// response — the error carries the timeout reason and prevents the
+	// synthetic 502 from being cached.
+	if err := fetchCtx.Err(); err != nil {
+		tracing.RecordError(span, err)
+		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
+	}
+
 	if rec.truncated {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}

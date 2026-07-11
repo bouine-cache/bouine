@@ -1649,3 +1649,60 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 		t.Fatalf("expected error wrapping http.ErrAbortHandler, got %v", res.Err)
 	}
 }
+
+func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
+	t.Parallel()
+	// Origin that sleeps longer than the fetch timeout. doFetch must
+	// abort the fetch and return a fetchResult.Err, not hang forever.
+	// The handler respects the request context so the timeout actually
+	// interrupts the upstream call (a real ReverseProxy would do this
+	// automatically via its Transport).
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2 * time.Second):
+			w.WriteHeader(200)
+		case <-r.Context().Done():
+			return
+		}
+	}))
+	h.fetchTimeout = 100 * time.Millisecond
+	req := httptest.NewRequest("GET", "/", nil)
+	res := h.doFetch(req)
+	if res.Err == nil {
+		t.Fatal("expected error from fetch timeout, got nil")
+	}
+}
+
+func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
+	t.Parallel()
+	// If the timeout started before semaphore acquire, the queueing
+	// delay would eat into the fetch budget. This test fills the
+	// semaphore so doFetch blocks on acquire for longer than the fetch
+	// timeout, then releases it. If the timeout started before acquire,
+	// the fetch would fail immediately with a deadline error. Since it
+	// starts after, the fetch proceeds normally once the slot is freed.
+	done := make(chan struct{})
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(done)
+		w.WriteHeader(200)
+	}))
+	h.fetchSem = make(chan struct{}, 1)
+	h.fetchSem <- struct{}{} // pre-fill the only slot
+	h.fetchTimeout = 50 * time.Millisecond
+	req := httptest.NewRequest("GET", "/", nil)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		<-h.fetchSem // release the slot after 100ms > fetchTimeout
+	}()
+	res := h.doFetch(req)
+	select {
+	case <-done:
+		// good — the origin was reached, proving the timeout didn't
+		// fire during the semaphore wait
+	default:
+		t.Fatalf("origin never called — fetch timeout fired during semaphore wait: %v", res.Err)
+	}
+	if res.Err != nil {
+		t.Fatalf("expected no error, got %v", res.Err)
+	}
+}

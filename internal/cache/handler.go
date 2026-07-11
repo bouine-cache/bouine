@@ -1611,7 +1611,76 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
 
+	obj.SerializedHead = serializeHead(obj)
+
 	return obj
+}
+
+// dynamicServeHeaders lists headers that serveObject sets per-request
+// and are therefore excluded from the pre-serialized head.
+var dynamicServeHeaders = map[string]struct{}{
+	header.Age:          {},
+	header.XCache:       {},
+	header.XCacheSource: {},
+	header.Warning:      {},
+}
+
+// internalServeHeaders are stored on the object for ban matching but
+// stripped before serving — excluded from the pre-serialized head.
+var internalServeHeaders = map[string]struct{}{
+	header.XBouinePath: {},
+	header.XBouineHost: {},
+}
+
+// serializeHead pre-renders the HTTP response header block (static
+// headers as "Key: Value\r\n" pairs + trailing "\r\n") at cache-fill
+// time. On a cache hit, serveObject writes this directly to the
+// ResponseWriter before WriteHeader, bypassing the header.Map iteration
+// and sub-slicing that WriteTo performs.
+//
+// Excludes dynamic headers (Age, X-Cache, X-Cache-Source, Warning) set
+// per-request by serveObject, internal headers (X-Bouine-Path, X-Bouine-
+// Host) used for ban matching, and no-cache fields stripped per RFC 9111
+// §5.2.2.4. The no-cache field list is part of the stored Cache-Control
+// which is immutable after store; a 304 merge creates a new object with
+// a new SerializedHead, so there is no staleness risk.
+func serializeHead(obj *api.Object) []byte {
+	var noCacheFields map[string]struct{}
+	if obj.CacheControl != "" {
+		cc := ParseCacheControl(obj.CacheControl)
+		if cc.NoCacheFields != "" {
+			noCacheFields = make(map[string]struct{}, 4)
+			for _, field := range strings.FieldsFunc(cc.NoCacheFields, func(r rune) bool {
+				return r == ',' || r == ' '
+			}) {
+				if field != "" {
+					noCacheFields[http.CanonicalHeaderKey(field)] = struct{}{}
+				}
+			}
+		}
+	}
+
+	buf := make([]byte, 0, 512)
+	obj.Header.Range(func(key, value string) bool {
+		if _, skip := dynamicServeHeaders[key]; skip {
+			return true
+		}
+		if _, skip := internalServeHeaders[key]; skip {
+			return true
+		}
+		if noCacheFields != nil {
+			if _, skip := noCacheFields[key]; skip {
+				return true
+			}
+		}
+		buf = append(buf, key...)
+		buf = append(buf, ": "...)
+		buf = append(buf, value...)
+		buf = append(buf, '\r', '\n')
+		return true
+	})
+	buf = append(buf, '\r', '\n')
+	return buf
 }
 
 // computeTTL derives the freshness lifetime for a response, applying

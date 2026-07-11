@@ -728,7 +728,7 @@ func KeyHash(b []byte) api.Key {
 }
 
 const (
-	objectStructSize    int64 = 256
+	objectStructSize    int64 = 280 // unsafe.Sizeof(api.Object{}) — update when fields are added
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.

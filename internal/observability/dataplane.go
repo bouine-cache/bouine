@@ -13,6 +13,16 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
+// HeaderVal returns the first value for key from h via direct map access,
+// avoiding the CanonicalMIMEHeaderKey allocation that http.Header.Get
+// performs. The caller must pass an already-canonical key.
+func HeaderVal(h http.Header, key string) string {
+	if vals := h[key]; len(vals) > 0 {
+		return vals[0]
+	}
+	return ""
+}
+
 // DataPlaneMetrics holds the RED counters for the data-plane pipeline.
 // Injected by the engine; consumed by the pipeline and access-log
 // middleware.
@@ -338,14 +348,17 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 
 		status := statusString(sw.Status)
 		// Route label is written by the pipeline router as a direct header
-		// map entry to avoid CanonicalMIMEHeaderKey on every request.
-		route := r.Header.Get(header.XBouineRoute)
-		if route == "" {
-			route = "_default"
+		// Direct map access avoids CanonicalMIMEHeaderKey on every request.
+		// The router writes X-Bouine-Route with the exact canonical key.
+		route := "_default"
+		if vals := r.Header[header.XBouineRoute]; len(vals) > 0 {
+			route = vals[0]
 		}
 		// cache_result: normalise X-Cache to HIT/MISS/STALE/REVALIDATED/BYPASS.
-		cacheResult := normaliseCacheResult(w.Header().Get(header.XCache))
-		source := normaliseSource(w.Header().Get(header.XCacheSource))
+		// The cache handler writes these with direct map assignment using
+		// canonical keys, so direct map access avoids canonicalization.
+		cacheResult := normaliseCacheResult(HeaderVal(w.Header(), header.XCache))
+		source := normaliseSource(HeaderVal(w.Header(), header.XCacheSource))
 
 		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, source, route).Inc()
 

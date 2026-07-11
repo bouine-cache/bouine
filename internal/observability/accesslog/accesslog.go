@@ -27,7 +27,7 @@ func Middleware(logger observability.Logger, next http.Handler) http.Handler {
 
 		next.ServeHTTP(sw, r)
 
-		cacheResult := sw.Header().Get(header.XCache)
+		cacheResult := observability.HeaderVal(sw.Header(), header.XCache)
 		msg := requestMessage(cacheResult, sw.Status)
 		attrs := []any{
 			"method", r.Method,

@@ -88,14 +88,14 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.metrics.RequestsTotal.Inc()
 	}
 
-	host := strings.ToLower(r.Host)
+	host := r.Host
 	if idx := strings.LastIndex(host, ":"); idx > 0 {
 		host = host[:idx]
 	}
 
 	for i := range rt.routes {
 		re := &rt.routes[i]
-		if re.host != "" && re.host != host {
+		if re.host != "" && !strings.EqualFold(re.host, host) {
 			continue
 		}
 		if re.pathPrefix != "" && !strings.HasPrefix(r.URL.Path, re.pathPrefix) {

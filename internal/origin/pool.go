@@ -42,6 +42,11 @@ type Target struct {
 	successes atomic.Int64
 }
 
+// DefaultResponseHeaderTimeout bounds the time waiting for the origin's
+// response headers after the request is fully sent. Used as the fallback
+// when the operator has not configured connect.response_header_timeout.
+const DefaultResponseHeaderTimeout = 30 * time.Second
+
 // PoolConfig configures a Pool at construction time.
 type PoolConfig struct {
 	Name    string
@@ -136,7 +141,7 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 			}).DialContext,
 			MaxIdleConnsPerHost:   64,
 			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
 			ForceAttemptHTTP2:     true,
 		}
 	}

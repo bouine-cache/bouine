@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1592,8 +1593,8 @@ func TestDoFetchErrAbortHandler(t *testing.T) {
 	if res.Err == nil {
 		t.Fatal("expected error from ErrAbortHandler, got nil")
 	}
-	if !strings.Contains(res.Err.Error(), "aborted") {
-		t.Fatalf("expected aborted error, got %v", res.Err)
+	if !errors.Is(res.Err, http.ErrAbortHandler) {
+		t.Fatalf("expected error wrapping http.ErrAbortHandler, got %v", res.Err)
 	}
 }
 
@@ -1627,5 +1628,24 @@ func TestDoFetchSemaphoreReleasedAfterAbort(t *testing.T) {
 		t.Fatal("fetch semaphore leaked — slot still held after ErrAbortHandler")
 	default:
 		// good — channel is empty, doFetch released its slot
+	}
+}
+
+func TestCollapsedFetchErrAbortHandler(t *testing.T) {
+	t.Parallel()
+	// Verify that ErrAbortHandler is converted to a clean fetchResult
+	// error through the singleflight path. singleflight wraps panics in
+	// *panicError and re-panics — if doFetch didn't recover, this test
+	// would panic instead of returning an error.
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	res := h.collapsedFetch(req, 0)
+	if res.Err == nil {
+		t.Fatal("expected error from collapsedFetch after ErrAbortHandler, got nil")
+	}
+	if !errors.Is(res.Err, http.ErrAbortHandler) {
+		t.Fatalf("expected error wrapping http.ErrAbortHandler, got %v", res.Err)
 	}
 }

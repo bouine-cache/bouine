@@ -1418,7 +1418,7 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	defer func() {
 		if rv := recover(); rv != nil {
 			if rv == http.ErrAbortHandler {
-				err := fmt.Errorf("upstream connection aborted")
+				err := fmt.Errorf("upstream connection aborted: %w", http.ErrAbortHandler)
 				tracing.RecordError(span, err)
 				res = fetchResult{Err: err}
 				return
@@ -1428,17 +1428,19 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 		}
 	}()
 
-	// Bound the total origin fetch time. This replaces the blanket
-	// WriteTimeout on the data plane with a per-fetch deadline that
-	// covers both headers and body without affecting cache hits.
-	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
-	defer cancel()
 	select {
 	case h.fetchSem <- struct{}{}:
 		defer func() { <-h.fetchSem }()
 	case <-ctx.Done():
 		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", ctx.Err())}
 	}
+	// Bound the total origin fetch time. This replaces the blanket
+	// WriteTimeout on the data plane with a per-fetch deadline that
+	// covers both headers and body without affecting cache hits. The
+	// timeout starts after the semaphore acquire so queueing time does
+	// not eat into the origin fetch budget.
+	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	defer cancel()
 	// Propagate W3C TraceContext into the upstream request so the origin
 	// can participate in the distributed trace.
 	outReq := r.WithContext(fetchCtx)

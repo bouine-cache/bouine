@@ -17,6 +17,14 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 )
 
+// safetyNetWriteTimeout is a generous write deadline that acts as a
+// last-resort guard against slowloris-style clients that read 1 byte/s.
+// It is NOT the primary origin-fetch timeout — that is bounded per-fetch
+// by fetch_timeout and per-transport by response_header_timeout. This
+// safety net only fires for truly stuck connections that would otherwise
+// hold a goroutine and its buffers indefinitely.
+const safetyNetWriteTimeout = 5 * time.Minute
+
 // ListenerConfig controls a single listener.
 //
 // MaxConnections, when > 0, caps the number of simultaneously open
@@ -59,7 +67,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0, // no write deadline — origin fetches are bounded by fetch_timeout and response_header_timeout
+		WriteTimeout:      safetyNetWriteTimeout, // safety net — primary timeouts are fetch_timeout and response_header_timeout
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
@@ -87,7 +95,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      0, // no write deadline — origin fetches are bounded by fetch_timeout and response_header_timeout
+		WriteTimeout:      safetyNetWriteTimeout, // safety net — primary timeouts are fetch_timeout and response_header_timeout
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}

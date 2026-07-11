@@ -12,13 +12,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// CoarseNow returns a monotonic timestamp with ~1ms resolution using
-// CLOCK_MONOTONIC_COARSE. This is ~10-20x faster than time.Now() on the
+// CoarseNow returns a wall-clock timestamp with ~1ms resolution using
+// CLOCK_REALTIME_COARSE. This is ~10-20x faster than time.Now() on the
 // hot path (~2-4ns vs ~25-40ns via vDSO). The 1ms resolution is sufficient
 // for cache Age headers (second granularity) and TTL evaluation.
+//
+// CLOCK_REALTIME_COARSE (not MONOTONIC_COARSE) is used because Age
+// computation and StoredAt comparison require wall time, not monotonic
+// time. MONOTONIC_COARSE returns seconds-since-boot which produces
+// nonsensical Age values.
 func CoarseNow() time.Time {
 	var ts unix.Timespec
-	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC_COARSE, &ts)
+	_ = unix.ClockGettime(unix.CLOCK_REALTIME_COARSE, &ts)
 	return time.Unix(ts.Sec, ts.Nsec)
 }
 
@@ -71,44 +76,66 @@ func FadviseWillNeed(fd int, offset int64, length int64) error {
 // effective GOMAXPROCS value. Returns runtime.NumCPU() when not
 // in a cgroup or when the quota is unlimited.
 func EffectiveGOMAXPROCS() int {
-	// Try cgroup v2 first: /sys/fs/cgroup/cpu.max
-	if data, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
-		parts := strings.Fields(strings.TrimSpace(string(data)))
-		if len(parts) == 2 && parts[0] != "max" {
-			if quota, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
-				if period, err := strconv.ParseInt(parts[1], 10, 64); err == nil && period > 0 && quota > 0 {
-					n := int(quota / period)
-					if n < 1 {
-						n = 1
-					}
-					if quota%period != 0 {
-						n++
-					}
-					return n
-				}
-			}
-		}
+	if n, ok := cgroupV2CPUs(); ok {
+		return n
 	}
-
-	// Try cgroup v1: /sys/fs/cgroup/cpu/cpu.cfs_quota_us and cpu.cfs_period_us
-	if quota, err := readCgroupV1Int("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"); err == nil && quota > 0 {
-		if period, err := readCgroupV1Int("/sys/fs/cgroup/cpu/cpu.cfs_period_us"); err == nil && period > 0 {
-			n := int(quota / period)
-			if n < 1 {
-				n = 1
-			}
-			if quota%period != 0 {
-				n++
-			}
-			return n
-		}
+	if n, ok := cgroupV1CPUs(); ok {
+		return n
 	}
-
 	return runtime.NumCPU()
 }
 
+// cgroupV2CPUs reads the cgroup v2 CPU quota from /sys/fs/cgroup/cpu.max.
+// Returns (n, true) if a quota was found, (0, false) otherwise.
+func cgroupV2CPUs() (int, bool) {
+	data, err := os.ReadFile("/sys/fs/cgroup/cpu.max")
+	if err != nil {
+		return 0, false
+	}
+	parts := strings.Fields(strings.TrimSpace(string(data)))
+	if len(parts) != 2 || parts[0] == "max" {
+		return 0, false
+	}
+	quota, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || quota <= 0 {
+		return 0, false
+	}
+	period, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || period <= 0 {
+		return 0, false
+	}
+	return computeCPUs(quota, period), true
+}
+
+// cgroupV1CPUs reads the cgroup v1 CPU quota from
+// /sys/fs/cgroup/cpu/cpu.cfs_quota_us and cpu.cfs_period_us.
+func cgroupV1CPUs() (int, bool) {
+	quota, err := readCgroupV1Int("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") //nolint:gosec // hardcoded path
+	if err != nil || quota <= 0 {
+		return 0, false
+	}
+	period, err := readCgroupV1Int("/sys/fs/cgroup/cpu/cpu.cfs_period_us") //nolint:gosec // hardcoded path
+	if err != nil || period <= 0 {
+		return 0, false
+	}
+	return computeCPUs(quota, period), true
+}
+
+// computeCPUs returns ceil(quota/period), minimum 1.
+func computeCPUs(quota, period int64) int {
+	n := int(quota / period)
+	if quota%period != 0 {
+		n++
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// readCgroupV1Int reads a single int from a cgroup v1 file.
 func readCgroupV1Int(path string) (int64, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is hardcoded by caller
 	if err != nil {
 		return 0, err
 	}

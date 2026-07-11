@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/admin"
@@ -21,6 +22,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/runtime/supervised"
 	"github.com/bouine-cache/bouine/internal/server"
@@ -85,6 +87,15 @@ type invalidationOps struct {
 }
 
 func (e *engine) run(ctx context.Context) error {
+	// Set GOMAXPROCS from cgroup CPU quota on Linux. Prevents Go
+	// scheduler from over-creating OS threads in K8s pods with CPU
+	// limits (e.g. --cpus=2 on a 64-core host). No-op on non-Linux.
+	if n := platform.EffectiveGOMAXPROCS(); n > 0 && n != runtime.GOMAXPROCS(0) {
+		runtime.GOMAXPROCS(n)
+		e.logger.Info("set GOMAXPROCS from cgroup quota",
+			"value", n, "num_cpu", runtime.NumCPU())
+	}
+
 	rs, shutdownTracer, err := e.initSubsystems(ctx)
 	if err != nil {
 		return err

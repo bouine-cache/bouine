@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/platform"
 )
 
 // safetyNetWriteTimeout is a generous write deadline that acts as a
@@ -29,6 +31,32 @@ import (
 // layering rules (L1 and L2 cannot depend on each other) prevent a
 // shared import. If you change one, change the other.
 const safetyNetWriteTimeout = 5 * time.Minute
+
+// setSocketOptions applies Linux-specific TCP optimizations to the
+// listener socket: TCP_FASTOPEN (data in SYN, -1 RTT) and
+// TCP_DEFER_ACCEPT (defer accept until data arrives). Both are no-ops
+// on non-Linux platforms via the platform package.
+func setSocketOptions(network, address string, c syscall.RawConn) error {
+	var sockErr error
+	err := c.Control(func(fd uintptr) {
+		// TCP_FASTOPEN allows data in the SYN packet, saving 1 RTT
+		// for the first request on a new connection.
+		if e := platform.SetTCPFastOpen(int(fd), 16); e != nil {
+			sockErr = e
+			return
+		}
+		// TCP_DEFER_ACCEPT tells the kernel to not wake the acceptor
+		// until data arrives, avoiding a wakeup for the bare SYN/ACK.
+		if e := platform.SetTCPDeferAccept(int(fd), 1); e != nil {
+			// Non-fatal: some kernels/configs may reject this.
+			sockErr = nil
+		}
+	})
+	if err != nil {
+		return err
+	}
+	return sockErr
+}
 
 // ListenerConfig controls a single listener.
 //
@@ -111,7 +139,9 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 //
 // Stable.
 func (s *Listener) Serve(ctx context.Context) error {
-	lc := net.ListenConfig{}
+	lc := net.ListenConfig{
+		Control: setSocketOptions,
+	}
 	ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
 	if err != nil {
 		return err

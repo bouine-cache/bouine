@@ -69,7 +69,7 @@ conformance-view: build ## Run conformance tests then open the comparison UI in 
 	bash test/cachetests/view.sh
 
 .PHONY: test-integration-cluster
-test-integration-cluster: test-integration-cluster-strong test-integration-cluster-eventual test-integration-cluster-full ## Run all 3 cluster consistency mode tests sequentially.
+test-integration-cluster: test-integration-cluster-strong test-integration-cluster-eventual ## Run all cluster consistency mode tests sequentially.
 
 .PHONY: test-integration-cluster-strong
 test-integration-cluster-strong: ## Run strong-mode cluster integration tests.
@@ -82,12 +82,6 @@ test-integration-cluster-eventual: ## Run eventual-mode cluster integration test
 	@echo ">>> Cluster integration: EVENTUAL mode"
 	go test -v -race -count=1 -timeout=3m -tags=integration \
 	    -run TestEventual ./test/integration/...
-
-.PHONY: test-integration-cluster-full
-test-integration-cluster-full: ## Run full-replication cluster integration tests.
-	@echo ">>> Cluster integration: FULL mode"
-	go test -v -race -count=1 -timeout=3m -tags=integration \
-	    -run TestFull ./test/integration/...
 
 .PHONY: test-chaos
 test-chaos: ## Run chaos test scenarios in-process (one test per process to avoid registry collisions).

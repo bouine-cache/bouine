@@ -20,7 +20,7 @@ All cluster peer communication used `encoding/json`:
 - **HTTP peer-purge/peer-ban**: the admin server JSON-decoded the body
   before calling the purge/ban function.
 
-The `ReplicationEvent` (full-object gossip in `full` mode) also uses JSON,
+The `ReplicationEvent` (legacy, full replication mode removed in ADR-0025) also used JSON,
 but its `Object` payload contains an `http.Header` map and body bytes —
 complex enough that a binary encoder would not justify the complexity.
 
@@ -176,6 +176,6 @@ the current design favours fewer copies over indirection.
 ## References
 
 - ADR-0014: Anti-entropy reconciliation for full cluster mode
-- ADR-0008: Cluster consistency modes — strong, eventual, full
+- ADR-0008: Cluster consistency modes — strong, eventual
 - `internal/cluster/codec.go` — the binary codec
 - `internal/cluster/handlers.go` — peer-purge/peer-ban HTTP handlers

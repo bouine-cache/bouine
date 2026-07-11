@@ -13,7 +13,6 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
-	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -27,9 +26,9 @@ func countPeers(members []api.PeerInfo) int {
 	return n
 }
 
-// Broadcaster fans out purge, ban, and replication events to all
-// cluster peers. In strong mode it uses HTTP fan-out for
-// invalidations; in eventual and full modes it uses gossip only.
+// Broadcaster fans out purge and ban events to all cluster peers.
+// In strong mode it uses HTTP fan-out for invalidations; in eventual
+// mode it uses gossip only.
 //
 // Stable.
 type Broadcaster struct {
@@ -38,14 +37,8 @@ type Broadcaster struct {
 	seq     atomic.Uint64
 	logger  observability.Logger
 	token   string
-	mode    string // ClusterModeStrong | ClusterModeEventual | ClusterModeFull
+	mode    string // ClusterModeStrong | ClusterModeEventual
 	metrics *Metrics
-	// replSem bounds concurrent async replication goroutines (full mode).
-	// Acquired non-blockingly; when full, replications are dropped.
-	replSem    chan struct{}
-	replClient *http.Client
-	// replWG tracks in-flight replication goroutines for testing.
-	replWG sync.WaitGroup
 }
 
 // NewBroadcaster creates a broadcaster for the given cluster.
@@ -57,21 +50,19 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		tok = token[0]
 	}
 	return &Broadcaster{
-		cluster:    c,
-		fetcher:    fetcher,
-		logger:     logger,
-		token:      tok,
-		mode:       c.Mode(),
-		metrics:    c.metrics,
-		replSem:    make(chan struct{}, 64),
-		replClient: &http.Client{Timeout: 5 * time.Second},
+		cluster: c,
+		fetcher: fetcher,
+		logger:  logger,
+		token:   tok,
+		mode:    c.Mode(),
+		metrics: c.metrics,
 	}
 }
 
 // BroadcastPurge sends a purge event for key to all live peers.
 // In strong mode it posts to each peer's admin API and also enqueues
-// via gossip for redundant delivery. In eventual and full modes it
-// sends via gossip only (no HTTP fan-out).
+// via gossip for redundant delivery. In eventual mode it sends via
+// gossip only (no HTTP fan-out).
 func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey string) {
 	evt := api.PurgeEvent{
 		Type:     api.GossipTypePurge,
@@ -82,7 +73,7 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 		Seq:      b.seq.Add(1),
 	}
 
-	if b.mode == config.ClusterModeStrong || b.mode == config.ClusterModeFull {
+	if b.mode == config.ClusterModeStrong {
 		peers := b.cluster.Members()
 		var wg sync.WaitGroup
 		for _, p := range peers {
@@ -115,7 +106,7 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 
 	// All modes: enqueue via gossip. In strong mode this is redundant
 	// delivery (peer admin may be temporarily unreachable). In eventual
-	// and full modes this is the sole delivery path for invalidations.
+	// mode this is the sole delivery path for invalidations.
 	if body, err := EncodePurgeGossip(evt); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
@@ -129,8 +120,8 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 }
 
 // BroadcastBan sends a ban predicate to all live peers.
-// In strong mode it posts to each peer's admin API. In eventual and
-// full modes it sends via gossip only.
+// In strong mode it posts to each peer's admin API. In eventual
+// mode it sends via gossip only.
 func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	evt := api.BanEvent{
 		Type:      api.GossipTypeBan,
@@ -140,7 +131,7 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 		Seq:       b.seq.Add(1),
 	}
 
-	if b.mode == config.ClusterModeStrong || b.mode == config.ClusterModeFull {
+	if b.mode == config.ClusterModeStrong {
 		peers := b.cluster.Members()
 		var wg sync.WaitGroup
 		for _, p := range peers {
@@ -180,139 +171,6 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 		"seq", evt.Seq,
 		"peers", peerCount,
 	)
-}
-
-// BroadcastReplicate sends a full cached object to all peers via async
-// HTTP POST. Only used in full mode. In other modes this is a no-op.
-//
-// The caller may pass an Object whose Body aliases a sync.Pool buffer
-// (e.g. the recorder pool used by the cache handler). To keep the
-// encoding free of lifetime hazards regardless of the caller's ownership
-// story, the body, header, and surrogate keys are copied into storage
-// owned by this function before storage.EncodeObject reads them. The
-// body copy is right-sized so the HTTP payload does not carry the pool's
-// over-allocation.
-//
-// Replication is fire-and-forget: each peer POST runs in its own goroutine
-// bounded by replSem (size 64). This must not block the data path —
-// BroadcastReplicate is called from storeAndReplicate on every cache fill.
-// When the semaphore is full, the replication is dropped (anti-entropy
-// heals any gaps).
-func (b *Broadcaster) BroadcastReplicate(_ context.Context, obj *api.Object) {
-	if b.mode != config.ClusterModeFull {
-		return
-	}
-
-	// Defensive copy so the encoded payload cannot observe a slice
-	// or map that the caller may return to a pool or mutate before the
-	// async goroutine reads it.
-	replicated := *obj
-	if len(obj.Body) > 0 {
-		bodyCopy := make([]byte, len(obj.Body))
-		copy(bodyCopy, obj.Body)
-		replicated.Body = bodyCopy
-	}
-	if len(obj.SurrogateKeys) > 0 {
-		keysCopy := make([]string, len(obj.SurrogateKeys))
-		copy(keysCopy, obj.SurrogateKeys)
-		replicated.SurrogateKeys = keysCopy
-	}
-	replicated.Header = obj.Header.Clone()
-
-	// Encode once; the same blob is sent to every peer.
-	encoded := storage.EncodeObject(&replicated)
-
-	issuer := b.cluster.cfg.NodeName
-	seq := b.seq.Add(1)
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	peers := b.cluster.Members()
-	peerCount := 0
-	for _, p := range peers {
-		if p.Name == b.cluster.cfg.NodeName {
-			continue
-		}
-		peerCount++
-
-		// Non-blocking semaphore acquire — never block the data path.
-		select {
-		case b.replSem <- struct{}{}:
-		default:
-			b.metrics.IncReplicationDropped()
-			b.logger.Warn("replication dropped, semaphore full",
-				"key", obj.Key,
-				"peer", p.Name,
-			)
-			continue
-		}
-
-		b.replWG.Add(1)
-		go func(peer api.PeerInfo, body []byte) { //nolint:gosec,contextcheck // G118: detached context is intentional; parent ctx is the request ctx which may be cancelled
-			// Intentionally use context.Background(): the request that triggered
-			// this replication may have already returned to the client, so its
-			// context is cancelled. The 5s timeout inside sendReplicate bounds
-			// the lifetime.
-			ctx := context.Background()
-			defer b.replWG.Done()
-			defer func() { <-b.replSem }()
-			defer func() {
-				if v := recover(); v != nil {
-					b.logger.Error("replication goroutine panicked",
-						"peer", peer.Name,
-						"panic", v,
-					)
-				}
-			}()
-
-			if err := b.sendReplicate(ctx, peer, body, issuer, seq, now); err != nil {
-				b.metrics.IncReplicationDropped()
-				b.logger.Warn("replication POST failed",
-					"peer", peer.Name,
-					"key", obj.Key,
-					"error", err,
-				)
-			}
-		}(p, encoded)
-	}
-
-	b.metrics.IncReplicationSent()
-	b.metrics.AddReplicationBytes("sent", float64(len(encoded)))
-	b.logger.Info("replicated to peers via HTTP",
-		"key", obj.Key,
-		"issuer", issuer,
-		"seq", seq,
-		"peers", peerCount,
-		"bytes", len(encoded),
-	)
-}
-
-func (b *Broadcaster) sendReplicate(parentCtx context.Context, peer api.PeerInfo, body []byte, issuer string, seq uint64, issuedAt string) error {
-	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
-	defer cancel()
-
-	url := "http://" + peer.AdminAddr + "/v1/peer/replicate"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("replication request: %w", err)
-	}
-	req.Header.Set(header.ContentType, "application/octet-stream")
-	req.Header.Set(header.BouineIssuer, issuer)
-	req.Header.Set(header.BouineSeq, fmt.Sprintf("%d", seq))
-	req.Header.Set(header.BouineIssuedAt, issuedAt)
-	req.Header.Set(header.BouineMethod, "GET")
-	if b.token != "" {
-		req.Header.Set(header.Authorization, "Bearer "+b.token)
-	}
-
-	resp, err := b.replClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("replication POST %s: %w", peer.AdminAddr, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("replication POST %s: status %d", peer.AdminAddr, resp.StatusCode)
-	}
-	return nil
 }
 
 func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.PurgeEvent) error {

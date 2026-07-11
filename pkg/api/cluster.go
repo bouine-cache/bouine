@@ -106,21 +106,9 @@ type PeerFetchRequest struct {
 	Hops int `json:"hops"`
 }
 
-// KeySet is the anti-entropy key-set exchange payload. It carries the
-// complete list of cache keys a node holds, so peers can compute the
-// diff and backfill missing objects. Keys are uint64 hashes.
-//
-// Unstable.
-type KeySet struct {
-	// NodeName is the node that produced this key set.
-	NodeName string `json:"node_name"`
-	// Keys is the full set of cache keys on the originating node.
-	Keys []uint64 `json:"keys"`
-}
-
-// ReplicationEvent is broadcast when a node stores a cacheable response
-// in full replication mode. Peers store the enclosed object in their
-// local hot tier without making their own origin request.
+// ReplicationEvent is a legacy type retained for wire compatibility.
+// Full replication mode has been removed; this struct is no longer
+// populated or broadcast.
 //
 // The Method field acts as a discriminator for gossip deserialisation:
 // PurgeEvent has Key != 0 but no Method; BanEvent has non-empty

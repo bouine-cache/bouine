@@ -1,5 +1,7 @@
 # ADR-0018: Backfill cooldown for anti-entropy reconciler
 
+
+> **Superseded** by [ADR-0025](0025-remove-full-cluster-mode.md). Full cluster mode has been removed.
 - **Status**: Accepted
 - **Date**: 2026-07-06
 - **Deciders**: @thylong

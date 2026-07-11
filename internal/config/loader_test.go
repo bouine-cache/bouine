@@ -180,7 +180,7 @@ func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 
 func TestClusterMode_ValidModes(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual, ClusterModeFull} {
+	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual} {
 		cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: mode}}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("mode %q: unexpected error: %v", mode, err)
@@ -547,108 +547,15 @@ func TestValidate_HotMaxBytesRatioOutOfRange(t *testing.T) {
 	}
 }
 
-func TestCluster_BackfillCooldown_ParsesFromYAML(t *testing.T) {
+func TestCluster_FullMode_Rejected(t *testing.T) {
 	t.Parallel()
-	yamlSrc := `
-listen:
-  admin: ":9000"
-cluster:
-  enabled: true
-  mode: full
-  backfill_cooldown: 5m
-`
-	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Cluster.BackfillCooldown != 5*time.Minute {
-		t.Fatalf("backfill_cooldown = %v, want 5m", cfg.Cluster.BackfillCooldown)
-	}
-}
-
-func TestCluster_BackfillCooldown_DefaultsToZero(t *testing.T) {
-	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: ClusterModeFull}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	if cfg.Cluster.BackfillCooldown != 0 {
-		t.Fatalf("default backfill_cooldown = %v, want 0 (disabled by default)", cfg.Cluster.BackfillCooldown)
-	}
-}
-
-func TestCluster_BackfillCooldown_NegativeRejected(t *testing.T) {
-	t.Parallel()
-	cfg := Config{
-		Listen:  Listen{Admin: ":9000"},
-		Cluster: Cluster{Enabled: true, Mode: ClusterModeFull, BackfillCooldown: -1 * time.Minute},
-	}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: "full"}}
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("expected error for negative backfill_cooldown")
+		t.Fatal("expected error for mode 'full' which has been removed")
 	}
-	if !strings.Contains(err.Error(), "backfill_cooldown") {
+	if !strings.Contains(err.Error(), "full mode has been removed") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCluster_ChurnThreshold_ParsesFromYAML(t *testing.T) {
-	t.Parallel()
-	yamlSrc := `
-listen:
-  admin: ":9000"
-cluster:
-  enabled: true
-  mode: full
-  churn_threshold: 0.5
-`
-	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Cluster.ChurnThreshold != 0.5 {
-		t.Fatalf("churn_threshold = %v, want 0.5", cfg.Cluster.ChurnThreshold)
-	}
-}
-
-func TestCluster_ChurnThreshold_DefaultsToZero(t *testing.T) {
-	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: ClusterModeFull}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	if cfg.Cluster.ChurnThreshold != 0 {
-		t.Fatalf("default churn_threshold = %v, want 0 (disabled by default)", cfg.Cluster.ChurnThreshold)
-	}
-}
-
-func TestCluster_ChurnThreshold_OutOfRangeRejected(t *testing.T) {
-	t.Parallel()
-	for _, v := range []float64{-0.1, 1.1, 2.0} {
-		cfg := Config{
-			Listen:  Listen{Admin: ":9000"},
-			Cluster: Cluster{Enabled: true, Mode: ClusterModeFull, ChurnThreshold: v},
-		}
-		err := cfg.Validate()
-		if err == nil {
-			t.Fatalf("expected error for churn_threshold %v", v)
-		}
-		if !strings.Contains(err.Error(), "churn_threshold") {
-			t.Fatalf("unexpected error for %v: %v", v, err)
-		}
-	}
-}
-
-func TestCluster_ChurnThreshold_BoundariesAccepted(t *testing.T) {
-	t.Parallel()
-	for _, v := range []float64{0, 0.5, 1.0} {
-		cfg := Config{
-			Listen:  Listen{Admin: ":9000"},
-			Cluster: Cluster{Enabled: true, Mode: ClusterModeFull, ChurnThreshold: v},
-		}
-		if err := cfg.Validate(); err != nil {
-			t.Fatalf("churn_threshold %v should be accepted, got: %v", v, err)
-		}
 	}
 }
 

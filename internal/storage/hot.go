@@ -614,8 +614,8 @@ func (h *HotStore) Close(_ context.Context) error {
 }
 
 // OverBudget reports whether the hot tier exceeds its configured byte
-// budget. Used by anti-entropy to skip backfill under memory pressure
-// (#175) and by TieredStore.OverBudget.
+// budget. Used by TieredStore.OverBudget to skip warm→hot promotion
+// under memory pressure (#175).
 func (h *HotStore) OverBudget() bool {
 	return h.Stats().HotBytes > h.maxBytes
 }
@@ -675,10 +675,9 @@ func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 	return s.evict.Evict()
 }
 
-// Keys returns all cache keys currently stored in the hot tier. Used by
-// the anti-entropy reconciler in full cluster mode to compute the diff
-// against peer key sets. The returned slice is unsorted; callers that
-// need determinism must sort it.
+// Keys returns all cache keys currently stored in the hot tier.
+// The returned slice is unsorted; callers that need determinism must
+// sort it.
 func (h *HotStore) Keys() []api.Key {
 	var totalEntries int
 	for i := range h.shards {

@@ -116,9 +116,6 @@ const (
 	// ClusterModeEventual caches locally with no peer fetch; N independent
 	// copies; invalidation via gossip only (eventual consistency).
 	ClusterModeEventual = "eventual"
-	// ClusterModeFull caches locally with active replication to all peers;
-	// N complete copies; invalidation + replication via gossip.
-	ClusterModeFull = "full"
 )
 
 // Cluster controls peer membership and fan-out. Phase 4+.
@@ -131,45 +128,11 @@ type Cluster struct {
 	// Mode determines the cluster consistency model. Accepted values:
 	//   "strong"    — consistent hash ring, peer fetch on miss (default)
 	//   "eventual"  — local cache, gossip invalidation, no peer fetch
-	//   "full"      — local cache + full replication, gossip everything
 	// Empty defaults to "strong" for backward compatibility.
 	Mode     string   `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
 	Replicas int      `yaml:"replicas,omitempty" json:"replicas,omitempty"`
 	HopLimit int      `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
-	// AntiEntropyInterval is the period between anti-entropy object
-	// reconciliation rounds in full mode. Default 30s. Set to 0 to
-	// disable. Has no effect in strong or eventual mode.
-	AntiEntropyInterval time.Duration `yaml:"anti_entropy_interval,omitempty" json:"anti_entropy_interval,omitempty"`
-	// BackfillLimit caps the number of keys backfilled per peer per
-	// anti-entropy round. 0 (default) means no limit — all missing
-	// keys are fetched in one round. Set to a positive value (e.g.
-	// 1000) to prevent thundering herd when a new pod joins a cluster
-	// with many cached objects.
-	BackfillLimit int `yaml:"backfill_limit,omitempty" json:"backfill_limit,omitempty"`
-	// BackfillCooldown suppresses re-backfill of a key for this window
-	// after it was last backfilled. SIEVE evicts freshly-backfilled keys
-	// (low priority: just inserted, never served) before the next round,
-	// so without a cooldown the same keys are "missing" again every round
-	// and the reconciler re-fetches them — a self-sustaining storm (#187).
-	// 0 (default) disables the cooldown for back-compat. The recommended
-	// value is 5m (≤ 10 rounds at the default 30s interval). Has no
-	// effect in strong or eventual mode.
-	BackfillCooldown time.Duration `yaml:"backfill_cooldown,omitempty" json:"backfill_cooldown,omitempty"`
-	// ChurnThreshold detects SIEVE evicting recently-backfilled keys faster
-	// than anti-entropy inserts them — the condition that turns backfill
-	// into a self-sustaining storm under budget (#187, fix #5). At the top
-	// of each round the reconciler counts cooldown keys (recently
-	// backfilled) that are absent from the local key set (evicted by
-	// SIEVE). When the evicted-to-backfilled ratio exceeds this threshold
-	// the round is skipped the same way OverBudget skips: log a warning,
-	// set keys-repaired to 0, return. 0 (default) disables churn detection
-	// for back-compat. The threshold is a float in [0, 1]; a reasonable
-	// default is 0.5 (skip when more than half of recent backfills were
-	// evicted). Requires BackfillCooldown > 0 — the cooldown map is the
-	// window over which churn is measured. Has no effect in strong or
-	// eventual mode.
-	ChurnThreshold float64 `yaml:"churn_threshold,omitempty" json:"churn_threshold,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

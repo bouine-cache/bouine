@@ -220,14 +220,6 @@ appropriate peer(s). The propagation mechanism depends on the cluster mode:
   possible during the convergence window.
 - Each node caches independently; no key sharding, no peer fetch on miss.
 
-### `full` mode
-
-- **Purge/Ban**: same as `eventual` — gossip only.
-- **Replication**: when a node stores a new cacheable response, it
-  broadcasts the full object to all peers via gossip. Every node holds
-  a copy of every cached object.
-- Convergence: ~1–5 s for invalidation, ~1 s for replication.
-- Memory cost: N× the working set (where N is the cluster size).
 
 The admin API on any node accepts invalidation requests and handles
 routing internally regardless of cluster mode.
@@ -238,7 +230,7 @@ routing internally regardless of cluster mode.
 
 | Metric | Description | Mode |
 |--------|-------------|------|
-| `bouine_cluster_mode_info` | Constant gauge with mode label (strong/eventual/full) | all |
+| `bouine_cluster_mode_info` | Constant gauge with mode label (strong/eventual) | all |
 | `bouine_cluster_invalidations_http_total{type="purge\|ban"}` | HTTP fan-out invalidations | strong |
 | `bouine_cluster_invalidations_gossip_total{type="purge\|ban"}` | Gossip invalidation events received | all |
 | `bouine_cluster_replications_sent_total` | Cached objects broadcast to peers | full |

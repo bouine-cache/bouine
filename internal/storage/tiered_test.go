@@ -407,7 +407,7 @@ func TestTieredStore_CloseStopsCompaction(t *testing.T) {
 // TestTieredStore_KeysReturnsHotWarmUnion reproduces issue #175: when a
 // warm-backed key is evicted from the hot tier, Keys() must still report
 // it because the node still owns the object in the warm tier. Returning
-// hot-only keys caused the anti-entropy reconciler to backfill evicted
+// hot-only keys caused warm→hot promotion to re-fill evicted
 // keys, re-overfilling the hot tier in a self-sustaining loop.
 func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 	t.Parallel()
@@ -455,8 +455,8 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 
 // TestTieredStore_OverBudget verifies the OverBudget contract: it must
 // report false when the hot tier is within its byte budget and true when
-// it exceeds it. Anti-entropy uses this to skip backfill under memory
-// pressure, preventing the eviction ↔ backfill feedback loop (#175).
+// it exceeds it. TieredStore uses this to skip warm→hot promotion under
+// memory pressure, preventing the eviction ↔ promotion feedback loop (#175).
 func TestTieredStore_OverBudget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

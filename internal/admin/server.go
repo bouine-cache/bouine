@@ -77,18 +77,11 @@ type Config struct {
 	// OnBanned, if non-nil, is called after a successful ban.
 	OnBanned func(ctx context.Context, expr api.BanExpr)
 	// PeerFetchHandler, if non-nil, serves peer cache-lookup requests
+	// PeerFetchHandler, if non-nil, handles peer-fetch RPCs
 	// from other cluster nodes. Mounted at POST /v1/peer/fetch (no auth
 	// required — callers are trusted cluster peers on the internal
 	// network; protected by network policy / mTLS in production).
 	PeerFetchHandler http.Handler
-	// PeerReplicateHandler, if non-nil, handles incoming replication
-	// POSTs from peer nodes in full cluster mode. Mounted at
-	// POST /v1/peer/replicate (no auth; same rationale as peer fetch).
-	PeerReplicateHandler http.Handler
-	// PeerKeysHandler, if non-nil, serves the local key set for
-	// anti-entropy reconciliation. Mounted at GET /v1/peer/keys (no auth;
-	// same rationale as peer fetch).
-	PeerKeysHandler http.Handler
 	// PeerMetricsHandler, if non-nil, is mounted at GET /v1/peer/metrics
 	// (behind bearer-token auth) so peers can fetch this node's ring summary.
 	PeerMetricsHandler http.Handler
@@ -218,12 +211,6 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.PeerFetchHandler != nil {
 		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
-	}
-	if cfg.PeerReplicateHandler != nil {
-		mux.Handle("POST /v1/peer/replicate", cfg.PeerReplicateHandler)
-	}
-	if cfg.PeerKeysHandler != nil {
-		mux.Handle("GET /v1/peer/keys", cfg.PeerKeysHandler)
 	}
 	if cfg.PeerMetricsHandler != nil {
 		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
@@ -506,12 +493,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// access in production. Must remain auth-exempt so peers without a
 		// shared token can still perform lookups.
 		"/v1/peer/fetch": true,
-		"/v1/peer/keys":  true,
 		// Peer-to-peer invalidation RPCs: same rationale as peer fetch.
 		// Peers forward purge/ban events via HTTP fan-out in strong mode.
-		"/v1/peer/purge":     true,
-		"/v1/peer/ban":       true,
-		"/v1/peer/replicate": true,
+		"/v1/peer/purge": true,
+		"/v1/peer/ban":   true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Panic recovery: log and return 500 instead of crashing the connection.

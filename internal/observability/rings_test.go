@@ -320,52 +320,6 @@ func BenchmarkRouteRing_RecordRoute(b *testing.B) {
 	}
 }
 
-func TestReplicationRing_RecordFlushTotals(t *testing.T) {
-	t.Parallel()
-	r := &ReplicationRing{}
-	r.RecordReplication("sent", 100)
-	r.RecordReplication("sent", 50)
-	r.RecordReplication("received", 200)
-
-	objSent, objRecv, bytesSent, bytesRecv, lastRecv := r.Totals()
-	if objSent != 2 || objRecv != 1 {
-		t.Errorf("objects: sent=%d recv=%d, want 2/1", objSent, objRecv)
-	}
-	if bytesSent != 150 || bytesRecv != 200 {
-		t.Errorf("bytes: sent=%d recv=%d, want 150/200", bytesSent, bytesRecv)
-	}
-	if lastRecv == 0 {
-		t.Error("lastRecvUnix should be set after a received record")
-	}
-
-	r.Flush(time.Now())
-	buckets := r.Snapshot(1)
-	if len(buckets) != 1 {
-		t.Fatalf("expected 1 bucket, got %d", len(buckets))
-	}
-	b := buckets[0]
-	if b.BytesSent != 150 || b.BytesRecv != 200 || b.ObjSent != 2 || b.ObjRecv != 1 {
-		t.Errorf("flushed bucket wrong: %+v", b)
-	}
-
-	// After flush, live accumulators reset; totals persist.
-	r.Flush(time.Now())
-	objSent2, _, _, _, _ := r.Totals()
-	if objSent2 != 2 {
-		t.Errorf("totals should persist across flush, got objSent=%d", objSent2)
-	}
-}
-
-func TestReplicationRing_UnknownDirectionIgnored(t *testing.T) {
-	t.Parallel()
-	r := &ReplicationRing{}
-	r.RecordReplication("bogus", 999)
-	objSent, objRecv, _, _, _ := r.Totals()
-	if objSent != 0 || objRecv != 0 {
-		t.Errorf("unknown direction should be ignored, got sent=%d recv=%d", objSent, objRecv)
-	}
-}
-
 func TestLatencyHistogram_Percentile(t *testing.T) {
 	var h LatencyHistogram
 	if got := h.Percentile(0.5); got != 0 {

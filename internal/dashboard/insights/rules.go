@@ -3,7 +3,6 @@ package insights
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/bouine-cache/bouine/internal/config"
 )
@@ -32,7 +31,6 @@ func init() {
 		ruleCDNAsyncLatency,
 		ruleClusterHopLimitNoEffect,
 		ruleClusterPeerStale,
-		ruleClusterFullModeMemory,
 		ruleConfigKeyQueryParams,
 		ruleConfigAllowSetCookie,
 		ruleConfigJitterZero,
@@ -41,7 +39,6 @@ func init() {
 		ruleConfigNoOCSPStapling,
 		ruleConfigTracingSamplingZero,
 		ruleConfigClusterDisabledWithPeers,
-		ruleConfigAntiEntropyDisabled,
 		ruleConfigPoolNoTimeout,
 		ruleConfigPoolNoMaxConnections,
 		ruleConfigMaxObjectSizeUnset,
@@ -56,8 +53,6 @@ func init() {
 		ruleCacheHotTierCritical,
 		ruleCacheWarmEntriesZero,
 		// Tier 3: existing data, new plumbing.
-		ruleClusterReplicationStalled,
-		ruleClusterNoReplicationTraffic,
 		ruleClusterBroadcastFailures,
 		ruleCDNLastError,
 		ruleCDNPurgeSkipped,
@@ -613,21 +608,6 @@ func ruleClusterPeerStale(data InsightData) *Insight {
 	return nil
 }
 
-func ruleClusterFullModeMemory(data InsightData) *Insight {
-	if data.Config.Cluster.Mode == config.ClusterModeFull {
-		return &Insight{
-			ID:       "cluster-full-mode-memory",
-			Severity: SeverityLow,
-			Category: CategoryCluster,
-			Title:    "Cluster mode 'full': memory scales linearly with cluster size",
-			Detail:   "Full replication mode copies all cache entries to every peer. Memory usage grows proportionally to cluster size × cache size.",
-			Evidence: "mode: full",
-			Action:   "/dashboard/config",
-		}
-	}
-	return nil
-}
-
 // ── Config insights ──────────────────────────────────────────────────
 
 func ruleConfigKeyQueryParams(data InsightData) *Insight {
@@ -774,24 +754,6 @@ func ruleConfigClusterDisabledWithPeers(data InsightData) *Insight {
 		Title:    "Cluster disabled but join addresses configured",
 		Detail:   fmt.Sprintf("%d join address(es) configured but cluster.enabled is false", len(data.Config.Cluster.Join)),
 		Evidence: fmt.Sprintf("join: %d entries, enabled: false", len(data.Config.Cluster.Join)),
-		Action:   "/dashboard/config",
-	}
-}
-
-func ruleConfigAntiEntropyDisabled(data InsightData) *Insight {
-	if !data.Config.Cluster.Enabled || data.Config.Cluster.Mode != config.ClusterModeFull {
-		return nil
-	}
-	if data.Config.Cluster.AntiEntropyInterval > 0 {
-		return nil
-	}
-	return &Insight{
-		ID:       "config-anti-entropy-disabled",
-		Severity: SeverityLow,
-		Category: CategoryConfig,
-		Title:    "Anti-entropy disabled in full mode",
-		Detail:   "Full replication without anti-entropy will drift over time as replication failures accumulate",
-		Evidence: "mode: full, anti_entropy_interval: 0",
 		Action:   "/dashboard/config",
 	}
 }
@@ -1115,49 +1077,6 @@ func ruleCacheWarmEntriesZero(data InsightData) *Insight {
 		Detail:   "WarmMaxBytes is set but WarmEntries is 0 — the warm tier is not receiving objects",
 		Evidence: fmt.Sprintf("warm_entries: 0, warm_max_bytes: %d", data.Config.Storage.WarmMaxBytes),
 		Action:   "/dashboard/config",
-	}
-}
-
-// ── Tier 3: Existing data, new plumbing ───────────────────────────────
-
-func ruleClusterReplicationStalled(data InsightData) *Insight {
-	if data.Config.Cluster.Mode != config.ClusterModeFull {
-		return nil
-	}
-	if data.ReplicationLastRecv == 0 {
-		return nil
-	}
-	now := time.Now().Unix()
-	stalledSecs := now - data.ReplicationLastRecv
-	if stalledSecs < 300 {
-		return nil
-	}
-	return &Insight{
-		ID:       "cluster-replication-stalled",
-		Severity: SeverityMed,
-		Category: CategoryCluster,
-		Title:    fmt.Sprintf("No replication received in %dm", stalledSecs/60),
-		Detail:   "Full mode expects continuous replication. Stalled receive may indicate peer disconnection or broadcast failures.",
-		Evidence: fmt.Sprintf("last_recv_unix: %d, stalled_secs: %d", data.ReplicationLastRecv, stalledSecs),
-		Action:   "/dashboard/cluster",
-	}
-}
-
-func ruleClusterNoReplicationTraffic(data InsightData) *Insight {
-	if data.Config.Cluster.Mode != config.ClusterModeFull {
-		return nil
-	}
-	if data.ReplicationBytes > 0 {
-		return nil
-	}
-	return &Insight{
-		ID:       "cluster-no-replication-traffic",
-		Severity: SeverityLow,
-		Category: CategoryCluster,
-		Title:    "No replication traffic since startup",
-		Detail:   "Full mode is active but no replication bytes have been sent or received",
-		Evidence: "replication_bytes: 0, mode: full",
-		Action:   "/dashboard/cluster",
 	}
 }
 

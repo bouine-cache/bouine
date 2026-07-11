@@ -571,7 +571,6 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 		RingSegs:     ringSegs,
 		Meta:         h.cfg.ClusterMeta,
 		FetchStats:   fetchStats,
-		Replication:  h.replicationStats(timeRange),
 		HotBytes:     hotBytes,
 		HotMaxBytes:  hotMax,
 		HotEntries:   hotEntries,
@@ -580,51 +579,6 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 		WarmEntries:  warmEntries,
 		Evictions:    evictions,
 	}))
-}
-
-// replicationStats builds the full-mode replication view model from the
-// replication ring. Returns a zeroed (Idle) struct when no ring is wired.
-func (h *Handler) replicationStats(timeRange string) templates.ReplicationStats {
-	if h.cfg.Rings == nil || h.cfg.Rings.Replication == nil {
-		return templates.ReplicationStats{Idle: true, LastActivity: "—"}
-	}
-	rr := h.cfg.Rings.Replication
-	objSent, objRecv, bytesSent, bytesRecv, lastRecv := rr.Totals()
-	n, _ := parseTimeRange(timeRange)
-	buckets := rr.Snapshot(n)
-
-	sentSeries := make([]int64, len(buckets))
-	recvSeries := make([]int64, len(buckets))
-	var recentObjSent, recentObjRecv int64
-	const bucketSecs = 10
-	recentN := 6 // last ~60s with 10s buckets
-	for i, b := range buckets {
-		sentSeries[i] = b.BytesSent
-		recvSeries[i] = b.BytesRecv
-		if i >= len(buckets)-recentN {
-			recentObjSent += b.ObjSent
-			recentObjRecv += b.ObjRecv
-		}
-	}
-	perMinFactor := 60.0 / float64(recentN*bucketSecs)
-
-	st := templates.ReplicationStats{
-		ObjectsSent: objSent,
-		ObjectsRecv: objRecv,
-		BytesSent:   bytesSent,
-		BytesRecv:   bytesRecv,
-		SentPerMin:  float64(recentObjSent) * perMinFactor,
-		RecvPerMin:  float64(recentObjRecv) * perMinFactor,
-		SentSeries:  sentSeries,
-		RecvSeries:  recvSeries,
-	}
-	if lastRecv == 0 {
-		st.Idle = objSent == 0
-		st.LastActivity = "—"
-	} else {
-		st.LastActivity = templates.TimeAgo(time.Unix(lastRecv, 0))
-	}
-	return st
 }
 
 func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {
@@ -908,12 +862,6 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 	if h.cfg.Rings != nil && h.cfg.Rings.Peer != nil {
 		peerHealth = h.cfg.Rings.Peer.PeerHealth()
 	}
-	var repLastRecv, repBytes int64
-	if h.cfg.Rings != nil && h.cfg.Rings.Replication != nil {
-		_, _, bytesSent, bytesRecv, lastRecv := h.cfg.Rings.Replication.Totals()
-		repLastRecv = lastRecv
-		repBytes = bytesSent + bytesRecv
-	}
 	var broadcastFailures int64
 	if h.cfg.BroadcastFailuresFn != nil {
 		broadcastFailures = h.cfg.BroadcastFailuresFn()
@@ -923,20 +871,18 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 		cfPurgeSkipped = h.cfg.CFPurgeSkippedFn()
 	}
 	return insights.InsightData{
-		Config:              h.cfg.Config,
-		StoreStats:          storeStats,
-		RouteStats:          merged.RouteStats,
-		RequestBuckets:      merged.RequestSnap,
-		PeerResults:         peerInfos,
-		PeerHealth:          peerHealth,
-		CFStatus:            cfStatus,
-		PoolHealth:          poolHealth,
-		HeaderAudit:         headerAudit,
-		VaryCapHits:         varyCapHits,
-		ReplicationLastRecv: repLastRecv,
-		ReplicationBytes:    repBytes,
-		BroadcastFailures:   broadcastFailures,
-		CFPurgeSkipped:      cfPurgeSkipped,
+		Config:            h.cfg.Config,
+		StoreStats:        storeStats,
+		RouteStats:        merged.RouteStats,
+		RequestBuckets:    merged.RequestSnap,
+		PeerResults:       peerInfos,
+		PeerHealth:        peerHealth,
+		CFStatus:          cfStatus,
+		PoolHealth:        poolHealth,
+		HeaderAudit:       headerAudit,
+		VaryCapHits:       varyCapHits,
+		BroadcastFailures: broadcastFailures,
+		CFPurgeSkipped:    cfPurgeSkipped,
 	}
 }
 

@@ -36,20 +36,21 @@ field to `Superseded by ADR-NNNN`.
 | 0005   | Round-robin upstream selection via atomic counter  | Accepted |
 | 0006   | Drop Fiber, unify admin on net/http                | Accepted |
 | 0007   | Cluster design — memberlist gossip + consistent hash | Accepted |
-| 0008   | Cluster mode: local cache + gossip invalidation      | Accepted |
+| 0008   | Cluster mode: local cache + gossip invalidation      | Superseded |
 | 0009   | Cache state-machine hardening (RFC 9111 conformance) | Accepted |
 | 0010   | Helm chart lint in prek and pre-push hooks         | Accepted |
 | 0011   | Per-route TTL override decoupled from upstream Cache-Control | Accepted |
 | 0012   | Block caching of Set-Cookie responses by default     | Accepted |
 | 0013   | ttl_default makes no-freshness responses cacheable   | Accepted |
-| 0014   | Anti-entropy reconciliation for full cluster mode    | Accepted |
+| 0014   | Anti-entropy reconciliation for full cluster mode    | Superseded |
 | 0015   | Binary wire format for cluster key replication       | Accepted |
 | 0016   | Refresh-Before-Expiry Per Route                      | Accepted |
 | 0017   | Static file serving routes                           | Accepted |
-| 0018   | Backfill cooldown for anti-entropy reconciler        | Accepted |
-| 0019   | Churn detection for anti-entropy backfill            | Accepted |
+| 0018   | Backfill cooldown for anti-entropy reconciler        | Superseded |
+| 0019   | Churn detection for anti-entropy backfill            | Superseded |
 | 0020   | Hot-to-warm sync                                     | Accepted |
 | 0021   | Refresh popularity gate                               | Accepted |
 | 0022   | Refresh persist cycles                               | Accepted |
 | 0023   | Warm-tier eviction (SIEVE)                            | Accepted |
 | 0024   | Async WAL fsync for miss-path throughput              | Proposed |
+| 0025   | Remove full cluster mode                             | Accepted |

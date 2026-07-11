@@ -86,7 +86,7 @@ type OverviewData struct {
 	// Ring for the compact circular SVG on the overview bottom row.
 	RingSegs []api.RingSegment
 	// ClusterMode is the active cluster consistency model:
-	// "strong", "eventual", "full", or "single-node" when cluster is disabled.
+	// "strong", "eventual", or "single-node" when cluster is disabled.
 	// Used to conditionally render ring SVG vs. mode info on overview.
 	ClusterMode string
 }
@@ -246,7 +246,7 @@ type ClusterMeta struct {
 	ProtocolVersion  string
 	GossipInterval   string
 	JoinRetryBudget  string
-	Mode             string // "strong" | "eventual" | "full" | "single-node"
+	Mode             string // "strong" | "eventual" | "single-node"
 }
 
 // PeerFetchStats holds aggregated peer fetch telemetry for the cluster page.
@@ -258,23 +258,6 @@ type PeerFetchStats struct {
 	DigestCount  int64
 }
 
-// ReplicationStats holds aggregated full-mode replication telemetry for
-// the cluster page. Bytes/objects are totals over the dashboard window;
-// the chart series carry per-bucket rates for the throughput graph.
-type ReplicationStats struct {
-	ObjectsSent  int64
-	ObjectsRecv  int64
-	BytesSent    int64
-	BytesRecv    int64
-	SentPerMin   float64 // objects replicated out per minute (recent)
-	RecvPerMin   float64 // objects replicated in per minute (recent)
-	LastActivity string  // human "12s ago" since last replication received, or "—"
-	Idle         bool    // true when no replication has been observed
-	// Chart series (oldest→newest), bytes per bucket.
-	SentSeries []int64
-	RecvSeries []int64
-}
-
 // ClusterData is the view model for the cluster page.
 type ClusterData struct {
 	LayoutProps
@@ -283,7 +266,6 @@ type ClusterData struct {
 	RingSegs    []api.RingSegment
 	Meta        ClusterMeta
 	FetchStats  PeerFetchStats
-	Replication ReplicationStats
 	// Store stats (same fields as OverviewData).
 	HotBytes     int64
 	HotMaxBytes  int64
@@ -431,7 +413,7 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		clusterBadgeKind = "g"
 		clusterBadge = cfg.Cluster.Mode
 	}
-	modeHint := "strong: ring-sharded · eventual: local cache, gossip invalidation · full: full replication"
+	modeHint := "strong: ring-sharded · eventual: local cache, gossip invalidation"
 	sections = append(sections, ConfigSection{
 		Icon: "◎", Title: "cluster", Badge: clusterBadge, BadgeKind: clusterBadgeKind,
 		Rows: []ConfigRow{
@@ -843,8 +825,6 @@ func modeLabel(mode string) string {
 		return "strong"
 	case "eventual":
 		return "eventual"
-	case "full":
-		return "full"
 	default:
 		return "single-node"
 	}

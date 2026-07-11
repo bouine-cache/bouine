@@ -39,8 +39,7 @@ const (
 	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
 	peerFetchTimeout = 500 * time.Millisecond
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
-	// prevent memory blow-up during miss fan-out or anti-entropy
-	// backfill (issue #133).
+	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
 )
 

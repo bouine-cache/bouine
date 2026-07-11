@@ -16,12 +16,12 @@ For a reverse-proxy cache this is problematic:
    SIEVE eviction under a tight memory budget (512 MiB) runs list
    manipulation under shard locks, spiking CPU and triggering
    spurious scale-ups.
-3. **Anti-entropy backfill** on new pods joining the cluster in `full`
+3. **Warm-tier replay** on new pods joining the cluster
    mode produces CPU spikes that the HPA interprets as load, creating
    a positive feedback loop: scale up → backfill → CPU spike → scale
    up more.
 
-In full cluster mode, adding pods does not increase cache capacity
+In eventual mode, adding pods does not increase cache capacity per node
 (every pod stores every object). Extra pods increase gossip overhead
 and backfill churn. The HPA should scale on real request load, not
 CPU side effects.

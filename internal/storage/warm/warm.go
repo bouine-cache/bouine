@@ -637,7 +637,7 @@ func (s *Store) dropStaleIndex(key uint64, stale warmLoc) {
 // Keys returns all keys present in the warm-tier index. The returned
 // slice is unsorted; callers that need determinism must sort it. Used by
 // TieredStore.Keys() to report the union of hot + warm keys so that
-// anti-entropy knows which keys the node owns, not just which are in RAM.
+// TieredStore.Keys() reports the complete set of keys the node owns.
 func (s *Store) Keys() []uint64 {
 	s.idxMu.RLock()
 	defer s.idxMu.RUnlock()

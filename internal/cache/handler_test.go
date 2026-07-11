@@ -1699,10 +1699,37 @@ func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
 	case <-done:
 		// good — the origin was reached, proving the timeout didn't
 		// fire during the semaphore wait
-	default:
+	case <-time.After(5 * time.Second):
 		t.Fatalf("origin never called — fetch timeout fired during semaphore wait: %v", res.Err)
 	}
 	if res.Err != nil {
 		t.Fatalf("expected no error, got %v", res.Err)
+	}
+}
+
+func TestDoFetchCanceledContextKeepsValidResponse(t *testing.T) {
+	t.Parallel()
+	// If the client disconnects (context cancelled) after the origin
+	// returned a complete response, doFetch must still return the
+	// response for caching — not discard it. Only timeout
+	// (DeadlineExceeded) or an empty recorder should produce an error.
+	ctx, cancel := context.WithCancel(context.Background())
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "cached-body")
+		cancel() // simulate client disconnect after origin responded
+	}))
+	h.fetchTimeout = 5 * time.Second
+	req := httptest.NewRequest("GET", "/", nil)
+	req = req.WithContext(ctx)
+	res := h.doFetch(req)
+	if res.Err != nil {
+		t.Fatalf("expected no error for completed response with cancelled context, got %v", res.Err)
+	}
+	if res.StatusCode != 200 {
+		t.Fatalf("expected status 200, got %d", res.StatusCode)
+	}
+	if string(res.Body) != "cached-body" {
+		t.Fatalf("expected body %q, got %q", "cached-body", res.Body)
 	}
 }

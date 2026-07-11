@@ -24,10 +24,11 @@ import (
 // safety net only fires for truly stuck connections that would otherwise
 // hold a goroutine and its buffers indefinitely.
 //
-// fetch_timeout (config) must be less than this value. Otherwise the
-// write deadline can fire during an origin fetch, aborting the client
-// connection before the fetch completes. Config validation enforces
-// this at load time.
+// fetch_timeout (config) must be strictly less than this value.
+// Config validation (config.maxFetchTimeout) enforces this at load
+// time. The two constants are duplicated across packages because the
+// layering rules (L1 and L2 cannot depend on each other) prevent a
+// shared import. If you change one, change the other.
 const safetyNetWriteTimeout = 5 * time.Minute
 
 // ListenerConfig controls a single listener.

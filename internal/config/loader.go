@@ -13,6 +13,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// maxFetchTimeout is the upper bound for fetch_timeout. It must stay
+// strictly below internal/server.safetyNetWriteTimeout so the write
+// deadline never fires during an origin fetch. The two constants are
+// duplicated across packages because the layering rules (L1 and L2
+// cannot depend on each other) prevent a shared import. If you change
+// one, change the other.
+const maxFetchTimeout = 5 * time.Minute
+
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even
 // with an empty config file.
@@ -235,8 +243,8 @@ func validateRouteCache(i int, rc RouteCache) error {
 	if rc.FetchTimeout < 0 {
 		return fmt.Errorf("config: route %d fetch_timeout must be >= 0, got %v", i, rc.FetchTimeout)
 	}
-	if rc.FetchTimeout > 5*time.Minute {
-		return fmt.Errorf("config: route %d fetch_timeout must be <= 5m (data plane safety-net WriteTimeout), got %v", i, rc.FetchTimeout)
+	if rc.FetchTimeout >= maxFetchTimeout {
+		return fmt.Errorf("config: route %d fetch_timeout must be < %v (data plane safety-net WriteTimeout), got %v", i, maxFetchTimeout, rc.FetchTimeout)
 	}
 	return validateRefreshConfig(i, rc)
 }

@@ -194,7 +194,9 @@ func (l *connLimitListener) Accept() (net.Conn, error) {
 		atomic.AddInt32(&l.open, 1)
 		return &connLimitConn{Conn: conn, sem: l.sem, open: &l.open}, nil
 	default:
-		// Limit reached — reject immediately.
+		// Limit reached — send 503 then close.
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, _ = conn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 		_ = conn.Close()
 		l.log.Warn("connection rejected: max_connections reached")
 		return nil, errors.New("max_connections reached")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -458,7 +459,7 @@ func (r *ring) add(name string, vnodes int) {
 		r.nodes = append(r.nodes, h)
 		r.owners[h] = name
 	}
-	sort.Slice(r.nodes, func(i, j int) bool { return r.nodes[i] < r.nodes[j] })
+	slices.Sort(r.nodes)
 }
 
 func (r *ring) remove(name string) {

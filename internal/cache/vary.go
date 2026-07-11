@@ -19,7 +19,7 @@ const MaxVariants = 64
 // as one of its field names. "Vary: *, foo" and "Vary: foo, *" both
 // mean "every request is unique" (RFC 9110 §12.5.5).
 func varyContainsStar(vary string) bool {
-	for _, f := range strings.Split(vary, ",") {
+	for f := range strings.SplitSeq(vary, ",") {
 		if strings.TrimSpace(f) == "*" {
 			return true
 		}

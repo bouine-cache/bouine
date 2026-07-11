@@ -1384,10 +1384,29 @@ func (h *Handler) storeAndReplicate(ctx context.Context, key api.Key, obj *api.O
 	}
 }
 
-func (h *Handler) doFetch(r *http.Request) fetchResult {
+func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	// L5 span: upstream origin pool layer.
 	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
 	defer span.End()
+
+	// Recover http.ErrAbortHandler from httputil.ReverseProxy (fires when
+	// the origin connection drops mid-stream or the client disconnects).
+	// singleflight wraps all panics in *panicError and re-panics, which
+	// breaks http.Server's built-in ErrAbortHandler recovery. Convert it
+	// to a normal error so singleflight sees a clean return. Real panics
+	// (nil dereference, etc.) are re-panicked so bugs remain visible.
+	defer func() {
+		if rv := recover(); rv != nil {
+			if rv == http.ErrAbortHandler {
+				err := fmt.Errorf("upstream connection aborted")
+				tracing.RecordError(span, err)
+				res = fetchResult{Err: err}
+				return
+			}
+			//nolint:forbidigo // re-panic is intentional: real bugs must crash
+			panic(rv)
+		}
+	}()
 	select {
 	case h.fetchSem <- struct{}{}:
 		defer func() { <-h.fetchSem }()

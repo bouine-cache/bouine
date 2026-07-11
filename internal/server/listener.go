@@ -59,7 +59,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      0, // no write deadline — origin timeouts are per-pool (connect.timeout)
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
@@ -87,7 +87,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      0, // no write deadline — origin timeouts are per-pool (connect.timeout)
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}

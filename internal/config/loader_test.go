@@ -239,6 +239,7 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 		{"negative_ttl", func(rc *RouteCache) { rc.NegativeTTL = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = -1 }},
 		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 6 * time.Minute }},
+		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = 5 * time.Minute }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

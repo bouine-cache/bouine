@@ -368,10 +368,11 @@ type RouteCache struct {
 	// WriteTimeout on the data plane, which was the wrong tool for a
 	// caching reverse proxy.
 	//
-	// Must be less than the data plane's safety-net WriteTimeout
-	// (internal/server.safetyNetWriteTimeout, currently 5 minutes).
-	// Otherwise the write deadline can fire during the origin fetch,
-	// aborting the client connection before the fetch completes.
+	// Must be strictly less than the data plane's safety-net WriteTimeout
+	// (internal/server.safetyNetWriteTimeout, currently 5 minutes, mirrored
+	// by config.maxFetchTimeout). Otherwise the write deadline can fire
+	// during the origin fetch, aborting the client connection before the
+	// fetch completes.
 	FetchTimeout time.Duration `yaml:"fetch_timeout,omitempty" json:"fetch_timeout,omitempty"`
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin, performing

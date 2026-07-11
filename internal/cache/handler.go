@@ -1449,15 +1449,19 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, outReq)
 
-	// Check the fetch context after ServeHTTP returns. If the deadline
-	// fired, the upstream either returned without writing (context-aware
-	// handler) or the ReverseProxy's ErrorHandler wrote a synthetic 502.
-	// In both cases, treat it as a fetch error rather than a real origin
-	// response — the error carries the timeout reason and prevents the
-	// synthetic 502 from being cached.
+	// Check the fetch context after ServeHTTP returns. On timeout
+	// (DeadlineExceeded), discard whatever the recorder captured — the
+	// fetch exceeded its budget, and the recorder may contain an empty
+	// response or a synthetic 502 from the ReverseProxy's ErrorHandler.
+	// On client disconnect (Canceled), discard only if the recorder is
+	// empty (statusCode == 0). If the origin returned a complete response
+	// before the cancellation propagated, keep it — the next client
+	// should benefit from the cached object.
 	if err := fetchCtx.Err(); err != nil {
-		tracing.RecordError(span, err)
-		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
+		if err == context.DeadlineExceeded || rec.statusCode == 0 {
+			tracing.RecordError(span, err)
+			return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
+		}
 	}
 
 	if rec.truncated {

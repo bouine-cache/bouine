@@ -1613,19 +1613,19 @@ func TestDoFetchRealPanicPropagates(t *testing.T) {
 
 func TestDoFetchSemaphoreReleasedAfterAbort(t *testing.T) {
 	t.Parallel()
+	// Use a cap-1 semaphore so doFetch's acquire is the only slot.
+	// After doFetch returns, the channel must be empty — if the defer
+	// failed to release, the slot would still be held.
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
-	// Fill the semaphore first so we can verify it drains after the abort.
-	h.fetchSem <- struct{}{}
+	h.fetchSem = make(chan struct{}, 1)
 	req := httptest.NewRequest("GET", "/", nil)
 	_ = h.doFetch(req)
-	// doFetch adds to fetchSem then releases via defer. After doFetch
-	// returns, the semaphore should have exactly the 1 item we pre-filled.
 	select {
 	case <-h.fetchSem:
-		// good — pre-filled item still there, doFetch's acquire/release balanced
+		t.Fatal("fetch semaphore leaked — slot still held after ErrAbortHandler")
 	default:
-		t.Fatal("fetch semaphore was not properly released after ErrAbortHandler")
+		// good — channel is empty, doFetch released its slot
 	}
 }

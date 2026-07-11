@@ -237,6 +237,7 @@ func TestValidate_RouteCache_NegativeDurationsRejected(t *testing.T) {
 		{"stale_while_revalidate", func(rc *RouteCache) { rc.StaleWhileRevalidate = -1 }},
 		{"stale_if_error", func(rc *RouteCache) { rc.StaleIfError = -1 }},
 		{"negative_ttl", func(rc *RouteCache) { rc.NegativeTTL = -1 }},
+		{"fetch_timeout", func(rc *RouteCache) { rc.FetchTimeout = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -267,6 +268,7 @@ func TestValidate_PoolDurations_NegativeRejected(t *testing.T) {
 		{"health.passive.eject_for", func(p *UpstreamPool) { p.Health.Passive.EjectFor = -1 }},
 		{"connect.timeout", func(p *UpstreamPool) { p.Connect.Timeout = -1 }},
 		{"connect.keep_alive", func(p *UpstreamPool) { p.Connect.KeepAlive = -1 }},
+		{"connect.response_header_timeout", func(p *UpstreamPool) { p.Connect.ResponseHeaderTimeout = -1 }},
 		{"connect.hedge_timeout", func(p *UpstreamPool) { p.Connect.HedgeTimeout = -1 }},
 	}
 	for _, tc := range cases {

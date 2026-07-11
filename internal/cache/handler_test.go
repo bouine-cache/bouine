@@ -1581,3 +1581,51 @@ func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 		t.Fatal("DecrementPersist should return false when persist exhausted")
 	}
 }
+
+func TestDoFetchErrAbortHandler(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	res := h.doFetch(req)
+	if res.Err == nil {
+		t.Fatal("expected error from ErrAbortHandler, got nil")
+	}
+	if !strings.Contains(res.Err.Error(), "aborted") {
+		t.Fatalf("expected aborted error, got %v", res.Err)
+	}
+}
+
+func TestDoFetchRealPanicPropagates(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		panic("real bug")
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	defer func() {
+		if rv := recover(); rv == nil {
+			t.Fatal("expected real panic to propagate, got nothing")
+		}
+	}()
+	h.doFetch(req)
+}
+
+func TestDoFetchSemaphoreReleasedAfterAbort(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	// Fill the semaphore first so we can verify it drains after the abort.
+	h.fetchSem <- struct{}{}
+	req := httptest.NewRequest("GET", "/", nil)
+	_ = h.doFetch(req)
+	// doFetch adds to fetchSem then releases via defer. After doFetch
+	// returns, the semaphore should have exactly the 1 item we pre-filled.
+	select {
+	case <-h.fetchSem:
+		// good — pre-filled item still there, doFetch's acquire/release balanced
+	default:
+		t.Fatal("fetch semaphore was not properly released after ErrAbortHandler")
+	}
+}

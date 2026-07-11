@@ -15,6 +15,12 @@ import (
 // a primary key exceeds this value, preventing Vary blow-up attacks.
 const MaxVariants = 64
 
+// maxVaryFields caps the number of Vary header fields we process.
+// RFC 9110 does not limit Vary fields, but >16 is pathological and
+// almost certainly an attack. The stack buffer for field names is sized
+// accordingly.
+const maxVaryFields = 16
+
 // varyContainsStar reports whether the Vary header value contains "*"
 // as one of its field names. "Vary: *, foo" and "Vary: foo, *" both
 // mean "every request is unique" (RFC 9110 §12.5.5).
@@ -33,6 +39,12 @@ func varyContainsStar(vary string) bool {
 // skipped — the variant key is computed as if those headers were absent
 // from the Vary list. When exclusion empties the Vary list entirely,
 // the variant key collapses to the primary key.
+//
+// Zero-alloc fast path: when the Vary header has ≤ maxVaryFields fields
+// and the total hash input fits in 256 bytes, the function uses a
+// stack-allocated buffer and xxhash.Sum64 instead of allocating a
+// *xxhash.Digest on the heap. Falls back to the allocation path for
+// pathological inputs.
 func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...map[string]bool) api.Key {
 	if vary == "" {
 		return primary
@@ -53,6 +65,61 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...
 		return api.Key(uint64(primary) ^ h.Sum64())
 	}
 
+	// Parse and sort Vary field names using a stack-allocated array.
+	// Avoids strings.Split []string allocation and sort.Strings slice.
+	var fields [maxVaryFields]string
+	n := 0
+	for f := range strings.SplitSeq(vary, ",") {
+		if n >= maxVaryFields {
+			// Pathological Vary — fall back to alloc path.
+			return variantKeySlow(primary, vary, reqHeader, excludeSet)
+		}
+		fields[n] = strings.ToLower(strings.TrimSpace(f))
+		n++
+	}
+	if n == 0 {
+		return primary
+	}
+	// Inline insertion sort (n is typically 1-3, max 16).
+	for i := 1; i < n; i++ {
+		for j := i; j > 0 && fields[j-1] > fields[j]; j-- {
+			fields[j-1], fields[j] = fields[j], fields[j-1]
+		}
+	}
+
+	// Build hash input into a stack buffer and use xxhash.Sum64
+	// (no heap allocation) instead of xxhash.New() (allocates *Digest).
+	var buf [256]byte
+	off := 0
+	written := false
+	for i := 0; i < n; i++ {
+		f := fields[i]
+		if excludeSet != nil && excludeSet[f] {
+			continue
+		}
+		val := normalizeHeaderValue(reqHeader.Get(f))
+		needed := len(f) + 1 + len(val) + 1 // f=val;
+		if off+needed > len(buf) {
+			// Buffer overflow — fall back to alloc path.
+			return variantKeySlow(primary, vary, reqHeader, excludeSet)
+		}
+		off += copy(buf[off:], f)
+		buf[off] = '='
+		off++
+		off += copy(buf[off:], val)
+		buf[off] = ';'
+		off++
+		written = true
+	}
+	if !written {
+		return primary
+	}
+	return api.Key(uint64(primary) ^ xxhash.Sum64(buf[:off]))
+}
+
+// variantKeySlow is the fallback allocation path for Vary headers that
+// exceed the stack buffer limits (too many fields or too much data).
+func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, excludeSet map[string]bool) api.Key {
 	fields := strings.Split(strings.ToLower(vary), ",")
 	for i, f := range fields {
 		fields[i] = strings.TrimSpace(f)

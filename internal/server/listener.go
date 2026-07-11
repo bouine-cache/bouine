@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability"
-	"github.com/bouine-cache/bouine/internal/observability/tracing"
 )
 
 // safetyNetWriteTimeout is a generous write deadline that acts as a
@@ -69,7 +68,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           tracing.HTTPMiddleware("bouine.listener.http", cfg.Handler),
+		Handler:           cfg.Handler,
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -96,7 +95,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           tracing.HTTPMiddleware("bouine.listener.https", cfg.Handler),
+		Handler:           cfg.Handler,
 		TLSConfig:         cfg.TLSConfig,
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,

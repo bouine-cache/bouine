@@ -374,6 +374,30 @@ type RouteCache struct {
 	// value. Zero (default) disables persistence — the gate kills
 	// re-scheduling immediately. Requires refresh_min_hits > 0.
 	RefreshPersistCycles int `yaml:"refresh_persist_cycles,omitempty" json:"refresh_persist_cycles,omitempty"`
+	// RefreshMinScore is the minimum refresh priority score required for
+	// re-scheduling after a background refresh. The score is computed as
+	// staleHits × obj.BodySize, where staleHits is the per-window hit count
+	// from the previous TTL window. This weights the refresh decision by
+	// object size: a 4 MB object with 1 hit outranks a 512 B object with
+	// 100 hits. Zero (default) disables the score gate. When both
+	// refresh_min_hits and refresh_min_score are set, both gates must pass.
+	// Requires refresh_before_expiry and refresh_min_hits > 0.
+	RefreshMinScore int64 `yaml:"refresh_min_score,omitempty" json:"refresh_min_score,omitempty"`
+	// RefreshMaxRPS caps the number of background refresh fetches per
+	// second per route. When the cap is reached, pending refreshes are
+	// deferred with jittered backoff rather than dropped. Zero (default)
+	// means no rate limit. Requires refresh_before_expiry. Range 0 or
+	// 1–10000.
+	RefreshMaxRPS int `yaml:"refresh_max_rps,omitempty" json:"refresh_max_rps,omitempty"`
+	// RefreshReactiveFirst changes the refresh strategy from proactive to
+	// reactive for the initial TTL window. New objects are not scheduled
+	// for proactive refresh. Instead, they rely on stale-while-revalidate
+	// (SWR): if accessed while stale, a background revalidation refreshes
+	// the object, and the popularity gate decides whether to promote it
+	// to proactive refresh for subsequent windows. Requires
+	// refresh_before_expiry, stale_while_revalidate > 0, and
+	// refresh_min_hits > 0.
+	RefreshReactiveFirst bool `yaml:"refresh_reactive_first,omitempty" json:"refresh_reactive_first,omitempty"`
 	// Key controls cache key construction for this route.
 	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
 }

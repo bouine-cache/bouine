@@ -1028,7 +1028,7 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 	if obj.Hits != 1 {
 		t.Fatalf("expected 1 hit after Get, got %d", obj.Hits)
 	}
-	h.doBackgroundRefresh(ctx, key, obj)
+	h.doBackgroundRefresh(ctx, key, obj, 0)
 
 	// After refresh with Hits=1 < minHits=2, the object should NOT be
 	// re-scheduled. The scheduler should still be empty.
@@ -1064,9 +1064,10 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 		t.Fatalf("expected >= 1 hits, got %d", obj.Hits)
 	}
 
-	// Simulate a background refresh. Since Hits >= refreshMinHits (1),
-	// the object should be re-scheduled.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	// Simulate a background refresh. Since the object was accessed
+	// (windowHits >= refreshMinHits), it should be re-scheduled.
+	staleHits := h.store.WindowHits(key)
+	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
 
 	scheduled := h.scheduler.Len()
 	if scheduled != 1 {
@@ -1135,7 +1136,7 @@ func TestRefresh_HitCountCarriedOverOn200Refresh(t *testing.T) {
 
 	// doBackgroundRefresh triggers a 200 (upstream never returns 304).
 	// The refreshed object should carry over the hit count.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 
 	// Verify the stored object preserved the hit count.
 	refreshed, _, err := h.store.Get(context.Background(), key)
@@ -1171,7 +1172,7 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	// copies stale.Hits, so Hits stays 1 < minHits=2 across all cycles.
 
 	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 	if scheduled := h.scheduler.Len(); scheduled != 1 {
 		t.Fatalf("after 1st persist refresh: expected 1 scheduled, got %d", scheduled)
 	}
@@ -1182,7 +1183,7 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	h.scheduler.Start()
 
 	// Refresh 2: persist=2 → decrement to 1, re-schedule.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 	if scheduled := h.scheduler.Len(); scheduled != 1 {
 		t.Fatalf("after 2nd persist refresh: expected 1 scheduled, got %d", scheduled)
 	}
@@ -1192,7 +1193,7 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	h.scheduler.Start()
 
 	// Refresh 3: persist=1 → decrement to 0, re-schedule.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 	if scheduled := h.scheduler.Len(); scheduled != 1 {
 		t.Fatalf("after 3rd persist refresh: expected 1 scheduled, got %d", scheduled)
 	}
@@ -1202,7 +1203,7 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	h.scheduler.Start()
 
 	// Refresh 4: persist=0 → gate blocks, no re-schedule.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 	if scheduled := h.scheduler.Len(); scheduled != 0 {
 		t.Fatalf("after persist exhausted: expected 0 scheduled, got %d", scheduled)
 	}
@@ -1233,8 +1234,9 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 		t.Fatalf("expected 1 hit after MISS, got %d", obj.Hits)
 	}
 
-	// Unpopular refresh: Hits=1 < minHits=2 → persist 2→1, re-scheduled.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	// Unpopular refresh: windowHits=0 < minHits=2 → persist 2→1, re-scheduled.
+	staleHits := h.store.WindowHits(key)
+	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
 	if scheduled := h.scheduler.Len(); scheduled != 1 {
 		t.Fatalf("persist should re-schedule, got %d", scheduled)
 	}
@@ -1243,7 +1245,9 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 		t.Fatalf("after unpopular refresh: persist should be 1, got %v", entry)
 	}
 
-	// Client HIT → Hits=2 >= minHits=2 → popular.
+	// Client HITs → windowHits incremented. After refresh reset,
+	// two HITs are needed to pass the minHits=2 gate.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// Re-read obj to get updated Hits.
@@ -1251,8 +1255,9 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get after HIT: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 2 {
-		t.Fatalf("expected >= 2 hits after HIT, got %d", obj.Hits)
+	wh := h.store.WindowHits(key)
+	if wh < 2 {
+		t.Fatalf("expected >= 2 windowHits after HITs, got %d", wh)
 	}
 
 	// Clear scheduler.
@@ -1260,8 +1265,9 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	// Popular refresh: Hits >= minHits → Register called → persist RESET to 2.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	// Popular refresh: windowHits >= minHits → Register called → persist RESET to 2.
+	staleHits = h.store.WindowHits(key)
+	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
 	if scheduled := h.scheduler.Len(); scheduled != 1 {
 		t.Fatalf("popular refresh should re-schedule, got %d", scheduled)
 	}
@@ -1297,7 +1303,7 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 	}
 
 	// Hits=1 < minHits=2, persist=0 → gate blocks immediately.
-	h.doBackgroundRefresh(context.Background(), key, obj)
+	h.doBackgroundRefresh(context.Background(), key, obj, 0)
 	if scheduled := h.scheduler.Len(); scheduled != 0 {
 		t.Fatalf("with persist=0, gate should block immediately, got %d scheduled", scheduled)
 	}

@@ -752,6 +752,13 @@ func (t *TieredStore) rewriteWAL() error {
 	return nil
 }
 
+// WindowHits returns the per-window hit count for key from the hot tier.
+// Returns 0 if the key is not in the hot tier (warm-only objects have no
+// hot-tier counter). Delegates to HotStore.WindowHits.
+func (t *TieredStore) WindowHits(key api.Key) int64 {
+	return t.hot.WindowHits(key)
+}
+
 // Close shuts down the WAL, warm tier, and hot tier in order.
 // The compaction and warm-sync goroutines are stopped and joined
 // before the warm store is closed, preventing use-after-close on file handles.

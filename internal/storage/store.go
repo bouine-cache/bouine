@@ -31,6 +31,10 @@ type Store interface {
 	Ban(ctx context.Context, predicate api.BanExpr) (int, error)
 	Stats() api.Stats
 	Close(ctx context.Context) error
+	// WindowHits returns the per-window hit count for key, or 0 if the
+	// key is not in the hot tier. Used by the cache layer's refresh
+	// popularity gate to evaluate per-TTL-window access frequency.
+	WindowHits(key api.Key) int64
 }
 
 // KeyLister returns all cache keys in the store. Implemented by HotStore

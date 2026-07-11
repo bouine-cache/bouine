@@ -1,8 +1,12 @@
 // 60% hit / 15% miss / 10% stale / 5% reval / 5% bypass / 3% vary / 2% error
+// Fixed metric: tracks both "hit_rate" (X-Cache == HIT only) and
+// "cache_served_rate" (HIT + STALE + REVALIDATED) for fair comparison
+// with Varnish, which counts grace-served responses as HIT.
 import http from 'k6/http';
 import { check } from 'k6';
 import { Rate } from 'k6/metrics';
 const hitRate = new Rate('hit_rate');
+const cacheServedRate = new Rate('cache_served_rate');
 const base = __ENV.BASE_URL || 'http://bouine:8080';
 const PATHS = [
   ...Array(60).fill('/hit'),
@@ -22,5 +26,7 @@ export default function() {
   const path = PATHS[Math.floor(Math.random() * PATHS.length)];
   const res = http.get(`${base}${path}`, { timeout: '5s' });
   check(res, { '2xx': r => r.status < 300 || r.status === 503 });
-  hitRate.add((res.headers['X-Cache']||'') === 'HIT');
+  const xCache = res.headers['X-Cache'] || '';
+  hitRate.add(xCache === 'HIT');
+  cacheServedRate.add(xCache === 'HIT' || xCache === 'STALE' || xCache === 'REVALIDATED');
 }

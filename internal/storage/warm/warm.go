@@ -139,6 +139,7 @@ type Store struct {
 	segMax   int64
 	mu       sync.RWMutex
 	segs     []*Segment
+	segByID  map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
 	nextID   atomic.Int32
 	stats    warmStats
 	idxMu    sync.RWMutex
@@ -169,6 +170,23 @@ type Store struct {
 	// metrics receives warm-tier Prometheus collectors. Nil when the
 	// store is constructed without a registry (tests, single-node).
 	metrics *Metrics
+}
+
+// rebuildSegByID updates the segByID index from the current segs slice.
+// Must be called under s.mu.Lock whenever segs is modified.
+func (s *Store) rebuildSegByID() {
+	if len(s.segs) == 0 {
+		s.segByID = nil
+		return
+	}
+	if s.segByID == nil {
+		s.segByID = make(map[int]*Segment, len(s.segs))
+	} else {
+		clear(s.segByID)
+	}
+	for _, seg := range s.segs {
+		s.segByID[seg.ID] = seg
+	}
 }
 
 type warmStats struct {
@@ -379,11 +397,16 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 		return nil, nil
 	}
 
+	// O(1) segment lookup by ID via the segByID index.
 	var seg *Segment
-	for _, ss := range s.segs {
-		if ss.ID == loc.segID {
-			seg = ss
-			break
+	if s.segByID != nil {
+		seg = s.segByID[loc.segID]
+	} else {
+		for _, ss := range s.segs {
+			if ss.ID == loc.segID {
+				seg = ss
+				break
+			}
 		}
 	}
 	if seg == nil {
@@ -877,6 +900,7 @@ func (s *Store) Close() error {
 		}
 	}
 	s.segs = nil
+	s.segByID = nil
 	return firstErr
 }
 
@@ -951,6 +975,7 @@ func (s *Store) newSegment() (*Segment, error) {
 		return nil, err
 	}
 	s.segs = append(s.segs, seg)
+	s.rebuildSegByID()
 	return seg, nil
 }
 
@@ -1245,6 +1270,8 @@ func (s *Store) Compact() error {
 		_ = seg.f.Close()
 	}
 	s.segs = fresh.segs
+	s.segByID = fresh.segByID
+	s.segByID = fresh.segByID
 	// Replace the index and rebuild the SIEVE list in append order.
 	// compactSegments returns keys in the order records were written to
 	// the new store (by segID then offset), so we can build the SIEVE list

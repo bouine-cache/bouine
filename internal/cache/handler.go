@@ -77,6 +77,13 @@ const defaultMaxResponseBytes int64 = 4 << 20 // 4 MiB
 // at concurrency × 2 × maxResponseBytes = 32 × 2 × 4 MiB = 256 MiB.
 const defaultFetchConcurrency = 32
 
+// defaultFetchTimeout bounds the total origin fetch time (header + body)
+// when the operator has not configured fetch_timeout. This replaces the
+// blanket WriteTimeout on the data plane, which was the wrong tool for a
+// caching reverse proxy: too short for slow origins, irrelevant for cache
+// hits.
+const defaultFetchTimeout = 60 * time.Second
+
 // bgRevalSem bounds concurrent background stale-while-revalidate
 // goroutines. When full, excess revalidation attempts are silently
 // dropped — the next client will re-trigger if still stale.
@@ -200,6 +207,7 @@ type Handler struct {
 	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
 	maxResponseBytes int64           // hard cap on body buffering; 0 = defaultMaxResponseBytes
 	fetchSem         chan struct{}   // bounds concurrent foreground origin fetches
+	fetchTimeout     time.Duration   // bounds total origin fetch time; 0 = defaultFetchTimeout
 	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
 	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
 
@@ -295,6 +303,11 @@ type HandlerConfig struct {
 	// block until a slot frees or the request context is cancelled.
 	// Zero (default) applies a safe built-in limit (64).
 	MaxFetchConcurrency int
+	// FetchTimeout bounds the total time for an origin fetch (header +
+	// body). When exceeded, the fetch is aborted and the caller receives
+	// a fetchResult error. Zero (default) applies a safe built-in limit
+	// (60s). This replaces the blanket WriteTimeout on the data plane.
+	FetchTimeout time.Duration
 	// StripQueryParams, when non-nil, excludes the listed query parameter
 	// names from the cache key. The parameters are still forwarded to
 	// the upstream. Allocated once at handler construction.
@@ -389,6 +402,10 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		conc = defaultFetchConcurrency
 	}
 	h.fetchSem = make(chan struct{}, conc)
+	h.fetchTimeout = cfg.FetchTimeout
+	if h.fetchTimeout <= 0 {
+		h.fetchTimeout = defaultFetchTimeout
+	}
 
 	// Wire refresh-before-expiry.
 	if h.refreshBeforeExpiry {
@@ -1395,6 +1412,9 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	// breaks http.Server's built-in ErrAbortHandler recovery. Convert it
 	// to a normal error so singleflight sees a clean return. Real panics
 	// (nil dereference, etc.) are re-panicked so bugs remain visible.
+	// The partial response captured by the recorder (if any) is
+	// intentionally discarded — serving a half-fetched response would
+	// corrupt the cache.
 	defer func() {
 		if rv := recover(); rv != nil {
 			if rv == http.ErrAbortHandler {
@@ -1407,6 +1427,12 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 			panic(rv)
 		}
 	}()
+
+	// Bound the total origin fetch time. This replaces the blanket
+	// WriteTimeout on the data plane with a per-fetch deadline that
+	// covers both headers and body without affecting cache hits.
+	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	defer cancel()
 	select {
 	case h.fetchSem <- struct{}{}:
 		defer func() { <-h.fetchSem }()
@@ -1415,8 +1441,8 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	}
 	// Propagate W3C TraceContext into the upstream request so the origin
 	// can participate in the distributed trace.
-	outReq := r.WithContext(ctx)
-	tracing.InjectHTTP(ctx, outReq)
+	outReq := r.WithContext(fetchCtx)
+	tracing.InjectHTTP(fetchCtx, outReq)
 	rec := acquireRecorder(h.maxResponseBytes)
 	defer releaseRecorder(rec)
 	h.upstream.ServeHTTP(rec, outReq)

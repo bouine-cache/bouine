@@ -239,6 +239,12 @@ type ConnectPolicy struct {
 	Timeout        time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	KeepAlive      time.Duration `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
 	MaxConnections int           `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// ResponseHeaderTimeout bounds the time waiting for the origin's
+	// response headers after the request is fully sent. Zero applies a
+	// safe built-in default (30s). This is the primary defence against
+	// slow-origin resource exhaustion now that WriteTimeout is 0 on the
+	// data plane.
+	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty" json:"response_header_timeout,omitempty"`
 	// HedgeTimeout fires a duplicate request to the same pool when the
 	// primary does not respond within this duration. Zero disables hedging.
 	// Only applies to idempotent methods (GET, HEAD, OPTIONS).
@@ -355,6 +361,13 @@ type RouteCache struct {
 	// fetches block until a slot frees or the request context is
 	// cancelled. Zero (default) applies a safe built-in limit (64).
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
+	// FetchTimeout bounds the total time for an origin fetch (header +
+	// body). When exceeded, the fetch is aborted and the client receives
+	// a 502 (or stale content if stayin-alive is enabled). Zero applies
+	// a safe built-in default (60s). This replaces the blanket
+	// WriteTimeout on the data plane, which was the wrong tool for a
+	// caching reverse proxy.
+	FetchTimeout time.Duration `yaml:"fetch_timeout,omitempty" json:"fetch_timeout,omitempty"`
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin, performing
 	// a conditional fetch (If-None-Match / If-Modified-Since). On 304,

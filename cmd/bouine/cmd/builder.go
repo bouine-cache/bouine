@@ -221,6 +221,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			MaxObjectSize:       rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:    rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency: rc.Cache.MaxFetchConcurrency,
+			FetchTimeout:        rc.Cache.FetchTimeout,
 			StripQueryParams:    buildStripSet(rc.Cache.Key.StripQueryParams),
 			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
 			VaryCapHits:         rs.dpMetrics.VaryCapHits,
@@ -295,6 +296,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			MaxObjectSize:       rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:    rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency: rc.Cache.MaxFetchConcurrency,
+			FetchTimeout:        rc.Cache.FetchTimeout,
 			StripQueryParams:    buildStripSet(rc.Cache.Key.StripQueryParams),
 			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
 			VaryCapHits:         rs.dpMetrics.VaryCapHits,
@@ -397,7 +399,8 @@ func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
 }
 
 // buildTransport constructs the HTTP transport for an upstream pool,
-// applying dial timeout, keep-alive, and optional hedge settings.
+// applying dial timeout, keep-alive, response header timeout, and
+// optional hedge settings.
 func buildTransport(pc config.UpstreamPool) http.RoundTripper {
 	dialTimeout := pc.Connect.Timeout
 	if dialTimeout <= 0 {
@@ -407,14 +410,19 @@ func buildTransport(pc config.UpstreamPool) http.RoundTripper {
 	if keepAlive <= 0 {
 		keepAlive = 30 * time.Second
 	}
+	responseHeaderTimeout := pc.Connect.ResponseHeaderTimeout
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = 30 * time.Second
+	}
 	base := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   dialTimeout,
 			KeepAlive: keepAlive,
 		}).DialContext,
-		MaxIdleConnsPerHost: 64,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		ForceAttemptHTTP2:     true,
 	}
 	if pc.Connect.HedgeTimeout > 0 {
 		return &origin.HedgedTransport{Inner: base, Timeout: pc.Connect.HedgeTimeout}

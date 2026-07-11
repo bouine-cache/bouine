@@ -232,6 +232,9 @@ func validateRouteCache(i int, rc RouteCache) error {
 	if rc.MaxFetchConcurrency < 0 {
 		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, rc.MaxFetchConcurrency)
 	}
+	if rc.FetchTimeout < 0 {
+		return fmt.Errorf("config: route %d fetch_timeout must be >= 0, got %v", i, rc.FetchTimeout)
+	}
 	return validateRefreshConfig(i, rc)
 }
 
@@ -277,6 +280,9 @@ func validatePoolDurations(p *UpstreamPool) error {
 	}
 	if p.Connect.KeepAlive < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.keep_alive must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
+	}
+	if p.Connect.ResponseHeaderTimeout < 0 {
+		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
 	}
 	if p.Connect.HedgeTimeout < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.hedge_timeout must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)

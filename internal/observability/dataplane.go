@@ -2,6 +2,7 @@ package observability
 
 import (
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,8 +25,8 @@ func HeaderVal(h http.Header, key string) string {
 }
 
 // DataPlaneMetrics holds the RED counters for the data-plane pipeline.
-// Injected by the engine; consumed by the pipeline and access-log
-// middleware.
+// Injected by the engine; consumed by the pipeline middleware which
+// records both metrics and access log entries.
 //
 // Stable.
 type DataPlaneMetrics struct {
@@ -34,6 +35,16 @@ type DataPlaneMetrics struct {
 	ResponseBytesOut *prometheus.CounterVec
 	VaryCapHits      prometheus.Counter // incremented when MaxVariants cap is hit
 	Rings            *Rings             // nil when dashboard is disabled
+	// accessLog receives structured access log entries. nil disables
+	// access logging (used in tests and when the operator sets log
+	// level above Info).
+	accessLog Logger
+	// accessSampleRate is the 1-in-N sampling rate for Info-level access
+	// log entries. 0 means always log (no sampling). The cache key is
+	// used for deterministic sampling so the same key is always logged
+	// or always skipped.
+	accessSampleRate uint64
+	accessCounter    atomic.Uint64
 	// Hot-tier storage gauges — updated on every Stats() poll by the engine.
 	HotStoreBytes     prometheus.Gauge
 	HotStoreEntries   prometheus.Gauge
@@ -130,6 +141,15 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
 		m.WALDroppedEntries, m.WALLastSyncTimestamp)
 	return m
+}
+
+// SetAccessLog configures the access logger and sampling rate for the
+// merged middleware. logger receives Warn for non-200 responses (always)
+// and Info for 200 responses (sampled 1-in-sampleRate by cache key).
+// sampleRate=0 disables sampling (every request is logged).
+func (m *DataPlaneMetrics) SetAccessLog(logger Logger, sampleRate uint64) {
+	m.accessLog = logger
+	m.accessSampleRate = sampleRate
 }
 
 // initCFPurgeMetrics creates the Cloudflare purge collectors on m.
@@ -333,11 +353,14 @@ func init() {
 	}
 }
 
-// Middleware wraps an http.Handler and records RED metrics for every
-// request. It sits between the access-log middleware and the pipeline
-// router. When a trace is active on the request context, the duration
-// histogram observation carries an exemplar with the trace_id so
-// Grafana can link high-latency buckets directly to a trace.
+// Middleware wraps an http.Handler and records RED metrics + structured
+// access log for every request. Metrics are always recorded; the access
+// log entry is sampled at the logger's configured rate (1-in-N for 200
+// OK, always for non-200).
+//
+// This merged middleware replaces the former separate accesslog + metrics
+// middleware pair, halving the ResponseWriter pool acquires and wrapper
+// layers on the Write path from two to one.
 func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -357,7 +380,8 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		// cache_result: normalise X-Cache to HIT/MISS/STALE/REVALIDATED/BYPASS.
 		// The cache handler writes these with direct map assignment using
 		// canonical keys, so direct map access avoids canonicalization.
-		cacheResult := normaliseCacheResult(HeaderVal(w.Header(), header.XCache))
+		xCache := HeaderVal(w.Header(), header.XCache)
+		cacheResult := normaliseCacheResult(xCache)
 		source := normaliseSource(HeaderVal(w.Header(), header.XCacheSource))
 
 		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, source, route).Inc()
@@ -382,8 +406,10 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 			Add(float64(sw.Bytes))
 
 		// Update ring buffers for the dashboard (if enabled).
-		if m.Rings != nil {
-			xCache := w.Header().Get(header.XCache)
+		// Skip ring recording on cache hits — hits are already counted by
+		// the Prometheus counter above, and the rings exist to surface
+		// miss/bypass/error patterns for dashboard insights.
+		if m.Rings != nil && xCache != "HIT" {
 			durMs := time.Since(start).Milliseconds()
 			m.Rings.Request.RecordRequest(xCache, sw.Status, durMs)
 			if route != "_default" {
@@ -395,7 +421,82 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 				m.Rings.HeaderRing.Sample(route, w.Header(), sw.Status)
 			}
 		}
+
+		// Access log: non-200 always logged at Warn; 200 sampled at Info.
+		// The attrs slice is only constructed when the record will actually
+		// be emitted, avoiding a 20-element heap allocation for the 99.9%
+		// of hit requests that are sampled out.
+		if m.accessLog != nil {
+			msg := accessLogMessage(xCache, sw.Status)
+			if sw.Status != http.StatusOK {
+				attrs := m.buildAccessLogAttrs(r, sw, xCache, start)
+				m.accessLog.Warn(msg, attrs...)
+			} else if m.shouldLogAccess(sw.Key) {
+				attrs := m.buildAccessLogAttrs(r, sw, xCache, start)
+				m.accessLog.Info(msg, attrs...)
+			}
+		}
 	})
+}
+
+// accessLogMessage returns a human-readable log message based on the
+// cache result and HTTP status code.
+func accessLogMessage(cacheResult string, status int) string {
+	if status != http.StatusOK {
+		return "request completed with error"
+	}
+	switch cacheResult {
+	case "HIT":
+		return "served cache hit"
+	case "MISS":
+		return "served cache miss"
+	case "BYPASS":
+		return "bypassed cache"
+	case "STALE":
+		return "served stale response"
+	case "REVALIDATED":
+		return "served revalidated response"
+	case "":
+		return "served uncached response"
+	default:
+		return "served response (unknown cache status)"
+	}
+}
+
+// buildAccessLogAttrs constructs the structured-log attribute slice for
+// an access log entry. Called only when the sampling decision is positive
+// or the status is non-200, so the 20-element []any allocation is avoided
+// for the vast majority of hit requests.
+func (m *DataPlaneMetrics) buildAccessLogAttrs(r *http.Request, sw *responsewriter.ResponseWriter, cacheResult string, start time.Time) []any {
+	attrs := []any{
+		"method", r.Method,
+		"host", r.Host,
+		"path", r.URL.Path,
+		"proto", r.Proto,
+		"status", sw.Status,
+		"bytes_out", sw.Bytes,
+		"dur_ms", time.Since(start).Milliseconds(),
+		"remote", r.RemoteAddr,
+		"cache_status", cacheResult,
+	}
+	if sw.Key != 0 {
+		attrs = append(attrs, "key", sw.Key)
+	}
+	return attrs
+}
+
+// shouldLogAccess returns true when this request should emit an Info-level
+// access log entry. Uses key-based deterministic sampling when a cache key
+// is available (same key always logged or always skipped), and counter-based
+// sampling as a fallback for requests without a cache key (bypass, no-route).
+func (m *DataPlaneMetrics) shouldLogAccess(key api.Key) bool {
+	if m.accessSampleRate == 0 {
+		return true
+	}
+	if key != 0 {
+		return uint64(key)%m.accessSampleRate == 0
+	}
+	return m.accessCounter.Add(1)%m.accessSampleRate == 0
 }
 
 // normaliseCacheResult maps X-Cache header values to a stable Prometheus

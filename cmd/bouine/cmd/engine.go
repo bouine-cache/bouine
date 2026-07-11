@@ -126,6 +126,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 	}
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
+	dpMetrics.SetAccessLog(e.logger, observability.DefaultKeySampleRate)
 
 	// Fall back to OTEL_EXPORTER_OTLP_ENDPOINT env var when the YAML
 	// config doesn't set tracing.endpoint. The chassis chart injects

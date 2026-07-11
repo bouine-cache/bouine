@@ -954,6 +954,20 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 	return v.(fetchResult)
 }
 
+// revalKeySuffix XORs the key with a constant to produce a singleflight
+// key that won't collide with regular fetches for the same cache key,
+// while still deduplicating concurrent revalidations for that key.
+const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
+
+func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult {
+	sfKey := strconv.FormatUint(uint64(key)^revalKeySuffix, 36)
+	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
+		res := h.doFetch(r)
+		return res, nil
+	})
+	return v.(fetchResult)
+}
+
 func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.Key) {
 	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
@@ -990,7 +1004,12 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
-	res := h.doFetch(revalReq)
+	// Collapse concurrent revalidations for the same key. Each concurrent
+	// request that finds the same stale object would otherwise fire its
+	// own conditional origin request. The singleflight key is suffixed
+	// with a constant to avoid colliding with regular fetch collapsing
+	// while still deduplicating revalidations for the same cache key.
+	res := h.collapsedRevalidate(revalReq, key)
 	if res.Err != nil {
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
@@ -1563,6 +1582,15 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	// AllowSetCookie controls whether responses with Set-Cookie are cached
 	// at all (gated above); it does not preserve Set-Cookie in the cache.
 	obj.Header.Del(header.SetCookie)
+	// Ensure Content-Length is set so cache hits don't fall back to chunked
+	// transfer encoding. Origins that use chunked encoding have their
+	// Transfer-Encoding stripped by Go's HTTP client, leaving no
+	// Content-Length on the stored response. Varnish computes this from
+	// the body; we do the same at store time.
+	if obj.Header.Get(header.ContentLength) == "" && obj.BodySize > 0 &&
+		obj.StatusCode != http.StatusNotModified {
+		obj.Header.Set(header.ContentLength, strconv.FormatInt(obj.BodySize, 10))
+	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid
 	} else if defaultSWR > 0 {

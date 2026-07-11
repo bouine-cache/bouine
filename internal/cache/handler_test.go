@@ -1169,8 +1169,8 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	}
 	// After Get, Hits=1 (visited bit flip). With minHits=2, the gate
 	// would block. But persist=3 should keep it alive for 3 more cycles.
-	// We pass the same obj to each doBackgroundRefresh — the 304 path
-	// copies stale.Hits, so Hits stays 1 < minHits=2 across all cycles.
+	// We pass staleHits=0 to each doBackgroundRefresh — the 304 path
+	// resets Hits to 0 and the gate checks staleHits (0 < minHits=2).
 
 	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)

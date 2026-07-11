@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func echoServer(t *testing.T) *httptest.Server {
@@ -174,5 +175,30 @@ func TestPool_ProxiesBody(t *testing.T) {
 	}
 	if got := rr.Body.String(); got != body {
 		t.Fatalf("body = %q, want %q", got, body)
+	}
+}
+
+func TestPool_ResponseHeaderTimeout(t *testing.T) {
+	t.Parallel()
+	// Origin that delays writing response headers beyond the transport's
+	// ResponseHeaderTimeout. The proxy's ErrorHandler must fire and
+	// return 502 — proving the timeout is wired into the transport.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	p := pool(t, srv.Listener.Addr().String())
+	transport := &http.Transport{
+		ResponseHeaderTimeout: 50 * time.Millisecond,
+	}
+	h := p.Handler(0, transport)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 from response header timeout, got %d", rr.Code)
 	}
 }

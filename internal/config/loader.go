@@ -273,6 +273,23 @@ func validateRefreshConfig(i int, rc RouteCache) error {
 	if rc.RefreshPersistCycles > 0 && rc.RefreshMinHits <= 0 {
 		return fmt.Errorf("config: route %d refresh_persist_cycles requires refresh_min_hits > 0", i)
 	}
+	if rc.RefreshMinScore < 0 {
+		return fmt.Errorf("config: route %d refresh_min_score must be >= 0, got %d", i, rc.RefreshMinScore)
+	}
+	if rc.RefreshMinScore > 0 && rc.RefreshMinHits <= 0 {
+		return fmt.Errorf("config: route %d refresh_min_score requires refresh_min_hits > 0", i)
+	}
+	if rc.RefreshMaxRPS < 0 || rc.RefreshMaxRPS > 10000 {
+		return fmt.Errorf("config: route %d refresh_max_rps must be 0 or 1-10000, got %d", i, rc.RefreshMaxRPS)
+	}
+	if rc.RefreshReactiveFirst {
+		if rc.StaleWhileRevalidate <= 0 {
+			return fmt.Errorf("config: route %d refresh_reactive_first requires stale_while_revalidate > 0", i)
+		}
+		if rc.RefreshMinHits <= 0 {
+			return fmt.Errorf("config: route %d refresh_reactive_first requires refresh_min_hits > 0", i)
+		}
+	}
 	return nil
 }
 

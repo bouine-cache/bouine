@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -222,6 +223,9 @@ type Handler struct {
 	refreshTimeout       time.Duration
 	refreshMinHits       int
 	refreshPersistCycles int
+	refreshMinScore      int64
+	refreshLimiter       *refreshRateLimiter
+	refreshReactiveFirst bool
 	refreshMetrics       observability.RefreshMetricsForRoute
 	routeName            string
 	done                 chan struct{}
@@ -347,6 +351,16 @@ type HandlerConfig struct {
 	// re-scheduling immediately. Requires refresh_min_hits > 0 to take
 	// effect.
 	RefreshPersistCycles int
+	// RefreshMinScore is the minimum refresh priority score (staleHits ×
+	// BodySize) required for re-scheduling. Zero disables the score gate.
+	RefreshMinScore int64
+	// RefreshMaxRPS caps background refresh fetches per second per route.
+	// Zero means no limit.
+	RefreshMaxRPS int
+	// RefreshReactiveFirst skips proactive refresh for new objects, relying
+	// on SWR to promote popular objects. Requires StaleWhileRevalidate > 0
+	// and RefreshMinHits > 0.
+	RefreshReactiveFirst bool
 	// RouteName labels refresh metrics. Set from the route's config name.
 	RouteName string
 	// RefreshMetrics records background refresh activity. Nil when the
@@ -382,6 +396,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshTimeout:       cfg.RefreshTimeout,
 		refreshMinHits:       cfg.RefreshMinHits,
 		refreshPersistCycles: cfg.RefreshPersistCycles,
+		refreshMinScore:      cfg.RefreshMinScore,
+		refreshReactiveFirst: cfg.RefreshReactiveFirst,
 		routeName:            cfg.RouteName,
 		done:                 make(chan struct{}),
 	}
@@ -414,6 +430,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 			h.lookupForRefresh,
 		)
 		h.scheduler.Start()
+		if cfg.RefreshMaxRPS > 0 {
+			h.refreshLimiter = newRefreshRateLimiter(cfg.RefreshMaxRPS)
+		}
 		if cfg.RefreshMetrics != nil && cfg.RouteName != "" {
 			h.refreshMetrics = cfg.RefreshMetrics.ForRoute(cfg.RouteName)
 		} else {
@@ -502,6 +521,15 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 		return
 	}
 
+	if h.refreshLimiter != nil && !h.refreshLimiter.Allow(time.Now()) {
+		delay := time.Duration(100+rand.IntN(400)) * time.Millisecond //nolint:gosec // G404: jitter for deferral, not crypto
+		h.scheduler.Schedule(key, time.Now().Add(delay))
+		h.refreshMetrics.IncSkips("rate_limited")
+		return
+	}
+
+	staleHits := h.store.WindowHits(key)
+
 	select {
 	case h.refreshSem <- struct{}{}:
 	default:
@@ -524,8 +552,6 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 		)
 		defer bgCancel()
 
-		// Cancel the refresh if the handler is shutting down so
-		// we don't call store.Put on a closed store.
 		go func() {
 			select {
 			case <-h.done:
@@ -534,7 +560,7 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 			}
 		}()
 
-		h.doBackgroundRefresh(bgCtx, key, obj)
+		h.doBackgroundRefresh(bgCtx, key, obj, staleHits)
 	}()
 }
 
@@ -542,7 +568,7 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 // object before its TTL expires. On 304, the TTL is refreshed in
 // place. On 200, the object is replaced. On error, the entry is
 // re-scheduled with backoff.
-func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *api.Object) {
+func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *api.Object, staleHits int64) {
 	entry := h.refreshRegistry.Lookup(key)
 	if entry == nil {
 		h.refreshMetrics.IncSkips("not_registered")
@@ -589,7 +615,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeObject(ctx, key, refreshed, req, true)
+		h.storeObject(ctx, key, refreshed, req, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
@@ -604,8 +630,8 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			return
 		}
 		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		obj.Hits = stale.Hits
-		h.storeObject(ctx, key, obj, req, true)
+		obj.Hits = 0
+		h.storeObject(ctx, key, obj, req, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
 		return
 	}
@@ -989,7 +1015,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeObject(r.Context(), key, refreshed, r, false)
+		h.storeObject(r.Context(), key, refreshed, r, false, 0)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
 	}
@@ -1010,9 +1036,10 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	refreshed := *stale
 	refreshed.Header = stale.Header.Clone()
 	refreshed.StoredAt = time.Now()
-	// Preserve hit count from the previous TTL window so the
-	// refresh_min_hits gate can evaluate popularity on re-schedule.
-	refreshed.Hits = stale.Hits
+	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
+	// eviction signal; the per-window popularity gate uses windowHits
+	// from the store, not Object.Hits.
+	refreshed.Hits = 0
 	MergeHeaders304(&refreshed, res.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
@@ -1057,6 +1084,8 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	revalReq := r.Clone(ctx)
 	ConditionalHeaders(revalReq, stale)
 
+	staleHits := h.store.WindowHits(key)
+
 	res := h.collapsedFetch(revalReq, key)
 	if res.Err != nil {
 		return
@@ -1064,7 +1093,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeObject(ctx, key, refreshed, r, false)
+		h.storeObject(ctx, key, refreshed, r, true, staleHits)
 		return
 	}
 
@@ -1076,7 +1105,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 			return
 		}
 		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeObject(ctx, key, obj, r, false)
+		h.storeObject(ctx, key, obj, r, true, staleHits)
 	}
 }
 
@@ -1125,10 +1154,10 @@ func (h *Handler) writeAndMaybeStore(
 			}
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-		h.storeObject(r.Context(), storeKey, obj, r, false)
+		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
 		if storeKey != primaryKey {
 			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			h.storeObject(r.Context(), primaryKey, primaryObj, r, false)
+			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)
 		}
 	}
 }
@@ -1295,7 +1324,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-	h.storeObject(r.Context(), key, obj, getReq, false)
+	h.storeObject(r.Context(), key, obj, getReq, false, 0)
 }
 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
@@ -1336,38 +1365,32 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 // scheduling is never skipped.
 //
 // isRefresh is true when the call originates from a background refresh
-// (doBackgroundRefresh). It enables the refresh_min_hits gate: if the
-// object accumulated fewer hits than refreshMinHits during its previous
-// TTL window, it is not re-scheduled and expires naturally. Foreground
-// stores pass false to ensure every object gets at least one refresh
-// cycle.
-func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool) {
+// (doBackgroundRefresh or doBackgroundRevalidate). It enables the
+// popularity gate: if the object accumulated fewer hits than
+// refreshMinHits during its previous TTL window (measured by staleHits
+// from the store's per-window counter), it is not re-scheduled and
+// expires naturally. Foreground stores pass false to ensure every
+// object gets at least one refresh cycle (unless reactive-first is
+// enabled).
+//
+// staleHits is the per-window hit count from the store's WindowHits
+// method, read before the refresh store. For non-refresh stores
+// (isRefresh=false), staleHits is 0 and unused.
+func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool, staleHits int64) {
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
-		// Skip negative-cached objects (404/405/410/501) — refreshing
-		// them proactively is surprising and wastes origin capacity.
 		if IsNegativeCacheable(obj.StatusCode) {
 			return
 		}
-		// In strong cluster mode, only the key owner schedules
-		// background refresh. Non-owners that fetched from origin
-		// (peer fetch failed) would waste origin requests.
 		if h.ownerFn != nil {
 			if _, isLocal := h.ownerFn(key); !isLocal {
 				return
 			}
 		}
-		// Popularity gate: skip re-scheduling for objects that were
-		// not accessed enough during their previous TTL window. Only
-		// applies to background refresh re-stores, not initial stores.
-		// Unregister the stale registry entry — the object stays in
-		// the cache but won't be refreshed, so the entry is dead weight.
-		if isRefresh && h.refreshMinHits > 0 && obj.Hits < uint64(h.refreshMinHits) {
-			// Persist: if the object has remaining persist cycles, keep
-			// it alive for more TTL windows. This bridges the gap
-			// between short TTL and long inter-access times without
-			// increasing the TTL itself. Each cycle decrements the
-			// counter; a popular refresh (Hits >= minHits) resets it.
+		if !isRefresh && h.refreshReactiveFirst {
+			return
+		}
+		if isRefresh && h.refreshMinHits > 0 && !h.shouldRefresh(staleHits, obj) {
 			if h.refreshPersistCycles > 0 && h.refreshRegistry.DecrementPersist(key) {
 				h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 				h.refreshMetrics.IncTotal("persist_cycle")
@@ -1386,6 +1409,19 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		h.refreshRegistry.Register(key, r, varyHeader, h.refreshPersistCycles)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 	}
+}
+
+// shouldRefresh returns true if the object passes both the hit-count and
+// score popularity gates. Returns false if either gate fails; the caller
+// handles persist-cycle logic.
+func (h *Handler) shouldRefresh(staleHits int64, obj *api.Object) bool {
+	if staleHits < int64(h.refreshMinHits) {
+		return false
+	}
+	if h.refreshMinScore > 0 && staleHits*obj.BodySize < h.refreshMinScore {
+		return false
+	}
+	return true
 }
 
 func (h *Handler) doFetch(r *http.Request) (res fetchResult) {

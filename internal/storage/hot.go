@@ -92,6 +92,12 @@ type hotEntry struct {
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
 	hasBackup bool
+	// windowHits is a per-TTL-window hit counter, incremented on every
+	// Get (both fast and slow paths). Unlike Object.Hits (which only
+	// increments on the SIEVE slow path), this is a true access count.
+	// Reset to 0 on every Put (new hotEntry created). Used by the cache
+	// layer's refresh popularity gate.
+	windowHits atomic.Int64
 }
 
 // evictionLog is a deferred log record collected under the shard lock
@@ -232,6 +238,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	s.mu.RLock()
 	e := s.entries[key]
 	if e != nil && e.sieve.Visited() {
+		e.windowHits.Add(1)
 		obj := e.obj
 		s.mu.RUnlock()
 		if h.matchesActiveBan(obj) {
@@ -259,6 +266,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 			return e.sieve
 		})
 		e.obj.Hits++
+		e.windowHits.Add(1)
 		obj = e.obj
 	}
 	s.mu.Unlock()
@@ -607,6 +615,22 @@ func (h *HotStore) Stats() api.Stats {
 	}
 }
 
+// WindowHits returns the per-window hit count for key, or 0 if the key
+// is not in the hot tier. Called by the cache layer during refresh to
+// evaluate the popularity gate. Objects in the warm tier only (not in
+// hot) return 0 — they are not being actively served from the hot tier.
+func (h *HotStore) WindowHits(key api.Key) int64 {
+	s := h.shard(key)
+	s.mu.RLock()
+	e := s.entries[key]
+	var n int64
+	if e != nil {
+		n = e.windowHits.Load()
+	}
+	s.mu.RUnlock()
+	return n
+}
+
 // Close stops the background sweeper and waits for it to exit.
 func (h *HotStore) Close(_ context.Context) error {
 	close(h.done)
@@ -705,7 +729,7 @@ func KeyHash(b []byte) api.Key {
 
 const (
 	objectStructSize    int64 = 256
-	hotEntrySize        int64 = 24
+	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).

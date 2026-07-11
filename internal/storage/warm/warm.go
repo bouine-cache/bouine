@@ -1271,7 +1271,6 @@ func (s *Store) Compact() error {
 	}
 	s.segs = fresh.segs
 	s.segByID = fresh.segByID
-	s.segByID = fresh.segByID
 	// Replace the index and rebuild the SIEVE list in append order.
 	// compactSegments returns keys in the order records were written to
 	// the new store (by segID then offset), so we can build the SIEVE list

@@ -17,7 +17,6 @@ import (
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/cluster"
 	"github.com/bouine-cache/bouine/internal/config"
-	"github.com/bouine-cache/bouine/internal/observability/accesslog"
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/internal/origin"
 	"github.com/bouine-cache/bouine/internal/server"
@@ -129,18 +128,16 @@ func listenPort(addr, defaultPort string) string {
 	return port
 }
 
-// buildHandler assembles the full L1–L8 data-plane stack for a single HTTP
-// listener. It delegates per-route cache and origin wiring to buildRouter, then
-// wraps the result with three middleware layers in order:
+// buildHandler assembles the full data-plane stack for a single HTTP
+// listener. The middleware chain is:
 //
-//  1. DataPlaneMetrics.Middleware — Prometheus counters and histograms (L2).
-//  2. tracing.HTTPMiddleware       — OpenTelemetry span for the pipeline layer.
-//  3. accesslog.Middleware         — structured JSON access log entry per request.
+//  1. tracing.HTTPMiddleware — single OTel span for the pipeline layer.
+//  2. DataPlaneMetrics.Middleware — Prometheus counters, histograms,
+//     ring buffers, and merged structured access log.
 func (e *engine) buildHandler(rs *runState) http.Handler {
 	router := e.buildRouter(rs)
 	metricsWrapped := rs.dpMetrics.Middleware(router)
-	tracedL2 := tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
-	return accesslog.Middleware(e.logger, tracedL2)
+	return tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
 }
 
 // buildPools constructs one origin.Pool per upstream_pools entry in the config.

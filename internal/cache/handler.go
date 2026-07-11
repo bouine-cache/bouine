@@ -693,10 +693,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// L4 span: cache engine layer.
-	ctx, span := tracing.StartSpan(r.Context(), "bouine.cache")
-	defer span.End()
-	r = r.WithContext(ctx)
+	// The bouine.pipeline span (created in builder.go) covers the full
+	// request lifecycle including the cache engine. A separate bouine.cache
+	// child span was removed — it covered ~200ns of work on hits and added
+	// a span creation + r.WithContext allocation per request with no
+	// additional tracing insight.
 
 	// Take a single timestamp; thread it through Evaluate and serve
 	// functions to avoid a second time.Now() syscall per hit.

@@ -13,6 +13,15 @@ spec:
   minReplicas: {{ .Values.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.maxReplicas }}
   metrics:
+    {{- if .Values.autoscaling.rpsTrigger }}
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .Values.autoscaling.rpsTrigger.metricName | default "bouine_requests_per_second" }}
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.rpsTrigger.averageValue | default "100" }}
+    {{- end }}
     {{- if .Values.autoscaling.cpuTrigger }}
     - type: Resource
       resource:
@@ -26,6 +35,13 @@ spec:
           {{- end }}
     {{- end }}
   behavior:
+    scaleUp:
+      stabilizationSeconds: {{ .Values.autoscaling.scaleUpStabilizationSeconds | default 120 }}
+      selectPolicy: Min
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
     scaleDown:
       stabilizationSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds | default 300 }}
       policies:

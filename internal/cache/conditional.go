@@ -60,7 +60,7 @@ func etagMatch(list, needle string) bool {
 		return strings.Trim(s, "\"")
 	}
 	needleNorm := norm(needle)
-	for _, tag := range strings.Split(list, ",") {
+	for tag := range strings.SplitSeq(list, ",") {
 		if norm(tag) == needleNorm {
 			return true
 		}
@@ -72,17 +72,14 @@ func etagMatch(list, needle string) bool {
 // object per RFC 9111 §3.2. The 304 response's headers update the
 // stored response, except for content-specific headers.
 func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
-	// Headers that MUST NOT be updated from a 304 (content-specific).
-	// Set-Cookie is excluded because SetValues joins multi-values with
-	// ", " which is non-conformant per RFC 9110 §5.2.
-	skip := map[string]bool{
-		header.ContentLength:    true,
-		header.ContentEncoding:  true,
-		header.TransferEncoding: true,
-		header.SetCookie:        true,
-	}
+	// Skipped headers are content-specific (RFC 9111 §3.2) and must not
+	// be updated from a 304. Set-Cookie is excluded because SetValues
+	// joins multi-values with ", " which is non-conformant per RFC 9110
+	// §5.2 and serving stale cookies is a security risk.
 	for k, vals := range resp304Header {
-		if skip[k] {
+		switch k {
+		case header.ContentLength, header.ContentEncoding,
+			header.TransferEncoding, header.SetCookie:
 			continue
 		}
 		stored.Header.SetValues(k, vals)

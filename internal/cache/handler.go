@@ -701,6 +701,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Take a single timestamp; thread it through Evaluate and serve
 	// functions to avoid a second time.Now() syscall per hit.
+	// time.Now() is required (not CoarseNow) because Fresh() compares
+	// against StoredAt which was set with nanosecond precision via
+	// time.Now() at store time. CoarseNow (1ms resolution, truncated)
+	// can produce now < StoredAt when both are in the same millisecond,
+	// causing a stale object to appear fresh.
 	now := time.Now()
 	key, obj, src := h.lookup(r)
 	if rw, ok := w.(*responsewriter.ResponseWriter); ok {

@@ -17,6 +17,11 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
+// broadcastTimeout is the per-call timeout for HTTP fan-out. Enforced
+// via context.WithTimeout so the shared client has no global Timeout
+// (which would cancel in-flight requests across all goroutines).
+const broadcastTimeout = 2 * time.Second
+
 // countPeers returns the number of live peers excluding the local node.
 func countPeers(members []api.PeerInfo) int {
 	n := len(members)
@@ -34,6 +39,7 @@ func countPeers(members []api.PeerInfo) int {
 type Broadcaster struct {
 	cluster *Cluster
 	fetcher *PeerFetcher
+	client  *http.Client // shared across all postBinary calls for connection reuse
 	seq     atomic.Uint64
 	logger  observability.Logger
 	token   string
@@ -49,9 +55,21 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 	if len(token) > 0 {
 		tok = token[0]
 	}
+	// Share the fetcher's transport when available so broadcast HTTP
+	// fan-out reuses the same connection pool. When no fetcher exists
+	// (eventual-only mode, tests), create a standalone tuned transport.
+	var client *http.Client
+	if fetcher != nil && fetcher.client != nil {
+		// Reuse the transport but not the Timeout — broadcast needs its
+		// own per-call timeout via context, not a global client timeout.
+		client = &http.Client{Transport: fetcher.client.Transport}
+	} else {
+		client = &http.Client{Transport: newClusterTransport(nil)}
+	}
 	return &Broadcaster{
 		cluster: c,
 		fetcher: fetcher,
+		client:  client,
 		logger:  logger,
 		token:   tok,
 		mode:    c.Mode(),
@@ -203,6 +221,9 @@ func broadcastFailureReason(err error) string {
 }
 
 func (b *Broadcaster) postBinary(ctx context.Context, addr, path string, body []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, broadcastTimeout)
+	defer cancel()
+
 	url := "http://" + addr + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url,
 		bytes.NewReader(body))
@@ -214,8 +235,7 @@ func (b *Broadcaster) postBinary(ctx context.Context, addr, path string, body []
 		req.Header.Set(header.Authorization, "Bearer "+b.token)
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := b.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("broadcast %s%s: %w", addr, path, err)
 	}

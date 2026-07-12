@@ -429,9 +429,9 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 		return nil, nil
 	}
 
-	seg.mu.Lock()
-	defer seg.mu.Unlock()
-
+	// readRecordAt uses os.File.ReadAt (pread), so it does not mutate the
+	// shared file offset and does not need seg.mu. s.mu.RLock is still
+	// held to keep Compact from closing the file descriptor mid-read.
 	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
@@ -574,7 +574,8 @@ func (s *Store) RecomputeStats() error {
 //
 // s.mu.RLock is held across the full operation (segment lookup + file
 // read) so that Compact cannot close file handles while a read is in
-// flight.
+// flight. The per-segment mutex is not needed: readRecordAt uses
+// os.File.ReadAt (pread), which does not mutate the shared file offset.
 func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -589,9 +590,6 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 	if seg == nil {
 		return nil, fmt.Errorf("warm: segment %d not found", segID)
 	}
-
-	seg.mu.Lock()
-	defer seg.mu.Unlock()
 
 	rec, err := readRecordAt(seg.f, offset, segID)
 	if err != nil {

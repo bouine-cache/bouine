@@ -85,21 +85,6 @@ type Object struct {
 	// time. Pre-parsed once so the read path never re-parses it per request.
 	// Not serialized (re-derived from Header on warm-tier load).
 	OriginAge time.Duration `json:"-"`
-
-	// SerializedHead is the pre-rendered HTTP response head (status line +
-	// static headers + \r\n\r\n) ready to write directly to the client on
-	// a cache hit, bypassing http.Header map operations and
-	// http.response.WriteHeader serialization.
-	//
-	// Excludes the dynamic headers that bouine sets per-request: Age,
-	// X-Cache, X-Cache-Source, Warning. These are appended as raw bytes
-	// at serve time.
-	//
-	// Also excludes internal headers (X-Bouine-Path, X-Bouine-Host) that
-	// are stripped before serving.
-	//
-	// Not serialized — re-derived from Header after codec decode.
-	SerializedHead []byte `json:"-"`
 }
 
 // Fresh reports whether the object is still within its freshness lifetime

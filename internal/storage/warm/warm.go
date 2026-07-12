@@ -310,10 +310,7 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	defer seg.mu.Unlock()
 
 	off := seg.size
-	if _, err := seg.f.Seek(off, io.SeekStart); err != nil {
-		return 0, 0, fmt.Errorf("warm: seek: %w", err)
-	}
-	if err := writeRecord(seg.f, magicLive, key, body); err != nil {
+	if err := writeRecordAt(seg.f, off, magicLive, key, body); err != nil {
 		return 0, 0, fmt.Errorf("warm: write: %w", err)
 	}
 	seg.size += recSize
@@ -357,10 +354,8 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 
-	if _, err := seg.f.Seek(seg.size, io.SeekStart); err != nil {
-		return 0, fmt.Errorf("warm: seek: %w", err)
-	}
-	if err := writeRecord(seg.f, magicDead, key, nil); err != nil {
+	off := seg.size
+	if err := writeRecordAt(seg.f, off, magicDead, key, nil); err != nil {
 		return 0, fmt.Errorf("warm: tombstone: %w", err)
 	}
 	recSize := int64(HeaderLen + FooterLen)
@@ -781,11 +776,8 @@ func (s *Store) evictOne() (uint64, bool) {
 	// rebuildIndexFromScan honors (tombstone applied first, then the
 	// later live record wins). On failure, restore the SIEVE entry and
 	// index entry so the victim is not lost.
-	if _, err := seg.f.Seek(seg.size, io.SeekStart); err != nil {
-		s.restoreSIEVEEntry(victimKey, victimLoc)
-		return 0, false
-	}
-	if err := writeRecord(seg.f, magicDead, victimKey, nil); err != nil {
+	off := seg.size
+	if err := writeRecordAt(seg.f, off, magicDead, victimKey, nil); err != nil {
 		s.restoreSIEVEEntry(victimKey, victimLoc)
 		return 0, false
 	}
@@ -1026,7 +1018,7 @@ func segName(id int) string {
 	return fmt.Sprintf("%06d%s", id, segExt)
 }
 
-func writeRecord(w io.Writer, magic uint32, key uint64, body []byte) error {
+func writeRecordAt(f *os.File, offset int64, magic uint32, key uint64, body []byte) error {
 	hdrPtr := recordHdrPool.Get().(*[]byte)
 	hdr := *hdrPtr
 	defer recordHdrPool.Put(hdrPtr)
@@ -1034,30 +1026,44 @@ func writeRecord(w io.Writer, magic uint32, key uint64, body []byte) error {
 	binary.LittleEndian.PutUint64(hdr[4:12], key)
 	binary.LittleEndian.PutUint32(hdr[12:16], uint32(len(body))) //nolint:gosec // body capped by segment size
 
-	crc := crc32.New(crcTable)
-	if _, err := crc.Write(hdr); err != nil {
-		return err
-	}
+	crc := crc32.Update(0, crcTable, hdr)
 	if len(body) > 0 {
-		if _, err := crc.Write(body); err != nil {
-			return err
-		}
+		crc = crc32.Update(crc, crcTable, body)
 	}
-
 	footPtr := recordFootPool.Get().(*[]byte)
 	foot := *footPtr
 	defer recordFootPool.Put(footPtr)
-	binary.LittleEndian.PutUint32(foot, crc.Sum32())
+	binary.LittleEndian.PutUint32(foot, crc)
 
-	if _, err := w.Write(hdr); err != nil {
+	var iov [3][]byte
+	iov[0] = hdr
+	nbuf := 1
+	if len(body) > 0 {
+		iov[nbuf] = body
+		nbuf++
+	}
+	iov[nbuf] = foot
+	nbuf++
+	expected := len(hdr) + len(body) + len(foot)
+	n, err := platform.Pwritev(int(f.Fd()), iov[:nbuf], offset)
+	if err == nil && n == expected {
+		return nil
+	}
+	if n != 0 {
+		return io.ErrShortWrite
+	}
+
+	if _, err := f.WriteAt(hdr, offset); err != nil {
 		return err
 	}
+	off := offset + int64(len(hdr))
 	if len(body) > 0 {
-		if _, err := w.Write(body); err != nil {
+		if _, err := f.WriteAt(body, off); err != nil {
 			return err
 		}
+		off += int64(len(body))
 	}
-	if _, err := w.Write(foot); err != nil {
+	if _, err := f.WriteAt(foot, off); err != nil {
 		return err
 	}
 	return nil

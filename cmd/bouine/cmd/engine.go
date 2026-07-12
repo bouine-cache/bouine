@@ -592,12 +592,16 @@ func insightsHeaderAudit(rs *runState) func() map[string]observability.HeaderAud
 }
 
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *runState) {
+	tcpFastOpen := boolDefault(e.cfg.Listen.TCPFastOpen, true)
+	tcpDeferAccept := boolDefault(e.cfg.Listen.TCPDeferAccept, true)
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:           e.cfg.Listen.HTTP,
 			Handler:        handler,
 			Logger:         e.logger,
 			MaxConnections: e.cfg.Listen.MaxConnections,
+			TCPFastOpen:    tcpFastOpen,
+			TCPDeferAccept: tcpDeferAccept,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -615,10 +619,19 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			Logger:         e.logger,
 			TLSConfig:      tlsCfg,
 			MaxConnections: e.cfg.Listen.MaxConnections,
+			TCPFastOpen:    tcpFastOpen,
+			TCPDeferAccept: tcpDeferAccept,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)
 	}
+}
+
+func boolDefault(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
 }
 
 func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin.Pool) {

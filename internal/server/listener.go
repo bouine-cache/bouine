@@ -36,26 +36,29 @@ const safetyNetWriteTimeout = 5 * time.Minute
 // listener socket: TCP_FASTOPEN (data in SYN, -1 RTT) and
 // TCP_DEFER_ACCEPT (defer accept until data arrives). Both are no-ops
 // on non-Linux platforms via the platform package.
-func setSocketOptions(network, address string, c syscall.RawConn) error {
-	var sockErr error
-	err := c.Control(func(fd uintptr) {
-		// TCP_FASTOPEN allows data in the SYN packet, saving 1 RTT
-		// for the first request on a new connection.
-		if e := platform.SetTCPFastOpen(int(fd), 16); e != nil {
-			sockErr = e
-			return
+func setSocketOptions(log observability.Logger, fastOpen, deferAccept bool) func(string, string, syscall.RawConn) error {
+	return func(network, address string, c syscall.RawConn) error {
+		var fatalErr error
+		if err := c.Control(func(fd uintptr) {
+			if fastOpen {
+				if err := platform.SetTCPFastOpen(int(fd), 16); err != nil {
+					log.Warn("listener socket option failed", "option", "tcp_fast_open", "error", err)
+				} else {
+					log.Info("listener socket option enabled", "option", "tcp_fast_open")
+				}
+			}
+			if deferAccept {
+				if err := platform.SetTCPDeferAccept(int(fd), 1); err != nil {
+					log.Warn("listener socket option failed", "option", "tcp_defer_accept", "error", err)
+				} else {
+					log.Info("listener socket option enabled", "option", "tcp_defer_accept")
+				}
+			}
+		}); err != nil {
+			fatalErr = err
 		}
-		// TCP_DEFER_ACCEPT tells the kernel to not wake the acceptor
-		// until data arrives, avoiding a wakeup for the bare SYN/ACK.
-		if e := platform.SetTCPDeferAccept(int(fd), 1); e != nil {
-			// Non-fatal: some kernels/configs may reject this.
-			sockErr = nil
-		}
-	})
-	if err != nil {
-		return err
+		return fatalErr
 	}
-	return sockErr
 }
 
 // ListenerConfig controls a single listener.
@@ -70,6 +73,8 @@ type ListenerConfig struct {
 	Logger         observability.Logger
 	TLSConfig      *tls.Config
 	MaxConnections int
+	TCPFastOpen    bool
+	TCPDeferAccept bool
 }
 
 // Listener wraps a net/http Server with lifecycle methods matching the
@@ -77,11 +82,13 @@ type ListenerConfig struct {
 //
 // Stable.
 type Listener struct {
-	inner    *http.Server
-	name     string
-	logger   observability.Logger
-	resolved atomic.Value // stores string
-	maxConns int
+	inner          *http.Server
+	name           string
+	logger         observability.Logger
+	resolved       atomic.Value // stores string
+	maxConns       int
+	tcpFastOpen    bool
+	tcpDeferAccept bool
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
@@ -104,7 +111,8 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Listener{inner: srv, name: "http", logger: cfg.Logger, maxConns: cfg.MaxConnections}
+	return &Listener{inner: srv, name: "http", logger: cfg.Logger, maxConns: cfg.MaxConnections,
+		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept}
 }
 
 // NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener.
@@ -132,7 +140,8 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-	return &Listener{inner: srv, name: "https", logger: cfg.Logger, maxConns: cfg.MaxConnections}
+	return &Listener{inner: srv, name: "https", logger: cfg.Logger, maxConns: cfg.MaxConnections,
+		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept}
 }
 
 // Serve starts the listener and blocks until ctx is cancelled.
@@ -140,7 +149,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 // Stable.
 func (s *Listener) Serve(ctx context.Context) error {
 	lc := net.ListenConfig{
-		Control: setSocketOptions,
+		Control: setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept),
 	}
 	ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
 	if err != nil {

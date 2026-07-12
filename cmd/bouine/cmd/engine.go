@@ -87,13 +87,15 @@ type invalidationOps struct {
 }
 
 func (e *engine) run(ctx context.Context) error {
-	// Set GOMAXPROCS from cgroup CPU quota on Linux. Prevents Go
-	// scheduler from over-creating OS threads in K8s pods with CPU
-	// limits (e.g. --cpus=2 on a 64-core host). No-op on non-Linux.
-	if n := platform.EffectiveGOMAXPROCS(); n > 0 && n != runtime.GOMAXPROCS(0) {
-		runtime.GOMAXPROCS(n)
-		e.logger.Info("set GOMAXPROCS from cgroup quota",
-			"value", n, "num_cpu", runtime.NumCPU())
+	// Set GOMAXPROCS from cgroup CPU quota on Linux unless the operator
+	// explicitly configured GOMAXPROCS. Prevents Go scheduler from
+	// over-creating OS threads in K8s pods with CPU limits.
+	if os.Getenv("GOMAXPROCS") == "" {
+		if n := platform.EffectiveGOMAXPROCS(); n > 0 && n != runtime.GOMAXPROCS(0) {
+			runtime.GOMAXPROCS(n)
+			e.logger.Info("set GOMAXPROCS from cgroup quota",
+				"value", n, "num_cpu", runtime.NumCPU())
+		}
 	}
 
 	rs, shutdownTracer, err := e.initSubsystems(ctx)

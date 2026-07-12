@@ -326,14 +326,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 280, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// objectStructSize: 256, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 280 + 32 + 32 + 22 +
+	want := int64(5) + 256 + 32 + 32 + 22 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)

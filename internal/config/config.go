@@ -52,6 +52,12 @@ type Listen struct {
 	Admin          string `yaml:"admin,omitempty" json:"admin,omitempty"`
 	Cluster        string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
 	MaxConnections int    `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// TCPFastOpen enables Linux TCP_FASTOPEN on data-plane listeners.
+	// nil defaults to true on Linux and no-op on other platforms.
+	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
+	// TCPDeferAccept enables Linux TCP_DEFER_ACCEPT on data-plane
+	// listeners. nil defaults to true on Linux and no-op elsewhere.
+	TCPDeferAccept *bool `yaml:"tcp_defer_accept,omitempty" json:"tcp_defer_accept,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are

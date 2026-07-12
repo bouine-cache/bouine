@@ -4,12 +4,18 @@ package platform
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
+)
+
+var (
+	cgroupRoot         = "/sys/fs/cgroup"
+	procSelfCgroupPath = "/proc/self/cgroup"
 )
 
 // CoarseNow returns a wall-clock timestamp with ~1ms resolution using
@@ -85,10 +91,54 @@ func EffectiveGOMAXPROCS() int {
 	return runtime.NumCPU()
 }
 
-// cgroupV2CPUs reads the cgroup v2 CPU quota from /sys/fs/cgroup/cpu.max.
-// Returns (n, true) if a quota was found, (0, false) otherwise.
 func cgroupV2CPUs() (int, bool) {
-	data, err := os.ReadFile("/sys/fs/cgroup/cpu.max")
+	path := filepath.Join(cgroupRoot, cgroupPath(""), "cpu.max")
+	return readCPUQuota(path)
+}
+
+func cgroupV1CPUs() (int, bool) {
+	path := cgroupPath("cpu")
+	if path == "" {
+		path = cgroupPath("cpu,cpuacct")
+	}
+	if path == "" {
+		return 0, false
+	}
+	quota, err := readCgroupInt(filepath.Join(cgroupRoot, path, "cpu.cfs_quota_us"))
+	if err != nil || quota <= 0 {
+		return 0, false
+	}
+	period, err := readCgroupInt(filepath.Join(cgroupRoot, path, "cpu.cfs_period_us"))
+	if err != nil || period <= 0 {
+		return 0, false
+	}
+	return computeCPUs(quota, period), true
+}
+
+func cgroupPath(controller string) string {
+	data, err := os.ReadFile(procSelfCgroupPath) //nolint:gosec // package var points to /proc/self/cgroup in production
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		if controller == "" && parts[1] == "" {
+			return strings.TrimPrefix(parts[2], "/")
+		}
+		for c := range strings.SplitSeq(parts[1], ",") {
+			if c == controller {
+				return strings.TrimPrefix(parts[2], "/")
+			}
+		}
+	}
+	return ""
+}
+
+func readCPUQuota(path string) (int, bool) {
+	data, err := os.ReadFile(path) //nolint:gosec // path derived from cgroup root and /proc/self/cgroup
 	if err != nil {
 		return 0, false
 	}
@@ -107,21 +157,6 @@ func cgroupV2CPUs() (int, bool) {
 	return computeCPUs(quota, period), true
 }
 
-// cgroupV1CPUs reads the cgroup v1 CPU quota from
-// /sys/fs/cgroup/cpu/cpu.cfs_quota_us and cpu.cfs_period_us.
-func cgroupV1CPUs() (int, bool) {
-	quota, err := readCgroupV1Int("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") //nolint:gosec // hardcoded path
-	if err != nil || quota <= 0 {
-		return 0, false
-	}
-	period, err := readCgroupV1Int("/sys/fs/cgroup/cpu/cpu.cfs_period_us") //nolint:gosec // hardcoded path
-	if err != nil || period <= 0 {
-		return 0, false
-	}
-	return computeCPUs(quota, period), true
-}
-
-// computeCPUs returns ceil(quota/period), minimum 1.
 func computeCPUs(quota, period int64) int {
 	n := int(quota / period)
 	if quota%period != 0 {
@@ -133,9 +168,8 @@ func computeCPUs(quota, period int64) int {
 	return n
 }
 
-// readCgroupV1Int reads a single int from a cgroup v1 file.
-func readCgroupV1Int(path string) (int64, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is hardcoded by caller
+func readCgroupInt(path string) (int64, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path derived from cgroup root and /proc/self/cgroup
 	if err != nil {
 		return 0, err
 	}

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"net/http"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func BenchmarkHotStore_Get_Hit(b *testing.B) {
@@ -35,12 +37,21 @@ func BenchmarkHotStore_Get_Miss(b *testing.B) {
 
 func BenchmarkHotStore_Put(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	hdr := header.FromHTTP(http.Header{header.ContentType: {"text/plain"}})
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := range b.N {
 		k := api.Key(i)
-		_ = s.Put(context.Background(), k, obj(k, 1024))
+		_ = s.Put(context.Background(), k, &api.Object{
+			Key:        k,
+			StatusCode: 200,
+			Header:     hdr,
+			Body:       make([]byte, 1024),
+			BodySize:   1024,
+			StoredAt:   time.Now(),
+			TTL:        time.Minute,
+		})
 	}
 }
 

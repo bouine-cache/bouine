@@ -34,62 +34,80 @@ func BuildKeyFromURL(rawURL string) api.Key {
 // BuildKey constructs the canonical primary cache key from a request.
 // The key is deterministic and stable across nodes.
 //
-// Zero-alloc on the hot path: uses a 4 KB stack buffer. If the
-// canonical key exceeds 4 KB (rare — the project caps URLs at 8 KiB),
-// it falls back to a heap buffer.
+// Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
+// canonical key exceeds 512 bytes (rare — the project caps URLs at 8 KiB),
+// it falls back to a heap buffer via buildKeyHeap.
 func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
 	var skipSet map[string]bool
 	if len(skip) > 0 {
 		skipSet = skip[0]
 	}
 
-	var stack [4096]byte
-	n := buildKeyInto(stack[:], r, skipSet)
-	if n <= len(stack) {
-		return api.Key(xxhash.Sum64(stack[:n]))
-	}
-
-	// Overflow: redo with a heap buffer sized to fit.
-	heap := make([]byte, n)
-	buildKeyInto(heap, r, skipSet)
-	return api.Key(xxhash.Sum64(heap))
-}
-
-// buildKeyInto writes the canonical key bytes into dst and returns the
-// total number of bytes that the canonical key occupies. If the key
-// exceeds len(dst), the content is truncated but the returned length
-// reflects the full canonical key size, allowing the caller to detect
-// overflow and reallocate.
-func buildKeyInto(dst []byte, r *http.Request, skipSet map[string]bool) int {
+	var buf [512]byte
 	n := 0
 
 	// Scheme.
 	if r.TLS != nil {
-		n += copyOverflow(dst, n, "https|")
+		n += copyOverflow(buf[:], n, "https|")
 	} else {
-		n += copyOverflow(dst, n, "http|")
+		n += copyOverflow(buf[:], n, "http|")
 	}
 
 	// Host (canonical).
-	n = appendCanonicalHost(dst, n, r.Host)
-	n = appendByte(dst, n, '|')
+	n = appendCanonicalHost(buf[:], n, r.Host)
+	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
-	n = appendCanonicalPath(dst, n, r.URL)
-	n = appendByte(dst, n, '|')
+	n = appendCanonicalPath(buf[:], n, r.URL)
+	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	n = appendCanonicalQuery(dst, n, r.URL, skipSet)
-	n = appendByte(dst, n, '|')
+	n = appendCanonicalQuery(buf[:], n, r.URL, skipSet)
+	n = appendByte(buf[:], n, '|')
 
 	// Method (HEAD→GET).
 	if r.Method == http.MethodHead {
-		n += copyOverflow(dst, n, http.MethodGet)
+		n += copyOverflow(buf[:], n, http.MethodGet)
 	} else {
-		n += copyOverflow(dst, n, r.Method)
+		n += copyOverflow(buf[:], n, r.Method)
 	}
 
-	return n
+	if n <= len(buf) {
+		return api.Key(xxhash.Sum64(buf[:n]))
+	}
+
+	// Overflow: redo with a heap buffer sized to fit.
+	return buildKeyHeap(r, skipSet, n)
+}
+
+// buildKeyHeap handles the rare case where the canonical key exceeds the
+// 512-byte stack buffer. It allocates a heap buffer and rebuilds the key.
+func buildKeyHeap(r *http.Request, skipSet map[string]bool, n int) api.Key {
+	heap := make([]byte, n)
+	n = 0
+
+	if r.TLS != nil {
+		n += copyOverflow(heap, n, "https|")
+	} else {
+		n += copyOverflow(heap, n, "http|")
+	}
+
+	n = appendCanonicalHost(heap, n, r.Host)
+	n = appendByte(heap, n, '|')
+
+	n = appendCanonicalPath(heap, n, r.URL)
+	n = appendByte(heap, n, '|')
+
+	n = appendCanonicalQuery(heap, n, r.URL, skipSet)
+	n = appendByte(heap, n, '|')
+
+	if r.Method == http.MethodHead {
+		n += copyOverflow(heap, n, http.MethodGet)
+	} else {
+		n += copyOverflow(heap, n, r.Method)
+	}
+
+	return api.Key(xxhash.Sum64(heap[:n]))
 }
 
 // appendByte writes a single byte at offset n into dst. If n is past

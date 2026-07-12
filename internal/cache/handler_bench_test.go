@@ -129,8 +129,8 @@ func BenchmarkBuildKey(b *testing.B) {
 }
 
 func BenchmarkBuildKey_LongURL(b *testing.B) {
-	// Exercises the heap fallback path: canonical key exceeds the 4 KB
-	// stack buffer. This URL is ~5 KB of path + query.
+	// Exercises the heap fallback path: canonical key exceeds the
+	// 512-byte stack buffer. This URL is ~5 KB of path + query.
 	longPath := strings.Repeat("a", 5000)
 	req := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1&c=3&d=4", nil)
 

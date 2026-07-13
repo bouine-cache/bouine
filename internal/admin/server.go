@@ -96,6 +96,24 @@ type Config struct {
 	PprofEnabled bool
 }
 
+// swapHandler is an atomic wrapper around http.Handler that allows the
+// handler to be replaced at runtime without restarting the server. This
+// is used during startup: a minimal handler (healthz/readyz only) is
+// installed first so K8s probes can reach the admin port before
+// subsystems finish loading. The full admin handler is swapped in once
+// initSubsystems completes.
+type swapHandler struct {
+	h atomic.Value // http.Handler
+}
+
+func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.h.Load().(http.Handler).ServeHTTP(w, r)
+}
+
+func (s *swapHandler) Store(h http.Handler) {
+	s.h.Store(h)
+}
+
 // Server is the admin HTTP server with lifecycle methods matching the
 // supervised-group contract.
 //
@@ -103,7 +121,54 @@ type Config struct {
 type Server struct {
 	inner    *http.Server
 	cfg      Config
+	swap     *swapHandler // non-nil when created via NewMinimal
 	resolved atomic.Value // stores string
+}
+
+// NewMinimal creates an admin server with only healthz, readyz, and
+// version routes. The handler can be replaced at runtime via SwapHandler,
+// allowing the full admin routes to be installed after subsystem
+// initialization without rebinding the listener.
+//
+// Unstable.
+func NewMinimal(addr string, readyFn func() bool, logger observability.Logger) *Server {
+	if addr == "" {
+		addr = ":9000"
+	}
+	logger = observability.ResolveLogger(logger)
+
+	mux := http.NewServeMux()
+	s := &Server{
+		cfg: Config{Addr: addr, ReadyFn: readyFn, Logger: logger},
+		inner: &http.Server{
+			Addr:              addr,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       5 * time.Second,
+			WriteTimeout:      5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		},
+	}
+	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.HandleFunc("GET /version", s.version)
+
+	sh := &swapHandler{}
+	sh.Store(mux)
+	s.swap = sh
+	s.inner.Handler = sh
+
+	return s
+}
+
+// SwapHandler atomically replaces the server's handler. Only valid for
+// servers created via NewMinimal. Calling SwapHandler on a server created
+// via New is a no-op.
+//
+// Unstable.
+func (s *Server) SwapHandler(h http.Handler) {
+	if s.swap != nil {
+		s.swap.Store(h)
+	}
 }
 
 // New constructs the admin server. It does not start listening; call

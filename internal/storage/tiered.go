@@ -69,6 +69,8 @@ type TieredStore struct {
 	done chan struct{}
 	// compactWg tracks the compaction goroutine for join-on-close.
 	compactWg sync.WaitGroup
+	// compactStartupDelay delays the first compaction after startup.
+	compactStartupDelay time.Duration
 	// syncWg tracks the warm sync goroutine for join-on-close.
 	syncWg sync.WaitGroup
 }
@@ -105,6 +107,12 @@ type TieredConfig struct {
 	// Default 100ms. Set to -1 for synchronous mode (per-entry fsync,
 	// same as pre-ADR-0024 behavior). See ADR-0024.
 	WALSyncInterval time.Duration
+	// CompactStartupDelay delays the first compaction check after
+	// startup. Compaction scans all segments and can take seconds with
+	// millions of keys — running it during startup (when WAL replay,
+	// cluster join, and initial traffic compete for I/O) causes probe
+	// timeouts and CrashLoopBackOff. Default 5 minutes.
+	CompactStartupDelay time.Duration
 }
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
@@ -135,14 +143,15 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	}
 
 	ts := &TieredStore{
-		bodyThreshold:     cfg.BodyThreshold,
-		warmSyncInterval:  warmSyncInterval,
-		warmSyncBatchSize: cfg.WarmSyncBatchSize,
-		tombstoneQueue:    make(chan api.Key, 4096),
-		warmEvictQueue:    make(chan api.Key, 4096),
-		done:              make(chan struct{}),
-		logger:            cfg.Logger,
-		walSyncInterval:   walSyncInterval,
+		bodyThreshold:       cfg.BodyThreshold,
+		warmSyncInterval:    warmSyncInterval,
+		warmSyncBatchSize:   cfg.WarmSyncBatchSize,
+		tombstoneQueue:      make(chan api.Key, 4096),
+		warmEvictQueue:      make(chan api.Key, 4096),
+		done:                make(chan struct{}),
+		logger:              cfg.Logger,
+		walSyncInterval:     walSyncInterval,
+		compactStartupDelay: cfg.CompactStartupDelay,
 	}
 
 	// Wire the eviction callback so backed evictions enqueue
@@ -214,8 +223,11 @@ func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
 }
 
 // initWAL opens the WAL, replays it to rebuild the warm-tier index, and
-// falls back to a segment scan if the replayed index is empty. Extracted
-// from NewTieredStore to keep cyclomatic complexity under the linter limit.
+// falls back to a segment scan if the replayed index is empty. When the
+// WAL contains v2 entries (opPutV2 with record size), the index is
+// populated with size information directly, and RecomputeStats is skipped
+// — eliminating the multi-second segment scan on startup with millions of
+// keys. v1-only WALs fall back to RecomputeStats as before.
 func (t *TieredStore) initWAL(walDir string) error {
 	t.walPath = walDir
 	l, err := wal.OpenAsync(walDir, t.walSyncInterval)
@@ -226,10 +238,16 @@ func (t *TieredStore) initWAL(walDir string) error {
 	if t.warm == nil {
 		return nil
 	}
+	allHaveSize := true
 	rErr := wal.Replay(walDir, func(e wal.Entry) error {
 		switch {
 		case e.IsPut():
-			t.warm.SetIndex(e.Key, int(e.SegID), e.Offset)
+			if e.HasSize() {
+				t.warm.SetIndexWithSize(e.Key, int(e.SegID), e.Offset, e.Size)
+			} else {
+				t.warm.SetIndex(e.Key, int(e.SegID), e.Offset)
+				allHaveSize = false
+			}
 		case e.IsDelete():
 			t.warm.DelIndex(e.Key)
 		}
@@ -254,6 +272,15 @@ func (t *TieredStore) initWAL(walDir string) error {
 		if err := t.rebuildIndexFromScan(); err != nil {
 			t.logger.Warn("segment scan index rebuild failed", "error", err)
 		}
+		// rebuildIndexFromScan populates sizes, so we can skip RecomputeStats.
+		return nil
+	}
+	// Skip RecomputeStats when all WAL entries had size (v2 format).
+	// This is the key startup optimization: with v2 WAL, we avoid a full
+	// segment scan that takes seconds with millions of keys.
+	if allHaveSize && t.warm.IndexLen() > 0 {
+		t.warm.RecomputeStatsFromIndex()
+		return nil
 	}
 	if err := t.warm.RecomputeStats(); err != nil {
 		t.logger.Warn("warm-tier stats recompute failed; counters may be stale",
@@ -356,7 +383,8 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 				return fmt.Errorf("warm: sync before wal append: %w", err)
 			}
 			t.walMu.Lock()
-			_ = t.wal.Enqueue(wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
+			recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
+			_ = t.wal.Enqueue(wal.PutEntryWithSize(uint64(key), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 			t.walMu.Unlock()
 			return nil
 		}
@@ -493,13 +521,25 @@ func (t *TieredStore) Stats() api.Stats {
 // so it stays bounded and restart replay is fast.
 func (t *TieredStore) compactLoop() {
 	defer t.compactWg.Done()
+	startupDelay := t.compactStartupDelay
+	if startupDelay <= 0 {
+		startupDelay = 5 * time.Minute
+	}
+	startupTimer := time.NewTimer(startupDelay)
+	defer startupTimer.Stop()
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
+	startupDone := false
 	for {
 		select {
 		case <-t.done:
 			return
+		case <-startupTimer.C:
+			startupDone = true
 		case <-ticker.C:
+			if !startupDone {
+				continue // still in startup delay period
+			}
 			if t.warm.NeedsCompaction() {
 				if err := t.warm.Compact(); err != nil {
 					t.logger.Error("warm tier compaction failed", "error", err)
@@ -700,7 +740,8 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 			skipped++
 			continue
 		}
-		*walEntries = append(*walEntries, wal.PutEntry(uint64(key), int32(segID), offset)) //nolint:gosec // segID bounded
+		recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
+		*walEntries = append(*walEntries, wal.PutEntryWithSize(uint64(key), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 		t.hot.SetBacked(key)
 		t.warm.Protect(uint64(key))
 		synced++
@@ -741,11 +782,15 @@ func (t *TieredStore) rewriteWAL() error {
 	}
 	var walEntries []wal.Entry
 	for _, key := range t.warm.Keys() {
-		segID, offset, ok := t.warm.Lookup(key)
+		segID, offset, size, ok := t.warm.LookupWithSize(key)
 		if !ok {
 			continue
 		}
-		walEntries = append(walEntries, wal.PutEntry(key, int32(segID), offset)) //nolint:gosec // segID bounded by segment count
+		if size > 0 {
+			walEntries = append(walEntries, wal.PutEntryWithSize(key, int32(segID), offset, size)) //nolint:gosec // segID bounded
+		} else {
+			walEntries = append(walEntries, wal.PutEntry(key, int32(segID), offset)) //nolint:gosec // segID bounded
+		}
 	}
 	if err := tmpLog.AppendBatch(walEntries); err != nil {
 		_ = tmpLog.Close()

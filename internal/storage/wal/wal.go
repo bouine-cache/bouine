@@ -5,14 +5,27 @@
 //
 // Record layout (little-endian):
 //
+// v1 (25 bytes, op=1 PUT / op=2 DELETE):
+//
 //	[1]  op        PUT=1, DELETE=2
 //	[8]  key       uint64
 //	[4]  seg_id    int32 (PUT only; 0 for DELETE)
 //	[8]  offset    int64 (PUT only; 0 for DELETE)
-//	[4]  crc32c    checksum of the preceding bytes
+//	[4]  crc32c    checksum of the preceding 21 bytes
 //
-// Total: 25 bytes per record (PUT), 25 bytes (DELETE, seg_id+offset
-// are zero).
+// v2 (33 bytes, op=3 PUT only):
+//
+//	[1]  op        PUT_V2=3
+//	[8]  key       uint64
+//	[4]  seg_id    int32
+//	[8]  offset    int64
+//	[8]  size      int64 (on-disk record size: HeaderLen + body + FooterLen)
+//	[4]  crc32c    checksum of the preceding 29 bytes
+//
+// The v2 format eliminates the need for RecomputeStats after WAL replay
+// because the record size is persisted. Replay auto-detects v1 vs v2 by
+// reading the op byte: opPutV2 (3) records are 33 bytes, all others are
+// 25 bytes. This avoids a format header or magic number.
 //
 // The WAL is truncated after a successful checkpoint (when the warm
 // tier and hot tier indices are known-good).
@@ -48,7 +61,11 @@ import (
 const (
 	opPut    byte = 1
 	opDelete byte = 2
-	recLen        = 1 + 8 + 4 + 8 + 4 // 25 bytes
+	opPutV2  byte = 3                     // PUT with record size (v2 format)
+	recLen        = 1 + 8 + 4 + 8 + 4     // 25 bytes (v1)
+	recLenV2      = 1 + 8 + 4 + 8 + 8 + 4 // 33 bytes (v2: adds 8-byte size)
+	crcLen        = 21                    // bytes covered by CRC in v1
+	crcLenV2      = 29                    // bytes covered by CRC in v2
 
 	// syncChSize is the bounded channel for async WAL entries.
 	// Matches existing tombstoneQueue / warmEvictQueue patterns.
@@ -63,12 +80,13 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// entryBufPool pools 25-byte encode buffers to avoid allocation on
-// the Enqueue path. Stores *[recLen]byte (pointer to fixed-size array),
+// entryBufPool pools 33-byte encode buffers (v2 max size) to avoid
+// allocation on the Enqueue path. v1 entries use the first 25 bytes and
+// return a sub-slice. Stores *[recLenV2]byte (pointer to fixed-size array),
 // matching the recordHdrPool / recordFootPool pattern in warm.go.
 var entryBufPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, recLen)
+		buf := make([]byte, recLenV2)
 		return &buf
 	},
 }
@@ -79,6 +97,7 @@ type Entry struct {
 	Key    uint64
 	SegID  int32
 	Offset int64
+	Size   int64 // v2 only: on-disk record size (0 for v1 entries)
 }
 
 // Log is an append-only WAL file opened with O_DSYNC (Linux) or O_SYNC
@@ -143,31 +162,35 @@ func OpenAsync(path string, syncInterval time.Duration) (*Log, error) {
 	return l, nil
 }
 
-// encodeEntry encodes an Entry into a pooled 25-byte buffer.
+// encodeEntry encodes an Entry into a pooled buffer. v2 entries (opPutV2)
+// produce a 33-byte buffer; v1 entries produce a 25-byte sub-slice.
+// The pool stores 33-byte buffers; reslicing to full capacity on Get
+// ensures v2 writes never panic even after a v1 sub-slice was returned.
 func encodeEntry(e Entry) []byte {
 	bufp := entryBufPool.Get().(*[]byte)
-	buf := *bufp
+	buf := (*bufp)[:cap(*bufp)] // reslice to full capacity (always recLenV2)
 	buf[0] = e.Op
 	binary.LittleEndian.PutUint64(buf[1:9], e.Key)
 	binary.LittleEndian.PutUint32(buf[9:13], uint32(e.SegID))   //nolint:gosec // seg IDs are small
 	binary.LittleEndian.PutUint64(buf[13:21], uint64(e.Offset)) //nolint:gosec // offsets are positive
-	crc := crc32.Checksum(buf[:21], crcTable)
+	if e.Op == opPutV2 {
+		binary.LittleEndian.PutUint64(buf[21:29], uint64(e.Size)) //nolint:gosec // size is positive
+		crc := crc32.Checksum(buf[:crcLenV2], crcTable)
+		binary.LittleEndian.PutUint32(buf[29:33], crc)
+		return buf[:recLenV2]
+	}
+	crc := crc32.Checksum(buf[:crcLen], crcTable)
 	binary.LittleEndian.PutUint32(buf[21:25], crc)
-	return buf
+	return buf[:recLen]
 }
 
 // Append writes a single entry to the WAL. The write is durable via
 // O_DSYNC/O_SYNC on the file descriptor — no explicit fsync needed.
-// Use for synchronous logs (opened with Open).
+// Use for synchronous logs (opened with Open). Handles both v1 (25-byte)
+// and v2 (33-byte) formats based on the entry's Op.
 func (l *Log) Append(e Entry) error {
-	buf := make([]byte, recLen)
-	buf[0] = e.Op
-	binary.LittleEndian.PutUint64(buf[1:9], e.Key)
-	binary.LittleEndian.PutUint32(buf[9:13], uint32(e.SegID))   //nolint:gosec // seg IDs are small
-	binary.LittleEndian.PutUint64(buf[13:21], uint64(e.Offset)) //nolint:gosec // offsets are positive
-
-	crc := crc32.Checksum(buf[:21], crcTable)
-	binary.LittleEndian.PutUint32(buf[21:25], crc)
+	buf := encodeEntry(e)
+	defer entryBufPool.Put(&buf)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -355,7 +378,9 @@ func (l *Log) LastSyncTime() time.Time {
 // Replay reads all valid entries from the WAL and calls fn for each.
 // Corrupt trailing records (partial writes) are silently skipped —
 // the WAL is append-only and a partial last record means a crash
-// interrupted the write.
+// interrupted the write. Auto-detects v1 (25-byte) and v2 (33-byte)
+// records by checking the op byte: opPutV2 (3) records are 33 bytes,
+// all others are 25 bytes.
 func Replay(path string, fn func(Entry) error) error {
 	f, err := os.Open(path) //nolint:gosec // operator-configured path
 	if err != nil {
@@ -366,29 +391,54 @@ func Replay(path string, fn func(Entry) error) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	buf := make([]byte, recLen)
+	buf := make([]byte, recLenV2) // max record size
 	for {
-		if _, err := io.ReadFull(f, buf); err != nil {
+		if _, err := io.ReadFull(f, buf[:recLen]); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil
 			}
 			return fmt.Errorf("wal: read: %w", err)
 		}
 
-		crc := crc32.Checksum(buf[:21], crcTable)
-		stored := binary.LittleEndian.Uint32(buf[21:25])
-		if crc != stored {
-			return nil
-		}
-
-		e := Entry{
-			Op:     buf[0],
-			Key:    binary.LittleEndian.Uint64(buf[1:9]),
-			SegID:  int32(binary.LittleEndian.Uint32(buf[9:13])),  //nolint:gosec // bounded by segment count,
-			Offset: int64(binary.LittleEndian.Uint64(buf[13:21])), //nolint:gosec // file offsets,
-		}
-		if err := fn(e); err != nil {
-			return err
+		if buf[0] == opPutV2 {
+			// v2 record: read 8 more bytes for size field
+			if _, err := io.ReadFull(f, buf[recLen:]); err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					return nil
+				}
+				return fmt.Errorf("wal: read v2: %w", err)
+			}
+			crc := crc32.Checksum(buf[:crcLenV2], crcTable)
+			stored := binary.LittleEndian.Uint32(buf[29:33])
+			if crc != stored {
+				return nil
+			}
+			e := Entry{
+				Op:     opPutV2,
+				Key:    binary.LittleEndian.Uint64(buf[1:9]),
+				SegID:  int32(binary.LittleEndian.Uint32(buf[9:13])),  //nolint:gosec // bounded by segment count
+				Offset: int64(binary.LittleEndian.Uint64(buf[13:21])), //nolint:gosec // file offsets
+				Size:   int64(binary.LittleEndian.Uint64(buf[21:29])), //nolint:gosec // record sizes
+			}
+			if err := fn(e); err != nil {
+				return err
+			}
+		} else {
+			// v1 record: 25 bytes already read
+			crc := crc32.Checksum(buf[:crcLen], crcTable)
+			stored := binary.LittleEndian.Uint32(buf[21:25])
+			if crc != stored {
+				return nil
+			}
+			e := Entry{
+				Op:     buf[0],
+				Key:    binary.LittleEndian.Uint64(buf[1:9]),
+				SegID:  int32(binary.LittleEndian.Uint32(buf[9:13])),  //nolint:gosec // bounded by segment count
+				Offset: int64(binary.LittleEndian.Uint64(buf[13:21])), //nolint:gosec // file offsets
+			}
+			if err := fn(e); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -408,16 +458,12 @@ func (l *Log) AppendBatch(entries []Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, e := range entries {
-		buf := make([]byte, recLen)
-		buf[0] = e.Op
-		binary.LittleEndian.PutUint64(buf[1:9], e.Key)
-		binary.LittleEndian.PutUint32(buf[9:13], uint32(e.SegID))   //nolint:gosec // seg IDs are small
-		binary.LittleEndian.PutUint64(buf[13:21], uint64(e.Offset)) //nolint:gosec // offsets are positive
-		crc := crc32.Checksum(buf[:21], crcTable)
-		binary.LittleEndian.PutUint32(buf[21:25], crc)
+		buf := encodeEntry(e)
 		if _, err := l.f.Write(buf); err != nil {
+			entryBufPool.Put(&buf)
 			return fmt.Errorf("wal: batch write: %w", err)
 		}
+		entryBufPool.Put(&buf)
 	}
 	return nil
 }
@@ -449,15 +495,28 @@ func (l *Log) Close() error {
 	return l.f.Close()
 }
 
-// IsPut returns true if the entry is a PUT.
-func (e Entry) IsPut() bool { return e.Op == opPut }
+// IsPut returns true if the entry is a PUT (v1 or v2).
+func (e Entry) IsPut() bool { return e.Op == opPut || e.Op == opPutV2 }
 
 // IsDelete returns true if the entry is a DELETE.
 func (e Entry) IsDelete() bool { return e.Op == opDelete }
 
-// PutEntry creates a PUT WAL entry.
+// HasSize reports whether this entry carries a v2 record size. v1
+// entries have Size == 0 and must fall back to RecomputeStats for size
+// backfill after replay.
+func (e Entry) HasSize() bool { return e.Op == opPutV2 }
+
+// PutEntry creates a v1 PUT WAL entry (no record size). Maintained for
+// backward compatibility with callers that don't have the size.
 func PutEntry(key uint64, segID int32, offset int64) Entry {
 	return Entry{Op: opPut, Key: key, SegID: segID, Offset: offset}
+}
+
+// PutEntryWithSize creates a v2 PUT WAL entry that includes the on-disk
+// record size. Replay can set the index size directly, avoiding a full
+// segment scan (RecomputeStats) on startup.
+func PutEntryWithSize(key uint64, segID int32, offset, size int64) Entry {
+	return Entry{Op: opPutV2, Key: key, SegID: segID, Offset: offset, Size: size}
 }
 
 // DeleteEntry creates a DELETE WAL entry.

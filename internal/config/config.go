@@ -139,6 +139,12 @@ type Cluster struct {
 	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
 	Replicas int      `yaml:"replicas,omitempty" json:"replicas,omitempty"`
 	HopLimit int      `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
+	// JoinTimeout is the maximum time to wait for cluster join before
+	// giving up. In strong mode, the pod stays not-ready if join fails
+	// within this timeout. In eventual mode, the pod becomes ready and
+	// continues retrying in the background. Default 120s. 0 means use
+	// the default.
+	JoinTimeout time.Duration `yaml:"join_timeout,omitempty" json:"join_timeout,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

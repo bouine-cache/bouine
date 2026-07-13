@@ -109,46 +109,42 @@ var hotEntryPool = sync.Pool{
 }
 
 // evictionLog is a deferred log record collected under the shard lock
-// and flushed after the lock is released. Backed evictions are
-// Info (sampled by key); evictions without a backup are Warn
-// (never sampled — signals potential data loss).
+// and flushed after the lock is released. Only unbacked evictions are
+// recorded — backed evictions are benign (the warm tier retains the
+// data) and are already counted by the hot_store_evictions_total
+// metric, so logging them wastes ~80% of the eviction-log allocation
+// budget for no operational value. Unbacked evictions signal potential
+// data loss and are always logged at Warn.
 type evictionLog struct {
-	key       api.Key
-	reason    string
-	hadBackup bool
-	size      int64
-	varyKey   string
+	key     api.Key
+	reason  string
+	size    int64
+	varyKey string
 }
 
 func (h *HotStore) flushEvictionLogs(logs []evictionLog) {
 	for _, e := range logs {
 		attrs := []any{
 			"reason", e.reason,
-			"had_backup", e.hadBackup,
 			"size_bytes", e.size,
 			"key", e.key,
 		}
 		if e.varyKey != "" {
 			attrs = append(attrs, "vary_key", e.varyKey)
 		}
-		if e.hadBackup {
-			h.logger.Info("evicted from hot store", attrs...)
-		} else {
-			h.logger.Warn("evicted from hot store", attrs...)
-		}
+		h.logger.Warn("evicted from hot store", attrs...)
 	}
 }
 
 func recordEviction(logs *[]evictionLog, key api.Key, entry *hotEntry, reason string) {
-	if entry == nil || entry.obj == nil {
+	if entry == nil || entry.obj == nil || entry.hasBackup {
 		return
 	}
 	*logs = append(*logs, evictionLog{
-		key:       key,
-		reason:    reason,
-		hadBackup: entry.hasBackup,
-		size:      objSize(entry.obj),
-		varyKey:   entry.obj.VaryKey,
+		key:     key,
+		reason:  reason,
+		size:    objSize(entry.obj),
+		varyKey: entry.obj.VaryKey,
 	})
 }
 

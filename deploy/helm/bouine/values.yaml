@@ -63,11 +63,11 @@ headlessService:
 
 resources:
   requests:
-    cpu: 500m
-    memory: 512Mi
+    cpu: 1000m
+    memory: 2Gi
   limits:
-    cpu: 2
-    memory: 4Gi
+    cpu: 4
+    memory: 8Gi
 
 podSecurityContext:
   runAsNonRoot: true
@@ -94,9 +94,31 @@ topologySpreadConstraints:
 
 terminationGracePeriodSeconds: 30
 
-# Go runtime tuning. GOMEMLIMIT should be ~75% of resources.limits.memory.
+# Pod management policy for the StatefulSet.
+# Parallel: all pods start simultaneously (correct for strong-mode
+# clusters where peers join via gossip concurrently).
+# maxUnavailable controls rolling update concurrency — set to 1 to
+# roll one pod at a time while allowing parallel initial boot.
+updateStrategy:
+  maxUnavailable: 1
+
+# Seconds after a pod becomes Ready before it enters Service endpoints.
+# Gives the cluster ring time to converge after a pod joins, reducing
+# the window where peer-fetch routes to a node with an incomplete ring.
+minReadySeconds: 30
+
+# preStop hook: sleep before the shutdown sequencer stops listeners,
+# giving the endpoints controller time to deregister the pod.
+# In strong mode, in-flight peer-fetch requests need time to drain.
+preStop:
+  sleepSeconds: 10
+
+# Go runtime tuning.
+# GOMEMLIMIT: leave empty (default) to auto-compute as 75% of
+# resources.limits.memory via the bouine.goMemLimit helper.
+# Set explicitly to override, e.g. goMemLimit: "6GiB".
 # GOGC=100 (default) paired with GOMEMLIMIT keeps GC pauses bounded.
-goMemLimit: "3GiB"
+goMemLimit: ""
 goGC: "100"
 
 # Cloudflare CDN invalidation propagation.
@@ -134,8 +156,13 @@ startupProbe:
   httpGet:
     path: /readyz
     port: admin
-  periodSeconds: 5
-  failureThreshold: 60  # 5 minutes max warmup for anti-entropy
+  periodSeconds: 10
+  failureThreshold: 180  # 30 minutes max warmup
+  # Budget for warm-tier WAL replay + RecomputeStats segment scan.
+  # Scale with warm-tier size: ~1 min per 10 GB of segment data at
+  # 10 GiB/s mmap throughput under typical container CPU limits.
+  # Anti-entropy (ring digest reconciliation) is async and not on
+  # the critical path — do not confuse the two.
 
 readinessProbe:
   httpGet:

@@ -80,3 +80,38 @@ func TestSequencer_IsReady_ShutdownFlipsFalse(t *testing.T) {
 		t.Fatal("expected not ready after markShuttingDown")
 	}
 }
+
+func TestReadinessGate_Conditions(t *testing.T) {
+	g := NewReadinessGate()
+	g.Register("store-loaded")
+	g.Register("listeners-bound")
+
+	conds := g.Conditions()
+	if len(conds) != 2 {
+		t.Fatalf("expected 2 conditions, got %d", len(conds))
+	}
+	// Conditions are sorted alphabetically.
+	if conds[0].Name != "listeners-bound" || conds[0].Ready {
+		t.Fatalf("expected listeners-bound=false first, got %s=%v", conds[0].Name, conds[0].Ready)
+	}
+	if conds[1].Name != "store-loaded" || conds[1].Ready {
+		t.Fatalf("expected store-loaded=false second, got %s=%v", conds[1].Name, conds[1].Ready)
+	}
+
+	g.MarkReady("store-loaded")
+	conds = g.Conditions()
+	if !conds[1].Ready {
+		t.Fatal("expected store-loaded=true after MarkReady")
+	}
+	if conds[0].Ready {
+		t.Fatal("expected listeners-bound=false")
+	}
+}
+
+func TestReadinessGate_ConditionsEmpty(t *testing.T) {
+	g := NewReadinessGate()
+	conds := g.Conditions()
+	if len(conds) != 0 {
+		t.Fatalf("expected 0 conditions, got %d", len(conds))
+	}
+}

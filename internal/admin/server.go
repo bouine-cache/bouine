@@ -94,6 +94,17 @@ type Config struct {
 	// admin port. Routes are auth-exempt; admin port is network-isolated.
 	// Default false.
 	PprofEnabled bool
+	// ConditionsFn, if non-nil, returns the status of individual readiness
+	// conditions. Used by /readyz?detail=1 to expose per-condition state
+	// for operator diagnostics during slow startup.
+	ConditionsFn func() []Condition
+}
+
+// Condition is a readiness condition status entry for the
+// /readyz?detail=1 JSON response.
+type Condition struct {
+	Name  string `json:"name"`
+	Ready bool   `json:"ready"`
 }
 
 // swapHandler is an atomic wrapper around http.Handler that allows the
@@ -131,7 +142,7 @@ type Server struct {
 // initialization without rebinding the listener.
 //
 // Unstable.
-func NewMinimal(addr string, readyFn func() bool, logger observability.Logger) *Server {
+func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Condition, logger observability.Logger) *Server {
 	if addr == "" {
 		addr = ":9000"
 	}
@@ -139,7 +150,7 @@ func NewMinimal(addr string, readyFn func() bool, logger observability.Logger) *
 
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg: Config{Addr: addr, ReadyFn: readyFn, Logger: logger},
+		cfg: Config{Addr: addr, ReadyFn: readyFn, ConditionsFn: conditionsFn, Logger: logger},
 		inner: &http.Server{
 			Addr:              addr,
 			ReadHeaderTimeout: 5 * time.Second,
@@ -302,8 +313,28 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
-	if s.cfg.ReadyFn != nil && !s.cfg.ReadyFn() {
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ready := s.cfg.ReadyFn == nil || s.cfg.ReadyFn()
+
+	if r.URL.Query().Has("detail") {
+		conditions := []Condition{}
+		if s.cfg.ConditionsFn != nil {
+			conditions = s.cfg.ConditionsFn()
+		}
+		status := "ready"
+		code := http.StatusOK
+		if !ready {
+			status = "not-ready"
+			code = http.StatusServiceUnavailable
+		}
+		writeJSON(w, code, map[string]any{
+			"status":     status,
+			"conditions": conditions,
+		})
+		return
+	}
+
+	if !ready {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not-ready"})
 		return
 	}

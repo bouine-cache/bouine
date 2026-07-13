@@ -4,7 +4,9 @@
 package shutdown
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +75,28 @@ func (g *ReadinessGate) AllReady() bool {
 		}
 	}
 	return true
+}
+
+// ConditionStatus describes a single readiness condition.
+type ConditionStatus struct {
+	Name  string
+	Ready bool
+}
+
+// Conditions returns the status of all registered conditions, sorted
+// alphabetically by name. Used by the /readyz?detail=1 endpoint and
+// startup metrics to expose per-condition state.
+func (g *ReadinessGate) Conditions() []ConditionStatus {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	result := make([]ConditionStatus, 0, len(g.conditions))
+	for name, c := range g.conditions {
+		result = append(result, ConditionStatus{Name: name, Ready: c.Load()})
+	}
+	slices.SortFunc(result, func(a, b ConditionStatus) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return result
 }
 
 // NewSequencer creates a Sequencer. It starts in the "not-ready"

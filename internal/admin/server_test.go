@@ -67,6 +67,90 @@ func TestReadyz_NotReady(t *testing.T) {
 	}
 }
 
+func TestReadyz_Detail_NotReady(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ReadyFn: func() bool { return false },
+		ConditionsFn: func() []Condition {
+			return []Condition{
+				{Name: "store-loaded", Ready: true},
+				{Name: "cluster-joined", Ready: false},
+			}
+		},
+	})
+	status, body := get(t, s, "/readyz?detail=1")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", status)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["status"] != "not-ready" {
+		t.Fatalf("status = %v, want not-ready", resp["status"])
+	}
+	conds, ok := resp["conditions"].([]any)
+	if !ok {
+		t.Fatal("missing conditions array")
+	}
+	if len(conds) != 2 {
+		t.Fatalf("expected 2 conditions, got %d", len(conds))
+	}
+}
+
+func TestReadyz_Detail_Ready(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ReadyFn: func() bool { return true },
+		ConditionsFn: func() []Condition {
+			return []Condition{
+				{Name: "store-loaded", Ready: true},
+				{Name: "listeners-bound", Ready: true},
+			}
+		},
+	})
+	status, body := get(t, s, "/readyz?detail=1")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["status"] != "ready" {
+		t.Fatalf("status = %v, want ready", resp["status"])
+	}
+	conds, ok := resp["conditions"].([]any)
+	if !ok {
+		t.Fatal("missing conditions array")
+	}
+	if len(conds) != 2 {
+		t.Fatalf("expected 2 conditions, got %d", len(conds))
+	}
+}
+
+func TestReadyz_Detail_NoConditionsFn(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, func() bool { return true })
+	status, body := get(t, s, "/readyz?detail=1")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	conds, ok := resp["conditions"].([]any)
+	if !ok {
+		t.Fatal("missing conditions array")
+	}
+	if len(conds) != 0 {
+		t.Fatalf("expected 0 conditions, got %d", len(conds))
+	}
+}
+
 func TestVersion(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, nil)

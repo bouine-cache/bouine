@@ -71,7 +71,8 @@ type runState struct {
 	peersFn        func() []api.PeerInfo
 	clusterMetrics *cluster.Metrics
 
-	warmMetrics *warm.Metrics
+	warmMetrics    *warm.Metrics
+	startupMetrics *observability.StartupMetrics
 
 	cfProp    *cfPropagator
 	cfCancel  context.CancelFunc
@@ -110,6 +111,18 @@ func (e *engine) run(ctx context.Context) error {
 		seq.Gate().Register("cluster-joined")
 	}
 
+	// Create a ConditionsFn closure for the /readyz?detail=1 endpoint.
+	// This exposes per-condition state so operators can see which startup
+	// step is blocking readiness during slow startup.
+	conditionsFn := func() []admin.Condition {
+		conds := seq.Gate().Conditions()
+		result := make([]admin.Condition, len(conds))
+		for i, c := range conds {
+			result[i] = admin.Condition{Name: c.Name, Ready: c.Ready}
+		}
+		return result
+	}
+
 	// Start a minimal admin server (healthz/readyz/version only) before
 	// initSubsystems so K8s probes can reach the admin port during the
 	// potentially long store-loading phase. The full admin handler is
@@ -119,8 +132,11 @@ func (e *engine) run(ctx context.Context) error {
 	if adminAddr == "" {
 		adminAddr = ":9000"
 	}
-	minimalAdmin := admin.NewMinimal(adminAddr, seq.IsReady, e.logger)
+	minimalAdmin := admin.NewMinimal(adminAddr, seq.IsReady, conditionsFn, e.logger)
 	g.Go("admin", minimalAdmin.Serve)
+
+	startupBegin := time.Now()
+	e.logger.Info("startup: init subsystems")
 
 	rs, shutdownTracer, err := e.initSubsystems(ctx, seq)
 	if err != nil {
@@ -128,22 +144,59 @@ func (e *engine) run(ctx context.Context) error {
 	}
 	defer shutdownTracer()
 
+	e.logger.Info("startup: store loaded", "duration", time.Since(startupBegin).String())
+
 	// Store loaded successfully — mark the condition ready.
 	seq.Gate().MarkReady("store-loaded")
+	updateStartupMetrics(seq, rs.startupMetrics)
 
 	handler := e.buildDataPlane(rs)
 
-	e.startBackgroundTasks(g, rs, ctx)        // rings snapshot, prefetch sitemap crawler, config watcher
-	e.swapAdminHandler(ctx, rs, minimalAdmin) // swap full admin routes into the minimal server
-	e.startListeners(g, handler, rs)          // HTTP/HTTPS data-plane listeners
-	e.startHealthChecks(g, rs.pools)          // active health probes per upstream pool
-	e.startClusterJoin(g, rs)                 // gossip join with retry against seed peers
-	e.registerShutdownSteps(g, rs)            // ordered drain: readiness, store flush, cluster leave
+	e.startBackgroundTasks(g, rs, ctx)                      // rings snapshot, prefetch sitemap crawler, config watcher
+	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn) // swap full admin routes into the minimal server
+	e.startListeners(g, handler, rs)                        // HTTP/HTTPS data-plane listeners
+	e.startHealthChecks(g, rs.pools)                        // active health probes per upstream pool
+	e.startClusterJoin(g, rs)                               // gossip join with retry against seed peers
+	e.registerShutdownSteps(g, rs)                          // ordered drain: readiness, store flush, cluster leave
 
 	// Listeners are started by startListeners (synchronous call above
 	// starts the supervised goroutines). Mark ready after the call
 	// returns — by then the listeners are bound.
 	seq.Gate().MarkReady("listeners-bound")
+	updateStartupMetrics(seq, rs.startupMetrics)
+
+	// Cluster join runs in a supervised goroutine (startClusterJoin), so
+	// the cluster-joined condition is marked asynchronously. When all
+	// conditions are met, log the total startup duration and record the
+	// histogram. The individual condition updates are logged by the
+	// goroutines that mark them; this final log fires when readyz flips
+	// to 200.
+	if seq.IsReady() {
+		startupDur := time.Since(startupBegin)
+		e.logger.Info("startup: complete", "duration", startupDur.String())
+		rs.startupMetrics.ObserveStartupDuration(startupDur.Seconds())
+	} else {
+		// Start a goroutine that waits for all conditions to be met,
+		// then logs and records. This covers the async cluster-join path.
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if seq.IsReady() {
+						startupDur := time.Since(startupBegin)
+						e.logger.Info("startup: complete", "duration", startupDur.String())
+						rs.startupMetrics.ObserveStartupDuration(startupDur.Seconds())
+						rs.startupMetrics.SetPhase("ready")
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	return g.Wait()
 }
@@ -171,6 +224,8 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 	dpMetrics.SetAccessLog(e.logger, observability.DefaultKeySampleRate)
+
+	startupMetrics := observability.NewStartupMetrics(e.metrics.Registry)
 
 	// Fall back to OTEL_EXPORTER_OTLP_ENDPOINT env var when the YAML
 	// config doesn't set tracing.endpoint. The chassis chart injects
@@ -215,11 +270,23 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		peersFn:        peersFn,
 		clusterMetrics: clusterMetrics,
 		warmMetrics:    warmMetrics,
+		startupMetrics: startupMetrics,
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
 		seq:            seq,
 	}
 	return rs, shutdownTracer, nil
+}
+
+// updateStartupMetrics syncs the readiness gate condition states into
+// the Prometheus startup metrics gauges.
+func updateStartupMetrics(seq *shutdown.Sequencer, m *observability.StartupMetrics) {
+	if m == nil {
+		return
+	}
+	for _, c := range seq.Gate().Conditions() {
+		m.SetCondition(c.Name, c.Ready)
+	}
 }
 
 func (e *engine) resolveAdminToken() string {
@@ -445,7 +512,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 // dashboard) and atomically swaps it into the already-listening minimal
 // admin server. The admin listener was started before initSubsystems so
 // K8s probes could reach healthz/readyz during store loading.
-func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server) {
+func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server, conditionsFn func() []admin.Condition) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -462,6 +529,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeersFn:            rs.peersFn,
 		CFStatusFn:         rs.cfProp.Status,
 		ReadyFn:            rs.seq.IsReady,
+		ConditionsFn:       conditionsFn,
 		MaxBatchSize:       e.cfg.Admin.MaxBatchSize,
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
 		PprofEnabled:       e.cfg.Admin.PprofEnabled,

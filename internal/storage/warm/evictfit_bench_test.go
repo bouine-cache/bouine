@@ -57,6 +57,6 @@ func BenchmarkWarmEvictToFit_MultiEvict(b *testing.B) {
 		}
 		b.StartTimer()
 
-		_ = s.evictToFit(largeRecSize)
+		_ = s.evictToFitBatch(largeRecSize)
 	}
 }

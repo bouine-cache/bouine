@@ -770,14 +770,14 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 
 		if err == nil {
 			e.logger.Info("cluster join succeeded", "members", len(rs.clusterNode.Members()))
-		} else {
-			e.logger.Warn("cluster join: initial attempt failed, continuing background retry",
-				"error", err)
+			return nil
 		}
 
-		// Continue retrying in the background regardless of the initial
-		// result. Peers may come up later (e.g., during a rolling update
-		// with sequential pod starts).
+		e.logger.Warn("cluster join: initial attempt failed, continuing background retry",
+			"error", err)
+
+		// Continue retrying in the background. Peers may come up later
+		// (e.g., during a rolling update with sequential pod starts).
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {

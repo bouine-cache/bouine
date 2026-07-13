@@ -27,6 +27,8 @@ chart (see `deploy/helm/bouine/templates/statefulset.yaml`). The
    background and does not block readiness — this avoids a
    StatefulSet bootstrapping deadlock where pod-0 waits for
    pod-1's DNS, but pod-1 hasn't started because pod-0 isn't ready.
+   The headless Service should have `publishNotReadyAddresses: true`
+   so peer DNS resolves during startup.
 7. Active health checks begin for all upstream pools.
 
 ### Readiness vs liveness

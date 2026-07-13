@@ -41,6 +41,10 @@ type TieredStore struct {
 	warmSyncBatchSize int
 	// warmSyncOffset rotates through the hot key set across cycles.
 	warmSyncOffset int
+	// warmSyncCycleCount tracks sync cycles since the last full
+	// reconciliation scan. Every 10th cycle the fallback scan runs
+	// to catch any hotOnly drift.
+	warmSyncCycleCount int
 
 	// walSyncInterval controls the async WAL fsync batching interval.
 	// <= 0 means synchronous mode (per-entry fsync). See ADR-0024.
@@ -730,32 +734,73 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 
 // collectHotOnlyKeys returns hot keys that are not in the warm tier,
 // capped at warmSyncBatchSize with rotation across cycles.
+//
+// On normal cycles it snapshots the incrementally-maintained hotOnly set
+// (see hot.go), avoiding the O(hotKeys + warmKeys) allocation of the old
+// diff approach. Every 10th cycle a full fallback scan reconciles any
+// drift the incremental updates may have missed.
 func (t *TieredStore) collectHotOnlyKeys() []api.Key {
+	t.warmSyncCycleCount++
+	if t.warmSyncCycleCount%10 == 0 {
+		return t.collectHotOnlyKeysFallback()
+	}
+	keys, total := t.hot.HotOnlyKeys(t.warmSyncOffset, t.warmSyncBatchSize)
+	if total > 0 {
+		t.warmSyncOffset = (t.warmSyncOffset + t.warmSyncBatchSize) % total
+	}
+	return keys
+}
+
+// collectHotOnlyKeysFallback performs a full reconciliation by streaming
+// all hot keys and checking each against the warm tier via Lookup. No
+// intermediate diff map is allocated — keys are filtered inline and
+// capped at warmSyncBatchSize with rotation.
+func (t *TieredStore) collectHotOnlyKeysFallback() []api.Key {
 	hotKeys := t.hot.Keys()
-	warmKeys := t.warm.Keys()
-	warmSet := make(map[uint64]struct{}, len(warmKeys))
-	for _, wk := range warmKeys {
-		warmSet[wk] = struct{}{}
+	total := len(hotKeys)
+	if total == 0 {
+		return nil
 	}
-	var hotOnlyKeys []api.Key
+	offset := t.warmSyncOffset % total
+	if offset < 0 {
+		offset += total
+	}
+	keys := make([]api.Key, 0, min(t.warmSyncBatchSize, total))
+	skipped := 0
+	needed := t.warmSyncBatchSize
 	for _, k := range hotKeys {
-		if _, inWarm := warmSet[uint64(k)]; !inWarm {
-			hotOnlyKeys = append(hotOnlyKeys, k)
+		if skipped < offset {
+			skipped++
+			continue
+		}
+		if _, _, ok := t.warm.Lookup(uint64(k)); !ok {
+			keys = append(keys, k)
+			needed--
+		}
+		if needed <= 0 {
+			break
 		}
 	}
-	// Apply batch size cap with rotation.
-	total := len(hotOnlyKeys)
-	if total > t.warmSyncBatchSize {
-		startIdx := t.warmSyncOffset % total
-		endIdx := startIdx + t.warmSyncBatchSize
-		if endIdx <= total {
-			hotOnlyKeys = hotOnlyKeys[startIdx:endIdx]
-		} else {
-			hotOnlyKeys = append(hotOnlyKeys[startIdx:], hotOnlyKeys[:endIdx-total]...)
+	// If we exhausted the array without filling the batch, wrap around
+	// to the beginning and check keys [0, offset) — those were skipped
+	// by the first pass and have not been added yet.
+	if needed > 0 {
+		for i := range offset {
+			if _, _, ok := t.warm.Lookup(uint64(hotKeys[i])); !ok {
+				keys = append(keys, hotKeys[i])
+				needed--
+			}
+			if needed <= 0 {
+				break
+			}
 		}
-		t.warmSyncOffset = endIdx % total
 	}
-	return hotOnlyKeys
+	// Reset offset — the fallback did a full scan, so starting from 0
+	// on the next normal cycle is correct and avoids a coordinate-space
+	// mismatch (fallback uses len(hotKeys) as the modulo base, normal
+	// cycles use HotOnlyCount).
+	t.warmSyncOffset = 0
+	return keys
 }
 
 // drainTombstones removes all pending tombstone keys from the warm tier

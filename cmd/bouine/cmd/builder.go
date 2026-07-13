@@ -37,7 +37,7 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
 	}
 	return storage.NewTieredStore(storage.TieredConfig{
 		Hot:                    hotCfg,
-		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes()},
+		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(), SegmentCacheSize: e.cfg.Storage.SegmentCacheSize},
 		WALDir:                 e.cfg.Storage.WarmDir + "/bouine.wal",
 		BodyThreshold:          e.cfg.Storage.BodyThreshold.Bytes(),
 		WarmSyncInterval:       e.cfg.Storage.WarmSyncInterval,

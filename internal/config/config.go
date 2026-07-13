@@ -127,6 +127,12 @@ type Storage struct {
 	// count exceeds this value, regardless of the interval. Bounds WAL
 	// replay time on unclean restart. Default 100000.
 	CheckpointWALThreshold int64 `yaml:"checkpoint_wal_threshold,omitempty" json:"checkpoint_wal_threshold,omitempty"`
+	// SegmentCacheSize caps the number of concurrently open segment
+	// file descriptors in the warm tier. 0 means auto (min(segCount,
+	// 256)). -1 means unlimited (no eviction, all segments stay open).
+	// When the cache is full and a new segment is opened, the least-
+	// recently-accessed segment with zero in-flight readers is closed.
+	SegmentCacheSize int `yaml:"segment_cache_size,omitempty" json:"segment_cache_size,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

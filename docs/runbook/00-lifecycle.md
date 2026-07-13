@@ -19,20 +19,21 @@ chart (see `deploy/helm/bouine/templates/statefulset.yaml`). The
 1. Config loaded and validated.
 2. Storage tiers initialised (hot → warm).
 3. Admin server starts on `listen.admin` (default `:9000`).
-4. `/readyz` returns `200` once all listeners are bound.
-5. Cluster join (if `cluster.enabled`): memberlist contacts seed nodes
-   with retry (every 2s for up to 60s). Join succeeds once at least
-   one peer besides self is discovered. StatefulSet headless Service
-   must have `publishNotReadyAddresses: true` for DNS to resolve
-   during startup.
-6. Data-plane listeners start on `listen.http`, `listen.https`.
+4. Data-plane listeners start on `listen.http`, `listen.https`.
+5. `/readyz` returns `200` once store is loaded and all listeners are bound.
+6. Cluster join (if `cluster.enabled`): memberlist contacts seed nodes
+   with retry (every 2s for up to 120s). Join succeeds once at least
+   one peer besides self is discovered. Cluster join runs in the
+   background and does not block readiness — this avoids a
+   StatefulSet bootstrapping deadlock where pod-0 waits for
+   pod-1's DNS, but pod-1 hasn't started because pod-0 isn't ready.
 7. Active health checks begin for all upstream pools.
 
 ### Readiness vs liveness
 
 | Probe      | Endpoint    | Meaning                                           |
 |------------|-------------|---------------------------------------------------|
-| Readiness  | `/readyz`   | All listeners bound, ready for traffic.           |
+| Readiness  | `/readyz`   | Store loaded, all listeners bound, ready for traffic. |
 | Liveness   | `/healthz`  | Process alive, can serve admin requests.          |
 
 Kubernetes will not route traffic until `/readyz` returns `200`. A

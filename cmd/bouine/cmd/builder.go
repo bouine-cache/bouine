@@ -36,15 +36,18 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
 		return storage.NewHotStore(hotCfg), nil
 	}
 	return storage.NewTieredStore(storage.TieredConfig{
-		Hot:               hotCfg,
-		Warm:              &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes()},
-		WALDir:            e.cfg.Storage.WarmDir + "/bouine.wal",
-		BodyThreshold:     e.cfg.Storage.BodyThreshold.Bytes(),
-		WarmSyncInterval:  e.cfg.Storage.WarmSyncInterval,
-		WarmSyncBatchSize: e.cfg.Storage.WarmSyncBatchSize,
-		WALSyncInterval:   e.cfg.Storage.WALSyncInterval,
-		Logger:            e.logger,
-		WarmMetrics:       warmMetrics,
+		Hot:                    hotCfg,
+		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes()},
+		WALDir:                 e.cfg.Storage.WarmDir + "/bouine.wal",
+		BodyThreshold:          e.cfg.Storage.BodyThreshold.Bytes(),
+		WarmSyncInterval:       e.cfg.Storage.WarmSyncInterval,
+		WarmSyncBatchSize:      e.cfg.Storage.WarmSyncBatchSize,
+		WALSyncInterval:        e.cfg.Storage.WALSyncInterval,
+		CompactStartupDelay:    e.cfg.Storage.CompactStartupDelay,
+		CheckpointInterval:     e.cfg.Storage.CheckpointInterval,
+		CheckpointWALThreshold: e.cfg.Storage.CheckpointWALThreshold,
+		Logger:                 e.logger,
+		WarmMetrics:            warmMetrics,
 	})
 }
 

@@ -60,6 +60,12 @@ const (
 	// protected (the steady state once the warm sync loop has marked
 	// the majority of entries). Mirrors the hot tier's maxEvictSkips.
 	maxWarmEvictSkips = 16
+	// maxSweepProbes caps the number of SIEVE entries scanned per
+	// Evict call in the warm tier. Under heavy read load all entries
+	// have visited=true, making the unbounded sweep O(N). The cap
+	// bounds the worst case at ~256 pointer chases instead of 2N.
+	// See ADR 0026.
+	maxSweepProbes = 256
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -1064,7 +1070,7 @@ func (s *Store) evictOne() (uint64, bool) {
 	seg.size += int64(HeaderLen + FooterLen)
 
 	// Remove from index and decrement stats. The SIEVE entry was
-	// already removed by Evict() and returned to the pool.
+	// already removed by EvictBounded and returned to the pool.
 	delete(s.index, victimKey)
 	s.stats.entries.Add(-1)
 	if victimLoc.size > 0 {
@@ -1087,7 +1093,7 @@ func (s *Store) evictOne() (uint64, bool) {
 // head with visited=true (second chance). idxMu must be held.
 func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 	for range maxWarmEvictSkips {
-		cand, ok := s.evictList.Evict()
+		cand, ok := s.evictList.EvictBounded(maxSweepProbes)
 		if !ok {
 			return 0, warmLoc{}, false
 		}
@@ -1117,7 +1123,7 @@ func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 
 // restoreSIEVEEntry re-inserts a victim into the SIEVE list and restores
 // its index entry after a failed tombstone write. idxMu must be held.
-// The SIEVE entry was removed by Evict(), so a fresh entry is inserted
+// The SIEVE entry was removed by EvictBounded, so a fresh entry is inserted
 // at the head with visited=false; the next Get will re-mark it.
 func (s *Store) restoreSIEVEEntry(key uint64, loc warmLoc) {
 	e, _ := s.evictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })

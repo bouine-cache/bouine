@@ -1,10 +1,10 @@
 // Package sieve implements the SIEVE cache eviction algorithm.
 //
-// SIEVE is a simple, near-LRU-K algorithm with O(1) per operation.
-// It uses a doubly-linked list of entries with a single "visited" bit.
-// A hand pointer sweeps the list; entries with visited=true get a
-// second chance (visited cleared), entries with visited=false are
-// evicted.
+// SIEVE is a simple, near-LRU-K algorithm with O(1) amortized per
+// operation and O(maxSweepProbes) worst case. It uses a doubly-linked
+// list of entries with a single "visited" bit. A hand pointer sweeps
+// the list; entries with visited=true get a second chance (visited
+// cleared), entries with visited=false are evicted.
 //
 // Reference: "SIEVE is Simpler than LRU: an Efficient Turn-Key
 // Eviction Algorithm for Web Caches" (Zhang et al., NSDI 2024).
@@ -111,8 +111,29 @@ func (l *List[K]) Access(key K, lookup func(K) *Entry[K]) (*Entry[K], bool) {
 // sweeps (a defensive bound; one sweep clears all visited bits, so
 // the second sweep must find an evictable entry under the write-lock
 // invariant).
+//
+// Evict is equivalent to EvictBounded(l.len * 2).
 func (l *List[K]) Evict() (K, bool) {
-	if l.len == 0 {
+	return l.EvictBounded(l.len * 2)
+}
+
+// EvictBounded removes and returns the key of the evicted entry,
+// scanning at most maxProbes entries. The caller must hold the write
+// lock as for Evict.
+//
+// When maxProbes is smaller than the list length, the sweep may return
+// (zero, false) even if evictable entries exist elsewhere in the list.
+// The caller handles this by treating it as a temporary budget
+// overshoot (hot tier) or an ErrOverBudget rejection (warm tier). The
+// hand advances and clears visited bits during the capped sweep, so
+// the next call resumes from the advanced position and typically finds
+// an evictable entry within a few probes.
+//
+// Returns the evicted key and true, or the zero value and false if
+// the list is empty or no evictable entry is found within maxProbes
+// probes.
+func (l *List[K]) EvictBounded(maxProbes int) (K, bool) {
+	if l.len == 0 || maxProbes <= 0 {
 		var zero K
 		return zero, false
 	}
@@ -122,13 +143,6 @@ func (l *List[K]) Evict() (K, bool) {
 		l.hand = l.tail
 	}
 
-	// Bound the scan at two full sweeps. After one sweep every visited
-	// bit has been cleared, so the second sweep must find an evictable
-	// entry. The bound is a safety net: under the caller's write lock
-	// no concurrent MarkVisited can re-set bits, so the second sweep
-	// always succeeds. If it somehow doesn't (list mutated between
-	// probes — a bug), we return false instead of looping forever.
-	maxProbes := l.len * 2
 	for range maxProbes {
 		cur := l.hand
 		if cur == nil {
@@ -158,9 +172,7 @@ func (l *List[K]) Evict() (K, bool) {
 		}
 	}
 
-	// Defensive: two full sweeps without a victim means every entry
-	// was visited and the write-lock invariant was violated. Return
-	// false rather than spinning.
+	// Capped out without finding an unvisited entry.
 	var zero K
 	return zero, false
 }

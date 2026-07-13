@@ -269,6 +269,14 @@ loadtest: loadtest-setup ## Run single-node scenarios and generate report.
 release: ## Create a GitHub release (usage: make release TAG=v0.1.0).
 	@test -n "$(TAG)" || { echo "usage: make release TAG=v0.1.0"; exit 1; }
 	@command -v gh >/dev/null || { echo "gh CLI is required: https://cli.github.com"; exit 1; }
+	@chart_ver=$$(sed -n 's/^version: //p' deploy/helm/bouine/Chart.yaml); \
+	published_ver=$$(git show origin/gh-pages:index.yaml 2>/dev/null \
+		| grep -m1 '^[[:space:]]*version:' | sed 's/^[[:space:]]*version:[[:space:]]*//'); \
+	if [ "$$chart_ver" = "$$published_ver" ]; then \
+		echo "ERROR: Chart.yaml version $$chart_ver is already published on gh-pages."; \
+		echo "Bump version and appVersion in deploy/helm/bouine/Chart.yaml before tagging."; \
+		exit 1; \
+	fi
 	@printf "Release description (one line): "; \
 	read -r DESC; \
 	REPO=$$(gh repo view --json nameWithOwner -q .nameWithOwner); \

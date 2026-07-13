@@ -60,12 +60,13 @@ jobs:
       - name: Publish Artifact Hub repository metadata
         run: |
           set -euo pipefail
+          git fetch origin gh-pages
           tmp="$(mktemp -d)"
-          git worktree add "$tmp" gh-pages
+          git worktree add "$tmp" origin/gh-pages
           cp deploy/helm/artifacthub-repo.yml "$tmp/artifacthub-repo.yml"
           git -C "$tmp" add artifacthub-repo.yml
           if ! git -C "$tmp" diff --cached --quiet; then
             git -C "$tmp" commit -m "ci: sync Artifact Hub repository metadata"
-            git -C "$tmp" push origin gh-pages
+            git -C "$tmp" push origin HEAD:gh-pages
           fi
           git worktree remove "$tmp"

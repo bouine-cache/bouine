@@ -585,8 +585,11 @@ func (t *TieredStore) Stats() api.Stats {
 func (t *TieredStore) compactLoop() {
 	defer t.compactWg.Done()
 	startupDelay := t.compactStartupDelay
-	if startupDelay <= 0 {
+	if startupDelay == 0 {
 		startupDelay = 5 * time.Minute
+	}
+	if startupDelay < 0 {
+		startupDelay = 0 // -1 means start immediately
 	}
 	startupTimer := time.NewTimer(startupDelay)
 	defer startupTimer.Stop()
@@ -837,9 +840,10 @@ func (t *TieredStore) rebuildIndexFromScan() error {
 
 // walEnqueue wraps wal.Enqueue with checkpoint awareness. While a
 // checkpoint is in progress (checkpointing == true), WAL enqueues spin
-// via runtime.Gosched until the checkpoint unblocks. The spin window
-// is ~2ms (second Sync + Truncate). After enqueuing, the entry count
-// is incremented for the checkpoint threshold trigger.
+// via runtime.Gosched until the checkpoint unblocks. The block window
+// covers the second Sync + snapshot I/O + Truncate (~350ms at 10M
+// entries). After enqueuing, the entry count is incremented for the
+// checkpoint threshold trigger.
 func (t *TieredStore) walEnqueue(entry wal.Entry) {
 	for t.checkpointing.Load() {
 		runtime.Gosched()

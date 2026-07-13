@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
@@ -520,27 +521,18 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 		return 0, err
 	}
 
-	total := 0
+	var total atomic.Int64
+	var g errgroup.Group
+	g.SetLimit(min(len(h.shards), runtime.NumCPU()))
 	for i := range h.shards {
-		s := &h.shards[i]
-		s.mu.Lock()
-		for key, e := range s.entries {
-			if pred(e.obj) {
-				s.bytes -= objSize(e.obj)
-				s.evict.Remove(e.sieve)
-				delete(s.entries, key)
-				delete(s.hotOnly, key)
-				h.stats.evictions.Add(1)
-				total++
-				e.obj = nil
-				e.sieve = nil
-				e.hasBackup = false
-				e.windowHits.Store(0)
-				hotEntryPool.Put(e)
-			}
-		}
-		s.mu.Unlock()
+		g.Go(func() error {
+			n := h.banShard(i, pred)
+			total.Add(int64(n))
+			return nil
+		})
 	}
+	_ = g.Wait()
+
 	// Register in the lazy ban list so objects filled AFTER this scan
 	// are also checked on next lookup (RFC 9111 §4.4 lazy semantics).
 	createdAt := expr.CreatedAt
@@ -551,7 +543,33 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	h.activeBans = append(h.activeBans, activeBan{pred: pred, created: createdAt})
 	h.banCount.Store(int64(len(h.activeBans)))
 	h.bansMu.Unlock()
-	return total, nil
+	return int(total.Load()), nil
+}
+
+// banShard locks one shard, evicts all entries matching pred, and returns
+// the count. Each worker scans exactly one shard — no cross-shard lock
+// ordering, no deadlock risk.
+func (h *HotStore) banShard(idx int, pred banPredicate) int {
+	s := &h.shards[idx]
+	n := 0
+	s.mu.Lock()
+	for key, e := range s.entries {
+		if pred(e.obj) {
+			s.bytes -= objSize(e.obj)
+			s.evict.Remove(e.sieve)
+			delete(s.entries, key)
+			delete(s.hotOnly, key)
+			h.stats.evictions.Add(1)
+			n++
+			e.obj = nil
+			e.sieve = nil
+			e.hasBackup = false
+			e.windowHits.Store(0)
+			hotEntryPool.Put(e)
+		}
+	}
+	s.mu.Unlock()
+	return n
 }
 
 // banPredicate is a compiled function that returns true when an Object

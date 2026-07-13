@@ -125,6 +125,7 @@ linters:
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/cespare/xxhash/v2
             - github.com/prometheus/client_golang
+            - golang.org/x/sync
             - golang.org/x/sys
         cache-L3:
           list-mode: strict

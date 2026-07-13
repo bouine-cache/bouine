@@ -107,9 +107,6 @@ func (e *engine) run(ctx context.Context) error {
 	seq := shutdown.NewSequencer(e.logger)
 	seq.Gate().Register("store-loaded")
 	seq.Gate().Register("listeners-bound")
-	if e.cfg.Cluster.Enabled && e.cfg.Listen.Cluster != "" {
-		seq.Gate().Register("cluster-joined")
-	}
 
 	// Create a ConditionsFn closure for the /readyz?detail=1 endpoint.
 	// This exposes per-condition state so operators can see which startup
@@ -165,12 +162,11 @@ func (e *engine) run(ctx context.Context) error {
 	seq.Gate().MarkReady("listeners-bound")
 	updateStartupMetrics(seq, rs.startupMetrics)
 
-	// Cluster join runs in a supervised goroutine (startClusterJoin), so
-	// the cluster-joined condition is marked asynchronously. When all
-	// conditions are met, log the total startup duration and record the
-	// histogram. The individual condition updates are logged by the
-	// goroutines that mark them; this final log fires when readyz flips
-	// to 200.
+	// Cluster join runs in a supervised goroutine (startClusterJoin) and
+	// does not gate readiness. This avoids a StatefulSet bootstrapping
+	// deadlock where pod-0 can't join because pod-1 hasn't started, but
+	// pod-1 won't start until pod-0 is ready. When all conditions are met,
+	// log the total startup duration and record the histogram.
 	if seq.IsReady() {
 		startupDur := time.Since(startupBegin)
 		e.logger.Info("startup: complete", "duration", startupDur.String())
@@ -761,8 +757,6 @@ func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin
 
 func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 	if rs.clusterNode == nil || len(e.cfg.Cluster.Join) == 0 {
-		// No cluster configured — mark condition as ready immediately.
-		rs.seq.Gate().MarkReady("cluster-joined")
 		return
 	}
 
@@ -774,48 +768,32 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 	g.Go("cluster-join", func(joinCtx context.Context) error {
 		err := e.joinWithRetry(joinCtx, rs.clusterNode, joinTimeout)
 
-		switch {
-		case err == nil:
-			rs.seq.Gate().MarkReady("cluster-joined")
-		case e.cfg.Cluster.Mode == config.ClusterModeStrong:
-			// In strong mode, join failure means the node can't route
-			// keys to peers. Keep the condition false so the pod stays
-			// not-ready. The startupProbe will eventually restart the
-			// pod, giving it another chance to join.
-			e.logger.Error("cluster join failed in strong mode; pod will stay not-ready",
+		if err == nil {
+			e.logger.Info("cluster join succeeded", "members", len(rs.clusterNode.Members()))
+		} else {
+			e.logger.Warn("cluster join: initial attempt failed, continuing background retry",
 				"error", err)
-		default:
-			// In eventual mode, the node can cache independently.
-			// Mark ready and keep retrying in the background.
-			rs.seq.Gate().MarkReady("cluster-joined")
 		}
 
 		// Continue retrying in the background regardless of the initial
 		// result. Peers may come up later (e.g., during a rolling update
 		// with sequential pod starts).
-		if err != nil {
-			e.logger.Info("cluster join: continuing background retry")
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-joinCtx.Done():
-					return nil
-				case <-ticker.C:
-					if _, jErr := rs.clusterNode.Join(e.cfg.Cluster.Join); jErr == nil {
-						if len(rs.clusterNode.Members()) > 1 {
-							e.logger.Info("cluster join succeeded (background retry)",
-								"members", len(rs.clusterNode.Members()))
-							if e.cfg.Cluster.Mode == config.ClusterModeStrong {
-								rs.seq.Gate().MarkReady("cluster-joined")
-							}
-							return nil
-						}
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-joinCtx.Done():
+				return nil
+			case <-ticker.C:
+				if _, jErr := rs.clusterNode.Join(e.cfg.Cluster.Join); jErr == nil {
+					if len(rs.clusterNode.Members()) > 1 {
+						e.logger.Info("cluster join succeeded (background retry)",
+							"members", len(rs.clusterNode.Members()))
+						return nil
 					}
 				}
 			}
 		}
-		return nil
 	})
 }
 

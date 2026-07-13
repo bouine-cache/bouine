@@ -491,7 +491,7 @@ All subcommands honor `--server`, `--token`, and `--insecure`.
 
 - Warm tier on `emptyDir` or PVC; otherwise stateless w.r.t. external services.
 - StatefulSet + headless Service for stable peer DNS.
-- Liveness: `/healthz`. Readiness: `/readyz` (waits for cluster quorum).
+- Liveness: `/healthz`. Readiness: `/readyz` (store loaded + listeners bound).
 - HPA-friendly: scaling out triggers automatic ring rebalance.
 - Helm chart: PodDisruptionBudget, anti-affinity, topology spread,
   NetworkPolicy template, ServiceMonitor optional.

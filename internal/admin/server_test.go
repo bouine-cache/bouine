@@ -75,7 +75,7 @@ func TestReadyz_Detail_NotReady(t *testing.T) {
 		ConditionsFn: func() []Condition {
 			return []Condition{
 				{Name: "store-loaded", Ready: true},
-				{Name: "cluster-joined", Ready: false},
+				{Name: "listeners-bound", Ready: false},
 			}
 		},
 	})

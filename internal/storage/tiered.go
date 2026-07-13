@@ -294,7 +294,10 @@ func (t *TieredStore) initWAL(walDir string) error {
 	}
 
 	allHaveSize := true
+	walBegin := time.Now()
+	var walEntries int
 	rErr := wal.Replay(walDir, func(e wal.Entry) error {
+		walEntries++
 		switch {
 		case e.IsPut():
 			if e.HasSize() {
@@ -308,9 +311,17 @@ func (t *TieredStore) initWAL(walDir string) error {
 		}
 		return nil
 	})
+	walDur := time.Since(walBegin)
+	walVersion := "v2"
+	if !allHaveSize {
+		walVersion = "v1"
+	}
 	if rErr != nil {
 		t.logger.Warn("wal replay failed; warm-tier index may be incomplete",
-			"error", rErr)
+			"error", rErr, "entries", walEntries, "duration", walDur.String())
+	} else {
+		t.logger.Info("wal replay complete",
+			"entries", walEntries, "duration", walDur.String(), "wal_version", walVersion)
 	}
 
 	if snapshotLoaded {
@@ -345,12 +356,20 @@ func (t *TieredStore) initWAL(walDir string) error {
 	// segment scan that takes seconds with millions of keys.
 	if allHaveSize && t.warm.IndexLen() > 0 {
 		t.warm.RecomputeStatsFromIndex()
+		t.logger.Info("recompute stats skipped (wal v2 has size)",
+			"entries", t.warm.IndexLen())
 		t.walEntryCount.Store(0)
 		return nil
 	}
+	t.logger.Info("recompute stats running (wal v1 lacks size field)",
+		"entries", t.warm.IndexLen())
+	recomputeBegin := time.Now()
 	if err := t.warm.RecomputeStats(); err != nil {
 		t.logger.Warn("warm-tier stats recompute failed; counters may be stale",
 			"error", err)
+	} else {
+		t.logger.Info("recompute stats complete",
+			"entries", t.warm.IndexLen(), "duration", time.Since(recomputeBegin).String())
 	}
 	t.walEntryCount.Store(0)
 	return nil

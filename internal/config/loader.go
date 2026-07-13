@@ -46,6 +46,12 @@ func Defaults() Config {
 // near GOMEMLIMIT (issue #161).
 const defaultHotMaxBytesRatio = 75
 
+// defaultWarmMaxEntriesRatio is the fraction of GOMEMLIMIT used to derive
+// the warm index entry cap when warm_max_entries is unset. 15% leaves
+// headroom for the hot store (75%), Go runtime overhead, and GC
+// fragmentation. At 14 GiB GOMEMLIMIT, 15% = ~16 M entries (~2 GiB heap).
+const defaultWarmMaxEntriesRatio = 15
+
 // Load reads a YAML file from path, applies Defaults, and validates.
 // Strict mode rejects unknown fields so typos surface immediately.
 func Load(path string) (*Config, error) {
@@ -81,6 +87,7 @@ func Parse(b []byte) (*Config, error) {
 	// Runs for both empty and populated configs so an empty config file
 	// in a container with GOMEMLIMIT still gets an eviction budget.
 	cfg.Storage.ResolveHotMaxBytes(os.Getenv("GOMEMLIMIT"))
+	cfg.Storage.ResolveWarmMaxEntries(os.Getenv("GOMEMLIMIT"))
 	return &cfg, nil
 }
 
@@ -130,6 +137,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: storage.hot_max_bytes_ratio must be 0–100, got %d", r)
 	}
 
+	// warm_max_entries_ratio range check. Zero means "use default" and is valid.
+	if r := c.Storage.WarmMaxEntriesRatio; r < 0 || r > 100 {
+		return fmt.Errorf("config: storage.warm_max_entries_ratio must be 0–100, got %d", r)
+	}
+
 	return nil
 }
 
@@ -162,6 +174,37 @@ func (s *Storage) ResolveHotMaxBytes(goMemLimit string) {
 		ratio = defaultHotMaxBytesRatio
 	}
 	s.HotMaxBytes = ByteSize(n * int64(ratio) / 100)
+}
+
+// ResolveWarmMaxEntries derives the warm index entry cap from the
+// GOMEMLIMIT value when warm_max_entries is not explicitly configured.
+// This bounds the Go heap cost of the warm index (map[uint64]warmLoc +
+// SIEVE entries) to a percentage of the runtime memory limit, preventing
+// unbounded heap growth that leads to OOMKill (exit 137).
+//
+// When warm_max_entries is set explicitly it is kept as-is (operator
+// override). When GOMEMLIMIT is empty or unparseable, WarmMaxEntries is
+// left unchanged (zero = unlimited). The 128 constant is inlined from
+// warm.EstimatedWarmLocHeapBytes to avoid a circular import.
+func (s *Storage) ResolveWarmMaxEntries(goMemLimit string) {
+	if s.WarmMaxEntries > 0 {
+		return
+	}
+	raw := strings.TrimSpace(goMemLimit)
+	if raw == "" {
+		return
+	}
+	n, err := parseByteSize(raw)
+	if err != nil || n <= 0 {
+		return
+	}
+	ratio := s.WarmMaxEntriesRatio
+	if ratio == 0 {
+		ratio = defaultWarmMaxEntriesRatio
+	}
+	// 128 = warm.EstimatedWarmLocHeapBytes. Inlined to avoid circular
+	// import (config -> warm -> storage). Update both if warmLoc changes.
+	s.WarmMaxEntries = n * int64(ratio) / (100 * 128)
 }
 
 // validateRoute checks a single route entry and normalises its fields.

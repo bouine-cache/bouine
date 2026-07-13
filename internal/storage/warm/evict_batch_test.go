@@ -288,3 +288,117 @@ func TestEvictToFitBatch_MidBatchFailure(t *testing.T) {
 		t.Errorf("index has %d entries after failed batch, want %d", indexLen, seedEntries)
 	}
 }
+
+// TestOverBudget_EntryCap verifies OverBudget returns true when the
+// entry count exceeds maxEntries even if byte budget is not exceeded.
+func TestOverBudget_EntryCap(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 20, MaxEntries: 5, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100)
+	for i := range 5 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put(%d): %v", i, err)
+		}
+	}
+
+	if !s.OverBudget() {
+		t.Fatal("OverBudget should be true with 5 entries and maxEntries=5")
+	}
+}
+
+// TestOverBudget_EntryCapNotReached verifies OverBudget returns false
+// when entries are under the cap.
+func TestOverBudget_EntryCapNotReached(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 20, MaxEntries: 10, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100)
+	for i := range 5 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put(%d): %v", i, err)
+		}
+	}
+
+	if s.OverBudget() {
+		t.Fatal("OverBudget should be false with 5 entries and maxEntries=10")
+	}
+}
+
+// TestPut_EntryCapRejects verifies that Put rejects when the entry cap
+// is reached and eviction cannot free space (all entries protected).
+func TestPut_EntryCapRejects(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// No byte budget, only entry cap. 3 entries max.
+	s, err := NewStore(Config{Dir: dir, MaxEntries: 3, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100)
+	for i := range 3 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put(%d): %v", i, err)
+		}
+	}
+
+	// Mark all entries protected so eviction cannot find a victim.
+	s.idxMu.Lock()
+	for k := range s.index {
+		loc := s.index[k]
+		loc.protected = true
+		s.index[k] = loc
+	}
+	s.idxMu.Unlock()
+
+	// 4th Put should be rejected — entry cap reached, no evictable victim.
+	_, _, err = s.Put(99, body)
+	if err == nil {
+		t.Fatal("expected ErrOverBudget, got nil")
+	}
+}
+
+// TestPut_EntryCapEvictsAndSucceeds verifies that Put triggers eviction
+// when entry cap is reached and succeeds when a non-protected victim exists.
+func TestPut_EntryCapEvictsAndSucceeds(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// No byte budget, only entry cap. 3 entries max.
+	s, err := NewStore(Config{Dir: dir, MaxEntries: 3, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	body := make([]byte, 100)
+	for i := range 3 {
+		if _, _, err := s.Put(uint64(i), body); err != nil {
+			t.Fatalf("Put(%d): %v", i, err)
+		}
+	}
+
+	// 4th Put should evict one entry and succeed.
+	if _, _, err := s.Put(99, body); err != nil {
+		t.Fatalf("Put with entry cap eviction: %v", err)
+	}
+
+	if s.stats.entries.Load() != 3 {
+		t.Errorf("entries = %d, want 3 (cap)", s.stats.entries.Load())
+	}
+}

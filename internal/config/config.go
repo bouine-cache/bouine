@@ -89,7 +89,16 @@ type Storage struct {
 	HotMaxBytesRatio int      `yaml:"hot_max_bytes_ratio,omitempty" json:"hot_max_bytes_ratio,omitempty"`
 	WarmDir          string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
 	WarmMaxBytes     ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
-	Eviction         string   `yaml:"eviction,omitempty" json:"eviction,omitempty"`
+	// WarmMaxEntries caps the warm-tier index size in entries. Zero means
+	// derive from GOMEMLIMIT (see WarmMaxEntriesRatio). A positive value
+	// overrides the derived limit. Negative means unlimited.
+	WarmMaxEntries int64 `yaml:"warm_max_entries,omitempty" json:"warm_max_entries,omitempty"`
+	// WarmMaxEntriesRatio is the percentage of GOMEMLIMIT used to derive
+	// WarmMaxEntries when warm_max_entries is not explicitly set. Zero
+	// means use the default (15). At 14 GiB GOMEMLIMIT with 15%, the
+	// warm index is capped at ~16M entries (~2 GiB heap).
+	WarmMaxEntriesRatio int    `yaml:"warm_max_entries_ratio,omitempty" json:"warm_max_entries_ratio,omitempty"`
+	Eviction            string `yaml:"eviction,omitempty" json:"eviction,omitempty"`
 	// BodyThreshold controls the hot/warm admission boundary during
 	// normal operation. Objects with BodySize > this value are written
 	// to warm on every Put (with fsync). Objects below this value are

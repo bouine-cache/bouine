@@ -69,5 +69,6 @@ func loadConfig(path string) (*config.Config, error) {
 	// this via Parse). Without it, a container with GOMEMLIMIT set but
 	// no config file would run the hot store without an eviction budget.
 	d.Storage.ResolveHotMaxBytes(os.Getenv("GOMEMLIMIT"))
+	d.Storage.ResolveWarmMaxEntries(os.Getenv("GOMEMLIMIT"))
 	return &d, nil
 }

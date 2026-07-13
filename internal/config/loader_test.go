@@ -584,3 +584,82 @@ func TestWALSyncInterval_NegativeOneAccepted(t *testing.T) {
 		t.Fatalf("wal_sync_interval = -1 should be accepted, got: %v", err)
 	}
 }
+
+func TestResolveWarmMaxEntries_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
+	t.Parallel()
+	// 14 GiB * 15% / (100 * 128) = 14*1024^3 * 15 / 12800 = ~16,777,216 entries
+	limit := int64(14 << 30)
+	want := limit * 15 / (100 * 128)
+	s := Storage{}
+	s.ResolveWarmMaxEntries("14GiB")
+	if s.WarmMaxEntries != want {
+		t.Fatalf("WarmMaxEntries = %d, want %d", s.WarmMaxEntries, want)
+	}
+}
+
+func TestResolveWarmMaxEntries_CustomRatio(t *testing.T) {
+	t.Parallel()
+	limit := int64(14 << 30)
+	want := limit * 10 / (100 * 128)
+	s := Storage{WarmMaxEntriesRatio: 10}
+	s.ResolveWarmMaxEntries("14GiB")
+	if s.WarmMaxEntries != want {
+		t.Fatalf("WarmMaxEntries = %d, want %d", s.WarmMaxEntries, want)
+	}
+}
+
+func TestResolveWarmMaxEntries_ExplicitOverrideKept(t *testing.T) {
+	t.Parallel()
+	s := Storage{WarmMaxEntries: 5_000_000}
+	s.ResolveWarmMaxEntries("14GiB")
+	if s.WarmMaxEntries != 5_000_000 {
+		t.Fatalf("explicit override clobbered: got %d, want 5000000", s.WarmMaxEntries)
+	}
+}
+
+func TestResolveWarmMaxEntries_NoGomemLimitStaysZero(t *testing.T) {
+	t.Parallel()
+	s := Storage{}
+	s.ResolveWarmMaxEntries("")
+	if s.WarmMaxEntries != 0 {
+		t.Fatalf("expected 0 when GOMEMLIMIT unset, got %d", s.WarmMaxEntries)
+	}
+}
+
+func TestResolveWarmMaxEntries_InvalidGomemLimitIgnored(t *testing.T) {
+	t.Parallel()
+	s := Storage{}
+	s.ResolveWarmMaxEntries("garbage")
+	if s.WarmMaxEntries != 0 {
+		t.Fatalf("expected 0 for invalid GOMEMLIMIT, got %d", s.WarmMaxEntries)
+	}
+}
+
+func TestValidate_WarmMaxEntriesRatioRange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		ratio int
+		ok    bool
+	}{
+		{"zero is valid (use default)", 0, true},
+		{"1 is valid", 1, true},
+		{"100 is valid", 100, true},
+		{"negative is invalid", -1, false},
+		{"101 is invalid", 101, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := Defaults()
+			c.Storage.WarmMaxEntriesRatio = tc.ratio
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}

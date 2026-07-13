@@ -52,7 +52,7 @@ func parseLogRecords(t *testing.T, mu *sync.Mutex, buf *bytes.Buffer) []map[stri
 	return records
 }
 
-func TestEvictionLogging_Backed(t *testing.T) {
+func TestEvictionLogging_BackedSkipped(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var buf bytes.Buffer
@@ -81,15 +81,14 @@ func TestEvictionLogging_Backed(t *testing.T) {
 	})
 	h.Close(ctx)
 
+	// Backed evictions must not produce logs — they are benign (the warm
+	// tier retains the data) and are already counted by the
+	// hot_store_evictions_total metric.
 	records := parseLogRecords(t, &mu, &buf)
-	found := false
 	for _, rec := range records {
-		if rec["msg"] == "evicted from hot store" && rec["had_backup"] == true {
-			found = true
+		if rec["msg"] == "evicted from hot store" {
+			t.Fatalf("did not expect any eviction log for backed entry, got: %v", rec)
 		}
-	}
-	if !found {
-		t.Fatal("expected a backed eviction log at Info level")
 	}
 }
 
@@ -122,7 +121,7 @@ func TestEvictionLogging_NoBackup(t *testing.T) {
 	records := parseLogRecords(t, &mu, &buf)
 	found := false
 	for _, rec := range records {
-		if rec["msg"] == "evicted from hot store" && rec["had_backup"] == false {
+		if rec["msg"] == "evicted from hot store" && rec["level"] == "WARN" && rec["reason"] == "inline_overshoot" {
 			found = true
 		}
 	}

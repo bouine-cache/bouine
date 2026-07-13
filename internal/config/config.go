@@ -111,6 +111,22 @@ type Storage struct {
 	// synchronous mode (per-entry fsync, same as pre-ADR-0024 behavior).
 	// Only effective when warm_dir is configured. See ADR-0024.
 	WALSyncInterval time.Duration `yaml:"wal_sync_interval,omitempty" json:"wal_sync_interval,omitempty"`
+	// CompactStartupDelay delays the first compaction check after
+	// startup. Compaction scans all segments and can take seconds with
+	// millions of keys — running it during startup (when WAL replay,
+	// cluster join, and initial traffic compete for I/O) causes probe
+	// timeouts and CrashLoopBackOff. Default 5 minutes. 0 means use the
+	// default. Set to -1 to start compaction immediately.
+	CompactStartupDelay time.Duration `yaml:"compact_startup_delay,omitempty" json:"compact_startup_delay,omitempty"`
+	// CheckpointInterval controls how often a snapshot + WAL truncate
+	// checkpoint runs. Default 5m. 0 means use the default. Set to -1
+	// to disable periodic checkpointing (WAL grows until compaction).
+	// Shorter intervals = faster restart but more background I/O.
+	CheckpointInterval time.Duration `yaml:"checkpoint_interval,omitempty" json:"checkpoint_interval,omitempty"`
+	// CheckpointWALThreshold triggers a checkpoint when the WAL entry
+	// count exceeds this value, regardless of the interval. Bounds WAL
+	// replay time on unclean restart. Default 100000.
+	CheckpointWALThreshold int64 `yaml:"checkpoint_wal_threshold,omitempty" json:"checkpoint_wal_threshold,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

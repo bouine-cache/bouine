@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,8 +70,22 @@ type TieredStore struct {
 	done chan struct{}
 	// compactWg tracks the compaction goroutine for join-on-close.
 	compactWg sync.WaitGroup
-	// compactStartupDelay delays the first compaction after startup.
+	// CompactStartupDelay delays the first compaction after startup.
 	compactStartupDelay time.Duration
+	// checkpointInterval controls how often a snapshot + WAL truncate
+	// checkpoint runs. Default 5m. 0 disables periodic checkpointing.
+	checkpointInterval time.Duration
+	// checkpointWALThreshold triggers a checkpoint when the WAL entry
+	// count exceeds this value, regardless of the interval. Default 100K.
+	checkpointWALThreshold int64
+	// checkpointing is true during the WAL truncate window. WAL enqueues
+	// spin until it is false. See checkpoint() for the sequence.
+	checkpointing atomic.Bool
+	// walEntryCount tracks entries since the last checkpoint. Used for
+	// the threshold trigger.
+	walEntryCount atomic.Int64
+	// checkpointWg tracks the checkpoint goroutine for join-on-close.
+	checkpointWg sync.WaitGroup
 	// syncWg tracks the warm sync goroutine for join-on-close.
 	syncWg sync.WaitGroup
 }
@@ -113,6 +128,12 @@ type TieredConfig struct {
 	// cluster join, and initial traffic compete for I/O) causes probe
 	// timeouts and CrashLoopBackOff. Default 5 minutes.
 	CompactStartupDelay time.Duration
+	// CheckpointInterval controls how often a snapshot + WAL truncate
+	// checkpoint runs. Default 5m. 0 disables periodic checkpointing.
+	CheckpointInterval time.Duration
+	// CheckpointWALThreshold triggers a checkpoint when the WAL entry
+	// count exceeds this value. Default 100000.
+	CheckpointWALThreshold int64
 }
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
@@ -142,16 +163,27 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		walSyncInterval = wal.DefaultSyncInterval
 	}
 
+	checkpointInterval := cfg.CheckpointInterval
+	if checkpointInterval == 0 {
+		checkpointInterval = 5 * time.Minute
+	}
+	checkpointWALThreshold := cfg.CheckpointWALThreshold
+	if checkpointWALThreshold == 0 {
+		checkpointWALThreshold = 100_000
+	}
+
 	ts := &TieredStore{
-		bodyThreshold:       cfg.BodyThreshold,
-		warmSyncInterval:    warmSyncInterval,
-		warmSyncBatchSize:   cfg.WarmSyncBatchSize,
-		tombstoneQueue:      make(chan api.Key, 4096),
-		warmEvictQueue:      make(chan api.Key, 4096),
-		done:                make(chan struct{}),
-		logger:              cfg.Logger,
-		walSyncInterval:     walSyncInterval,
-		compactStartupDelay: cfg.CompactStartupDelay,
+		bodyThreshold:          cfg.BodyThreshold,
+		warmSyncInterval:       warmSyncInterval,
+		warmSyncBatchSize:      cfg.WarmSyncBatchSize,
+		tombstoneQueue:         make(chan api.Key, 4096),
+		warmEvictQueue:         make(chan api.Key, 4096),
+		done:                   make(chan struct{}),
+		logger:                 cfg.Logger,
+		walSyncInterval:        walSyncInterval,
+		compactStartupDelay:    cfg.CompactStartupDelay,
+		checkpointInterval:     checkpointInterval,
+		checkpointWALThreshold: checkpointWALThreshold,
 	}
 
 	// Wire the eviction callback so backed evictions enqueue
@@ -190,6 +222,12 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		go ts.warmSyncLoop()
 	}
 
+	// Start the checkpoint loop if warm tier and WAL are both enabled.
+	if ts.warm != nil && ts.wal != nil && ts.checkpointInterval > 0 {
+		ts.checkpointWg.Add(1)
+		go ts.checkpointLoop()
+	}
+
 	return ts, nil
 }
 
@@ -223,8 +261,10 @@ func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
 }
 
 // initWAL opens the WAL, replays it to rebuild the warm-tier index, and
-// falls back to a segment scan if the replayed index is empty. When the
-// WAL contains v2 entries (opPutV2 with record size), the index is
+// falls back to a segment scan if the replayed index is empty. When an
+// index snapshot exists, it is loaded first to skip the segment scan —
+// the WAL is replayed on top of the snapshot as a delta. When the WAL
+// contains v2 entries (opPutV2 with record size), the index is
 // populated with size information directly, and RecomputeStats is skipped
 // — eliminating the multi-second segment scan on startup with millions of
 // keys. v1-only WALs fall back to RecomputeStats as before.
@@ -238,6 +278,21 @@ func (t *TieredStore) initWAL(walDir string) error {
 	if t.warm == nil {
 		return nil
 	}
+
+	// Try to load the index snapshot first. If successful, the WAL is
+	// replayed as a delta on top of the snapshot instead of from scratch.
+	snapshotLoaded := false
+	if snapPath := t.warm.SnapshotPath(); snapPath != "" {
+		if err := t.warm.LoadSnapshot(snapPath); err != nil {
+			t.logger.Warn("index snapshot load failed; falling back to WAL replay",
+				"error", err)
+		} else {
+			snapshotLoaded = true
+			t.logger.Info("index snapshot loaded",
+				"entries", t.warm.IndexLen())
+		}
+	}
+
 	allHaveSize := true
 	rErr := wal.Replay(walDir, func(e wal.Entry) error {
 		switch {
@@ -257,11 +312,20 @@ func (t *TieredStore) initWAL(walDir string) error {
 		t.logger.Warn("wal replay failed; warm-tier index may be incomplete",
 			"error", rErr)
 	}
-	// Fallback: if WAL replay failed or produced an empty index,
-	// rebuild from segment scan. We check IndexLen (the actual map
-	// size) rather than Stats() because SetIndex populates the map
-	// without touching the stats counters — Stats() always returns 0
-	// after replay, which caused a redundant full scan on every restart.
+
+	if snapshotLoaded {
+		// Snapshot has correct sizes. WAL replay failure means recent
+		// writes may be lost, but the base index is consistent. No
+		// RecomputeStats needed.
+		if rErr != nil {
+			t.logger.Warn("wal replay failed after snapshot; recent writes may be lost",
+				"error", rErr)
+		}
+		t.walEntryCount.Store(0)
+		return nil
+	}
+
+	// No snapshot — may need full scan if WAL was empty/corrupt.
 	needRebuild := rErr != nil || t.warm.IndexLen() == 0
 	if needRebuild {
 		if rErr != nil {
@@ -273,6 +337,7 @@ func (t *TieredStore) initWAL(walDir string) error {
 			t.logger.Warn("segment scan index rebuild failed", "error", err)
 		}
 		// rebuildIndexFromScan populates sizes, so we can skip RecomputeStats.
+		t.walEntryCount.Store(0)
 		return nil
 	}
 	// Skip RecomputeStats when all WAL entries had size (v2 format).
@@ -280,12 +345,14 @@ func (t *TieredStore) initWAL(walDir string) error {
 	// segment scan that takes seconds with millions of keys.
 	if allHaveSize && t.warm.IndexLen() > 0 {
 		t.warm.RecomputeStatsFromIndex()
+		t.walEntryCount.Store(0)
 		return nil
 	}
 	if err := t.warm.RecomputeStats(); err != nil {
 		t.logger.Warn("warm-tier stats recompute failed; counters may be stale",
 			"error", err)
 	}
+	t.walEntryCount.Store(0)
 	return nil
 }
 
@@ -382,10 +449,8 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
 			}
-			t.walMu.Lock()
 			recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
-			_ = t.wal.Enqueue(wal.PutEntryWithSize(uint64(key), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
-			t.walMu.Unlock()
+			t.walEnqueue(wal.PutEntryWithSize(uint64(key), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 			return nil
 		}
 	}
@@ -427,9 +492,7 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 		if err := t.warm.SyncSegment(segID); err != nil {
 			return fmt.Errorf("warm: sync before wal append: %w", err)
 		}
-		t.walMu.Lock()
-		_ = t.wal.Enqueue(wal.DeleteEntry(uint64(key)))
-		t.walMu.Unlock()
+		t.walEnqueue(wal.DeleteEntry(uint64(key)))
 		return nil
 	}
 	return nil
@@ -547,6 +610,14 @@ func (t *TieredStore) compactLoop() {
 					t.logger.Info("warm tier compaction complete")
 					if err := t.rewriteWAL(); err != nil {
 						t.logger.Error("wal rewrite after compaction failed", "error", err)
+					} else {
+						// Write a fresh snapshot after compaction —
+						// segIDs and offsets changed, the old
+						// snapshot is stale.
+						if err := t.warm.WriteSnapshot(); err != nil {
+							t.logger.Error("snapshot write after compaction failed", "error", err)
+						}
+						t.walEntryCount.Store(0)
 					}
 				}
 			}
@@ -609,9 +680,7 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 			t.logger.Warn("warm sync: warm sync failed", "error", err)
 		}
 		if t.wal != nil {
-			t.walMu.Lock()
-			t.wal.EnqueueBatch(walEntries)
-			t.walMu.Unlock()
+			t.walEnqueueBatch(walEntries)
 		}
 	}
 
@@ -766,6 +835,145 @@ func (t *TieredStore) rebuildIndexFromScan() error {
 	})
 }
 
+// walEnqueue wraps wal.Enqueue with checkpoint awareness. While a
+// checkpoint is in progress (checkpointing == true), WAL enqueues spin
+// via runtime.Gosched until the checkpoint unblocks. The spin window
+// is ~2ms (second Sync + Truncate). After enqueuing, the entry count
+// is incremented for the checkpoint threshold trigger.
+func (t *TieredStore) walEnqueue(entry wal.Entry) {
+	for t.checkpointing.Load() {
+		runtime.Gosched()
+	}
+	t.walMu.Lock()
+	defer t.walMu.Unlock()
+	if t.wal != nil {
+		_ = t.wal.Enqueue(entry)
+		t.walEntryCount.Add(1)
+	}
+}
+
+// walEnqueueBatch wraps wal.EnqueueBatch with checkpoint awareness.
+// Same spin semantics as walEnqueue. The entry count is incremented by
+// the batch size.
+func (t *TieredStore) walEnqueueBatch(entries []wal.Entry) {
+	for t.checkpointing.Load() {
+		runtime.Gosched()
+	}
+	t.walMu.Lock()
+	defer t.walMu.Unlock()
+	if t.wal != nil {
+		t.wal.EnqueueBatch(entries)
+		t.walEntryCount.Add(int64(len(entries)))
+	}
+}
+
+// checkpoint performs a crash-safe WAL checkpoint: flush the WAL, block
+// writes, flush again, write the index snapshot, truncate the WAL, then
+// unblock writes. The snapshot is written before the WAL is truncated so
+// that a crash between snapshot and truncate leaves the WAL intact —
+// restart loads the old snapshot and replays the WAL (idempotent). If the
+// snapshot write fails, the WAL is not truncated and no data is lost.
+// After a successful checkpoint, the WAL is empty and the snapshot
+// captures the full index state — restart loads the snapshot + replays
+// the (empty or small) WAL instead of scanning all segments.
+func (t *TieredStore) checkpoint() error {
+	// Step 1: Flush all pending WAL entries to disk.
+	t.walMu.Lock()
+	if t.wal != nil {
+		if err := t.wal.Sync(); err != nil {
+			t.walMu.Unlock()
+			return fmt.Errorf("checkpoint: flush wal: %w", err)
+		}
+	}
+	t.walMu.Unlock()
+
+	// Step 2: Block WAL writes. Any Enqueue call now spins until
+	// the block is released. The block window covers the second
+	// flush + snapshot I/O (~350ms at 10M entries).
+	t.checkpointing.Store(true)
+
+	// Step 3: Flush any WAL entries written between step 1 and step 2.
+	// These entries' index updates are already in the in-memory index
+	// (Put updates index before Enqueue). The flush ensures they're on
+	// disk before the snapshot captures the index.
+	t.walMu.Lock()
+	if t.wal != nil {
+		if err := t.wal.Sync(); err != nil {
+			t.walMu.Unlock()
+			t.checkpointing.Store(false)
+			return fmt.Errorf("checkpoint: second flush: %w", err)
+		}
+	}
+	t.walMu.Unlock()
+
+	// Step 4: Write the snapshot from the current index state. This
+	// takes a consistent copy under idxMu.RLock (~50ms at 10M entries)
+	// then writes lock-free (~300ms I/O). The snapshot captures all
+	// writes up to this point. If this fails, the WAL is still intact
+	// and no data is lost — we unblock and return an error.
+	if err := t.warm.WriteSnapshot(); err != nil {
+		t.checkpointing.Store(false)
+		return fmt.Errorf("checkpoint: snapshot: %w", err)
+	}
+
+	// Step 5: Truncate the WAL. Safe now — the snapshot on disk
+	// captures the full index state. All entries up to this point are
+	// reflected in both the in-memory index and the snapshot.
+	t.walMu.Lock()
+	if t.wal != nil {
+		if err := t.wal.Truncate(); err != nil {
+			t.walMu.Unlock()
+			t.checkpointing.Store(false)
+			return fmt.Errorf("checkpoint: truncate wal: %w", err)
+		}
+		t.walEntryCount.Store(0)
+	}
+	t.walMu.Unlock()
+
+	// Step 6: Unblock WAL writes. New entries go into the fresh WAL.
+	// On restart, the snapshot is loaded first, then WAL replay
+	// overwrites/extends it (idempotent).
+	t.checkpointing.Store(false)
+
+	return nil
+}
+
+// checkpointLoop runs periodic checkpoints and threshold-triggered
+// checkpoints. A checkpoint writes an index snapshot and truncates
+// the WAL, bounding WAL replay time on restart.
+func (t *TieredStore) checkpointLoop() {
+	defer t.checkpointWg.Done()
+	// Check frequently enough to catch the threshold trigger in a
+	// timely manner without burning CPU. The interval tick still
+	// gates the periodic checkpoint; the check tick only decides
+	// whether to evaluate the conditions.
+	checkInterval := t.checkpointInterval
+	if checkInterval > 10*time.Second {
+		checkInterval = 10 * time.Second
+	}
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	lastCheckpoint := time.Now()
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-ticker.C:
+			count := t.walEntryCount.Load()
+			if count == 0 {
+				continue
+			}
+			elapsed := time.Since(lastCheckpoint)
+			if elapsed >= t.checkpointInterval || count >= t.checkpointWALThreshold {
+				if err := t.checkpoint(); err != nil {
+					t.logger.Warn("checkpoint failed", "error", err)
+				}
+				lastCheckpoint = time.Now()
+			}
+		}
+	}
+}
+
 // rewriteWAL writes a fresh WAL containing all live warm-tier index
 // entries, then atomically replaces the old WAL file. Called after a
 // successful warm-tier compaction so the WAL stays bounded.
@@ -839,6 +1047,7 @@ func (t *TieredStore) Close(ctx context.Context) error {
 	close(t.done)
 	t.compactWg.Wait()
 	t.syncWg.Wait()
+	t.checkpointWg.Wait()
 
 	t.walMu.Lock()
 	if t.wal != nil {

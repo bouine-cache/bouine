@@ -118,6 +118,47 @@ type Segment struct {
 	f        *os.File
 	size     int64
 	maxBytes int64
+	opened   atomic.Bool
+}
+
+// ensureOpen opens the segment file if not already open. Must be called
+// while s.mu (Store-level) is held to prevent Compact from swapping the
+// segment set mid-open.
+func (seg *Segment) ensureOpen() error {
+	if seg.opened.Load() {
+		return nil
+	}
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	if seg.f != nil {
+		return nil
+	}
+	f, err := os.OpenFile(seg.Path, os.O_RDWR, 0o600) //nolint:gosec // operator-configured path
+	if err != nil {
+		return fmt.Errorf("warm: open %s: %w", seg.Path, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("warm: stat %s: %w", seg.Path, err)
+	}
+	seg.f = f
+	seg.size = info.Size()
+	seg.opened.Store(true)
+	return nil
+}
+
+// Close closes the segment file if open. Safe to call on unopened segments.
+func (seg *Segment) Close() error {
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	if seg.f == nil {
+		return nil
+	}
+	err := seg.f.Close()
+	seg.f = nil
+	seg.opened.Store(false)
+	return err
 }
 
 // warmLoc is the in-memory index entry for a warm-tier object. The
@@ -261,15 +302,23 @@ func (s *Store) openExisting() error {
 	}
 	sort.Ints(ids)
 	for _, id := range ids {
-		seg, err := openSegment(filepath.Join(s.dir, segName(id)), id, s.segMax)
+		path := filepath.Join(s.dir, segName(id))
+		info, err := os.Stat(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("warm: stat %s: %w", path, err)
+		}
+		seg := &Segment{
+			ID:       id,
+			Path:     path,
+			size:     info.Size(),
+			maxBytes: s.segMax,
 		}
 		s.segs = append(s.segs, seg)
 		if int32(id) >= s.nextID.Load() { //nolint:gosec // segment IDs bounded
 			s.nextID.Store(int32(id + 1)) //nolint:gosec // bounded
 		}
 	}
+	s.rebuildSegByID()
 	return nil
 }
 
@@ -427,6 +476,9 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 	// readRecordAt uses os.File.ReadAt (pread), so it does not mutate the
 	// shared file offset and does not need seg.mu. s.mu.RLock is still
 	// held to keep Compact from closing the file descriptor mid-read.
+	if err := seg.ensureOpen(); err != nil {
+		return nil, fmt.Errorf("warm: open segment %d: %w", seg.ID, err)
+	}
 	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
@@ -638,6 +690,9 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 		return nil, fmt.Errorf("warm: segment %d not found", segID)
 	}
 
+	if err := seg.ensureOpen(); err != nil {
+		return nil, fmt.Errorf("warm: open segment %d: %w", segID, err)
+	}
 	rec, err := readRecordAt(seg.f, offset, segID)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
@@ -657,6 +712,9 @@ func (s *Store) Scan(fn func(Record) error) error {
 	s.mu.RUnlock()
 
 	for _, seg := range segs {
+		if err := seg.ensureOpen(); err != nil {
+			return err
+		}
 		seg.mu.Lock()
 		err := scanSegment(seg.f, seg.ID, fn)
 		seg.mu.Unlock()
@@ -931,23 +989,36 @@ func (s *Store) SyncSegment(segID int) error {
 	if seg == nil {
 		return fmt.Errorf("warm: sync: segment %d not found", segID)
 	}
+	if err := seg.ensureOpen(); err != nil {
+		return err
+	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 	return seg.f.Sync()
 }
 
-// Close syncs and closes all segment files.
+// Close syncs and closes all segment files. Writes a final index
+// snapshot first so the next startup can use the fast path.
 func (s *Store) Close() error {
+	var firstErr error
+	if err := s.WriteSnapshot(); err != nil {
+		firstErr = fmt.Errorf("warm: snapshot on close: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var firstErr error
 	for _, seg := range s.segs {
-		if err := seg.f.Sync(); err != nil && firstErr == nil {
-			firstErr = err
+		seg.mu.Lock()
+		if seg.f != nil {
+			if err := seg.f.Sync(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			if err := seg.f.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			seg.f = nil
+			seg.opened.Store(false)
 		}
-		if err := seg.f.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		seg.mu.Unlock()
 	}
 	s.segs = nil
 	s.segByID = nil
@@ -1014,6 +1085,9 @@ func (s *Store) activeSeg() (*Segment, error) {
 		last.mu.Unlock()
 		if !full {
 			s.mu.RUnlock()
+			if err := last.ensureOpen(); err != nil {
+				return nil, err
+			}
 			return last, nil
 		}
 	}
@@ -1033,6 +1107,9 @@ func (s *Store) newSegment() (*Segment, error) {
 		full := last.size >= last.maxBytes
 		last.mu.Unlock()
 		if !full {
+			if err := last.ensureOpen(); err != nil {
+				return nil, err
+			}
 			return last, nil
 		}
 	}
@@ -1057,13 +1134,15 @@ func openSegment(path string, id int, maxBytes int64) (*Segment, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("warm: stat %s: %w", path, err)
 	}
-	return &Segment{
+	seg := &Segment{
 		ID:       id,
 		Path:     path,
 		f:        f,
 		size:     info.Size(),
 		maxBytes: maxBytes,
-	}, nil
+	}
+	seg.opened.Store(true)
+	return seg, nil
 }
 
 func segName(id int) string {
@@ -1352,7 +1431,7 @@ func (s *Store) Compact() error {
 	// Now safe to close old handles: new store is open, old inodes are
 	// unlinked and will be freed when these fds close.
 	for _, seg := range s.segs {
-		_ = seg.f.Close()
+		_ = seg.Close()
 	}
 	s.segs = fresh.segs
 	s.segByID = fresh.segByID

@@ -54,6 +54,7 @@ rules:
       - github.com/bouine-cache/bouine/pkg/header
       - github.com/cespare/xxhash/v2
       - github.com/prometheus/client_golang
+      - golang.org/x/sync
       - golang.org/x/sys
 
   # L3 may depend on L2 (Store interface), L4 (Fetcher), L7.

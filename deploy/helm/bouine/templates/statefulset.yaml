@@ -7,6 +7,12 @@ metadata:
 spec:
   serviceName: {{ include "bouine.fullname" . }}-headless
   replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  minReadySeconds: {{ .Values.minReadySeconds | default 30 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.updateStrategy.maxUnavailable | default 1 }}
   selector:
     matchLabels:
       {{- include "bouine.selectorLabels" . | nindent 6 }}
@@ -44,10 +50,11 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             # GC tuning: keep pauses small relative to the memory limit.
-            # Set GOMEMLIMIT to ~75% of the pod's memory limit so the Go
-            # runtime increases GC frequency before the OOM-killer fires.
+            # GOMEMLIMIT is auto-computed as 75% of resources.limits.memory
+            # by the bouine.goMemLimit helper. Set goMemLimit in values.yaml
+            # to override with a manual value.
             - name: GOMEMLIMIT
-              value: "{{ .Values.goMemLimit | default "3GiB" }}"
+              value: "{{ include "bouine.goMemLimit" . }}"
             - name: GOGC
               value: "{{ .Values.goGC | default "100" }}"
             {{- if .Values.extraEnv }}
@@ -95,7 +102,7 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["sh", "-c", "sleep {{ add1 (.Values.readinessProbe.periodSeconds | default 5) }}"]
+                command: ["sh", "-c", "sleep {{ .Values.preStop.sleepSeconds | default 10 }}"]
       volumes:
         - name: config
           configMap:

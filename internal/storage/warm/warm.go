@@ -23,6 +23,7 @@
 package warm
 
 import (
+	"container/list"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -119,6 +120,11 @@ type Segment struct {
 	size     int64
 	maxBytes int64
 	opened   atomic.Bool
+	// readers counts in-flight read operations using this segment's fd.
+	// The fdCache checks this before evicting an open segment — a
+	// non-zero count means a read is in progress and the fd cannot be
+	// closed safely.
+	readers atomic.Int32
 }
 
 // ensureOpen opens the segment file if not already open. Must be called
@@ -130,6 +136,12 @@ func (seg *Segment) ensureOpen() error {
 	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
+	return seg.openLocked()
+}
+
+// openLocked opens the segment file if not already open. The caller
+// MUST hold seg.mu.
+func (seg *Segment) openLocked() error {
 	if seg.f != nil {
 		return nil
 	}
@@ -148,6 +160,26 @@ func (seg *Segment) ensureOpen() error {
 	return nil
 }
 
+// closeIfIdle closes the segment fd if no readers are in flight.
+// Returns true if the fd was closed (or already nil). Returns false
+// if a reader started between the fdCache's lock-free readers check
+// and the seg.mu acquisition — the caller leaves the fd open and
+// the entry stays out of the cache until the next touch re-adds it.
+func (seg *Segment) closeIfIdle() bool {
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	if seg.f == nil {
+		return true
+	}
+	if seg.readers.Load() > 0 {
+		return false
+	}
+	_ = seg.f.Close()
+	seg.f = nil
+	seg.opened.Store(false)
+	return true
+}
+
 // Close closes the segment file if open. Safe to call on unopened segments.
 func (seg *Segment) Close() error {
 	seg.mu.Lock()
@@ -159,6 +191,100 @@ func (seg *Segment) Close() error {
 	seg.f = nil
 	seg.opened.Store(false)
 	return err
+}
+
+// fdCache is a bounded LRU cache of open segment file descriptors.
+// It prevents unbounded FD growth when the warm tier has many segments.
+// Eviction skips segments with in-flight readers (readers > 0) by moving
+// them to the front of the LRU. If a reader starts between the lock-free
+// readers check and the seg.mu acquisition inside closeIfIdle, the entry
+// is removed from the cache but the fd is left open — it will be re-added
+// on the next touch. The cache is protected by its own mutex, separate
+// from s.mu, so eviction does not block normal segment lookups.
+type fdCache struct {
+	mu       sync.Mutex
+	capacity int
+	entries  map[int]*list.Element
+	lru      *list.List
+}
+
+// newFDCache creates an FD cache with the given capacity. capacity <= 0
+// means unlimited (no eviction).
+func newFDCache(capacity int) *fdCache {
+	if capacity < 0 {
+		capacity = 0
+	}
+	return &fdCache{
+		capacity: capacity,
+		entries:  make(map[int]*list.Element),
+		lru:      list.New(),
+	}
+}
+
+// touch moves seg to the front of the LRU list and adds it if not
+// present. If the cache is over capacity after insertion, it evicts
+// LRU entries with zero readers until under capacity or no evictable
+// entries remain. Must be called after seg.ensureOpen() succeeds.
+func (c *fdCache) touch(seg *Segment) {
+	if c == nil || c.capacity == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.entries[seg.ID]; ok {
+		c.lru.MoveToFront(el)
+		return
+	}
+	el := c.lru.PushFront(seg)
+	c.entries[seg.ID] = el
+	moved := 0
+	for c.lru.Len() > c.capacity {
+		if moved >= c.lru.Len() {
+			break // all entries have active readers
+		}
+		back := c.lru.Back()
+		if back == nil {
+			break
+		}
+		candidate := back.Value.(*Segment)
+		if candidate.readers.Load() > 0 {
+			c.lru.MoveToFront(back)
+			moved++
+			continue
+		}
+		c.lru.Remove(back)
+		delete(c.entries, candidate.ID)
+		moved = 0
+		// closeIfIdle rechecks readers under seg.mu. If a reader
+		// started between the lock-free check above and the lock
+		// acquisition, the fd stays open and the entry stays out
+		// of the cache until the next touch re-adds it.
+		if !candidate.closeIfIdle() {
+			continue
+		}
+	}
+}
+
+// clear removes all entries from the cache without closing them.
+// Called during Compact and Close where the caller handles closing.
+func (c *fdCache) clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[int]*list.Element)
+	c.lru = list.New()
+}
+
+// Len returns the number of entries in the cache.
+func (c *fdCache) Len() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
 }
 
 // warmLoc is the in-memory index entry for a warm-tier object. The
@@ -219,6 +345,11 @@ type Store struct {
 	// metrics receives warm-tier Prometheus collectors. Nil when the
 	// store is constructed without a registry (tests, single-node).
 	metrics *Metrics
+	// fdCache bounds the number of open segment file descriptors.
+	// Nil when SegmentCacheSize is -1 (unlimited). ensureOpen calls
+	// fdCache.touch after opening a segment so the cache can evict the
+	// LRU entry when over capacity.
+	fdCache *fdCache
 }
 
 // rebuildSegByID updates the segByID index from the current segs slice.
@@ -249,6 +380,12 @@ type Config struct {
 	Dir      string
 	MaxBytes int64
 	SegMax   int64 // per-segment max, default 64 MiB
+	// SegmentCacheSize caps the number of concurrently open segment
+	// file descriptors. 0 means auto (min(segCount, 256)). -1 means
+	// unlimited (no eviction). When the cache is full and a new segment
+	// is opened, the least-recently-accessed segment with zero in-flight
+	// readers is closed.
+	SegmentCacheSize int
 	// Metrics receives warm-tier Prometheus collectors. Nil disables
 	// metric collection (single-node mode without a registry).
 	Metrics *Metrics
@@ -274,8 +411,20 @@ func NewStore(cfg Config) (*Store, error) {
 		evictList: sieve.NewList[uint64](),
 		metrics:   cfg.Metrics,
 	}
+	if cfg.SegmentCacheSize != -1 {
+		cacheSize := cfg.SegmentCacheSize
+		if cacheSize == 0 {
+			cacheSize = 256 // auto default, clamped to segCount after openExisting
+		}
+		s.fdCache = newFDCache(cacheSize)
+	}
 	if err := s.openExisting(); err != nil {
 		return nil, err
+	}
+	// Clamp the FD cache to the actual segment count so we don't
+	// reserve capacity for segments that don't exist.
+	if s.fdCache != nil && s.fdCache.capacity > len(s.segs) && len(s.segs) > 0 {
+		s.fdCache.capacity = len(s.segs)
 	}
 	// Set the max_bytes gauge once at construction. 0 means unlimited.
 	if s.metrics != nil {
@@ -358,6 +507,12 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 
+	if seg.f == nil {
+		if err := seg.openLocked(); err != nil {
+			return 0, 0, err
+		}
+	}
+
 	off := seg.size
 	if err := writeRecordAt(seg.f, off, magicLive, key, body); err != nil {
 		return 0, 0, fmt.Errorf("warm: write: %w", err)
@@ -402,6 +557,12 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
+
+	if seg.f == nil {
+		if err := seg.openLocked(); err != nil {
+			return 0, err
+		}
+	}
 
 	off := seg.size
 	if err := writeRecordAt(seg.f, off, magicDead, key, nil); err != nil {
@@ -479,6 +640,9 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 	if err := seg.ensureOpen(); err != nil {
 		return nil, fmt.Errorf("warm: open segment %d: %w", seg.ID, err)
 	}
+	seg.readers.Add(1)
+	defer seg.readers.Add(-1)
+	s.fdCache.touch(seg)
 	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
@@ -693,6 +857,9 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 	if err := seg.ensureOpen(); err != nil {
 		return nil, fmt.Errorf("warm: open segment %d: %w", segID, err)
 	}
+	seg.readers.Add(1)
+	defer seg.readers.Add(-1)
+	s.fdCache.touch(seg)
 	rec, err := readRecordAt(seg.f, offset, segID)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
@@ -715,9 +882,12 @@ func (s *Store) Scan(fn func(Record) error) error {
 		if err := seg.ensureOpen(); err != nil {
 			return err
 		}
+		seg.readers.Add(1)
+		s.fdCache.touch(seg)
 		seg.mu.Lock()
 		err := scanSegment(seg.f, seg.ID, fn)
 		seg.mu.Unlock()
+		seg.readers.Add(-1)
 		if err != nil {
 			return err
 		}
@@ -992,8 +1162,14 @@ func (s *Store) SyncSegment(segID int) error {
 	if err := seg.ensureOpen(); err != nil {
 		return err
 	}
+	s.fdCache.touch(seg)
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
+	if seg.f == nil {
+		if err := seg.openLocked(); err != nil {
+			return err
+		}
+	}
 	return seg.f.Sync()
 }
 
@@ -1006,6 +1182,7 @@ func (s *Store) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.fdCache.clear()
 	for _, seg := range s.segs {
 		seg.mu.Lock()
 		if seg.f != nil {
@@ -1088,6 +1265,7 @@ func (s *Store) activeSeg() (*Segment, error) {
 			if err := last.ensureOpen(); err != nil {
 				return nil, err
 			}
+			s.fdCache.touch(last)
 			return last, nil
 		}
 	}
@@ -1110,6 +1288,7 @@ func (s *Store) newSegment() (*Segment, error) {
 			if err := last.ensureOpen(); err != nil {
 				return nil, err
 			}
+			s.fdCache.touch(last)
 			return last, nil
 		}
 	}
@@ -1121,6 +1300,7 @@ func (s *Store) newSegment() (*Segment, error) {
 	}
 	s.segs = append(s.segs, seg)
 	s.rebuildSegByID()
+	s.fdCache.touch(seg)
 	return seg, nil
 }
 
@@ -1418,6 +1598,8 @@ func (s *Store) Compact() error {
 	// only the mounted PVC at dir is writable.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.fdCache.clear()
 
 	if err := swapSegmentFiles(dir, compactDir); err != nil {
 		return err

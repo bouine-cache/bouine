@@ -68,6 +68,16 @@ const (
 	maxSweepProbes = 256
 )
 
+// EstimatedWarmLocHeapBytes is the approximate Go heap cost per warm
+// index entry: warmLoc struct (segID int + offset int64 + size int64 +
+// sieve pointer 8B + protected bool padded to 8B = ~40B) + map overhead
+// (~50B at load factor 6.5) + sieve.Entry (32B pooled, but pointer 8B
+// in warmLoc) = ~98B. Rounded to 128 for alignment and safety margin.
+// Update if warmLoc or sieve.Entry struct layout changes.
+// The same value is inlined in config/loader.go ResolveWarmMaxEntries
+// to avoid a circular import.
+const EstimatedWarmLocHeapBytes = 128
+
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
 // recordHdrPool pools the fixed-size 16-byte header buffer used by
@@ -315,16 +325,17 @@ type warmLoc struct {
 
 // Store is the warm-tier disk store.
 type Store struct {
-	dir      string
-	maxBytes int64
-	segMax   int64
-	mu       sync.RWMutex
-	segs     []*Segment
-	segByID  map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
-	nextID   atomic.Int32
-	stats    warmStats
-	idxMu    sync.RWMutex
-	index    map[uint64]warmLoc
+	dir        string
+	maxBytes   int64
+	maxEntries int64
+	segMax     int64
+	mu         sync.RWMutex
+	segs       []*Segment
+	segByID    map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
+	nextID     atomic.Int32
+	stats      warmStats
+	idxMu      sync.RWMutex
+	index      map[uint64]warmLoc
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
@@ -392,6 +403,12 @@ type Config struct {
 	// is opened, the least-recently-accessed segment with zero in-flight
 	// readers is closed.
 	SegmentCacheSize int
+	// MaxEntries caps the warm-tier index size in entries. Zero means
+	// unlimited (backward compatible). A positive value derived from
+	// GOMEMLIMIT bounds the Go heap cost of the index map. When the cap
+	// is exceeded, Put rejects with ErrOverBudget and the warm sync loop
+	// skips promotion.
+	MaxEntries int64
 	// Metrics receives warm-tier Prometheus collectors. Nil disables
 	// metric collection (single-node mode without a registry).
 	Metrics *Metrics
@@ -410,12 +427,13 @@ func NewStore(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{
-		dir:       cfg.Dir,
-		maxBytes:  cfg.MaxBytes,
-		segMax:    cfg.SegMax,
-		index:     make(map[uint64]warmLoc),
-		evictList: sieve.NewList[uint64](),
-		metrics:   cfg.Metrics,
+		dir:        cfg.Dir,
+		maxBytes:   cfg.MaxBytes,
+		maxEntries: cfg.MaxEntries,
+		segMax:     cfg.SegMax,
+		index:      make(map[uint64]warmLoc),
+		evictList:  sieve.NewList[uint64](),
+		metrics:    cfg.Metrics,
 	}
 	if cfg.SegmentCacheSize != -1 {
 		cacheSize := cfg.SegmentCacheSize
@@ -480,24 +498,26 @@ func (s *Store) openExisting() error {
 // Put appends a record to the active segment. Returns the segment ID
 // and offset.
 //
-// maxBytes is enforced on Put only. Delete appends tombstones without
-// a budget check; tombstones are reclaimed by compaction. When the live
-// bytes exceed maxBytes, Put attempts to evict the least-recently-
+// Both the live-bytes budget (maxBytes) and the entry-count budget
+// (maxEntries) are enforced on Put. Delete appends tombstones without
+// a budget check; tombstones are reclaimed by compaction. When either
+// budget is exceeded, Put attempts to evict the least-recently-
 // accessed entries before rejecting with ErrOverBudget.
 //
-// The budget is checked against live entry bytes (stats.bytes), not
+// The byte budget is checked against live entry bytes (stats.bytes), not
 // total segment file sizes (diskBytes). Tombstones increase diskBytes
 // but not stats.bytes — only compaction can shrink the files. Using
 // stats.bytes keeps the gate and the eviction loop on the same metric
 // so operators see a consistent story: if Put succeeds, live bytes fit.
+// The entry budget bounds the Go heap cost of the warm index map.
 func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error) {
 	recSize := int64(HeaderLen + len(body) + FooterLen)
 
-	// Enforce live-bytes budget before appending. maxBytes == 0 means
-	// no limit (backward compatible with the default). When over budget,
-	// attempt eviction to free space before rejecting.
-	if s.maxBytes > 0 {
-		if s.stats.bytes.Load()+recSize > s.maxBytes {
+	// Enforce both budgets before appending. A zero budget means
+	// no limit (backward compatible with the default). When over
+	// either budget, attempt eviction to free space before rejecting.
+	if s.maxBytes > 0 || s.maxEntries > 0 {
+		if !s.fitsBudgets(recSize) {
 			if evictErr := s.evictToFitBatch(recSize); evictErr != nil {
 				s.metrics.IncOverBudget()
 				return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
@@ -1075,21 +1095,31 @@ func (s *Store) evictOne() (uint64, bool) {
 	return s.evictOneLocked(seg)
 }
 
+// fitsBudgets reports whether recSize bytes plus one new entry would
+// fit under both the byte and entry-count budgets. A zero budget means
+// unlimited, so a zero budget always fits.
+func (s *Store) fitsBudgets(recSize int64) bool {
+	bytesOK := s.maxBytes <= 0 || s.stats.bytes.Load()+recSize <= s.maxBytes
+	entriesOK := s.maxEntries <= 0 || s.stats.entries.Load()+1 <= s.maxEntries
+	return bytesOK && entriesOK
+}
+
 // evictToFitBatch is the batch version of evictToFit: it acquires
 // seg.mu and idxMu once, then loops evictOneLocked until recSize fits
-// under the byte budget or no victim is available. This amortizes
-// lock acquisition across N evictions, reducing contention and syscall
-// overhead. Put calls this instead of evictToFit.
+// under both the byte and entry-count budgets, or no victim is
+// available. This amortizes lock acquisition across N evictions,
+// reducing contention and syscall overhead. Put calls this instead
+// of evictToFit.
 func (s *Store) evictToFitBatch(recSize int64) error {
-	if s.maxBytes <= 0 {
+	if s.maxBytes <= 0 && s.maxEntries <= 0 {
 		return nil
 	}
-	if recSize > s.maxBytes {
+	if s.maxBytes > 0 && recSize > s.maxBytes {
 		return ErrOverBudget
 	}
 
-	// Fast path: already fits.
-	if s.stats.bytes.Load()+recSize <= s.maxBytes {
+	// Fast path: already fits both budgets.
+	if s.fitsBudgets(recSize) {
 		return nil
 	}
 
@@ -1109,7 +1139,7 @@ func (s *Store) evictToFitBatch(recSize int64) error {
 	defer s.idxMu.Unlock()
 
 	for {
-		if s.stats.bytes.Load()+recSize <= s.maxBytes {
+		if s.fitsBudgets(recSize) {
 			return nil
 		}
 		if _, ok := s.evictOneLocked(seg); !ok {
@@ -1271,22 +1301,26 @@ func (s *Store) MaxBytes() int64 {
 	return s.maxBytes
 }
 
-// OverBudget reports whether live entry bytes have reached the configured
-// maxBytes budget. The warm sync loop consults this before attempting
-// hot→warm promotion to avoid wasting I/O on Put calls that will return
-// ErrOverBudget (#205). maxBytes == 0 means unlimited, so OverBudget
-// always returns false.
+// OverBudget reports whether the warm index has reached either the
+// configured maxBytes or maxEntries budget. The warm sync loop
+// consults this before attempting hot→warm promotion to avoid
+// wasting I/O on Put calls that will return ErrOverBudget (#205).
+// A zero budget means unlimited, so only non-zero budgets are checked.
 //
-// This is an advisory, best-effort check: stats.bytes is read atomically
-// without holding any lock, so a concurrent eviction or self-heal may drop
-// live bytes below maxBytes between this call and the subsequent Put. The
-// Put path re-checks the budget under the index lock, so a false-positive
-// skip only delays promotion by one cycle.
+// This is an advisory, best-effort check: stats.bytes and stats.entries
+// are read atomically without holding any lock, so a concurrent
+// eviction or self-heal may drop the counts below the thresholds
+// between this call and the subsequent Put. The Put path re-checks
+// both budgets under the index lock, so a false-positive skip only
+// delays promotion by one cycle.
 func (s *Store) OverBudget() bool {
-	if s.maxBytes <= 0 {
-		return false
+	if s.maxBytes > 0 && s.stats.bytes.Load() >= s.maxBytes {
+		return true
 	}
-	return s.stats.bytes.Load() >= s.maxBytes
+	if s.maxEntries > 0 && s.stats.entries.Load() >= s.maxEntries {
+		return true
+	}
+	return false
 }
 
 func (s *Store) activeSeg() (*Segment, error) {

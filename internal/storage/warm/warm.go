@@ -453,9 +453,10 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 }
 
 // SetIndex adds or replaces an index entry. Called during WAL replay
-// on startup to rebuild the index from persisted write history. The
-// size is set to 0 because the WAL does not record record sizes;
-// RecomputeStats fills it in by scanning segments after replay.
+// on startup to rebuild the index from persisted write history. The size
+// is set to 0 (unknown) for v1 WAL entries; RecomputeStats fills it in by
+// scanning segments after replay. For v2 WAL entries, use SetIndexWithSize
+// instead to set the size directly and avoid the segment scan.
 //
 // The SIEVE Access call mirrors Put: the bool return (newly inserted) is
 // discarded — the entry pointer is sufficient for the index.
@@ -469,6 +470,22 @@ func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 		return nil
 	})
 	s.index[key] = warmLoc{segID: segID, offset: offset, sieve: e}
+}
+
+// SetIndexWithSize is like SetIndex but also sets the on-disk record
+// size. Used during WAL v2 replay to populate the index with size
+// information directly, avoiding the need for RecomputeStats to scan
+// all segments on startup.
+func (s *Store) SetIndexWithSize(key uint64, segID int, offset, size int64) {
+	s.idxMu.Lock()
+	defer s.idxMu.Unlock()
+	e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
+		if loc, ok := s.index[k]; ok {
+			return loc.sieve
+		}
+		return nil
+	})
+	s.index[key] = warmLoc{segID: segID, offset: offset, size: size, sieve: e}
 }
 
 // IndexLen returns the number of entries currently in the warm-tier
@@ -495,6 +512,19 @@ func (s *Store) Lookup(key uint64) (segID int, offset int64, ok bool) {
 	return loc.segID, loc.offset, true
 }
 
+// LookupWithSize is like Lookup but also returns the on-disk record
+// size. Used by rewriteWAL to write v2 WAL entries that include the
+// size, so the next startup can skip RecomputeStats.
+func (s *Store) LookupWithSize(key uint64) (segID int, offset, size int64, ok bool) {
+	s.idxMu.RLock()
+	loc, exists := s.index[key]
+	s.idxMu.RUnlock()
+	if !exists {
+		return 0, 0, 0, false
+	}
+	return loc.segID, loc.offset, loc.size, true
+}
+
 // DelIndex removes a key from the index. Called during WAL replay for
 // delete entries so keys deleted before the last checkpoint are not
 // served from the warm tier. Does not update stats counters; callers
@@ -512,27 +542,29 @@ func (s *Store) DelIndex(key uint64) {
 }
 
 // RecomputeStats scans all segments and recounts live entries and bytes
-// from the current index. Called after WAL replay to restore the stats
-// counters that are not persisted in the WAL. It also backfills the
-// size field in each warmLoc so that subsequent Delete calls can
-// subtract the correct record size from stats.bytes. On scan error the
-// stats counters are not updated and the index backfill is skipped, so
-// callers do not act on partial data.
+// from the current index. Called after WAL v1 replay (or when some
+// entries lack size) to restore the stats counters that are not
+// persisted in the WAL. It also backfills the size field in each warmLoc
+// so that subsequent Delete calls can subtract the correct record size
+// from stats.bytes. On scan error the stats counters are not updated
+// and the index backfill is skipped, so callers do not act on partial
+// data.
+//
+// This function uses per-key RLock lookups instead of copying the entire
+// index under RLock. This avoids the O(N) memory allocation that caused
+// GC pressure and startup slowdown with millions of keys. RecomputeStats
+// is only called on startup (before serving) or after compaction, so
+// concurrent index modifications are not a concern.
 func (s *Store) RecomputeStats() error {
-	s.idxMu.RLock()
-	idxSnap := make(map[uint64]warmLoc, len(s.index))
-	for k, v := range s.index {
-		idxSnap[k] = v
-	}
-	s.idxMu.RUnlock()
-
 	sizeUpdates := make(map[uint64]int64)
 	var entries, bytes int64
 	if err := s.Scan(func(r Record) error {
 		if r.IsTomb {
 			return nil
 		}
-		loc, ok := idxSnap[r.Key]
+		s.idxMu.RLock()
+		loc, ok := s.index[r.Key]
+		s.idxMu.RUnlock()
 		if !ok || loc.segID != r.SegID || loc.offset != r.Offset {
 			return nil
 		}
@@ -563,6 +595,26 @@ func (s *Store) RecomputeStats() error {
 		s.idxMu.Unlock()
 	}
 	return nil
+}
+
+// RecomputeStatsFromIndex computes stats counters from the in-memory
+// index without scanning segments. Used after WAL v2 replay where all
+// index entries already have their on-disk record size. This avoids the
+// multi-second segment scan that RecomputeStats performs, reducing
+// startup time from seconds to milliseconds with millions of keys.
+// Entries with size=0 (from v1 WAL or SetIndex without size) are
+// counted as zero bytes — callers should only use this when all entries
+// have size (allHaveSize == true from initWAL).
+func (s *Store) RecomputeStatsFromIndex() {
+	s.idxMu.RLock()
+	var entries, bytes int64
+	for _, loc := range s.index {
+		entries++
+		bytes += loc.size
+	}
+	s.idxMu.RUnlock()
+	s.stats.entries.Store(entries)
+	s.stats.bytes.Store(bytes)
 }
 
 // ReadRecord reads a record at the given offset in the given segment.

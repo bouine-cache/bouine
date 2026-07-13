@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -98,28 +99,58 @@ func (e *engine) run(ctx context.Context) error {
 		}
 	}
 
-	rs, shutdownTracer, err := e.initSubsystems(ctx)
+	// Create the sequencer early so the readiness gate is available
+	// before initSubsystems. The admin server (started below) wires
+	// ReadyFn to seq.IsReady, which checks both the shutdown flag and
+	// all registered startup conditions.
+	seq := shutdown.NewSequencer(e.logger)
+	seq.Gate().Register("store-loaded")
+	seq.Gate().Register("listeners-bound")
+	if e.cfg.Cluster.Enabled && e.cfg.Listen.Cluster != "" {
+		seq.Gate().Register("cluster-joined")
+	}
+
+	// Start a minimal admin server (healthz/readyz/version only) before
+	// initSubsystems so K8s probes can reach the admin port during the
+	// potentially long store-loading phase. The full admin handler is
+	// swapped in after subsystems are ready.
+	g := supervised.NewGroup(ctx, e.logger)
+	adminAddr := e.cfg.Listen.Admin
+	if adminAddr == "" {
+		adminAddr = ":9000"
+	}
+	minimalAdmin := admin.NewMinimal(adminAddr, seq.IsReady, e.logger)
+	g.Go("admin", minimalAdmin.Serve)
+
+	rs, shutdownTracer, err := e.initSubsystems(ctx, seq)
 	if err != nil {
 		return err
 	}
 	defer shutdownTracer()
 
+	// Store loaded successfully — mark the condition ready.
+	seq.Gate().MarkReady("store-loaded")
+
 	handler := e.buildDataPlane(rs)
 
-	g := supervised.NewGroup(ctx, e.logger)
-	e.startBackgroundTasks(g, rs, ctx) // rings snapshot, prefetch sitemap crawler, config watcher
-	e.startAdmin(g, ctx, rs)           // admin API, dashboard, peer-fetch handler
-	e.startListeners(g, handler, rs)   // HTTP/HTTPS data-plane listeners
-	e.startHealthChecks(g, rs.pools)   // active health probes per upstream pool
-	e.startClusterJoin(g, rs)          // gossip join with retry against seed peers
-	e.registerShutdownSteps(g, rs)     // ordered drain: readiness, store flush, cluster leave
+	e.startBackgroundTasks(g, rs, ctx)        // rings snapshot, prefetch sitemap crawler, config watcher
+	e.swapAdminHandler(ctx, rs, minimalAdmin) // swap full admin routes into the minimal server
+	e.startListeners(g, handler, rs)          // HTTP/HTTPS data-plane listeners
+	e.startHealthChecks(g, rs.pools)          // active health probes per upstream pool
+	e.startClusterJoin(g, rs)                 // gossip join with retry against seed peers
+	e.registerShutdownSteps(g, rs)            // ordered drain: readiness, store flush, cluster leave
+
+	// Listeners are started by startListeners (synchronous call above
+	// starts the supervised goroutines). Mark ready after the call
+	// returns — by then the listeners are bound.
+	seq.Gate().MarkReady("listeners-bound")
 
 	return g.Wait()
 }
 
 // initSubsystems creates all subsystem instances and wires them together.
 // Returns the bundled state and a tracer shutdown func.
-func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) {
+func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*runState, func(), error) {
 	pools, err := e.buildPools()
 	if err != nil {
 		return nil, func() {}, err
@@ -186,7 +217,7 @@ func (e *engine) initSubsystems(ctx context.Context) (*runState, func(), error) 
 		warmMetrics:    warmMetrics,
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
-		seq:            shutdown.NewSequencer(e.logger),
+		seq:            seq,
 	}
 	return rs, shutdownTracer, nil
 }
@@ -410,7 +441,11 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 	}
 }
 
-func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runState) {
+// swapAdminHandler builds the full admin handler (all routes, auth,
+// dashboard) and atomically swaps it into the already-listening minimal
+// admin server. The admin listener was started before initSubsystems so
+// K8s probes could reach healthz/readyz during store loading.
+func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -470,7 +505,7 @@ func (e *engine) startAdmin(g *supervised.Group, ctx context.Context, rs *runSta
 		FaviconHandler:     webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
-	g.Go("admin", srv.Serve)
+	minimalAdmin.SwapHandler(srv.Handler())
 }
 
 // buildDashboard wires and returns the dashboard ServeMux.
@@ -657,11 +692,63 @@ func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin
 }
 
 func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
-	if rs.clusterNode != nil && len(e.cfg.Cluster.Join) > 0 {
-		g.Go("cluster-join", func(joinCtx context.Context) error {
-			return e.joinWithRetry(joinCtx, rs.clusterNode)
-		})
+	if rs.clusterNode == nil || len(e.cfg.Cluster.Join) == 0 {
+		// No cluster configured — mark condition as ready immediately.
+		rs.seq.Gate().MarkReady("cluster-joined")
+		return
 	}
+
+	joinTimeout := e.cfg.Cluster.JoinTimeout
+	if joinTimeout == 0 {
+		joinTimeout = 120 * time.Second
+	}
+
+	g.Go("cluster-join", func(joinCtx context.Context) error {
+		err := e.joinWithRetry(joinCtx, rs.clusterNode, joinTimeout)
+
+		switch {
+		case err == nil:
+			rs.seq.Gate().MarkReady("cluster-joined")
+		case e.cfg.Cluster.Mode == config.ClusterModeStrong:
+			// In strong mode, join failure means the node can't route
+			// keys to peers. Keep the condition false so the pod stays
+			// not-ready. The startupProbe will eventually restart the
+			// pod, giving it another chance to join.
+			e.logger.Error("cluster join failed in strong mode; pod will stay not-ready",
+				"error", err)
+		default:
+			// In eventual mode, the node can cache independently.
+			// Mark ready and keep retrying in the background.
+			rs.seq.Gate().MarkReady("cluster-joined")
+		}
+
+		// Continue retrying in the background regardless of the initial
+		// result. Peers may come up later (e.g., during a rolling update
+		// with sequential pod starts).
+		if err != nil {
+			e.logger.Info("cluster join: continuing background retry")
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-joinCtx.Done():
+					return nil
+				case <-ticker.C:
+					if _, jErr := rs.clusterNode.Join(e.cfg.Cluster.Join); jErr == nil {
+						if len(rs.clusterNode.Members()) > 1 {
+							e.logger.Info("cluster join succeeded (background retry)",
+								"members", len(rs.clusterNode.Members()))
+							if e.cfg.Cluster.Mode == config.ClusterModeStrong {
+								rs.seq.Gate().MarkReady("cluster-joined")
+							}
+							return nil
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
@@ -706,13 +793,14 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 }
 
 // joinWithRetry attempts to join the cluster, retrying every 2 seconds
-// for up to 60 seconds. Success requires Members() > 1.
-func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster) error {
+// for up to joinTimeout. Returns nil if join succeeded (Members() > 1),
+// or an error identifying the failure if the deadline was reached.
+func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster, joinTimeout time.Duration) error {
 	seeds := e.cfg.Cluster.Join
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	deadline := time.After(60 * time.Second)
+	deadline := time.After(joinTimeout)
 	for {
 		_, err := c.Join(seeds)
 		if err != nil {
@@ -727,8 +815,7 @@ func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster) error {
 		case <-ctx.Done():
 			return nil
 		case <-deadline:
-			e.logger.Warn("cluster join: gave up after 60s, running with local member only", "seeds", seeds)
-			return nil
+			return fmt.Errorf("cluster join: gave up after %s, running with local member only", joinTimeout)
 		case <-ticker.C:
 		}
 	}

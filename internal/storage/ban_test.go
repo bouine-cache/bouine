@@ -212,19 +212,32 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 	}
 
 	var total atomic.Int64
+	var banErr atomic.Value // error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		count, _ := s.Ban(context.Background(), api.BanExpr{HostRegex: "a\\.example\\.com"})
+		count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "a\\.example\\.com"})
+		if err != nil {
+			banErr.Store(err)
+			return
+		}
 		total.Add(int64(count))
 	}()
 	go func() {
 		defer wg.Done()
-		count, _ := s.Ban(context.Background(), api.BanExpr{HostRegex: "b\\.example\\.com"})
+		count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "b\\.example\\.com"})
+		if err != nil {
+			banErr.Store(err)
+			return
+		}
 		total.Add(int64(count))
 	}()
 	wg.Wait()
+
+	if err, ok := banErr.Load().(error); ok && err != nil {
+		t.Fatalf("concurrent Ban failed: %v", err)
+	}
 
 	// Both bans match disjoint host patterns, so every entry is
 	// evicted by exactly one ban. total must equal n.

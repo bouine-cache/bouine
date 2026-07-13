@@ -512,9 +512,11 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 }
 
 // Ban performs an eager scan of the hot tier, deleting all entries
-// whose stored object matches the ban predicate (RFC 9111 §4.4 lazy
-// bans are deferred to post-v1.0; this eager scan handles the common
-// case of host/path/surrogate-key invalidation on administrative APIs).
+// whose stored object matches the ban predicate. After the eager
+// scan, the predicate is registered in the lazy ban list so objects
+// filled after this scan are also checked on next lookup (RFC 9111
+// §4.4 lazy semantics). This handles the common case of
+// host/path/surrogate-key invalidation on administrative APIs.
 func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	pred, err := compileBanPredicate(expr)
 	if err != nil {
@@ -526,12 +528,17 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	g.SetLimit(min(len(h.shards), runtime.NumCPU()))
 	for i := range h.shards {
 		g.Go(func() error {
-			n := h.banShard(i, pred)
+			n, err := h.banShard(i, pred)
+			if err != nil {
+				return err
+			}
 			total.Add(int64(n))
 			return nil
 		})
 	}
-	_ = g.Wait()
+	if err := g.Wait(); err != nil {
+		return 0, err
+	}
 
 	// Register in the lazy ban list so objects filled AFTER this scan
 	// are also checked on next lookup (RFC 9111 §4.4 lazy semantics).
@@ -546,15 +553,19 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	return int(total.Load()), nil
 }
 
-// banShard locks one shard, evicts all entries matching pred, and returns
-// the count. Each worker scans exactly one shard — no cross-shard lock
-// ordering, no deadlock risk.
-func (h *HotStore) banShard(idx int, pred banPredicate) int {
+// banShard locks one shard, evicts all entries matching pred, and
+// returns the count. Each worker scans exactly one shard — no
+// cross-shard lock ordering, no deadlock risk. Fires notifyEvict for
+// each evicted entry, matching the inline eviction and reaper paths.
+// The error return is always nil today but is plumbed through
+// errgroup so future fallible operations propagate correctly.
+func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:unparam // error return reserved for future fallible ops
 	s := &h.shards[idx]
 	n := 0
 	s.mu.Lock()
 	for key, e := range s.entries {
 		if pred(e.obj) {
+			h.notifyEvict(key, e)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
@@ -569,7 +580,7 @@ func (h *HotStore) banShard(idx int, pred banPredicate) int {
 		}
 	}
 	s.mu.Unlock()
-	return n
+	return n, nil
 }
 
 // banPredicate is a compiled function that returns true when an Object

@@ -498,7 +498,7 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 	// attempt eviction to free space before rejecting.
 	if s.maxBytes > 0 {
 		if s.stats.bytes.Load()+recSize > s.maxBytes {
-			if evictErr := s.evictToFit(recSize); evictErr != nil {
+			if evictErr := s.evictToFitBatch(recSize); evictErr != nil {
 				s.metrics.IncOverBudget()
 				return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
 			}
@@ -984,38 +984,61 @@ func (s *Store) Protect(key uint64) {
 	s.idxMu.Unlock()
 }
 
-// evictToFit attempts to evict entries until the given record size fits
-// within the live-bytes budget (stats.bytes). Returns nil if space was
-// freed, or ErrOverBudget if eviction cannot free enough space (empty
-// index or all visible entries protected within the skip budget).
-// Evicted entries are tombstoned; actual disk space is reclaimed at the
-// next compaction. The budget is checked against live bytes, not
-// diskBytes (total segment file sizes), because tombstones increase
-// diskBytes — only compaction can shrink the files.
-//
-// Only non-protected entries are evicted on the Put path: evicting a
-// protected warm entry is wasteful because the acceleration tier will
-// re-sync it on the next warm sync cycle. If no non-protected victim is
-// found within maxWarmEvictSkips SIEVE probes, the Put is rejected with
-// ErrOverBudget rather than scanning the whole list under idxMu.
-func (s *Store) evictToFit(recSize int64) error {
-	if s.maxBytes <= 0 {
-		return nil
+// writeTombstoneLocked writes a tombstone record for key to the active
+// segment. Both seg.mu and idxMu must be held by the caller. On failure,
+// the SIEVE entry and index entry for the victim are restored so the
+// victim is not lost.
+func (s *Store) writeTombstoneLocked(seg *Segment, key uint64, loc warmLoc) error {
+	off := seg.size
+	if err := writeRecordAt(seg.f, off, magicDead, key, nil); err != nil {
+		s.restoreSIEVEEntry(key, loc)
+		return err
 	}
-	// A record larger than the entire budget can never fit, even with
-	// an empty tier. Reject early to avoid evicting the whole warm tier
-	// for nothing.
-	if recSize > s.maxBytes {
-		return ErrOverBudget
+	seg.size += int64(HeaderLen + FooterLen)
+	return nil
+}
+
+// evictOneLocked performs a single eviction assuming seg.mu and idxMu
+// are already held. Returns the evicted key and true on success, or
+// (0, false) if no victim is available or the tombstone write fails.
+func (s *Store) evictOneLocked(seg *Segment) (uint64, bool) {
+	if s.evictList.Len() == 0 {
+		return 0, false
 	}
-	for {
-		if s.stats.bytes.Load()+recSize <= s.maxBytes {
-			return nil
-		}
-		if _, ok := s.evictOne(); !ok {
-			return ErrOverBudget
-		}
+
+	victimKey, victimLoc, found := s.pickEvictVictim()
+	if !found {
+		return 0, false
 	}
+
+	// Write the tombstone to the active segment. Both seg.mu and idxMu
+	// are held, so a concurrent Put for victimKey cannot interleave a
+	// new live record between this tombstone and the index removal
+	// below — the on-disk order is tombstone-then-future-live, which
+	// rebuildIndexFromScan honors (tombstone applied first, then the
+	// later live record wins). On failure, restore the SIEVE entry and
+	// index entry so the victim is not lost.
+	if err := s.writeTombstoneLocked(seg, victimKey, victimLoc); err != nil {
+		return 0, false
+	}
+
+	// Remove from index and decrement stats. The SIEVE entry was
+	// already removed by EvictBounded and returned to the pool.
+	delete(s.index, victimKey)
+	s.stats.entries.Add(-1)
+	if victimLoc.size > 0 {
+		s.stats.bytes.Add(-victimLoc.size)
+	}
+	// Fire OnEvict under idxMu (and seg.mu) so a concurrent Put for
+	// victimKey cannot re-insert a live record and set hasBackup=true
+	// before ClearBacked runs — that would clobber hasBackup on a genuinely
+	// backed hot entry, stranding the warm copy as permanently
+	// protected and un-evictable. ClearBacked is O(1) lock-only.
+	if callback := s.OnEvict; callback != nil {
+		callback(victimKey)
+	}
+	s.metrics.IncEvictions()
+	return victimKey, true
 }
 
 // evictOne picks a non-protected victim via SIEVE, writes a tombstone
@@ -1035,6 +1058,9 @@ func (s *Store) evictToFit(recSize int64) error {
 // permanently stranding the warm entry as protected and making it
 // un-evictable. ClearBacked is O(1) and lock-only, so the extra hold
 // time is negligible.
+//
+// For batch eviction (multiple victims in a single lock acquisition),
+// use evictToFitBatch instead.
 func (s *Store) evictOne() (uint64, bool) {
 	seg, err := s.activeSeg()
 	if err != nil {
@@ -1046,46 +1072,50 @@ func (s *Store) evictOne() (uint64, bool) {
 	s.idxMu.Lock()
 	defer s.idxMu.Unlock()
 
-	if s.evictList.Len() == 0 {
-		return 0, false
+	return s.evictOneLocked(seg)
+}
+
+// evictToFitBatch is the batch version of evictToFit: it acquires
+// seg.mu and idxMu once, then loops evictOneLocked until recSize fits
+// under the byte budget or no victim is available. This amortizes
+// lock acquisition across N evictions, reducing contention and syscall
+// overhead. Put calls this instead of evictToFit.
+func (s *Store) evictToFitBatch(recSize int64) error {
+	if s.maxBytes <= 0 {
+		return nil
+	}
+	if recSize > s.maxBytes {
+		return ErrOverBudget
 	}
 
-	victimKey, victimLoc, found := s.pickEvictVictim()
-	if !found {
-		return 0, false
+	// Fast path: already fits.
+	if s.stats.bytes.Load()+recSize <= s.maxBytes {
+		return nil
 	}
 
-	// Write the tombstone to the active segment. Both seg.mu and idxMu
-	// are held, so a concurrent Put for victimKey cannot interleave a
-	// new live record between this tombstone and the index removal
-	// below — the on-disk order is tombstone-then-future-live, which
-	// rebuildIndexFromScan honors (tombstone applied first, then the
-	// later live record wins). On failure, restore the SIEVE entry and
-	// index entry so the victim is not lost.
-	off := seg.size
-	if err := writeRecordAt(seg.f, off, magicDead, victimKey, nil); err != nil {
-		s.restoreSIEVEEntry(victimKey, victimLoc)
-		return 0, false
+	seg, err := s.activeSeg()
+	if err != nil {
+		return err
 	}
-	seg.size += int64(HeaderLen + FooterLen)
 
-	// Remove from index and decrement stats. The SIEVE entry was
-	// already removed by EvictBounded and returned to the pool.
-	delete(s.index, victimKey)
-	s.stats.entries.Add(-1)
-	if victimLoc.size > 0 {
-		s.stats.bytes.Add(-victimLoc.size)
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	if seg.f == nil {
+		if err := seg.openLocked(); err != nil {
+			return err
+		}
 	}
-	// Fire OnEvict under idxMu (and seg.mu) so a concurrent Put for
-	// victimKey cannot re-insert a live record and set hasBackup=true
-	// before ClearBacked runs — that would clobber hasBackup on a genuinely
-	// backed hot entry, stranding the warm copy as permanently
-	// protected and un-evictable. ClearBacked is O(1) lock-only.
-	if callback := s.OnEvict; callback != nil {
-		callback(victimKey)
+	s.idxMu.Lock()
+	defer s.idxMu.Unlock()
+
+	for {
+		if s.stats.bytes.Load()+recSize <= s.maxBytes {
+			return nil
+		}
+		if _, ok := s.evictOneLocked(seg); !ok {
+			return ErrOverBudget
+		}
 	}
-	s.metrics.IncEvictions()
-	return victimKey, true
 }
 
 // pickEvictVictim sweeps the SIEVE list (bounded by maxWarmEvictSkips)

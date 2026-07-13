@@ -103,7 +103,7 @@ readinessProbe:
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | 503 during rollout | `preStop` hook too short; kube-proxy updated Endpoints before pod drained | Increase `sleep` in `preStop` to 10 s |
-| 502 after new pod starts | New pod not yet joined gossip ring; peer-fetch fails | Check `/readyz` — should fail until ring joined; increase `initialDelaySeconds` |
+| 502 after new pod starts | New pod not yet joined gossip ring; peer-fetch fails | Check logs for cluster join status; `/readyz` passes before ring join by design (avoids StatefulSet deadlock). Wait for background join to complete or increase `initialDelaySeconds` |
 | Rollout stuck | PDB `minAvailable` prevents eviction | Check `kubectl get pdb`; verify at least `minAvailable` pods are Ready |
 | Long rollout | `terminationGracePeriodSeconds` too high relative to actual drain time | Reduce to `max(in_flight_p99_ms / 1000, 15)` seconds |
 

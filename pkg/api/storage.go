@@ -87,9 +87,10 @@ type Object struct {
 	OriginAge time.Duration `json:"-"`
 
 	// BouinePath is the request URL path, stored at Put time for ban
-	// predicate matching. Not serialized — the warm-tier binary codec
-	// does not reference this field. On warm load, it is empty; ban
-	// matching on warm objects falls back to key-based matching.
+	// predicate matching. Serialized by the warm-tier binary codec
+	// (appended after the body) so it survives warm round-trips and
+	// peer fetches. On legacy blobs written before this field existed,
+	// it decodes as empty.
 	BouinePath string `json:"-"`
 
 	// BouineHost is the request Host header, stored at Put time for ban

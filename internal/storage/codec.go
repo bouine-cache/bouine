@@ -56,7 +56,9 @@ func DecodeObject(blob []byte) (*api.Object, error) {
 //
 // Fields tagged json:"-" on api.Object (CacheControl, OriginAge) are not
 // stored; they are re-derived from the headers on load, exactly as the
-// JSON path did.
+// JSON path did. BouinePath and BouineHost are serialized as trailing
+// fields after the body — backward compatible with older blobs that
+// end at the body.
 func encodeObject(obj *api.Object) []byte {
 	buf := make([]byte, 0, len(obj.Body)+256)
 
@@ -89,6 +91,14 @@ func encodeObject(obj *api.Object) []byte {
 	// Body last: length-prefixed raw bytes.
 	buf = binary.AppendUvarint(buf, uint64(len(obj.Body)))
 	buf = append(buf, obj.Body...)
+
+	// Transient ban-matching fields (added after the body so older
+	// decoders that stop at the body are unaffected). BouinePath and
+	// BouineHost are serialized here — not in header.Map — so they
+	// survive warm-tier round-trips and peer fetches.
+	buf = appendString(buf, obj.BouinePath)
+	buf = appendString(buf, obj.BouineHost)
+
 	return buf
 }
 
@@ -148,6 +158,18 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	}
 	obj.Body = body
 	obj.BodySize = int64(len(body))
+
+	// BouinePath and BouineHost are appended after the body. Older
+	// blobs (written before these fields existed) end at the body.
+	// When no bytes remain, the fields default to empty — backward
+	// compatible without a codec version bump.
+	if r.pos < len(r.b) {
+		obj.BouinePath = r.str()
+		obj.BouineHost = r.str()
+		if r.err != nil {
+			return nil, r.err
+		}
+	}
 
 	return obj, nil
 }

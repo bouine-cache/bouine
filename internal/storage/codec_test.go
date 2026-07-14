@@ -30,6 +30,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		LastModified:         time.Unix(1_699_000_000, 0).UTC(),
 		SurrogateKeys:        []string{"product-42", "category-7"},
 		Hits:                 99,
+		BouinePath:           "/api/v1/products/42",
+		BouineHost:           "example.com",
 	}
 
 	got, err := decodeObject(encodeObject(orig))
@@ -54,6 +56,12 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 	if len(got.SurrogateKeys) != 2 || got.SurrogateKeys[0] != "product-42" {
 		t.Errorf("surrogate keys mismatch: %v", got.SurrogateKeys)
+	}
+	if got.BouinePath != orig.BouinePath {
+		t.Errorf("BouinePath: got %q want %q", got.BouinePath, orig.BouinePath)
+	}
+	if got.BouineHost != orig.BouineHost {
+		t.Errorf("BouineHost: got %q want %q", got.BouineHost, orig.BouineHost)
 	}
 	orig.Header.Range(func(k, want string) bool {
 		if g := got.Header.Get(k); g != want {
@@ -131,5 +139,44 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 		if _, err := decodeObject(blob); err == nil {
 			t.Errorf("%s: expected decode error, got nil", name)
 		}
+	}
+}
+
+func TestDecodeLegacyBlobWithoutBouineFields(t *testing.T) {
+	// Simulate a legacy blob (written before BouinePath/BouineHost were
+	// added to the codec). The blob ends at the body — no trailing fields.
+	// The decoder must handle this gracefully: empty BouinePath/BouineHost,
+	// no error.
+	orig := &api.Object{
+		Key:        api.Key(42),
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{"Content-Type": {"text/html"}}),
+		Body:       []byte("hello"),
+		BodySize:   5,
+		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
+		TTL:        time.Minute,
+	}
+	encoded := encodeObject(orig)
+	// Truncate the trailing BouinePath/BouineHost (2 appendString calls:
+	// each is 1 byte uvarint length prefix + 0 bytes for empty string = 2 bytes total).
+	// Actually, orig has empty BouinePath/BouineHost, so the trailing is
+	// just two zero-length strings: [0x00, 0x00]. Remove them.
+	legacy := encoded[:len(encoded)-2]
+
+	got, err := decodeObject(legacy)
+	if err != nil {
+		t.Fatalf("decode legacy blob: %v", err)
+	}
+	if got.BouinePath != "" {
+		t.Errorf("BouinePath: got %q, want empty", got.BouinePath)
+	}
+	if got.BouineHost != "" {
+		t.Errorf("BouineHost: got %q, want empty", got.BouineHost)
+	}
+	if got.Key != orig.Key || got.StatusCode != orig.StatusCode {
+		t.Errorf("identity fields mismatch: %+v", got)
+	}
+	if !bytes.Equal(got.Body, orig.Body) {
+		t.Errorf("body mismatch: got %q want %q", got.Body, orig.Body)
 	}
 }

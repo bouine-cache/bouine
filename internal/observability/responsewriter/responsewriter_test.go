@@ -209,3 +209,12 @@ func TestInterfaceGuards(t *testing.T) {
 		t.Fatal("ResponseWriter does not satisfy io.ReaderFrom")
 	}
 }
+
+func BenchmarkResponseWriterPool_AcquireRelease(b *testing.B) {
+	w := httptest.NewRecorder()
+	b.ReportAllocs()
+	for b.Loop() {
+		rw := Acquire(w)
+		Release(rw)
+	}
+}

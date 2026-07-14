@@ -693,6 +693,7 @@ func insightsHeaderAudit(rs *runState) func() map[string]observability.HeaderAud
 func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *runState) {
 	tcpFastOpen := boolDefault(e.cfg.Listen.TCPFastOpen, true)
 	tcpDeferAccept := boolDefault(e.cfg.Listen.TCPDeferAccept, true)
+	reusePort := boolDefault(e.cfg.Listen.ReusePort, platform.ReusePortSupported)
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:           e.cfg.Listen.HTTP,
@@ -701,6 +702,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			MaxConnections: e.cfg.Listen.MaxConnections,
 			TCPFastOpen:    tcpFastOpen,
 			TCPDeferAccept: tcpDeferAccept,
+			ReusePort:      reusePort,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -720,6 +722,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			MaxConnections: e.cfg.Listen.MaxConnections,
 			TCPFastOpen:    tcpFastOpen,
 			TCPDeferAccept: tcpDeferAccept,
+			ReusePort:      reusePort,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)

@@ -58,6 +58,11 @@ type Listen struct {
 	// TCPDeferAccept enables Linux TCP_DEFER_ACCEPT on data-plane
 	// listeners. nil defaults to true on Linux and no-op elsewhere.
 	TCPDeferAccept *bool `yaml:"tcp_defer_accept,omitempty" json:"tcp_defer_accept,omitempty"`
+	// ReusePort enables SO_REUSEPORT on data-plane listeners, creating
+	// N parallel accept loops (one per GOMAXPROCS) for better connection
+	// distribution under high load. nil defaults to true on Linux, false
+	// on other platforms (macOS/BSD have different SO_REUSEPORT semantics).
+	ReusePort *bool `yaml:"reuse_port,omitempty" json:"reuse_port,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are

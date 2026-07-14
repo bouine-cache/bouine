@@ -19,7 +19,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/bouine-cache/bouine/internal/server"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // readBufferSize is the size of the pooled read buffer. 16 KB covers
@@ -30,17 +30,18 @@ const readBufferSize = 16 * 1024
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to net/http.
 type Parser struct {
-	fastPath  server.FastPathHandler
+	fastPath  api.FastPathHandler
 	fallback  http.Handler
 	readBuf   [readBufferSize]byte
 	nowFunc   func() time.Time
 	idleRead  time.Duration
 	writeTime time.Duration
+	scheme    string
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
 // fall through to the fallback handler. fallback must not be nil.
-func New(fastPath server.FastPathHandler, fallback http.Handler, opts ...Option) *Parser {
+func New(fastPath api.FastPathHandler, fallback http.Handler, opts ...Option) *Parser {
 	p := &Parser{
 		fastPath:  fastPath,
 		fallback:  fallback,
@@ -70,6 +71,13 @@ func WithIdleReadTimeout(d time.Duration) Option {
 // WithWriteTimeout sets the write deadline for responses.
 func WithWriteTimeout(d time.Duration) Option {
 	return func(p *Parser) { p.writeTime = d }
+}
+
+// WithScheme sets the URL scheme ("http" or "https") used to build
+// cache keys. The listener sets this based on whether the connection
+// is TLS.
+func WithScheme(scheme string) Option {
+	return func(p *Parser) { p.scheme = scheme }
 }
 
 // ErrFallThrough signals that the parser cannot handle the connection
@@ -118,7 +126,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 // parseRequest reads and parses a single HTTP/1.1 request from conn.
 // Returns (req, fallThrough, err). When fallThrough is true, the
 // caller should hand the connection to net/http.
-func (p *Parser) parseRequest(conn net.Conn) (*server.RawRequest, bool, error) {
+func (p *Parser) parseRequest(conn net.Conn) (*api.RawRequest, bool, error) {
 	buf := p.readBuf[:0]
 
 	// Read until we find the end of headers (\r\n\r\n).
@@ -142,7 +150,7 @@ func (p *Parser) parseRequest(conn net.Conn) (*server.RawRequest, bool, error) {
 		}
 	}
 
-	req := &server.RawRequest{}
+	req := &api.RawRequest{Scheme: p.scheme}
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, err
 	}
@@ -163,7 +171,7 @@ func findHeaderEnd(buf []byte) int {
 }
 
 // parseRequestLine parses the first line: "METHOD SP PATH SP VERSION\r\n".
-func parseRequestLine(buf []byte, req *server.RawRequest) error {
+func parseRequestLine(buf []byte, req *api.RawRequest) error {
 	// Find end of request line.
 	lineEnd := 0
 	for lineEnd < len(buf) && buf[lineEnd] != '\r' {
@@ -209,7 +217,7 @@ func parseRequestLine(buf []byte, req *server.RawRequest) error {
 }
 
 // parseHeaders parses header lines from buf, starting after the request line.
-func parseHeaders(buf []byte, req *server.RawRequest) error {
+func parseHeaders(buf []byte, req *api.RawRequest) error {
 	// Skip past the request line.
 	pos := skipRequestLine(buf)
 
@@ -228,7 +236,7 @@ func parseHeaders(buf []byte, req *server.RawRequest) error {
 			break
 		}
 
-		if req.NHeaders >= server.MaxRawHeaders {
+		if req.NHeaders >= api.MaxRawHeaders {
 			return errors.New("h1parser: too many headers")
 		}
 
@@ -258,7 +266,7 @@ func skipRequestLine(buf []byte) int {
 }
 
 // appendHeader parses a single header line and appends it to req.
-func appendHeader(req *server.RawRequest, line []byte) {
+func appendHeader(req *api.RawRequest, line []byte) {
 	colon := 0
 	for colon < len(line) && line[colon] != ':' {
 		colon++
@@ -274,26 +282,30 @@ func appendHeader(req *server.RawRequest, line []byte) {
 	}
 	value := bytesToString(line[valStart:])
 
-	req.Headers[req.NHeaders] = server.RawHeader{
+	req.Headers[req.NHeaders] = api.RawHeader{
 		Key:   key,
 		Value: value,
 	}
 	req.NHeaders++
 }
 
-// serveHit writes the fast path response to the connection.
-func (p *Parser) serveHit(conn net.Conn, resp *server.FastPathResponse) error {
+// serveHit writes the fast path response to the connection and returns
+// the pooled header buffer via the Return callback.
+func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse) error {
 	if err := conn.SetWriteDeadline(time.Now().Add(p.writeTime)); err != nil {
 		return err
 	}
 	_, err := resp.Buffers.WriteTo(conn)
+	if resp.Return != nil {
+		resp.Return()
+	}
 	return err
 }
 
 // handleFallThrough constructs an *http.Request from the parsed RawRequest
 // and calls the fallback handler. The connection is yielded to net/http
 // for the remainder of its lifetime — the parser does not loop back.
-func (p *Parser) handleFallThrough(_ net.Conn, req *server.RawRequest) error {
+func (p *Parser) handleFallThrough(_ net.Conn, req *api.RawRequest) error {
 	// For a true fall-through (parse failure or no request parsed),
 	// we can't construct an *http.Request. Return ErrFallThrough to
 	// signal the caller to hand the raw connection to net/http.

@@ -710,6 +710,13 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 	tcpFastOpen := boolDefault(e.cfg.Listen.TCPFastOpen, true)
 	tcpDeferAccept := boolDefault(e.cfg.Listen.TCPDeferAccept, true)
 	reusePort := boolDefault(e.cfg.Listen.ReusePort, platform.ReusePortSupported)
+
+	var fastPathHandler api.FastPathHandler
+	if e.cfg.Experimental.H1FastPath && rs.store != nil {
+		fastPathHandler = cache.NewFastPathHandlerFromStore(rs.store)
+		e.logger.Info("H1 fast path enabled", "experimental", true)
+	}
+
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:           e.cfg.Listen.HTTP,
@@ -719,6 +726,8 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			TCPFastOpen:    tcpFastOpen,
 			TCPDeferAccept: tcpDeferAccept,
 			ReusePort:      reusePort,
+			FastPath:       fastPathHandler,
+			Scheme:         "http",
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -739,6 +748,8 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			TCPFastOpen:    tcpFastOpen,
 			TCPDeferAccept: tcpDeferAccept,
 			ReusePort:      reusePort,
+			FastPath:       fastPathHandler,
+			Scheme:         "https",
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)

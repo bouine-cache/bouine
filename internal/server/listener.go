@@ -17,6 +17,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/platform"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // safetyNetWriteTimeout is a generous write deadline that acts as a
@@ -85,6 +86,8 @@ type ListenerConfig struct {
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
+	FastPath       api.FastPathHandler
+	Scheme         string
 }
 
 // Listener wraps a net/http Server with lifecycle methods matching the
@@ -100,6 +103,8 @@ type Listener struct {
 	tcpFastOpen    bool
 	tcpDeferAccept bool
 	reusePort      bool
+	fastPath       api.FastPathHandler
+	scheme         string
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
@@ -123,7 +128,8 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		MaxHeaderBytes:    64 << 10,
 	}
 	return &Listener{inner: srv, name: "http", logger: cfg.Logger, maxConns: cfg.MaxConnections,
-		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort}
+		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort,
+		fastPath: cfg.FastPath, scheme: cfg.Scheme}
 }
 
 // NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener.
@@ -152,7 +158,8 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		MaxHeaderBytes:    64 << 10,
 	}
 	return &Listener{inner: srv, name: "https", logger: cfg.Logger, maxConns: cfg.MaxConnections,
-		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort}
+		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort,
+		fastPath: cfg.FastPath, scheme: cfg.Scheme}
 }
 
 // Serve starts the listener and blocks until ctx is cancelled. When
@@ -166,6 +173,22 @@ func (s *Listener) Serve(ctx context.Context) error {
 		return s.serveMulti(ctx)
 	}
 	return s.serveSingle(ctx)
+}
+
+// fastPathEnabled reports whether the fast-path H1 parser is active.
+func (s *Listener) fastPathEnabled() bool {
+	return s.fastPath != nil
+}
+
+// logReusePortStart logs the listener startup with reuse-port info.
+func (s *Listener) logReusePortStart(addr string, n int) {
+	if s.fastPathEnabled() {
+		s.logger.Info("listener started with H1 fast path + SO_REUSEPORT",
+			"name", s.name, "addr", addr, "listeners", n)
+	} else {
+		s.logger.Info("listener started with SO_REUSEPORT",
+			"name", s.name, "addr", addr, "listeners", n)
+	}
 }
 
 // serveSingle runs a single accept loop — the traditional listener model.
@@ -189,6 +212,13 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 
 	if s.inner.TLSConfig != nil {
 		ln = tls.NewListener(ln, s.inner.TLSConfig)
+	}
+
+	if s.fastPathEnabled() {
+		s.logger.Info("listener started with H1 fast path",
+			"name", s.name,
+			"addr", s.resolved.Load().(string))
+		return s.serveFastPath(ctx, ln)
 	}
 
 	errCh := make(chan error, 1)
@@ -255,10 +285,11 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 	}
 
 	s.resolved.Store(firstAddr)
-	s.logger.Info("listener started with SO_REUSEPORT",
-		"name", s.name,
-		"addr", firstAddr,
-		"listeners", len(listeners))
+	s.logReusePortStart(firstAddr, len(listeners))
+
+	if s.fastPathEnabled() {
+		return s.serveMultiFastPath(ctx, listeners)
+	}
 
 	errCh := make(chan error, len(listeners))
 	for _, ln := range listeners {

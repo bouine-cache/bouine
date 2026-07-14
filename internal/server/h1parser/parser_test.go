@@ -3,7 +3,7 @@ package h1parser
 import (
 	"testing"
 
-	"github.com/bouine-cache/bouine/internal/server"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestParseRequestLine(t *testing.T) {
@@ -48,7 +48,7 @@ func TestParseRequestLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := &server.RawRequest{}
+			req := &api.RawRequest{}
 			buf := []byte(tt.input)
 			if err := parseRequestLine(buf, req); err != nil {
 				t.Fatalf("parseRequestLine: %v", err)
@@ -79,8 +79,8 @@ func TestParseRequestLine(t *testing.T) {
 }
 
 func TestRawRequest_Header(t *testing.T) {
-	req := &server.RawRequest{
-		Headers: [server.MaxRawHeaders]server.RawHeader{
+	req := &api.RawRequest{
+		Headers: [api.MaxRawHeaders]api.RawHeader{
 			{Key: "Host", Value: "example.com"},
 			{Key: "Accept", Value: "text/html"},
 		},
@@ -102,7 +102,7 @@ func BenchmarkH1Parse_Get(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		req := &server.RawRequest{}
+		req := &api.RawRequest{}
 		_ = parseRequestLine(raw, req)
 		_ = parseHeaders(raw, req)
 	}

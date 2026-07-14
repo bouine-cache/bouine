@@ -34,6 +34,7 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithIdleReadTimeout(10*time.Second),
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
+		h1parser.WithFallbackServer(s.inner),
 	)
 
 	var wg sync.WaitGroup

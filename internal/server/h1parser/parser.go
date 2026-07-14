@@ -12,12 +12,11 @@ package h1parser
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"strconv"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -32,13 +31,14 @@ const readBufferSize = 16 * 1024
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to net/http.
 type Parser struct {
-	fastPath    api.FastPathHandler
-	fallback    http.Handler
-	nowFunc     func() time.Time
-	idleRead    time.Duration
-	writeTime   time.Duration
-	scheme      string
-	metricsHook func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	fastPath       api.FastPathHandler
+	fallback       http.Handler
+	fallbackServer *http.Server
+	nowFunc        func() time.Time
+	idleRead       time.Duration
+	writeTime      time.Duration
+	scheme         string
+	metricsHook    func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -54,6 +54,17 @@ func New(fastPath api.FastPathHandler, fallback http.Handler, opts ...Option) *P
 	for _, opt := range opts {
 		opt(p)
 	}
+	// Use the provided fallback server, or create a minimal one.
+	if p.fallbackServer == nil {
+		p.fallbackServer = &http.Server{
+			Handler:           p.fallback,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      5 * time.Minute,
+			IdleTimeout:       120 * time.Second,
+		}
+	}
+
 	return p
 }
 
@@ -80,6 +91,15 @@ func WithWriteTimeout(d time.Duration) Option {
 // is TLS.
 func WithScheme(scheme string) Option {
 	return func(p *Parser) { p.scheme = scheme }
+}
+
+// WithFallbackServer sets the *http.Server used for fall-through
+// connections. When provided, the parser uses this server's Serve
+// method and inherits all its timeout and connection configuration.
+// When nil (default), the parser creates a minimal server with
+// ReadHeaderTimeout=10s.
+func WithFallbackServer(srv *http.Server) Option {
+	return func(p *Parser) { p.fallbackServer = srv }
 }
 
 // WithMetricsHook sets a callback invoked after each fast-path hit.
@@ -335,89 +355,39 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse) error {
 }
 
 // handleFallThrough serves a miss-path request via the fallback handler.
-// It constructs an *http.Request from the parsed RawRequest and calls
-// p.fallback.ServeHTTP with a connResponseWriter that writes directly
-// to the connection. The parser does not loop back after a fall-through
-// — the connection is closed after the response is written.
+// It reconstructs the raw request bytes and hands the connection to net/http
+// via a singleConnListener, which uses http.Server's built-in response
+// writer. This ensures correct HTTP framing (chunked encoding, content-length,
+// flushing) that the custom connResponseWriter failed to handle, causing
+// unexpected EOF errors under load.
 //
 // excess contains body bytes that were already read from the connection
-// by parseRequest (bytes past the \r\n\r\n header end). For non-GET/HEAD
-// methods, these bytes plus the remaining connection data form the
-// request body.
+// by parseRequest (bytes past the header end). These are prepended
+// to the connection via a prefixedConn so net/http sees the complete request.
 func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []byte) error {
 	if req == nil {
 		return ErrFallThrough
 	}
 
-	url := req.Path
-	if req.Query != "" {
-		url += "?" + req.Query
-	}
+	// Reconstruct the raw request bytes that net/http will parse.
+	rawReq := reconstructRawRequest(req)
 
-	r, err := http.NewRequestWithContext( //nolint:noctx // context not available in fast-path fall-through
-		context.Background(), req.Method, "http://"+req.Host+url, nil)
-	if err != nil {
-		return ErrFallThrough
-	}
+	// Prepend the raw request + any excess body bytes to the connection.
+	prefix := make([]byte, 0, len(rawReq)+len(excess))
+	prefix = append(prefix, rawReq...)
+	prefix = append(prefix, excess...)
+	// Reset deadlines so http.Server manages its own timeouts.
+	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
+	pc := &prefixedConn{Conn: conn, prefix: prefix}
 
-	// Set proto from the parsed version.
-	if req.HTTPVersion == "HTTP/1.0" {
-		r.Proto = "HTTP/1.0"
-		r.ProtoMajor = 1
-		r.ProtoMinor = 0
-	} else {
-		r.Proto = "HTTP/1.1"
-		r.ProtoMajor = 1
-		r.ProtoMinor = 1
+	// Hand the connection to net/http via a one-shot listener.
+	// This uses http.Server's proper response writer which correctly
+	// handles chunked encoding, content-length, and connection lifecycle.
+	cl := &singleConnListener{conn: pc}
+	if err := p.fallbackServer.Serve(cl); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
-
-	for i := 0; i < req.NHeaders; i++ {
-		r.Header.Add(req.Headers[i].Key, req.Headers[i].Value)
-	}
-	r.Host = req.Host
-	r.RemoteAddr = conn.RemoteAddr().String()
-
-	// Construct the request body. For GET/HEAD there is no body.
-	// For other methods, the body is the excess bytes already read
-	// by the parser, followed by any remaining bytes on the connection.
-	// We use Content-Length to bound the reader; without it, we read
-	// until EOF (which only works for Connection: close).
-	contentLength := -1
-	for i := 0; i < req.NHeaders; i++ {
-		if api.EqualFold(req.Headers[i].Key, "Content-Length") {
-			if cl, perr := strconv.Atoi(req.Headers[i].Value); perr == nil {
-				contentLength = cl
-			}
-			break
-		}
-	}
-
-	switch {
-	case req.Method == http.MethodGet || req.Method == http.MethodHead:
-		r.Body = http.NoBody
-		r.ContentLength = 0
-	case contentLength > 0:
-		bodyReader := io.MultiReader(bytes.NewReader(excess), conn)
-		r.Body = io.NopCloser(io.LimitReader(bodyReader, int64(contentLength)))
-		r.ContentLength = int64(contentLength)
-	case contentLength == 0:
-		r.Body = http.NoBody
-		r.ContentLength = 0
-	default:
-		// No Content-Length: read excess + connection until EOF.
-		// This only works because we close the connection after
-		// the response (Connection: close semantics).
-		if len(excess) > 0 {
-			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(excess), conn))
-		} else {
-			r.Body = io.NopCloser(conn)
-		}
-		r.ContentLength = -1
-	}
-
-	w := newConnResponseWriter(conn)
-	p.fallback.ServeHTTP(w, r)
-	w.flushAndClose()
 	return nil
 }
 
@@ -446,3 +416,74 @@ func bytesToString(b []byte) string {
 	}
 	return unsafe.String(&b[0], len(b))
 }
+
+// reconstructRawRequest rebuilds the raw HTTP/1.1 request bytes from a
+// parsed RawRequest so net/http can re-parse them. This is needed because
+// the h1parser already consumed the request bytes from the connection,
+// and net/http's Server.Serve expects to read the request from the wire.
+func reconstructRawRequest(req *api.RawRequest) []byte {
+	var buf bytes.Buffer
+	buf.Grow(256 + req.NHeaders*64)
+
+	// Request line.
+	buf.WriteString(req.Method)
+	buf.WriteByte(' ')
+	buf.WriteString(req.Path)
+	if req.Query != "" {
+		buf.WriteByte('?')
+		buf.WriteString(req.Query)
+	}
+	buf.WriteByte(' ')
+	buf.WriteString(req.HTTPVersion)
+	buf.WriteString("\r\n")
+
+	// Headers.
+	for i := 0; i < req.NHeaders; i++ {
+		buf.WriteString(req.Headers[i].Key)
+		buf.WriteString(": ")
+		buf.WriteString(req.Headers[i].Value)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("\r\n")
+
+	return buf.Bytes()
+}
+
+// prefixedConn wraps a net.Conn and serves a prefix buffer before reading
+// from the underlying connection. Used to prepend already-parsed request
+// bytes when handing a connection to net/http.
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (p *prefixedConn) Read(b []byte) (int, error) {
+	if len(p.prefix) > 0 {
+		n := copy(b, p.prefix)
+		p.prefix = p.prefix[n:]
+		return n, nil
+	}
+	return p.Conn.Read(b)
+}
+
+// singleConnListener returns one pre-accepted connection, then EOFs.
+// Duplicated from server.fp_conn.go to avoid a circular dependency;
+// keep both copies in sync.
+type singleConnListener struct {
+	conn net.Conn
+	mu   sync.Mutex
+	done bool
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		return nil, net.ErrClosed
+	}
+	l.done = true
+	return l.conn, nil
+}
+
+func (l *singleConnListener) Close() error   { return nil }
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }

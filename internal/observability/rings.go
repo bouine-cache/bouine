@@ -751,6 +751,10 @@ type urlCounters struct {
 type URLRing struct {
 	entries sync.Map // urlKey → *urlCounters
 	size    atomic.Int64
+	// sampleRate controls 1-in-N sampling. 0 = record every call.
+	// Set by SetSampleRate; default 0 (no sampling) for backward compat.
+	sampleRate    int64
+	sampleCounter atomic.Int64
 }
 
 // urlKey returns a stable cache key from a URL path: the first
@@ -781,8 +785,22 @@ func urlKey(path string) string {
 	return path[:end]
 }
 
+// SetSampleRate configures 1-in-N sampling for RecordURL. A rate of
+// 100 records 1 in 100 calls; 0 records every call. This reduces
+// sync.Map.Load overhead under high miss rates.
+func (r *URLRing) SetSampleRate(n int) {
+	r.sampleRate = int64(n)
+}
+
 // RecordURL is called on the hot path. Zero allocs for known URLs.
+// When sampling is enabled (sampleRate > 0), only 1-in-N calls proceed
+// past the atomic counter check — the remaining calls return in ~5 ns.
 func (r *URLRing) RecordURL(path, route, xCache string) {
+	if r.sampleRate > 0 {
+		if r.sampleCounter.Add(1)%r.sampleRate != 0 {
+			return
+		}
+	}
 	key := urlKey(path)
 	v, ok := r.entries.Load(key)
 	if !ok {

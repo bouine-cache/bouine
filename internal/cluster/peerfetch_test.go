@@ -120,20 +120,9 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	obj.Header = header.NewMap(1)
 	obj.Header.AppendEntry("X-Custom", "value")
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != PeerFetchPath {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		var req api.PeerFetchRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Key != key {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(obj))
-	}))
+	srv := httptest.NewServer(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+		key: obj,
+	}}))
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil)
@@ -234,20 +223,9 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 		LastModified:         lastMod,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != PeerFetchPath {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		var req api.PeerFetchRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Key != key {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(obj))
-	}))
+	srv := httptest.NewServer(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+		key: obj,
+	}}))
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil)

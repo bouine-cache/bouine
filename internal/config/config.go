@@ -51,6 +51,12 @@ type Config struct {
 	// transient heap usage. Safe to raise when GOMEMLIMIT is set, since
 	// the soft memory limit acts as a hard cap.
 	GOGC *int `yaml:"gogc,omitempty" json:"gogc,omitempty"`
+
+	// URLRingSampleRate controls 1-in-N sampling for the dashboard URL
+	// ring buffer. Default 0 = record every non-HIT request. A value of
+	// 100 records 1 in 100, reducing sync.Map overhead under high miss
+	// rates. Set to 1 to record every call (debug mode).
+	URLRingSampleRate int `yaml:"url_ring_sample_rate,omitempty" json:"url_ring_sample_rate,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

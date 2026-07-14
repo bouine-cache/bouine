@@ -748,6 +748,13 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key ap
 			if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
+					// Populate transient ban-matching fields from the
+					// current request — the peer codec does not serialize
+					// them (json:"-"), so the decoded object has empty
+					// values. Without this, ban-by-path/host would not
+					// work on peer-fetched objects.
+					peerObj.BouinePath = r.URL.Path
+					peerObj.BouineHost = r.Host
 					h.serveObject(w, r, peerObj, now, cacheHit, api.SourcePeer)
 					// Promote to local hot tier (best-effort; ignore error).
 					_ = h.store.Put(r.Context(), key, peerObj)

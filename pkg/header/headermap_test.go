@@ -328,3 +328,104 @@ func TestMap_Footprint_WithOrphanedDel(t *testing.T) {
 		t.Errorf("valueBytes = %d, want %d (orphaned value data must be counted)", valueBytes, wantBytes)
 	}
 }
+
+func TestStripNoCacheFields(t *testing.T) {
+	t.Parallel()
+
+	// no-cache with quoted field list — the common RFC 9111 form.
+	h := FromHTTP(http.Header{
+		"Content-Type":  {"text/html"},
+		"Cache-Control": {`no-cache="Set-Cookie, Vary"`},
+		"Set-Cookie":    {"session=abc"},
+		"Vary":          {"Accept-Encoding"},
+		"X-Custom":      {"keep-me"},
+	})
+
+	h.StripNoCacheFields(`no-cache="Set-Cookie, Vary"`)
+
+	if h.Has("Set-Cookie") {
+		t.Error("Set-Cookie should be stripped by no-cache directive")
+	}
+	if h.Has("Vary") {
+		t.Error("Vary should be stripped by no-cache directive")
+	}
+	if !h.Has("Content-Type") {
+		t.Error("Content-Type should be preserved")
+	}
+	if !h.Has("X-Custom") {
+		t.Error("X-Custom should be preserved")
+	}
+}
+
+func TestStripNoCacheFields_Unquoted(t *testing.T) {
+	t.Parallel()
+
+	// no-cache with unquoted field (single field, no quotes).
+	h := FromHTTP(http.Header{
+		"Content-Type":  {"text/html"},
+		"Cache-Control": {"no-cache=Set-Cookie"},
+		"Set-Cookie":    {"session=abc"},
+	})
+
+	h.StripNoCacheFields("no-cache=Set-Cookie")
+
+	if h.Has("Set-Cookie") {
+		t.Error("Set-Cookie should be stripped by unquoted no-cache directive")
+	}
+	if !h.Has("Content-Type") {
+		t.Error("Content-Type should be preserved")
+	}
+}
+
+func TestStripNoCacheFields_NoDirective(t *testing.T) {
+	t.Parallel()
+
+	// No no-cache directive — nothing should be stripped.
+	h := FromHTTP(http.Header{
+		"Content-Type":  {"text/html"},
+		"Cache-Control": {"public, max-age=3600"},
+		"Set-Cookie":    {"session=abc"},
+	})
+
+	h.StripNoCacheFields("public, max-age=3600")
+
+	if !h.Has("Set-Cookie") {
+		t.Error("Set-Cookie should be preserved when no no-cache directive")
+	}
+	if !h.Has("Content-Type") {
+		t.Error("Content-Type should be preserved")
+	}
+}
+
+func TestStripNoCacheFields_Empty(t *testing.T) {
+	t.Parallel()
+
+	h := FromHTTP(http.Header{
+		"Content-Type": {"text/html"},
+	})
+
+	// Empty ccHeader — no-op, no panic.
+	h.StripNoCacheFields("")
+
+	if !h.Has("Content-Type") {
+		t.Error("Content-Type should be preserved with empty ccHeader")
+	}
+}
+
+func TestStripNoCacheFields_BareNoCache(t *testing.T) {
+	t.Parallel()
+
+	// Bare "no-cache" without =fields means "must revalidate" — no
+	// fields to strip.
+	h := FromHTTP(http.Header{
+		"Content-Type":  {"text/html"},
+		"Cache-Control": {"no-cache"},
+		"Set-Cookie":    {"session=abc"},
+	})
+
+	h.StripNoCacheFields("no-cache")
+
+	if !h.Has("Set-Cookie") {
+		t.Error("Set-Cookie should be preserved with bare no-cache (no fields)")
+	}
+}

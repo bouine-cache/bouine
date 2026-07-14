@@ -727,6 +727,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			TCPDeferAccept: tcpDeferAccept,
 			ReusePort:      reusePort,
 			FastPath:       fastPathHandler,
+			FastMetrics:    rs.dpMetrics,
 			Scheme:         "http",
 		})
 		rs.listeners = append(rs.listeners, srv)
@@ -749,6 +750,7 @@ func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *r
 			TCPDeferAccept: tcpDeferAccept,
 			ReusePort:      reusePort,
 			FastPath:       fastPathHandler,
+			FastMetrics:    rs.dpMetrics,
 			Scheme:         "https",
 		})
 		rs.listeners = append(rs.listeners, srv)

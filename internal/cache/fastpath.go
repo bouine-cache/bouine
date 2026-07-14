@@ -58,6 +58,11 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 	}
 }
 
+// storeGetTimeout bounds the storage lookup in the fast path. If the
+// store is stuck (e.g. warm-tier disk I/O), the fast path falls through
+// to net/http rather than blocking the connection goroutine indefinitely.
+const storeGetTimeout = 5 * time.Second
+
 // TryHit attempts to serve a cache hit from the parsed request. See
 // api.FastPathHandler for the full contract.
 func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
@@ -65,8 +70,11 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		return nil, false
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), storeGetTimeout)
+	defer cancel()
+
 	key := buildKeyFromRaw(req, f.stripQueryParams)
-	obj, src, err := f.store.Get(context.Background(), key)
+	obj, src, err := f.store.Get(ctx, key)
 	if err != nil || obj == nil {
 		return nil, false
 	}
@@ -75,7 +83,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	if vary := obj.Header.Get(header.Vary); vary != "" {
 		vk := variantKeyFromRaw(key, vary, req, f.excludeHeaders)
 		if vk != key {
-			vobj, vsrc, verr := f.store.Get(context.Background(), vk)
+			vobj, vsrc, verr := f.store.Get(ctx, vk)
 			if verr != nil || vobj == nil {
 				return nil, false
 			}
@@ -87,9 +95,17 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	disp := evaluateFromRaw(req, obj, now)
 	switch disp.Decision {
 	case Hit:
-		return f.serializeResponse(req, obj, src, now, "HIT"), true
+		resp := f.serializeResponse(req, obj, src, now, "HIT")
+		if resp == nil {
+			return nil, false
+		}
+		return resp, true
 	case StaleHit:
-		return f.serializeResponse(req, obj, src, now, "STALE"), true
+		resp := f.serializeResponse(req, obj, src, now, "STALE")
+		if resp == nil {
+			return nil, false
+		}
+		return resp, true
 	default:
 		return nil, false
 	}

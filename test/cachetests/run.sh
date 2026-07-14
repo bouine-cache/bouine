@@ -71,7 +71,26 @@ echo ">>> Origin is up."
 
 # 4. Write bouine config and start bouine.
 BOUINE_CONFIG=$(mktemp)
-cat > "$BOUINE_CONFIG" <<YAML
+EXPERIMENTAL_YAML="${BOUINE_FAST_PATH:-}"
+if [ "$EXPERIMENTAL_YAML" = "true" ]; then
+    cat > "$BOUINE_CONFIG" <<YAML
+listen:
+  http: "127.0.0.1:$BOUINE_HTTP_PORT"
+  admin: "127.0.0.1:$BOUINE_ADMIN_PORT"
+storage:
+  hot_max_bytes: 256MiB
+upstream_pools:
+  - name: cache-tests
+    targets: ["127.0.0.1:$ORIGIN_PORT"]
+routes:
+  - match: {}
+    pool: cache-tests
+experimental:
+  h1_fast_path: true
+YAML
+    echo ">>> H1 fast path ENABLED for conformance run"
+else
+    cat > "$BOUINE_CONFIG" <<YAML
 listen:
   http: "127.0.0.1:$BOUINE_HTTP_PORT"
   admin: "127.0.0.1:$BOUINE_ADMIN_PORT"
@@ -84,6 +103,7 @@ routes:
   - match: {}
     pool: cache-tests
 YAML
+fi
 
 echo ">>> Starting bouine on port $BOUINE_HTTP_PORT..."
 "$BOUINE_BIN" serve --config "$BOUINE_CONFIG" --log-level error --log-format text &

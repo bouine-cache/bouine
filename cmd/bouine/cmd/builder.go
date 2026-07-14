@@ -19,6 +19,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/internal/origin"
+	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/server"
 	"github.com/bouine-cache/bouine/internal/staticfile"
 	"github.com/bouine-cache/bouine/internal/storage"
@@ -139,6 +140,18 @@ func listenPort(addr, defaultPort string) string {
 //     ring buffers, and merged structured access log.
 func (e *engine) buildHandler(rs *runState) http.Handler {
 	router := e.buildRouter(rs)
+	// Pre-resolve Prometheus label tuples for each route to eliminate
+	// per-request WithLabelValues hash lookups on the hit path.
+	routeNames := make([]string, 0, len(e.cfg.Routes))
+	for _, rc := range e.cfg.Routes {
+		if rc.Name != "" {
+			routeNames = append(routeNames, rc.Name)
+		}
+	}
+	rs.dpMetrics.PreResolveRoutes(routeNames)
+	// Inject CoarseNow on Linux (~2-4ns vs ~25-40ns for time.Now).
+	// On non-Linux, CoarseNow falls back to time.Now, so always inject.
+	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 	metricsWrapped := rs.dpMetrics.Middleware(router)
 	return tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
 }

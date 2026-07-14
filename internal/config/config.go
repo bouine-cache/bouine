@@ -57,6 +57,21 @@ type Config struct {
 	// 100 records 1 in 100, reducing sync.Map overhead under high miss
 	// rates. Set to 1 to record every call (debug mode).
 	URLRingSampleRate int `yaml:"url_ring_sample_rate,omitempty" json:"url_ring_sample_rate,omitempty"`
+
+	// Experimental holds opt-in features that are not yet stable.
+	// Fields default to off (zero value) and must be explicitly enabled.
+	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
+}
+
+// ExperimentalConfig holds opt-in experimental features.
+type ExperimentalConfig struct {
+	// H1FastPath enables the custom HTTP/1.1 parser that bypasses
+	// net/http on cache hits. When true, GET/HEAD requests with no
+	// conditional headers are served directly from the parsed request
+	// without allocating *http.Request or http.ResponseWriter. Misses
+	// and non-GET/HEAD requests fall through to net/http unchanged.
+	// Default false.
+	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

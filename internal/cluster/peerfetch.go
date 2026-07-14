@@ -251,8 +251,9 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	// reduces peak transient allocation from 256 MiB to ~64 MiB.
 	buf := peerFetchBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
+	putBufBack := true
 	defer func() {
-		if buf.Cap() <= int(maxPeerFetchBytes) {
+		if putBufBack && buf.Cap() <= int(maxPeerFetchBytes) {
 			peerFetchBufPool.Put(buf)
 		}
 	}()
@@ -264,6 +265,11 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)
 	}
+	// DecodeObject returns an Object whose Body aliases respBody (buf.Bytes()).
+	// We must NOT return buf to the pool — the caller retains obj.Body which
+	// points into buf's backing array. Returning buf would allow a concurrent
+	// Fetch to overwrite obj.Body (use-after-free, race detector finds it).
+	putBufBack = false
 
 	f.hits.Add(1)
 	if f.pHits != nil {

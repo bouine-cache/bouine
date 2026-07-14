@@ -154,3 +154,33 @@ func itoa(i int) string {
 	}
 	return string(buf[n:])
 }
+
+// BenchmarkStoreFootprint_Interned measures the heap footprint of storing
+// 1000 objects whose header values are all common strings (text/html,
+// max-age=3600). With interning, these values are deduplicated across
+// all objects via unique.Make. Compare B/op and allocs/op against
+// BenchmarkStoreFootprint (which uses the same origin but stores
+// distinct URLs, so the header values are still common and interned).
+//
+// To measure the interning benefit directly, compare:
+//   - allocs/op: should be lower because value strings are shared
+//   - B/op: should be lower because duplicate string data is eliminated
+func BenchmarkStoreFootprint_Interned(b *testing.B) {
+	const (
+		bodySize  = 64 << 10
+		chunkSize = 16 << 10
+		numObjs   = 1000
+	)
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  256 << 20,
+		NumShards: 16,
+	})
+	h := NewHandler(HandlerConfig{Upstream: chunkedOrigin(bodySize, chunkSize), Store: store})
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := range numObjs {
+		req := httptest.NewRequest("GET", "http://example.com/obj/"+itoa(i), nil)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+}

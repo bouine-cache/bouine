@@ -132,10 +132,15 @@ func reportFastPathError(err error, errCh chan<- error) {
 }
 
 // serveConnWithHTTP hands a single connection to net/http via a
-// one-shot listener.
+// one-shot listener. The closeNotifyConn ensures Serve does not return
+// until the handler goroutine finishes, preventing the caller's defer
+// from closing the connection mid-response.
 func (s *Listener) serveConnWithHTTP(conn net.Conn, errCh chan<- error) {
-	cl := &singleConnListener{conn: conn}
-	if err := s.inner.Serve(cl); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	notifyConn := newCloseNotifyConn(conn)
+	cl := &singleConnListener{conn: notifyConn, ready: notifyConn.done}
+	if err := s.inner.Serve(cl); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) &&
+		!errors.Is(err, net.ErrClosed) {
 		errCh <- err
 	}
 }
@@ -177,19 +182,40 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 	}
 }
 
-// singleConnListener returns one pre-accepted connection, then EOFs.
-// This allows http.Server.Serve to handle a single connection without
-// the caller needing a real listener.
+// closeNotifyConn wraps a net.Conn and closes a channel when Close is
+// called, so the singleConnListener can block until the handler goroutine
+// is done with the connection. Duplicated from h1parser to avoid a
+// circular dependency; keep both copies in sync.
+type closeNotifyConn struct {
+	net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func newCloseNotifyConn(c net.Conn) *closeNotifyConn {
+	return &closeNotifyConn{Conn: c, done: make(chan struct{})}
+}
+
+func (c *closeNotifyConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return c.Conn.Close()
+}
+
+// singleConnListener returns one pre-accepted connection, then blocks
+// until that connection is closed before returning ErrClosed on the
+// next Accept. This ensures http.Server.Serve does not return until the
+// handler goroutine has finished, preventing the caller from closing the
+// connection mid-response. Duplicated from h1parser to avoid a circular
+// dependency; keep both copies in sync.
 type singleConnListener struct {
-	conn net.Conn
-	done bool
-	mu   sync.Mutex
+	conn  net.Conn
+	ready <-chan struct{}
+	done  bool
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.done {
+		<-l.ready
 		return nil, net.ErrClosed
 	}
 	l.done = true

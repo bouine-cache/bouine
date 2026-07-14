@@ -270,8 +270,14 @@ loadtest: loadtest-setup ## Run single-node scenarios and generate report.
 	@echo "Charts: $(CHARTS_DIR)/"
 
 .PHONY: release
-release: ## Create a GitHub release (usage: make release TAG=v0.1.0).
-	@test -n "$(TAG)" || { echo "usage: make release TAG=v0.1.0"; exit 1; }
+release: ## Create a GitHub release. Requires TAG=v0.X.Y and a git tag on main.
+## Prerequisites (all must be done before running this target):
+##   1. Bump version + appVersion in deploy/helm/bouine/Chart.yaml
+##   2. Commit: git add deploy/helm/bouine/Chart.yaml && git commit -m "chore(helm): bump chart version"
+##   3. Merge to main (PR or fast-forward — the release targets main)
+##   4. Tag: git tag v0.X.Y && git push origin v0.X.Y
+##   5. Run: make release TAG=v0.X.Y
+	@test -n "$(TAG)" || { echo "usage: make release TAG=v0.1.0"; echo ""; echo "Prerequisites:"; echo "  1. Bump version + appVersion in deploy/helm/bouine/Chart.yaml"; echo "  2. Commit and merge to main"; echo "  3. Tag: git tag v0.X.Y && git push origin v0.X.Y"; echo "  4. Run: make release TAG=v0.X.Y"; exit 1; }
 	@command -v gh >/dev/null || { echo "gh CLI is required: https://cli.github.com"; exit 1; }
 	@chart_ver=$$(sed -n 's/^version: //p' deploy/helm/bouine/Chart.yaml); \
 	published_ver=$$(git show origin/gh-pages:index.yaml 2>/dev/null \
@@ -281,10 +287,20 @@ release: ## Create a GitHub release (usage: make release TAG=v0.1.0).
 		echo "Bump version and appVersion in deploy/helm/bouine/Chart.yaml before tagging."; \
 		exit 1; \
 	fi
+	@if ! git rev-parse -q --verify "refs/tags/$(TAG)" >/dev/null 2>&1; then \
+		echo "ERROR: Tag $(TAG) does not exist locally."; \
+		echo "Create it first: git tag $(TAG) && git push origin $(TAG)"; \
+		exit 1; \
+	fi
+	@if ! git merge-base --is-ancestor "$(TAG)^{commit}" origin/main 2>/dev/null; then \
+		echo "ERROR: Tag $(TAG) is not on origin/main."; \
+		echo "Merge the commit to main first, then retag if necessary."; \
+		exit 1; \
+	fi
 	@printf "Release description (one line): "; \
 	read -r DESC; \
 	REPO=$$(gh repo view --json nameWithOwner -q .nameWithOwner); \
-	PREV=$$(git describe --tags --abbrev=0 2>/dev/null || echo ""); \
+	PREV=$$(git describe --tags --abbrev=0 HEAD~ 2>/dev/null || echo ""); \
 	if [ -n "$$PREV" ]; then \
 		COMMITS=$$(git log --format='- %s ([%h](https://github.com/'"$$REPO"'/commit/%H))' $$PREV..HEAD --no-merges); \
 	else \

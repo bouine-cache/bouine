@@ -663,3 +663,70 @@ func TestValidate_WarmMaxEntriesRatioRange(t *testing.T) {
 		})
 	}
 }
+
+func TestParse_GOGC(t *testing.T) {
+	t.Parallel()
+	gogc := 200
+	cases := []struct {
+		name string
+		yaml string
+		want *int
+	}{
+		{"unset defaults to nil", "", nil},
+		{"200", "gogc: 200\n", &gogc},
+		{"-1 (off)", "gogc: -1\n", ptrInt(-1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if tc.want == nil {
+				if cfg.GOGC != nil {
+					t.Fatalf("expected nil GOGC, got %d", *cfg.GOGC)
+				}
+				return
+			}
+			if cfg.GOGC == nil {
+				t.Fatalf("expected GOGC=%d, got nil", *tc.want)
+			}
+			if *cfg.GOGC != *tc.want {
+				t.Fatalf("expected GOGC=%d, got %d", *tc.want, *cfg.GOGC)
+			}
+		})
+	}
+}
+
+func TestValidate_GOGC(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		gogc int
+		ok   bool
+	}{
+		{"1 is valid", 1, true},
+		{"100 is valid", 100, true},
+		{"200 is valid", 200, true},
+		{"-1 (off) is valid", -1, true},
+		{"0 is invalid", 0, false},
+		{"-2 is invalid", -2, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := Defaults()
+			c.GOGC = &tc.gogc
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+func ptrInt(v int) *int { return &v }

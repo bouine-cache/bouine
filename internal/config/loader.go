@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -140,6 +141,13 @@ func (c *Config) Validate() error {
 	// warm_max_entries_ratio range check. Zero means "use default" and is valid.
 	if r := c.Storage.WarmMaxEntriesRatio; r < 0 || r > 100 {
 		return fmt.Errorf("config: storage.warm_max_entries_ratio must be 0–100, got %d", r)
+	}
+
+	// SO_REUSEPORT is only supported on Linux. The config package is a
+	// leaf and cannot import internal/platform, so we check GOOS directly.
+	// platform.ReusePortSupported mirrors this check.
+	if c.Listen.ReusePort != nil && *c.Listen.ReusePort && runtime.GOOS != "linux" {
+		return errors.New("config: listen.reuse_port is only supported on Linux")
 	}
 
 	return nil

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -36,7 +37,7 @@ const safetyNetWriteTimeout = 5 * time.Minute
 // listener socket: TCP_FASTOPEN (data in SYN, -1 RTT) and
 // TCP_DEFER_ACCEPT (defer accept until data arrives). Both are no-ops
 // on non-Linux platforms via the platform package.
-func setSocketOptions(log observability.Logger, fastOpen, deferAccept bool) func(string, string, syscall.RawConn) error {
+func setSocketOptions(log observability.Logger, fastOpen, deferAccept, reusePort bool) func(string, string, syscall.RawConn) error {
 	return func(network, address string, c syscall.RawConn) error {
 		var fatalErr error
 		if err := c.Control(func(fd uintptr) {
@@ -52,6 +53,14 @@ func setSocketOptions(log observability.Logger, fastOpen, deferAccept bool) func
 					log.Warn("listener socket option failed", "option", "tcp_defer_accept", "error", err)
 				} else {
 					log.Info("listener socket option enabled", "option", "tcp_defer_accept")
+				}
+			}
+			if reusePort {
+				if err := platform.SetReusePort(int(fd)); err != nil {
+					log.Warn("listener socket option failed", "option", "so_reuseport", "error", err)
+					fatalErr = err
+				} else {
+					log.Info("listener socket option enabled", "option", "so_reuseport")
 				}
 			}
 		}); err != nil {
@@ -75,6 +84,7 @@ type ListenerConfig struct {
 	MaxConnections int
 	TCPFastOpen    bool
 	TCPDeferAccept bool
+	ReusePort      bool
 }
 
 // Listener wraps a net/http Server with lifecycle methods matching the
@@ -89,6 +99,7 @@ type Listener struct {
 	maxConns       int
 	tcpFastOpen    bool
 	tcpDeferAccept bool
+	reusePort      bool
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
@@ -112,7 +123,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		MaxHeaderBytes:    64 << 10,
 	}
 	return &Listener{inner: srv, name: "http", logger: cfg.Logger, maxConns: cfg.MaxConnections,
-		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept}
+		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort}
 }
 
 // NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener.
@@ -141,15 +152,26 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		MaxHeaderBytes:    64 << 10,
 	}
 	return &Listener{inner: srv, name: "https", logger: cfg.Logger, maxConns: cfg.MaxConnections,
-		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept}
+		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort}
 }
 
-// Serve starts the listener and blocks until ctx is cancelled.
+// Serve starts the listener and blocks until ctx is cancelled. When
+// SO_REUSEPORT is enabled and supported, N parallel accept loops (one
+// per GOMAXPROCS) share the same port, distributing connections via
+// kernel-level hashing. Otherwise a single accept loop is used.
 //
 // Stable.
 func (s *Listener) Serve(ctx context.Context) error {
+	if s.reusePort && platform.ReusePortSupported {
+		return s.serveMulti(ctx)
+	}
+	return s.serveSingle(ctx)
+}
+
+// serveSingle runs a single accept loop — the traditional listener model.
+func (s *Listener) serveSingle(ctx context.Context) error {
 	lc := net.ListenConfig{
-		Control: setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept),
+		Control: setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept, false),
 	}
 	ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
 	if err != nil {
@@ -186,6 +208,82 @@ func (s *Listener) Serve(ctx context.Context) error {
 	}
 }
 
+// serveMulti creates N=runtime.GOMAXPROCS(0) listeners with SO_REUSEPORT
+// so the kernel distributes incoming connections across them. All N
+// listeners share a single connection-limit semaphore. If the first
+// listener creation fails (e.g. SO_REUSEPORT unsupported at runtime),
+// it falls back to serveSingle.
+func (s *Listener) serveMulti(ctx context.Context) error {
+	n := runtime.GOMAXPROCS(0)
+
+	var sem chan struct{}
+	if s.maxConns > 0 {
+		sem = make(chan struct{}, s.maxConns)
+	}
+
+	control := setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept, true)
+	lc := net.ListenConfig{Control: control}
+
+	listeners := make([]net.Listener, 0, n)
+	var firstAddr string
+
+	for range n {
+		ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
+		if err != nil {
+			for _, l := range listeners {
+				_ = l.Close()
+			}
+			if len(listeners) == 0 {
+				s.logger.Warn("reuse_port: listener creation failed, falling back to single listener",
+					"error", err)
+				return s.serveSingle(ctx)
+			}
+			s.logger.Warn("reuse_port: partial creation, using fewer listeners",
+				"created", len(listeners), "requested", n, "error", err)
+			break
+		}
+		if firstAddr == "" {
+			firstAddr = ln.Addr().String()
+		}
+		if s.maxConns > 0 {
+			ln = newConnLimitListenerWithSem(ln, sem, s.logger)
+		}
+		if s.inner.TLSConfig != nil {
+			ln = tls.NewListener(ln, s.inner.TLSConfig)
+		}
+		listeners = append(listeners, ln)
+	}
+
+	s.resolved.Store(firstAddr)
+	s.logger.Info("listener started with SO_REUSEPORT",
+		"name", s.name,
+		"addr", firstAddr,
+		"listeners", len(listeners))
+
+	errCh := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		go func(l net.Listener) {
+			if err := s.inner.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}(ln)
+	}
+
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		return s.inner.Shutdown(shutCtx)
+	case err := <-errCh:
+		shutCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = s.inner.Shutdown(shutCtx)
+		return err
+	}
+}
+
 // Shutdown gracefully stops the listener, waiting for in-flight
 // requests to complete or ctx to expire. Safe to call concurrently
 // with Serve; the inner http.Server.Shutdown is idempotent.
@@ -216,9 +314,13 @@ type connLimitListener struct {
 }
 
 func newConnLimitListener(inner net.Listener, max int, log observability.Logger) net.Listener {
+	return newConnLimitListenerWithSem(inner, make(chan struct{}, max), log)
+}
+
+func newConnLimitListenerWithSem(inner net.Listener, sem chan struct{}, log observability.Logger) net.Listener {
 	return &connLimitListener{
 		Listener: inner,
-		sem:      make(chan struct{}, max),
+		sem:      sem,
 		log:      log,
 	}
 }

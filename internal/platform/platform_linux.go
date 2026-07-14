@@ -13,6 +13,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ReusePortSupported is true on Linux, false on other platforms.
+// Used by config validation to reject ReusePort=true on non-Linux.
+const ReusePortSupported = true
+
 var (
 	cgroupRoot         = "/sys/fs/cgroup"
 	procSelfCgroupPath = "/proc/self/cgroup"

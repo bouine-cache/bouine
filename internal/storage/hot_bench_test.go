@@ -251,3 +251,34 @@ func (a *atomicAppender) append(dst *[]time.Duration, src []time.Duration) {
 	*dst = append(*dst, src...)
 	a.mu.Unlock()
 }
+
+// BenchmarkHotStore_Get_Parallel_64Shards measures the parallel hit path
+// with 64 shards, one key per shard. This isolates shard-level scalability
+// under SO_REUSEPORT-style multi-listener contention (each listener goroutine
+// hammering a different shard). The high shard count ensures zero cross-shard
+// lock contention, so ns/op should scale linearly with GOMAXPROCS.
+func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
+	const shards = 64
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: shards})
+	ks := make([]api.Key, shards)
+	for i := range ks {
+		ks[i] = api.Key(i + 1)
+		_ = s.Put(context.Background(), ks[i], obj(ks[i], 1024))
+	}
+	for _, k := range ks {
+		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		ctx := context.Background()
+		var i uint64
+		for pb.Next() {
+			k := ks[i%shards]
+			i++
+			_, _, _ = s.Get(ctx, k)
+		}
+	})
+}

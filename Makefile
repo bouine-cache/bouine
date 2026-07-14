@@ -64,6 +64,10 @@ bench: ## Run the benchmark suite and compare against the committed baseline.
 conformance: build ## Run the http-tests/cache-tests conformance harness.
 	bash test/cachetests/run.sh
 
+.PHONY: conformance-fastpath
+conformance-fastpath: build ## Run cache-tests conformance with H1 fast path enabled.
+	BOUINE_FAST_PATH=true bash test/cachetests/run.sh
+
 .PHONY: conformance-view
 conformance-view: build ## Run conformance tests then open the comparison UI in a browser.
 	bash test/cachetests/view.sh

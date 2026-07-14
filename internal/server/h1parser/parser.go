@@ -11,11 +11,13 @@
 package h1parser
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 	"unsafe"
 
@@ -30,13 +32,13 @@ const readBufferSize = 16 * 1024
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to net/http.
 type Parser struct {
-	fastPath  api.FastPathHandler
-	fallback  http.Handler
-	readBuf   [readBufferSize]byte
-	nowFunc   func() time.Time
-	idleRead  time.Duration
-	writeTime time.Duration
-	scheme    string
+	fastPath    api.FastPathHandler
+	fallback    http.Handler
+	nowFunc     func() time.Time
+	idleRead    time.Duration
+	writeTime   time.Duration
+	scheme      string
+	metricsHook func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -80,6 +82,15 @@ func WithScheme(scheme string) Option {
 	return func(p *Parser) { p.scheme = scheme }
 }
 
+// WithMetricsHook sets a callback invoked after each fast-path hit.
+// The callback receives the method, route, cache result, source,
+// status code, bytes out, and request duration. Used by the engine
+// to increment Prometheus counters and histograms without going
+// through the middleware chain.
+func WithMetricsHook(fn func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)) Option {
+	return func(p *Parser) { p.metricsHook = fn }
+}
+
 // ErrFallThrough signals that the parser cannot handle the connection
 // and it should be handed to net/http.
 var ErrFallThrough = errors.New("h1parser: fall through to net/http")
@@ -93,43 +104,55 @@ func (p *Parser) Serve(conn net.Conn) error {
 		_ = tcp.SetKeepAlive(true)
 	}
 
+	var readBuf [readBufferSize]byte
+
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(p.idleRead)); err != nil {
 			return err
 		}
 
-		req, fallThrough, err := p.parseRequest(conn)
+		req, fallThrough, excess, err := p.parseRequest(conn, &readBuf)
 		if err != nil {
 			return err
 		}
 		if fallThrough {
-			return p.handleFallThrough(conn, req)
+			if req == nil {
+				return ErrFallThrough
+			}
+			return p.handleFallThrough(conn, req, excess)
 		}
 
 		// Try the fast path.
 		if p.fastPath != nil {
 			now := p.nowFunc()
+			start := now
 			resp, hit := p.fastPath.TryHit(req, now)
 			if hit && resp != nil {
 				if err := p.serveHit(conn, resp); err != nil {
 					return err
+				}
+				if p.metricsHook != nil {
+					dur := p.nowFunc().Sub(start)
+					p.metricsHook(req.Method, resp.Route, resp.CacheResult,
+						resp.Source, resp.StatusCode, resp.BytesOut, dur)
 				}
 				continue
 			}
 		}
 
 		// Miss path: construct *http.Request and fall through.
-		return p.handleFallThrough(conn, req)
+		return p.handleFallThrough(conn, req, excess)
 	}
 }
 
 // parseRequest reads and parses a single HTTP/1.1 request from conn.
 // Returns (req, fallThrough, err). When fallThrough is true, the
 // caller should hand the connection to net/http.
-func (p *Parser) parseRequest(conn net.Conn) (*api.RawRequest, bool, error) {
-	buf := p.readBuf[:0]
+func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*api.RawRequest, bool, []byte, error) {
+	buf := readBuf[:0]
 
 	// Read until we find the end of headers (\r\n\r\n).
+	headerEnd := -1
 	for {
 		n, err := conn.Read(buf[len(buf):cap(buf)])
 		if n > 0 {
@@ -139,25 +162,34 @@ func (p *Parser) parseRequest(conn net.Conn) (*api.RawRequest, bool, error) {
 			if err == io.EOF && len(buf) > 0 {
 				break
 			}
-			return nil, true, err
+			return nil, true, nil, err
 		}
 		if idx := findHeaderEnd(buf); idx >= 0 {
+			headerEnd = idx
 			break
 		}
 		if len(buf) >= cap(buf) {
 			// Headers exceed our buffer — fall through to net/http.
-			return nil, true, nil
+			return nil, true, nil, nil
 		}
 	}
 
 	req := &api.RawRequest{Scheme: p.scheme}
 	if err := parseRequestLine(buf, req); err != nil {
-		return nil, true, err
+		return nil, true, nil, err
 	}
 	if err := parseHeaders(buf, req); err != nil {
-		return nil, true, err
+		return nil, true, nil, err
 	}
-	return req, false, nil
+
+	// excess contains body bytes that were read past the header end.
+	// These are returned to the caller so handleFallThrough can use
+	// them as the start of the request body for non-GET/HEAD methods.
+	var excess []byte
+	if headerEnd >= 0 && headerEnd < len(buf) {
+		excess = buf[headerEnd:]
+	}
+	return req, false, excess, nil
 }
 
 // findHeaderEnd searches for \r\n\r\n in buf.
@@ -245,9 +277,9 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 		pos = lineEnd + 2
 	}
 
-	// Extract Host header.
+	// Extract Host header (case-insensitive, RFC 9110 §5.1).
 	for i := 0; i < req.NHeaders; i++ {
-		if req.Headers[i].Key == "Host" || req.Headers[i].Key == "host" {
+		if api.EqualFold(req.Headers[i].Key, "Host") {
 			req.Host = req.Headers[i].Value
 			break
 		}
@@ -302,19 +334,21 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse) error {
 	return err
 }
 
-// handleFallThrough constructs an *http.Request from the parsed RawRequest
-// and calls the fallback handler. The connection is yielded to net/http
-// for the remainder of its lifetime — the parser does not loop back.
-func (p *Parser) handleFallThrough(_ net.Conn, req *api.RawRequest) error {
-	// For a true fall-through (parse failure or no request parsed),
-	// we can't construct an *http.Request. Return ErrFallThrough to
-	// signal the caller to hand the raw connection to net/http.
+// handleFallThrough serves a miss-path request via the fallback handler.
+// It constructs an *http.Request from the parsed RawRequest and calls
+// p.fallback.ServeHTTP with a connResponseWriter that writes directly
+// to the connection. The parser does not loop back after a fall-through
+// — the connection is closed after the response is written.
+//
+// excess contains body bytes that were already read from the connection
+// by parseRequest (bytes past the \r\n\r\n header end). For non-GET/HEAD
+// methods, these bytes plus the remaining connection data form the
+// request body.
+func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []byte) error {
 	if req == nil {
 		return ErrFallThrough
 	}
 
-	// Construct *http.Request from the parsed fields.
-	// This is one allocation on the miss path — acceptable.
 	url := req.Path
 	if req.Query != "" {
 		url += "?" + req.Query
@@ -325,23 +359,66 @@ func (p *Parser) handleFallThrough(_ net.Conn, req *api.RawRequest) error {
 	if err != nil {
 		return ErrFallThrough
 	}
-	r.Proto = "HTTP/1.1"
-	r.ProtoMajor = 1
-	r.ProtoMinor = 1
 
-	// Copy headers.
+	// Set proto from the parsed version.
+	if req.HTTPVersion == "HTTP/1.0" {
+		r.Proto = "HTTP/1.0"
+		r.ProtoMajor = 1
+		r.ProtoMinor = 0
+	} else {
+		r.Proto = "HTTP/1.1"
+		r.ProtoMajor = 1
+		r.ProtoMinor = 1
+	}
+
 	for i := 0; i < req.NHeaders; i++ {
 		r.Header.Add(req.Headers[i].Key, req.Headers[i].Value)
 	}
 	r.Host = req.Host
+	r.RemoteAddr = conn.RemoteAddr().String()
 
-	// The connection has already been partially read. We need to
-	// yield the remaining connection to net/http. In a real
-	// implementation, this would use a custom http.Server with
-	// the connection as the listener. For now, return ErrFallThrough
-	// so the caller can hand the raw connection to net/http.
-	_ = r
-	return ErrFallThrough
+	// Construct the request body. For GET/HEAD there is no body.
+	// For other methods, the body is the excess bytes already read
+	// by the parser, followed by any remaining bytes on the connection.
+	// We use Content-Length to bound the reader; without it, we read
+	// until EOF (which only works for Connection: close).
+	contentLength := -1
+	for i := 0; i < req.NHeaders; i++ {
+		if api.EqualFold(req.Headers[i].Key, "Content-Length") {
+			if cl, perr := strconv.Atoi(req.Headers[i].Value); perr == nil {
+				contentLength = cl
+			}
+			break
+		}
+	}
+
+	switch {
+	case req.Method == http.MethodGet || req.Method == http.MethodHead:
+		r.Body = http.NoBody
+		r.ContentLength = 0
+	case contentLength > 0:
+		bodyReader := io.MultiReader(bytes.NewReader(excess), conn)
+		r.Body = io.NopCloser(io.LimitReader(bodyReader, int64(contentLength)))
+		r.ContentLength = int64(contentLength)
+	case contentLength == 0:
+		r.Body = http.NoBody
+		r.ContentLength = 0
+	default:
+		// No Content-Length: read excess + connection until EOF.
+		// This only works because we close the connection after
+		// the response (Connection: close semantics).
+		if len(excess) > 0 {
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(excess), conn))
+		} else {
+			r.Body = io.NopCloser(conn)
+		}
+		r.ContentLength = -1
+	}
+
+	w := newConnResponseWriter(conn)
+	p.fallback.ServeHTTP(w, r)
+	w.flushAndClose()
+	return nil
 }
 
 // indexByte is a simple byte search.

@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -606,6 +607,29 @@ func observeDuration(obs prometheus.Observer, dur float64, ctx context.Context) 
 		}
 	}
 	obs.Observe(dur)
+}
+
+// RecordHit implements api.FastPathMetrics. It increments the RED
+// counters for a fast-path hit without going through the middleware
+// chain. Called by the h1parser after serving a cache hit.
+func (m *DataPlaneMetrics) RecordHit(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+	dur := duration.Seconds()
+	if rm, ok := m.lookupRouteMetrics(route); ok {
+		mi := methodIndex(method)
+		si := statusIndex(status)
+		ri := cacheResultIndex(cacheResult)
+		src := sourceIndex(source)
+		if si >= 0 && ri >= 0 && src >= 0 {
+			rm.requestsTotal[mi][si][ri][src].Inc()
+			rm.requestDuration[mi][si][ri][src].Observe(dur)
+			rm.responseBytes[mi][ri][src].Add(float64(bytesOut))
+			return
+		}
+		m.fallbackCount.Add(1)
+	}
+	m.RequestsTotal.WithLabelValues(method, strconv.Itoa(status), cacheResult, source, route).Inc()
+	m.RequestDuration.WithLabelValues(method, strconv.Itoa(status), cacheResult, source, route).Observe(dur)
+	m.ResponseBytesOut.WithLabelValues(method, cacheResult, source, route).Add(float64(bytesOut))
 }
 
 // recordRings updates the dashboard ring buffers for non-HIT requests.

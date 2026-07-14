@@ -110,3 +110,13 @@ func EqualFold(a, b string) bool {
 	}
 	return true
 }
+
+// FastPathMetrics is implemented by the observability layer (L7) to
+// record fast-path hits without going through the middleware chain.
+// The h1parser calls RecordHit after serving a hit. L1 depends on
+// this interface (declared in the leaf package), not on L7 directly.
+//
+// Unstable.
+type FastPathMetrics interface {
+	RecordHit(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+}

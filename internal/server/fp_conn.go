@@ -33,6 +33,7 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithNowFunc(time.Now),
 		h1parser.WithIdleReadTimeout(10*time.Second),
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
+		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
 	)
 
 	var wg sync.WaitGroup
@@ -88,14 +89,19 @@ func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, er
 		}
 		// HTTP/1.1 over TLS — use h1parser.
 		if err := parser.Serve(tlsConn); err != nil { //nolint:contextcheck // parser manages its own deadlines
-			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-				errCh <- err
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, h1parser.ErrFallThrough) {
+				select {
+				case errCh <- err:
+				default:
+				}
 			}
 		}
 		return
 	}
 
 	// Cleartext connection: peek first bytes to detect h2c.
+	// Set a read deadline to prevent slowloris attacks during peek.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	peeker := newPeekConn(conn)
 	preface, err := peeker.Peek(len(h2cPreface))
 	if err != nil && len(preface) == 0 {
@@ -109,8 +115,11 @@ func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, er
 
 	// HTTP/1.1 cleartext — use h1parser.
 	if err := parser.Serve(peeker); err != nil { //nolint:contextcheck // parser manages its own deadlines
-		if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-			errCh <- err
+		if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, h1parser.ErrFallThrough) {
+			select {
+			case errCh <- err:
+			default:
+			}
 		}
 	}
 }

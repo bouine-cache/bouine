@@ -87,6 +87,7 @@ type ListenerConfig struct {
 	TCPDeferAccept bool
 	ReusePort      bool
 	FastPath       api.FastPathHandler
+	FastMetrics    api.FastPathMetrics
 	Scheme         string
 }
 
@@ -104,6 +105,7 @@ type Listener struct {
 	tcpDeferAccept bool
 	reusePort      bool
 	fastPath       api.FastPathHandler
+	fastMetrics    api.FastPathMetrics
 	scheme         string
 }
 
@@ -129,7 +131,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 	}
 	return &Listener{inner: srv, name: "http", logger: cfg.Logger, maxConns: cfg.MaxConnections,
 		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort,
-		fastPath: cfg.FastPath, scheme: cfg.Scheme}
+		fastPath: cfg.FastPath, fastMetrics: cfg.FastMetrics, scheme: cfg.Scheme}
 }
 
 // NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener.
@@ -159,7 +161,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 	}
 	return &Listener{inner: srv, name: "https", logger: cfg.Logger, maxConns: cfg.MaxConnections,
 		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort,
-		fastPath: cfg.FastPath, scheme: cfg.Scheme}
+		fastPath: cfg.FastPath, fastMetrics: cfg.FastMetrics, scheme: cfg.Scheme}
 }
 
 // Serve starts the listener and blocks until ctx is cancelled. When

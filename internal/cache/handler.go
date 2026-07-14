@@ -892,28 +892,6 @@ func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 	h.upstream.ServeHTTP(guard, r)
 }
 
-// stripNoCacheFields removes headers named in a `no-cache="…"` field list
-// from dst before writing it to the client. Per RFC 9111 §5.2.2.4 a cache
-// MUST NOT forward these fields without successful revalidation.
-// ccHeader is the merged Cache-Control string for the stored response.
-func stripNoCacheFields(dst http.Header, ccHeader string) {
-	if ccHeader == "" {
-		return
-	}
-	cc := ParseCacheControl(ccHeader)
-	if cc.NoCacheFields == "" {
-		return
-	}
-	for _, field := range strings.FieldsFunc(cc.NoCacheFields, func(r rune) bool {
-		return r == ',' || r == ' '
-	}) {
-		if field != "" {
-			del := http.CanonicalHeaderKey(field)
-			delete(dst, del)
-		}
-	}
-}
-
 // cacheResult selects the X-Cache header and optional Warning for served objects.
 type cacheResult int
 
@@ -930,9 +908,6 @@ const (
 func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
 	dst := w.Header()
 	obj.Header.WriteTo(dst)
-	// Strip internal headers used for ban matching — never forwarded to clients.
-	dst.Del(header.XBouinePath)
-	dst.Del(header.XBouineHost)
 	dst[header.Age] = ageHeader(ComputeAge(obj, now))
 	dst[header.XCacheSource] = sourceSlice(src)
 	switch result {
@@ -944,7 +919,6 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 	case cacheRevalidated:
 		dst[header.XCache] = headerREVALIDATED
 	}
-	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(obj.Body) // #nosec G705 -- obj.Body is a cached origin response, not user input
@@ -1578,16 +1552,22 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 	}
-	// Stamp internal headers for ban predicate matching. These are
-	// stripped before serving to clients (see serveObject).
-	obj.Header.Set(header.XBouinePath, r.URL.Path)
-	obj.Header.Set(header.XBouineHost, r.Host)
+	// Stamp internal fields for ban predicate matching. These are not
+	// stored in header.Map — they are transient fields on api.Object,
+	// never serialized to the warm tier, and never forwarded to clients.
+	obj.BouinePath = r.URL.Path
+	obj.BouineHost = r.Host
 	// Set-Cookie is always stripped from cached objects: joining multiple
 	// Set-Cookie values with ", " is non-conformant per RFC 9110 §5.2,
 	// and serving stale cookies to a different client is a security risk.
 	// AllowSetCookie controls whether responses with Set-Cookie are cached
 	// at all (gated above); it does not preserve Set-Cookie in the cache.
 	obj.Header.Del(header.SetCookie)
+	// Strip no-cache=field directives at Put time so the stored headers
+	// are already clean — serveObject does not need to strip per request.
+	// Per RFC 9111 §5.2.2.4, a cache MUST NOT forward these fields
+	// without successful revalidation.
+	obj.Header.StripNoCacheFields(ccHeader)
 	// Ensure Content-Length is set so cache hits don't fall back to chunked
 	// transfer encoding. Origins that use chunked encoding have their
 	// Transfer-Encoding stripped by Go's HTTP client, leaving no

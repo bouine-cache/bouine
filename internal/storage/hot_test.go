@@ -221,7 +221,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 
 func TestObjSize_AccountsForHeaders(t *testing.T) {
 	t.Parallel()
-	smallHeaders := http.Header{header.XBouinePath: {"/a"}}
+	smallHeaders := http.Header{"X-Custom": {"/a"}}
 	bigHeaders := http.Header{}
 	for i := range 20 {
 		bigHeaders.Set(fmt.Sprintf("X-H%d", i), strings.Repeat("v", 100))
@@ -326,14 +326,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 256, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// objectStructSize: 288, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 256 + 32 + 32 + 22 +
+	want := int64(5) + 288 + 32 + 32 + 22 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
@@ -713,8 +713,8 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 
 	k := KeyHash([]byte("host-ban"))
 	o := obj(k, 50)
-	o.Header.Set(header.XBouineHost, "example.com")
-	o.Header.Set(header.XBouinePath, "/keep")
+	o.BouineHost = "example.com"
+	o.BouinePath = "/keep"
 	_ = s.Put(context.Background(), k, o)
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "example\\.com"})
@@ -738,8 +738,8 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 
 	k := KeyHash([]byte("path-ban"))
 	o := obj(k, 50)
-	o.Header.Set(header.XBouineHost, "example.com")
-	o.Header.Set(header.XBouinePath, "/ban-me")
+	o.BouineHost = "example.com"
+	o.BouinePath = "/ban-me"
 	_ = s.Put(context.Background(), k, o)
 
 	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me"})
@@ -776,8 +776,8 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 	// Simulate peer replication: Put an object with StoredAt before the ban.
 	k := KeyHash([]byte("lazy-ban"))
 	o := obj(k, 50)
-	o.Header.Set(header.XBouineHost, "example.com")
-	o.Header.Set(header.XBouinePath, "/ban-me")
+	o.BouineHost = "example.com"
+	o.BouinePath = "/ban-me"
 	o.StoredAt = banTime.Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
@@ -795,8 +795,8 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	// Put a matching object with old StoredAt and access it to set visited=true.
 	k := KeyHash([]byte("lazy-fast"))
 	o := obj(k, 50)
-	o.Header.Set(header.XBouineHost, "example.com")
-	o.Header.Set(header.XBouinePath, "/ban-me")
+	o.BouineHost = "example.com"
+	o.BouinePath = "/ban-me"
 	o.StoredAt = time.Now().Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
@@ -838,8 +838,8 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 	// Object stored AFTER the ban — should be exempt from lazy eviction.
 	k := KeyHash([]byte("exempt"))
 	o := obj(k, 50)
-	o.Header.Set(header.XBouineHost, "example.com")
-	o.Header.Set(header.XBouinePath, "/ban-me")
+	o.BouineHost = "example.com"
+	o.BouinePath = "/ban-me"
 	o.StoredAt = banTime.Add(1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 

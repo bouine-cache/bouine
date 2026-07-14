@@ -158,6 +158,25 @@ func BenchmarkEvaluate_Hit(b *testing.B) {
 // Ensure HotStore satisfies storage.Store at compile time.
 var _ storage.Store = (*storage.HotStore)(nil)
 
+// BenchmarkServeObject measures the serveObject path after Phase 2
+// changes (X-Bouine-* headers moved to api.Object fields, stripNoCacheFields
+// moved to Put time). Gate: 0 allocs/op.
+func BenchmarkServeObject(b *testing.B) {
+	obj := freshObj(60)
+	obj.BouinePath = "/bench"
+	obj.BouineHost = "bench.local"
+	h := &Handler{}
+	req := httptest.NewRequest("GET", "http://bench.local/bench", nil)
+	w := newBenchResponseWriter()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		w.Reset()
+		h.serveObject(w, req, obj, obj.StoredAt, cacheHit, "hot")
+	}
+}
+
 // BenchmarkMetricsMiddleware_Hit measures the full DataPlaneMetrics
 // middleware overhead on a cache hit (Prometheus counter increment +
 // histogram observe + response writer pool acquire/release).

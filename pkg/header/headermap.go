@@ -161,6 +161,125 @@ func (h *Map) Del(key string) {
 	}
 }
 
+// StripNoCacheFields removes headers listed in a Cache-Control
+// no-cache=field1,field2 directive from the Map. This is called at Put
+// time (buildObject) so the stored headers are already clean — the
+// serve path does not need to strip them per request. Per RFC 9111
+// §5.2.2.4, a cache MUST NOT forward these fields without successful
+// revalidation. ccHeader is the merged Cache-Control string for the
+// stored response.
+func (h *Map) StripNoCacheFields(ccHeader string) {
+	if ccHeader == "" {
+		return
+	}
+	fields := extractNoCacheFields(ccHeader)
+	if fields == "" {
+		return
+	}
+	h.stripFieldList(fields)
+}
+
+// extractNoCacheFields scans ccHeader for a no-cache=<fields> directive
+// and returns the field list string. Returns "" if no no-cache directive
+// with fields is present.
+func extractNoCacheFields(ccHeader string) string {
+	i := 0
+	for i < len(ccHeader) {
+		i = skipCCDelimiters(ccHeader, i)
+		if i >= len(ccHeader) {
+			break
+		}
+		var token string
+		token, i = readCCToken(ccHeader, i)
+		if i < len(ccHeader) && ccHeader[i] == '=' {
+			i++
+			val := readCCValue(ccHeader, &i)
+			if equalFold(token, "no-cache") {
+				return val
+			}
+		}
+	}
+	return ""
+}
+
+func skipCCDelimiters(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == ',' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+func readCCToken(s string, i int) (string, int) {
+	start := i
+	for i < len(s) && s[i] != '=' && s[i] != ',' && s[i] != ' ' && s[i] != '\t' {
+		i++
+	}
+	return s[start:i], i
+}
+
+func readCCValue(s string, i *int) string {
+	if *i < len(s) && s[*i] == '"' {
+		*i++
+		vStart := *i
+		for *i < len(s) && s[*i] != '"' {
+			*i++
+		}
+		val := s[vStart:*i]
+		if *i < len(s) {
+			*i++
+		}
+		return val
+	}
+	vStart := *i
+	for *i < len(s) && s[*i] != ',' && s[*i] != ' ' && s[*i] != '\t' {
+		*i++
+	}
+	return s[vStart:*i]
+}
+
+// stripFieldList parses a comma-separated list of header names and
+// deletes each one from the Map. Called only when no-cache=fields is
+// present — the uncommon path, called once at Put time.
+func (h *Map) stripFieldList(fields string) {
+	i := 0
+	for i < len(fields) {
+		for i < len(fields) && (fields[i] == ',' || fields[i] == ' ') {
+			i++
+		}
+		if i >= len(fields) {
+			break
+		}
+		start := i
+		for i < len(fields) && fields[i] != ',' && fields[i] != ' ' {
+			i++
+		}
+		if start < i {
+			h.Del(fields[start:i])
+		}
+	}
+}
+
+// equalFold is a case-insensitive ASCII compare without allocating
+// strings.ToLower.
+func equalFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 32
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 32
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
 // Has reports whether the header with the given key exists.
 func (h Map) Has(key string) bool {
 	ck := http.CanonicalHeaderKey(key)

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
-	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // hotOnlyContains checks whether key is present in the shard's hotOnly map.
@@ -115,8 +114,8 @@ func TestHotOnly_BanRemovesKey(t *testing.T) {
 
 	k := KeyHash([]byte("ban-key"))
 	o := obj(k, 50)
-	o.Header.Set(header.XBouineHost, "example.com")
-	o.Header.Set(header.XBouinePath, "/ban-me")
+	o.BouineHost = "example.com"
+	o.BouinePath = "/ban-me"
 	_ = s.Put(ctx, k, o)
 
 	if !hotOnlyContains(s, k) {

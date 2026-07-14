@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/bouine-cache/bouine/pkg/api"
-	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // TestBan_ParallelEvictsAllMatching verifies that Ban with parallel
@@ -24,8 +23,8 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 	for i := range n {
 		k := api.Key(i)
 		o := obj(k, 64)
-		o.Header.Set(header.XBouineHost, "example.com")
-		o.Header.Set(header.XBouinePath, fmt.Sprintf("/ban-%d", i))
+		o.BouineHost = "example.com"
+		o.BouinePath = fmt.Sprintf("/ban-%d", i)
 		_ = s.Put(context.Background(), k, o)
 	}
 
@@ -56,7 +55,7 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 	for i := range n {
 		k := api.Key(i)
 		o := obj(k, 64)
-		o.Header.Set(header.XBouineHost, "keep.example.com")
+		o.BouineHost = "keep.example.com"
 		_ = s.Put(context.Background(), k, o)
 	}
 
@@ -88,9 +87,9 @@ func TestBan_ParallelPartialMatch(t *testing.T) {
 		k := api.Key(i)
 		o := obj(k, 64)
 		if i%2 == 0 {
-			o.Header.Set(header.XBouinePath, "/ban-me")
+			o.BouinePath = "/ban-me"
 		} else {
-			o.Header.Set(header.XBouinePath, "/keep")
+			o.BouinePath = "/keep"
 		}
 		_ = s.Put(context.Background(), k, o)
 	}
@@ -129,7 +128,7 @@ func TestBan_ParallelEvictionCount(t *testing.T) {
 	for i := range n {
 		k := api.Key(i)
 		o := obj(k, 64)
-		o.Header.Set(header.XBouineHost, "evict.example.com")
+		o.BouineHost = "evict.example.com"
 		_ = s.Put(context.Background(), k, o)
 	}
 
@@ -204,9 +203,9 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 		k := api.Key(i)
 		o := obj(k, 64)
 		if i%2 == 0 {
-			o.Header.Set(header.XBouineHost, "a.example.com")
+			o.BouineHost = "a.example.com"
 		} else {
-			o.Header.Set(header.XBouineHost, "b.example.com")
+			o.BouineHost = "b.example.com"
 		}
 		_ = s.Put(context.Background(), k, o)
 	}

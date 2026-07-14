@@ -85,6 +85,16 @@ type Object struct {
 	// time. Pre-parsed once so the read path never re-parses it per request.
 	// Not serialized (re-derived from Header on warm-tier load).
 	OriginAge time.Duration `json:"-"`
+
+	// BouinePath is the request URL path, stored at Put time for ban
+	// predicate matching. Not serialized — the warm-tier binary codec
+	// does not reference this field. On warm load, it is empty; ban
+	// matching on warm objects falls back to key-based matching.
+	BouinePath string `json:"-"`
+
+	// BouineHost is the request Host header, stored at Put time for ban
+	// predicate matching. Same serialization rules as BouinePath.
+	BouineHost string `json:"-"`
 }
 
 // Fresh reports whether the object is still within its freshness lifetime

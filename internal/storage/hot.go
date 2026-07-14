@@ -15,7 +15,6 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/pkg/api"
-	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // inlineEvictCap is the maximum number of entries evicted synchronously
@@ -610,10 +609,10 @@ func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
 		if !expr.CreatedAt.IsZero() && obj.StoredAt.After(expr.CreatedAt) {
 			return false
 		}
-		if hostRE != nil && !hostRE.MatchString(obj.Header.Get(header.XBouineHost)) {
+		if hostRE != nil && !hostRE.MatchString(obj.BouineHost) {
 			return false
 		}
-		if pathRE != nil && !pathRE.MatchString(obj.Header.Get(header.XBouinePath)) {
+		if pathRE != nil && !pathRE.MatchString(obj.BouinePath) {
 			return false
 		}
 		if expr.SurrogateKey != "" {
@@ -874,7 +873,7 @@ func KeyHash(b []byte) api.Key {
 }
 
 const (
-	objectStructSize    int64 = 256 // unsafe.Sizeof(api.Object{}) — update when fields are added
+	objectStructSize    int64 = 288 // unsafe.Sizeof(api.Object{}) — update when fields are added
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.

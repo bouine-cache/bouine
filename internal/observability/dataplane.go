@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -45,6 +46,19 @@ type DataPlaneMetrics struct {
 	// or always skipped.
 	accessSampleRate uint64
 	accessCounter    atomic.Uint64
+	// nowFunc returns the current time. Defaults to time.Now; the engine
+	// injects platform.CoarseNow (~2-4ns vs ~25-40ns) to reduce hit-path
+	// CPU cost. Injected rather than imported directly to respect the L7
+	// layering rule (observability cannot import internal/platform).
+	nowFunc func() time.Time
+	// routeTable holds pre-resolved Prometheus collectors indexed by route
+	// ID, eliminating per-request WithLabelValues hash lookups for common
+	// label tuples. nil when PreResolveRoutes has not been called (tests,
+	// minimal configs). When nil, the middleware falls back to
+	// WithLabelValues for all requests.
+	routeTable    []*routeMetrics
+	routeIDs      map[string]int
+	fallbackCount atomic.Uint64
 	// Hot-tier storage gauges — updated on every Stats() poll by the engine.
 	HotStoreBytes     prometheus.Gauge
 	HotStoreEntries   prometheus.Gauge
@@ -143,7 +157,163 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	return m
 }
 
-// SetAccessLog configures the access logger and sampling rate for the
+// SetNowFunc injects a custom time function for the metrics middleware.
+// The engine calls this with platform.CoarseNow on Linux to reduce
+// hit-path CPU cost (~2-4ns vs ~25-40ns for time.Now).
+func (m *DataPlaneMetrics) SetNowFunc(fn func() time.Time) {
+	if fn == nil {
+		fn = time.Now
+	}
+	m.nowFunc = fn
+}
+
+// Label dimension sizes for the pre-resolved metrics array.
+const (
+	metricMethodSlots = 3 // GET=0, HEAD=1, other=2
+	metricStatusSlots = 8 // 200=0,206=1,304=2,301=3,302=4,404=5,500=6,other=7
+	metricResultSlots = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
+	metricSourceSlots = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,NONE=4
+)
+
+// routeMetrics holds pre-resolved Prometheus collectors for a single route,
+// indexed by [method][status][cacheResult][source]. This eliminates the
+// per-request WithLabelValues hash lookup for common label tuples.
+type routeMetrics struct {
+	requestsTotal   [metricMethodSlots][metricStatusSlots][metricResultSlots][metricSourceSlots]prometheus.Counter
+	requestDuration [metricMethodSlots][metricStatusSlots][metricResultSlots][metricSourceSlots]prometheus.Observer
+	responseBytes   [metricMethodSlots][metricResultSlots][metricSourceSlots]prometheus.Counter
+}
+
+// methodIndex maps HTTP methods to array indices.
+func methodIndex(method string) int {
+	switch method {
+	case "GET":
+		return 0
+	case "HEAD":
+		return 1
+	default:
+		return 2
+	}
+}
+
+// statusIndex maps common HTTP status codes to array indices. Returns -1
+// for uncommon codes, signalling the middleware to fall back to WithLabelValues.
+func statusIndex(code int) int {
+	switch code {
+	case 200:
+		return 0
+	case 206:
+		return 1
+	case 304:
+		return 2
+	case 301:
+		return 3
+	case 302:
+		return 4
+	case 404:
+		return 5
+	case 500:
+		return 6
+	default:
+		return -1
+	}
+}
+
+// cacheResultIndex maps cache result strings to array indices. Returns -1
+// for unknown values.
+func cacheResultIndex(s string) int {
+	switch s {
+	case "HIT":
+		return 0
+	case "MISS":
+		return 1
+	case "STALE":
+		return 2
+	case "REVALIDATED":
+		return 3
+	case "BYPASS":
+		return 4
+	default:
+		return -1
+	}
+}
+
+// sourceIndex maps source strings to array indices. Returns -1 for unknown.
+func sourceIndex(s string) int {
+	switch s {
+	case string(api.SourceHot):
+		return 0
+	case string(api.SourceWarm):
+		return 1
+	case string(api.SourcePeer):
+		return 2
+	case string(api.SourceOrigin):
+		return 3
+	case "":
+		return 4
+	default:
+		return -1
+	}
+}
+
+// PreResolveRoutes builds the pre-resolved metrics array for the given route
+// names. Each route gets its own set of pre-resolved counters, observers, and
+// byte counters for all common (method, status, cacheResult, source) tuples.
+// Uncommon tuples fall back to WithLabelValues at runtime.
+func (m *DataPlaneMetrics) PreResolveRoutes(routeNames []string) {
+	m.routeIDs = make(map[string]int, len(routeNames)+1)
+	m.routeTable = make([]*routeMetrics, 0, len(routeNames)+1)
+
+	// Index 0 is the _default route (used when no route header is set).
+	m.routeIDs["_default"] = 0
+	m.routeTable = append(m.routeTable, m.buildRouteMetrics("_default"))
+
+	for _, name := range routeNames {
+		if name == "" || name == "_default" {
+			continue
+		}
+		m.routeIDs[name] = len(m.routeTable)
+		m.routeTable = append(m.routeTable, m.buildRouteMetrics(name))
+	}
+}
+
+// buildRouteMetrics pre-resolves all counter/observer instances for a single
+// route by calling WithLabelValues once per tuple at init time. Subsequent
+// requests use direct array indexing instead of hash lookups.
+func (m *DataPlaneMetrics) buildRouteMetrics(route string) *routeMetrics {
+	rm := &routeMetrics{}
+	methods := []string{"GET", "HEAD", ""}
+	statuses := []string{"200", "206", "304", "301", "302", "404", "500", "0"}
+	results := []string{"HIT", "MISS", "STALE", "REVALIDATED", "BYPASS"}
+	sources := []string{
+		string(api.SourceHot), string(api.SourceWarm),
+		string(api.SourcePeer), string(api.SourceOrigin), "",
+	}
+	for mi := range methods {
+		for si := range statuses {
+			for ri := range results {
+				for src := range sources {
+					rm.requestsTotal[mi][si][ri][src] =
+						m.RequestsTotal.WithLabelValues(methods[mi], statuses[si], results[ri], sources[src], route)
+					rm.requestDuration[mi][si][ri][src] =
+						m.RequestDuration.WithLabelValues(methods[mi], statuses[si], results[ri], sources[src], route)
+				}
+			}
+		}
+	}
+	// ResponseBytesOut has 4 labels (no status).
+	for mi := range methods {
+		for ri := range results {
+			for src := range sources {
+				rm.responseBytes[mi][ri][src] =
+					m.ResponseBytesOut.WithLabelValues(methods[mi], results[ri], sources[src], route)
+			}
+		}
+	}
+	return rm
+}
+
+// SetAccessLog configures the access logger and sampling rate for the the
 // merged middleware. logger receives Warn for non-200 responses (always)
 // and Info for 200 responses (sampled 1-in-sampleRate by cache key).
 // sampleRate=0 disables sampling (every request is logged).
@@ -362,81 +532,110 @@ func init() {
 // middleware pair, halving the ResponseWriter pool acquires and wrapper
 // layers on the Write path from two to one.
 func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
+	nowFunc := m.nowFunc
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+		start := nowFunc()
 		sw := responsewriter.Acquire(w)
 		defer responsewriter.Release(sw)
 
 		next.ServeHTTP(sw, r)
 
 		status := statusString(sw.Status)
-		// Route label is written by the pipeline router as a direct header
-		// Direct map access avoids CanonicalMIMEHeaderKey on every request.
-		// The router writes X-Bouine-Route with the exact canonical key.
 		route := "_default"
 		if vals := r.Header[header.XBouineRoute]; len(vals) > 0 {
 			route = vals[0]
 		}
-		// cache_result: normalise X-Cache to HIT/MISS/STALE/REVALIDATED/BYPASS.
-		// The cache handler writes these with direct map assignment using
-		// canonical keys, so direct map access avoids canonicalization.
 		xCache := HeaderVal(w.Header(), header.XCache)
 		cacheResult := normaliseCacheResult(xCache)
 		source := normaliseSource(HeaderVal(w.Header(), header.XCacheSource))
 
-		m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, source, route).Inc()
+		elapsed := time.Since(start)
+		dur := elapsed.Seconds()
+		bytesOut := float64(sw.Bytes)
 
-		// Attach an exemplar when a trace is active so Grafana can link
-		// high-latency histogram buckets directly to the matching trace.
-		dur := time.Since(start).Seconds()
-		obs := m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, source, route)
-		if span := trace.SpanFromContext(r.Context()); span.SpanContext().IsValid() {
-			if eo, ok := obs.(prometheus.ExemplarObserver); ok {
-				eo.ObserveWithExemplar(dur, prometheus.Labels{
-					"trace_id": span.SpanContext().TraceID().String(),
-				})
-			} else {
-				obs.Observe(dur)
-			}
-		} else {
-			obs.Observe(dur)
-		}
+		m.recordMetrics(r, sw.Status, status, route, cacheResult, source, dur, bytesOut, r.Context())
 
-		m.ResponseBytesOut.WithLabelValues(r.Method, cacheResult, source, route).
-			Add(float64(sw.Bytes))
+		m.recordRings(xCache, sw.Status, route, r.URL.Path, elapsed, w.Header())
 
-		// Update ring buffers for the dashboard (if enabled).
-		// Skip ring recording on cache hits — hits are already counted by
-		// the Prometheus counter above, and the rings exist to surface
-		// miss/bypass/error patterns for dashboard insights.
-		if m.Rings != nil && xCache != "HIT" {
-			durMs := time.Since(start).Milliseconds()
-			m.Rings.Request.RecordRequest(xCache, sw.Status, durMs)
-			if route != "_default" {
-				m.Rings.Route.RecordRoute(route, xCache, sw.Status, durMs)
-			}
-			m.Rings.URL.RecordURL(r.URL.Path, route, xCache)
-			// Sample origin response headers on miss/bypass (origin was contacted).
-			if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
-				m.Rings.HeaderRing.Sample(route, w.Header(), sw.Status)
-			}
-		}
-
-		// Access log: non-200 always logged at Warn; 200 sampled at Info.
-		// The attrs slice is only constructed when the record will actually
-		// be emitted, avoiding a 20-element heap allocation for the 99.9%
-		// of hit requests that are sampled out.
 		if m.accessLog != nil {
 			msg := accessLogMessage(xCache, sw.Status)
 			if sw.Status != http.StatusOK {
-				attrs := m.buildAccessLogAttrs(r, sw, xCache, start)
+				attrs := m.buildAccessLogAttrs(r, sw, xCache, elapsed)
 				m.accessLog.Warn(msg, attrs...)
 			} else if m.shouldLogAccess(sw.Key) {
-				attrs := m.buildAccessLogAttrs(r, sw, xCache, start)
+				attrs := m.buildAccessLogAttrs(r, sw, xCache, elapsed)
 				m.accessLog.Info(msg, attrs...)
 			}
 		}
 	})
+}
+
+// recordMetrics increments the RED counters using pre-resolved labels when
+// available, falling back to WithLabelValues for uncommon tuples.
+func (m *DataPlaneMetrics) recordMetrics(r *http.Request, code int, status, route, cacheResult, source string, dur, bytesOut float64, ctx context.Context) {
+	if rm, ok := m.lookupRouteMetrics(route); ok {
+		mi := methodIndex(r.Method)
+		si := statusIndex(code)
+		ri := cacheResultIndex(cacheResult)
+		src := sourceIndex(source)
+		if si >= 0 && ri >= 0 && src >= 0 {
+			rm.requestsTotal[mi][si][ri][src].Inc()
+			observeDuration(rm.requestDuration[mi][si][ri][src], dur, ctx)
+			rm.responseBytes[mi][ri][src].Add(bytesOut)
+			return
+		}
+		m.fallbackCount.Add(1)
+	}
+	m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, source, route).Inc()
+	observeDuration(m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, source, route), dur, ctx)
+	m.ResponseBytesOut.WithLabelValues(r.Method, cacheResult, source, route).Add(bytesOut)
+}
+
+// observeDuration records the request duration on the given observer,
+// attaching a trace exemplar when a valid span context is available.
+func observeDuration(obs prometheus.Observer, dur float64, ctx context.Context) {
+	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+		if eo, ok := obs.(prometheus.ExemplarObserver); ok {
+			eo.ObserveWithExemplar(dur, prometheus.Labels{
+				"trace_id": span.SpanContext().TraceID().String(),
+			})
+			return
+		}
+	}
+	obs.Observe(dur)
+}
+
+// recordRings updates the dashboard ring buffers for non-HIT requests.
+func (m *DataPlaneMetrics) recordRings(xCache string, status int, route, path string, elapsed time.Duration, hdr http.Header) {
+	if m.Rings == nil || xCache == "HIT" {
+		return
+	}
+	durMs := elapsed.Milliseconds()
+	m.Rings.Request.RecordRequest(xCache, status, durMs)
+	if route != "_default" {
+		m.Rings.Route.RecordRoute(route, xCache, status, durMs)
+	}
+	m.Rings.URL.RecordURL(path, route, xCache)
+	if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
+		m.Rings.HeaderRing.Sample(route, hdr, status)
+	}
+}
+
+// lookupRouteMetrics returns the pre-resolved metrics for the given route
+// name. Returns ok=false when pre-resolved metrics are not initialized or
+// the route name is not in the route table.
+func (m *DataPlaneMetrics) lookupRouteMetrics(route string) (*routeMetrics, bool) {
+	if m.routeTable == nil || m.routeIDs == nil {
+		return nil, false
+	}
+	id, ok := m.routeIDs[route]
+	if !ok || id >= len(m.routeTable) {
+		return nil, false
+	}
+	return m.routeTable[id], true
 }
 
 // accessLogMessage returns a human-readable log message based on the
@@ -467,7 +666,7 @@ func accessLogMessage(cacheResult string, status int) string {
 // an access log entry. Called only when the sampling decision is positive
 // or the status is non-200, so the 20-element []any allocation is avoided
 // for the vast majority of hit requests.
-func (m *DataPlaneMetrics) buildAccessLogAttrs(r *http.Request, sw *responsewriter.ResponseWriter, cacheResult string, start time.Time) []any {
+func (m *DataPlaneMetrics) buildAccessLogAttrs(r *http.Request, sw *responsewriter.ResponseWriter, cacheResult string, elapsed time.Duration) []any {
 	attrs := []any{
 		"method", r.Method,
 		"host", r.Host,
@@ -475,7 +674,7 @@ func (m *DataPlaneMetrics) buildAccessLogAttrs(r *http.Request, sw *responsewrit
 		"proto", r.Proto,
 		"status", sw.Status,
 		"bytes_out", sw.Bytes,
-		"dur_ms", time.Since(start).Milliseconds(),
+		"dur_ms", elapsed.Milliseconds(),
 		"remote", r.RemoteAddr,
 		"cache_status", cacheResult,
 	}

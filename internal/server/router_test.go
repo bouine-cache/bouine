@@ -163,3 +163,18 @@ func TestRouter_NilMethodsMatchAll(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkRouter_Match(b *testing.B) {
+	rt := NewRouter(RouterConfig{})
+	rt.AddRoute("", "/api/", "api", nil, ok200("api"))
+	rt.AddRoute("", "/static/", "static", nil, ok200("static"))
+	rt.AddRoute("", "/", "root", nil, ok200("root"))
+
+	req := httptest.NewRequest("GET", "/api/v1/users", nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		rr := httptest.NewRecorder()
+		rt.ServeHTTP(rr, req)
+	}
+}

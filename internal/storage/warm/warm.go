@@ -1658,14 +1658,29 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("compact: close temp: %w", err)
 	}
 
-	// Hold s.mu.Lock across the segment-file swap + internal replacement
-	// so that concurrent Put/Delete (which call activeSeg → newSegment
-	// → openSegment) cannot hit missing files.
-	//
-	// The compact directory is a subdirectory of dir so it lives on the
-	// same writable volume. This is required for read-only root
-	// filesystems (e.g. Kubernetes readOnlyRootFilesystem: true) where
-	// only the mounted PVC at dir is writable.
+	// Build the SIEVE list and compute live bytes outside any lock.
+	// This is the O(N) step that was previously inside s.mu.Lock +
+	// idxMu.Lock, blocking all Gets and Puts for 100-500 ms at 1M
+	// entries. Moving it here reduces the lock hold to a few pointer
+	// assignments (~1 µs).
+	newEvictList := sieve.NewList[uint64]()
+	for _, key := range orderedKeys {
+		e, _ := newEvictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
+		loc := newIndex[key]
+		loc.sieve = e
+		newIndex[key] = loc
+	}
+	var liveBytes int64
+	for _, loc := range newIndex {
+		liveBytes += loc.size
+	}
+
+	// Hold s.mu.Lock only for the segment-file swap + pointer
+	// assignments. This blocks concurrent Put/Delete (which call
+	// activeSeg → newSegment → openSegment) from hitting missing
+	// files during the rename. The lock is held for filesystem ops
+	// + struct creation only — the O(N) SIEVE rebuild is already
+	// done above.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1680,45 +1695,22 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("compact: reopen: %w", err)
 	}
 
-	// Now safe to close old handles: new store is open, old inodes are
-	// unlinked and will be freed when these fds close.
 	for _, seg := range s.segs {
 		_ = seg.Close()
 	}
 	s.segs = fresh.segs
 	s.segByID = fresh.segByID
-	// Replace the index and rebuild the SIEVE list in append order.
-	// compactSegments returns keys in the order records were written to
-	// the new store (by segID then offset), so we can build the SIEVE list
-	// directly — no O(n log n) sort needed. The SIEVE tail holds the
-	// oldest entries (first written), preserving the aging property.
-	// All rebuilt entries start with visited=false — the first eviction
-	// sweep after compaction will prefer the tail (oldest) entries.
+
+	// Atomic pointer swap: replace the index and SIEVE list in one
+	// short idxMu.Lock critical section. The new index already has
+	// sieve pointers set (built above), so no O(N) work here.
 	s.idxMu.Lock()
 	s.index = newIndex
-	// Clear the old SIEVE list in-place, returning entries to the pool.
-	// The rebuilt list reuses the same pool, avoiding a multi-MB
-	// allocation spike on compaction with millions of entries.
-	s.evictList.Clear()
-	for _, key := range orderedKeys {
-		e, _ := s.evictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
-		loc := s.index[key]
-		loc.sieve = e
-		s.index[key] = loc
-	}
+	s.evictList = newEvictList
 	s.idxMu.Unlock()
+
 	s.stats.entries.Store(int64(len(newIndex)))
-	// Recompute stats.bytes from the new index. The fresh store (NewStore)
-	// doesn't run RecomputeStats, so its stats.bytes is 0 — using it would
-	// leave evictToFit blind (it gates on stats.bytes == 0 → no eviction).
-	// Every entry's size was set by compactSegments, so summing the index
-	// gives the correct live-bytes count without a segment scan.
-	var liveBytes int64
-	for _, loc := range newIndex {
-		liveBytes += loc.size
-	}
 	s.stats.bytes.Store(liveBytes)
-	// Retain the grown buffer for the next compaction cycle.
 	s.compactKeysBuf = orderedKeys
 	return nil
 }

@@ -384,8 +384,17 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// Hand the connection to net/http via a one-shot listener.
 	// This uses http.Server's proper response writer which correctly
 	// handles chunked encoding, content-length, and connection lifecycle.
-	cl := &singleConnListener{conn: pc}
-	if err := p.fallbackServer.Serve(cl); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	//
+	// closeNotifyConn signals when http.Server closes the connection so
+	// that singleConnListener.Accept can block until the handler goroutine
+	// is done. Without this, Serve returns immediately after spawning the
+	// handler goroutine, and the caller closes the connection out from
+	// under the handler — truncating the response.
+	notifyConn := newCloseNotifyConn(pc)
+	cl := &singleConnListener{conn: notifyConn, ready: notifyConn.done}
+	if err := p.fallbackServer.Serve(cl); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) &&
+		!errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil
@@ -466,19 +475,41 @@ func (p *prefixedConn) Read(b []byte) (int, error) {
 	return p.Conn.Read(b)
 }
 
-// singleConnListener returns one pre-accepted connection, then EOFs.
+// closeNotifyConn wraps a net.Conn and closes a channel when Close is
+// called, so the singleConnListener can block until the handler goroutine
+// is done with the connection.
+type closeNotifyConn struct {
+	net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func newCloseNotifyConn(c net.Conn) *closeNotifyConn {
+	return &closeNotifyConn{Conn: c, done: make(chan struct{})}
+}
+
+func (c *closeNotifyConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return c.Conn.Close()
+}
+
+// singleConnListener returns one pre-accepted connection, then blocks
+// until that connection is closed before returning ErrClosed on the
+// next Accept. This ensures http.Server.Serve does not return until the
+// handler goroutine has finished writing the response, preventing the
+// caller from closing the connection mid-response.
+//
 // Duplicated from server.fp_conn.go to avoid a circular dependency;
 // keep both copies in sync.
 type singleConnListener struct {
-	conn net.Conn
-	mu   sync.Mutex
-	done bool
+	conn  net.Conn
+	ready <-chan struct{}
+	done  bool
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.done {
+		<-l.ready
 		return nil, net.ErrClosed
 	}
 	l.done = true

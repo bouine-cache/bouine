@@ -233,7 +233,8 @@ func (s *RefreshScheduler) compact() {
 	now := time.Now().UnixNano()
 	cutoff := now + compactionWindow.Nanoseconds()
 
-	var live []*heapEntry
+	// Phase 1: collect entries to check under the lock.
+	var toCheck []*heapEntry
 	s.mu.Lock()
 	for s.heap.Len() > 0 {
 		top := s.heap[0]
@@ -242,17 +243,27 @@ func (s *RefreshScheduler) compact() {
 		}
 		entry := heap.Pop(&s.heap).(*heapEntry)
 		delete(s.index, entry.key)
-		// Call alive while holding the lock. This blocks Schedule
-		// briefly, but alive is a hot-tier Get (microseconds) and
-		// compaction touches only the near-future window (a few
-		// entries). Holding the lock prevents a concurrent Schedule
-		// from re-inserting the same key and causing a double-pop.
-		obj := s.alive(entry.key)
-		if obj != nil {
+		toCheck = append(toCheck, entry)
+	}
+	s.mu.Unlock()
+
+	// Phase 2: check alive() without holding the lock. This unblocks
+	// Schedule calls during the store.Get round-trips.
+	var live []*heapEntry
+	for _, entry := range toCheck {
+		if s.alive(entry.key) != nil {
 			live = append(live, entry)
 		}
 	}
+
+	// Phase 3: re-insert live entries under the lock. Verify each
+	// entry hasn't been re-scheduled by a concurrent Schedule call
+	// during phase 2 — if it was, skip re-insertion to avoid duplicates.
+	s.mu.Lock()
 	for _, e := range live {
+		if _, exists := s.index[e.key]; exists {
+			continue
+		}
 		heap.Push(&s.heap, e)
 		s.index[e.key] = e
 	}

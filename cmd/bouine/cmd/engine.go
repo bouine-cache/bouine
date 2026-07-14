@@ -325,6 +325,7 @@ func (e *engine) initRings() (*observability.Rings, string) {
 		hostname = "bouine"
 	}
 	rings := observability.NewRings(hostname)
+	rings.URL.SetSampleRate(e.cfg.URLRingSampleRate)
 	snapshotPath := ""
 	if e.cfg.Storage.WarmDir != "" {
 		snapshotPath = e.cfg.Storage.WarmDir + "/metrics.snap"

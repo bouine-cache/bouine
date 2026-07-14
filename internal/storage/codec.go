@@ -36,6 +36,16 @@ func EncodeObject(obj *api.Object) []byte {
 	return encodeObject(obj)
 }
 
+// EncodeObjectInto serialises an Object into the provided buffer,
+// appending to it. Callers can use a sync.Pool to reuse buffers
+// across calls, eliminating per-request allocation on the peer-fetch
+// server path.
+//
+// Stable.
+func EncodeObjectInto(obj *api.Object, buf []byte) []byte {
+	return encodeObjectInto(obj, buf)
+}
+
 // DecodeObject is the exported form of decodeObject. The returned
 // Object's Body aliases blob (no copy); callers must treat blob as
 // immutable for the object's lifetime. BodySize is set to the inline
@@ -58,8 +68,10 @@ func DecodeObject(blob []byte) (*api.Object, error) {
 // stored; they are re-derived from the headers on load, exactly as the
 // JSON path did.
 func encodeObject(obj *api.Object) []byte {
-	buf := make([]byte, 0, len(obj.Body)+256)
+	return encodeObjectInto(obj, make([]byte, 0, len(obj.Body)+256))
+}
 
+func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = append(buf, objCodecVersion)
 	buf = binary.AppendUvarint(buf, uint64(obj.Key))
 	buf = appendString(buf, obj.VaryKey)

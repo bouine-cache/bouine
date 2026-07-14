@@ -61,3 +61,7 @@ testdata/fuzz/*/
 /test/soak/results/
 /test/perf/mock-origin
 /test/soak/mock-origin
+
+.env
+.envrc
+kubeconfig.yaml

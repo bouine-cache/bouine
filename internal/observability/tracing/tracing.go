@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -26,6 +27,19 @@ import (
 )
 
 const tracerName = "bouine"
+
+// tracingEnabled is set to true by InitTracer when a non-no-op tracer
+// is configured (OTLP endpoint provided). It allows the data plane to
+// skip the tracing middleware entirely when tracing is not configured,
+// eliminating per-request span creation overhead on the hit path.
+var tracingEnabled atomic.Bool
+
+// Enabled returns true when InitTracer has configured a real (non-no-op)
+// tracer with an OTLP endpoint. Callers use this to decide whether to
+// wire the tracing middleware into the handler chain.
+func Enabled() bool {
+	return tracingEnabled.Load()
+}
 
 // Tracer returns the global tracer under the bouine instrumentation name.
 func Tracer() trace.Tracer {
@@ -42,7 +56,7 @@ func HTTPMiddleware(spanName string, next http.Handler) http.Handler {
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				attribute.String("http.method", r.Method),
-				attribute.String("http.url", r.URL.String()),
+				attribute.String("url.path", r.URL.Path),
 				attribute.String("http.host", r.Host),
 			),
 		)
@@ -85,6 +99,7 @@ func RecordError(span trace.Span, err error) {
 // to flush buffered spans.
 func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 	if cfg.Endpoint == "" {
+		tracingEnabled.Store(false)
 		return func() {}, nil
 	}
 	// otlptracehttp.WithEndpoint expects "host:port" without a scheme.
@@ -127,6 +142,7 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	tracingEnabled.Store(true)
 
 	return func() { //nolint:contextcheck
 		_ = tp.Shutdown(context.Background())

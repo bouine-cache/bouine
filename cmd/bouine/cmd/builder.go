@@ -134,12 +134,16 @@ func listenPort(addr, defaultPort string) string {
 // buildHandler assembles the full data-plane stack for a single HTTP
 // listener. The middleware chain is:
 //
-//  1. tracing.HTTPMiddleware — single OTel span for the pipeline layer.
+//  1. tracing.HTTPMiddleware — single OTel span for the pipeline layer
+//     (only when tracing.Enabled() returns true).
 //  2. DataPlaneMetrics.Middleware — Prometheus counters, histograms,
 //     ring buffers, and merged structured access log.
 func (e *engine) buildHandler(rs *runState) http.Handler {
 	router := e.buildRouter(rs)
 	metricsWrapped := rs.dpMetrics.Middleware(router)
+	if !tracing.Enabled() {
+		return metricsWrapped
+	}
 	return tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
 }
 

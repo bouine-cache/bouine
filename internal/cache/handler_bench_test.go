@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -154,3 +157,42 @@ func BenchmarkEvaluate_Hit(b *testing.B) {
 
 // Ensure HotStore satisfies storage.Store at compile time.
 var _ storage.Store = (*storage.HotStore)(nil)
+
+// BenchmarkMetricsMiddleware_Hit measures the full DataPlaneMetrics
+// middleware overhead on a cache hit (Prometheus counter increment +
+// histogram observe + response writer pool acquire/release).
+// Gate: allocs/op ≤ 1 (the 1 is from the histogram bucket lookup,
+// unavoidable).
+func BenchmarkMetricsMiddleware_Hit(b *testing.B) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"bench"`)
+		w.WriteHeader(200)
+		_, _ = w.Write(make([]byte, 1024))
+	})
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  256 << 20,
+		NumShards: 16,
+	})
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://bench.local/hit", nil))
+	if rr.Header().Get(header.XCache) != "MISS" {
+		b.Fatal("warmup should be MISS")
+	}
+
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewDataPlaneMetrics(reg)
+	wrapped := metrics.Middleware(h)
+
+	req := httptest.NewRequest("GET", "http://bench.local/hit", nil)
+	w := newBenchResponseWriter()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		w.Reset()
+		wrapped.ServeHTTP(w, req)
+	}
+}

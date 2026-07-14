@@ -279,6 +279,11 @@ func shouldSkipHeader(key string, noCacheFields map[string]bool) bool {
 	case header.Connection, header.KeepAlive, header.TransferEncoding,
 		header.TE, header.Trailer, header.Upgrade:
 		return true
+	case header.Age:
+		// Age is recomputed by ComputeAge and appended after the
+		// stored-header iteration. Skip the stored origin value to
+		// avoid emitting two Age headers (RFC 9111 §4.2.3).
+		return true
 	}
 	return noCacheFields[key]
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/admin"
@@ -88,10 +89,10 @@ type invalidationOps struct {
 	RefreshFn func(ctx context.Context, url string) error
 }
 
-func (e *engine) run(ctx context.Context) error {
-	// Set GOMAXPROCS from cgroup CPU quota on Linux unless the operator
-	// explicitly configured GOMAXPROCS. Prevents Go scheduler from
-	// over-creating OS threads in K8s pods with CPU limits.
+// applyRuntimeTuning sets GOMAXPROCS from the cgroup CPU quota and
+// applies the GOGC override from config. Called once at startup before
+// any subsystems are initialized.
+func (e *engine) applyRuntimeTuning() {
 	if os.Getenv("GOMAXPROCS") == "" {
 		if n := platform.EffectiveGOMAXPROCS(); n > 0 && n != runtime.GOMAXPROCS(0) {
 			runtime.GOMAXPROCS(n)
@@ -99,6 +100,20 @@ func (e *engine) run(ctx context.Context) error {
 				"value", n, "num_cpu", runtime.NumCPU())
 		}
 	}
+
+	if e.cfg.GOGC != nil {
+		old := debug.SetGCPercent(*e.cfg.GOGC)
+		e.logger.Info("set GOGC from config",
+			"value", *e.cfg.GOGC, "previous", old)
+	} else if gogcEnv := os.Getenv("GOGC"); gogcEnv != "" {
+		e.logger.Info("GOGC from env var", "value", gogcEnv)
+	} else {
+		e.logger.Info("GOGC using Go default", "value", 100)
+	}
+}
+
+func (e *engine) run(ctx context.Context) error {
+	e.applyRuntimeTuning()
 
 	// Create the sequencer early so the readiness gate is available
 	// before initSubsystems. The admin server (started below) wires

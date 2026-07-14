@@ -43,6 +43,14 @@ type Config struct {
 
 	// Tracing configures OpenTelemetry span export. Empty endpoint = no-op.
 	Tracing TracingConfig `yaml:"tracing,omitempty" json:"tracing,omitempty"`
+
+	// GOGC controls the Go GC trigger percentage. nil defers to the
+	// GOGC env var (Go default 100). A value of -1 disables the
+	// percentage-based trigger entirely, relying solely on GOMEMLIMIT.
+	// Raising GOGC (e.g. 200) reduces GC frequency at the cost of higher
+	// transient heap usage. Safe to raise when GOMEMLIMIT is set, since
+	// the soft memory limit acts as a hard cap.
+	GOGC *int `yaml:"gogc,omitempty" json:"gogc,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

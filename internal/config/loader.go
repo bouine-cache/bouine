@@ -150,6 +150,13 @@ func (c *Config) Validate() error {
 		return errors.New("config: listen.reuse_port is only supported on Linux")
 	}
 
+	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
+	// (would trigger GC on every allocation) and negative values other
+	// than -1 are meaningless.
+	if c.GOGC != nil && *c.GOGC != -1 && *c.GOGC <= 0 {
+		return errors.New("config: gogc must be -1 (off) or a positive percentage")
+	}
+
 	return nil
 }
 

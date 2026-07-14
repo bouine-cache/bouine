@@ -76,31 +76,32 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, errCh chan<- error) {
 	defer func() { _ = conn.Close() }()
 
-	// Check if this is a TLS connection.
 	if tlsConn, ok := conn.(*tls.Conn); ok {
-		if err := tlsConn.HandshakeContext(context.Background()); err != nil {
-			return
-		}
-		state := tlsConn.ConnectionState()
-		if state.NegotiatedProtocol == "h2" {
-			// HTTP/2 over TLS — hand to net/http.
-			s.serveConnWithHTTP(tlsConn, errCh)
-			return
-		}
-		// HTTP/1.1 over TLS — use h1parser.
-		if err := parser.Serve(tlsConn); err != nil { //nolint:contextcheck // parser manages its own deadlines
-			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, h1parser.ErrFallThrough) {
-				select {
-				case errCh <- err:
-				default:
-				}
-			}
-		}
+		s.handleTLSFastPath(tlsConn, parser, errCh)
 		return
 	}
 
-	// Cleartext connection: peek first bytes to detect h2c.
-	// Set a read deadline to prevent slowloris attacks during peek.
+	s.handleCleartextFastPath(conn, parser, errCh)
+}
+
+// handleTLSFastPath routes a TLS connection to the h1parser or net/http
+// based on the ALPN negotiation result.
+func (s *Listener) handleTLSFastPath(conn *tls.Conn, parser *h1parser.Parser, errCh chan<- error) {
+	if err := conn.HandshakeContext(context.Background()); err != nil {
+		return
+	}
+	if state := conn.ConnectionState(); state.NegotiatedProtocol == "h2" {
+		s.serveConnWithHTTP(conn, errCh)
+		return
+	}
+	if err := parser.Serve(conn); err != nil { //nolint:contextcheck // parser manages its own deadlines
+		reportFastPathError(err, errCh)
+	}
+}
+
+// handleCleartextFastPath routes a cleartext connection to the h1parser
+// or net/http by peeking for the h2c preface.
+func (s *Listener) handleCleartextFastPath(conn net.Conn, parser *h1parser.Parser, errCh chan<- error) {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	peeker := newPeekConn(conn)
 	preface, err := peeker.Peek(len(h2cPreface))
@@ -108,19 +109,24 @@ func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, er
 		return
 	}
 	if len(preface) >= len(h2cPreface) && string(preface[:len(h2cPreface)]) == h2cPreface {
-		// h2c upgrade — hand to net/http.
 		s.serveConnWithHTTP(peeker, errCh)
 		return
 	}
-
-	// HTTP/1.1 cleartext — use h1parser.
 	if err := parser.Serve(peeker); err != nil { //nolint:contextcheck // parser manages its own deadlines
-		if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, h1parser.ErrFallThrough) {
-			select {
-			case errCh <- err:
-			default:
-			}
-		}
+		reportFastPathError(err, errCh)
+	}
+}
+
+// reportFastPathError sends a non-fatal parser error to errCh using a
+// non-blocking send. Expected errors (EOF, closed, fall-through) are
+// silently discarded.
+func reportFastPathError(err error, errCh chan<- error) {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, h1parser.ErrFallThrough) {
+		return
+	}
+	select {
+	case errCh <- err:
+	default:
 	}
 }
 

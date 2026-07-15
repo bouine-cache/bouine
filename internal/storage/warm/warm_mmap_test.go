@@ -23,7 +23,7 @@ func TestMmapFieldNilByDefault(t *testing.T) {
 	if seg == nil {
 		t.Fatalf("segment %d not found", segID)
 	}
-	if seg.mmap != nil {
+	if seg.mmap.Load() != nil {
 		t.Fatal("new segment should have nil mmap")
 	}
 }
@@ -334,7 +334,7 @@ func TestMmapNonLinuxStubs(t *testing.T) {
 	s.mu.RLock()
 	for _, seg := range s.segs {
 		seg.tryMmap()
-		if seg.mmap != nil {
+		if seg.mmap.Load() != nil {
 			t.Errorf("segment %d: mmap should be nil on non-Linux", seg.ID)
 		}
 	}

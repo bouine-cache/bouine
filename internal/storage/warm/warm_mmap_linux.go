@@ -19,15 +19,15 @@ import (
 //
 // seg.mu is acquired to serialize concurrent tryMmap calls from multiple
 // Get goroutines holding s.mu.RLock. Without seg.mu, two goroutines would
-// both pass the nil check, both call Mmap, and leak the first mapping.
+// both pass the atomic nil check, both call Mmap, and waste one mapping.
 // The double-check after acquiring seg.mu prevents the duplicate.
 func (seg *Segment) tryMmap() {
-	if seg.mmap != nil || seg.size <= 0 || seg.f == nil {
+	if seg.mmap.Load() != nil || seg.size <= 0 || seg.f == nil {
 		return
 	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
-	if seg.mmap != nil {
+	if seg.mmap.Load() != nil {
 		return
 	}
 	data, err := unix.Mmap(int(seg.f.Fd()), 0, int(seg.size),
@@ -36,21 +36,19 @@ func (seg *Segment) tryMmap() {
 		return
 	}
 	_ = unix.Madvise(data, unix.MADV_RANDOM)
-	seg.mmap = data
+	seg.mmap.Store(&mmapRef{data: data})
 }
 
 // munmap removes the mmap mapping for a segment. The caller MUST hold
-// s.mu.Lock() (Store-level), which prevents concurrent reads. seg.mu is
-// also acquired to serialize with concurrent tryMmap calls (which can
-// run under s.mu.RLock from Get).
+// s.mu.Lock() (Store-level), which prevents concurrent reads and
+// tryMmap calls. Swap(nil) atomically retrieves the old mapping for
+// munmap while clearing the pointer.
 func (seg *Segment) munmap() {
-	seg.mu.Lock()
-	defer seg.mu.Unlock()
-	if seg.mmap == nil {
+	ref := seg.mmap.Swap(nil)
+	if ref == nil {
 		return
 	}
-	_ = unix.Munmap(seg.mmap)
-	seg.mmap = nil
+	_ = unix.Munmap(ref.data)
 }
 
 // munmapAll removes mmap mappings for all segments. Used by Compact and Close.
@@ -66,17 +64,16 @@ func munmapAll(segs []*Segment) {
 // The body is copied out of the mmap region because Compact may munmap
 // the segment after s.mu.RLock is released.
 //
-// seg.mu is acquired briefly to snapshot seg.mmap (a []byte slice header
-// is 3 words and cannot be read atomically). Once snapshotted, the
-// mapping is valid for the duration of the caller's s.mu.RLock because
+// seg.mmap.Load() is atomic and race-free. The returned *mmapRef is
+// immutable (set once in tryMmap, never mutated). The underlying mmap
+// memory is valid for the duration of the caller's s.mu.RLock because
 // munmap only happens under s.mu.Lock (in Compact/Close).
 func readRecordAtMmap(seg *Segment, offset int64, size int64) (*Record, error) {
-	seg.mu.Lock()
-	mmapData := seg.mmap
-	seg.mu.Unlock()
-	if mmapData == nil || size <= 0 {
+	ref := seg.mmap.Load()
+	if ref == nil || size <= 0 {
 		return nil, nil
 	}
+	mmapData := ref.data
 	if offset+size > int64(len(mmapData)) {
 		return nil, ErrTornRecord
 	}
@@ -113,7 +110,7 @@ func readRecordAtMmap(seg *Segment, offset int64, size int64) (*Record, error) {
 // The caller MUST hold s.mu (RLock or Lock) and must have already called
 // seg.readers.Add(1) so that fdCache eviction cannot close the fd mid-mmap.
 func (seg *Segment) ensureMmapOpened(isActive bool) {
-	if isActive || seg.mmap != nil {
+	if isActive || seg.mmap.Load() != nil {
 		return
 	}
 	_ = seg.ensureOpen()

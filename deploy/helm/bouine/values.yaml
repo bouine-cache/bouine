@@ -35,6 +35,8 @@ config:
     join: []  # populated from headless service DNS
     replicas: 2
     hop_limit: 2
+  # admin:
+  #   drain_duration: 10s  # /drain endpoint block time (preStop hook)
   upstream_pools: []
   routes: []
   # Cloudflare Cache API invalidation propagation.
@@ -92,7 +94,7 @@ topologySpreadConstraints:
     topologyKey: topology.kubernetes.io/zone
     whenUnsatisfiable: DoNotSchedule
 
-terminationGracePeriodSeconds: 30
+terminationGracePeriodSeconds: 40
 
 # Pod management policy for the StatefulSet.
 # Parallel: all pods start simultaneously (correct for strong-mode
@@ -107,11 +109,11 @@ updateStrategy:
 # the window where peer-fetch routes to a node with an incomplete ring.
 minReadySeconds: 30
 
-# preStop hook: sleep before the shutdown sequencer stops listeners,
-# giving the endpoints controller time to deregister the pod.
-# In strong mode, in-flight peer-fetch requests need time to drain.
-preStop:
-  sleepSeconds: 10
+# preStop hook: the /drain endpoint (httpGet on the admin port) marks the
+# pod as not-ready and blocks for admin.drain_duration (default 10s) so
+# kube-proxy can deregister the pod before SIGTERM arrives.
+# The drain duration is configured in the bouine config under admin.drain_duration.
+# No exec/sleep needed — the distroless container image has no shell.
 
 # Go runtime tuning.
 # GOMEMLIMIT: leave empty (default) to auto-compute as 75% of

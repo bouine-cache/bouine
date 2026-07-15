@@ -134,6 +134,14 @@ func (s *Sequencer) IsReady() bool {
 	return s.gate.AllReady()
 }
 
+// Drain marks the sequencer as not ready without executing shutdown
+// steps. This makes IsReady() return false so /readyz starts failing,
+// allowing kube-proxy to deregister the pod before SIGTERM arrives.
+// Called by the /drain preStop HTTP hook.
+func (s *Sequencer) Drain() {
+	s.ready.Store(false)
+}
+
 // markShuttingDown flips the ready flag to false. Called by Execute.
 func (s *Sequencer) markShuttingDown() {
 	s.ready.Store(false)

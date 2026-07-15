@@ -20,8 +20,8 @@ clients see connection-refused errors that manifest as 5xx in upstream metrics.
 
 | Requirement | Why |
 |-------------|-----|
-| `terminationGracePeriodSeconds` ≥ 30 s | Must exceed the longest expected in-flight request + cluster leave timeout (10 s). |
-| `preStop` hook (sleep 5 s) | Kubernetes removes the pod from Endpoints asynchronously; the hook lets existing connections drain before `SIGTERM` arrives. |
+| `terminationGracePeriodSeconds` ≥ 40 s | Must exceed drain duration (10 s) + in-flight request + cluster leave timeout (10 s). |
+| `preStop` hook (httpGet `/drain`) | Kubernetes removes the pod from Endpoints asynchronously; the `/drain` endpoint marks the pod not-ready and blocks for `admin.drain_duration` (default 10 s) so kube-proxy can deregister before `SIGTERM` arrives. The distroless container image has no shell, so an `exec` sleep cannot be used. |
 | `PodDisruptionBudget minAvailable: 2` | Prevents Kubernetes from evicting more than one pod at a time in a 3-node cluster. |
 | `readinessProbe` on `/readyz` | Traffic is removed before the pod enters `Terminating` only if the probe fails; new pod receives traffic only once it passes. |
 | `publishNotReadyAddresses: true` on the headless Service | Ensures DNS resolves all StatefulSet pods (including unready ones) for gossip seed discovery. |
@@ -76,10 +76,11 @@ Expected output: `✓ http_req_failed rate<0.001%`.
 # Ensures Kubernetes drains endpoints before SIGTERM.
 lifecycle:
   preStop:
-    exec:
-      command: ["sh", "-c", "sleep 5"]
+    httpGet:
+      path: /drain
+      port: admin
 
-terminationGracePeriodSeconds: 30
+terminationGracePeriodSeconds: 40
 
 # Prevents simultaneous eviction of two pods.
 podDisruptionBudget:
@@ -94,6 +95,11 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 3
   failureThreshold: 3
+
+# Drain duration (how long /drain blocks before returning).
+# config:
+#   admin:
+#     drain_duration: 10s
 ```
 
 ---
@@ -102,7 +108,8 @@ readinessProbe:
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| 503 during rollout | `preStop` hook too short; kube-proxy updated Endpoints before pod drained | Increase `sleep` in `preStop` to 10 s |
+| 503 during rollout | `preStop` hook too short; kube-proxy updated Endpoints before pod drained | Increase `admin.drain_duration` in config (default 10 s) |
+| `FailedPreStopHook` events | Container image is distroless (no `sh`/`sleep`); exec-based preStop fails | Use `httpGet` preStop to `/drain` (default in chart since 0.3.2) |
 | 502 after new pod starts | New pod not yet joined gossip ring; peer-fetch fails | Check logs for cluster join status; `/readyz` passes before ring join by design (avoids StatefulSet deadlock). Wait for background join to complete or increase `initialDelaySeconds` |
 | Rollout stuck | PDB `minAvailable` prevents eviction | Check `kubectl get pdb`; verify at least `minAvailable` pods are Ready |
 | Long rollout | `terminationGracePeriodSeconds` too high relative to actual drain time | Reduce to `max(in_flight_p99_ms / 1000, 15)` seconds |

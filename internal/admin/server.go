@@ -98,6 +98,11 @@ type Config struct {
 	// conditions. Used by /readyz?detail=1 to expose per-condition state
 	// for operator diagnostics during slow startup.
 	ConditionsFn func() []Condition
+	// DrainFn, if non-nil, is called by the /drain endpoint (used as the
+	// K8s preStop httpGet hook). It should mark the pod as not-ready and
+	// block for the desired drain duration so kube-proxy can deregister
+	// the pod before SIGTERM arrives. If nil, /drain returns 200 immediately.
+	DrainFn func()
 }
 
 // Condition is a readiness condition status entry for the
@@ -136,13 +141,13 @@ type Server struct {
 	resolved atomic.Value // stores string
 }
 
-// NewMinimal creates an admin server with only healthz, readyz, and
-// version routes. The handler can be replaced at runtime via SwapHandler,
+// NewMinimal creates an admin server with only healthz, readyz, version,
+// and drain routes. The handler can be replaced at runtime via SwapHandler,
 // allowing the full admin routes to be installed after subsystem
 // initialization without rebinding the listener.
 //
 // Unstable.
-func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Condition, logger observability.Logger) *Server {
+func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Condition, drainFn func(), logger observability.Logger) *Server {
 	if addr == "" {
 		addr = ":9000"
 	}
@@ -150,7 +155,7 @@ func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Conditio
 
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg: Config{Addr: addr, ReadyFn: readyFn, ConditionsFn: conditionsFn, Logger: logger},
+		cfg: Config{Addr: addr, ReadyFn: readyFn, ConditionsFn: conditionsFn, DrainFn: drainFn, Logger: logger},
 		inner: &http.Server{
 			Addr:              addr,
 			ReadHeaderTimeout: 5 * time.Second,
@@ -162,6 +167,7 @@ func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Conditio
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.version)
+	mux.HandleFunc("GET /drain", s.drain)
 
 	sh := &swapHandler{}
 	sh.Store(mux)
@@ -216,6 +222,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /version", s.version)
+	mux.HandleFunc("GET /drain", s.drain)
 	s.mountOptionalRoutes(mux, cfg)
 	mux.HandleFunc("POST /v1/config/reload", s.configReload)
 
@@ -347,6 +354,13 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 		"commit":  buildinfo.Commit,
 		"date":    buildinfo.Date,
 	})
+}
+
+func (s *Server) drain(w http.ResponseWriter, _ *http.Request) {
+	if s.cfg.DrainFn != nil {
+		s.cfg.DrainFn()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "drained"})
 }
 
 // Handler returns the admin mux for testing with httptest.
@@ -581,6 +595,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	exempt := map[string]bool{
 		"/healthz":          true,
 		"/readyz":           true,
+		"/drain":            true,
 		"/metrics":          true,
 		"/version":          true,
 		"/v1/cluster/peers": true,

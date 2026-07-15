@@ -227,13 +227,46 @@ func TestAuth_ReadEndpointsExempt(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 
-	for _, path := range []string{"/healthz", "/readyz", "/version"} {
+	for _, path := range []string{"/healthz", "/readyz", "/version", "/drain"} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
 		s.Handler().ServeHTTP(rr, req)
 		if rr.Code == http.StatusUnauthorized {
 			t.Errorf("%s returned 401 (should be exempt)", path)
 		}
+	}
+}
+
+func TestDrain_NoDrainFn(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, func() bool { return true })
+	status, body := get(t, s, "/drain")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["status"] != "drained" {
+		t.Fatalf("status field = %q, want drained", got["status"])
+	}
+}
+
+func TestDrain_CallsDrainFn(t *testing.T) {
+	t.Parallel()
+	called := false
+	s := New(Config{
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ReadyFn: func() bool { return true },
+		DrainFn: func() { called = true },
+	})
+	status, _ := get(t, s, "/drain")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !called {
+		t.Fatal("expected DrainFn to be called")
 	}
 }
 

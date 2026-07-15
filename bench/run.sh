@@ -9,6 +9,7 @@
 #   - Evaluate_Hit:           allocs/op must be 0
 #   - HotStore_Get_Hit:       allocs/op must be 0
 #   - Handler_CacheHit:       allocs/op must be ≤ 9 (6 are test harness)
+#   - FastPath_Hit:           allocs/op must be 0
 #
 # The script writes results to bench/results/current.txt and exits
 # non-zero if any gate is breached.
@@ -23,6 +24,7 @@ echo ">>> Running benchmarks (count=5)..."
 go test -bench=. -benchmem -count=5 -timeout=120s \
     ./internal/cache/... \
     ./internal/storage/... \
+    ./internal/server/h1parser/... \
     | tee "$OUTFILE"
 
 echo ""
@@ -54,6 +56,8 @@ check_allocs "BenchmarkEvaluate_Hit" 0 || FAILED=1
 check_allocs "BenchmarkHotStore_Get_Hit" 0 || FAILED=1
 check_allocs "BenchmarkHandler_CacheHit" 13 || FAILED=1
 check_allocs "BenchmarkSIEVE_Access" 0 || FAILED=1
+check_allocs "BenchmarkFastPath_Hit" 0 || FAILED=1
+check_allocs "BenchmarkH1Parse_Get" 0 || FAILED=1
 
 if [ "$FAILED" -ne 0 ]; then
     echo ""

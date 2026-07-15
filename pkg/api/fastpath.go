@@ -64,9 +64,15 @@ func (r *RawRequest) HasHeader(key string) bool {
 // (miss, conditional, range, etc.), it returns nil — the caller falls
 // through to net/http.
 //
+// Release returns a FastPathResponse (and its pooled header buffer) to
+// the pool. The caller MUST call Release after serveHit has finished
+// writing, even on error. After Release, the response is invalid and
+// must not be used.
+//
 // Unstable.
 type FastPathHandler interface {
 	TryHit(req *RawRequest, now time.Time) (*FastPathResponse, bool)
+	Release(resp *FastPathResponse)
 }
 
 // FastPathResponse is the pre-serialized response for a cache hit.
@@ -74,15 +80,15 @@ type FastPathHandler interface {
 //
 // Buffers layout: [0] = status line, [1] = header block, [2] = body.
 // Buffers[0] and [1] are slices of HeaderBuf — a pooled buffer. After
-// WriteTo returns, the caller calls Return() if non-nil to return
-// HeaderBuf to the pool.
+// WriteTo returns, the caller calls FastPathHandler.Release to return
+// both HeaderBuf (via BufPtr) and this response to their pools.
 // Buffers[2] is obj.Body — owned by the cache, not pooled, not returned.
 //
 // Unstable.
 type FastPathResponse struct {
 	Buffers     net.Buffers
 	HeaderBuf   []byte
-	Return      func()
+	BufPtr      *[]byte // original pool pointer for HeaderBuf, used by Release
 	StatusCode  int
 	CacheResult string
 	Source      string

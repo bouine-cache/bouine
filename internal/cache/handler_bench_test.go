@@ -140,14 +140,17 @@ func BenchmarkHandler_CacheMiss_Cacheable(b *testing.B) {
 
 	// Use a unique URL per iteration to guarantee a miss every time.
 	// The hit path benchmarks reuse the same URL; here we need freshness.
+	// Use benchResponseWriter (reusable) instead of httptest.NewRecorder
+	// to eliminate ~8 harness allocs/op that mask the miss-path savings.
 	base := "http://bench.local/miss/"
+	w := newBenchResponseWriter()
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
+		w.Reset()
 		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
+		h.ServeHTTP(w, req)
 	}
 }
 

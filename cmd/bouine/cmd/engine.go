@@ -184,7 +184,7 @@ func (e *engine) run(ctx context.Context) error {
 
 	handler := e.buildDataPlane(rs)
 
-	e.startBackgroundTasks(g, rs, ctx)                               // rings snapshot, prefetch sitemap crawler, config watcher
+	e.startBackgroundTasks(g, rs, ctx)                               // rings snapshot, store metrics
 	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
 	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
 	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
@@ -880,6 +880,11 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 		})
 	}
 	if rs.clusterNode != nil {
+		if rs.peerFetcher != nil {
+			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
+				return rs.peerFetcher.Close(ctx)
+			})
+		}
 		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
 			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
 		})

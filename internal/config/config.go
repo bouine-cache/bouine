@@ -276,9 +276,16 @@ type PassiveHealthCheck struct {
 
 // ConnectPolicy bounds dial behaviour.
 type ConnectPolicy struct {
-	Timeout        time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	KeepAlive      time.Duration `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
-	MaxConnections int           `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	Timeout   time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	KeepAlive time.Duration `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
+	// MaxConnections caps the number of concurrent connections per upstream
+	// host (http.Transport.MaxConnsPerHost). Zero means unlimited — the
+	// default, which preserves existing behaviour. Set this to bound FD
+	// consumption under high miss ratios with hedged requests. Note: this
+	// is per-host, not per-pool; a pool with N targets gets N × MaxConnections.
+	// This is distinct from Listen.MaxConnections, which caps total TCP
+	// connections to the data plane.
+	MaxConnections int `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
 	// ResponseHeaderTimeout bounds the time waiting for the origin's
 	// response headers after the request is fully sent. Zero applies a
 	// safe built-in default (30s). This is the primary defence against

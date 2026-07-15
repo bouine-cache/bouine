@@ -1559,13 +1559,21 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	// lifetime of the cached object — up to 2x memory waste on large
 	// responses. The make+copy allocates exactly len(body) bytes.
 	//
+	// The body buffer itself is NOT replaced — the pool reuses its
+	// capacity across fetches. acquireRecorder calls rec.body.Reset()
+	// which preserves cap, so subsequent upstream writes reuse the
+	// existing backing array without re-growing. Replacing the buffer
+	// here would force a new backing-array allocation on every fetch,
+	// defeating the pool.
+	//
 	// Safety: all singleflight waiters read res.Header and res.Body without
-	// mutating. The recorder gets fresh internals so the pool reuse is safe.
+	// mutating. The recorder gets a fresh header map so the pool reuse is
+	// safe. The body buffer is Reset()ed on next acquire, clearing stale
+	// content while preserving capacity.
 	body := make([]byte, rec.body.Len())
 	copy(body, rec.body.Bytes())
 	hdr := rec.header
 	rec.header = make(http.Header, 8)
-	rec.body = &bytes.Buffer{}
 
 	return fetchResult{
 		StatusCode: rec.statusCode,

@@ -708,7 +708,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// can produce now < StoredAt when both are in the same millisecond,
 	// causing a stale object to appear fresh.
 	now := time.Now()
-	key, obj, src := h.lookup(r)
+	primaryKey, key, obj, src := h.lookup(r)
 	if rw, ok := w.(*responsewriter.ResponseWriter); ok {
 		rw.SetCacheKey(key)
 	}
@@ -727,9 +727,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.triggerBgRevalidate(r, key, disp.Object)
 		}
 	case Miss:
-		h.handleCacheMiss(w, r, key, obj, now, src)
+		h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
 	case Revalidate:
-		h.revalidate(w, r, key, disp.Object, now, src)
+		h.revalidate(w, r, primaryKey, disp.Object, now, src)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
@@ -743,23 +743,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // stored locally for future requests on this node (L0 promotion).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
-func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key api.Key, obj *api.Object, now time.Time, src api.Source) {
+func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source) {
 	if h.ownerFn != nil && h.peerFetch != nil {
-		if owner, isLocal := h.ownerFn(key); !isLocal {
-			if peerObj, err := h.peerFetch(r.Context(), owner, key); err == nil && peerObj != nil {
+		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
+			if peerObj, err := h.peerFetch(r.Context(), owner, lookupKey); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					h.serveObject(w, r, peerObj, now, cacheHit, api.SourcePeer)
 					// Promote to local hot tier (best-effort; ignore error).
-					_ = h.store.Put(r.Context(), key, peerObj)
+					_ = h.store.Put(r.Context(), lookupKey, peerObj)
 					if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
-						h.triggerBgRevalidate(r, key, peerObj)
+						h.triggerBgRevalidate(r, lookupKey, peerObj)
 					}
 					return
 				}
 			} else if err != nil {
 				h.logger.Debug("peer fetch error, falling back to origin",
-					"peer", owner.Addr, "key", key, "error", err)
+					"peer", owner.Addr, "key", lookupKey, "error", err)
 			}
 		}
 	}
@@ -768,33 +768,33 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, key ap
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
 	// the error to be forwarded to the client.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, key, obj, now, src)
+		h.fetchAndStoreStayinAlive(w, r, primaryKey, obj, now, src)
 	} else {
-		h.fetchAndStore(w, r, key)
+		h.fetchAndStore(w, r, primaryKey)
 	}
 }
 
 // lookup resolves the cache key and stored object for r, accounting
 // for Vary-based secondary keys. Returns the source (hot/warm) from
 // the storage tier that served the object.
-func (h *Handler) lookup(r *http.Request) (api.Key, *api.Object, api.Source) {
-	key := h.buildKey(r)
-	obj, src, err := h.store.Get(r.Context(), key)
+func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, lookupKey api.Key, obj *api.Object, src api.Source) {
+	primaryKey = h.buildKey(r)
+	obj, src, err := h.store.Get(r.Context(), primaryKey)
 	if err != nil {
-		h.logger.Warn("cache lookup error", "key", key, "error", err)
+		h.logger.Warn("cache lookup error", "key", primaryKey, "error", err)
 	}
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
-		return key, obj, src
+		return primaryKey, primaryKey, obj, src
 	}
-	vk := VariantKey(key, obj.Header.Get(header.Vary), r.Header, h.excludeHeaders)
-	if vk == key {
-		return key, obj, src
+	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), r.Header, h.excludeHeaders)
+	if vk == primaryKey {
+		return primaryKey, primaryKey, obj, src
 	}
 	vobj, vsrc, verr := h.store.Get(r.Context(), vk)
 	if verr == nil && vobj != nil {
-		return vk, vobj, vsrc
+		return primaryKey, vk, vobj, vsrc
 	}
-	return vk, nil, ""
+	return primaryKey, vk, nil, ""
 }
 
 // tryConditional304 returns true and writes a 304 if the client's
@@ -983,7 +983,7 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res)
+	h.writeAndMaybeStore(w, r, res, key)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -1004,7 +1004,7 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res)
+	h.writeAndMaybeStore(w, r, res, key)
 }
 
 func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
@@ -1048,7 +1048,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 		return
 	}
 
-	h.writeAndMaybeStore(w, r, res)
+	h.writeAndMaybeStore(w, r, res, key)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1156,6 +1156,7 @@ func (h *Handler) writeAndMaybeStore(
 	w http.ResponseWriter,
 	r *http.Request,
 	res fetchResult,
+	primaryKey api.Key,
 ) {
 	dst := w.Header()
 	for k, vals := range res.Header {
@@ -1195,10 +1196,8 @@ func (h *Handler) writeAndMaybeStore(
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		// Always compute from the canonical URL so the cap is enforced
-		// against the primary key regardless of whether lookup() already
-		// resolved the variant key.
-		primaryKey := h.buildKey(r)
+		// primaryKey is passed in from lookup() to avoid a redundant
+		// buildKey call on the same request.
 		storeKey := primaryKey
 		if vary := res.Header.Get(header.Vary); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, r.Header, h.excludeHeaders)

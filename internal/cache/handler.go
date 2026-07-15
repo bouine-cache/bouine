@@ -160,9 +160,9 @@ const maxRecorderCap = 1 << 20 // 1 MiB
 
 // recorderPool reuses responseRecorder instances on the miss and
 // invalidation paths. The miss path transfers ownership of the
-// recorder's header map and body buffer to the fetchResult, then gives
-// the recorder fresh internals before returning it to the pool. The
-// hit path never allocates a recorder.
+// recorder's header map to the fetchResult (the body is copied via
+// make+copy so the recorder's buffer is preserved for pool reuse).
+// The hit path never allocates a recorder.
 var recorderPool = sync.Pool{
 	New: func() any {
 		return &responseRecorder{

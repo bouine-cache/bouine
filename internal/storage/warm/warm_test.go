@@ -601,6 +601,42 @@ func TestReadRecordAtSinglePread(t *testing.T) {
 	}
 }
 
+// TestReadRecordAtSinglePreadCorrupted verifies that corrupted or stale
+// index entries with invalid sizes return ErrTornRecord instead of panicking.
+func TestReadRecordAtSinglePreadCorrupted(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := []byte("test body")
+	segID, off, err := s.Put(1, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.mu.RLock()
+	seg := s.segs[segID]
+	s.mu.RUnlock()
+	if seg == nil {
+		t.Fatalf("segment %d not found", segID)
+	}
+
+	// Size too small (< HeaderLen + FooterLen).
+	_, err = readRecordAt(seg, off, 5)
+	if !errors.Is(err, ErrTornRecord) {
+		t.Errorf("size=5: err=%v, want ErrTornRecord", err)
+	}
+
+	// Size larger than actual record (bodyLen in header won't match).
+	_, err = readRecordAt(seg, off, 1000)
+	if err == nil {
+		t.Error("size=1000: expected error, got nil")
+	}
+}
+
 // BenchmarkReadRecordAtSinglePread measures the single-pread path (1 syscall)
 // vs the legacy 3-pread path (3 syscalls).
 func BenchmarkReadRecordAtSinglePread(b *testing.B) {

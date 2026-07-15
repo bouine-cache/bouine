@@ -1468,6 +1468,9 @@ func readRecordAt(seg *Segment, offset int64, size int64) (*Record, error) {
 // per record, temporary. Do NOT copy the body out — that adds an allocation
 // and defeats the purpose.
 func readRecordAtSingle(f *os.File, segID int, offset int64, size int64) (*Record, error) {
+	if size < int64(HeaderLen+FooterLen) {
+		return nil, ErrTornRecord
+	}
 	buf := make([]byte, size)
 	if _, err := f.ReadAt(buf, offset); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

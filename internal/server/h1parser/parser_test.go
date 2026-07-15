@@ -103,6 +103,7 @@ func BenchmarkH1Parse_Get(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		req := &api.RawRequest{}
+		_ = findHeaderEnd(raw)
 		_ = parseRequestLine(raw, req)
 		_ = parseHeaders(raw, req)
 	}

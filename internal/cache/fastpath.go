@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -26,13 +25,12 @@ var fastPathHeaderPool = sync.Pool{
 	},
 }
 
-// fastPathRespPool pools FastPathResponse objects with pre-allocated
-// Buffers slices (cap=3) to eliminate per-hit allocations.
+// fastPathRespPool pools FastPathResponse objects. The Buffers slice is
+// rebuilt from the fixed-size BuffersArr on every TryHit, so we don't
+// pre-allocate it here.
 var fastPathRespPool = sync.Pool{
 	New: func() any {
-		return &api.FastPathResponse{
-			Buffers: make(net.Buffers, 0, 3),
-		}
+		return &api.FastPathResponse{}
 	},
 }
 
@@ -267,8 +265,13 @@ func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *ap
 	resp.Route = routeName
 	resp.BytesOut = len(body)
 
-	resp.Buffers = resp.Buffers[:0]
-	resp.Buffers = append(resp.Buffers, statusLine, headerBlock, body)
+	// Rebuild Buffers from the fixed-size backing array. net.Buffers.WriteTo
+	// consumes the slice (advancing past the backing array), so we cannot
+	// reuse the Buffers slice across hits — we must reset it from buffersArr.
+	resp.BuffersArr[0] = statusLine
+	resp.BuffersArr[1] = headerBlock
+	resp.BuffersArr[2] = body
+	resp.Buffers = resp.BuffersArr[:3]
 	return resp
 }
 
@@ -291,7 +294,8 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 	}
 	// Reset and return the response to its pool.
 	resp.HeaderBuf = nil
-	resp.Buffers = resp.Buffers[:0]
+	resp.BuffersArr = [3][]byte{}
+	resp.Buffers = nil
 	resp.StatusCode = 0
 	resp.CacheResult = ""
 	resp.Source = ""

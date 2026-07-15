@@ -84,9 +84,15 @@ type FastPathHandler interface {
 // both HeaderBuf (via BufPtr) and this response to their pools.
 // Buffers[2] is obj.Body — owned by the cache, not pooled, not returned.
 //
+// BuffersArr is the fixed-size backing array for Buffers. net.Buffers.WriteTo
+// consumes the Buffers slice (advancing past the backing array via *v = (*v)[1:]),
+// leaving Buffers with len=0, cap=0. Rebuilding Buffers from buffersArr on
+// every TryHit avoids allocating a new [][]byte backing array on pool reuse.
+//
 // Unstable.
 type FastPathResponse struct {
 	Buffers     net.Buffers
+	BuffersArr  [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
 	HeaderBuf   []byte
 	BufPtr      *[]byte // original pool pointer for HeaderBuf, used by Release
 	StatusCode  int

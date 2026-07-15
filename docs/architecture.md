@@ -511,8 +511,11 @@ fraction of `terminationGracePeriodSeconds` (default 30s):
 7. **t+~Ns** — close admin & cluster listeners.
 8. **Process exits.** Timely exit preferred over clean exit on budget overrun.
 
-A `preStop` hook in the Helm chart sleeps `readinessProbe.periodSeconds + 1s`
-before `SIGTERM` to let LB state propagate.
+A `preStop` httpGet hook in the Helm chart calls the `/drain` endpoint,
+which marks the pod not-ready and blocks for `admin.drain_duration`
+(default 10 s) before `SIGTERM` to let kube-proxy propagate endpoint removal.
+The distroless container image has no shell, so an exec-based sleep cannot
+be used.
 
 ---
 

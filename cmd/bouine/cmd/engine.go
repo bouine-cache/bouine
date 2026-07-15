@@ -135,6 +135,20 @@ func (e *engine) run(ctx context.Context) error {
 		return result
 	}
 
+	// Create a DrainFn closure for the /drain preStop endpoint. It marks
+	// the pod as not-ready (so /readyz starts failing and kube-proxy
+	// deregisters the pod) and then blocks for the configured drain
+	// duration to give endpoint propagation time before SIGTERM arrives.
+	drainDuration := e.cfg.Admin.DrainDuration
+	if drainDuration <= 0 {
+		drainDuration = 10 * time.Second
+	}
+	drainFn := func() {
+		seq.Drain()
+		e.logger.Info("drain: marking not-ready, sleeping", "duration", drainDuration.String())
+		time.Sleep(drainDuration)
+	}
+
 	// Start a minimal admin server (healthz/readyz/version only) before
 	// initSubsystems so K8s probes can reach the admin port during the
 	// potentially long store-loading phase. The full admin handler is
@@ -144,7 +158,7 @@ func (e *engine) run(ctx context.Context) error {
 	if adminAddr == "" {
 		adminAddr = ":9000"
 	}
-	minimalAdmin := admin.NewMinimal(adminAddr, seq.IsReady, conditionsFn, e.logger)
+	minimalAdmin := admin.NewMinimal(adminAddr, seq.IsReady, conditionsFn, drainFn, e.logger)
 	g.Go("admin", minimalAdmin.Serve)
 
 	startupBegin := time.Now()
@@ -164,12 +178,12 @@ func (e *engine) run(ctx context.Context) error {
 
 	handler := e.buildDataPlane(rs)
 
-	e.startBackgroundTasks(g, rs, ctx)                      // rings snapshot, prefetch sitemap crawler, config watcher
-	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn) // swap full admin routes into the minimal server
-	e.startListeners(g, handler, rs)                        // HTTP/HTTPS data-plane listeners
-	e.startHealthChecks(g, rs.pools)                        // active health probes per upstream pool
-	e.startClusterJoin(g, rs)                               // gossip join with retry against seed peers
-	e.registerShutdownSteps(g, rs)                          // ordered drain: readiness, store flush, cluster leave
+	e.startBackgroundTasks(g, rs, ctx)                               // rings snapshot, prefetch sitemap crawler, config watcher
+	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
+	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
+	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
+	e.startClusterJoin(g, rs)                                        // gossip join with retry against seed peers
+	e.registerShutdownSteps(g, rs)                                   // ordered drain: readiness, store flush, cluster leave
 
 	// Listeners are started by startListeners (synchronous call above
 	// starts the supervised goroutines). Mark ready after the call
@@ -524,7 +538,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 // dashboard) and atomically swaps it into the already-listening minimal
 // admin server. The admin listener was started before initSubsystems so
 // K8s probes could reach healthz/readyz during store loading.
-func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server, conditionsFn func() []admin.Condition) {
+func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmin *admin.Server, conditionsFn func() []admin.Condition, drainFn func()) {
 	addr := e.cfg.Listen.Admin
 	if addr == "" {
 		addr = ":9000"
@@ -542,6 +556,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		CFStatusFn:         rs.cfProp.Status,
 		ReadyFn:            rs.seq.IsReady,
 		ConditionsFn:       conditionsFn,
+		DrainFn:            drainFn,
 		MaxBatchSize:       e.cfg.Admin.MaxBatchSize,
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
 		PprofEnabled:       e.cfg.Admin.PprofEnabled,

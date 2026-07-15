@@ -38,6 +38,9 @@ func Defaults() Config {
 			Mode:     ClusterModeStrong,
 			HopLimit: 2,
 		},
+		Admin: AdminConfig{
+			DrainDuration: 10 * time.Second,
+		},
 	}
 }
 

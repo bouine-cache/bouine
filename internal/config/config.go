@@ -577,6 +577,10 @@ type AdminConfig struct {
 	// admin port. The routes are auth-exempt; the admin port is expected
 	// to be network-isolated in production. Default is false.
 	PprofEnabled bool `yaml:"pprof_enabled,omitempty" json:"pprof_enabled,omitempty"`
+	// DrainDuration is how long the /drain endpoint blocks before
+	// returning. Used by the K8s preStop httpGet hook to keep the pod
+	// alive while kube-proxy deregisters it. Zero defaults to 10s.
+	DrainDuration time.Duration `yaml:"drain_duration,omitempty" json:"drain_duration,omitempty"`
 }
 
 // ByteSize is a typed size in bytes, parsed from strings like "2Go"

@@ -81,6 +81,21 @@ func TestSequencer_IsReady_ShutdownFlipsFalse(t *testing.T) {
 	}
 }
 
+func TestSequencer_Drain_MarksNotReady(t *testing.T) {
+	s := NewSequencer(newTestLogger())
+	s.Gate().Register("store-loaded")
+	s.Gate().MarkReady("store-loaded")
+
+	if !s.IsReady() {
+		t.Fatal("expected ready after all conditions met")
+	}
+
+	s.Drain()
+	if s.IsReady() {
+		t.Fatal("expected not ready after Drain")
+	}
+}
+
 func TestReadinessGate_Conditions(t *testing.T) {
 	g := NewReadinessGate()
 	g.Register("store-loaded")

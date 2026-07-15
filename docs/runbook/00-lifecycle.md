@@ -49,8 +49,10 @@ bouine uses a `shutdown.Sequencer` (`internal/runtime/shutdown`) that
 runs registered steps in order, each with a time budget:
 
 1. **Mark not ready** — `/readyz` returns `503`. Kubernetes stops
-   sending new connections. The `preStop` hook sleeps one readiness
-   period to let in-flight probes propagate.
+   sending new connections. The `preStop` httpGet hook calls `/drain`,
+   which marks the pod not-ready and blocks for `admin.drain_duration`
+   (default 10 s) to let kube-proxy propagate endpoint removal before
+   `SIGTERM` arrives.
 2. **Drain data-plane listeners** — stop accepting new connections,
    finish in-flight requests within budget.
 3. **Leave cluster** — `memberlist.Leave` with a timeout so peers
@@ -58,7 +60,7 @@ runs registered steps in order, each with a time budget:
 4. **Flush storage** — WAL sync, warm-tier segment close.
 5. **Close admin** — final metrics scrape window, then shutdown.
 
-The total budget is `terminationGracePeriodSeconds` (Helm default: 30s).
+The total budget is `terminationGracePeriodSeconds` (Helm default: 40s).
 
 ### Manual stop
 
@@ -132,11 +134,13 @@ graceful shutdown sequence (above) handles draining.
 
 ### Best practices
 
-- Set `terminationGracePeriodSeconds` ≥ 30s (Helm default).
+- Set `terminationGracePeriodSeconds` ≥ 40s (Helm default).
 - PodDisruptionBudget (`minAvailable: 1`) prevents draining all replicas
   simultaneously.
-- The `preStop` sleep ensures the endpoints controller removes the pod
-  from the Service before connections stop.
+- The `preStop` httpGet hook calls `/drain`, which marks the pod
+  not-ready and blocks for `admin.drain_duration` (default 10 s) so the
+  endpoints controller removes the pod from the Service before
+  connections stop.
 - Monitor `bouine_inflight_requests` to confirm drain completes.
 
 ### Rolling update order

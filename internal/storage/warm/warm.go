@@ -141,6 +141,13 @@ type Segment struct {
 	// non-zero count means a read is in progress and the fd cannot be
 	// closed safely.
 	readers atomic.Int32
+	// mmap is a persistent MAP_SHARED mapping of the segment file used
+	// for zero-syscall point reads on inactive (sealed) segments. It is
+	// protected by s.mu (Store-level RWMutex), not seg.mu. nil on
+	// non-Linux, before initialization, or while the segment is active.
+	// The mapping stays valid after the fd is closed by fdCache eviction
+	// (POSIX guarantee); only Compact and Close munmap.
+	mmap []byte
 }
 
 // ensureOpen opens the segment file if not already open. Must be called
@@ -661,14 +668,20 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 		return nil, nil
 	}
 
-	// readRecordAt uses os.File.ReadAt (pread), so it does not mutate the
-	// shared file offset and does not need seg.mu. s.mu.RLock is still
-	// held to keep Compact from closing the file descriptor mid-read.
+	// readers.Add(1) before ensureOpen to prevent fdCache eviction from
+	// closing the fd between ensureOpen and the actual read. Also needed
+	// for ensureMmapOpened, which calls tryMmap using seg.f.Fd().
+	seg.readers.Add(1)
+	defer seg.readers.Add(-1)
 	if err := seg.ensureOpen(); err != nil {
 		return nil, fmt.Errorf("warm: open segment %d: %w", seg.ID, err)
 	}
-	seg.readers.Add(1)
-	defer seg.readers.Add(-1)
+	// Lazy mmap init for segments that did not go through newSegment
+	// (e.g., created by compaction or startup WAL replay). The active
+	// segment is never mmap'd — it is being written to via pwritev and
+	// mremap on growth would be complex and unnecessary.
+	isActive := len(s.segs) > 0 && s.segs[len(s.segs)-1].ID == seg.ID
+	seg.ensureMmapOpened(isActive)
 	s.fdCache.touch(seg)
 	rec, err := readRecordAt(seg, loc.offset, loc.size)
 	if err != nil {
@@ -1249,6 +1262,11 @@ func (s *Store) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Munmap all segments before closing fds. The mappings reference
+	// the same files as the fds; munmap first to avoid accessing freed
+	// mappings after fd close (defensive — POSIX allows it, but this
+	// makes the lifecycle explicit and race-detector-clean).
+	munmapAll(s.segs)
 	s.fdCache.clear()
 	for _, seg := range s.segs {
 		seg.mu.Lock()
@@ -1369,6 +1387,15 @@ func (s *Store) newSegment() (*Segment, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Mmap the old (now-sealed) segment for zero-syscall reads. The old
+	// segment's fd may have been evicted by fdCache; ensureOpen reopens
+	// it so tryMmap can map the file. If either fails, seg.mmap stays nil
+	// and Get's lazy init will retry later.
+	if len(s.segs) > 0 {
+		old := s.segs[len(s.segs)-1]
+		_ = old.ensureOpen()
+		old.tryMmap()
+	}
 	s.segs = append(s.segs, seg)
 	s.rebuildSegByID()
 	s.fdCache.touch(seg)
@@ -1452,6 +1479,12 @@ func writeRecordAt(f *os.File, offset int64, magic uint32, key uint64, body []by
 }
 
 func readRecordAt(seg *Segment, offset int64, size int64) (*Record, error) {
+	// Fastest path: mmap read (zero syscalls) for sealed segments with
+	// a persistent MAP_SHARED mapping. Returns nil,nil if not mmap'd,
+	// signaling the caller to fall through to the pread path.
+	if rec, err := readRecordAtMmap(seg, offset, size); rec != nil || err != nil {
+		return rec, err
+	}
 	// Fast path: single pread when the total record size is known from
 	// the index (v2 WAL entries). This cuts 3 syscalls to 1.
 	if size > 0 {
@@ -1686,6 +1719,8 @@ func (s *Store) NeedsCompaction() bool {
 // Records are streamed per-segment: live records from one segment are
 // collected, the segment lock is released, and only then written to the
 // temp store. Peak heap is O(1 segment) instead of O(total live bytes).
+//
+//nolint:funlen // munmapAll adds 1 statement over the limit; extracting would harm readability
 func (s *Store) Compact() error {
 	s.metrics.IncCompactionTriggered()
 	s.idxMu.RLock()
@@ -1740,6 +1775,12 @@ func (s *Store) Compact() error {
 	// done above.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Munmap all old segments before swapping files. The old mappings
+	// point at file offsets that will be replaced by swapSegmentFiles.
+	// POSIX guarantees mappings are valid after fd close, but the files
+	// themselves are about to be deleted — munmap first for cleanliness.
+	munmapAll(s.segs)
 
 	s.fdCache.clear()
 

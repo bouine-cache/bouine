@@ -71,10 +71,8 @@ func TestFastPathHandler_TryHit(t *testing.T) {
 		t.Errorf("body=%q want %q", string(body), "Hello, World!")
 	}
 
-	// Return the buffer.
-	if resp.Return != nil {
-		resp.Return()
-	}
+	// Release the pooled response.
+	fp.Release(resp)
 }
 
 func TestFastPathHandler_Miss(t *testing.T) {
@@ -186,9 +184,7 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 	if len(resp.Buffers) >= 3 && resp.Buffers[2] != nil {
 		t.Errorf("body should be nil for HEAD request")
 	}
-	if resp.Return != nil {
-		resp.Return()
-	}
+	fp.Release(resp)
 }
 
 func TestFastPathHandler_StaleHit(t *testing.T) {
@@ -234,9 +230,7 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 	if resp.CacheResult != "STALE" {
 		t.Errorf("CacheResult=%q want STALE", resp.CacheResult)
 	}
-	if resp.Return != nil {
-		resp.Return()
-	}
+	fp.Release(resp)
 }
 
 func BenchmarkFastPath_Hit(b *testing.B) {
@@ -282,9 +276,7 @@ func BenchmarkFastPath_Hit(b *testing.B) {
 		if !ok {
 			b.Fatal("TryHit returned false")
 		}
-		if resp.Return != nil {
-			resp.Return()
-		}
+		fp.Release(resp)
 	}
 }
 
@@ -325,5 +317,56 @@ func BenchmarkBuildKeyFromRaw(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		_ = buildKeyFromRaw(req, nil)
+	}
+}
+
+// BenchmarkFastPath_ParseAndHit measures the combined cost of request
+// parsing (simulated by constructing a RawRequest) + TryHit + Release.
+// This approximates the full H1 fast-path hit cost excluding network I/O.
+// The h1parser package adds ~114 ns for actual byte-level parsing on top.
+func BenchmarkFastPath_ParseAndHit(b *testing.B) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	obj := &api.Object{
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			"Content-Type":   []string{"text/html"},
+			"Content-Length": []string{"13"},
+		}),
+		Body:     []byte("Hello, World!"),
+		BodySize: 13,
+		StoredAt: time.Now(),
+		TTL:      600 * time.Second,
+	}
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}, nil)
+	obj.Key = key
+	if err := store.Put(context.Background(), key, obj); err != nil {
+		b.Fatalf("Put failed: %v", err)
+	}
+
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		// Simulate parsed request (h1parser adds ~114ns for real parsing).
+		req := &api.RawRequest{
+			Method:      "GET",
+			Path:        "/",
+			Host:        "example.com",
+			Scheme:      "http",
+			HTTPVersion: "HTTP/1.1",
+		}
+		resp, ok := fp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		fp.Release(resp)
 	}
 }

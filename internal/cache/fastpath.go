@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -22,6 +23,16 @@ var fastPathHeaderPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 0, 4096)
 		return &buf
+	},
+}
+
+// fastPathRespPool pools FastPathResponse objects with pre-allocated
+// Buffers slices (cap=3) to eliminate per-hit allocations.
+var fastPathRespPool = sync.Pool{
+	New: func() any {
+		return &api.FastPathResponse{
+			Buffers: make(net.Buffers, 0, 3),
+		}
 	},
 }
 
@@ -147,7 +158,8 @@ func qualifiesForFastPath(req *api.RawRequest) bool {
 
 // serializeResponse builds a FastPathResponse from a cached object.
 // It serializes the status line + headers into a pooled buffer and
-// sets up net.Buffers for writev.
+// sets up net.Buffers for writev. The returned response is pooled;
+// the caller must call Release after writing.
 func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) *api.FastPathResponse {
 	bufPtr := fastPathHeaderPool.Get().(*[]byte)
 	hbuf := (*bufPtr)[:0]
@@ -161,11 +173,13 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 		return nil
 	}
 
-	return buildFastPathResponse(hbuf, obj, req, cacheResult, src, f.routeName)
+	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
 }
 
 // appendResponseHeaders serializes the stored object's headers plus
 // dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date) into hbuf.
+// Uses header.Map.Len + header.Map.At for closure-free iteration to
+// avoid heap-allocating a Range callback on the hit path.
 func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
 	// Skip parseNoCacheFieldNames when Cache-Control is empty — the common
 	// case for most cached responses. Avoids a redundant ParseCacheControl
@@ -175,9 +189,11 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
 	}
 	hasDate := false
-	obj.Header.Range(func(key, value string) bool {
+	n := obj.Header.Len()
+	for i := 0; i < n; i++ {
+		key, value := obj.Header.At(i)
 		if shouldSkipHeader(key, noCacheFields) {
-			return true
+			continue
 		}
 		if key == header.Date {
 			hasDate = true
@@ -186,8 +202,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 		hbuf = append(hbuf, ": "...)
 		hbuf = append(hbuf, value...)
 		hbuf = append(hbuf, '\r', '\n')
-		return true
-	})
+	}
 
 	if !hasDate {
 		hbuf = append(hbuf, header.Date...)
@@ -225,8 +240,10 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 }
 
 // buildFastPathResponse splits hbuf into status line + header block and
-// creates the FastPathResponse with net.Buffers for writev.
-func buildFastPathResponse(hbuf []byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, routeName string) *api.FastPathResponse {
+// creates the FastPathResponse with net.Buffers for writev. The response
+// is obtained from fastPathRespPool with a pre-allocated Buffers slice,
+// eliminating per-hit allocations.
+func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, routeName string) *api.FastPathResponse {
 	statusEnd := 0
 	for statusEnd < len(hbuf)-1 && (hbuf[statusEnd] != '\r' || hbuf[statusEnd+1] != '\n') {
 		statusEnd++
@@ -241,28 +258,46 @@ func buildFastPathResponse(hbuf []byte, obj *api.Object, req *api.RawRequest, ca
 		body = nil
 	}
 
-	resp := &api.FastPathResponse{
-		HeaderBuf:   hbuf,
-		StatusCode:  obj.StatusCode,
-		CacheResult: cacheResult,
-		Source:      string(src),
-		Route:       routeName,
-		BytesOut:    len(body),
-		Return: func() {
-			returnHeaderBuf(hbuf)
-		},
-	}
+	resp := fastPathRespPool.Get().(*api.FastPathResponse)
+	resp.HeaderBuf = hbuf
+	resp.BufPtr = bufPtr
+	resp.StatusCode = obj.StatusCode
+	resp.CacheResult = cacheResult
+	resp.Source = string(src)
+	resp.Route = routeName
+	resp.BytesOut = len(body)
+
+	resp.Buffers = resp.Buffers[:0]
 	resp.Buffers = append(resp.Buffers, statusLine, headerBlock, body)
 	return resp
 }
 
-// returnHeaderBuf returns the pooled header buffer to the pool.
-func returnHeaderBuf(hbuf []byte) {
-	if cap(hbuf) > maxFastPathHeaderBytes {
-		return // discard oversized buffers
+// Release returns a FastPathResponse and its pooled header buffer to their
+// sync.Pools. Implements api.FastPathHandler. The caller MUST call Release
+// after serveHit has finished writing. After Release, the response is invalid.
+func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
+	if resp == nil {
+		return
 	}
-	buf := hbuf[:0]
-	fastPathHeaderPool.Put(&buf)
+	// Return the header buffer using the original pool pointer, avoiding
+	// a new *[]byte allocation that would occur with &resp.HeaderBuf[:0].
+	if resp.BufPtr != nil {
+		if cap(resp.HeaderBuf) <= maxFastPathHeaderBytes {
+			*resp.BufPtr = resp.HeaderBuf[:0]
+			fastPathHeaderPool.Put(resp.BufPtr)
+		}
+		// Oversized buffers are discarded (not returned to pool).
+		resp.BufPtr = nil
+	}
+	// Reset and return the response to its pool.
+	resp.HeaderBuf = nil
+	resp.Buffers = resp.Buffers[:0]
+	resp.StatusCode = 0
+	resp.CacheResult = ""
+	resp.Source = ""
+	resp.Route = ""
+	resp.BytesOut = 0
+	fastPathRespPool.Put(resp)
 }
 
 // appendStatusLine writes the HTTP/1.1 status line into buf.

@@ -145,17 +145,18 @@ func (p *Parser) Serve(conn net.Conn) error {
 		// Try the fast path.
 		if p.fastPath != nil {
 			now := p.nowFunc()
-			start := now
 			resp, hit := p.fastPath.TryHit(req, now)
 			if hit && resp != nil {
-				if err := p.serveHit(conn, resp); err != nil {
+				if err := p.serveHit(conn, resp, now); err != nil {
+					p.fastPath.Release(resp)
 					return err
 				}
 				if p.metricsHook != nil {
-					dur := p.nowFunc().Sub(start)
+					dur := p.nowFunc().Sub(now)
 					p.metricsHook(req.Method, resp.Route, resp.CacheResult,
 						resp.Source, resp.StatusCode, resp.BytesOut, dur)
 				}
+				p.fastPath.Release(resp)
 				continue
 			}
 		}
@@ -212,14 +213,14 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*ap
 	return req, false, excess, nil
 }
 
-// findHeaderEnd searches for \r\n\r\n in buf.
+// findHeaderEnd searches for \r\n\r\n in buf using bytes.Index for the
+// optimized SIMD/Boyer-Moore implementation in the standard library.
 func findHeaderEnd(buf []byte) int {
-	for i := 0; i < len(buf)-3; i++ {
-		if buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n' {
-			return i + 4
-		}
+	idx := bytes.Index(buf, []byte("\r\n\r\n"))
+	if idx < 0 {
+		return -1
 	}
-	return -1
+	return idx + 4
 }
 
 // parseRequestLine parses the first line: "METHOD SP PATH SP VERSION\r\n".
@@ -341,16 +342,13 @@ func appendHeader(req *api.RawRequest, line []byte) {
 	req.NHeaders++
 }
 
-// serveHit writes the fast path response to the connection and returns
-// the pooled header buffer via the Return callback.
-func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse) error {
-	if err := conn.SetWriteDeadline(time.Now().Add(p.writeTime)); err != nil {
+// serveHit writes the fast path response to the connection. The caller
+// is responsible for calling Release on resp after this returns.
+func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time) error {
+	if err := conn.SetWriteDeadline(now.Add(p.writeTime)); err != nil {
 		return err
 	}
 	_, err := resp.Buffers.WriteTo(conn)
-	if resp.Return != nil {
-		resp.Return()
-	}
 	return err
 }
 

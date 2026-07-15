@@ -273,6 +273,14 @@ func (h Map) WriteTo(dst http.Header) {
 	}
 }
 
+// At returns the key and value at index i. Panics if i >= Len().
+// Keys are in canonical MIME form, sorted at construction time.
+// Use At with Len for closure-free iteration in hot paths where a
+// Range callback would escape to the heap.
+func (h Map) At(i int) (string, string) {
+	return h.entries[i].key, h.values[h.entries[i].off]
+}
+
 // Range iterates over all headers in canonical-key order, calling f for
 // each. If f returns false, iteration stops. This replaces
 // `for k, vs := range obj.Header` loops.
@@ -281,6 +289,9 @@ func (h Map) WriteTo(dst http.Header) {
 // Set), so Range is a zero-allocation linear scan. Deterministic Range
 // output makes the binary codec produce stable bytes for logically
 // identical objects, which content-addressing and checksums rely on.
+//
+// For hot paths where the closure would escape (caller not inlined),
+// prefer Len + At to avoid the closure allocation.
 func (h Map) Range(f func(key string, value string) bool) {
 	for i := range h.entries {
 		if !f(h.entries[i].key, h.values[h.entries[i].off]) {

@@ -346,6 +346,18 @@ type connLimitListener struct {
 	open int32 // atomic, for observability only
 }
 
+// errMaxConns is returned by Accept when the connection limit is reached.
+// It implements net.Error with Temporary()=true so that http.Server.Serve()
+// retries the accept instead of exiting the serve loop (a plain error
+// would be treated as fatal and kill the listener).
+var errMaxConns = maxConnsError{}
+
+type maxConnsError struct{}
+
+func (maxConnsError) Error() string   { return "max_connections reached" }
+func (maxConnsError) Timeout() bool   { return false }
+func (maxConnsError) Temporary() bool { return true }
+
 func newConnLimitListener(inner net.Listener, max int, log observability.Logger) net.Listener {
 	return newConnLimitListenerWithSem(inner, make(chan struct{}, max), log)
 }
@@ -373,7 +385,7 @@ func (l *connLimitListener) Accept() (net.Conn, error) {
 		_, _ = conn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
 		_ = conn.Close()
 		l.log.Warn("connection rejected: max_connections reached")
-		return nil, errors.New("max_connections reached")
+		return nil, errMaxConns
 	}
 }
 

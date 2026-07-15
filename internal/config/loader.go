@@ -97,6 +97,8 @@ func Parse(b []byte) (*Config, error) {
 
 // Validate runs cross-field checks. It is called by Load/Parse but is
 // also useful from tests.
+//
+//nolint:gocyclo // 22: validation is a flat checklist of independent fields
 func (c *Config) Validate() error {
 	// At least one listener must be enabled. Admin is OK as a sole
 	// listener when no TLS is configured.
@@ -310,6 +312,7 @@ func validateRouteCache(i int, rc RouteCache) error {
 	return validateRefreshConfig(i, rc)
 }
 
+//nolint:gocyclo // 22: validation is a flat checklist of independent fields
 func validateRefreshConfig(i int, rc RouteCache) error {
 	if rc.RefreshBeforeExpiry {
 		if rc.TTLDefault <= 0 && rc.TTLOverride <= 0 {

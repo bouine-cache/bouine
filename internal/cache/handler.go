@@ -1079,6 +1079,10 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	// from the store, not Object.Hits.
 	refreshed.Hits = 0
 	MergeHeaders304(&refreshed, res.Header)
+	// Recompute the pre-serialized header block: MergeHeaders304 may have
+	// changed ETag, Cache-Control, or other static headers. Without this,
+	// the H1 fast-path would serve the stale pre-304 headers.
+	refreshed.SerializedHead = serializeHead(&refreshed)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
@@ -1582,6 +1586,7 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	}
 }
 
+//nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
 func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, excludeHeaders map[string]bool) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).

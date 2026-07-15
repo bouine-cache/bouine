@@ -328,6 +328,8 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 // runs inline for up to inlineEvictCap victims, then signals the
 // background sweeper for any remaining overshoot. Entries with a backup
 // are evicted first (cheap: recoverable from disk).
+//
+//nolint:funlen // 52 statements: eviction loop is inherently linear; extracting would harm readability
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)

@@ -45,6 +45,8 @@ func varyContainsStar(vary string) bool {
 // stack-allocated buffer and xxhash.Sum64 instead of allocating a
 // *xxhash.Digest on the heap. Falls back to the allocation path for
 // pathological inputs.
+//
+//nolint:gocyclo // 17: Vary header parsing is inherently branchy
 func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...map[string]bool) api.Key {
 	if vary == "" {
 		return primary

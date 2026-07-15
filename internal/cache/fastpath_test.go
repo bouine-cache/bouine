@@ -1,7 +1,10 @@
 package cache
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -366,6 +369,151 @@ func BenchmarkFastPath_ParseAndHit(b *testing.B) {
 		resp, ok := fp.TryHit(req, now)
 		if !ok {
 			b.Fatal("TryHit returned false")
+		}
+		fp.Release(resp)
+	}
+}
+
+// TestFastPathHandler_WriteAndReuse verifies that after WriteTo consumes
+// the Buffers slice, the response can be released to the pool and reused
+// on the next TryHit without allocating a new Buffers backing array.
+// This is the regression test for the net.Buffers.WriteTo consume bug.
+func TestFastPathHandler_WriteAndReuse(t *testing.T) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	obj := &api.Object{
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			"Content-Type":   []string{"text/html"},
+			"Content-Length": []string{"13"},
+		}),
+		Body:     []byte("Hello, World!"),
+		BodySize: 13,
+		StoredAt: time.Now(),
+		TTL:      600 * time.Second,
+	}
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}, nil)
+	obj.Key = key
+	if err := store.Put(context.Background(), key, obj); err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	for i := 0; i < 3; i++ {
+		resp, ok := fp.TryHit(req, now)
+		if !ok {
+			t.Fatalf("TryHit %d returned false", i)
+		}
+
+		// Simulate WriteTo via a pipe — this consumes the Buffers slice.
+		r, w := net.Pipe()
+		go func() {
+			_, err := resp.Buffers.WriteTo(w)
+			w.Close()
+			if err != nil {
+				t.Errorf("WriteTo error on iteration %d: %v", i, err)
+			}
+		}()
+
+		written, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			t.Fatalf("ReadAll error on iteration %d: %v", i, err)
+		}
+
+		// After WriteTo, Buffers should be consumed (len=0).
+		if len(resp.Buffers) != 0 {
+			t.Errorf("iteration %d: after WriteTo, Buffers len=%d, want 0", i, len(resp.Buffers))
+		}
+
+		// Verify the response bytes are correct.
+		if !bytes.Contains(written, []byte("Hello, World!")) {
+			t.Errorf("iteration %d: response missing body, got %q", i, written)
+		}
+		if !bytes.Contains(written, []byte("HTTP/1.1 200")) {
+			t.Errorf("iteration %d: response missing status line, got %q", i, written)
+		}
+
+		fp.Release(resp)
+	}
+}
+
+// BenchmarkFastPath_HitWithWrite measures the full hit path including
+// net.Buffers.WriteTo — the operation that consumes the Buffers slice.
+// This is the real production path: TryHit → WriteTo → Release → reuse.
+// allocs/op must be 0 to prove pool reuse survives WriteTo consumption.
+func BenchmarkFastPath_HitWithWrite(b *testing.B) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	obj := &api.Object{
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			"Content-Type":   []string{"text/html"},
+			"Content-Length": []string{"13"},
+		}),
+		Body:     []byte("Hello, World!"),
+		BodySize: 13,
+		StoredAt: time.Now(),
+		TTL:      600 * time.Second,
+	}
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}, nil)
+	obj.Key = key
+	if err := store.Put(context.Background(), key, obj); err != nil {
+		b.Fatalf("Put failed: %v", err)
+	}
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	// Pre-warm the pool with one cycle through WriteTo.
+	resp, ok := fp.TryHit(req, now)
+	if !ok {
+		b.Fatal("TryHit returned false")
+	}
+	r, w := net.Pipe()
+	go func() { _, _ = resp.Buffers.WriteTo(w); w.Close() }()
+	_, _ = io.ReadAll(r)
+	r.Close()
+	fp.Release(resp)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		resp, ok := fp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		// WriteTo consumes the Buffers slice — this is what the production
+		// path does and what BenchmarkFastPath_Hit fails to test.
+		_, err := resp.Buffers.WriteTo(io.Discard)
+		if err != nil {
+			b.Fatalf("WriteTo error: %v", err)
 		}
 		fp.Release(resp)
 	}

@@ -10,6 +10,7 @@
 #   - HotStore_Get_Hit:       allocs/op must be 0
 #   - Handler_CacheHit:       allocs/op must be ≤ 9 (6 are test harness)
 #   - FastPath_Hit:           allocs/op must be 0
+#   - FastPath_HitWithWrite:  allocs/op must be 0 (includes WriteTo consumption)
 #
 # The script writes results to bench/results/current.txt and exits
 # non-zero if any gate is breached.
@@ -57,6 +58,7 @@ check_allocs "BenchmarkHotStore_Get_Hit" 0 || FAILED=1
 check_allocs "BenchmarkHandler_CacheHit" 13 || FAILED=1
 check_allocs "BenchmarkSIEVE_Access" 0 || FAILED=1
 check_allocs "BenchmarkFastPath_Hit" 0 || FAILED=1
+check_allocs "BenchmarkFastPath_HitWithWrite" 0 || FAILED=1
 check_allocs "BenchmarkH1Parse_Get" 0 || FAILED=1
 
 if [ "$FAILED" -ne 0 ]; then

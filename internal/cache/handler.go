@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,10 +159,10 @@ type fetchResult struct {
 const maxRecorderCap = 1 << 20 // 1 MiB
 
 // recorderPool reuses responseRecorder instances on the miss and
-// invalidation paths. Both paths copy the captured body and header out of
-// the recorder before returning it to the pool, so the recorder's buffer
-// and header map are reused across requests rather than reallocated per
-// fetch. The hit path never allocates a recorder.
+// invalidation paths. The miss path transfers ownership of the
+// recorder's header map and body buffer to the fetchResult, then gives
+// the recorder fresh internals before returning it to the pool. The
+// hit path never allocates a recorder.
 var recorderPool = sync.Pool{
 	New: func() any {
 		return &responseRecorder{
@@ -1518,15 +1519,27 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Right-size the body copy: the recorder's bytes.Buffer may have slack
-	// capacity from doubling, and stored objects are long-lived.
-	body := make([]byte, rec.body.Len())
-	copy(body, rec.body.Bytes())
-	header := rec.header.Clone()
+	// Transfer ownership of the recorder's header map and body buffer to
+	// the fetchResult, then give the recorder fresh internals before it is
+	// returned to the pool. This eliminates the body make+copy and the
+	// header.Clone() that the previous defensive copy required (~10 allocs
+	// for a typical response with N headers: original 2+N allocs → 2 allocs
+	// for the fresh map and buffer).
+	//
+	// The body slice is clipped to cap==len so the stored object doesn't
+	// retain the buffer's excess capacity (bytes.Buffer doubles its backing
+	// array, so cap can be up to 2x the content length).
+	//
+	// Safety: all singleflight waiters read res.Header and res.Body without
+	// mutating. The recorder gets fresh internals so the pool reuse is safe.
+	body := slices.Clip(rec.body.Bytes())
+	hdr := rec.header
+	rec.header = make(http.Header, 8)
+	rec.body = &bytes.Buffer{}
 
 	return fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     header,
+		Header:     hdr,
 		Body:       body,
 	}
 }

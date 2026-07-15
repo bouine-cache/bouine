@@ -92,6 +92,8 @@ type TieredStore struct {
 	checkpointWg sync.WaitGroup
 	// syncWg tracks the warm sync goroutine for join-on-close.
 	syncWg sync.WaitGroup
+	// compactInterval is the configured compaction check interval.
+	compactInterval time.Duration
 }
 
 // TieredConfig configures a TieredStore.
@@ -138,6 +140,9 @@ type TieredConfig struct {
 	// CheckpointWALThreshold triggers a checkpoint when the WAL entry
 	// count exceeds this value. Default 100000.
 	CheckpointWALThreshold int64
+	// CompactInterval controls how often the warm-tier compaction check
+	// runs. Default 30m. Set to -1 to disable periodic compaction.
+	CompactInterval time.Duration
 }
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
@@ -188,6 +193,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		logger:                 cfg.Logger,
 		walSyncInterval:        walSyncInterval,
 		compactStartupDelay:    cfg.CompactStartupDelay,
+		compactInterval:        cfg.CompactInterval,
 		checkpointInterval:     checkpointInterval,
 		checkpointWALThreshold: checkpointWALThreshold,
 	}
@@ -623,8 +629,20 @@ func (t *TieredStore) compactLoop() {
 	}
 	startupTimer := time.NewTimer(startupDelay)
 	defer startupTimer.Stop()
-	ticker := time.NewTicker(30 * time.Minute)
-	defer ticker.Stop()
+	// Use configured interval, default 30m. -1 disables periodic
+	// compaction (disk over-budget check on the 30s tick still runs).
+	interval := t.compactInterval
+	if interval == 0 {
+		interval = 30 * time.Minute
+	}
+	var ticker *time.Ticker
+	if interval > 0 {
+		ticker = time.NewTicker(interval)
+		defer ticker.Stop()
+	}
+	// Fast check tick for disk over-budget detection (every 30s).
+	checkTicker := time.NewTicker(30 * time.Second)
+	defer checkTicker.Stop()
 	startupDone := false
 	for {
 		select {
@@ -632,30 +650,62 @@ func (t *TieredStore) compactLoop() {
 			return
 		case <-startupTimer.C:
 			startupDone = true
-		case <-ticker.C:
+		case <-checkTicker.C:
+			if !startupDone {
+				continue
+			}
+			// Disk over-budget check: trigger compaction immediately
+			// if physical disk usage exceeds warm_max_disk_bytes or
+			// filesystem free space drops below min_free_disk.
+			if t.warm.DiskOverBudget() {
+				t.runCompaction("disk over-budget", true)
+			}
+		case <-periodicTick(ticker):
 			if !startupDone {
 				continue // still in startup delay period
 			}
 			if t.warm.NeedsCompaction() {
-				if err := t.warm.Compact(); err != nil {
-					t.logger.Error("warm tier compaction failed", "error", err)
-				} else {
-					t.logger.Info("warm tier compaction complete")
-					if err := t.rewriteWAL(); err != nil {
-						t.logger.Error("wal rewrite after compaction failed", "error", err)
-					} else {
-						// Write a fresh snapshot after compaction —
-						// segIDs and offsets changed, the old
-						// snapshot is stale.
-						if err := t.warm.WriteSnapshot(); err != nil {
-							t.logger.Error("snapshot write after compaction failed", "error", err)
-						}
-						t.walEntryCount.Store(0)
-					}
-				}
+				t.runCompaction("periodic", false)
 			}
 		}
 	}
+}
+
+// periodicTick returns the ticker channel if non-nil, or a nil channel
+// that blocks forever when periodic compaction is disabled (-1).
+func periodicTick(ticker *time.Ticker) <-chan time.Time {
+	if ticker == nil {
+		return nil // nil channel blocks forever in select
+	}
+	return ticker.C
+}
+
+// runCompaction executes a compaction cycle with post-compaction WAL
+// rewrite and snapshot write. The reason string is included in log
+// messages for observability (e.g., "periodic", "disk over-budget").
+// When force is true, the NeedsCompaction dead-byte ratio check is
+// skipped — used by the disk over-budget path where compaction must
+// run regardless of dead-byte ratio to attempt space reclamation.
+func (t *TieredStore) runCompaction(reason string, force bool) {
+	if !force && !t.warm.NeedsCompaction() {
+		return
+	}
+	if err := t.warm.Compact(); err != nil {
+		t.logger.Error("warm tier compaction failed", "reason", reason, "error", err)
+		return
+	}
+	t.logger.Info("warm tier compaction complete", "reason", reason)
+	if err := t.rewriteWAL(); err != nil {
+		t.logger.Error("wal rewrite after compaction failed", "error", err)
+		return
+	}
+	// Write a fresh snapshot after compaction — segIDs and offsets
+	// changed, the old snapshot is stale.
+	if err := t.warm.WriteSnapshot(); err != nil {
+		t.logger.Error("snapshot write after compaction failed", "error", err)
+		return
+	}
+	t.walEntryCount.Store(0)
 }
 
 // warmSyncLoop periodically batches hot-only entries into the warm tier

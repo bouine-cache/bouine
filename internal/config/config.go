@@ -133,6 +133,32 @@ type Storage struct {
 	// warm index is capped at ~16M entries (~2 GiB heap).
 	WarmMaxEntriesRatio int    `yaml:"warm_max_entries_ratio,omitempty" json:"warm_max_entries_ratio,omitempty"`
 	Eviction            string `yaml:"eviction,omitempty" json:"eviction,omitempty"`
+	// WarmMaxDiskBytes caps the total physical disk usage of warm-tier
+	// segment files (live + dead bytes). Unlike WarmMaxBytes which limits
+	// logical bytes in the index, this limits actual disk consumption.
+	// When exceeded, compaction is triggered immediately. Zero means
+	// unlimited (backward compatible).
+	WarmMaxDiskBytes ByteSize `yaml:"warm_max_disk_bytes,omitempty" json:"warm_max_disk_bytes,omitempty"`
+	// MinFreeDisk is the minimum free disk space (in bytes) to maintain
+	// on the warm-tier filesystem. When free space drops below this,
+	// compaction is triggered immediately and warm promotion is paused.
+	// Zero means no filesystem-level monitoring (backward compatible).
+	// This is defense-in-depth alongside WarmMaxDiskBytes: the latter
+	// catches bouine's own disk growth, while MinFreeDisk catches
+	// external growth (orphaned PVCs, other workloads).
+	MinFreeDisk ByteSize `yaml:"min_free_disk,omitempty" json:"min_free_disk,omitempty"`
+	// WarmPreallocate, when non-zero, pre-creates segment files at
+	// startup totaling this size. The warm store operates as a circular
+	// buffer: when all pre-allocated segments are full, the oldest sealed
+	// segment is evicted and overwritten. This eliminates disk
+	// amplification from append-only segments. Zero means create segments
+	// on demand (backward compatible, subject to disk amplification).
+	WarmPreallocate ByteSize `yaml:"warm_preallocate,omitempty" json:"warm_preallocate,omitempty"`
+	// CompactInterval controls how often the warm-tier compaction check
+	// runs. Default 30m (applied when warm_dir is set and the field is
+	// zero). Set to -1 to disable periodic compaction (not recommended —
+	// dead bytes accumulate without bound).
+	CompactInterval time.Duration `yaml:"compact_interval,omitempty" json:"compact_interval,omitempty"`
 	// BodyThreshold controls the hot/warm admission boundary during
 	// normal operation. Objects with BodySize > this value are written
 	// to warm on every Put (with fsync). Objects below this value are

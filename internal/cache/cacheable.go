@@ -65,13 +65,15 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 	// CDN-Cache-Control overrides Cache-Control for shared-cache
 	// decisions (RFC 9211). Use it when present.
 	var respCC Directives
-	if cdnCC, hasCDN := cdnCacheControl(respHeader); hasCDN {
+	var hasCDN bool
+	if cdnCC, ok := cdnCacheControl(respHeader); ok {
 		respCC = cdnCC
+		hasCDN = true
 	} else {
 		respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
 	}
 
-	if isCacheBlocked(status, respCC, reqHeader, respHeader) {
+	if isCacheBlocked(status, respCC, hasCDN, reqHeader, respHeader) {
 		return false
 	}
 
@@ -139,12 +141,14 @@ func IsCacheableWithDefault(status int, reqHeader, respHeader http.Header, negat
 		return false
 	}
 	var respCC Directives
-	if cdnCC, hasCDN := cdnCacheControl(respHeader); hasCDN {
+	var hasCDN bool
+	if cdnCC, ok := cdnCacheControl(respHeader); ok {
 		respCC = cdnCC
+		hasCDN = true
 	} else {
 		respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
 	}
-	if isCacheBlocked(status, respCC, reqHeader, respHeader) {
+	if isCacheBlocked(status, respCC, hasCDN, reqHeader, respHeader) {
 		return false
 	}
 	// Only successful / heuristically-cacheable statuses are eligible for
@@ -153,7 +157,61 @@ func IsCacheableWithDefault(status int, reqHeader, respHeader http.Header, negat
 	return isHeuristicStatus(status)
 }
 
-func isCacheBlocked(status int, respCC Directives, reqHeader, respHeader http.Header) bool {
+// parsedResponse holds pre-parsed cache-control directives so callers can
+// avoid re-parsing the same headers up to 6 times per miss (IsCacheable
+// parses, isCacheBlocked re-parses for hasCDN, IsCacheableWithDefault
+// re-parses again).
+type parsedResponse struct {
+	status     int
+	respCC     Directives
+	hasCDN     bool
+	reqHeader  http.Header
+	respHeader http.Header
+}
+
+// isCacheablePreParsed checks cacheability using pre-parsed directives.
+// This is the zero-reparse path for callers that have already called
+// cdnCacheControl or ParseCacheControl (e.g. buildObject).
+func (p *parsedResponse) isCacheable(negativeTTL time.Duration) bool {
+	if isCacheBlocked(p.status, p.respCC, p.hasCDN, p.reqHeader, p.respHeader) {
+		return false
+	}
+	if p.respCC.MaxAgeSet || p.respCC.SMaxAgeSet {
+		return true
+	}
+	if exp := p.respHeader.Get(header.Expires); exp != "" {
+		if !parseHTTPDate(exp).IsZero() {
+			return true
+		}
+	}
+	if p.respHeader.Get(header.LastModified) != "" && (isHeuristicStatus(p.status) || p.respCC.Public) {
+		if !p.hasCDN && isBlockedByPragma(p.respCC, p.respHeader) {
+			return false
+		}
+		return true
+	}
+	if negativeTTL > 0 && IsNegativeCacheable(p.status) {
+		return true
+	}
+	return false
+}
+
+// isCacheableWithDefaultPreParsed extends isCacheablePreParsed with the
+// operator-configured default-TTL fallback, using pre-parsed directives.
+func (p *parsedResponse) isCacheableWithDefault(negativeTTL, defaultTTL time.Duration) bool {
+	if p.isCacheable(negativeTTL) {
+		return true
+	}
+	if defaultTTL <= 0 {
+		return false
+	}
+	if isCacheBlocked(p.status, p.respCC, p.hasCDN, p.reqHeader, p.respHeader) {
+		return false
+	}
+	return isHeuristicStatus(p.status)
+}
+
+func isCacheBlocked(status int, respCC Directives, hasCDN bool, reqHeader, respHeader http.Header) bool {
 	// RFC 9111 §5.2.2.3: must-understand means the cache MAY store even when
 	// no-store is present, but ONLY if the cache understands the status code.
 	// Unknown status codes (e.g. 599) do NOT satisfy must-understand.
@@ -167,7 +225,7 @@ func isCacheBlocked(status int, respCC Directives, reqHeader, respHeader http.He
 	}
 	// Only check Pragma in the response when using the plain CC path;
 	// CDN-CC completely replaces the CC semantics so Pragma doesn't apply.
-	if _, hasCDN := cdnCacheControl(respHeader); !hasCDN {
+	if !hasCDN {
 		if isBlockedByPragma(respCC, respHeader) {
 			return true
 		}

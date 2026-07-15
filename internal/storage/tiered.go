@@ -142,6 +142,8 @@ type TieredConfig struct {
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
 // WAL is replayed on open to rebuild the warm-tier index.
+//
+//nolint:gocyclo // 19: store initialization has many independent config branches
 func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.BodyThreshold <= 0 {
@@ -272,6 +274,8 @@ func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
 // populated with size information directly, and RecomputeStats is skipped
 // — eliminating the multi-second segment scan on startup with millions of
 // keys. v1-only WALs fall back to RecomputeStats as before.
+//
+//nolint:gocyclo,funlen // WAL replay has many independent error/condition branches
 func (t *TieredStore) initWAL(walDir string) error {
 	t.walPath = walDir
 	l, err := wal.OpenAsync(walDir, t.walSyncInterval)

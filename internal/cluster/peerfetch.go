@@ -213,6 +213,8 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 
 // Fetch asks a peer for a cached object. Returns nil, nil on a cache
 // miss at the peer; returns an error only on network/protocol failure.
+//
+//nolint:gocyclo // 16: hop/error/decode branches are inherently branchy
 func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
 	if req.Hops >= MaxHops {
 		f.hopLimitHits.Add(1)

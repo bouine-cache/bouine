@@ -184,7 +184,7 @@ func (e *engine) run(ctx context.Context) error {
 
 	handler := e.buildDataPlane(rs)
 
-	e.startBackgroundTasks(g, rs, ctx)                               // rings snapshot, store metrics
+	e.startBackgroundTasks(g, rs)                                    // rings snapshot, store metrics
 	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
 	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
 	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
@@ -279,7 +279,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	rings, snapshotPath := e.initRings()
 	dpMetrics.Rings = rings
 
-	clusterNode, peerFetcher, broadcaster, peersFn, clusterMetrics := e.initCluster(ctx, store, rings)
+	clusterNode, peerFetcher, broadcaster, peersFn, clusterMetrics := e.initCluster(ctx, store)
 
 	cfCtx, cfCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cfCancel is stored in runState and called during shutdown
 	cfProp := e.initCloudflare(dpMetrics, cfCtx)                //nolint:contextcheck // detached lifecycle for CF async goroutines
@@ -361,7 +361,6 @@ func (e *engine) initRings() (*observability.Rings, string) {
 func (e *engine) initCluster(
 	ctx context.Context,
 	store storage.Store,
-	rings *observability.Rings,
 ) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.Metrics) {
 	if !e.cfg.Cluster.Enabled || e.cfg.Listen.Cluster == "" {
 		return nil, nil, nil, nil, nil
@@ -437,7 +436,7 @@ func (e *engine) buildDataPlane(rs *runState) http.Handler {
 	return e.buildHandler(rs)
 }
 
-func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState, ctx context.Context) {
+func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 	g.Go("rings", func(rCtx context.Context) error {
 		rs.rings.Start(rCtx, rs.snapshotPath)
 		return nil

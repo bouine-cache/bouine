@@ -60,10 +60,20 @@ func (s *Store) WriteSnapshot() error {
 
 // WriteSnapshotFromCopy writes a snapshot from a pre-copied index map.
 // Used by checkpoint() which takes the copy as part of its crash-safe
-// sequence. The caller must ensure idxSnap is not mutated during this call.
+// sequence. The caller must ensure idxSnap is not mutated during this
+// call. The segByID map is copied internally under s.mu.RLock, so the
+// caller does not need to synchronize access to it.
 func (s *Store) WriteSnapshotFromCopy(idxSnap map[uint64]warmLoc) error {
+	// Copy segByID under s.mu.RLock. The segByID map is modified by
+	// rebuildSegByID during compaction (under s.mu.Lock). Reading the
+	// map reference without the lock and then iterating it after release
+	// causes a concurrent map read and map write fatal crash.
+	// segByID has O(segments) entries (~hundreds), so the copy is cheap.
 	s.mu.RLock()
-	segByID := s.segByID
+	segByID := make(map[int]*Segment, len(s.segByID))
+	for id, seg := range s.segByID {
+		segByID[id] = seg
+	}
 	s.mu.RUnlock()
 
 	segSizes := make(map[int]int64)

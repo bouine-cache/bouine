@@ -127,6 +127,13 @@ type Record struct {
 	SegID  int
 }
 
+// mmapRef wraps the mmap'd []byte so it can be stored in an atomic.Pointer.
+// Allocated once per segment (in tryMmap), never mutated after creation.
+type mmapRef struct {
+	//nolint:unused // accessed only in warm_mmap_linux.go (build-tag split)
+	data []byte
+}
+
 // Segment is an append-only file on disk.
 type Segment struct {
 	ID       int
@@ -143,13 +150,12 @@ type Segment struct {
 	readers atomic.Int32
 	// mmap is a persistent MAP_SHARED mapping of the segment file used
 	// for zero-syscall point reads on inactive (sealed) segments. It is
-	// protected by seg.mu for write serialization (tryMmap from multiple
-	// Get goroutines under s.mu.RLock) and by s.mu for lifecycle (munmap
-	// under s.mu.Lock in Compact/Close). nil on non-Linux, before
-	// initialization, or while the segment is active. The mapping stays
-	// valid after the fd is closed by fdCache eviction (POSIX guarantee);
-	// only Compact and Close munmap.
-	mmap []byte
+	// an atomic.Pointer for race-free access from multiple Get goroutines
+	// holding s.mu.RLock. The mapping stays valid after the fd is closed
+	// by fdCache eviction (POSIX guarantee); only Compact and Close munmap
+	// (under s.mu.Lock, which excludes all RLock holders). nil on non-Linux,
+	// before initialization, or while the segment is active.
+	mmap atomic.Pointer[mmapRef]
 }
 
 // ensureOpen opens the segment file if not already open. Must be called

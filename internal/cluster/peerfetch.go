@@ -101,6 +101,15 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 	return f.hits.Load(), f.misses.Load(), f.hopLimitHits.Load(), f.latN.Load(), f.latSumMs.Load()
 }
 
+// Close drains idle cluster connections. Should be called during shutdown
+// so that rolling restarts don't leave TIME_WAIT sockets on peers.
+func (f *PeerFetcher) Close(_ context.Context) error {
+	if t, ok := f.client.Transport.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
+	return nil
+}
+
 // NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
 // mTLS credentials. If nil a plain HTTP client is used (test-only).
 // reg, if non-nil, receives Prometheus metric registration.
@@ -112,13 +121,15 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher 
 // RPCs (peer fetch, broadcast). The defaults leave MaxIdleConnsPerHost at
 // Go's default of 2, which causes TLS handshake storms under bursty miss
 // traffic. Setting it to 64 matches the origin pool and keeps idle
-// connections warm for reuse.
+// connections warm for reuse. MaxConnsPerHost caps concurrent connections
+// per peer to prevent FD exhaustion during purge storms in strong mode.
 func newClusterTransport(tlsCfg *tls.Config) *http.Transport {
 	return &http.Transport{
 		ForceAttemptHTTP2:   true,
 		TLSClientConfig:     tlsCfg,
 		MaxIdleConns:        512,
 		MaxIdleConnsPerHost: 64,
+		MaxConnsPerHost:     256,
 		IdleConnTimeout:     90 * time.Second,
 		DialContext: (&net.Dialer{
 			Timeout:   2 * time.Second,

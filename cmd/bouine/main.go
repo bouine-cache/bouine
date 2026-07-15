@@ -6,15 +6,25 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"os"
+	"time"
 
 	"github.com/bouine-cache/bouine/cmd/bouine/cmd"
 )
 
 func main() {
 	if err := cmd.Root().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// Emit a structured JSON error line so log shippers can parse it.
+		// Raw fmt.Fprintln would inject a non-JSON line into the log stream,
+		// breaking structured log pipelines.
+		entry := map[string]any{
+			"time":  time.Now().UTC().Format(time.RFC3339Nano),
+			"level": "ERROR",
+			"msg":   "fatal error",
+			"error": err.Error(),
+		}
+		_ = json.NewEncoder(os.Stderr).Encode(entry)
 		os.Exit(1)
 	}
 }

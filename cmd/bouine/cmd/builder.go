@@ -432,6 +432,9 @@ func buildTransport(pc config.UpstreamPool) http.RoundTripper {
 		ResponseHeaderTimeout: responseHeaderTimeout,
 		ForceAttemptHTTP2:     true,
 	}
+	if pc.Connect.MaxConnections > 0 {
+		base.MaxConnsPerHost = pc.Connect.MaxConnections
+	}
 	if pc.Connect.HedgeTimeout > 0 {
 		return &origin.HedgedTransport{Inner: base, Timeout: pc.Connect.HedgeTimeout}
 	}

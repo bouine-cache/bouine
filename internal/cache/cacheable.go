@@ -186,7 +186,7 @@ func newParsedResponse(status int, reqHeader, respHeader http.Header) parsedResp
 	return p
 }
 
-// isCacheablePreParsed checks cacheability using pre-parsed directives.
+// isCacheable checks cacheability using pre-parsed directives.
 // This is the zero-reparse path for callers that have already called
 // cdnCacheControl or ParseCacheControl (e.g. buildObject).
 func (p *parsedResponse) isCacheable(negativeTTL time.Duration) bool {
@@ -213,7 +213,7 @@ func (p *parsedResponse) isCacheable(negativeTTL time.Duration) bool {
 	return false
 }
 
-// isCacheableWithDefaultPreParsed extends isCacheablePreParsed with the
+// isCacheableWithDefault extends isCacheable with the
 // operator-configured default-TTL fallback, using pre-parsed directives.
 func (p *parsedResponse) isCacheableWithDefault(negativeTTL, defaultTTL time.Duration) bool {
 	if p.isCacheable(negativeTTL) {

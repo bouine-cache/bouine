@@ -153,7 +153,7 @@ func BenchmarkHandler_CacheMiss_Cacheable(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		w.Reset()
 		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
 		h.ServeHTTP(w, req)
@@ -188,7 +188,7 @@ func BenchmarkHandler_CacheMiss_Vary(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		w.Reset()
 		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
 		req.Header.Set("Accept-Encoding", "gzip")

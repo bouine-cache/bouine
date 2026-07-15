@@ -180,6 +180,33 @@ func readCgroupInt(path string) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 }
 
+// RaiseFileLimit raises the RLIMIT_NOFILE soft limit to at least want,
+// capped by the current hard limit. This is called once at startup
+// before any listeners or storage are opened. Containers often inherit
+// a low default (1024) from the container runtime; without raising it,
+// a cache with hundreds of segment files plus data-plane connections
+// can exhaust file descriptors under load.
+//
+// Returns the new soft limit and nil on success, or the current soft
+// limit and an error if the limit could not be raised.
+func RaiseFileLimit(want uint64) (uint64, error) {
+	var rlim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &rlim); err != nil {
+		return 0, err
+	}
+	if rlim.Cur >= want {
+		return rlim.Cur, nil
+	}
+	if rlim.Max < want {
+		want = rlim.Max
+	}
+	rlim.Cur = want
+	if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &rlim); err != nil {
+		return 0, err
+	}
+	return rlim.Cur, nil
+}
+
 // Pwritev writes from multiple buffers to the file at the given offset
 // in a single syscall (scatter-gather write).
 func Pwritev(fd int, buffers [][]byte, offset int64) (int, error) {

@@ -89,10 +89,16 @@ type invalidationOps struct {
 	RefreshFn func(ctx context.Context, url string) error
 }
 
-// applyRuntimeTuning sets GOMAXPROCS from the cgroup CPU quota and
-// applies the GOGC override from config. Called once at startup before
-// any subsystems are initialized.
+// applyRuntimeTuning sets GOMAXPROCS from the cgroup CPU quota, raises
+// the file descriptor limit, and applies the GOGC override from config.
+// Called once at startup before any subsystems are initialized.
 func (e *engine) applyRuntimeTuning() {
+	if n, err := platform.RaiseFileLimit(65536); err != nil {
+		e.logger.Warn("failed to raise file descriptor limit", "error", err)
+	} else if n > 0 {
+		e.logger.Info("file descriptor limit", "soft", n)
+	}
+
 	if os.Getenv("GOMAXPROCS") == "" {
 		if n := platform.EffectiveGOMAXPROCS(); n > 0 && n != runtime.GOMAXPROCS(0) {
 			runtime.GOMAXPROCS(n)

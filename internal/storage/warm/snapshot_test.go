@@ -222,6 +222,55 @@ func TestSnapshotSegmentSizeMismatch(t *testing.T) {
 	}
 }
 
+func TestSnapshotSegmentGrewAfterCheckpoint(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if _, _, err := s.Put(1, []byte("initial")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := s.WriteSnapshot(); err != nil {
+		t.Fatalf("writeSnapshot: %v", err)
+	}
+	snapPath := s.SnapshotPath()
+
+	// Simulate writes that happen after the checkpoint: append more
+	// data to the same segment so its on-disk size grows beyond the
+	// snapshot size. The WAL would normally capture these writes.
+	if _, _, err := s.Put(2, []byte("appended-data")); err != nil {
+		t.Fatalf("put after snapshot: %v", err)
+	}
+
+	// Simulate a hard kill (SIGKILL) — close the file handles without
+	// writing a new snapshot. The on-disk snapshot still reflects
+	// only key 1, but the segment files contain both keys.
+	s.mu.RLock()
+	segs := make([]*Segment, len(s.segs))
+	copy(segs, s.segs)
+	s.mu.RUnlock()
+	for _, seg := range segs {
+		_ = seg.Close()
+	}
+
+	s2, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	// The snapshot should load successfully despite segments being
+	// larger on disk — the WAL replay applies the delta on top.
+	if err := s2.LoadSnapshot(snapPath); err != nil {
+		t.Fatalf("loadSnapshot should succeed when segments grew: %v", err)
+	}
+	if got := s2.IndexLen(); got != 1 {
+		t.Fatalf("index len = %d, want 1 (snapshot has 1 entry; WAL adds the 2nd)", got)
+	}
+}
+
 func TestSnapshotCloseWritesSnapshot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

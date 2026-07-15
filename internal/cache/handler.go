@@ -1616,7 +1616,33 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
 
+	obj.SerializedHead = serializeHead(obj)
+
 	return obj
+}
+
+// serializeHead pre-renders the HTTP response header block (static
+// headers as "Key: Value\r\n" pairs, without status line or trailing
+// \r\n) at cache-fill time. The H1 fast-path uses this to write headers
+// directly via net.Buffers without iterating the header map per request.
+//
+// Excludes dynamic headers (Age, X-Cache, X-Cache-Source, Warning), internal
+// headers (X-Bouine-*), and no-cache fields stripped per RFC 9111 §5.2.2.4.
+func serializeHead(obj *api.Object) []byte {
+	noCacheFields := parseNoCacheFieldNames(obj.CacheControl)
+	buf := make([]byte, 0, 512)
+	n := obj.Header.Len()
+	for i := 0; i < n; i++ {
+		key, value := obj.Header.At(i)
+		if skipStaticHeader(key, noCacheFields) {
+			continue
+		}
+		buf = append(buf, key...)
+		buf = append(buf, ": "...)
+		buf = append(buf, value...)
+		buf = append(buf, '\r', '\n')
+	}
+	return buf
 }
 
 // computeTTL derives the freshness lifetime for a response, applying

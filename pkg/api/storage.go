@@ -85,6 +85,14 @@ type Object struct {
 	// time. Pre-parsed once so the read path never re-parses it per request.
 	// Not serialized (re-derived from Header on warm-tier load).
 	OriginAge time.Duration `json:"-"`
+
+	// SerializedHead is the pre-rendered HTTP response header block
+	// (static headers as "Key: Value\r\n" pairs, without the status line
+	// or trailing \r\n). Computed once at store time so the H1 fast-path
+	// can write it directly via net.Buffers without iterating the header
+	// map on every cache hit. Not serialized (re-derived on warm-tier
+	// load via serializeHead).
+	SerializedHead []byte `json:"-"`
 }
 
 // Fresh reports whether the object is still within its freshness lifetime

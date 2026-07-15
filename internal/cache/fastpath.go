@@ -155,15 +155,28 @@ func qualifiesForFastPath(req *api.RawRequest) bool {
 }
 
 // serializeResponse builds a FastPathResponse from a cached object.
-// It serializes the status line + headers into a pooled buffer and
-// sets up net.Buffers for writev. The returned response is pooled;
-// the caller must call Release after writing.
+// It writes the status line + pre-serialized static headers + dynamic
+// headers (Age, X-Cache, X-Cache-Source, Warning, Date) into a pooled
+// buffer and sets up net.Buffers for writev.
 func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) *api.FastPathResponse {
 	bufPtr := fastPathHeaderPool.Get().(*[]byte)
 	hbuf := (*bufPtr)[:0]
 
 	hbuf = appendStatusLine(hbuf, obj.StatusCode)
-	hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult)
+
+	// Use pre-serialized static headers if available — avoids iterating
+	// the header map on every cache hit.
+	if len(obj.SerializedHead) > 0 {
+		hbuf = append(hbuf, obj.SerializedHead...)
+	} else {
+		// Fallback: serialize headers on-the-fly (warm-tier objects loaded
+		// from disk without pre-serialization).
+		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult)
+		return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
+	}
+
+	// Append dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date).
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult)
 
 	if cap(hbuf) > maxFastPathHeaderBytes {
 		*bufPtr = hbuf
@@ -174,27 +187,20 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
 }
 
-// appendResponseHeaders serializes the stored object's headers plus
-// dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date) into hbuf.
-// Uses header.Map.Len + header.Map.At for closure-free iteration to
-// avoid heap-allocating a Range callback on the hit path.
+// appendResponseHeaders serializes the stored object's static headers
+// into hbuf, then appends dynamic headers via appendDynamicHeaders.
+// Used as a fallback when SerializedHead is not available (warm-tier
+// objects loaded from disk without pre-serialization).
 func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
-	// Skip parseNoCacheFieldNames when Cache-Control is empty — the common
-	// case for most cached responses. Avoids a redundant ParseCacheControl
-	// call that evaluateFromRaw already performed.
 	var noCacheFields map[string]bool
 	if obj.CacheControl != "" {
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
 	}
-	hasDate := false
 	n := obj.Header.Len()
 	for i := 0; i < n; i++ {
 		key, value := obj.Header.At(i)
-		if shouldSkipHeader(key, noCacheFields) {
+		if skipStaticHeader(key, noCacheFields) {
 			continue
-		}
-		if key == header.Date {
-			hasDate = true
 		}
 		hbuf = append(hbuf, key...)
 		hbuf = append(hbuf, ": "...)
@@ -202,12 +208,20 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 		hbuf = append(hbuf, '\r', '\n')
 	}
 
-	if !hasDate {
-		hbuf = append(hbuf, header.Date...)
-		hbuf = append(hbuf, ": "...)
-		hbuf = now.UTC().AppendFormat(hbuf, http.TimeFormat)
-		hbuf = append(hbuf, '\r', '\n')
-	}
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult)
+	return hbuf
+}
+
+// appendDynamicHeaders writes the per-request dynamic headers (Date, Age,
+// X-Cache, X-Cache-Source, Warning, Connection) plus the trailing \r\n
+// that terminates the HTTP header block. Called after either the
+// pre-serialized static headers or the fallback header iteration.
+func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
+	// Date is always dynamic (set per-request).
+	hbuf = append(hbuf, header.Date...)
+	hbuf = append(hbuf, ": "...)
+	hbuf = now.UTC().AppendFormat(hbuf, http.TimeFormat)
+	hbuf = append(hbuf, '\r', '\n')
 
 	age := ComputeAge(obj, now)
 	hbuf = append(hbuf, header.Age...)
@@ -326,12 +340,26 @@ func shouldSkipHeader(key string, noCacheFields map[string]bool) bool {
 		header.TE, header.Trailer, header.Upgrade:
 		return true
 	case header.Age:
-		// Age is recomputed by ComputeAge and appended after the
-		// stored-header iteration. Skip the stored origin value to
-		// avoid emitting two Age headers (RFC 9111 §4.2.3).
 		return true
 	}
 	return noCacheFields[key]
+}
+
+// skipStaticHeader reports whether a header should be excluded from the
+// pre-serialized static header block (used by both serializeHead and the
+// fallback appendResponseHeaders). It combines shouldSkipHeader (internal,
+// hop-by-hop, no-cache fields) with dynamic headers that are set
+// per-request by appendDynamicHeaders (Date, X-Cache, X-Cache-Source,
+// Warning).
+func skipStaticHeader(key string, noCacheFields map[string]bool) bool {
+	if shouldSkipHeader(key, noCacheFields) {
+		return true
+	}
+	switch key {
+	case header.Date, header.XCache, header.XCacheSource, header.Warning:
+		return true
+	}
+	return false
 }
 
 // parseNoCacheFieldNames extracts the field names from a Cache-Control

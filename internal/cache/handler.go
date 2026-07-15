@@ -1184,8 +1184,15 @@ func (h *Handler) writeAndMaybeStore(
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
 		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
 		if storeKey != primaryKey {
-			primaryObj := buildObject(primaryKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
-			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)
+			// Shallow-copy the object and change only the Key. This avoids
+			// a second full buildObject call (~5 allocs: api.Object,
+			// header.FromHTTP, serializeHead, parseSurrogateKeys, etc.).
+			// The two objects share Header and Body, which are immutable
+			// after buildObject. Hits are per-pointer (HotStore.Get
+			// increments entry.obj.Hits on the specific stored pointer).
+			primaryObj := *obj
+			primaryObj.Key = primaryKey
+			h.storeObject(r.Context(), primaryKey, &primaryObj, r, false, 0)
 		}
 	}
 }

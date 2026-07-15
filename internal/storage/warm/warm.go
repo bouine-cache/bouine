@@ -170,6 +170,7 @@ func (seg *Segment) openLocked() error {
 		_ = f.Close()
 		return fmt.Errorf("warm: stat %s: %w", seg.Path, err)
 	}
+	_ = platform.FadviseRandom(int(f.Fd()), 0, 0) //nolint:gosec // fd from os.OpenFile; hint kernel for random-access reads
 	seg.f = f
 	seg.size = info.Size()
 	seg.opened.Store(true)
@@ -669,7 +670,7 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 	seg.readers.Add(1)
 	defer seg.readers.Add(-1)
 	s.fdCache.touch(seg)
-	rec, err := readRecordAt(seg.f, loc.offset, loc.segID)
+	rec, err := readRecordAt(seg, loc.offset, loc.size)
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
 			s.dropStaleIndex(key, loc)
@@ -886,7 +887,7 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 	seg.readers.Add(1)
 	defer seg.readers.Add(-1)
 	s.fdCache.touch(seg)
-	rec, err := readRecordAt(seg.f, offset, segID)
+	rec, err := readRecordAt(seg, offset, 0) // size unknown for ReadRecord API
 	if err != nil {
 		if errors.Is(err, ErrTornRecord) {
 			return nil, nil
@@ -1450,11 +1451,58 @@ func writeRecordAt(f *os.File, offset int64, magic uint32, key uint64, body []by
 	return nil
 }
 
-func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
+func readRecordAt(seg *Segment, offset int64, size int64) (*Record, error) {
+	// Fast path: single pread when the total record size is known from
+	// the index (v2 WAL entries). This cuts 3 syscalls to 1.
+	if size > 0 {
+		return readRecordAtSingle(seg, offset, size)
+	}
+	// Fallback: 3-pread path for v1 WAL entries where size is unknown.
+	return readRecordAtLegacy(seg, offset)
+}
+
+// readRecordAtSingle reads an entire record in one pread syscall using the
+// total on-disk record size from the index. The body aliases the read buffer
+// (no separate body allocation). The full buffer stays alive until the body
+// is consumed by decode+promote; the overhead is HeaderLen+FooterLen = 20 bytes
+// per record, temporary. Do NOT copy the body out — that adds an allocation
+// and defeats the purpose.
+func readRecordAtSingle(seg *Segment, offset int64, size int64) (*Record, error) {
+	buf := make([]byte, size)
+	if _, err := seg.f.ReadAt(buf, offset); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrTornRecord
+		}
+		return nil, fmt.Errorf("warm: read record at %d: %w", offset, err)
+	}
+
+	magic := binary.LittleEndian.Uint32(buf[0:4])
+	key := binary.LittleEndian.Uint64(buf[4:12])
+	bodyLen := binary.LittleEndian.Uint32(buf[12:16])
+	body := buf[HeaderLen : HeaderLen+bodyLen] // aliases buf, no separate alloc
+
+	storedCRC := binary.LittleEndian.Uint32(buf[len(buf)-FooterLen:])
+	if crc32.Checksum(buf[:len(buf)-FooterLen], crcTable) != storedCRC {
+		return nil, fmt.Errorf("warm: CRC mismatch at seg %d offset %d", seg.ID, offset)
+	}
+
+	return &Record{
+		Key:    key,
+		Body:   body,
+		IsTomb: magic == magicDead,
+		Offset: offset,
+		SegID:  seg.ID,
+	}, nil
+}
+
+// readRecordAtLegacy is the 3-pread fallback for v1 WAL entries where the
+// total record size is unknown. Reads header (16B), body (N bytes), and
+// footer (4B) in separate pread syscalls.
+func readRecordAtLegacy(seg *Segment, offset int64) (*Record, error) {
 	hdrPtr := recordHdrPool.Get().(*[]byte)
 	hdr := *hdrPtr
 	defer recordHdrPool.Put(hdrPtr)
-	if _, err := f.ReadAt(hdr, offset); err != nil {
+	if _, err := seg.f.ReadAt(hdr, offset); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, ErrTornRecord
 		}
@@ -1468,7 +1516,7 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 	var body []byte
 	if bodyLen > 0 {
 		body = make([]byte, bodyLen)
-		if _, err := f.ReadAt(body, offset+HeaderLen); err != nil {
+		if _, err := seg.f.ReadAt(body, offset+HeaderLen); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, ErrTornRecord
 			}
@@ -1479,7 +1527,7 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 	footPtr := recordFootPool.Get().(*[]byte)
 	footBuf := *footPtr
 	defer recordFootPool.Put(footPtr)
-	if _, err := f.ReadAt(footBuf, offset+HeaderLen+int64(bodyLen)); err != nil {
+	if _, err := seg.f.ReadAt(footBuf, offset+HeaderLen+int64(bodyLen)); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, ErrTornRecord
 		}
@@ -1493,7 +1541,7 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 		_, _ = crc.Write(body)
 	}
 	if crc.Sum32() != storedCRC {
-		return nil, fmt.Errorf("warm: CRC mismatch at seg %d offset %d", segID, offset)
+		return nil, fmt.Errorf("warm: CRC mismatch at seg %d offset %d", seg.ID, offset)
 	}
 
 	return &Record{
@@ -1501,7 +1549,7 @@ func readRecordAt(f *os.File, offset int64, segID int) (*Record, error) {
 		Body:   body,
 		IsTomb: magic == magicDead,
 		Offset: offset,
-		SegID:  segID,
+		SegID:  seg.ID,
 	}, nil
 }
 
@@ -1580,12 +1628,19 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 	return nil
 }
 
+// readRecordAtLegacyFile is the file-based 3-pread fallback used by
+// scanSegmentReadAt, which only has an *os.File (not a *Segment).
+func readRecordAtLegacyFile(f *os.File, offset int64, segID int) (*Record, error) {
+	seg := &Segment{ID: segID, f: f}
+	return readRecordAtLegacy(seg, offset)
+}
+
 // scanSegmentReadAt is the fallback scan implementation using ReadAt,
 // used when mmap is not available or fails.
 func scanSegmentReadAt(f *os.File, segID int, size int64, fn func(Record) error) error {
 	offset := int64(0)
 	for offset < size {
-		rec, err := readRecordAt(f, offset, segID)
+		rec, err := readRecordAtLegacyFile(f, offset, segID)
 		if err != nil {
 			if errors.Is(err, ErrTornRecord) {
 				return nil

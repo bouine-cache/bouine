@@ -537,7 +537,103 @@ func BenchmarkReadRecordAt(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		rec, err := readRecordAt(seg.f, off, segID)
+		rec, err := readRecordAt(seg, off, 0) // size=0: use legacy 3-pread path
+		if err != nil {
+			b.Fatal(err)
+		}
+		if rec.Key != 1 {
+			b.Fatalf("key=%d, want 1", rec.Key)
+		}
+	}
+}
+
+// TestReadRecordAtSinglePread verifies the single-pread fast path (size > 0)
+// returns the same data as the legacy 3-pread path (size == 0).
+func TestReadRecordAtSinglePread(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := []byte("test body for single pread verification")
+	segID, off, err := s.Put(1, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Compute the total record size: HeaderLen + len(body) + FooterLen.
+	totalSize := int64(HeaderLen + len(body) + FooterLen)
+
+	s.mu.RLock()
+	seg := s.segs[segID]
+	s.mu.RUnlock()
+	if seg == nil {
+		t.Fatalf("segment %d not found", segID)
+	}
+
+	// Single-pread path (size > 0).
+	recSingle, err := readRecordAt(seg, off, totalSize)
+	if err != nil {
+		t.Fatalf("readRecordAt single: %v", err)
+	}
+	if recSingle.Key != 1 {
+		t.Errorf("single: key=%d, want 1", recSingle.Key)
+	}
+	if string(recSingle.Body) != string(body) {
+		t.Errorf("single: body=%q, want %q", recSingle.Body, body)
+	}
+	if recSingle.SegID != segID {
+		t.Errorf("single: segID=%d, want %d", recSingle.SegID, segID)
+	}
+
+	// Legacy 3-pread path (size == 0).
+	recLegacy, err := readRecordAt(seg, off, 0)
+	if err != nil {
+		t.Fatalf("readRecordAt legacy: %v", err)
+	}
+	if recLegacy.Key != recSingle.Key {
+		t.Errorf("key mismatch: legacy=%d, single=%d", recLegacy.Key, recSingle.Key)
+	}
+	if string(recLegacy.Body) != string(recSingle.Body) {
+		t.Errorf("body mismatch: legacy=%q, single=%q", recLegacy.Body, recSingle.Body)
+	}
+}
+
+// BenchmarkReadRecordAtSinglePread measures the single-pread path (1 syscall)
+// vs the legacy 3-pread path (3 syscalls).
+func BenchmarkReadRecordAtSinglePread(b *testing.B) {
+	dir := b.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	body := []byte(fmt.Sprintf("bench-body-padding-to-256-bytes" +
+		"------------------------------------------------------------" +
+		"------------------------------------------------------------" +
+		"------------------------------------------------------------" +
+		"----------------------------------------------"))
+	segID, off, err := s.Put(1, body)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	totalSize := int64(HeaderLen + len(body) + FooterLen)
+
+	s.mu.RLock()
+	seg := s.segs[segID]
+	s.mu.RUnlock()
+	if seg == nil {
+		b.Fatalf("segment %d not found", segID)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		rec, err := readRecordAt(seg, off, totalSize)
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -43,7 +43,7 @@ type TieredStore struct {
 	warmSyncOffset int
 	// warmSyncCycleCount tracks sync cycles since the last full
 	// reconciliation scan. Every 10th cycle the fallback scan runs
-	// to catch any hotOnly drift.
+	// to catch any hasBackup flag drift.
 	warmSyncCycleCount int
 
 	// walSyncInterval controls the async WAL fsync batching interval.
@@ -742,10 +742,10 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 // collectHotOnlyKeys returns hot keys that are not in the warm tier,
 // capped at warmSyncBatchSize with rotation across cycles.
 //
-// On normal cycles it snapshots the incrementally-maintained hotOnly set
-// (see hot.go), avoiding the O(hotKeys + warmKeys) allocation of the old
-// diff approach. Every 10th cycle a full fallback scan reconciles any
-// drift the incremental updates may have missed.
+// On normal cycles it scans hot-tier entries filtered by !hasBackup
+// (see hot.go HotOnlyKeys), avoiding the O(hotKeys + warmKeys) allocation
+// of the old diff approach. Every 10th cycle a full fallback scan
+// reconciles any drift the hasBackup flag may have missed.
 func (t *TieredStore) collectHotOnlyKeys() []api.Key {
 	t.warmSyncCycleCount++
 	if t.warmSyncCycleCount%10 == 0 {

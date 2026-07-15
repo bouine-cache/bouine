@@ -84,10 +84,6 @@ type shard struct {
 	evict       *sieve.List[api.Key]
 	bytes       int64
 	backedCount int64 // entries with a backup (cheap to evict)
-	// hotOnly tracks keys in this shard that are not backed by the warm
-	// tier. Used by collectHotOnlyKeys to avoid copying all hot and
-	// warm keys every sync cycle. Protected by mu.
-	hotOnly map[api.Key]struct{}
 }
 
 type hotEntry struct {
@@ -205,7 +201,6 @@ func NewHotStore(cfg HotConfig) *HotStore {
 	for i := range shards {
 		shards[i].entries = make(map[api.Key]*hotEntry)
 		shards[i].evict = sieve.NewList[api.Key]()
-		shards[i].hotOnly = make(map[api.Key]struct{})
 	}
 	reaperInterval := defaultReaperInterval
 	if cfg.ReaperInterval > 0 {
@@ -313,7 +308,6 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.sieve)
 		delete(s.entries, key)
-		delete(s.hotOnly, key)
 		h.stats.evictions.Add(1)
 		cur.obj = nil
 		cur.sieve = nil
@@ -352,7 +346,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 			h.notifyEvict(evKey, old)
 			s.bytes -= objSize(old.obj)
 			delete(s.entries, evKey)
-			delete(s.hotOnly, evKey)
 			h.stats.evictions.Add(1)
 			old.obj = nil
 			old.sieve = nil
@@ -372,8 +365,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		s.evict.Remove(old.sieve)
 		if old.hasBackup {
 			s.backedCount--
-		} else {
-			delete(s.hotOnly, key)
 		}
 		old.obj = nil
 		old.sieve = nil
@@ -390,7 +381,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	e.sieve = se
 	s.entries[key] = e
 	s.bytes += size
-	s.hotOnly[key] = struct{}{} // new entry is not backed; SetBacked will remove it
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
 
@@ -448,7 +438,6 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
-			delete(s.hotOnly, key)
 			h.stats.evictions.Add(1)
 			e.obj = nil
 			e.sieve = nil
@@ -483,7 +472,6 @@ func (h *HotStore) sweeper() {
 					h.notifyEvict(evKey, old)
 					s.bytes -= objSize(old.obj)
 					delete(s.entries, evKey)
-					delete(s.hotOnly, evKey)
 					h.stats.evictions.Add(1)
 				}
 			}
@@ -503,7 +491,6 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.sieve)
 		delete(s.entries, key)
-		delete(s.hotOnly, key)
 		e.obj = nil
 		e.sieve = nil
 		e.hasBackup = false
@@ -571,7 +558,6 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
-			delete(s.hotOnly, key)
 			h.stats.evictions.Add(1)
 			n++
 			e.obj = nil
@@ -736,7 +722,6 @@ func (h *HotStore) SetBacked(key api.Key) {
 	if e, ok := s.entries[key]; ok && !e.hasBackup {
 		e.hasBackup = true
 		s.backedCount++
-		delete(s.hotOnly, key) // now backed by warm, no longer hot-only
 	}
 }
 
@@ -750,7 +735,6 @@ func (h *HotStore) ClearBacked(key api.Key) {
 	if e, ok := s.entries[key]; ok && e.hasBackup {
 		e.hasBackup = false
 		s.backedCount--
-		s.hotOnly[key] = struct{}{} // warm evicted it, back to hot-only
 	}
 }
 
@@ -813,13 +797,14 @@ func (h *HotStore) Keys() []api.Key {
 	return keys
 }
 
-// HotOnlyKeys returns up to limit keys from the hotOnly sets across all
-// shards, starting at offset % total. Also returns the total hot-only
-// count so callers can advance their rotation offset without a separate
-// scan. The returned keys are unsorted.
+// HotOnlyKeys returns up to limit hot-tier keys that are not backed by
+// a slower tier, starting at offset % total. Also returns the total
+// hot-only count so callers can advance their rotation offset without a
+// separate scan. The returned keys are unsorted.
 //
-// Each shard is locked individually with a read lock, so concurrent
-// writers are not blocked for the full scan.
+// This iterates s.entries and filters by !hasBackup, trading O(N) scan
+// cost on the cold warm-sync path for zero map overhead on the hot Put
+// path. Each shard is locked individually with a read lock.
 func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	if limit <= 0 {
 		return nil, 0
@@ -830,7 +815,11 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		total += len(s.hotOnly)
+		for _, e := range s.entries {
+			if !e.hasBackup {
+				total++
+			}
+		}
 		s.mu.RUnlock()
 	}
 	if total == 0 {
@@ -853,7 +842,10 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 		}
 		s := &h.shards[i]
 		s.mu.RLock()
-		for k := range s.hotOnly {
+		for k, e := range s.entries {
+			if e.hasBackup {
+				continue
+			}
 			if skipped < offset {
 				skipped++
 				continue

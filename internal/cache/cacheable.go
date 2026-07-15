@@ -169,6 +169,23 @@ type parsedResponse struct {
 	respHeader http.Header
 }
 
+// newParsedResponse constructs a parsedResponse from the response and
+// request headers, parsing Cache-Control/CDN-Cache-Control exactly once.
+func newParsedResponse(status int, reqHeader, respHeader http.Header) parsedResponse {
+	p := parsedResponse{
+		status:     status,
+		reqHeader:  reqHeader,
+		respHeader: respHeader,
+	}
+	if cdnCC, hasCDN := cdnCacheControl(respHeader); hasCDN {
+		p.respCC = cdnCC
+		p.hasCDN = hasCDN
+	} else {
+		p.respCC = ParseCacheControl(mergeHeaderValues(respHeader, header.CacheControl))
+	}
+	return p
+}
+
 // isCacheablePreParsed checks cacheability using pre-parsed directives.
 // This is the zero-reparse path for callers that have already called
 // cdnCacheControl or ParseCacheControl (e.g. buildObject).

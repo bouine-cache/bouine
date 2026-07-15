@@ -768,9 +768,9 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
 	// the error to be forwarded to the client.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, primaryKey, obj, now, src)
+		h.fetchAndStoreStayinAlive(w, r, lookupKey, primaryKey, obj, now, src)
 	} else {
-		h.fetchAndStore(w, r, primaryKey)
+		h.fetchAndStore(w, r, lookupKey, primaryKey)
 	}
 }
 
@@ -975,39 +975,41 @@ func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult 
 	return v.(fetchResult)
 }
 
-func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.Key) {
-	res := h.collapsedFetch(r, key)
+func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key) {
+	res := h.collapsedFetch(r, lookupKey)
 	if res.Err != nil {
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res, key)
+	h.writeAndMaybeStore(w, r, res, primaryKey)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
 // serving the super-stale obj if the upstream is unavailable.
 // src is the original storage-tier source from lookup (hot/warm),
 // threaded to stale-fallback serveObject calls.
-// key is the primary key: the miss path does a full (non-conditional)
-// fetch, so collapsing on the primary key is correct — the Vary variant
-// key is computed from the response in writeAndMaybeStore.
-func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
-	res := h.collapsedFetch(r, key)
+// lookupKey is the key under which the stale object was found (may be a
+// Vary variant key); it is used for singleflight dedup so that different
+// Vary variants do not collapse into a single fetch.
+// primaryKey is the canonical key used for Vary variant storage in
+// writeAndMaybeStore.
+func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source) {
+	res := h.collapsedFetch(r, lookupKey)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
-			"error", res.Err, "key", key)
+			"error", res.Err, "key", lookupKey)
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
-			"status", res.StatusCode, "key", key)
+			"status", res.StatusCode, "key", lookupKey)
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res, key)
+	h.writeAndMaybeStore(w, r, res, primaryKey)
 }
 
 // revalidate sends a conditional request to the origin and refreshes the
@@ -1543,20 +1545,24 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Transfer ownership of the recorder's header map and body buffer to
-	// the fetchResult, then give the recorder fresh internals before it is
-	// returned to the pool. This eliminates the body make+copy and the
-	// header.Clone() that the previous defensive copy required. Savings
-	// scale with response header count (Clone allocates 1 map + N value
-	// slices); measured on a 6-header benchmark: 2 full-path allocs saved.
+	// Transfer ownership of the recorder's header map to the fetchResult,
+	// then give the recorder a fresh header map before it is returned to
+	// the pool. This eliminates the header.Clone() that the previous
+	// defensive copy required (Clone allocates 1 map + N value slices).
+	// Savings scale with response header count; measured on a 6-header
+	// benchmark: 1 full-path alloc saved.
 	//
-	// The body slice is clipped to cap==len so the stored object doesn't
-	// retain the buffer's excess capacity (bytes.Buffer doubles its backing
-	// array, so cap can be up to 2x the content length).
+	// The body is copied (make+copy) rather than transferred because
+	// bytes.Buffer doubles its backing array, so the buffer's cap can be
+	// up to 2x the content length. Transferring the slice directly (even
+	// with slices.Clip) would retain the oversized backing array for the
+	// lifetime of the cached object — up to 2x memory waste on large
+	// responses. The make+copy allocates exactly len(body) bytes.
 	//
 	// Safety: all singleflight waiters read res.Header and res.Body without
 	// mutating. The recorder gets fresh internals so the pool reuse is safe.
-	body := slices.Clip(rec.body.Bytes())
+	body := make([]byte, rec.body.Len())
+	copy(body, rec.body.Bytes())
 	hdr := rec.header
 	rec.header = make(http.Header, 8)
 	rec.body = &bytes.Buffer{}

@@ -153,3 +153,28 @@ For a 3-replica StatefulSet:
 4. … and so on.
 
 The consistent-hash ring rebalances automatically as nodes join/leave.
+
+### File descriptor limits
+
+bouine raises its `RLIMIT_NOFILE` soft limit to 65536 at startup
+(via `platform.RaiseFileLimit`). This is necessary because the warm
+tier can have hundreds of segment files open concurrently (bounded by
+`segment_cache_size`, default 256), plus data-plane connections,
+listeners, and WAL handles.
+
+If the hard limit is below 65536 (common in some container runtimes),
+the soft limit is raised to the hard limit instead. To increase the
+hard limit, set it at the container runtime or node level:
+
+```yaml
+# Example: init container to raise the hard limit via sysctl
+initContainers:
+  - name: sysctl-fd
+    image: busybox
+    securityContext:
+      privileged: true
+    command: ['sysctl', '-w', 'fs.file-max=1048576']
+```
+
+Or set `securityContext.procMount: Unmasked` on the container and
+raise the limit in an entrypoint wrapper.

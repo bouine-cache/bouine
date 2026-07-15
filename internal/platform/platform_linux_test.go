@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestEffectiveGOMAXPROCS_CgroupV2NestedPath(t *testing.T) {
@@ -69,5 +71,33 @@ func writeFile(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRaiseFileLimit(t *testing.T) {
+	var before unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before); err != nil {
+		t.Fatalf("getrlimit: %v", err)
+	}
+
+	got, err := RaiseFileLimit(65536)
+	if err != nil {
+		t.Fatalf("RaiseFileLimit: %v", err)
+	}
+	if got < 65536 && got < before.Max {
+		t.Fatalf("soft limit = %d, want >= 65536 (or capped at hard limit %d)", got, before.Max)
+	}
+
+	var after unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after); err != nil {
+		t.Fatalf("getrlimit after: %v", err)
+	}
+	if after.Cur < 65536 && after.Cur < before.Max {
+		t.Fatalf("soft limit after = %d, want >= 65536 (or capped at hard limit %d)", after.Cur, before.Max)
+	}
+
+	// Calling again with the same value should be a no-op.
+	if _, err := RaiseFileLimit(65536); err != nil {
+		t.Fatalf("RaiseFileLimit idempotent: %v", err)
 	}
 }

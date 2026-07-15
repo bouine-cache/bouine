@@ -183,8 +183,13 @@ func encodeSnapshot(segIDs []int, segSizes map[int]int64, entries []snapEntry, t
 }
 
 // validateSegmentTable checks that every segment ID in the snapshot
-// exists on disk with the expected size. Returns ErrSnapshotInvalid
-// on mismatch so the caller falls back to WAL replay.
+// exists on disk and that the on-disk size is at least as large as the
+// snapshot size. Segments may have grown since the snapshot was taken
+// (writes between checkpoint and restart append to segments and are
+// captured by WAL replay), so actualSize > segSize is normal and safe.
+// A segment smaller than the snapshot indicates data loss (compaction
+// or truncation) and means the snapshot's offsets are stale — reject
+// and fall back to WAL replay + segment scan.
 func (s *Store) validateSegmentTable(segTbl []byte, segCount uint32) error {
 	for i := range segCount {
 		se := segTbl[i*snapSegEntryLen : (i+1)*snapSegEntryLen]
@@ -200,8 +205,8 @@ func (s *Store) validateSegmentTable(segTbl []byte, segCount uint32) error {
 		seg.mu.Lock()
 		actualSize := seg.size
 		seg.mu.Unlock()
-		if actualSize != segSize {
-			return fmt.Errorf("%w: segment %d size mismatch (snapshot=%d, disk=%d)", ErrSnapshotInvalid, segID, segSize, actualSize)
+		if actualSize < segSize {
+			return fmt.Errorf("%w: segment %d shrank (snapshot=%d, disk=%d)", ErrSnapshotInvalid, segID, segSize, actualSize)
 		}
 	}
 	return nil

@@ -48,6 +48,10 @@ func FadviseWillNeed(fd int, offset int64, length int64) error { return nil }
 // EffectiveGOMAXPROCS returns runtime.NumCPU() on non-Linux platforms.
 func EffectiveGOMAXPROCS() int { return runtime.NumCPU() }
 
+// RaiseFileLimit is a no-op on non-Linux platforms. The container
+// runtime or OS manages file descriptor limits outside the process.
+func RaiseFileLimit(want uint64) (uint64, error) { return 0, nil }
+
 // Pwritev falls back to sequential writes on non-Linux platforms.
 // Callers should use it but expect it to be unused (they fall back to Write).
 func Pwritev(fd int, buffers [][]byte, offset int64) (int, error) { return 0, nil }

@@ -1698,14 +1698,26 @@ func parseSurrogateKeys(h http.Header) []string {
 		if v == "" {
 			continue
 		}
-		seen := make(map[string]bool)
+		// Use a stack-allocated array for dedup instead of a map allocation.
+		// Operators typically tag with 0-5 surrogate keys; >16 is extremely
+		// rare. If exceeded, dedup stops but all tags are still returned
+		// (potential duplicates in the output for the overflow case).
+		var seen [16]string
+		var n int
 		var keys []string
 		for _, tag := range strings.Fields(strings.ReplaceAll(v, ",", " ")) {
 			tag = strings.TrimSpace(tag)
-			if tag != "" && !seen[tag] {
-				keys = append(keys, tag)
-				seen[tag] = true
+			if tag == "" {
+				continue
 			}
+			if n < len(seen) {
+				if slices.Contains(seen[:n], tag) {
+					continue
+				}
+				seen[n] = tag
+				n++
+			}
+			keys = append(keys, tag)
 		}
 		return keys
 	}

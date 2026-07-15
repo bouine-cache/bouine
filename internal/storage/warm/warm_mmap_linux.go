@@ -22,12 +22,12 @@ import (
 // both pass the atomic nil check, both call Mmap, and waste one mapping.
 // The double-check after acquiring seg.mu prevents the duplicate.
 func (seg *Segment) tryMmap() {
-	if seg.mmap.Load() != nil || seg.size <= 0 || seg.f == nil {
+	if seg.mmap.Load() != nil {
 		return
 	}
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
-	if seg.mmap.Load() != nil {
+	if seg.mmap.Load() != nil || seg.size <= 0 || seg.f == nil {
 		return
 	}
 	data, err := unix.Mmap(int(seg.f.Fd()), 0, int(seg.size),

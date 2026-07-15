@@ -729,7 +729,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case Miss:
 		h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
 	case Revalidate:
-		h.revalidate(w, r, primaryKey, disp.Object, now, src)
+		h.revalidate(w, r, primaryKey, key, disp.Object, now, src)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
@@ -990,6 +990,9 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, key api.
 // serving the super-stale obj if the upstream is unavailable.
 // src is the original storage-tier source from lookup (hot/warm),
 // threaded to stale-fallback serveObject calls.
+// key is the primary key: the miss path does a full (non-conditional)
+// fetch, so collapsing on the primary key is correct — the Vary variant
+// key is computed from the response in writeAndMaybeStore.
 func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
 	res := h.collapsedFetch(r, key)
 	if res.Err != nil {
@@ -1007,7 +1010,12 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 	h.writeAndMaybeStore(w, r, res, key)
 }
 
-func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key, stale *api.Object, now time.Time, src api.Source) {
+// revalidate sends a conditional request to the origin and refreshes the
+// stored object. lookupKey is the key under which the stale object was found
+// (may be a Vary variant key); it is used for singleflight dedup and for
+// storing the 304-refreshed object. primaryKey is the canonical key used for
+// Vary variant storage in writeAndMaybeStore.
+func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source) {
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
@@ -1016,7 +1024,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	res := h.collapsedRevalidate(revalReq, key)
+	res := h.collapsedRevalidate(revalReq, lookupKey)
 	if res.Err != nil {
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
@@ -1043,12 +1051,12 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, key api.Key
 
 	if res.StatusCode == http.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res)
-		h.storeObject(r.Context(), key, refreshed, r, false, 0)
+		h.storeObject(r.Context(), lookupKey, refreshed, r, false, 0)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
-	h.writeAndMaybeStore(w, r, res, key)
+	h.writeAndMaybeStore(w, r, res, primaryKey)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1538,9 +1546,9 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 	// Transfer ownership of the recorder's header map and body buffer to
 	// the fetchResult, then give the recorder fresh internals before it is
 	// returned to the pool. This eliminates the body make+copy and the
-	// header.Clone() that the previous defensive copy required (~10 allocs
-	// for a typical response with N headers: original 2+N allocs → 2 allocs
-	// for the fresh map and buffer).
+	// header.Clone() that the previous defensive copy required. Savings
+	// scale with response header count (Clone allocates 1 map + N value
+	// slices); measured on a 6-header benchmark: 2 full-path allocs saved.
 	//
 	// The body slice is clipped to cap==len so the stored object doesn't
 	// retain the buffer's excess capacity (bytes.Buffer doubles its backing

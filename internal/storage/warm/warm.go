@@ -341,17 +341,20 @@ type warmLoc struct {
 
 // Store is the warm-tier disk store.
 type Store struct {
-	dir        string
-	maxBytes   int64
-	maxEntries int64
-	segMax     int64
-	mu         sync.RWMutex
-	segs       []*Segment
-	segByID    map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
-	nextID     atomic.Int32
-	stats      warmStats
-	idxMu      sync.RWMutex
-	index      map[uint64]warmLoc
+	dir          string
+	maxBytes     int64
+	maxEntries   int64
+	maxDiskBytes int64
+	minFreeDisk  int64
+	preallocate  int64
+	segMax       int64
+	mu           sync.RWMutex
+	segs         []*Segment
+	segByID      map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
+	nextID       atomic.Int32
+	stats        warmStats
+	idxMu        sync.RWMutex
+	index        map[uint64]warmLoc
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
@@ -425,6 +428,18 @@ type Config struct {
 	// is exceeded, Put rejects with ErrOverBudget and the warm sync loop
 	// skips promotion.
 	MaxEntries int64
+	// MaxDiskBytes caps the total physical disk usage of segment files.
+	// When exceeded, DiskOverBudget returns true and the caller should
+	// trigger compaction. Zero means unlimited.
+	MaxDiskBytes int64
+	// MinFreeDisk is the minimum free disk space to maintain on the
+	// warm-tier filesystem. When free space drops below this,
+	// DiskOverBudget returns true. Zero means no filesystem monitoring.
+	MinFreeDisk int64
+	// Preallocate, when non-zero, pre-creates segment files at startup
+	// totaling this size. The store operates as a circular buffer.
+	// Zero means create segments on demand.
+	Preallocate int64
 	// Metrics receives warm-tier Prometheus collectors. Nil disables
 	// metric collection (single-node mode without a registry).
 	Metrics *Metrics
@@ -443,13 +458,16 @@ func NewStore(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{
-		dir:        cfg.Dir,
-		maxBytes:   cfg.MaxBytes,
-		maxEntries: cfg.MaxEntries,
-		segMax:     cfg.SegMax,
-		index:      make(map[uint64]warmLoc),
-		evictList:  sieve.NewList[uint64](),
-		metrics:    cfg.Metrics,
+		dir:          cfg.Dir,
+		maxBytes:     cfg.MaxBytes,
+		maxEntries:   cfg.MaxEntries,
+		maxDiskBytes: cfg.MaxDiskBytes,
+		minFreeDisk:  cfg.MinFreeDisk,
+		preallocate:  cfg.Preallocate,
+		segMax:       cfg.SegMax,
+		index:        make(map[uint64]warmLoc),
+		evictList:    sieve.NewList[uint64](),
+		metrics:      cfg.Metrics,
 	}
 	if cfg.SegmentCacheSize != -1 {
 		cacheSize := cfg.SegmentCacheSize
@@ -460,6 +478,14 @@ func NewStore(cfg Config) (*Store, error) {
 	}
 	if err := s.openExisting(); err != nil {
 		return nil, err
+	}
+	// Pre-allocate segment files if configured. This creates segment
+	// files at startup totaling the preallocate size, so the warm store
+	// operates as a circular buffer instead of growing unboundedly.
+	if s.preallocate > 0 && len(s.segs) == 0 {
+		if err := s.preallocateSegments(); err != nil {
+			return nil, fmt.Errorf("warm: preallocate: %w", err)
+		}
 	}
 	// Clamp the FD cache to the actual segment count so we don't
 	// reserve capacity for segments that don't exist.
@@ -506,6 +532,42 @@ func (s *Store) openExisting() error {
 		if int32(id) >= s.nextID.Load() { //nolint:gosec // segment IDs bounded
 			s.nextID.Store(int32(id + 1)) //nolint:gosec // bounded
 		}
+	}
+	s.rebuildSegByID()
+	return nil
+}
+
+// preallocateSegments creates segment files at startup totaling the
+// preallocate size. Each file is truncated to segMax (64 MiB default).
+// This reserves disk space upfront so the warm store cannot grow
+// beyond the pre-allocated size. When all segments are full, the
+// activeSeg logic will reuse the oldest sealed segment (circular buffer).
+func (s *Store) preallocateSegments() error {
+	numSegs := int(s.preallocate / s.segMax)
+	if numSegs <= 0 {
+		numSegs = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for range numSegs {
+		id := int(s.nextID.Add(1)) - 1
+		segPath := filepath.Join(s.dir, segName(id))
+		f, err := os.OpenFile(segPath, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // operator-configured warm dir
+		if err != nil {
+			return fmt.Errorf("create segment %d: %w", id, err)
+		}
+		if err := f.Truncate(s.segMax); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("truncate segment %d: %w", id, err)
+		}
+		_ = f.Close()
+		seg := &Segment{
+			ID:   id,
+			f:    nil, // opened on first access
+			size: 0,
+		}
+		seg.mu = sync.Mutex{}
+		s.segs = append(s.segs, seg)
 	}
 	s.rebuildSegByID()
 	return nil
@@ -1346,6 +1408,27 @@ func (s *Store) OverBudget() bool {
 	}
 	if s.maxEntries > 0 && s.stats.entries.Load() >= s.maxEntries {
 		return true
+	}
+	return false
+}
+
+// DiskOverBudget reports whether the physical disk usage exceeds
+// warm_max_disk_bytes or the filesystem free space drops below
+// min_free_disk. Unlike OverBudget (which checks logical bytes),
+// this checks actual disk consumption. Used by the compactLoop to
+// trigger immediate compaction when the disk is filling up.
+func (s *Store) DiskOverBudget() bool {
+	if s.maxDiskBytes > 0 && s.diskBytes() > s.maxDiskBytes {
+		return true
+	}
+	if s.minFreeDisk > 0 {
+		var stat unix.Statfs_t
+		if err := unix.Statfs(s.dir, &stat); err == nil {
+			freeBytes := int64(stat.Bavail) * int64(stat.Bsize) //nolint:gosec // filesystem sizes fit int64 on all supported platforms
+			if freeBytes < s.minFreeDisk {
+				return true
+			}
+		}
 	}
 	return false
 }

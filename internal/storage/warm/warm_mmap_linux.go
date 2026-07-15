@@ -17,10 +17,17 @@ import (
 // with MADV_RANDOM for random-access workloads. On failure, seg.mmap stays
 // nil and the segment falls back to pread.
 //
-// The caller MUST hold s.mu.Lock() (Store-level), which prevents Compact
-// from running concurrently. seg.mmap is protected by s.mu, not seg.mu.
+// seg.mu is acquired to serialize concurrent tryMmap calls from multiple
+// Get goroutines holding s.mu.RLock. Without seg.mu, two goroutines would
+// both pass the nil check, both call Mmap, and leak the first mapping.
+// The double-check after acquiring seg.mu prevents the duplicate.
 func (seg *Segment) tryMmap() {
 	if seg.mmap != nil || seg.size <= 0 || seg.f == nil {
+		return
+	}
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	if seg.mmap != nil {
 		return
 	}
 	data, err := unix.Mmap(int(seg.f.Fd()), 0, int(seg.size),
@@ -33,8 +40,12 @@ func (seg *Segment) tryMmap() {
 }
 
 // munmap removes the mmap mapping for a segment. The caller MUST hold
-// s.mu.Lock() (Store-level), which prevents concurrent reads.
+// s.mu.Lock() (Store-level), which prevents concurrent reads. seg.mu is
+// also acquired to serialize with concurrent tryMmap calls (which can
+// run under s.mu.RLock from Get).
 func (seg *Segment) munmap() {
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
 	if seg.mmap == nil {
 		return
 	}
@@ -54,14 +65,22 @@ func munmapAll(segs []*Segment) {
 // if the segment is not mmap'd (caller should fall back to pread).
 // The body is copied out of the mmap region because Compact may munmap
 // the segment after s.mu.RLock is released.
+//
+// seg.mu is acquired briefly to snapshot seg.mmap (a []byte slice header
+// is 3 words and cannot be read atomically). Once snapshotted, the
+// mapping is valid for the duration of the caller's s.mu.RLock because
+// munmap only happens under s.mu.Lock (in Compact/Close).
 func readRecordAtMmap(seg *Segment, offset int64, size int64) (*Record, error) {
-	if seg.mmap == nil || size <= 0 {
+	seg.mu.Lock()
+	mmapData := seg.mmap
+	seg.mu.Unlock()
+	if mmapData == nil || size <= 0 {
 		return nil, nil
 	}
-	if offset+size > int64(len(seg.mmap)) {
+	if offset+size > int64(len(mmapData)) {
 		return nil, ErrTornRecord
 	}
-	data := seg.mmap[offset : offset+size]
+	data := mmapData[offset : offset+size]
 
 	magic := binary.LittleEndian.Uint32(data[0:4])
 	key := binary.LittleEndian.Uint64(data[4:12])

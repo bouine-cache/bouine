@@ -143,10 +143,12 @@ type Segment struct {
 	readers atomic.Int32
 	// mmap is a persistent MAP_SHARED mapping of the segment file used
 	// for zero-syscall point reads on inactive (sealed) segments. It is
-	// protected by s.mu (Store-level RWMutex), not seg.mu. nil on
-	// non-Linux, before initialization, or while the segment is active.
-	// The mapping stays valid after the fd is closed by fdCache eviction
-	// (POSIX guarantee); only Compact and Close munmap.
+	// protected by seg.mu for write serialization (tryMmap from multiple
+	// Get goroutines under s.mu.RLock) and by s.mu for lifecycle (munmap
+	// under s.mu.Lock in Compact/Close). nil on non-Linux, before
+	// initialization, or while the segment is active. The mapping stays
+	// valid after the fd is closed by fdCache eviction (POSIX guarantee);
+	// only Compact and Close munmap.
 	mmap []byte
 }
 

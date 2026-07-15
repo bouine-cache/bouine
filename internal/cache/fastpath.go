@@ -34,6 +34,7 @@ const maxFastPathHeaderBytes = 8 * 1024
 // to serve cache hits without constructing an *http.Request.
 type FastPathHandler struct {
 	store            storage.Store
+	routeName        string
 	stripQueryParams map[string]bool
 	excludeHeaders   map[string]bool
 }
@@ -43,6 +44,7 @@ type FastPathHandler struct {
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
 		store:            h.store,
+		routeName:        h.routeName,
 		stripQueryParams: h.stripQueryParams,
 		excludeHeaders:   h.excludeHeaders,
 	}
@@ -58,11 +60,6 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 	}
 }
 
-// storeGetTimeout bounds the storage lookup in the fast path. If the
-// store is stuck (e.g. warm-tier disk I/O), the fast path falls through
-// to net/http rather than blocking the connection goroutine indefinitely.
-const storeGetTimeout = 5 * time.Second
-
 // TryHit attempts to serve a cache hit from the parsed request. See
 // api.FastPathHandler for the full contract.
 func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
@@ -70,8 +67,11 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		return nil, false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), storeGetTimeout)
-	defer cancel()
+	// Use context.Background() directly — store.Get has its own internal
+	// timeout mechanisms. Creating a context.WithTimeout per hit allocates
+	// a timer + cancelFunc + deadlineCtx on the heap, which defeats the
+	// fast-path's zero-allocation goal.
+	ctx := context.Background()
 
 	key := buildKeyFromRaw(req, f.stripQueryParams)
 	obj, src, err := f.store.Get(ctx, key)
@@ -161,13 +161,19 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 		return nil
 	}
 
-	return buildFastPathResponse(hbuf, obj, req, cacheResult, src)
+	return buildFastPathResponse(hbuf, obj, req, cacheResult, src, f.routeName)
 }
 
 // appendResponseHeaders serializes the stored object's headers plus
 // dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date) into hbuf.
 func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
-	noCacheFields := parseNoCacheFieldNames(obj.CacheControl)
+	// Skip parseNoCacheFieldNames when Cache-Control is empty — the common
+	// case for most cached responses. Avoids a redundant ParseCacheControl
+	// call that evaluateFromRaw already performed.
+	var noCacheFields map[string]bool
+	if obj.CacheControl != "" {
+		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
+	}
 	hasDate := false
 	obj.Header.Range(func(key, value string) bool {
 		if shouldSkipHeader(key, noCacheFields) {
@@ -220,7 +226,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 
 // buildFastPathResponse splits hbuf into status line + header block and
 // creates the FastPathResponse with net.Buffers for writev.
-func buildFastPathResponse(hbuf []byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source) *api.FastPathResponse {
+func buildFastPathResponse(hbuf []byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, routeName string) *api.FastPathResponse {
 	statusEnd := 0
 	for statusEnd < len(hbuf)-1 && (hbuf[statusEnd] != '\r' || hbuf[statusEnd+1] != '\n') {
 		statusEnd++
@@ -240,6 +246,7 @@ func buildFastPathResponse(hbuf []byte, obj *api.Object, req *api.RawRequest, ca
 		StatusCode:  obj.StatusCode,
 		CacheResult: cacheResult,
 		Source:      string(src),
+		Route:       routeName,
 		BytesOut:    len(body),
 		Return: func() {
 			returnHeaderBuf(hbuf)

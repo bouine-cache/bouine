@@ -11,8 +11,12 @@ import (
 // sweeps the entire list (~2.25 ms), while EvictBounded(128) caps at 128
 // probes and returns false, deferring eviction to the next call.
 //
-// The list is built once (all-visited). Only a single EvictBounded is
-// measured per run — use -benchtime=1x -count=10 to get 10 samples.
+// The list is built once (all-visited). This benchmark is designed for
+// -benchtime=1x -count=N: each run performs a single EvictBounded and
+// reports the evict-ns custom metric. With default -benchtime the list
+// state evolves across iterations (visited bits are cleared, entries are
+// eventually evicted), so the evict-ns metric reflects a mix of states
+// rather than the pure all-visited worst case.
 //
 // Usage: go test -bench=BenchmarkSIEVE_Evict_AllVisited_1M -benchtime=1x -count=10 -benchmem ./internal/storage/sieve/
 func BenchmarkSIEVE_Evict_AllVisited_1M(b *testing.B) {
@@ -33,11 +37,7 @@ func BenchmarkSIEVE_Evict_AllVisited_1M(b *testing.B) {
 
 	for b.Loop() {
 		start := time.Now()
-		_, ok := l.EvictBounded(128)
-		elapsed := time.Since(start)
-		if ok {
-			b.Fatal("EvictBounded(128) on 1M all-visited should return false")
-		}
-		b.ReportMetric(float64(elapsed.Nanoseconds()), "evict-ns")
+		l.EvictBounded(128)
+		b.ReportMetric(float64(time.Since(start).Nanoseconds()), "evict-ns")
 	}
 }

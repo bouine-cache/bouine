@@ -9,13 +9,13 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// hotOnlyContains checks whether key is present in the shard's hotOnly map.
+// hotOnlyContains checks whether key is hot-only (present and not backed).
 func hotOnlyContains(s *HotStore, key api.Key) bool {
 	sh := &s.shards[uint64(key)&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	_, ok := sh.hotOnly[key]
-	return ok
+	e, ok := sh.entries[key]
+	return ok && !e.hasBackup
 }
 
 // hotOnlyCount returns the total number of hot-only entries across all shards.
@@ -24,7 +24,11 @@ func hotOnlyCount(s *HotStore) int {
 	for i := range s.shards {
 		sh := &s.shards[i]
 		sh.mu.RLock()
-		total += len(sh.hotOnly)
+		for _, e := range sh.entries {
+			if !e.hasBackup {
+				total++
+			}
+		}
 		sh.mu.RUnlock()
 	}
 	return total

@@ -1097,6 +1097,10 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	if newETag := res.Header.Get(header.ETag); newETag != "" {
 		refreshed.ETag = newETag
 	}
+	// SerializedHead must be recomputed last — serializeHead uses
+	// CacheControl to parse no-cache field names, so it depends on the
+	// updated CacheControl set above.
+	refreshed.SerializedHead = serializeHead(&refreshed)
 	return &refreshed
 }
 

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -1485,5 +1486,45 @@ func TestDoFetchCanceledContextKeepsValidResponse(t *testing.T) {
 	}
 	if string(res.Body) != "cached-body" {
 		t.Fatalf("expected body %q, got %q", "cached-body", res.Body)
+	}
+}
+
+func TestRefreshFrom304_RecomputesSerializedHead(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+
+	stale := &api.Object{
+		Key:        BuildKeyFromURL("http://example.com/test"),
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}, "X-Sensitive": {"secret"}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now().Add(-time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+	}
+	stale.CacheControl = stale.Header.Get(header.CacheControl)
+	stale.SerializedHead = serializeHead(stale)
+
+	// 304 adds no-cache="X-Sensitive" — serializeHead must now skip X-Sensitive.
+	res := fetchResult{
+		StatusCode: 304,
+		Header:     http.Header{header.CacheControl: {"max-age=3600, no-cache=\"X-Sensitive\""}, header.ETag: {`"v2"`}},
+	}
+
+	refreshed := h.refreshFrom304(stale, res)
+
+	expected := serializeHead(refreshed)
+	if !bytes.Equal(refreshed.SerializedHead, expected) {
+		t.Fatalf("SerializedHead mismatch after 304 refresh:\n  got:  %q\n  want: %q", refreshed.SerializedHead, expected)
+	}
+	if !bytes.Contains(refreshed.SerializedHead, []byte("max-age=3600")) {
+		t.Fatalf("SerializedHead does not contain updated Cache-Control: %q", refreshed.SerializedHead)
+	}
+	if bytes.Contains(refreshed.SerializedHead, []byte("max-age=60")) {
+		t.Fatalf("SerializedHead still contains old Cache-Control value")
+	}
+	if bytes.Contains(refreshed.SerializedHead, []byte("X-Sensitive: secret")) {
+		t.Fatalf("SerializedHead contains X-Sensitive header, which should be skipped by no-cache directive: %q", refreshed.SerializedHead)
 	}
 }

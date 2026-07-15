@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -344,4 +345,55 @@ func TestSegmentCloseOnUnopened(t *testing.T) {
 	if err := seg.Close(); err != nil {
 		t.Fatalf("Close on unopened segment should return nil, got %v", err)
 	}
+}
+
+// TestSnapshotConcurrentWithCompact reproduces the data race between
+// WriteSnapshotFromCopy (iterating segByID after releasing s.mu.RLock)
+// and rebuildSegByID (mutating segByID under s.mu.Lock). Under
+// -race, the pre-fix code fatals with "concurrent map read and map
+// write".
+func TestSnapshotConcurrentWithCompact(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 4 << 10})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	for i := range 200 {
+		if _, _, err := s.Put(uint64(i), make([]byte, 1024)); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+
+	// rebuildSegByID mutates segByID under s.mu.Lock (clear + insert).
+	// WriteSnapshotFromCopy reads segByID under s.mu.RLock then iterates
+	// the map after releasing the lock. Calling rebuildSegByID in a
+	// tight loop (no I/O) maximises the race window against the
+	// snapshot's lock-free iteration phase.
+	var wg sync.WaitGroup
+	const snapGoroutines = 2
+	const snapIters = 50
+	const rebuildIters = 500
+
+	for range snapGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range snapIters {
+				_ = s.WriteSnapshot()
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range rebuildIters {
+			s.mu.Lock()
+			s.rebuildSegByID()
+			s.mu.Unlock()
+		}
+	}()
+	wg.Wait()
 }

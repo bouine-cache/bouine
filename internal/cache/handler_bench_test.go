@@ -3,6 +3,7 @@ package cache
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -113,6 +114,38 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+	}
+}
+
+// BenchmarkHandler_CacheMiss_Cacheable measures the full cacheable miss
+// path: origin fetch → response copy → cacheability check → buildObject
+// → storeObject. Unlike BenchmarkHandler_CacheMiss (no-store), this
+// exercises the storage path and is the primary benchmark for the
+// miss-path performance plan (see notes/Bouine/miss-path-perf-plan.md).
+func BenchmarkHandler_CacheMiss_Cacheable(b *testing.B) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"bench"`)
+		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		w.WriteHeader(200)
+		_, _ = w.Write(make([]byte, 1024))
+	})
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  256 << 20,
+		NumShards: 16,
+	})
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
+
+	// Use a unique URL per iteration to guarantee a miss every time.
+	// The hit path benchmarks reuse the same URL; here we need freshness.
+	base := "http://bench.local/miss/"
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 	}

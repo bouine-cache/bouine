@@ -1125,7 +1125,22 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		return
 	}
 
-	if IsCacheableWithDefault(res.StatusCode, r.Header, res.Header, h.negativeTTL, h.defaultTTL) {
+	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
+	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
+	// IsCacheableWithDefault re-parses again).
+	bgParsed := parsedResponse{
+		status:     res.StatusCode,
+		reqHeader:  r.Header,
+		respHeader: res.Header,
+	}
+	if cdnCC, hasCDN := cdnCacheControl(res.Header); hasCDN {
+		bgParsed.respCC = cdnCC
+		bgParsed.hasCDN = hasCDN
+	} else {
+		bgParsed.respCC = ParseCacheControl(mergeHeaderValues(res.Header, header.CacheControl))
+	}
+
+	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			return
 		}
@@ -1158,7 +1173,22 @@ func (h *Handler) writeAndMaybeStore(
 		_, _ = w.Write(res.Body)
 	}
 
-	if IsCacheableWithDefault(res.StatusCode, r.Header, res.Header, h.negativeTTL, h.defaultTTL) {
+	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
+	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
+	// IsCacheableWithDefault re-parses again).
+	parsed := parsedResponse{
+		status:     res.StatusCode,
+		reqHeader:  r.Header,
+		respHeader: res.Header,
+	}
+	if cdnCC, hasCDN := cdnCacheControl(res.Header); hasCDN {
+		parsed.respCC = cdnCC
+		parsed.hasCDN = hasCDN
+	} else {
+		parsed.respCC = ParseCacheControl(mergeHeaderValues(res.Header, header.CacheControl))
+	}
+
+	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			return
 		}

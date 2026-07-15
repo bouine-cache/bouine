@@ -124,11 +124,17 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 // → storeObject. Unlike BenchmarkHandler_CacheMiss (no-store), this
 // exercises the storage path and is the primary benchmark for the
 // miss-path performance plan (see notes/Bouine/miss-path-perf-plan.md).
+//
+// The upstream returns 6 headers — a realistic subset that exercises
+// item 1.1's ownership transfer (savings scale with header count).
 func BenchmarkHandler_CacheMiss_Cacheable(b *testing.B) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)
 		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.WriteHeader(200)
 		_, _ = w.Write(make([]byte, 1024))
 	})
@@ -150,6 +156,42 @@ func BenchmarkHandler_CacheMiss_Cacheable(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		w.Reset()
 		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
+		h.ServeHTTP(w, req)
+	}
+}
+
+// BenchmarkHandler_CacheMiss_Vary measures the cacheable miss path with a
+// Vary header, exercising item 1.3's shallow-copy optimization in
+// writeAndMaybeStore. When the upstream sets Vary, the handler stores the
+// response under both a variant key and the primary key — the shallow copy
+// avoids a second full buildObject call (~5 allocs).
+func BenchmarkHandler_CacheMiss_Vary(b *testing.B) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"bench"`)
+		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set(header.Vary, "Accept-Encoding")
+		w.WriteHeader(200)
+		_, _ = w.Write(make([]byte, 1024))
+	})
+	store := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  256 << 20,
+		NumShards: 16,
+	})
+	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
+
+	base := "http://bench.local/vary/"
+	w := newBenchResponseWriter()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		w.Reset()
+		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
+		req.Header.Set("Accept-Encoding", "gzip")
 		h.ServeHTTP(w, req)
 	}
 }

@@ -90,8 +90,9 @@ type Object struct {
 	// (static headers as "Key: Value\r\n" pairs, without the status line
 	// or trailing \r\n). Computed once at store time so the H1 fast-path
 	// can write it directly via net.Buffers without iterating the header
-	// map on every cache hit. Not serialized (re-derived on warm-tier
-	// load via serializeHead).
+	// map on every cache hit. Not serialized to disk (json:"-").
+	// Warm-tier loads leave this nil; the fast-path falls back to
+	// appendResponseHeaders (header iteration) for those objects.
 	SerializedHead []byte `json:"-"`
 }
 

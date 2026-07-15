@@ -217,11 +217,15 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 // that terminates the HTTP header block. Called after either the
 // pre-serialized static headers or the fallback header iteration.
 func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
-	// Date is always dynamic (set per-request).
-	hbuf = append(hbuf, header.Date...)
-	hbuf = append(hbuf, ": "...)
-	hbuf = now.UTC().AppendFormat(hbuf, http.TimeFormat)
-	hbuf = append(hbuf, '\r', '\n')
+	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
+	// represents when the message was originated, not when the cache served
+	// it). Only synthesize a Date when the stored object has none.
+	if obj.Header.Get(header.Date) == "" {
+		hbuf = append(hbuf, header.Date...)
+		hbuf = append(hbuf, ": "...)
+		hbuf = now.UTC().AppendFormat(hbuf, http.TimeFormat)
+		hbuf = append(hbuf, '\r', '\n')
+	}
 
 	age := ComputeAge(obj, now)
 	hbuf = append(hbuf, header.Age...)
@@ -349,14 +353,16 @@ func shouldSkipHeader(key string, noCacheFields map[string]bool) bool {
 // pre-serialized static header block (used by both serializeHead and the
 // fallback appendResponseHeaders). It combines shouldSkipHeader (internal,
 // hop-by-hop, no-cache fields) with dynamic headers that are set
-// per-request by appendDynamicHeaders (Date, X-Cache, X-Cache-Source,
-// Warning).
+// per-request by appendDynamicHeaders (X-Cache, X-Cache-Source, Warning).
+// Date is NOT excluded — the origin's Date header is preserved per
+// RFC 9110 §6.6.1; appendDynamicHeaders adds a Date only when the
+// stored object has none.
 func skipStaticHeader(key string, noCacheFields map[string]bool) bool {
 	if shouldSkipHeader(key, noCacheFields) {
 		return true
 	}
 	switch key {
-	case header.Date, header.XCache, header.XCacheSource, header.Warning:
+	case header.XCache, header.XCacheSource, header.Warning:
 		return true
 	}
 	return false

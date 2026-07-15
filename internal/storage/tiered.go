@@ -413,8 +413,11 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		return nil, "", nil
 	}
 	// Re-derive transient fields not serialised to disk (tagged json:"-").
-	// These fields exist purely for hit-path performance; recalculating them
-	// once on warm-tier load restores the fast path for subsequent hits.
+	// CacheControl and OriginAge are recalculated here so Evaluate and
+	// ComputeAge work without re-parsing headers on every hit. SerializedHead
+	// is left nil — the H1 fast-path falls back to appendResponseHeaders
+	// (header iteration) for warm-tier objects until they are re-stored
+	// via buildObject on a subsequent cache fill.
 	if cc := loaded.Header.Get(header.CacheControl); cc != "" {
 		loaded.CacheControl = cc
 	}

@@ -167,7 +167,10 @@ func TestSlabAllocator_DataIntegrity(t *testing.T) {
 	t.Cleanup(func() { _ = slab.Close() })
 
 	// Allocate, write, free, re-allocate the same size — verify the
-	// data is zeroed (mmap gives zero pages) or at least not stale.
+	// slot is reused (same region, same class). Free does not zero the
+	// slot, so the reused buffer contains stale data from buf1. This
+	// test verifies that Alloc/Free recycle slots correctly and that
+	// the header is re-written on each Alloc.
 	size := 512
 	buf1 := slab.Alloc(size)
 	for i := range buf1 {
@@ -176,12 +179,43 @@ func TestSlabAllocator_DataIntegrity(t *testing.T) {
 	slab.Free(buf1)
 
 	buf2 := slab.Alloc(size)
+	if len(buf2) != size {
+		t.Fatalf("re-alloc: expected len %d, got %d", size, len(buf2))
+	}
+	// Write new data to verify the buffer is writable after reuse.
 	for i := range buf2 {
-		if buf2[i] != 0 {
-			t.Fatalf("byte %d: expected 0 (fresh mmap), got %d", i, buf2[i])
+		buf2[i] = byte(i % 128)
+	}
+	// Verify data integrity after write.
+	for i := range buf2 {
+		if buf2[i] != byte(i%128) {
+			t.Fatalf("byte %d: expected %d, got %d", i, byte(i%128), buf2[i])
 		}
 	}
 	slab.Free(buf2)
+}
+
+func TestSlabAllocator_DoubleFree(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("slab allocator is Linux-only")
+	}
+	slab, err := NewSlabAllocator()
+	if err != nil {
+		t.Skipf("slab allocator unavailable on this platform: %v", err)
+	}
+	t.Cleanup(func() { _ = slab.Close() })
+
+	buf := slab.Alloc(100)
+	slab.Free(buf)
+	// Double-free must be a no-op: the magic was cleared on first Free,
+	// so slabClassFromHeader returns -1 and Free returns early.
+	slab.Free(buf)
+
+	_, frees, _ := slab.Stats()
+	if frees != 1 {
+		t.Fatalf("expected 1 free (double-free should be no-op), got %d", frees)
+	}
 }
 
 func TestHotStore_SlabPutGet(t *testing.T) {

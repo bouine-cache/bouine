@@ -131,7 +131,7 @@ func TestSlabAllocator_Growable(t *testing.T) {
 		if buf == nil {
 			break
 		}
-		// Slab buffers have cap == slotSize - slabHeaderSize (240 for
+		// Slab buffers have cap == slotSize - slabHeaderSize (248 for
 		// class 0). Heap fallback has cap == size (100).
 		if cap(buf) == size && len(bufs) > 0 {
 			break

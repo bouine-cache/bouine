@@ -32,6 +32,9 @@ func (s *SlabAllocator) Alloc(_ int) []byte {
 // Free is a no-op on non-Linux platforms.
 func (s *SlabAllocator) Free(_ []byte) {}
 
+// FreeBatch is a no-op on non-Linux platforms.
+func (s *SlabAllocator) FreeBatch(_ [][]byte) {}
+
 // Stats returns zero stats on non-Linux platforms.
 func (s *SlabAllocator) Stats() (allocs, frees, fallback int64) {
 	return s.allocs.Load(), s.frees.Load(), s.fallback.Load()

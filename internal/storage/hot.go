@@ -735,6 +735,9 @@ func (h *HotStore) WindowHits(key api.Key) int64 {
 // Close stops the background sweeper and waits for it to exit.
 func (h *HotStore) Close(_ context.Context) error {
 	close(h.done)
+	if h.slab != nil {
+		_ = h.slab.Close()
+	}
 	return nil
 }
 

@@ -120,9 +120,13 @@ type Storage struct {
 	// soft memory limit so the GC does not enter a death spiral as the
 	// cache fills (issue #161). An explicit hot_max_bytes always takes
 	// precedence.
-	HotMaxBytesRatio int      `yaml:"hot_max_bytes_ratio,omitempty" json:"hot_max_bytes_ratio,omitempty"`
-	WarmDir          string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
-	WarmMaxBytes     ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
+	HotMaxBytesRatio int `yaml:"hot_max_bytes_ratio,omitempty" json:"hot_max_bytes_ratio,omitempty"`
+	// HotMmapSlab enables the mmap'd slab allocator for hot store body
+	// bytes. When true, bodies are allocated from mmap'd regions instead
+	// of Go heap, reducing GC pressure. Default false (Go heap).
+	HotMmapSlab  bool     `yaml:"hot_mmap_slab,omitempty" json:"hot_mmap_slab,omitempty"`
+	WarmDir      string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
+	WarmMaxBytes ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
 	// WarmMaxEntries caps the warm-tier index size in entries. Zero means
 	// derive from GOMEMLIMIT (see WarmMaxEntriesRatio). A positive value
 	// overrides the derived limit. Negative means unlimited.

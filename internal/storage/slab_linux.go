@@ -101,14 +101,11 @@ func NewSlabAllocator() (*SlabAllocator, error) {
 }
 
 // newSlabRegion allocates a single mmap'd region for the given slot size.
-// MAP_POPULATE pre-faults all pages so the first Alloc/write doesn't
-// trigger a per-page fault — critical under high traffic where the
-// slab grows frequently.
 func newSlabRegion(slotSize int64) (*slabRegion, error) {
 	regionSize := slotSize * slabSlotsPerRegion
 	data, err := unix.Mmap(-1, 0, int(regionSize),
 		unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_ANONYMOUS|unix.MAP_PRIVATE|unix.MAP_POPULATE) //nolint:gosec // anonymous mmap, no fd
+		unix.MAP_ANONYMOUS|unix.MAP_PRIVATE) //nolint:gosec // anonymous mmap, no fd
 	if err != nil {
 		return nil, err
 	}

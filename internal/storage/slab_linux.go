@@ -214,21 +214,27 @@ func (s *SlabAllocator) allocFromRegion(
 }
 
 // classFromCap derives the slab class from the buffer's capacity.
-// The cap of a slab-allocated buffer is slotSize - slabHeaderSize.
-// This lets Free determine the class without backward pointer
-// arithmetic, avoiding checkptr panics under -race. Returns -1 if
-// the cap doesn't match any slab class (Go-heap fallback buffer).
+// The cap of a slab-allocated buffer is slotSize - slabHeaderSize,
+// so total = cap + slabHeaderSize = slotSize, which is a power of two
+// in [2^8, 2^20]. O(1) via bits.Len64, same formula as slabClass.
+// Returns -1 if the cap doesn't match any slab class (Go-heap fallback).
 func classFromCap(c int) int {
 	if c <= 0 {
 		return -1
 	}
-	total := c + slabHeaderSize
-	for i, sc := range slabSizeClasses {
-		if total == int(sc) {
-			return i
-		}
+	total := uint64(c + slabHeaderSize)
+	if total < uint64(slabSizeClasses[0]) || total > uint64(slabSizeClasses[numSlabClasses-1]) {
+		return -1
 	}
-	return -1
+	// Slot sizes are powers of two; a non-power-of-two total is a heap buffer.
+	if total&(total-1) != 0 {
+		return -1
+	}
+	class := int(bits.Len64(total-1)+1)/2 - 4
+	if class < 0 || class >= numSlabClasses || slabSizeClasses[class] != int64(total) {
+		return -1
+	}
+	return class
 }
 
 // findSlotOffset computes the slot offset within a region given the
@@ -244,7 +250,10 @@ func findSlotOffset(r *slabRegion, bufPtr unsafe.Pointer) int64 {
 		return -1
 	}
 	slotStart := bp - rs - uintptr(slabHeaderSize)
-	return int64((slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize))
+	// Align down to slot boundary. slotSize is a power of two, so
+	// bit masking is equivalent to (slotStart / slotSize) * slotSize
+	// but avoids the division.
+	return int64(slotStart &^ uintptr(r.slotSize-1))
 }
 
 // freeSlot returns a slab-allocated buffer to its region's free list.
@@ -284,7 +293,11 @@ func (s *SlabAllocator) Free(buf []byte) {
 	bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
 	cs := &s.classes[class]
 	cs.mu.Lock()
-	// Find the region containing this buffer and compute the slot offset.
+	// Find the region containing this buffer. The scan is bounded by
+	// slabMaxRegionsPerClass (64) and only runs on the eviction path,
+	// not the hit path. Under high traffic with 40% hit ratio, the
+	// 60% miss path triggers evictions, but FreeBatch coalesces most
+	// frees so the single-Free path is rarely the bottleneck.
 	for _, r := range cs.regions {
 		slotOffset := findSlotOffset(r, bufPtr)
 		if slotOffset < 0 {
@@ -335,21 +348,20 @@ func (s *SlabAllocator) FreeBatch(bodies [][]byte) {
 	s.freeGroupedEntries(entries)
 }
 
-// freeEntry pairs a buffer with its class for grouped freeing.
+// freeEntry pairs a buffer pointer with its class for grouped freeing.
 type freeEntry struct {
 	class  int
-	region int
-	buf    []byte
 	bufPtr unsafe.Pointer
 }
 
 // classifyBodies identifies the slab class of each buffer from its cap
 // (slotSize - slabHeaderSize). Does not acquire any locks — just collects
-// the class index for each valid slab buffer.
+// the class index for each valid slab buffer. Pre-allocates the entries
+// slice to avoid append growth on the hot eviction path.
 //
 //nolint:gosec // G103: pointer read on mmap'd memory is intentional
 func (s *SlabAllocator) classifyBodies(bodies [][]byte) []freeEntry {
-	var entries []freeEntry
+	entries := make([]freeEntry, 0, len(bodies))
 	for _, buf := range bodies {
 		if buf == nil || cap(buf) == 0 {
 			continue
@@ -359,17 +371,16 @@ func (s *SlabAllocator) classifyBodies(bodies [][]byte) []freeEntry {
 			continue
 		}
 		bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
-		entries = append(entries, freeEntry{class: class, buf: buf, bufPtr: bufPtr})
+		entries = append(entries, freeEntry{class: class, bufPtr: bufPtr})
 	}
 	return entries
 }
 
-// sortFreeEntries sorts entries by (class, region) using insertion sort.
+// sortFreeEntries sorts entries by class using insertion sort.
 // n is small (≤ inlineEvictCap + 1 = 5), so insertion sort is efficient.
 func sortFreeEntries(entries []freeEntry) {
 	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && (entries[j].class < entries[j-1].class ||
-			(entries[j].class == entries[j-1].class && entries[j].region < entries[j-1].region)); j-- {
+		for j := i; j > 0 && entries[j].class < entries[j-1].class; j-- {
 			entries[j], entries[j-1] = entries[j-1], entries[j]
 		}
 	}
@@ -377,7 +388,10 @@ func sortFreeEntries(entries []freeEntry) {
 
 // freeGroupedEntries frees entries grouped by class. For each class,
 // acquires the lock once and frees all entries in that class by
-// finding their region and slot offset.
+// finding their region and slot offset. A locality cache avoids
+// re-scanning the same region for consecutive entries from the same
+// region — common under high-traffic eviction bursts where multiple
+// evicted entries share a hot region.
 //
 //nolint:gosec // G103: pointer arithmetic on mmap'd memory is intentional
 func (s *SlabAllocator) freeGroupedEntries(entries []freeEntry) {
@@ -386,12 +400,25 @@ func (s *SlabAllocator) freeGroupedEntries(entries []freeEntry) {
 		class := entries[i].class
 		cs := &s.classes[class]
 		cs.mu.Lock()
-		// Free all entries belonging to this class.
+		lastRegion := -1
 		for i < len(entries) && entries[i].class == class {
-			for _, r := range cs.regions {
-				slotOffset := findSlotOffset(r, entries[i].bufPtr)
-				if slotOffset >= 0 {
-					s.freeSlot(r, slotOffset)
+			ptr := entries[i].bufPtr
+			// Try the last matched region first (locality cache).
+			if lastRegion >= 0 {
+				if off := findSlotOffset(cs.regions[lastRegion], ptr); off >= 0 {
+					s.freeSlot(cs.regions[lastRegion], off)
+					i++
+					continue
+				}
+			}
+			// Scan all regions, skipping the cached one (already checked).
+			for j, r := range cs.regions {
+				if j == lastRegion {
+					continue
+				}
+				if off := findSlotOffset(r, ptr); off >= 0 {
+					s.freeSlot(r, off)
+					lastRegion = j
 					break
 				}
 			}

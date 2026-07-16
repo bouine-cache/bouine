@@ -158,44 +158,44 @@ func (s *SlabAllocator) Free(buf []byte) {
 	// Go-heap buffers, which could segfault if the buffer is at a page
 	// boundary.
 	bufStart := uintptr(unsafe.Pointer(&buf[:1][0]))
-	var region *slabRegion
-	var class int
+	var regionStart uintptr
 	for i, r := range s.regions {
 		if r == nil {
 			continue
 		}
-		regionStart := uintptr(unsafe.Pointer(&r.data[0]))
-		regionEnd := regionStart + uintptr(len(r.data))
-		if bufStart >= regionStart+uintptr(slabHeaderSize) && bufStart < regionEnd {
-			// The header sits slabHeaderSize bytes before buf[0].
+		rs := uintptr(unsafe.Pointer(&r.data[0]))
+		re := rs + uintptr(len(r.data))
+		if bufStart >= rs+uintptr(slabHeaderSize) && bufStart < re {
+			regionStart = rs
+			// Lock the region before reading the header so Alloc's
+			// header write on the same region is synchronized.
+			r.mu.Lock()
+			// Re-validate under the lock: the slot could have been
+			// recycled by Alloc between the unlocked scan and here.
 			headerPtr := unsafe.Pointer(bufStart - uintptr(slabHeaderSize))
 			h := (*slabHeader)(headerPtr)
 			if h.magic != slabMagic {
-				return // not a slab buffer
+				r.mu.Unlock()
+				return // not a slab buffer or already freed
 			}
-			class = int(h.class)
+			class := int(h.class)
 			if class < 0 || class >= numSlabClasses || class != i {
+				r.mu.Unlock()
 				return // header corrupted or mismatched
 			}
-			region = r
-			break
+			// Recover the slot offset and clear the header.
+			slotStart := bufStart - regionStart - uintptr(slabHeaderSize)
+			slotOffset := (slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize)
+			hdr := (*slabHeader)(unsafe.Pointer(&r.data[slotOffset]))
+			hdr.magic = 0
+			hdr.class = -1
+			r.freeList = append(r.freeList, int64(slotOffset))
+			r.mu.Unlock()
+			s.frees.Add(1)
+			return
 		}
 	}
-	if region == nil {
-		return // not from any slab region
-	}
-	// Recover the slot offset from the buffer's position in the region.
-	regionStart := uintptr(unsafe.Pointer(&region.data[0]))
-	slotStart := bufStart - regionStart - uintptr(slabHeaderSize)
-	slotOffset := (slotStart / uintptr(region.slotSize)) * uintptr(region.slotSize)
-	region.mu.Lock()
-	// Clear the magic under the lock so Alloc's header write can't race.
-	header := (*slabHeader)(unsafe.Pointer(&region.data[slotOffset]))
-	header.magic = 0
-	header.class = -1
-	region.freeList = append(region.freeList, int64(slotOffset))
-	region.mu.Unlock()
-	s.frees.Add(1)
+	// Not from any slab region — Go heap fallback, no-op.
 }
 
 // slabClass returns the size class index for the given size, or -1 if

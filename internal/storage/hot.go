@@ -70,6 +70,9 @@ type HotStore struct {
 	// onEvict is called when a backed entry is evicted. Set via
 	// HotConfig.OnEvict. See HotConfig.OnEvict for the constraint.
 	onEvict func(key api.Key)
+	// slab allocates body bytes from mmap'd regions to reduce GC
+	// pressure. nil means use Go heap (default, backward compatible).
+	slab *SlabAllocator
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
@@ -162,6 +165,10 @@ type HotConfig struct {
 	// NumShards overrides the default shard count. Zero means
 	// min(runtime.NumCPU(), 64).
 	NumShards int
+	// Slab enables the mmap'd slab allocator for body bytes. When
+	// true, bodies are allocated from mmap'd regions instead of Go
+	// heap, reducing GC pressure. Default false (Go heap).
+	Slab bool
 	// ReaperInterval controls how often the background TTL reaper scans
 	// shards for entries past TTL + SWR + SIE. Zero means use the
 	// default (30 s). A negative value disables background reaping
@@ -215,6 +222,14 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
 		onEvict:        cfg.OnEvict,
+	}
+	if cfg.Slab {
+		slab, err := NewSlabAllocator()
+		if err != nil {
+			cfg.Logger.Warn("slab allocator init failed, falling back to Go heap", "error", err)
+		} else {
+			h.slab = slab
+		}
 	}
 	go h.sweeper()
 	if cfg.ReaperInterval >= 0 {
@@ -293,6 +308,9 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 // evicted. Called while the shard write lock is held — the callback
 // MUST NOT block or perform I/O.
 func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry) {
+	if h.slab != nil && entry.obj != nil {
+		h.slab.Free(entry.obj.Body)
+	}
 	if h.onEvict != nil && entry.hasBackup {
 		h.onEvict(key)
 	}
@@ -376,6 +394,18 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	se, _ := s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 		return nil // force insert
 	})
+	// If slab is enabled, copy the body into an mmap'd slot to move it
+	// off the Go heap and reduce GC pressure. The original body (from
+	// the HTTP response or warm tier) stays on the Go heap and is GC'd.
+	if h.slab != nil && len(obj.Body) > 0 {
+		slabBuf := h.slab.Alloc(len(obj.Body))
+		if slabBuf != nil {
+			copy(slabBuf, obj.Body)
+			obj.Body = slabBuf
+		}
+		// If slabBuf is nil (slab full or mmap failed), obj.Body stays
+		// on the Go heap — no crash, just no GC optimization.
+	}
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = obj
 	e.sieve = se
@@ -490,6 +520,9 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	if e, ok := s.entries[key]; ok {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.sieve)
+		if h.slab != nil && e.obj != nil {
+			h.slab.Free(e.obj.Body)
+		}
 		delete(s.entries, key)
 		e.obj = nil
 		e.sieve = nil

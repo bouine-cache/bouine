@@ -32,7 +32,7 @@ import (
 // warmMetrics, when non-nil, is injected into the warm store so it can
 // increment over-budget, eviction, and compaction counters inline.
 func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
-	hotCfg := storage.HotConfig{MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes()}
+	hotCfg := storage.HotConfig{MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes(), Slab: e.cfg.Storage.HotMmapSlab}
 	if e.cfg.Storage.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
 	}

@@ -2,8 +2,11 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -103,6 +106,47 @@ func TestSlabAllocator_ReuseSlots(t *testing.T) {
 	}
 	if frees != 100 {
 		t.Fatalf("expected 100 frees, got %d", frees)
+	}
+}
+
+func TestSlabAllocator_Growable(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("slab allocator is Linux-only")
+	}
+	slab, err := NewSlabAllocator()
+	if err != nil {
+		t.Skipf("slab allocator unavailable on this platform: %v", err)
+	}
+	t.Cleanup(func() { _ = slab.Close() })
+
+	// Exhaust the initial 1024 slots for class 0 (256B), then verify
+	// the next alloc still succeeds by growing a new region.
+	size := 100 // fits in class 0 (256B - 16B header = 240B usable)
+	bufs := make([][]byte, 0, 2048)
+	for {
+		buf := slab.Alloc(size)
+		if buf == nil {
+			break // reached region cap or fallback
+		}
+		bufs = append(bufs, buf)
+	}
+	if len(bufs) <= 1024 {
+		t.Fatalf("expected more than 1024 allocs from growable slab, got %d", len(bufs))
+	}
+	// Free all and verify they return cleanly.
+	for _, b := range bufs {
+		slab.Free(b)
+	}
+	allocs, frees, fallback := slab.Stats()
+	if allocs == 0 {
+		t.Fatal("expected non-zero allocs")
+	}
+	if frees == 0 {
+		t.Fatal("expected non-zero frees")
+	}
+	if fallback > 0 {
+		t.Logf("fallback=%d (some sizes may exceed slab classes)", fallback)
 	}
 }
 
@@ -220,6 +264,9 @@ func TestSlabAllocator_DoubleFree(t *testing.T) {
 
 func TestHotStore_SlabPutGet(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("slab allocator is Linux-only")
+	}
 	s := NewHotStore(HotConfig{
 		MaxBytes:  1 << 20,
 		NumShards: 4,
@@ -236,6 +283,14 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 
 	if err := s.Put(context.Background(), k, o); err != nil {
 		t.Fatalf("put: %v", err)
+	}
+	// Verify Put did not mutate the caller's obj.Body — the caller
+	// (TieredStore.Put) may still need to read it for warm-tier encoding.
+	for i := range o.Body {
+		if o.Body[i] != byte(i%256) {
+			t.Fatalf("Put mutated caller obj.Body at byte %d: expected %d, got %d",
+				i, byte(i%256), o.Body[i])
+		}
 	}
 	got, src, err := s.Get(context.Background(), k)
 	if err != nil {
@@ -259,6 +314,9 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 
 func TestHotStore_SlabEviction(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("slab allocator is Linux-only")
+	}
 	s := NewHotStore(HotConfig{
 		MaxBytes:  4096,
 		NumShards: 1,
@@ -274,5 +332,101 @@ func TestHotStore_SlabEviction(t *testing.T) {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
-	// No crash, no panic — the slab Free path ran during evictions.
+	// Verify that slab frees actually happened during evictions.
+	// With 20 puts of 200B each into a 4096B store, at least some
+	// entries must have been evicted, and their slab slots freed.
+	if s.slab == nil {
+		t.Fatal("slab should be initialized on Linux")
+	}
+	allocs, frees, _ := s.slab.Stats()
+	if allocs == 0 {
+		t.Fatal("expected slab allocations during puts")
+	}
+	if frees == 0 {
+		t.Fatal("expected slab frees during evictions")
+	}
+}
+
+// TestHotStore_SlabConcurrentGetEviction proves the use-after-free fix:
+// Get returns a heap-copied body, so concurrent eviction (which frees
+// the slab slot) cannot corrupt the body the caller is reading. Without
+// the detachBody fix, this test would intermittently read recycled
+// slab memory instead of the original body content.
+func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("slab allocator is Linux-only")
+	}
+
+	s := NewHotStore(HotConfig{
+		MaxBytes:  8192,
+		NumShards: 1,
+		Slab:      true,
+	})
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+
+	// Insert a known object, then hammer it with concurrent Gets
+	// while simultaneously filling the store to force evictions.
+	key := KeyHash([]byte("concurrent-key"))
+	bodySize := 200
+	o := obj(key, bodySize)
+	o.Body = make([]byte, bodySize)
+	for i := range o.Body {
+		o.Body[i] = byte(i % 256)
+	}
+	if err := s.Put(context.Background(), key, o); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Reader: Get the key repeatedly and verify body integrity.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, _, err := s.Get(context.Background(), key)
+			if err != nil || got == nil {
+				continue
+			}
+			if len(got.Body) != bodySize {
+				t.Errorf("body len: expected %d, got %d", bodySize, len(got.Body))
+				return
+			}
+			for i := range got.Body {
+				if got.Body[i] != byte(i%256) {
+					t.Errorf("body corrupted at byte %d: expected %d, got %d (use-after-free)",
+						i, byte(i%256), got.Body[i])
+					return
+				}
+			}
+		}
+	}()
+
+	// Evictor: continuously insert new keys to force eviction.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			k := KeyHash([]byte(fmt.Sprintf("evict-%d", i)))
+			if err := s.Put(context.Background(), k, obj(k, 200)); err != nil {
+				return
+			}
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

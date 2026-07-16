@@ -147,19 +147,39 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 		return make([]byte, size)
 	}
 	cs := &s.classes[class]
+	hdrSize := int64(slabHeaderSize)
+	need := hdrSize + int64(size)
 	cs.mu.Lock()
-	// Try to find a region with a free slot, starting from the hint
-	// (the last region that had a free slot). This avoids scanning
-	// full regions on every Alloc.
+	// Fast path: try the hinted region first. Under high traffic with
+	// huge route cardinality, the working set churns rapidly but the
+	// hinted region usually has bump space or recycled slots.
+	if h := cs.allocHint; h < len(cs.regions) {
+		r := cs.regions[h]
+		if r.bump+need <= int64(len(r.data)) {
+			// Bump pointer fast path: single int64 increment, no
+			// function call, no free-list pop.
+			offset := r.bump
+			r.bump += r.slotSize
+			hdr := (*slabHeader)(unsafe.Pointer(&r.data[offset])) //nolint:gosec // intentional on mmap'd memory
+			hdr.magic = slabMagic
+			start := offset + hdrSize
+			cs.mu.Unlock()
+			s.allocs.Add(1)
+			return r.data[start : start+int64(size) : offset+r.slotSize]
+		}
+		if len(r.freeList) > 0 {
+			buf := s.allocFromRegion(cs, r, h, size)
+			cs.mu.Unlock()
+			s.allocs.Add(1)
+			return buf
+		}
+	}
+	// Slow path: scan other regions for a free slot.
 	for j := range cs.regions {
 		idx := (cs.allocHint + j) % len(cs.regions)
 		r := cs.regions[idx]
-		// Check if this region can satisfy the allocation: either
-		// the bump pointer has room for this size, or the free list
-		// has recycled slots (which are always slotSize, so always fit).
-		bumpFits := r.bump+int64(slabHeaderSize)+int64(size) <= int64(len(r.data))
-		if bumpFits || len(r.freeList) > 0 {
-			buf := s.allocFromRegion(cs, r, idx, class, size)
+		if r.bump+need <= int64(len(r.data)) || len(r.freeList) > 0 {
+			buf := s.allocFromRegion(cs, r, idx, size)
 			cs.mu.Unlock()
 			s.allocs.Add(1)
 			return buf
@@ -172,7 +192,7 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 			cs.regions = append(cs.regions, r)
 			idx := len(cs.regions) - 1
 			cs.allocHint = idx
-			buf := s.allocFromRegion(cs, r, idx, class, size)
+			buf := s.allocFromRegion(cs, r, idx, size)
 			cs.mu.Unlock()
 			s.allocs.Add(1)
 			return buf
@@ -192,7 +212,7 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 func (s *SlabAllocator) allocFromRegion(
 	cs *slabClassState,
 	r *slabRegion,
-	regionIdx, class, size int,
+	regionIdx, size int,
 ) []byte {
 	var offset int64
 	if r.bump+int64(slabHeaderSize)+int64(size) <= int64(len(r.data)) {

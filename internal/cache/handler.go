@@ -1079,10 +1079,6 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	// from the store, not Object.Hits.
 	refreshed.Hits = 0
 	MergeHeaders304(&refreshed, res.Header)
-	// Recompute the pre-serialized header block: MergeHeaders304 may have
-	// changed ETag, Cache-Control, or other static headers. Without this,
-	// the H1 fast-path would serve the stale pre-304 headers.
-	refreshed.SerializedHead = serializeHead(&refreshed)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
@@ -1097,10 +1093,6 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	if newETag := res.Header.Get(header.ETag); newETag != "" {
 		refreshed.ETag = newETag
 	}
-	// SerializedHead must be recomputed last — serializeHead uses
-	// CacheControl to parse no-cache field names, so it depends on the
-	// updated CacheControl set above.
-	refreshed.SerializedHead = serializeHead(&refreshed)
 	return &refreshed
 }
 
@@ -1676,7 +1668,10 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
 
-	obj.SerializedHead = serializeHead(obj)
+	// SerializedHead is not computed here — it is lazily computed on
+	// the first fast-path cache hit by getOrComputeSerializedHead.
+	// This avoids allocating ~512 bytes per object for objects that
+	// are never served via the fast-path (misses, net/http path).
 
 	return obj
 }

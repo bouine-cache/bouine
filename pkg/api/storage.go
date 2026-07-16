@@ -3,6 +3,7 @@ package api
 import (
 	"log/slog"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -86,14 +87,30 @@ type Object struct {
 	// Not serialized (re-derived from Header on warm-tier load).
 	OriginAge time.Duration `json:"-"`
 
-	// SerializedHead is the pre-rendered HTTP response header block
-	// (static headers as "Key: Value\r\n" pairs, without the status line
-	// or trailing \r\n). Computed once at store time so the H1 fast-path
-	// can write it directly via net.Buffers without iterating the header
-	// map on every cache hit. Not serialized to disk (json:"-").
-	// Warm-tier loads leave this nil; the fast-path falls back to
-	// appendResponseHeaders (header iteration) for those objects.
-	SerializedHead []byte `json:"-"`
+	// serializedHead is the lazily-computed pre-rendered HTTP response
+	// header block (static headers as "Key: Value\r\n" pairs, without
+	// status line or trailing \r\n). Computed on the first fast-path
+	// cache hit, not at store time — objects never served via the
+	// fast-path (misses, net/http path) never pay the ~512-byte cost.
+	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
+	// Accessed via atomic.Pointer for race-safe lazy initialization.
+	serializedHead atomic.Pointer[[]byte] `json:"-"`
+}
+
+// LoadSerializedHead returns the lazily-computed serialized header block,
+// or nil if it has not been computed yet. Thread-safe.
+func (o *Object) LoadSerializedHead() []byte {
+	p := o.serializedHead.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// StoreSerializedHead atomically stores the serialized header block.
+// Called by the fast-path on first cache hit. Thread-safe.
+func (o *Object) StoreSerializedHead(head []byte) {
+	o.serializedHead.Store(&head)
 }
 
 // Fresh reports whether the object is still within its freshness lifetime

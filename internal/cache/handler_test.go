@@ -1489,7 +1489,7 @@ func TestDoFetchCanceledContextKeepsValidResponse(t *testing.T) {
 	}
 }
 
-func TestRefreshFrom304_RecomputesSerializedHead(t *testing.T) {
+func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
@@ -1504,7 +1504,6 @@ func TestRefreshFrom304_RecomputesSerializedHead(t *testing.T) {
 		ETag:       `"v1"`,
 	}
 	stale.CacheControl = stale.Header.Get(header.CacheControl)
-	stale.SerializedHead = serializeHead(stale)
 
 	// 304 adds no-cache="X-Sensitive" — serializeHead must now skip X-Sensitive.
 	res := fetchResult{
@@ -1514,17 +1513,23 @@ func TestRefreshFrom304_RecomputesSerializedHead(t *testing.T) {
 
 	refreshed := h.refreshFrom304(stale, res)
 
+	// SerializedHead is lazy — must be nil after refresh (not eagerly computed).
+	if refreshed.LoadSerializedHead() != nil {
+		t.Fatalf("SerializedHead should be nil after refresh (lazy), got non-nil")
+	}
+
+	// Verify that serializeHead(refreshed) produces the correct result.
 	expected := serializeHead(refreshed)
-	if !bytes.Equal(refreshed.SerializedHead, expected) {
-		t.Fatalf("SerializedHead mismatch after 304 refresh:\n  got:  %q\n  want: %q", refreshed.SerializedHead, expected)
+	if !bytes.Equal(expected, serializeHead(refreshed)) {
+		t.Fatalf("serializeHead not deterministic after 304 refresh")
 	}
-	if !bytes.Contains(refreshed.SerializedHead, []byte("max-age=3600")) {
-		t.Fatalf("SerializedHead does not contain updated Cache-Control: %q", refreshed.SerializedHead)
+	if !bytes.Contains(expected, []byte("max-age=3600")) {
+		t.Fatalf("serializeHead does not contain updated Cache-Control: %q", expected)
 	}
-	if bytes.Contains(refreshed.SerializedHead, []byte("max-age=60")) {
-		t.Fatalf("SerializedHead still contains old Cache-Control value")
+	if bytes.Contains(expected, []byte("max-age=60")) {
+		t.Fatalf("serializeHead still contains old Cache-Control value")
 	}
-	if bytes.Contains(refreshed.SerializedHead, []byte("X-Sensitive: secret")) {
-		t.Fatalf("SerializedHead contains X-Sensitive header, which should be skipped by no-cache directive: %q", refreshed.SerializedHead)
+	if bytes.Contains(expected, []byte("X-Sensitive: secret")) {
+		t.Fatalf("serializeHead contains X-Sensitive header, which should be skipped by no-cache directive: %q", expected)
 	}
 }

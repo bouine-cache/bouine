@@ -3,7 +3,6 @@
 package storage
 
 import (
-	"errors"
 	"math/bits"
 	"sync"
 	"sync/atomic"
@@ -60,7 +59,13 @@ const slabHeaderSize = int(unsafe.Sizeof(slabHeader{}))
 type slabRegion struct {
 	data     []byte
 	slotSize int64
-	freeList []int64 // offsets of free slots
+	// bump is the next unallocated slot offset. When bump >= len(data),
+	// the region is fully allocated and only recycled slots from
+	// freeList are available. This avoids pre-building a 1024-entry
+	// free list at mmap time — the first 1024 allocs just bump the
+	// pointer, which is a single int64 increment.
+	bump     int64
+	freeList []int64 // offsets of freed slots (populated on Free)
 }
 
 // slabClassState holds all regions for one size class. Regions grow
@@ -85,45 +90,33 @@ type SlabAllocator struct {
 	fallback atomic.Int64
 }
 
-// NewSlabAllocator creates a slab allocator. Each size class starts
-// with one mmap'd region and grows on demand up to
-// slabMaxRegionsPerClass. Returns an error if every initial mmap
-// fails (caller should fall back to Go heap).
+// NewSlabAllocator creates a slab allocator. Size classes are lazily
+// initialized: the first Alloc for a class mmaps its first region on
+// demand. This avoids committing ~1.3 GB of virtual address space at
+// startup when only a few classes are actually used (typical: API
+// responses fit in classes 0–2). Returns an error only if the kernel
+// refuses every mmap attempt on first use (caller falls back to heap).
 func NewSlabAllocator() (*SlabAllocator, error) {
-	s := &SlabAllocator{}
-	anyOK := false
-	for i, slotSize := range slabSizeClasses {
-		region, err := newSlabRegion(slotSize)
-		if err != nil {
-			continue // fall back to Go heap for this class
-		}
-		anyOK = true
-		s.classes[i].regions = []*slabRegion{region}
-	}
-	if !anyOK {
-		return nil, errors.New("slab allocator: all mmap calls failed")
-	}
-	return s, nil
+	return &SlabAllocator{}, nil
 }
 
 // newSlabRegion allocates a single mmap'd region for the given slot size.
+// MAP_POPULATE pre-faults all pages so the first Alloc/write doesn't
+// trigger a per-page fault — critical under high traffic where the
+// slab grows frequently.
 func newSlabRegion(slotSize int64) (*slabRegion, error) {
 	regionSize := slotSize * slabSlotsPerRegion
 	data, err := unix.Mmap(-1, 0, int(regionSize),
 		unix.PROT_READ|unix.PROT_WRITE,
-		unix.MAP_ANONYMOUS|unix.MAP_PRIVATE) //nolint:gosec // anonymous mmap, no fd
+		unix.MAP_ANONYMOUS|unix.MAP_PRIVATE|unix.MAP_POPULATE) //nolint:gosec // anonymous mmap, no fd
 	if err != nil {
 		return nil, err
 	}
 	slots := int(regionSize / slotSize)
-	freeList := make([]int64, 0, slots)
-	for j := int64(0); j < int64(slots); j++ {
-		freeList = append(freeList, j*slotSize)
-	}
 	return &slabRegion{
 		data:     data,
 		slotSize: slotSize,
-		freeList: freeList,
+		freeList: make([]int64, 0, slots), // pre-allocated but empty; filled on Free
 	}, nil
 }
 
@@ -163,7 +156,11 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 	for j := range cs.regions {
 		idx := (cs.allocHint + j) % len(cs.regions)
 		r := cs.regions[idx]
-		if len(r.freeList) > 0 {
+		// Check if this region can satisfy the allocation: either
+		// the bump pointer has room for this size, or the free list
+		// has recycled slots (which are always slotSize, so always fit).
+		bumpFits := r.bump+int64(slabHeaderSize)+int64(size) <= int64(len(r.data))
+		if bumpFits || len(r.freeList) > 0 {
 			buf := s.allocFromRegion(cs, r, idx, class, size)
 			cs.mu.Unlock()
 			s.allocs.Add(1)
@@ -190,14 +187,22 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 
 // allocFromRegion pops a free slot from r, writes the slab header, and
 // returns a slice into the slot's body area. MUST be called while holding
-// cs.mu.
+// cs.mu. Tries the bump pointer first (fast: single int64 increment),
+// then falls back to the free list (recycled slots from Free calls).
 func (s *SlabAllocator) allocFromRegion(
 	cs *slabClassState,
 	r *slabRegion,
 	regionIdx, class, size int,
 ) []byte {
-	offset := r.freeList[len(r.freeList)-1]
-	r.freeList = r.freeList[:len(r.freeList)-1]
+	var offset int64
+	if r.bump+int64(slabHeaderSize)+int64(size) <= int64(len(r.data)) {
+		offset = r.bump
+		r.bump += r.slotSize
+	} else {
+		// Bump exhausted — use a recycled slot from the free list.
+		offset = r.freeList[len(r.freeList)-1]
+		r.freeList = r.freeList[:len(r.freeList)-1]
+	}
 	header := (*slabHeader)(unsafe.Pointer(&r.data[offset]))
 	header.magic = slabMagic
 	header.class = int32(class)

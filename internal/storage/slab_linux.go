@@ -157,7 +157,7 @@ func (s *SlabAllocator) Free(buf []byte) {
 	// before reading the header. This avoids reading garbage memory from
 	// Go-heap buffers, which could segfault if the buffer is at a page
 	// boundary.
-	bufStart := uintptr(unsafe.Pointer(&buf[:1][0]))
+	bufStart := uintptr(unsafe.Pointer(unsafe.SliceData(buf)))
 	var regionStart uintptr
 	for i, r := range s.regions {
 		if r == nil {

@@ -4,8 +4,9 @@ package storage
 
 import "sync/atomic"
 
-// SlabAllocator is a no-op on non-Linux platforms. Alloc falls back to
-// Go heap allocation; Free is a no-op (GC handles it).
+// SlabAllocator is a no-op on non-Linux platforms. Alloc returns nil
+// so the caller keeps the original body without a copy. Free is a
+// no-op (GC handles it).
 type SlabAllocator struct {
 	allocs   atomic.Int64
 	frees    atomic.Int64
@@ -20,13 +21,12 @@ func NewSlabAllocator() (*SlabAllocator, error) {
 // Close is a no-op on non-Linux platforms.
 func (s *SlabAllocator) Close() error { return nil }
 
-// Alloc allocates a []byte of the given size from the Go heap.
-func (s *SlabAllocator) Alloc(size int) []byte {
-	if size <= 0 {
-		return nil
-	}
-	s.fallback.Add(1)
-	return make([]byte, size)
+// Alloc returns nil on non-Linux platforms so the caller falls back
+// to the original body without an unnecessary copy. The slab is a
+// no-op here; pretending to allocate would force a pointless make +
+// copy on every Put for zero GC benefit.
+func (s *SlabAllocator) Alloc(_ int) []byte {
+	return nil
 }
 
 // Free is a no-op on non-Linux platforms.

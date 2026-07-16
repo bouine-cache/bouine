@@ -62,9 +62,12 @@ type slabRegion struct {
 
 // slabClassState holds all regions for one size class. Regions grow
 // on demand when the free list is empty, up to slabMaxRegionsPerClass.
+// allocHint is the index of the last region that had a free slot,
+// avoiding an O(N) scan of all regions on every Alloc.
 type slabClassState struct {
-	mu      sync.Mutex
-	regions []*slabRegion
+	mu        sync.Mutex
+	regions   []*slabRegion
+	allocHint int
 }
 
 // SlabAllocator manages mmap'd regions for hot store body allocation.
@@ -151,8 +154,12 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 	}
 	cs := &s.classes[class]
 	cs.mu.Lock()
-	// Try to find a region with a free slot.
-	for _, r := range cs.regions {
+	// Try to find a region with a free slot, starting from the hint
+	// (the last region that had a free slot). This avoids scanning
+	// full regions on every Alloc.
+	for j := range cs.regions {
+		idx := (cs.allocHint + j) % len(cs.regions)
+		r := cs.regions[idx]
 		if len(r.freeList) > 0 {
 			offset := r.freeList[len(r.freeList)-1]
 			r.freeList = r.freeList[:len(r.freeList)-1]
@@ -161,6 +168,7 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 			header := (*slabHeader)(unsafe.Pointer(&r.data[offset]))
 			header.magic = slabMagic
 			header.class = int64(class)
+			cs.allocHint = idx
 			cs.mu.Unlock()
 			s.allocs.Add(1)
 			hdrSize := int64(slabHeaderSize)
@@ -174,6 +182,7 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 		r, err := newSlabRegion(slabSizeClasses[class])
 		if err == nil {
 			cs.regions = append(cs.regions, r)
+			cs.allocHint = len(cs.regions) - 1
 			offset := r.freeList[len(r.freeList)-1]
 			r.freeList = r.freeList[:len(r.freeList)-1]
 			header := (*slabHeader)(unsafe.Pointer(&r.data[offset]))
@@ -198,47 +207,48 @@ func (s *SlabAllocator) Free(buf []byte) {
 	if buf == nil || cap(buf) == 0 {
 		return
 	}
-	// Keep the unsafe.Pointer around for safe pointer arithmetic via
-	// unsafe.Add. The uintptr (bufStart) is only used for range
-	// comparisons — never converted back to unsafe.Pointer.
+	// Read the header first to determine the size class. This avoids
+	// scanning all 7 class mutexes on every Free — we jump directly to
+	// the right class. The header sits 16 bytes before the buffer start.
+	// For Go-heap buffers, those 16 bytes are random heap memory, so
+	// the magic check below rejects them before touching the class lock.
 	bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
-	bufStart := uintptr(bufPtr)
-	for i := range s.classes {
-		cs := &s.classes[i]
-		cs.mu.Lock()
-		for _, r := range cs.regions {
-			rs := uintptr(unsafe.Pointer(&r.data[0]))
-			re := rs + uintptr(len(r.data))
-			if bufStart >= rs+uintptr(slabHeaderSize) && bufStart < re {
-				// Lock is already held (cs.mu). Re-validate:
-				// the slot could have been recycled by Alloc
-				// between the unlocked scan and here.
-				// unsafe.Add avoids the uintptr→Pointer
-				// round-trip that violates unsafe.Pointer rule 4.
-				h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
-				if h.magic != slabMagic {
-					cs.mu.Unlock()
-					return // not a slab buffer or already freed
-				}
-				class := int(h.class)
-				if class < 0 || class >= numSlabClasses || class != i {
-					cs.mu.Unlock()
-					return // header corrupted or mismatched
-				}
-				// Recover the slot offset and clear the header.
-				slotStart := bufStart - rs - uintptr(slabHeaderSize)
-				slotOffset := (slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize)
-				h.magic = 0
-				h.class = -1
-				r.freeList = append(r.freeList, int64(slotOffset))
-				cs.mu.Unlock()
-				s.frees.Add(1)
-				return
-			}
-		}
-		cs.mu.Unlock()
+	h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
+	if h.magic != slabMagic {
+		return // not a slab buffer (Go heap fallback or already freed)
 	}
-	// Not from any slab region — Go heap fallback, no-op.
+	class := int(h.class)
+	if class < 0 || class >= numSlabClasses {
+		return // header corrupted
+	}
+	// Validate that the buffer pointer falls within a known mmap region
+	// for this class before clearing the header. This guards against
+	// a false magic match from Go-heap memory.
+	bufStart := uintptr(bufPtr)
+	cs := &s.classes[class]
+	cs.mu.Lock()
+	for _, r := range cs.regions {
+		rs := uintptr(unsafe.Pointer(&r.data[0]))
+		re := rs + uintptr(len(r.data))
+		if bufStart >= rs+uintptr(slabHeaderSize) && bufStart < re {
+			if h.magic != slabMagic {
+				cs.mu.Unlock()
+				return // re-validate under lock: slot may have been recycled
+			}
+			// Recover the slot offset and clear the header.
+			slotStart := bufStart - rs - uintptr(slabHeaderSize)
+			slotOffset := (slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize)
+			h.magic = 0
+			h.class = -1
+			r.freeList = append(r.freeList, int64(slotOffset))
+			cs.mu.Unlock()
+			s.frees.Add(1)
+			return
+		}
+	}
+	cs.mu.Unlock()
+	// Magic matched but pointer is outside all regions for this class —
+	// false positive from Go-heap memory. No-op.
 }
 
 // slabClass returns the size class index for the given size, or -1 if

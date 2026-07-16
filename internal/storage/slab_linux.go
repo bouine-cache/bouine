@@ -242,7 +242,7 @@ func classFromCap(c int) int {
 		return -1
 	}
 	total := uint64(c + slabHeaderSize)
-	if total < uint64(slabSizeClasses[0]) || total > uint64(slabSizeClasses[numSlabClasses-1]) {
+	if total < uint64(slabSizeClasses[0]) || total > uint64(slabSizeClasses[numSlabClasses-1]) { //nolint:gosec // G115: slabSizeClasses are positive powers of two
 		return -1
 	}
 	// Slot sizes are powers of two; a non-power-of-two total is a heap buffer.
@@ -250,7 +250,7 @@ func classFromCap(c int) int {
 		return -1
 	}
 	class := int(bits.Len64(total-1)+1)/2 - 4
-	if class < 0 || class >= numSlabClasses || slabSizeClasses[class] != int64(total) {
+	if class < 0 || class >= numSlabClasses || slabSizeClasses[class] != int64(total) { //nolint:gosec // G115: total is bounded to [256, 1048576]
 		return -1
 	}
 	return class

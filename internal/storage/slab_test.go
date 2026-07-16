@@ -209,7 +209,7 @@ func TestSlabAllocator_DoubleFree(t *testing.T) {
 	buf := slab.Alloc(100)
 	slab.Free(buf)
 	// Double-free must be a no-op: the magic was cleared on first Free,
-	// so slabClassFromHeader returns -1 and Free returns early.
+	// so the region scan in Free won't find a matching header and returns.
 	slab.Free(buf)
 
 	_, frees, _ := slab.Stats()

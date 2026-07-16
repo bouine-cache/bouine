@@ -30,27 +30,26 @@ const slabSlotsPerRegion = 1024
 const slabMaxRegionsPerClass = 64
 
 // slabSizeClasses defines the slot size for each class. The usable
-// body capacity per class is slotSize - slabHeaderSize (16 bytes).
+// body capacity per class is slotSize - slabHeaderSize (8 bytes).
 var slabSizeClasses = [numSlabClasses]int64{
-	256,     // class 0: up to 240B
-	1024,    // class 1: up to 1008B
-	4096,    // class 2: up to 4080B
-	16384,   // class 3: up to 16368B
-	65536,   // class 4: up to 65520B
-	262144,  // class 5: up to 262128B
-	1048576, // class 6: up to 1048560B
+	256,     // class 0: up to 248B
+	1024,    // class 1: up to 1016B
+	4096,    // class 2: up to 4088B
+	16384,   // class 3: up to 16376B
+	65536,   // class 4: up to 65528B
+	262144,  // class 5: up to 262136B
+	1048576, // class 6: up to 1048568B
 }
 
-// slabHeader stores the magic and class index in the first 16 bytes of
-// each slab slot. Free reads this from the region data (not backward
+// slabHeader is the 8-byte magic prefix at the start of each slab
+// slot. Free reads it forward from r.data[slotOffset] (not backward
 // from the buffer pointer) to avoid checkptr panics under -race.
+// The magic is the sole slab-buffer identification mechanism: a heap
+// buffer's bytes at the computed offset won't match (false positive
+// rate ~1/2^64). Class is derived from cap(buf) via classFromCap;
+// the region is found by pointer-range scan.
 type slabHeader struct {
 	magic uint64
-	class int32
-	// region is written by Alloc so Free can jump directly to the
-	// owning region without scanning. Read via the region's data
-	// slice, not via backward pointer arithmetic.
-	region int32
 }
 
 const slabHeaderSize = int(unsafe.Sizeof(slabHeader{}))
@@ -136,6 +135,8 @@ func (s *SlabAllocator) Close() error {
 // to Go heap allocation if no slab slot is available. On success the
 // returned slice has len == size; the cap is the remaining usable space
 // in the slot (slotSize - slabHeaderSize). On fallback, cap == size.
+// The 8-byte slab header overhead means a 248B body fits in class 0
+// (256B slot), not 240B as with the old 16-byte header.
 func (s *SlabAllocator) Alloc(size int) []byte {
 	if size <= 0 {
 		return nil
@@ -204,8 +205,6 @@ func (s *SlabAllocator) allocFromRegion(
 	}
 	header := (*slabHeader)(unsafe.Pointer(&r.data[offset]))
 	header.magic = slabMagic
-	header.class = int32(class)
-	header.region = int32(regionIdx)
 	cs.allocHint = regionIdx
 	hdrSize := int64(slabHeaderSize)
 	start := offset + hdrSize
@@ -268,8 +267,6 @@ func (s *SlabAllocator) freeSlot(r *slabRegion, slotOffset int64) {
 		return // slot was already freed or recycled
 	}
 	header.magic = 0
-	header.class = -1
-	header.region = -1
 	r.freeList = append(r.freeList, slotOffset)
 	s.frees.Add(1)
 }

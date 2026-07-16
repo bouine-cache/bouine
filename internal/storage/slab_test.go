@@ -124,10 +124,17 @@ func TestSlabAllocator_Growable(t *testing.T) {
 	// the next alloc still succeeds by growing a new region.
 	size := 100 // fits in class 0 (256B - 16B header = 240B usable)
 	bufs := make([][]byte, 0, 2048)
-	for {
+	// Alloc returns heap fallback (non-nil, cap==size) when the region
+	// cap is reached. Stop when we detect a heap fallback buffer.
+	for i := 0; i < 100000; i++ {
 		buf := slab.Alloc(size)
 		if buf == nil {
-			break // reached region cap or fallback
+			break
+		}
+		// Slab buffers have cap == slotSize - slabHeaderSize (240 for
+		// class 0). Heap fallback has cap == size (100).
+		if cap(buf) == size && len(bufs) > 0 {
+			break
 		}
 		bufs = append(bufs, buf)
 	}

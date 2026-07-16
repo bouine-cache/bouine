@@ -164,13 +164,14 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 
 	hbuf = appendStatusLine(hbuf, obj.StatusCode)
 
-	// Use pre-serialized static headers if available — avoids iterating
-	// the header map on every cache hit.
-	if len(obj.SerializedHead) > 0 {
-		hbuf = append(hbuf, obj.SerializedHead...)
+	// Use lazily-computed pre-serialized static headers if available.
+	// On the first fast-path hit, getOrComputeSerializedHead computes
+	// and caches the header block. Subsequent hits reuse the cached bytes.
+	if head := f.getOrComputeSerializedHead(obj); head != nil {
+		hbuf = append(hbuf, head...)
 	} else {
-		// Fallback: serialize headers on-the-fly (warm-tier objects loaded
-		// from disk without pre-serialization).
+		// Fallback: serialize headers on-the-fly (serialization failed
+		// or headers exceed maxFastPathHeaderBytes).
 		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult)
 		return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
 	}
@@ -185,6 +186,27 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 	}
 
 	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
+}
+
+// getOrComputeSerializedHead returns the lazily-computed serialized
+// header block for the object. On the first call, it computes the
+// serialized headers via serializeHead and stores them atomically.
+// Subsequent calls return the cached bytes. Returns nil if the
+// serialized headers exceed maxFastPathHeaderBytes (the fast-path
+// falls back to appendResponseHeaders in that case).
+func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
+	if head := obj.LoadSerializedHead(); head != nil {
+		return head
+	}
+	head := serializeHead(obj)
+	if len(head) > maxFastPathHeaderBytes {
+		return nil // too large, don't cache — fall back to per-hit serialization
+	}
+	obj.StoreSerializedHead(head)
+	// Re-load to return the atomically-stored value, not the local.
+	// Concurrent callers may have stored a different *[]byte with the
+	// same content; returning the stored value ensures consistency.
+	return obj.LoadSerializedHead()
 }
 
 // appendResponseHeaders serializes the stored object's static headers

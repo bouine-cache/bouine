@@ -11,6 +11,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// slabMagic is written into the header of every slab-allocated buffer.
+// It lets Free distinguish slab buffers from Go-heap buffers without
+// reading garbage memory — a heap buffer's "header" bytes are random,
+// so the probability of a false magic match is ~1/2^64.
+const slabMagic uint64 = 0x534c4142534c4f54 // "SLABSLOT"
+
 // slabSizeClasses defines the size classes for the slab allocator.
 // Each class is the maximum body size that fits in that class's slots.
 var slabSizeClasses = [numSlabClasses]int64{
@@ -27,10 +33,17 @@ const numSlabClasses = 7
 
 const slabSlotsPerRegion = 1024
 
-// slabHeaderSize is reserved at the front of each slot to store the class
-// index. This lets Free identify a slab-allocated buffer in O(1) without
-// scanning regions or doing fragile pointer-range comparisons.
-const slabHeaderSize = 8
+// slabHeader stores the magic and class index in the first 16 bytes of
+// each slab slot. Free reads this to identify slab-allocated buffers in
+// O(1) without scanning regions or doing fragile pointer-range
+// comparisons. The magic prevents false positives from Go-heap buffers,
+// whose "header" bytes are random heap memory.
+type slabHeader struct {
+	magic uint64
+	class int64
+}
+
+const slabHeaderSize = int(unsafe.Sizeof(slabHeader{}))
 
 // slabRegion is a single mmap'd region for a size class.
 type slabRegion struct {
@@ -122,13 +135,15 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 	region.freeList = region.freeList[:len(region.freeList)-1]
 	region.mu.Unlock()
 	s.allocs.Add(1)
-	// Write the class index into the slot header so Free can identify
-	// this buffer in O(1) without pointer arithmetic.
-	header := (*[slabHeaderSize]byte)(unsafe.Pointer(&region.data[offset]))
-	*(*int)(unsafe.Pointer(&header[0])) = class
+	// Write the magic and class index into the slot header so Free can
+	// identify this buffer as slab-allocated in O(1).
+	header := (*slabHeader)(unsafe.Pointer(&region.data[offset]))
+	header.magic = slabMagic
+	header.class = int64(class)
 	// Return the usable portion after the header.
-	start := offset + slabHeaderSize
-	end := offset + int64(size) + slabHeaderSize
+	hdrSize := int64(slabHeaderSize)
+	start := offset + hdrSize
+	end := offset + int64(size) + hdrSize
 	return region.data[start : end : offset+region.slotSize]
 }
 
@@ -138,10 +153,6 @@ func (s *SlabAllocator) Free(buf []byte) {
 	if buf == nil || cap(buf) == 0 {
 		return
 	}
-	// The header sits slabHeaderSize bytes before the start of the
-	// usable region. Read the class index from it.
-	// This is safe because slab-allocated buffers always have
-	// slabHeaderSize bytes of capacity before their start pointer.
 	class := slabClassFromHeader(buf)
 	if class < 0 || class >= numSlabClasses {
 		return // not a slab buffer (Go heap fallback)
@@ -154,34 +165,39 @@ func (s *SlabAllocator) Free(buf []byte) {
 	bufStart := uintptr(unsafe.Pointer(&buf[:1][0]))
 	regionStart := uintptr(unsafe.Pointer(&region.data[0]))
 	if bufStart < regionStart || bufStart >= regionStart+uintptr(len(region.data)) {
-		return // not from this region (shouldn't happen, but defensive)
+		return // not from this region (defensive)
 	}
-	slotStart := bufStart - regionStart - slabHeaderSize
+	slotStart := bufStart - regionStart - uintptr(slabHeaderSize)
 	slotOffset := (slotStart / uintptr(region.slotSize)) * uintptr(region.slotSize)
+	// Clear the magic so a double-free is detected (the header magic
+	// won't match, and Free will treat it as a non-slab buffer).
+	header := (*slabHeader)(unsafe.Pointer(&region.data[slotOffset]))
+	header.magic = 0
+	header.class = -1
 	region.mu.Lock()
 	region.freeList = append(region.freeList, int64(slotOffset))
 	region.mu.Unlock()
 	s.frees.Add(1)
 }
 
-// slabClassFromHeader reads the class index from the slab header that
-// precedes the usable portion of a slab-allocated buffer. Returns -1 if
-// the buffer is not slab-allocated (the header bytes would be garbage
-// from a Go heap allocation).
+// slabClassFromHeader reads the slab header that precedes the usable
+// portion of a slab-allocated buffer. Returns -1 if the buffer is not
+// slab-allocated (the magic won't match for Go-heap buffers, whose
+// "header" bytes are random heap memory).
 func slabClassFromHeader(buf []byte) int {
-	// We need to read slabHeaderSize bytes before buf[0]. This is only
-	// safe if the buffer was allocated by Alloc (which reserves header
-	// space). For Go heap buffers, this reads unrelated heap memory —
-	// but we validate the class index range and region membership, so
-	// a false positive is caught by Free's range check.
-	// The cap check ensures we don't read before the allocation.
 	if cap(buf) < slabHeaderSize {
 		return -1
 	}
-	// Use unsafe to read the 8 bytes before buf[0] as an int.
-	headerPtr := unsafe.Pointer(&buf[:1][0])
-	classPtr := unsafe.Pointer(uintptr(headerPtr) - slabHeaderSize)
-	class := *(*int)(classPtr)
+	// Read the header that sits slabHeaderSize bytes before buf[0].
+	// For slab-allocated buffers, this is always safe (Alloc reserves
+	// header space). For Go-heap buffers, the magic check prevents
+	// false positives with ~1/2^64 probability.
+	headerPtr := unsafe.Pointer(uintptr(unsafe.Pointer(&buf[:1][0])) - uintptr(slabHeaderSize))
+	h := (*slabHeader)(headerPtr)
+	if h.magic != slabMagic {
+		return -1
+	}
+	class := int(h.class)
 	if class < 0 || class >= numSlabClasses {
 		return -1
 	}
@@ -192,7 +208,7 @@ func slabClassFromHeader(buf []byte) int {
 // the size exceeds the largest class.
 func slabClass(size int) int {
 	for i, s := range slabSizeClasses {
-		if int64(size)+slabHeaderSize <= s {
+		if int64(size)+int64(slabHeaderSize) <= s {
 			return i
 		}
 	}

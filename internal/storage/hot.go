@@ -67,6 +67,11 @@ type HotStore struct {
 	reaperInterval time.Duration
 	// done is closed by Close() to stop all background goroutines.
 	done chan struct{}
+	// wg tracks the sweeper and reaper goroutines so Close can wait
+	// for them to fully exit before munmapping slab regions. Without
+	// this, a goroutine mid-flushSlabFrees could access munmap'd
+	// memory and segfault.
+	wg sync.WaitGroup
 	// onEvict is called when a backed entry is evicted. Set via
 	// HotConfig.OnEvict. See HotConfig.OnEvict for the constraint.
 	onEvict func(key api.Key)
@@ -231,9 +236,13 @@ func NewHotStore(cfg HotConfig) *HotStore {
 			h.slab = slab
 		}
 	}
+	h.wg.Add(2)
 	go h.sweeper()
 	if cfg.ReaperInterval >= 0 {
 		go h.reaperLoop()
+	} else {
+		// Balance the Add(2) above when reaping is disabled.
+		h.wg.Done()
 	}
 	return h
 }
@@ -259,15 +268,16 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	e := s.entries[key]
 	if e != nil && e.sieve.Visited() {
 		e.windowHits.Add(1)
-		obj := e.obj
+		stored := e.obj
+		ret := h.detachBody(stored)
 		s.mu.RUnlock()
-		if h.matchesActiveBan(obj) {
-			h.evictBanned(s, key, obj)
+		if h.matchesActiveBan(ret) {
+			h.evictBanned(s, key, stored)
 			h.stats.misses.Add(1)
 			return nil, "", nil
 		}
 		h.stats.hits.Add(1)
-		return obj, api.SourceHot, nil
+		return ret, api.SourceHot, nil
 	}
 	s.mu.RUnlock()
 
@@ -280,28 +290,52 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	// (entry may have been evicted between RUnlock and Lock), then set it.
 	s.mu.Lock()
 	e = s.entries[key]
-	var obj *api.Object
+	var stored *api.Object
 	if e != nil {
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
 		})
 		e.obj.Hits++
 		e.windowHits.Add(1)
-		obj = e.obj
+		stored = e.obj
+	}
+	var ret *api.Object
+	if stored != nil {
+		ret = h.detachBody(stored)
 	}
 	s.mu.Unlock()
 
-	if obj == nil {
+	if ret == nil {
 		h.stats.misses.Add(1)
 		return nil, "", nil
 	}
-	if h.matchesActiveBan(obj) {
-		h.evictBanned(s, key, obj)
+	if h.matchesActiveBan(ret) {
+		h.evictBanned(s, key, stored)
 		h.stats.misses.Add(1)
 		return nil, "", nil
 	}
 	h.stats.hits.Add(1)
-	return obj, api.SourceHot, nil
+	return ret, api.SourceHot, nil
+}
+
+// detachBody returns a copy of obj with Body on the Go heap, safe for
+// the caller to use after the shard lock is released. When slab is
+// disabled (the default), it returns obj as-is — zero allocations on
+// the hit path. When slab is enabled, it copies Body to the heap and
+// returns a new Object to avoid use-after-free: the stored entry's
+// slab-backed Body can be freed by concurrent eviction after the lock
+// is released.
+//
+// MUST be called while holding at least a read lock on the shard —
+// the body copy reads slab memory that eviction (which holds the write
+// lock) could otherwise free mid-copy.
+func (h *HotStore) detachBody(obj *api.Object) *api.Object {
+	if h.slab == nil || len(obj.Body) == 0 {
+		return obj
+	}
+	heapBody := make([]byte, len(obj.Body))
+	copy(heapBody, obj.Body)
+	return obj.CloneForReturn(heapBody)
 }
 
 // notifyEvict fires the OnEvict callback for a backed entry being
@@ -364,13 +398,19 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 
 	// Move the body off the Go heap before acquiring the shard lock so
 	// the per-region mutex in slab.Alloc doesn't extend shard lock hold
-	// time. If the slab is full or unavailable, obj.Body stays on the
-	// Go heap — no crash, just no GC optimization.
+	// time. If the slab is full or unavailable, the stored entry keeps
+	// the Go-heap body — no crash, just no GC optimization.
+	//
+	// We clone obj so the caller's *api.Object is not mutated: the
+	// caller (TieredStore.Put) may still read obj.Body for warm-tier
+	// encoding, and mutating it in place would cause a use-after-free
+	// if the slab slot is later evicted before encoding finishes.
+	stored := obj
 	if h.slab != nil && len(obj.Body) > 0 {
 		slabBuf := h.slab.Alloc(len(obj.Body))
 		if slabBuf != nil {
 			copy(slabBuf, obj.Body)
-			obj.Body = slabBuf
+			stored = obj.CloneForReturn(slabBuf)
 		}
 	}
 
@@ -422,7 +462,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		return nil // force insert
 	})
 	e := hotEntryPool.Get().(*hotEntry)
-	e.obj = obj
+	e.obj = stored
 	e.sieve = se
 	s.entries[key] = e
 	s.bytes += size
@@ -446,6 +486,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 // exceeded TTL + SWR + SIE and removes them. This prevents dead entries
 // from accumulating indefinitely when they are never accessed again.
 func (h *HotStore) reaperLoop() {
+	defer h.wg.Done()
 	ticker := time.NewTicker(h.reaperInterval)
 	defer ticker.Stop()
 	for {
@@ -501,6 +542,7 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 // sweeper is the background goroutine that drains overshoot evictions
 // signalled by Put. It terminates when Close() is called.
 func (h *HotStore) sweeper() {
+	defer h.wg.Done()
 	perShardMax := h.maxBytes / int64(len(h.shards))
 	for {
 		select {
@@ -756,6 +798,7 @@ func (h *HotStore) WindowHits(key api.Key) int64 {
 // Close stops the background sweeper and waits for it to exit.
 func (h *HotStore) Close(_ context.Context) error {
 	close(h.done)
+	h.wg.Wait()
 	if h.slab != nil {
 		_ = h.slab.Close()
 	}

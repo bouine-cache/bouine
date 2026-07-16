@@ -113,6 +113,38 @@ func (o *Object) StoreSerializedHead(head []byte) {
 	o.serializedHead.Store(&head)
 }
 
+// CloneForReturn returns a shallow copy of o with Body replaced by
+// the given body slice. The clone has a nil serializedHead (recomputed
+// on first use) and does not share the original's atomic.Pointer,
+// avoiding copylocks violations from shallow-copying a struct that
+// contains atomic.Pointer.
+//
+// Used by the hot store slab path in two contexts:
+//   - Get (detachBody): heap-copied body, safe from concurrent eviction.
+//   - Put (CloneForStorage): slab-backed body, stored in the shard entry
+//     without mutating the caller's *Object.
+func (o *Object) CloneForReturn(body []byte) *Object {
+	clone := &Object{
+		Key:                  o.Key,
+		VaryKey:              o.VaryKey,
+		StatusCode:           o.StatusCode,
+		Header:               o.Header,
+		Body:                 body,
+		BodySize:             o.BodySize,
+		StoredAt:             o.StoredAt,
+		TTL:                  o.TTL,
+		StaleWhileRevalidate: o.StaleWhileRevalidate,
+		StaleIfError:         o.StaleIfError,
+		ETag:                 o.ETag,
+		LastModified:         o.LastModified,
+		SurrogateKeys:        o.SurrogateKeys,
+		Hits:                 o.Hits,
+		CacheControl:         o.CacheControl,
+		OriginAge:            o.OriginAge,
+	}
+	return clone
+}
+
 // Fresh reports whether the object is still within its freshness lifetime
 // relative to now. This is the single source of truth for object
 // freshness: every other freshness/staleness decision in the cache layer is

@@ -17,16 +17,16 @@ import (
 // so the probability of a false magic match is ~1/2^64.
 const slabMagic uint64 = 0x534c4142534c4f54 // "SLABSLOT"
 
-// slabSizeClasses defines the size classes for the slab allocator.
-// Each class is the maximum body size that fits in that class's slots.
+// slabSizeClasses defines the slot size for each class. The usable
+// body capacity per class is slotSize - slabHeaderSize (16 bytes).
 var slabSizeClasses = [numSlabClasses]int64{
-	256,     // class 0: 0-256B
-	1024,    // class 1: 257B-1KB
-	4096,    // class 2: 1KB-4KB
-	16384,   // class 3: 4KB-16KB
-	65536,   // class 4: 16KB-64KB
-	262144,  // class 5: 64KB-256KB
-	1048576, // class 6: 256KB-1MB
+	256,     // class 0: up to 240B
+	1024,    // class 1: up to 1008B
+	4096,    // class 2: up to 4080B
+	16384,   // class 3: up to 16368B
+	65536,   // class 4: up to 65520B
+	262144,  // class 5: up to 262128B
+	1048576, // class 6: up to 1048560B
 }
 
 const numSlabClasses = 7
@@ -133,13 +133,13 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 	}
 	offset := region.freeList[len(region.freeList)-1]
 	region.freeList = region.freeList[:len(region.freeList)-1]
-	region.mu.Unlock()
-	s.allocs.Add(1)
-	// Write the magic and class index into the slot header so Free can
-	// identify this buffer as slab-allocated in O(1).
+	// Write the header under the lock so Free's header clear can't
+	// race with this write on the same slot.
 	header := (*slabHeader)(unsafe.Pointer(&region.data[offset]))
 	header.magic = slabMagic
 	header.class = int64(class)
+	region.mu.Unlock()
+	s.allocs.Add(1)
 	// Return the usable portion after the header.
 	hdrSize := int64(slabHeaderSize)
 	start := offset + hdrSize
@@ -153,55 +153,49 @@ func (s *SlabAllocator) Free(buf []byte) {
 	if buf == nil || cap(buf) == 0 {
 		return
 	}
-	class := slabClassFromHeader(buf)
-	if class < 0 || class >= numSlabClasses {
-		return // not a slab buffer (Go heap fallback)
+	// Validate that the buffer pointer falls within a known mmap region
+	// before reading the header. This avoids reading garbage memory from
+	// Go-heap buffers, which could segfault if the buffer is at a page
+	// boundary.
+	bufStart := uintptr(unsafe.Pointer(&buf[:1][0]))
+	var region *slabRegion
+	var class int
+	for i, r := range s.regions {
+		if r == nil {
+			continue
+		}
+		regionStart := uintptr(unsafe.Pointer(&r.data[0]))
+		regionEnd := regionStart + uintptr(len(r.data))
+		if bufStart >= regionStart+uintptr(slabHeaderSize) && bufStart < regionEnd {
+			// The header sits slabHeaderSize bytes before buf[0].
+			headerPtr := unsafe.Pointer(bufStart - uintptr(slabHeaderSize))
+			h := (*slabHeader)(headerPtr)
+			if h.magic != slabMagic {
+				return // not a slab buffer
+			}
+			class = int(h.class)
+			if class < 0 || class >= numSlabClasses || class != i {
+				return // header corrupted or mismatched
+			}
+			region = r
+			break
+		}
 	}
-	region := s.regions[class]
 	if region == nil {
-		return
+		return // not from any slab region
 	}
 	// Recover the slot offset from the buffer's position in the region.
-	bufStart := uintptr(unsafe.Pointer(&buf[:1][0]))
 	regionStart := uintptr(unsafe.Pointer(&region.data[0]))
-	if bufStart < regionStart || bufStart >= regionStart+uintptr(len(region.data)) {
-		return // not from this region (defensive)
-	}
 	slotStart := bufStart - regionStart - uintptr(slabHeaderSize)
 	slotOffset := (slotStart / uintptr(region.slotSize)) * uintptr(region.slotSize)
-	// Clear the magic so a double-free is detected (the header magic
-	// won't match, and Free will treat it as a non-slab buffer).
+	region.mu.Lock()
+	// Clear the magic under the lock so Alloc's header write can't race.
 	header := (*slabHeader)(unsafe.Pointer(&region.data[slotOffset]))
 	header.magic = 0
 	header.class = -1
-	region.mu.Lock()
 	region.freeList = append(region.freeList, int64(slotOffset))
 	region.mu.Unlock()
 	s.frees.Add(1)
-}
-
-// slabClassFromHeader reads the slab header that precedes the usable
-// portion of a slab-allocated buffer. Returns -1 if the buffer is not
-// slab-allocated (the magic won't match for Go-heap buffers, whose
-// "header" bytes are random heap memory).
-func slabClassFromHeader(buf []byte) int {
-	if cap(buf) < slabHeaderSize {
-		return -1
-	}
-	// Read the header that sits slabHeaderSize bytes before buf[0].
-	// For slab-allocated buffers, this is always safe (Alloc reserves
-	// header space). For Go-heap buffers, the magic check prevents
-	// false positives with ~1/2^64 probability.
-	headerPtr := unsafe.Pointer(uintptr(unsafe.Pointer(&buf[:1][0])) - uintptr(slabHeaderSize))
-	h := (*slabHeader)(headerPtr)
-	if h.magic != slabMagic {
-		return -1
-	}
-	class := int(h.class)
-	if class < 0 || class >= numSlabClasses {
-		return -1
-	}
-	return class
 }
 
 // slabClass returns the size class index for the given size, or -1 if

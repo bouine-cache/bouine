@@ -41,15 +41,15 @@ var slabSizeClasses = [numSlabClasses]int64{
 	1048576, // class 6: up to 1048560B
 }
 
-// slabHeader stores the magic, class index, and region index in the
-// first 16 bytes of each slab slot. Free reads this to identify
-// slab-allocated buffers and jump directly to the owning region in O(1),
-// without scanning all regions in the class. The magic prevents false
-// positives from Go-heap buffers, whose "header" bytes are random heap
-// memory.
+// slabHeader stores the magic and class index in the first 16 bytes of
+// each slab slot. Free reads this from the region data (not backward
+// from the buffer pointer) to avoid checkptr panics under -race.
 type slabHeader struct {
-	magic  uint64
-	class  int32
+	magic uint64
+	class int32
+	// region is written by Alloc so Free can jump directly to the
+	// owning region without scanning. Read via the region's data
+	// slice, not via backward pointer arithmetic.
 	region int32
 }
 
@@ -189,6 +189,8 @@ func (s *SlabAllocator) Alloc(size int) []byte {
 // returns a slice into the slot's body area. MUST be called while holding
 // cs.mu. Tries the bump pointer first (fast: single int64 increment),
 // then falls back to the free list (recycled slots from Free calls).
+//
+//nolint:gosec // G103/G115: unsafe pointer arithmetic on mmap'd memory is intentional
 func (s *SlabAllocator) allocFromRegion(
 	cs *slabClassState,
 	r *slabRegion,
@@ -214,57 +216,90 @@ func (s *SlabAllocator) allocFromRegion(
 	return r.data[start : end : offset+r.slotSize]
 }
 
+// classFromCap derives the slab class from the buffer's capacity.
+// The cap of a slab-allocated buffer is slotSize - slabHeaderSize.
+// This lets Free determine the class without backward pointer
+// arithmetic, avoiding checkptr panics under -race. Returns -1 if
+// the cap doesn't match any slab class (Go-heap fallback buffer).
+func classFromCap(c int) int {
+	if c <= 0 {
+		return -1
+	}
+	total := c + slabHeaderSize
+	for i, sc := range slabSizeClasses {
+		if total == int(sc) {
+			return i
+		}
+	}
+	return -1
+}
+
+// findSlotOffset computes the slot offset within a region given the
+// buffer's data pointer and the region's data pointer. Returns -1 if
+// the buffer is not within this region.
+//
+//nolint:gosec // G103/G115: pointer arithmetic on mmap'd memory is intentional
+func findSlotOffset(r *slabRegion, bufPtr unsafe.Pointer) int64 {
+	rs := uintptr(unsafe.Pointer(&r.data[0]))
+	re := rs + uintptr(len(r.data))
+	bp := uintptr(bufPtr)
+	if bp < rs+uintptr(slabHeaderSize) || bp >= re {
+		return -1
+	}
+	slotStart := bp - rs - uintptr(slabHeaderSize)
+	return int64((slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize))
+}
+
+// freeSlot returns a slab-allocated buffer to its region's free list.
+// MUST be called while holding cs.mu. slotOffset is the pre-computed
+// offset of the slot within r.data. Validates the magic by reading
+// the header from r.data (forward access, no checkptr issue).
+//
+//nolint:gosec // G103/G115: pointer arithmetic on mmap'd memory is intentional
+func (s *SlabAllocator) freeSlot(r *slabRegion, slotOffset int64) {
+	header := (*slabHeader)(unsafe.Pointer(&r.data[slotOffset]))
+	if header.magic != slabMagic {
+		return // slot was already freed or recycled
+	}
+	header.magic = 0
+	header.class = -1
+	header.region = -1
+	r.freeList = append(r.freeList, slotOffset)
+	s.frees.Add(1)
+}
+
 // Free returns a slab-allocated []byte to the free list. If the buffer
 // was not allocated from the slab (Go heap fallback), Free is a no-op.
+//
+//nolint:gosec // G103/G115: pointer arithmetic on mmap'd memory is intentional
 func (s *SlabAllocator) Free(buf []byte) {
 	if buf == nil || cap(buf) == 0 {
 		return
 	}
-	// Read the header first to determine the size class and region.
-	// This avoids scanning all 7 class mutexes on every Free — we jump
-	// directly to the right class and region. The header sits 16 bytes
-	// before the buffer start. For Go-heap buffers, those 16 bytes are
-	// random heap memory, so the magic check below rejects them before
-	// touching any lock.
+	// Derive the class from the buffer's capacity. The cap of a
+	// slab-allocated buffer is slotSize - slabHeaderSize, so we can
+	// determine the class without backward pointer arithmetic (which
+	// would trigger checkptr under -race on mmap'd memory).
+	class := classFromCap(cap(buf))
+	if class < 0 {
+		return // not a slab buffer (Go heap fallback)
+	}
 	bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
-	h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
-	if h.magic != slabMagic {
-		return // not a slab buffer (Go heap fallback or already freed)
-	}
-	class := int(h.class)
-	region := int(h.region)
-	if class < 0 || class >= numSlabClasses {
-		return // header corrupted
-	}
 	cs := &s.classes[class]
 	cs.mu.Lock()
-	if region < 0 || region >= len(cs.regions) {
+	// Find the region containing this buffer and compute the slot offset.
+	for _, r := range cs.regions {
+		slotOffset := findSlotOffset(r, bufPtr)
+		if slotOffset < 0 {
+			continue
+		}
+		s.freeSlot(r, slotOffset)
 		cs.mu.Unlock()
-		return // stale or corrupted region index
+		return
 	}
-	r := cs.regions[region]
-	bufStart := uintptr(bufPtr)
-	rs := uintptr(unsafe.Pointer(&r.data[0]))
-	re := rs + uintptr(len(r.data))
-	// Validate that the buffer pointer falls within this region. This
-	// guards against a false magic match from Go-heap memory.
-	if bufStart < rs+uintptr(slabHeaderSize) || bufStart >= re {
-		cs.mu.Unlock()
-		return // false positive: pointer outside region
-	}
-	if h.magic != slabMagic {
-		cs.mu.Unlock()
-		return // re-validate under lock: slot may have been recycled
-	}
-	// Recover the slot offset and clear the header.
-	slotStart := bufStart - rs - uintptr(slabHeaderSize)
-	slotOffset := (slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize)
-	h.magic = 0
-	h.class = -1
-	h.region = -1
-	r.freeList = append(r.freeList, int64(slotOffset))
 	cs.mu.Unlock()
-	s.frees.Add(1)
+	// Buffer's cap matched a slab class but pointer is outside all
+	// regions — extremely unlikely false positive. No-op.
 }
 
 // slabClass returns the size class index for the given size, or -1 if
@@ -272,7 +307,7 @@ func (s *SlabAllocator) Free(buf []byte) {
 // are 2^8, 2^10, 2^12, ..., 2^20, so class = (bits.Len(total-1)+1)/2 - 4,
 // clamped to [0, numSlabClasses-1].
 func slabClass(size int) int {
-	total := uint64(int64(size) + int64(slabHeaderSize))
+	total := uint64(int64(size) + int64(slabHeaderSize)) //nolint:gosec // G115: size+16 fits in uint64
 	if total > uint64(slabSizeClasses[numSlabClasses-1]) {
 		return -1
 	}
@@ -298,74 +333,73 @@ func (s *SlabAllocator) Stats() (allocs, frees, fallback int64) {
 // reducing lock contention under high eviction rates. Non-slab buffers
 // (Go heap fallback) are silently skipped.
 func (s *SlabAllocator) FreeBatch(bodies [][]byte) {
-	// Sort by (class, region) so we can coalesce lock acquisitions.
-	// n is small (≤ inlineEvictCap + 1 = 5), so insertion sort is fine.
-	type freeEntry struct {
-		class  int
-		region int
-		buf    []byte
-	}
+	entries := s.classifyBodies(bodies)
+	sortFreeEntries(entries)
+	s.freeGroupedEntries(entries)
+}
+
+// freeEntry pairs a buffer with its class for grouped freeing.
+type freeEntry struct {
+	class  int
+	region int
+	buf    []byte
+	bufPtr unsafe.Pointer
+}
+
+// classifyBodies identifies the slab class of each buffer from its cap
+// (slotSize - slabHeaderSize). Does not acquire any locks — just collects
+// the class index for each valid slab buffer.
+//
+//nolint:gosec // G103: pointer read on mmap'd memory is intentional
+func (s *SlabAllocator) classifyBodies(bodies [][]byte) []freeEntry {
 	var entries []freeEntry
 	for _, buf := range bodies {
 		if buf == nil || cap(buf) == 0 {
 			continue
 		}
+		class := classFromCap(cap(buf))
+		if class < 0 {
+			continue
+		}
 		bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
-		h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
-		if h.magic != slabMagic {
-			continue
-		}
-		class := int(h.class)
-		region := int(h.region)
-		if class < 0 || class >= numSlabClasses {
-			continue
-		}
-		entries = append(entries, freeEntry{class, region, buf})
+		entries = append(entries, freeEntry{class: class, buf: buf, bufPtr: bufPtr})
 	}
-	// Sort by class, then region.
+	return entries
+}
+
+// sortFreeEntries sorts entries by (class, region) using insertion sort.
+// n is small (≤ inlineEvictCap + 1 = 5), so insertion sort is efficient.
+func sortFreeEntries(entries []freeEntry) {
 	for i := 1; i < len(entries); i++ {
 		for j := i; j > 0 && (entries[j].class < entries[j-1].class ||
 			(entries[j].class == entries[j-1].class && entries[j].region < entries[j-1].region)); j-- {
 			entries[j], entries[j-1] = entries[j-1], entries[j]
 		}
 	}
-	// Free entries, coalescing same (class, region) under one lock.
-	for i := 0; i < len(entries); {
-		e := entries[i]
-		cs := &s.classes[e.class]
+}
+
+// freeGroupedEntries frees entries grouped by class. For each class,
+// acquires the lock once and frees all entries in that class by
+// finding their region and slot offset.
+//
+//nolint:gosec // G103: pointer arithmetic on mmap'd memory is intentional
+func (s *SlabAllocator) freeGroupedEntries(entries []freeEntry) {
+	i := 0
+	for i < len(entries) {
+		class := entries[i].class
+		cs := &s.classes[class]
 		cs.mu.Lock()
-		for i < len(entries) && entries[i].class == e.class && entries[i].region == e.region {
-			s.freeLocked(cs, e.region, entries[i].buf)
+		// Free all entries belonging to this class.
+		for i < len(entries) && entries[i].class == class {
+			for _, r := range cs.regions {
+				slotOffset := findSlotOffset(r, entries[i].bufPtr)
+				if slotOffset >= 0 {
+					s.freeSlot(r, slotOffset)
+					break
+				}
+			}
 			i++
 		}
 		cs.mu.Unlock()
 	}
-}
-
-// freeLocked returns a slab buffer to its region's free list. MUST be
-// called while holding cs.mu. Performs the same validation as Free
-// but skips the lock/unlock since the caller already holds it.
-func (s *SlabAllocator) freeLocked(cs *slabClassState, regionIdx int, buf []byte) {
-	if regionIdx < 0 || regionIdx >= len(cs.regions) {
-		return
-	}
-	r := cs.regions[regionIdx]
-	bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
-	bufStart := uintptr(bufPtr)
-	rs := uintptr(unsafe.Pointer(&r.data[0]))
-	re := rs + uintptr(len(r.data))
-	if bufStart < rs+uintptr(slabHeaderSize) || bufStart >= re {
-		return
-	}
-	h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
-	if h.magic != slabMagic {
-		return
-	}
-	slotStart := bufStart - rs - uintptr(slabHeaderSize)
-	slotOffset := (slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize)
-	h.magic = 0
-	h.class = -1
-	h.region = -1
-	r.freeList = append(r.freeList, int64(slotOffset))
-	s.frees.Add(1)
 }

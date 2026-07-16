@@ -287,3 +287,80 @@ func slabClass(size int) int {
 func (s *SlabAllocator) Stats() (allocs, frees, fallback int64) {
 	return s.allocs.Load(), s.frees.Load(), s.fallback.Load()
 }
+
+// FreeBatch frees multiple slab-allocated buffers. Buffers from the
+// same size class + region are freed under a single lock acquisition,
+// reducing lock contention under high eviction rates. Non-slab buffers
+// (Go heap fallback) are silently skipped.
+func (s *SlabAllocator) FreeBatch(bodies [][]byte) {
+	// Sort by (class, region) so we can coalesce lock acquisitions.
+	// n is small (≤ inlineEvictCap + 1 = 5), so insertion sort is fine.
+	type freeEntry struct {
+		class  int
+		region int
+		buf    []byte
+	}
+	var entries []freeEntry
+	for _, buf := range bodies {
+		if buf == nil || cap(buf) == 0 {
+			continue
+		}
+		bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
+		h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
+		if h.magic != slabMagic {
+			continue
+		}
+		class := int(h.class)
+		region := int(h.region)
+		if class < 0 || class >= numSlabClasses {
+			continue
+		}
+		entries = append(entries, freeEntry{class, region, buf})
+	}
+	// Sort by class, then region.
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && (entries[j].class < entries[j-1].class ||
+			(entries[j].class == entries[j-1].class && entries[j].region < entries[j-1].region)); j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+	// Free entries, coalescing same (class, region) under one lock.
+	for i := 0; i < len(entries); {
+		e := entries[i]
+		cs := &s.classes[e.class]
+		cs.mu.Lock()
+		for i < len(entries) && entries[i].class == e.class && entries[i].region == e.region {
+			s.freeLocked(cs, e.region, entries[i].buf)
+			i++
+		}
+		cs.mu.Unlock()
+	}
+}
+
+// freeLocked returns a slab buffer to its region's free list. MUST be
+// called while holding cs.mu. Performs the same validation as Free
+// but skips the lock/unlock since the caller already holds it.
+func (s *SlabAllocator) freeLocked(cs *slabClassState, regionIdx int, buf []byte) {
+	if regionIdx < 0 || regionIdx >= len(cs.regions) {
+		return
+	}
+	r := cs.regions[regionIdx]
+	bufPtr := unsafe.Pointer(unsafe.SliceData(buf))
+	bufStart := uintptr(bufPtr)
+	rs := uintptr(unsafe.Pointer(&r.data[0]))
+	re := rs + uintptr(len(r.data))
+	if bufStart < rs+uintptr(slabHeaderSize) || bufStart >= re {
+		return
+	}
+	h := (*slabHeader)(unsafe.Add(bufPtr, -slabHeaderSize))
+	if h.magic != slabMagic {
+		return
+	}
+	slotStart := bufStart - rs - uintptr(slabHeaderSize)
+	slotOffset := (slotStart / uintptr(r.slotSize)) * uintptr(r.slotSize)
+	h.magic = 0
+	h.class = -1
+	h.region = -1
+	r.freeList = append(r.freeList, int64(slotOffset))
+	s.frees.Add(1)
+}

@@ -357,9 +357,7 @@ func (h *HotStore) flushSlabFrees(bodies [][]byte) {
 	if h.slab == nil {
 		return
 	}
-	for _, b := range bodies {
-		h.slab.Free(b)
-	}
+	h.slab.FreeBatch(bodies)
 }
 
 // evictBanned removes a ban-matching entry from the shard. It re-checks

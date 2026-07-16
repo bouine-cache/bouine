@@ -114,10 +114,13 @@ func (o *Object) StoreSerializedHead(head []byte) {
 }
 
 // CloneForReturn returns a shallow copy of o with Body replaced by
-// the given body slice. The clone has a nil serializedHead (recomputed
-// on first use) and does not share the original's atomic.Pointer,
-// avoiding copylocks violations from shallow-copying a struct that
-// contains atomic.Pointer.
+// the given body slice. The clone does not share the original's
+// atomic.Pointer, avoiding copylocks violations from shallow-copying
+// a struct that contains atomic.Pointer.
+//
+// If the original has a pre-computed serializedHead, it is shared with
+// the clone via a new atomic.Pointer so the fast path does not
+// re-compute it on every hit.
 //
 // Used by the hot store slab path in two contexts:
 //   - Get (detachBody): heap-copied body, safe from concurrent eviction.
@@ -141,6 +144,9 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		Hits:                 o.Hits,
 		CacheControl:         o.CacheControl,
 		OriginAge:            o.OriginAge,
+	}
+	if head := o.serializedHead.Load(); head != nil {
+		clone.serializedHead.Store(head)
 	}
 	return clone
 }

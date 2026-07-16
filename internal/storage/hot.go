@@ -564,6 +564,11 @@ func (h *HotStore) sweeper() {
 					s.bytes -= objSize(old.obj)
 					delete(s.entries, evKey)
 					h.stats.evictions.Add(1)
+					old.obj = nil
+					old.sieve = nil
+					old.hasBackup = false
+					old.windowHits.Store(0)
+					hotEntryPool.Put(old)
 				}
 			}
 			s.mu.Unlock()

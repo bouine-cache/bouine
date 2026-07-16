@@ -306,13 +306,25 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 
 // notifyEvict fires the OnEvict callback for a backed entry being
 // evicted. Called while the shard write lock is held — the callback
-// MUST NOT block or perform I/O.
-func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry) {
+// MUST NOT block or perform I/O. slabFrees collects slab-allocated
+// bodies that must be returned to the free list after the shard lock
+// is released (slab.Free takes a per-region mutex and must not be
+// called under the shard lock).
+func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry, slabFrees *[][]byte) {
 	if h.slab != nil && entry.obj != nil {
-		h.slab.Free(entry.obj.Body)
+		*slabFrees = append(*slabFrees, entry.obj.Body)
 	}
 	if h.onEvict != nil && entry.hasBackup {
 		h.onEvict(key)
+	}
+}
+
+func (h *HotStore) flushSlabFrees(bodies [][]byte) {
+	if h.slab == nil {
+		return
+	}
+	for _, b := range bodies {
+		h.slab.Free(b)
 	}
 }
 
@@ -320,9 +332,10 @@ func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry) {
 // that the current entry is still the same object pointer to avoid
 // evicting a replacement that arrived between the unlock and re-lock.
 func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
+	var slabFrees [][]byte
 	s.mu.Lock()
 	if cur, ok := s.entries[key]; ok && cur.obj == obj {
-		h.notifyEvict(key, cur)
+		h.notifyEvict(key, cur, &slabFrees)
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.sieve)
 		delete(s.entries, key)
@@ -334,6 +347,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 		hotEntryPool.Put(cur)
 	}
 	s.mu.Unlock()
+	h.flushSlabFrees(slabFrees)
 }
 
 // Put stores an object. If the shard is over budget, SIEVE eviction
@@ -349,6 +363,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	var logs []evictionLog
+	var slabFrees [][]byte
 	s.mu.Lock()
 	stillOver := false
 	for range inlineEvictCap {
@@ -361,7 +376,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		}
 		if old, exists := s.entries[evKey]; exists {
 			recordEviction(&logs, evKey, old, "inline_overshoot")
-			h.notifyEvict(evKey, old)
+			h.notifyEvict(evKey, old, &slabFrees)
 			s.bytes -= objSize(old.obj)
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
@@ -378,7 +393,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 
 	// Remove old entry if replacing, return to pool.
 	if old, exists := s.entries[key]; exists {
-		h.notifyEvict(key, old)
+		h.notifyEvict(key, old, &slabFrees)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.sieve)
 		if old.hasBackup {
@@ -413,6 +428,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	s.bytes += size
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
+	h.flushSlabFrees(slabFrees)
 
 	// Signal the sweeper if the shard is still over budget after the
 	// inline cap. Non-blocking: a full channel means a signal is already
@@ -454,6 +470,7 @@ func (h *HotStore) reapExpired(now time.Time) {
 func (h *HotStore) reapShard(idx int, now time.Time) {
 	s := &h.shards[idx]
 	var logs []evictionLog
+	var slabFrees [][]byte
 	s.mu.Lock()
 
 	deadline := time.Now().Add(reaperShardBudget)
@@ -464,7 +481,7 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
 			recordEviction(&logs, key, e, "expired")
-			h.notifyEvict(key, e)
+			h.notifyEvict(key, e, &slabFrees)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
@@ -478,6 +495,7 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 	}
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
+	h.flushSlabFrees(slabFrees)
 }
 
 // sweeper is the background goroutine that drains overshoot evictions
@@ -491,6 +509,7 @@ func (h *HotStore) sweeper() {
 		case idx := <-h.evictSignal:
 			s := &h.shards[idx]
 			var logs []evictionLog
+			var slabFrees [][]byte
 			s.mu.Lock()
 			for s.bytes > perShardMax && s.evict.Len() > 0 {
 				evKey, ok := s.evictPreferBacked()
@@ -499,7 +518,7 @@ func (h *HotStore) sweeper() {
 				}
 				if old, exists := s.entries[evKey]; exists {
 					recordEviction(&logs, evKey, old, "sweeper_overshoot")
-					h.notifyEvict(evKey, old)
+					h.notifyEvict(evKey, old, &slabFrees)
 					s.bytes -= objSize(old.obj)
 					delete(s.entries, evKey)
 					h.stats.evictions.Add(1)
@@ -507,6 +526,7 @@ func (h *HotStore) sweeper() {
 			}
 			s.mu.Unlock()
 			h.flushEvictionLogs(logs)
+			h.flushSlabFrees(slabFrees)
 		}
 	}
 }
@@ -514,15 +534,12 @@ func (h *HotStore) sweeper() {
 // Delete removes a key from the hot tier.
 func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	s := h.shard(key)
+	var slabFrees [][]byte
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if e, ok := s.entries[key]; ok {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.sieve)
-		if h.slab != nil && e.obj != nil {
-			h.slab.Free(e.obj.Body)
-		}
+		h.notifyEvict(key, e, &slabFrees)
 		delete(s.entries, key)
 		e.obj = nil
 		e.sieve = nil
@@ -530,6 +547,8 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 		e.windowHits.Store(0)
 		hotEntryPool.Put(e)
 	}
+	s.mu.Unlock()
+	h.flushSlabFrees(slabFrees)
 	return nil
 }
 
@@ -584,10 +603,11 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:unparam // error return reserved for future fallible ops
 	s := &h.shards[idx]
 	n := 0
+	var slabFrees [][]byte
 	s.mu.Lock()
 	for key, e := range s.entries {
 		if pred(e.obj) {
-			h.notifyEvict(key, e)
+			h.notifyEvict(key, e, &slabFrees)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.sieve)
 			delete(s.entries, key)
@@ -601,6 +621,7 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 		}
 	}
 	s.mu.Unlock()
+	h.flushSlabFrees(slabFrees)
 	return n, nil
 }
 

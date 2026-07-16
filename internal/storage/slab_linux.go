@@ -17,6 +17,10 @@ import (
 // so the probability of a false magic match is ~1/2^64.
 const slabMagic uint64 = 0x534c4142534c4f54 // "SLABSLOT"
 
+const numSlabClasses = 7
+
+const slabSlotsPerRegion = 1024
+
 // slabSizeClasses defines the slot size for each class. The usable
 // body capacity per class is slotSize - slabHeaderSize (16 bytes).
 var slabSizeClasses = [numSlabClasses]int64{
@@ -28,10 +32,6 @@ var slabSizeClasses = [numSlabClasses]int64{
 	262144,  // class 5: up to 262128B
 	1048576, // class 6: up to 1048560B
 }
-
-const numSlabClasses = 7
-
-const slabSlotsPerRegion = 1024
 
 // slabHeader stores the magic and class index in the first 16 bytes of
 // each slab slot. Free reads this to identify slab-allocated buffers in
@@ -109,8 +109,9 @@ func (s *SlabAllocator) Close() error {
 }
 
 // Alloc returns a []byte of the given size from the slab, or falls back
-// to Go heap allocation if no slab slot is available. The returned
-// slice has len == size and cap == slotSize-slabHeaderSize.
+// to Go heap allocation if no slab slot is available. On success the
+// returned slice has len == size; the cap is the remaining usable space
+// in the slot (slotSize - slabHeaderSize). On fallback, cap == size.
 func (s *SlabAllocator) Alloc(size int) []byte {
 	if size <= 0 {
 		return nil

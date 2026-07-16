@@ -362,6 +362,18 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	shardIdx := int(uint64(key) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
+	// Move the body off the Go heap before acquiring the shard lock so
+	// the per-region mutex in slab.Alloc doesn't extend shard lock hold
+	// time. If the slab is full or unavailable, obj.Body stays on the
+	// Go heap — no crash, just no GC optimization.
+	if h.slab != nil && len(obj.Body) > 0 {
+		slabBuf := h.slab.Alloc(len(obj.Body))
+		if slabBuf != nil {
+			copy(slabBuf, obj.Body)
+			obj.Body = slabBuf
+		}
+	}
+
 	var logs []evictionLog
 	var slabFrees [][]byte
 	s.mu.Lock()
@@ -409,18 +421,6 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	se, _ := s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 		return nil // force insert
 	})
-	// If slab is enabled, copy the body into an mmap'd slot to move it
-	// off the Go heap and reduce GC pressure. The original body (from
-	// the HTTP response or warm tier) stays on the Go heap and is GC'd.
-	if h.slab != nil && len(obj.Body) > 0 {
-		slabBuf := h.slab.Alloc(len(obj.Body))
-		if slabBuf != nil {
-			copy(slabBuf, obj.Body)
-			obj.Body = slabBuf
-		}
-		// If slabBuf is nil (slab full or mmap failed), obj.Body stays
-		// on the Go heap — no crash, just no GC optimization.
-	}
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = obj
 	e.sieve = se

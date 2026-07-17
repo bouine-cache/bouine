@@ -47,13 +47,9 @@ func varyContainsStar(vary string) bool {
 // pathological inputs.
 //
 //nolint:gocyclo // 17: Vary header parsing is inherently branchy
-func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...map[string]bool) api.Key {
+func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
 	if vary == "" {
 		return primary
-	}
-	var excludeSet map[string]bool
-	if len(exclude) > 0 {
-		excludeSet = exclude[0]
 	}
 	if varyContainsStar(vary) {
 		h := xxhash.New()
@@ -74,7 +70,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...
 	for f := range strings.SplitSeq(vary, ",") {
 		if n >= maxVaryFields {
 			// Pathological Vary — fall back to alloc path.
-			return variantKeySlow(primary, vary, reqHeader, excludeSet)
+			return variantKeySlow(primary, vary, reqHeader, policy)
 		}
 		fields[n] = strings.ToLower(strings.TrimSpace(f))
 		n++
@@ -96,14 +92,14 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...
 	written := false
 	for i := 0; i < n; i++ {
 		f := fields[i]
-		if excludeSet != nil && excludeSet[f] {
+		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
 		val := normalizeHeaderValue(reqHeader.Get(f))
 		needed := len(f) + 1 + len(val) + 1 // f=val;
 		if off+needed > len(buf) {
 			// Buffer overflow — fall back to alloc path.
-			return variantKeySlow(primary, vary, reqHeader, excludeSet)
+			return variantKeySlow(primary, vary, reqHeader, policy)
 		}
 		off += copy(buf[off:], f)
 		buf[off] = '='
@@ -121,7 +117,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, exclude ...
 
 // variantKeySlow is the fallback allocation path for Vary headers that
 // exceed the stack buffer limits (too many fields or too much data).
-func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, excludeSet map[string]bool) api.Key {
+func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
 	fields := strings.Split(strings.ToLower(vary), ",")
 	for i, f := range fields {
 		fields[i] = strings.TrimSpace(f)
@@ -130,7 +126,7 @@ func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, exclude
 	h := xxhash.New()
 	written := false
 	for _, f := range fields {
-		if excludeSet != nil && excludeSet[f] {
+		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
 		_, _ = h.WriteString(f)

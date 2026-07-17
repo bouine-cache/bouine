@@ -15,7 +15,7 @@ import (
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
 // *http.Request is available.
-func BuildKeyFromURL(rawURL string) api.Key {
+func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if rawURL == "" {
 		return 0
 	}
@@ -28,7 +28,7 @@ func BuildKeyFromURL(rawURL string) api.Key {
 		URL:    u,
 		Host:   u.Host,
 	}
-	return BuildKey(r)
+	return BuildKey(r, policy)
 }
 
 // BuildKey constructs the canonical primary cache key from a request.
@@ -37,12 +37,7 @@ func BuildKeyFromURL(rawURL string) api.Key {
 // Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
 // canonical key exceeds 512 bytes (rare — the project caps URLs at 8 KiB),
 // it falls back to a heap buffer via buildKeyHeap.
-func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
-	var skipSet map[string]bool
-	if len(skip) > 0 {
-		skipSet = skip[0]
-	}
-
+func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	var buf [512]byte
 	n := 0
 
@@ -62,7 +57,7 @@ func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
 	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	n = appendCanonicalQuery(buf[:], n, r.URL, skipSet)
+	n = appendCanonicalQuery(buf[:], n, r.URL, policy)
 	n = appendByte(buf[:], n, '|')
 
 	// Method (HEAD→GET).
@@ -77,12 +72,12 @@ func BuildKey(r *http.Request, skip ...map[string]bool) api.Key {
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
-	return buildKeyHeap(r, skipSet, n)
+	return buildKeyHeap(r, policy, n)
 }
 
 // buildKeyHeap handles the rare case where the canonical key exceeds the
 // 512-byte stack buffer. It allocates a heap buffer and rebuilds the key.
-func buildKeyHeap(r *http.Request, skipSet map[string]bool, n int) api.Key {
+func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
 	heap := make([]byte, n)
 	n = 0
 
@@ -98,7 +93,7 @@ func buildKeyHeap(r *http.Request, skipSet map[string]bool, n int) api.Key {
 	n = appendCanonicalPath(heap, n, r.URL)
 	n = appendByte(heap, n, '|')
 
-	n = appendCanonicalQuery(heap, n, r.URL, skipSet)
+	n = appendCanonicalQuery(heap, n, r.URL, policy)
 	n = appendByte(heap, n, '|')
 
 	if r.Method == http.MethodHead {
@@ -180,15 +175,60 @@ func appendCanonicalPath(buf []byte, n int, u *url.URL) int {
 	return n
 }
 
-func appendCanonicalQuery(buf []byte, n int, u *url.URL, skip map[string]bool) int {
+func appendCanonicalQuery(buf []byte, n int, u *url.URL, p *KeyPolicy) int {
 	raw := u.RawQuery
 	if raw == "" {
 		return n
 	}
 
-	// Fast path: for ≤8 simple ASCII params (no percent-encoding) use a
-	// stack-allocated pair array and an insertion sort to avoid the
-	// url.Values map + keys slice allocations from the slow path.
+	// No-policy path: identical to existing code, no policy overhead.
+	if p == nil {
+		return appendCanonicalQueryNoPolicy(buf, n, u)
+	}
+
+	var stackPairs [8]kvPair
+	var seen stackSeen
+	np := 0
+	simple := true
+
+	for s := raw; s != ""; {
+		var seg string
+		if i := strings.IndexByte(s, '&'); i >= 0 {
+			seg, s = s[:i], s[i+1:]
+		} else {
+			seg, s = s, ""
+		}
+		k, v, _ := strings.Cut(seg, "=")
+		if p.shouldStripParam(k, v, &seen) {
+			continue
+		}
+		if strings.IndexByte(k, '%') >= 0 || strings.IndexByte(v, '%') >= 0 {
+			simple = false
+			break
+		}
+		if np >= len(stackPairs) {
+			simple = false
+			break
+		}
+		p.markSeen(k, &seen)
+		stackPairs[np] = kvPair{k, v}
+		np++
+	}
+
+	if !simple {
+		return appendCanonicalQuerySlow(buf, n, u, p)
+	}
+
+	sortPairs(stackPairs[:np])
+	return writeSortedPairs(buf, n, stackPairs[:np])
+}
+
+// appendCanonicalQueryNoPolicy is the existing fast path with no policy
+// checking. Identical to the pre-change code path to ensure zero
+// regression for the common case (most routes have no query policy).
+// Takes u *url.URL to avoid allocating a new url.URL on the slow path.
+func appendCanonicalQueryNoPolicy(buf []byte, n int, u *url.URL) int {
+	raw := u.RawQuery
 	var stackPairs [8]kvPair
 	np := 0
 	simple := true
@@ -201,9 +241,6 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL, skip map[string]bool) i
 			seg, s = s, ""
 		}
 		k, v, _ := strings.Cut(seg, "=")
-		if skip != nil && skip[k] {
-			continue
-		}
 		if strings.IndexByte(k, '%') >= 0 || strings.IndexByte(v, '%') >= 0 {
 			simple = false
 			break
@@ -217,47 +254,20 @@ func appendCanonicalQuery(buf []byte, n int, u *url.URL, skip map[string]bool) i
 	}
 
 	if !simple {
-		return appendCanonicalQuerySlow(buf, n, u, skip)
+		return appendCanonicalQuerySlowNoPolicy(buf, n, u)
 	}
 
-	// Insertion sort by key (fast for ≤8 elements, zero alloc).
-	pairs := stackPairs[:np]
-	for i := 1; i < len(pairs); i++ {
-		for j := i; j > 0 && pairs[j].k < pairs[j-1].k; j-- {
-			pairs[j], pairs[j-1] = pairs[j-1], pairs[j]
-		}
-	}
-
-	return writeSortedPairs(buf, n, pairs)
+	sortPairs(stackPairs[:np])
+	return writeSortedPairs(buf, n, stackPairs[:np])
 }
 
-type kvPair struct{ k, v string }
-
-func writeSortedPairs(buf []byte, n int, pairs []kvPair) int {
-	first := true
-	for _, p := range pairs {
-		if !first {
-			n = appendByte(buf, n, '&')
-		}
-		first = false
-		n += copyOverflow(buf, n, p.k)
-		n = appendByte(buf, n, '=')
-		n += copyOverflow(buf, n, p.v)
-	}
-	return n
-}
-
-// appendCanonicalQuerySlow handles query strings with percent-encoded
-// characters or more than 8 parameters. Allocates via url.Values.
-func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, skip map[string]bool) int {
-	// Parse + sort. Allocates url.Values map and a keys slice, but only
-	// for complex or long query strings (≥9 params or percent-encoded).
+// appendCanonicalQuerySlowNoPolicy is the existing slow path with no
+// policy checking. Identical to the pre-change code to ensure zero
+// regression. No nil checks, no policy branches.
+func appendCanonicalQuerySlowNoPolicy(buf []byte, n int, u *url.URL) int {
 	params := u.Query()
 	keys := make([]string, 0, len(params))
 	for k := range params {
-		if skip != nil && skip[k] {
-			continue
-		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -278,42 +288,156 @@ func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, skip map[string]boo
 	return n
 }
 
+// sortPairs insertion-sorts kvPair slices by key, then by value.
+// Used by both the policy and no-policy fast paths to ensure
+// identical ordering. Zero allocations.
+func sortPairs(pairs []kvPair) {
+	for i := 1; i < len(pairs); i++ {
+		for j := i; j > 0; j-- {
+			if pairs[j].k < pairs[j-1].k ||
+				(pairs[j].k == pairs[j-1].k && pairs[j].v < pairs[j-1].v) {
+				pairs[j], pairs[j-1] = pairs[j-1], pairs[j]
+			} else {
+				break
+			}
+		}
+	}
+}
+
+type kvPair struct{ k, v string }
+
+func writeSortedPairs(buf []byte, n int, pairs []kvPair) int {
+	first := true
+	for _, p := range pairs {
+		if !first {
+			n = appendByte(buf, n, '&')
+		}
+		first = false
+		n += copyOverflow(buf, n, p.k)
+		n = appendByte(buf, n, '=')
+		n += copyOverflow(buf, n, p.v)
+	}
+	return n
+}
+
+// appendCanonicalQuerySlow handles query strings with percent-encoded
+// characters or more than 8 parameters. Allocates via url.Values.
+// Called only with p != nil. The no-policy slow path uses
+// appendCanonicalQuerySlowNoPolicy.
+//
+//nolint:gocyclo // 23: policy application is inherently branchy
+func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, p *KeyPolicy) int {
+	params := u.Query()
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		// keepParams allowlist: if set, skip anything not in it.
+		// Allowlisted params survive stripEmpty (they keep all values).
+		if p.keepParams != nil && !p.keepParams[k] {
+			continue
+		}
+		// stripParams blocklist.
+		if p.stripParams != nil && p.stripParams[k] {
+			continue
+		}
+		// stripPrefixes: linear scan.
+		stripped := false
+		for i := range p.stripPrefixes {
+			if strings.HasPrefix(k, p.stripPrefixes[i]) {
+				stripped = true
+				break
+			}
+		}
+		if stripped {
+			continue
+		}
+		// stripEmpty (when no allowlist): skip key if ALL values are empty.
+		// Allowlisted params are exempt (they passed the allowlist check
+		// above). The keepParams == nil guard ensures this.
+		// Do not add stripEmpty checks without this guard.
+		if p.stripEmpty && p.keepParams == nil {
+			allEmpty := true
+			for _, v := range params[k] {
+				if v != "" {
+					allEmpty = false
+					break
+				}
+			}
+			if allEmpty {
+				continue
+			}
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	first := true
+	for _, k := range keys {
+		vals := params[k]
+		// dedup: take only the first value (first in request order).
+		// Do NOT sort values when dedup is enabled — dedup eliminates
+		// the multi-value case, sorting is pointless.
+		if p.dedup {
+			vals = vals[:1]
+		} else {
+			sort.Strings(vals)
+		}
+		// stripEmpty (when no allowlist): filter individual empty values.
+		// Allowlisted params are exempt (keepParams == nil guard).
+		if p.stripEmpty && p.keepParams == nil {
+			filtered := vals[:0]
+			for _, v := range vals {
+				if v != "" {
+					filtered = append(filtered, v)
+				}
+			}
+			vals = filtered
+			if len(vals) == 0 {
+				continue
+			}
+		}
+		for _, v := range vals {
+			if !first {
+				n = appendByte(buf, n, '&')
+			}
+			first = false
+			n += copyOverflow(buf, n, url.QueryEscape(k))
+			n = appendByte(buf, n, '=')
+			n += copyOverflow(buf, n, url.QueryEscape(v))
+		}
+	}
+	return n
+}
+
 // BuildVaryKey constructs the secondary key from the Vary header
 // values in the response and the corresponding request headers.
 // List-valued headers (Accept-Language, Accept-Encoding, Accept) are
 // normalised by sorting their comma-separated tokens so that
 // "en, fr" and "fr, en" produce the same cache key.
-func BuildVaryKey(vary string, reqHeader http.Header, exclude ...map[string]bool) string {
+func BuildVaryKey(vary string, reqHeader http.Header, policy *KeyPolicy) string {
 	if vary == "" || vary == "*" {
 		return vary
-	}
-
-	var excludeSet map[string]bool
-	if len(exclude) > 0 {
-		excludeSet = exclude[0]
 	}
 
 	fields := strings.Split(vary, ",")
 	sort.Strings(fields)
 
 	var stack [256]byte
-	n := buildVaryKeyInto(stack[:], fields, reqHeader, excludeSet)
+	n := buildVaryKeyInto(stack[:], fields, reqHeader, policy)
 	if n <= len(stack) {
 		return strconv.FormatUint(xxhash.Sum64(stack[:n]), 16)
 	}
 	heap := make([]byte, n)
-	buildVaryKeyInto(heap, fields, reqHeader, excludeSet)
+	buildVaryKeyInto(heap, fields, reqHeader, policy)
 	return strconv.FormatUint(xxhash.Sum64(heap), 16)
 }
 
 // buildVaryKeyInto writes the canonical Vary key bytes into dst and
 // returns the total canonical length. If the key exceeds len(dst), the
 // content is truncated but the returned length reflects the full size.
-func buildVaryKeyInto(dst []byte, fields []string, reqHeader http.Header, exclude map[string]bool) int {
+func buildVaryKeyInto(dst []byte, fields []string, reqHeader http.Header, policy *KeyPolicy) int {
 	n := 0
 	for _, f := range fields {
 		f = strings.TrimSpace(strings.ToLower(f))
-		if exclude != nil && exclude[f] {
+		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
 		n += copyOverflow(dst, n, f)

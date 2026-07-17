@@ -530,6 +530,31 @@ type RouteKey struct {
 	// per-request headers (X-Request-ID, X-Trace-ID) from fragmenting
 	// the cache when the origin includes them in Vary.
 	ExcludeHeaders []string `yaml:"exclude_headers,omitempty" json:"exclude_headers,omitempty"`
+	// KeepQueryParams, when non-empty, restricts the cache key to only
+	// these query parameters; all others are excluded. Mutually
+	// exclusive with strip_query_params and strip_query_prefix.
+	// Equivalent to Varnish qs.keep().
+	KeepQueryParams []string `yaml:"keep_query_params,omitempty" json:"keep_query_params,omitempty"`
+	// StripQueryPrefix strips query params whose names start with any of
+	// these prefixes. Covers "strip all utm_* / fb_* / _ga" without
+	// enumerating every variant. Capped at 16 entries in validation.
+	StripQueryPrefix []string `yaml:"strip_query_prefix,omitempty" json:"strip_query_prefix,omitempty"`
+	// StripEmptyParams removes query params with empty values
+	// (?foo=&bar=1 -> ?bar=1). Does NOT apply to params in
+	// keep_query_params (allowlisted params are always kept, even
+	// with empty values).
+	StripEmptyParams bool `yaml:"strip_empty_params,omitempty" json:"strip_empty_params,omitempty"`
+	// DedupQueryParams keeps only the first value for duplicate query
+	// params (?a=2&a=1 -> ?a=2). "First" is first in request order
+	// (matches Varnish qs.unique()). Values are NOT sorted when dedup
+	// is enabled.
+	DedupQueryParams bool `yaml:"dedup_query_params,omitempty" json:"dedup_query_params,omitempty"`
+	// CanonicalizePath normalizes the path component at parse time:
+	// percent-decode unreserved chars, uppercase remaining hex,
+	// resolve dot-segments. Applies at the listener level: if any
+	// route on a listener enables this, all requests on that
+	// listener get canonical paths. Default false.
+	CanonicalizePath bool `yaml:"canonicalize_path,omitempty" json:"canonicalize_path,omitempty"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

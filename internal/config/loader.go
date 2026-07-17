@@ -309,6 +309,9 @@ func validateRouteCache(i int, rc RouteCache) error {
 	if rc.FetchTimeout >= maxFetchTimeout {
 		return fmt.Errorf("config: route %d fetch_timeout must be < %v (data plane safety-net WriteTimeout), got %v", i, maxFetchTimeout, rc.FetchTimeout)
 	}
+	if err := validateRouteKey(i, rc.Key); err != nil {
+		return err
+	}
 	return validateRefreshConfig(i, rc)
 }
 
@@ -352,6 +355,27 @@ func validateRefreshConfig(i int, rc RouteCache) error {
 		}
 		if rc.RefreshMinHits <= 0 {
 			return fmt.Errorf("config: route %d refresh_reactive_first requires refresh_min_hits > 0", i)
+		}
+	}
+	return nil
+}
+
+// validateRouteKey validates cache key construction fields on a route.
+func validateRouteKey(i int, rk RouteKey) error {
+	if len(rk.KeepQueryParams) > 0 {
+		if len(rk.StripQueryParams) > 0 {
+			return fmt.Errorf("config: route %d keep_query_params is mutually exclusive with strip_query_params", i)
+		}
+		if len(rk.StripQueryPrefix) > 0 {
+			return fmt.Errorf("config: route %d keep_query_params is mutually exclusive with strip_query_prefix", i)
+		}
+	}
+	if len(rk.StripQueryPrefix) > 16 {
+		return fmt.Errorf("config: route %d strip_query_prefix capped at 16 entries, got %d", i, len(rk.StripQueryPrefix))
+	}
+	for j, p := range rk.StripQueryPrefix {
+		if p == "" {
+			return fmt.Errorf("config: route %d strip_query_prefix[%d] must be non-empty", i, j)
 		}
 	}
 	return nil

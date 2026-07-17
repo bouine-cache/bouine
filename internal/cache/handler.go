@@ -201,17 +201,16 @@ type Handler struct {
 	negativeTTL      time.Duration
 	jitterPercent    int
 	stayinAlive      bool
-	defaultTTL       time.Duration   // operator fallback when origin sends no freshness
-	overrideTTL      time.Duration   // operator override; wins over origin max-age/Expires when > 0
-	defaultSWR       time.Duration   // operator-level stale-while-revalidate floor
-	defaultSIE       time.Duration   // operator-level stale-if-error floor
-	allowSetCookie   bool            // when false (default), Set-Cookie blocks caching
-	maxObjectSize    int64           // skip storage for responses larger than this; 0 = no limit
-	maxResponseBytes int64           // hard cap on body buffering; 0 = defaultMaxResponseBytes
-	fetchSem         chan struct{}   // bounds concurrent foreground origin fetches
-	fetchTimeout     time.Duration   // bounds total origin fetch time; 0 = defaultFetchTimeout
-	stripQueryParams map[string]bool // query params to exclude from cache key; nil = none
-	excludeHeaders   map[string]bool // headers to exclude from Vary variant key; nil = none
+	defaultTTL       time.Duration // operator fallback when origin sends no freshness
+	overrideTTL      time.Duration // operator override; wins over origin max-age/Expires when > 0
+	defaultSWR       time.Duration // operator-level stale-while-revalidate floor
+	defaultSIE       time.Duration // operator-level stale-if-error floor
+	allowSetCookie   bool          // when false (default), Set-Cookie blocks caching
+	maxObjectSize    int64         // skip storage for responses larger than this; 0 = no limit
+	maxResponseBytes int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
+	fetchSem         chan struct{} // bounds concurrent foreground origin fetches
+	fetchTimeout     time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
+	policy           *KeyPolicy    // pre-compiled cache key policy (query + Vary headers); nil = none
 
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
@@ -309,15 +308,10 @@ type HandlerConfig struct {
 	// a fetchResult error. Zero (default) applies a safe built-in limit
 	// (60s). This replaces the blanket WriteTimeout on the data plane.
 	FetchTimeout time.Duration
-	// StripQueryParams, when non-nil, excludes the listed query parameter
-	// names from the cache key. The parameters are still forwarded to
-	// the upstream. Allocated once at handler construction.
-	StripQueryParams map[string]bool
-	// ExcludeHeaders, when non-nil, excludes the listed request header
-	// names from the Vary-based variant key. The headers are still
-	// forwarded to the upstream and the Vary response header is left
-	// intact — only the key computation skips them.
-	ExcludeHeaders map[string]bool
+	// Policy, when non-nil, encodes cache key construction rules for this
+	// route: query param stripping/keeping/prefix/empty/dedup and Vary
+	// header exclusion. nil means no query/header policy.
+	Policy *KeyPolicy
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -390,8 +384,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		allowSetCookie:       cfg.AllowSetCookie,
 		maxObjectSize:        cfg.MaxObjectSize,
 		maxResponseBytes:     cfg.MaxResponseBytes,
-		stripQueryParams:     cfg.StripQueryParams,
-		excludeHeaders:       cfg.ExcludeHeaders,
+		policy:               cfg.Policy,
 		refreshBeforeExpiry:  cfg.RefreshBeforeExpiry,
 		refreshMargin:        cfg.RefreshMargin,
 		refreshTimeout:       cfg.RefreshTimeout,
@@ -632,7 +625,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
+		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, req, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -677,14 +670,11 @@ func (h *Handler) RouteName() string {
 	return h.routeName
 }
 
-// buildKey constructs the cache key, applying strip_query_params when
-// configured. Inlined to avoid variadic spread overhead on the hit path
-// when no strip is configured (zero added allocs).
+// buildKey constructs the cache key, applying the route's KeyPolicy
+// when configured. Inlined to avoid overhead on the hit path when no
+// policy is configured (zero added allocs).
 func (h *Handler) buildKey(r *http.Request) api.Key {
-	if h.stripQueryParams != nil {
-		return BuildKey(r, h.stripQueryParams)
-	}
-	return BuildKey(r)
+	return BuildKey(r, h.policy)
 }
 
 // ServeHTTP implements http.Handler.
@@ -786,7 +776,7 @@ func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, lookupKey api.Key
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
 		return primaryKey, primaryKey, obj, src
 	}
-	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), r.Header, h.excludeHeaders)
+	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), r.Header, h.policy)
 	if vk == primaryKey {
 		return primaryKey, primaryKey, obj, src
 	}
@@ -1147,7 +1137,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
+		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		h.storeObject(ctx, key, obj, r, true, staleHits)
 	}
 }
@@ -1190,7 +1180,7 @@ func (h *Handler) writeAndMaybeStore(
 		// buildKey call on the same request.
 		storeKey := primaryKey
 		if vary := res.Header.Get(header.Vary); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, r.Header, h.excludeHeaders)
+			storeKey = VariantKey(primaryKey, vary, r.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
@@ -1200,7 +1190,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
+		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
 		if storeKey != primaryKey {
 			// Shallow-copy the object and change only the Key. This avoids
@@ -1377,7 +1367,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Header:     rec.header.Clone(),
 		Body:       bodyCopy,
 	}
-	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.excludeHeaders)
+	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 	h.storeObject(r.Context(), key, obj, getReq, false, 0)
 }
 
@@ -1583,7 +1573,7 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, excludeHeaders map[string]bool) *api.Object {
+func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
@@ -1664,7 +1654,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), r.Header, excludeHeaders)
+	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), r.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header)
 

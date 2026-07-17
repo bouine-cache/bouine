@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/a-h/templ"
@@ -69,10 +70,12 @@ type Config struct {
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
 type Handler struct {
-	cfg           Config
-	auth          *sessionAuth
-	agg           *Aggregator
-	insightEngine *insights.Engine
+	cfg              Config
+	auth             *sessionAuth
+	agg              *Aggregator
+	insightEngine    *insights.Engine
+	prevStoreStatsMu sync.Mutex
+	prevStoreStats   api.Stats
 }
 
 // New creates and registers dashboard routes on mux.
@@ -812,6 +815,10 @@ func (h *Handler) insights(w http.ResponseWriter, r *http.Request) {
 	merged, peers := h.agg.Collect(r.Context())
 
 	data := h.collectInsightData(merged, peers)
+	h.prevStoreStatsMu.Lock()
+	data.PrevStoreStats = h.prevStoreStats
+	h.prevStoreStats = data.StoreStats
+	h.prevStoreStatsMu.Unlock()
 	rawInsights := h.insightEngine.Evaluate(r.Context(), data)
 	routeToPool := h.buildRouteToPool()
 	cards, highCount, medCount, lowCount := convertInsightCards(rawInsights, routeToPool)

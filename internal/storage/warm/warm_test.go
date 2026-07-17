@@ -2241,3 +2241,26 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestSync_PreallocatedNilFd tests that Sync does not panic on
+// preallocated segments that have never been opened (f == nil).
+// Regression test for #288.
+func TestSync_PreallocatedNilFd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{
+		Dir:         dir,
+		MaxBytes:    100 << 20,
+		SegMax:      1 << 20,
+		Preallocate: 4 << 20, // 4 segments
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Sync should not panic on segments with f == nil.
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync on preallocated (nil-fd) segments: %v", err)
+	}
+}

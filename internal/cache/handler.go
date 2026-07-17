@@ -757,6 +757,11 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 	// the stale copy on 5xx/error — unless the stored response has
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
 	// the error to be forwarded to the client.
+	//
+	// The miss path uses staleFallbackAllowed as a third OR term (unbounded
+	// stale-on-error) for backward compatibility; the revalidate path
+	// (handler.go:1041) is stricter and bounds stale to the SIE window.
+	// Tightening the miss path to match is tracked as a follow-up.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 		h.fetchAndStoreStayinAlive(w, r, lookupKey, primaryKey, obj, now, src)
 	} else {
@@ -1032,10 +1037,15 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}
-		// Serve stale unless the stored response demands revalidation.
-		// Use the same gate as the miss path (staleFallbackAllowed) so the
-		// policy can't drift between the two stale-on-error sites.
-		if staleFallbackAllowed(stale) {
+		// Serve stale only within the stale-if-error window (RFC 5861 §4)
+		// and only when the stored response does not require revalidation.
+		// An object that expired long ago with no stale-if-error must not
+		// be served on a 5xx — the error is forwarded to the client.
+		// Directives like must-revalidate / proxy-revalidate / no-cache /
+		// s-maxage require a successful revalidation (staleFallbackAllowed
+		// returns false for them), so the 5xx is forwarded even if a SIE
+		// window is configured.
+		if stale.StaleForSIE(now) && staleFallbackAllowed(stale) {
 			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}

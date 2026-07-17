@@ -11,7 +11,12 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-func BenchmarkHandler_CacheHit(b *testing.B) {
+// BenchmarkHandler_CacheHit_WithHttptestRecorder measures the cache hit
+// path using httptest.NewRecorder, which allocates per call. The
+// allocs/op figure is dominated by the recorder, not the hit path.
+// Use BenchmarkHandler_CacheHit_ReusableWriter for the real hit-path
+// allocation benchmark.
+func BenchmarkHandler_CacheHit_WithHttptestRecorder(b *testing.B) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)

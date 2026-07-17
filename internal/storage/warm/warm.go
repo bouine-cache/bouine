@@ -964,11 +964,11 @@ func (s *Store) ReadRecord(segID int, offset int64) (*Record, error) {
 		return nil, fmt.Errorf("warm: segment %d not found", segID)
 	}
 
+	seg.readers.Add(1)
+	defer seg.readers.Add(-1)
 	if err := seg.ensureOpen(); err != nil {
 		return nil, fmt.Errorf("warm: open segment %d: %w", segID, err)
 	}
-	seg.readers.Add(1)
-	defer seg.readers.Add(-1)
 	s.fdCache.touch(seg)
 	rec, err := readRecordAt(seg, offset, 0) // size unknown for ReadRecord API
 	if err != nil {
@@ -989,10 +989,11 @@ func (s *Store) Scan(fn func(Record) error) error {
 	s.mu.RUnlock()
 
 	for _, seg := range segs {
+		seg.readers.Add(1)
 		if err := seg.ensureOpen(); err != nil {
+			seg.readers.Add(-1)
 			return err
 		}
-		seg.readers.Add(1)
 		s.fdCache.touch(seg)
 		seg.mu.Lock()
 		err := scanSegment(seg.f, seg.ID, fn)
@@ -1285,8 +1286,10 @@ func (s *Store) Sync() error {
 	var firstErr error
 	for _, seg := range s.segs {
 		seg.mu.Lock()
-		if err := seg.f.Sync(); err != nil && firstErr == nil {
-			firstErr = err
+		if seg.f != nil {
+			if err := seg.f.Sync(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 		seg.mu.Unlock()
 	}

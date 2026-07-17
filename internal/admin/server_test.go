@@ -456,7 +456,7 @@ func TestPurgeBatch_PartialFailure(t *testing.T) {
 		Token:  "secret",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(key api.Key) error {
-			if key == cache.BuildKeyFromURL("https://b.com/") {
+			if key == cache.BuildKeyFromURL("https://b.com/", nil) {
 				return errors.New("storage error")
 			}
 			return nil

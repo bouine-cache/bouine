@@ -15,7 +15,7 @@ import (
 func TestVariantKey_NoVary(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
-	got := VariantKey(primary, "", nil)
+	got := VariantKey(primary, "", nil, nil)
 	if got != primary {
 		t.Fatalf("no Vary should return primary key")
 	}
@@ -26,8 +26,8 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 	primary := api.Key(100)
 	h1 := http.Header{header.AcceptEncoding: {"gzip"}}
 	h2 := http.Header{header.AcceptEncoding: {"br"}}
-	k1 := VariantKey(primary, "Accept-Encoding", h1)
-	k2 := VariantKey(primary, "Accept-Encoding", h2)
+	k1 := VariantKey(primary, "Accept-Encoding", h1, nil)
+	k2 := VariantKey(primary, "Accept-Encoding", h2, nil)
 	if k1 == k2 {
 		t.Fatal("different Accept-Encoding should produce different keys")
 	}
@@ -40,8 +40,8 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
 	h := http.Header{header.AcceptEncoding: {"gzip"}}
-	k1 := VariantKey(primary, "Accept-Encoding", h)
-	k2 := VariantKey(primary, "Accept-Encoding", h)
+	k1 := VariantKey(primary, "Accept-Encoding", h, nil)
+	k2 := VariantKey(primary, "Accept-Encoding", h, nil)
 	if k1 != k2 {
 		t.Fatal("same headers should produce same variant key")
 	}
@@ -52,8 +52,8 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	primary := api.Key(100)
 	h1 := http.Header{header.Accept: {"text/html"}}
 	h2 := http.Header{header.Accept: {"application/json"}}
-	k1 := VariantKey(primary, "*", h1)
-	k2 := VariantKey(primary, "*", h2)
+	k1 := VariantKey(primary, "*", h1, nil)
+	k2 := VariantKey(primary, "*", h2, nil)
 	if k1 == k2 {
 		t.Fatal("Vary: * with different headers should differ")
 	}
@@ -65,11 +65,11 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	// Exclude map uses lowercase; Vary header uses mixed case.
 	// VariantKey lowercases Vary fields before lookup, so this should
 	// match.
-	exclude := map[string]bool{"x-request-id": true}
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
 	h1 := http.Header{"X-Request-ID": {"abc"}}
 	h2 := http.Header{"X-Request-ID": {"xyz"}}
-	k1 := VariantKey(primary, "X-Request-ID", h1, exclude)
-	k2 := VariantKey(primary, "X-Request-ID", h2, exclude)
+	k1 := VariantKey(primary, "X-Request-ID", h1, excludePolicy)
+	k2 := VariantKey(primary, "X-Request-ID", h2, excludePolicy)
 	if k1 != k2 {
 		t.Fatal("exclude lookup should be case-insensitive")
 	}
@@ -80,7 +80,7 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	// Partial exclude: non-excluded Vary field must still produce a
 	// variant key distinct from primary.
 	hGzip := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-ID": {"abc"}}
-	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", hGzip, exclude)
+	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", hGzip, excludePolicy)
 	if kPartial == primary {
 		t.Fatal("non-excluded Vary field should still produce a variant key")
 	}
@@ -175,7 +175,7 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	url := "http://example.com/stale-range"
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
-	key := BuildKey(httptest.NewRequest("GET", url, nil))
+	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored")

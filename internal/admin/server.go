@@ -389,7 +389,7 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: url field is required", http.StatusBadRequest)
 		return
 	}
-	key := cache.BuildKeyFromURL(req.URL)
+	key := cache.BuildKeyFromURL(req.URL, nil)
 	if err := s.cfg.PurgeFn(key); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -429,7 +429,7 @@ func (s *Server) purgeBatch(w http.ResponseWriter, r *http.Request) {
 	purged := 0
 	failed := 0
 	for _, urlStr := range req.URLs {
-		key := cache.BuildKeyFromURL(urlStr)
+		key := cache.BuildKeyFromURL(urlStr, nil)
 		if err := s.cfg.PurgeFn(key); err != nil {
 			failed++
 			continue
@@ -491,7 +491,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: url field is required", http.StatusBadRequest)
 		return
 	}
-	key := cache.BuildKeyFromURL(req.URL)
+	key := cache.BuildKeyFromURL(req.URL, nil)
 	if err := s.cfg.RefreshFn(key); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

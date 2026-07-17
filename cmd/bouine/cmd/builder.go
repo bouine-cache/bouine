@@ -234,8 +234,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			MaxResponseBytes:    rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency: rc.Cache.MaxFetchConcurrency,
 			FetchTimeout:        rc.Cache.FetchTimeout,
-			StripQueryParams:    buildStripSet(rc.Cache.Key.StripQueryParams),
-			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
+			Policy:              buildKeyPolicy(rc.Cache.Key),
 			VaryCapHits:         rs.dpMetrics.VaryCapHits,
 			RefreshBeforeExpiry: rc.Cache.RefreshBeforeExpiry,
 			RouteName:           rc.Name,
@@ -306,8 +305,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			MaxResponseBytes:    rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency: rc.Cache.MaxFetchConcurrency,
 			FetchTimeout:        rc.Cache.FetchTimeout,
-			StripQueryParams:    buildStripSet(rc.Cache.Key.StripQueryParams),
-			ExcludeHeaders:      buildExcludeHeaderSet(rc.Cache.Key.ExcludeHeaders),
+			Policy:              buildKeyPolicy(rc.Cache.Key),
 			VaryCapHits:         rs.dpMetrics.VaryCapHits,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
@@ -353,6 +351,42 @@ func stripPrefixHandler(prefix string, next http.Handler) http.Handler {
 		r2.URL = u
 		next.ServeHTTP(w, r2)
 	})
+}
+
+// buildKeyPolicy compiles the route's cache key config into a
+// pre-compiled KeyPolicy. Returns nil when no query/header policy
+// is active (no allocation).
+func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
+	if !hasKeyPolicy(rk) {
+		return nil
+	}
+	return cache.NewKeyPolicy(
+		buildStripSet(rk.StripQueryParams),
+		buildKeepSet(rk.KeepQueryParams),
+		buildExcludeHeaderSet(rk.ExcludeHeaders),
+		rk.StripQueryPrefix,
+		rk.StripEmptyParams,
+		rk.DedupQueryParams,
+	)
+}
+
+func buildKeepSet(params []string) map[string]bool {
+	if len(params) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(params))
+	for _, p := range params {
+		m[p] = true
+	}
+	return m
+}
+
+// hasKeyPolicy checks query/header fields only. canonicalize_path
+// is handled at the parser level, not in KeyPolicy.
+func hasKeyPolicy(rk config.RouteKey) bool {
+	return len(rk.StripQueryParams) > 0 || len(rk.ExcludeHeaders) > 0 ||
+		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||
+		rk.StripEmptyParams || rk.DedupQueryParams
 }
 
 // buildStripSet converts a config []string into a map for O(1) lookup.

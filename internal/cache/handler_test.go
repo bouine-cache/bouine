@@ -535,7 +535,7 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
-	key := BuildKey(httptest.NewRequest("GET", url, nil))
+	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
 	if obj == nil {
 		t.Fatal("object not stored after seed")
@@ -1494,7 +1494,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	stale := &api.Object{
-		Key:        BuildKeyFromURL("http://example.com/test"),
+		Key:        BuildKeyFromURL("http://example.com/test", nil),
 		StatusCode: 200,
 		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}, "X-Sensitive": {"secret"}}),
 		Body:       []byte("body"),

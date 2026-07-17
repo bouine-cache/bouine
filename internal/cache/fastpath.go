@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,20 +43,18 @@ const maxFastPathHeaderBytes = 8 * 1024
 // It holds a reference to the storage store and cache config, and attempts
 // to serve cache hits without constructing an *http.Request.
 type FastPathHandler struct {
-	store            storage.Store
-	routeName        string
-	stripQueryParams map[string]bool
-	excludeHeaders   map[string]bool
+	store     storage.Store
+	routeName string
+	policy    *KeyPolicy // nil = no query/header policy
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's config.
 // The Handler must be fully initialized before calling this.
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
-		store:            h.store,
-		routeName:        h.routeName,
-		stripQueryParams: h.stripQueryParams,
-		excludeHeaders:   h.excludeHeaders,
+		store:     h.store,
+		routeName: h.routeName,
+		policy:    h.policy,
 	}
 }
 
@@ -82,7 +81,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	// fast-path's zero-allocation goal.
 	ctx := context.Background()
 
-	key := buildKeyFromRaw(req, f.stripQueryParams)
+	key := buildKeyFromRaw(req, f.policy)
 	obj, src, err := f.store.Get(ctx, key)
 	if err != nil || obj == nil {
 		return nil, false
@@ -90,7 +89,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
 	if vary := obj.Header.Get(header.Vary); vary != "" {
-		vk := variantKeyFromRaw(key, vary, req, f.excludeHeaders)
+		vk := variantKeyFromRaw(key, vary, req, f.policy)
 		if vk != key {
 			vobj, vsrc, verr := f.store.Get(ctx, vk)
 			if verr != nil || vobj == nil {
@@ -421,7 +420,7 @@ func parseNoCacheFieldNames(ccHeader string) map[string]bool {
 // *http.Request, avoiding the allocation of *http.Request + *url.URL.
 //
 // Zero-alloc on the hot path: uses a 512-byte stack buffer.
-func buildKeyFromRaw(req *api.RawRequest, skip map[string]bool) api.Key {
+func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	var buf [512]byte
 	n := 0
 
@@ -442,7 +441,7 @@ func buildKeyFromRaw(req *api.RawRequest, skip map[string]bool) api.Key {
 	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	n = appendCanonicalQueryString(buf[:], n, req.Query, skip)
+	n = appendCanonicalQueryString(buf[:], n, req.Query, policy)
 	n = appendByte(buf[:], n, '|')
 
 	// Method (HEAD→GET).
@@ -465,7 +464,7 @@ func buildKeyFromRaw(req *api.RawRequest, skip map[string]bool) api.Key {
 	n = appendByte(heap, n, '|')
 	n = appendCanonicalPathString(heap, n, req.Path)
 	n = appendByte(heap, n, '|')
-	n = appendCanonicalQueryString(heap, n, req.Query, skip)
+	n = appendCanonicalQueryString(heap, n, req.Query, policy)
 	n = appendByte(heap, n, '|')
 	n += copyOverflow(heap, n, method)
 	return api.Key(xxhash.Sum64(heap[:n]))
@@ -496,12 +495,57 @@ func appendCanonicalPathString(buf []byte, n int, p string) int {
 // appendCanonicalQueryString canonicalizes a query string (sorted params,
 // optional stripping). Mirrors appendCanonicalQuery but reads from a
 // raw query string instead of *url.URL.
-func appendCanonicalQueryString(buf []byte, n int, raw string, skip map[string]bool) int {
+func appendCanonicalQueryString(buf []byte, n int, raw string, p *KeyPolicy) int {
 	if raw == "" {
 		return n
 	}
 
-	// Fast path: ≤8 simple ASCII params (no percent-encoding).
+	// No-policy path: identical to existing code, no policy overhead.
+	if p == nil {
+		return appendCanonicalQueryStringNoPolicy(buf, n, raw)
+	}
+
+	var stackPairs [8]kvPair
+	var seen stackSeen
+	np := 0
+	simple := true
+
+	for s := raw; s != ""; {
+		var seg string
+		if i := strings.IndexByte(s, '&'); i >= 0 {
+			seg, s = s[:i], s[i+1:]
+		} else {
+			seg, s = s, ""
+		}
+		k, v, _ := strings.Cut(seg, "=")
+		if p.shouldStripParam(k, v, &seen) {
+			continue
+		}
+		if strings.IndexByte(k, '%') >= 0 || strings.IndexByte(v, '%') >= 0 {
+			simple = false
+			break
+		}
+		if np >= len(stackPairs) {
+			simple = false
+			break
+		}
+		p.markSeen(k, &seen)
+		stackPairs[np] = kvPair{k, v}
+		np++
+	}
+
+	if !simple {
+		return appendCanonicalQuerySlowString(buf, n, raw, p)
+	}
+
+	sortPairs(stackPairs[:np])
+	return writeSortedPairs(buf, n, stackPairs[:np])
+}
+
+// appendCanonicalQueryStringNoPolicy is the existing fast path with no
+// policy checking. Identical to the pre-change code path to ensure
+// zero regression for the common case.
+func appendCanonicalQueryStringNoPolicy(buf []byte, n int, raw string) int {
 	var stackPairs [8]kvPair
 	np := 0
 	simple := true
@@ -514,9 +558,6 @@ func appendCanonicalQueryString(buf []byte, n int, raw string, skip map[string]b
 			seg, s = s, ""
 		}
 		k, v, _ := strings.Cut(seg, "=")
-		if skip != nil && skip[k] {
-			continue
-		}
 		if strings.IndexByte(k, '%') >= 0 || strings.IndexByte(v, '%') >= 0 {
 			simple = false
 			break
@@ -530,30 +571,20 @@ func appendCanonicalQueryString(buf []byte, n int, raw string, skip map[string]b
 	}
 
 	if !simple {
-		// Fall back to slow path with url.Values for complex queries.
-		return appendCanonicalQuerySlowString(buf, n, raw, skip)
+		return appendCanonicalQuerySlowStringNoPolicy(buf, n, raw)
 	}
 
-	// Insertion sort by key.
-	pairs := stackPairs[:np]
-	for i := 1; i < len(pairs); i++ {
-		for j := i; j > 0 && pairs[j].k < pairs[j-1].k; j-- {
-			pairs[j], pairs[j-1] = pairs[j-1], pairs[j]
-		}
-	}
-
-	return writeSortedPairs(buf, n, pairs)
+	sortPairs(stackPairs[:np])
+	return writeSortedPairs(buf, n, stackPairs[:np])
 }
 
-// appendCanonicalQuerySlowString handles complex query strings.
-func appendCanonicalQuerySlowString(buf []byte, n int, raw string, skip map[string]bool) int {
-	// Parse with url.Values for percent-decoding + multi-value support.
-	params := parseQueryString(raw)
+// appendCanonicalQuerySlowStringNoPolicy is the existing slow path with
+// no policy checking. Uses url.ParseQuery for percent-decoding to match
+// key.go's appendCanonicalQuerySlowNoPolicy canonical encoding.
+func appendCanonicalQuerySlowStringNoPolicy(buf []byte, n int, raw string) int {
+	params, _ := url.ParseQuery(raw)
 	keys := make([]string, 0, len(params))
 	for k := range params {
-		if skip != nil && skip[k] {
-			continue
-		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -566,29 +597,85 @@ func appendCanonicalQuerySlowString(buf []byte, n int, raw string, skip map[stri
 				n = appendByte(buf, n, '&')
 			}
 			first = false
-			n += copyOverflow(buf, n, k)
+			n += copyOverflow(buf, n, url.QueryEscape(k))
 			n = appendByte(buf, n, '=')
-			n += copyOverflow(buf, n, v)
+			n += copyOverflow(buf, n, url.QueryEscape(v))
 		}
 	}
 	return n
 }
 
-// parseQueryString parses a raw query string into a map of key→[]value.
-// This is a simplified version of url.ParseQuery for the fast path.
-func parseQueryString(raw string) map[string][]string {
-	params := make(map[string][]string)
-	for s := raw; s != ""; {
-		var seg string
-		if i := strings.IndexByte(s, '&'); i >= 0 {
-			seg, s = s[:i], s[i+1:]
-		} else {
-			seg, s = s, ""
+// appendCanonicalQuerySlowString handles complex query strings with policy.
+// Uses url.ParseQuery for percent-decoding to match appendCanonicalQuerySlow's
+// canonical encoding. Called only with p != nil.
+//
+//nolint:gocyclo // 23: policy application is inherently branchy
+func appendCanonicalQuerySlowString(buf []byte, n int, raw string, p *KeyPolicy) int {
+	params, _ := url.ParseQuery(raw)
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		if p.keepParams != nil && !p.keepParams[k] {
+			continue
 		}
-		k, v, _ := strings.Cut(seg, "=")
-		params[k] = append(params[k], v)
+		if p.stripParams != nil && p.stripParams[k] {
+			continue
+		}
+		stripped := false
+		for i := range p.stripPrefixes {
+			if strings.HasPrefix(k, p.stripPrefixes[i]) {
+				stripped = true
+				break
+			}
+		}
+		if stripped {
+			continue
+		}
+		if p.stripEmpty && p.keepParams == nil {
+			allEmpty := true
+			for _, v := range params[k] {
+				if v != "" {
+					allEmpty = false
+					break
+				}
+			}
+			if allEmpty {
+				continue
+			}
+		}
+		keys = append(keys, k)
 	}
-	return params
+	sort.Strings(keys)
+	first := true
+	for _, k := range keys {
+		vals := params[k]
+		if p.dedup {
+			vals = vals[:1]
+		} else {
+			sort.Strings(vals)
+		}
+		if p.stripEmpty && p.keepParams == nil {
+			filtered := vals[:0]
+			for _, v := range vals {
+				if v != "" {
+					filtered = append(filtered, v)
+				}
+			}
+			vals = filtered
+			if len(vals) == 0 {
+				continue
+			}
+		}
+		for _, v := range vals {
+			if !first {
+				n = appendByte(buf, n, '&')
+			}
+			first = false
+			n += copyOverflow(buf, n, url.QueryEscape(k))
+			n = appendByte(buf, n, '=')
+			n += copyOverflow(buf, n, url.QueryEscape(v))
+		}
+	}
+	return n
 }
 
 // evaluateFromRaw runs a simplified RFC 9111 state machine for the fast
@@ -651,7 +738,7 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 // variantKeyFromRaw computes the variant key from a RawRequest.
 // It mirrors VariantKey but reads header values from RawRequest
 // instead of http.Header.
-func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, exclude map[string]bool) api.Key {
+func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
 	if vary == "" {
 		return primary
 	}
@@ -693,7 +780,7 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, exclud
 	written := false
 	for i := 0; i < n; i++ {
 		f := fields[i]
-		if exclude != nil && exclude[f] {
+		if policy != nil && policy.ShouldExcludeHeader(f) {
 			continue
 		}
 		val := normalizeHeaderValue(req.Header(f))

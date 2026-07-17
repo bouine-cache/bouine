@@ -82,6 +82,27 @@ func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, han
 	})
 }
 
+// MatchByHostPath returns the label of the first route matching
+// host:path, or "" if none. Uses the same matching logic as ServeHTTP
+// (host case-insensitive + pathPrefix HasPrefix) but skips method
+// matching. Used by admin BuildKeyForURL to find the route's policy.
+func (rt *Router) MatchByHostPath(host, path string) string {
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		host = host[:idx]
+	}
+	for i := range rt.routes {
+		re := &rt.routes[i]
+		if re.host != "" && !strings.EqualFold(re.host, host) {
+			continue
+		}
+		if re.pathPrefix != "" && !strings.HasPrefix(path, re.pathPrefix) {
+			continue
+		}
+		return re.label
+	}
+	return ""
+}
+
 // ServeHTTP implements http.Handler.
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt.metrics.RequestsTotal != nil {

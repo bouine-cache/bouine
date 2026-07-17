@@ -12,13 +12,13 @@ import (
 
 func TestBuildKey_StripQueryParams(t *testing.T) {
 	t.Parallel()
-	skip := map[string]bool{"utm_source": true, "fbclid": true}
+	policy := NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false)
 
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=email&b=2", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
 
-	k1 := BuildKey(r1, skip)
-	k2 := BuildKey(r2)
+	k1 := BuildKey(r1, policy)
+	k2 := BuildKey(r2, nil)
 
 	if k1 != k2 {
 		t.Errorf("keys should match after stripping utm_source: got %v vs %v", k1, k2)
@@ -27,13 +27,13 @@ func TestBuildKey_StripQueryParams(t *testing.T) {
 
 func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 	t.Parallel()
-	skip := map[string]bool{"a": true, "b": true}
+	policy := NewKeyPolicy(map[string]bool{"a": true, "b": true}, nil, nil, nil, false, false)
 
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page", nil)
 
-	k1 := BuildKey(r1, skip)
-	k2 := BuildKey(r2)
+	k1 := BuildKey(r1, policy)
+	k2 := BuildKey(r2, nil)
 
 	if k1 != k2 {
 		t.Errorf("keys should match when all params stripped: got %v vs %v", k1, k2)
@@ -43,23 +43,23 @@ func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
-	k1 := BuildKey(r)
+	k1 := BuildKey(r, nil)
 	k2 := BuildKey(r, nil)
 
 	if k1 != k2 {
-		t.Errorf("nil skip map should not change key: got %v vs %v", k1, k2)
+		t.Errorf("nil policy should not change key: got %v vs %v", k1, k2)
 	}
 }
 
 func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
 	t.Parallel()
-	skip := map[string]bool{"utm_source": true}
+	policy := NewKeyPolicy(map[string]bool{"utm_source": true}, nil, nil, nil, false, false)
 
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=x", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1", nil)
 
-	k1 := BuildKey(r1, skip)
-	k2 := BuildKey(r2)
+	k1 := BuildKey(r1, policy)
+	k2 := BuildKey(r2, nil)
 
 	if k1 != k2 {
 		t.Errorf("keys should match after stripping utm_source: got %v vs %v", k1, k2)
@@ -81,9 +81,9 @@ func TestStripQueryParams_HandlerIntegration(t *testing.T) {
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
-		Upstream:         upstream,
-		Store:            store,
-		StripQueryParams: map[string]bool{"utm_source": true, "fbclid": true},
+		Upstream: upstream,
+		Store:    store,
+		Policy:   NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false),
 	})
 
 	h.ServeHTTP(httptest.NewRecorder(),

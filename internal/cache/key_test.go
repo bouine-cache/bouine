@@ -13,7 +13,7 @@ func TestBuildKey_Deterministic(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/foo?b=2&a=1", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/foo?a=1&b=2", nil)
-	if BuildKey(r1) != BuildKey(r2) {
+	if BuildKey(r1, nil) != BuildKey(r2, nil) {
 		t.Fatal("query order should not affect key")
 	}
 }
@@ -22,7 +22,7 @@ func TestBuildKey_HeadSharesGet(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/x", nil)
 	r2 := httptest.NewRequest("HEAD", "http://example.com/x", nil)
-	if BuildKey(r1) != BuildKey(r2) {
+	if BuildKey(r1, nil) != BuildKey(r2, nil) {
 		t.Fatal("HEAD and GET should share key space")
 	}
 }
@@ -31,7 +31,7 @@ func TestBuildKey_DifferentPaths(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/a", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/b", nil)
-	if BuildKey(r1) == BuildKey(r2) {
+	if BuildKey(r1, nil) == BuildKey(r2, nil) {
 		t.Fatal("different paths should produce different keys")
 	}
 }
@@ -40,7 +40,7 @@ func TestBuildKey_SchemeMatters(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	r2 := httptest.NewRequest("GET", "https://example.com/", nil)
-	if BuildKey(r1) == BuildKey(r2) {
+	if BuildKey(r1, nil) == BuildKey(r2, nil) {
 		t.Fatal("different schemes should produce different keys")
 	}
 }
@@ -49,7 +49,7 @@ func TestBuildKey_DefaultPortStripped(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com:80/", nil)
-	if BuildKey(r1) != BuildKey(r2) {
+	if BuildKey(r1, nil) != BuildKey(r2, nil) {
 		t.Fatal("default port should be stripped")
 	}
 }
@@ -58,7 +58,7 @@ func TestBuildKey_DuplicateSlashes(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/a/b", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/a//b", nil)
-	if BuildKey(r1) != BuildKey(r2) {
+	if BuildKey(r1, nil) != BuildKey(r2, nil) {
 		t.Fatal("duplicate slashes should be collapsed")
 	}
 }
@@ -68,13 +68,13 @@ func TestBuildKey_HostNormalization(t *testing.T) {
 	// Same host, different casing → same key.
 	r1 := httptest.NewRequest("GET", "http://Example.COM/a", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/a", nil)
-	if BuildKey(r1) != BuildKey(r2) {
+	if BuildKey(r1, nil) != BuildKey(r2, nil) {
 		t.Fatal("host casing should not affect key")
 	}
 
 	// Non-default port produces different key.
 	r3 := httptest.NewRequest("GET", "http://example.com:8080/a", nil)
-	if BuildKey(r1) == BuildKey(r3) {
+	if BuildKey(r1, nil) == BuildKey(r3, nil) {
 		t.Fatal("non-default port should produce different key")
 	}
 }
@@ -87,7 +87,7 @@ func TestBuildKey_LongURLNoPanic(t *testing.T) {
 	longPath := strings.Repeat("a", 600)
 	r := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1", nil)
 	// Must not panic.
-	k := BuildKey(r)
+	k := BuildKey(r, nil)
 	if k == 0 {
 		t.Fatal("expected non-zero key for long URL")
 	}
@@ -103,22 +103,22 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 		header.AcceptEncoding: {longVal},
 	}
 	// Must not panic.
-	_ = BuildVaryKey("Accept-Language, Accept-Encoding", reqHeader)
+	_ = BuildVaryKey("Accept-Language, Accept-Encoding", reqHeader, nil)
 }
 
 func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 	t.Parallel()
-	exclude := map[string]bool{"x-request-id": true}
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
 	h1 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"abc"}}
 	h2 := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-Id": {"xyz"}}
-	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, exclude)
-	k2 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, exclude)
+	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, excludePolicy)
+	k2 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, excludePolicy)
 	if k1 != k2 {
 		t.Fatal("excluded header should not affect Vary key")
 	}
 	// Without exclusion, keys should differ.
-	k3 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1)
-	k4 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2)
+	k3 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, nil)
+	k4 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, nil)
 	if k3 == k4 {
 		t.Fatal("without exclusion, different X-Request-Id should produce different keys")
 	}
@@ -126,11 +126,11 @@ func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 
 func TestBuildVaryKey_ExcludeAllHeaders(t *testing.T) {
 	t.Parallel()
-	exclude := map[string]bool{"x-request-id": true}
+	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
 	h1 := http.Header{"X-Request-Id": {"abc"}}
 	h2 := http.Header{"X-Request-Id": {"xyz"}}
-	k1 := BuildVaryKey("X-Request-Id", h1, exclude)
-	k2 := BuildVaryKey("X-Request-Id", h2, exclude)
+	k1 := BuildVaryKey("X-Request-Id", h1, excludePolicy)
+	k2 := BuildVaryKey("X-Request-Id", h2, excludePolicy)
 	if k1 != k2 {
 		t.Fatal("excluding all Vary fields should produce same key")
 	}

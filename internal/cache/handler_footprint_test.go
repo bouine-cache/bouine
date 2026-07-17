@@ -47,7 +47,7 @@ func TestFetchStoresRightSizedBody(t *testing.T) {
 		t.Fatalf("expected MISS, got %q", rr.Header().Get(header.XCache))
 	}
 
-	key := BuildKey(req)
+	key := BuildKey(req, nil)
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("stored object not found: obj=%v err=%v", obj, err)

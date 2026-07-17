@@ -86,9 +86,9 @@ type CFStatus struct {
 }
 
 // Engine evaluates all registered insight rules against the provided data.
-type Engine struct {
-	prevStoreStats api.Stats
-}
+// It is stateless; the caller is responsible for threading PrevStoreStats
+// across calls via InsightData.
+type Engine struct{}
 
 // New creates a new Engine.
 func New() *Engine {
@@ -98,9 +98,6 @@ func New() *Engine {
 // Evaluate runs all insight rules and returns the results, sorted by
 // severity (HIGH first, then MED, then LOW).
 func (e *Engine) Evaluate(_ context.Context, data InsightData) []Insight {
-	data.PrevStoreStats = e.prevStoreStats
-	e.prevStoreStats = data.StoreStats
-
 	var results []Insight
 	for _, rule := range rules {
 		if insight := rule(data); insight != nil {

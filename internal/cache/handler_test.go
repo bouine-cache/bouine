@@ -507,6 +507,84 @@ func TestHandler_Revalidate_5xx_StaleFallbackGateConsistency(t *testing.T) {
 	}
 }
 
+// TestHandler_Revalidate_5xx_NoSIEWindow verifies that an expired object
+// without a stale-if-error window is NOT served stale on a 5xx response.
+// RFC 5861 §4 bounds stale-on-error to the stale-if-error window.
+// Regression test for #291.
+func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=1")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "fresh-body")
+			return
+		}
+		w.WriteHeader(503)
+	})
+
+	h := testHandler(t, upstream)
+
+	seed := httptest.NewRecorder()
+	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
+	if seed.Code != 200 {
+		t.Fatalf("seed: status = %d", seed.Code)
+	}
+
+	// Wait for the object to expire (max-age=1, no stale-if-error).
+	time.Sleep(1500 * time.Millisecond)
+
+	// Second request triggers revalidation; upstream returns 5xx.
+	// Without a stale-if-error window, the 5xx must be forwarded.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
+	if rr.Code != 503 {
+		t.Fatalf("revalidate 5xx without SIE: status = %d, want 503 (stale must NOT be served outside SIE window)", rr.Code)
+	}
+	if rr.Header().Get(header.XCache) != "MISS" {
+		t.Fatalf("revalidate 5xx without SIE: X-Cache = %q, want MISS", rr.Header().Get(header.XCache))
+	}
+}
+
+// TestHandler_Revalidate_5xx_MustRevalidateWithSIE verifies that an object
+// with both must-revalidate and stale-if-error is NOT served stale on 5xx.
+// must-revalidate requires a successful revalidation before serving stale
+// (RFC 9111 §5.2.2.1), so the SIE window must not override it.
+func TestHandler_Revalidate_5xx_MustRevalidateWithSIE(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=1, must-revalidate, stale-if-error=600")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "fresh-body")
+			return
+		}
+		w.WriteHeader(503)
+	})
+
+	h := testHandler(t, upstream)
+
+	seed := httptest.NewRecorder()
+	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
+	if seed.Code != 200 {
+		t.Fatalf("seed: status = %d", seed.Code)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
+	if rr.Code != 503 {
+		t.Fatalf("revalidate 5xx with must-revalidate: status = %d, want 503 (must-revalidate forbids stale on error)", rr.Code)
+	}
+}
+
 // TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency verifies that when
 // the upstream is slow and returns 5xx, the stale object's Age header is
 // computed from the request-start timestamp, not from a second time.Now()

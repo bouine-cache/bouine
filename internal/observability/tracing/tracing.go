@@ -38,12 +38,17 @@ func Tracer() trace.Tracer {
 func HTTPMiddleware(spanName string, next http.Handler) http.Handler {
 	t := Tracer()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
 		ctx, span := t.Start(r.Context(), spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				attribute.String("http.method", r.Method),
-				attribute.String("http.url", r.URL.String()),
+				attribute.String("http.scheme", scheme),
 				attribute.String("http.host", r.Host),
+				attribute.String("http.path", r.URL.Path),
 			),
 		)
 		defer span.End()

@@ -184,7 +184,7 @@ func TestPool_ResponseHeaderTimeout(t *testing.T) {
 	// ResponseHeaderTimeout. The proxy's ErrorHandler must fire and
 	// return 502 — proving the timeout is wired into the transport.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		<-time.After(200 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()

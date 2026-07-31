@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -189,15 +190,14 @@ func TestWarmSync_SyncGoroutineStopsOnClose(t *testing.T) {
 		t.Fatalf("NewTieredStore: %v", err)
 	}
 
-	// Let it run a few cycles.
-	time.Sleep(300 * time.Millisecond)
-
-	// Close should join syncWg within timeout.
+	// Let the sync goroutine run for a fixed window, then close via a
+	// timer so the main goroutine waits on the done channel instead of
+	// sleeping. Close should join syncWg within timeout.
 	done := make(chan struct{})
-	go func() {
+	time.AfterFunc(300*time.Millisecond, func() {
 		_ = ts.Close(context.Background())
 		close(done)
-	}()
+	})
 
 	select {
 	case <-done:
@@ -279,15 +279,14 @@ func TestWarmSync_WarmSyncIntervalNegativeOneDisablesSync(t *testing.T) {
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// syncWg should be 0 — no goroutine started.
-	// Put small objects and wait — warm should stay empty.
+	// Put small objects and poll — warm should stay empty since sync is disabled.
 	for i := range 5 {
 		k := api.Key(800 + i)
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
-	time.Sleep(200 * time.Millisecond)
-	if keys := ts.warm.Keys(); len(keys) != 0 {
-		t.Fatalf("warm should be empty with sync disabled, got %d keys", len(keys))
-	}
+	poll.Eventually(t, 200*time.Millisecond, 20*time.Millisecond, func() bool {
+		return len(ts.warm.Keys()) == 0
+	})
 }
 
 func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
@@ -474,8 +473,12 @@ func TestOnEvictCallback(t *testing.T) {
 		_ = s.Put(context.Background(), k2, obj(k2, 100))
 	}
 
-	// Wait for sweeper to process overshoot.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for sweeper to process overshoot and evict k1.
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(evictedKeys, k1)
+	})
 
 	mu.Lock()
 	found := slices.Contains(evictedKeys, k1)

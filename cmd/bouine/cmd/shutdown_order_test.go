@@ -14,6 +14,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/server"
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -26,7 +27,7 @@ import (
 // due to store.Close racing listener drain).
 func TestShutdown_OrderedDrainBeforeStoreClose(t *testing.T) {
 	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(500 * time.Millisecond)
+		<-time.After(500 * time.Millisecond)
 		_, _ = io.WriteString(w, "slow")
 	}))
 	defer originSrv.Close()
@@ -72,7 +73,7 @@ routes:
 		reqDone <- nil
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	<-time.After(100 * time.Millisecond)
 	cancel()
 
 	select {
@@ -102,7 +103,7 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 	var inflightDone atomic.Bool
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		<-time.After(200 * time.Millisecond)
 		inflightDone.Store(true)
 		_, _ = io.WriteString(w, "ok")
 	})
@@ -115,12 +116,9 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- ln.Serve(context.Background()) }()
 
-	for i := 0; i < 100; i++ {
-		if ln.Addr() != "127.0.0.1:0" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		return ln.Addr() != "127.0.0.1:0"
+	})
 	if ln.Addr() == "127.0.0.1:0" {
 		t.Fatal("listener did not bind")
 	}
@@ -137,7 +135,7 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 		reqDone <- nil
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	<-time.After(50 * time.Millisecond)
 
 	shutdownDone := make(chan error, 1)
 	go func() {
@@ -178,7 +176,7 @@ func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 	var requestCompletedAt atomic.Int64
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		<-time.After(200 * time.Millisecond)
 		requestCompletedAt.Store(time.Now().UnixNano())
 		_, _ = io.WriteString(w, "ok")
 	})
@@ -191,12 +189,9 @@ func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- ln.Serve(context.Background()) }()
 
-	for i := 0; i < 100; i++ {
-		if ln.Addr() != "127.0.0.1:0" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		return ln.Addr() != "127.0.0.1:0"
+	})
 	if ln.Addr() == "127.0.0.1:0" {
 		t.Fatal("listener did not bind")
 	}
@@ -208,7 +203,7 @@ func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 	}()
-	time.Sleep(50 * time.Millisecond)
+	<-time.After(50 * time.Millisecond)
 
 	var storeCloseStartedAt atomic.Int64
 

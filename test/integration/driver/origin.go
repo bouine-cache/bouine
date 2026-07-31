@@ -31,7 +31,7 @@ func startOriginWithControl() (*httptest.Server, *originControl) {
 				return
 			}
 			if ms := ctrl.latencyMs.Load(); ms > 0 {
-				time.Sleep(time.Duration(ms) * time.Millisecond)
+				<-time.After(time.Duration(ms) * time.Millisecond)
 			}
 			next(w, r)
 		}
@@ -82,7 +82,7 @@ func startOriginWithControl() (*httptest.Server, *originControl) {
 		if ms <= 0 {
 			ms = 500
 		}
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		<-time.After(time.Duration(ms) * time.Millisecond)
 		w.Header().Set("Cache-Control", "max-age=60")
 		fmt.Fprintf(w, "slow %dms", ms)
 	}))

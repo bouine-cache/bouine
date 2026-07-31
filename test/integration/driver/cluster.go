@@ -23,6 +23,7 @@ import (
 
 	"github.com/bouine-cache/bouine/cmd/bouine/cmd"
 	"github.com/bouine-cache/bouine/internal/cluster"
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -184,46 +185,32 @@ routes:
 
 func (s *ClusterStack) waitHealthy(t *testing.T, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
 	for _, node := range s.Nodes {
 		ep := node.AdminAddr + "/healthz"
-		for time.Now().Before(deadline) {
+		poll.Eventually(t, timeout, 50*time.Millisecond, func() bool {
 			resp, err := http.Get(ep) //nolint:noctx
-			if err == nil && resp.StatusCode == 200 {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-				break
+			if err != nil {
+				return false
 			}
-			if resp != nil {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("node %s did not become healthy within %s", node.Name, timeout)
-		}
+			ok := resp.StatusCode == 200
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			return ok
+		})
 	}
 }
 
 func (s *ClusterStack) waitMembership(t *testing.T, timeout time.Duration, expected int) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		ok := true
+	poll.Eventually(t, timeout, 200*time.Millisecond, func() bool {
 		for i := range s.Nodes {
 			peers := s.Peers(t, i)
 			if len(peers) < expected {
-				ok = false
-				break
+				return false
 			}
 		}
-		if ok {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatalf("cluster did not reach %d members within %s", expected, timeout)
+		return true
+	})
 }
 
 // Down stops all nodes and the origin.
@@ -311,21 +298,19 @@ routes:
 	}(s.errChs[n])
 
 	// Wait for health.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	poll.Eventually(t, 30*time.Second, 50*time.Millisecond, func() bool {
 		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
-		if err == nil && resp.StatusCode == 200 {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+		if err != nil {
+			return false
+		}
+		ok := resp.StatusCode == 200
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if ok {
 			t.Logf("cluster: restarted %s on %s", name, s.Nodes[n].HTTPAddr)
-			return
 		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("node %s did not become healthy after restart", name)
+		return ok
+	})
 }
 
 // gossipSeeds returns the gossip join list from live nodes.
@@ -383,10 +368,10 @@ func (s *ClusterStack) FlapOrigin(t *testing.T, n int, pause time.Duration) {
 	t.Helper()
 	for i := range n {
 		s.originCtl.forceErr.Store(true)
-		time.Sleep(pause)
+		<-time.After(pause)
 		s.originCtl.forceErr.Store(false)
 		t.Logf("origin flap %d/%d: toggled error→ok", i+1, n)
-		time.Sleep(pause)
+		<-time.After(pause)
 	}
 }
 
@@ -567,14 +552,7 @@ func (s *ClusterStack) MetricValue(t *testing.T, n int, metric string) float64 {
 // RetryUntil polls f until it returns true or deadline expires.
 func RetryUntil(t *testing.T, deadline time.Duration, interval time.Duration, f func() bool) {
 	t.Helper()
-	end := time.Now().Add(deadline)
-	for time.Now().Before(end) {
-		if f() {
-			return
-		}
-		time.Sleep(interval)
-	}
-	t.Fatalf("condition not met within %s", deadline)
+	poll.Eventually(t, deadline, interval, f)
 }
 
 // XCache returns the X-Cache header value.

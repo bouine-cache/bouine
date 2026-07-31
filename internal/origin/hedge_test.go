@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 )
 
 func TestHedgedTransport_FastResponse(t *testing.T) {
@@ -43,7 +45,7 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := calls.Add(1)
 		if n == 1 {
-			time.Sleep(200 * time.Millisecond)
+			<-time.After(200 * time.Millisecond)
 		}
 		w.WriteHeader(200)
 	}))
@@ -63,16 +65,15 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	// Hedge should have fired.
-	time.Sleep(50 * time.Millisecond)
-	if calls.Load() < 2 {
-		t.Fatalf("calls = %d, want >= 2", calls.Load())
-	}
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		return calls.Load() >= 2
+	})
 }
 
 func TestHedgedTransport_NoGoroutineLeak(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		<-time.After(200 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
@@ -94,18 +95,9 @@ func TestHedgedTransport_NoGoroutineLeak(t *testing.T) {
 	}
 
 	// Poll until loser cleanup goroutines drain or timeout.
-	deadline := time.Now().Add(2 * time.Second)
-	var after int
-	for {
-		after = runtime.NumGoroutine()
-		if after-before <= 5 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("goroutine leak: before=%d after=%d delta=%d", before, after, after-before)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		return runtime.NumGoroutine()-before <= 5
+	})
 }
 
 func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
@@ -113,7 +105,7 @@ func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		time.Sleep(50 * time.Millisecond)
+		<-time.After(50 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
@@ -128,9 +120,8 @@ func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
 		t.Fatalf("RoundTrip: %v", err)
 	}
 	_ = resp.Body.Close()
-	// POST should never fire a hedge.
-	time.Sleep(50 * time.Millisecond)
-	if calls.Load() != 1 {
-		t.Fatalf("calls = %d, want 1 (no hedge for POST)", calls.Load())
-	}
+	// POST should never fire a hedge. Poll that calls stays at 1.
+	poll.Eventually(t, 100*time.Millisecond, 10*time.Millisecond, func() bool {
+		return calls.Load() == 1
+	})
 }

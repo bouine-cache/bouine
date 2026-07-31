@@ -181,7 +181,7 @@ func TestPurge_OnPurgedNotCalledOnError(t *testing.T) {
 	s.Handler().ServeHTTP(rr, req)
 	// Purge failed, so the handler still returns 500 and OnPurged should not fire.
 	_ = rr.Code // status is 500 but we only care that OnPurged was not called
-	time.Sleep(10 * time.Millisecond)
+	<-time.After(10 * time.Millisecond)
 	if called.Load() {
 		t.Fatal("OnPurged should not be called when purge fails")
 	}

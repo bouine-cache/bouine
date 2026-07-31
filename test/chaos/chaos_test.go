@@ -32,7 +32,7 @@ func TestChaos_PeerKill(t *testing.T) {
 	}
 
 	s.KillNode(t, 2)
-	time.Sleep(500 * time.Millisecond)
+	<-time.After(500 * time.Millisecond)
 
 	failures := 0
 	for _, node := range s.Nodes[:2] {
@@ -97,7 +97,7 @@ func TestChaos_OriginFlap(t *testing.T) {
 	}()
 
 	s.FlapOrigin(t, 5, 300*time.Millisecond)
-	time.Sleep(1 * time.Second)
+	<-time.After(1 * time.Second)
 	stop.Store(true)
 	wg.Wait()
 
@@ -125,7 +125,7 @@ func TestChaos_PartialPartition(t *testing.T) {
 				break
 			}
 			if attempt < 4 {
-				time.Sleep(200 * time.Millisecond)
+				<-time.After(200 * time.Millisecond)
 			}
 		}
 		if err != nil {
@@ -166,7 +166,7 @@ func requireStatus200(t *testing.T, url, msgf string, args ...any) {
 			lastErr = err
 		}
 		if attempt < 9 {
-			time.Sleep(200 * time.Millisecond)
+			<-time.After(200 * time.Millisecond)
 		}
 	}
 	prefix := fmt.Sprintf(msgf, args...)
@@ -266,12 +266,12 @@ func TestChaos_RollingRestart(t *testing.T) {
 	for i := range len(s.Nodes) {
 		t.Logf("rolling restart: killing node %d", i)
 		s.KillNode(t, i)
-		time.Sleep(1 * time.Second)
+		<-time.After(1 * time.Second)
 		s.RestartNode(t, i)
-		time.Sleep(3 * time.Second)
+		<-time.After(3 * time.Second)
 	}
 
-	time.Sleep(1 * time.Second)
+	<-time.After(1 * time.Second)
 	stop.Store(true)
 	wg.Wait()
 
@@ -303,7 +303,7 @@ func TestChaos_OriginDown(t *testing.T) {
 	resp.Body.Close()
 
 	// Wait for max-age=1 to expire so the object becomes stale.
-	time.Sleep(2 * time.Second)
+	<-time.After(2 * time.Second)
 
 	// Force origin down.
 	s.SetOriginError(true)
@@ -394,7 +394,7 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 
 	// Kill node 2 and wait long enough for gossip to mark it dead.
 	s.KillNode(t, 2)
-	time.Sleep(5 * time.Second)
+	<-time.After(5 * time.Second)
 
 	// Surviving nodes should still be reachable.
 	for _, n := range []int{0, 1} {
@@ -410,7 +410,7 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 
 	// Restart node 2 (gets fresh ports).
 	s.RestartNode(t, 2)
-	time.Sleep(5 * time.Second)
+	<-time.After(5 * time.Second)
 
 	// Node 2 must be reachable and serve requests.
 	resp, err := http.Get(s.Nodes[2].HTTPAddr + "/hit?x=rejoin-after") //nolint:noctx

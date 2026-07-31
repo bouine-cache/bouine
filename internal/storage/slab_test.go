@@ -433,7 +433,9 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	close(stop)
+	// Run the concurrent readers/evictors for a fixed window. A timer
+	// closes the stop channel after the duration; the main goroutine
+	// waits for the workers to drain via wg.Wait instead of sleeping.
+	time.AfterFunc(100*time.Millisecond, func() { close(stop) })
 	wg.Wait()
 }

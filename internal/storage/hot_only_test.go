@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -184,16 +185,12 @@ func TestHotOnly_SweeperEvictionRemovesKey(t *testing.T) {
 	// Wait for the sweeper to drain the overshoot. The sweeper runs
 	// asynchronously, so we poll until the shard is within budget.
 	sh := &s.shards[0]
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	poll.Eventually(t, 2*time.Second, time.Millisecond, func() bool {
 		sh.mu.RLock()
 		over := sh.bytes > 4<<10
 		sh.mu.RUnlock()
-		if !over {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return !over
+	})
 
 	// After the sweeper runs, no evicted key should remain in hotOnly.
 	// Every key still in entries must be in hotOnly; every evicted key

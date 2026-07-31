@@ -12,6 +12,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/storage/wal"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -391,12 +392,9 @@ func TestTieredStore_CloseStopsCompaction(t *testing.T) {
 	}
 
 	// Poll for the goroutine to exit, matching the pattern in TestHotClose.
-	for range 50 {
-		if runtime.NumGoroutine() < before {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	poll.Eventually(t, 500*time.Millisecond, 10*time.Millisecond, func() bool {
+		return runtime.NumGoroutine() < before
+	})
 	after := runtime.NumGoroutine()
 
 	if after >= before {

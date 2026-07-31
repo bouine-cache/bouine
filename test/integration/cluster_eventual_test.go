@@ -74,7 +74,7 @@ func TestEventual_BanPropagationGossip(t *testing.T) {
 
 	for i := range s.Nodes {
 		s.GetWithHost(t, i, path, crossNodeHost)
-		time.Sleep(100 * time.Millisecond)
+		<-time.After(100 * time.Millisecond)
 		s.GetWithHost(t, i, path, crossNodeHost)
 	}
 	s.Ban(t, 0, ".*", "")
@@ -94,7 +94,7 @@ func TestEventual_StaleDuringConvergence(t *testing.T) {
 	path := "/hit?x=eventual-stale"
 
 	s.GetWithHost(t, 1, path, crossNodeHost)
-	time.Sleep(100 * time.Millisecond)
+	<-time.After(100 * time.Millisecond)
 	s.GetWithHost(t, 1, path, crossNodeHost)
 	s.Purge(t, 0, "http://"+driver.CrossNodeHost+path)
 	driver.RetryUntil(t, driver.GossipConvergence, 500*time.Millisecond, func() bool {

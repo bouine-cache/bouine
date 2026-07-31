@@ -32,7 +32,7 @@ func TestStrong_PeerFetch(t *testing.T) {
 	// Prime the cache via node 0: first request stores the object on the owner.
 	s.Get(t, 0, "/hit?x=strong-peerfetch")
 	// Wait a moment for single-flight to complete.
-	time.Sleep(200 * time.Millisecond)
+	<-time.After(200 * time.Millisecond)
 
 	// Fetch the same URL from all three nodes and assert each can serve it.
 	// In strong mode, non-owner nodes peer-fetch from the owner.
@@ -61,7 +61,7 @@ func TestStrong_PurgePropagation(t *testing.T) {
 	// Prime: cache the URL on one node (whichever owns the key).
 	s.Get(t, 0, path)
 	// Give the single-flight a moment.
-	time.Sleep(200 * time.Millisecond)
+	<-time.After(200 * time.Millisecond)
 
 	// All nodes should be able to serve the object now.
 	for i := range s.Nodes {
@@ -116,7 +116,7 @@ func TestStrong_BanPropagation(t *testing.T) {
 	// Prime all nodes.
 	for i := range s.Nodes {
 		s.Get(t, i, path)
-		time.Sleep(100 * time.Millisecond)
+		<-time.After(100 * time.Millisecond)
 		s.Get(t, i, path) // make sure it's a HIT before banning
 	}
 

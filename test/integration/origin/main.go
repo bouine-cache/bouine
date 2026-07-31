@@ -79,7 +79,7 @@ func main() {
 		if ms <= 0 {
 			ms = 500
 		}
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		<-time.After(time.Duration(ms) * time.Millisecond)
 		w.Header().Set("Cache-Control", "max-age=60")
 		fmt.Fprintf(w, "slow %dms", ms)
 	})
@@ -108,9 +108,9 @@ func main() {
 	mux.HandleFunc("/outlier", func(w http.ResponseWriter, r *http.Request) {
 		// 5% of requests take 2000ms; rest take 10ms (for hedging tests)
 		if time.Now().UnixNano()%20 == 0 {
-			time.Sleep(2000 * time.Millisecond)
+			<-time.After(2000 * time.Millisecond)
 		} else {
-			time.Sleep(10 * time.Millisecond)
+			<-time.After(10 * time.Millisecond)
 		}
 		w.Header().Set("Cache-Control", "max-age=60")
 		fmt.Fprint(w, "outlier")

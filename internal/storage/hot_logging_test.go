@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -205,7 +206,14 @@ func TestEvictionLogging_SweeperOvershoot(t *testing.T) {
 		Key: 1, Body: make([]byte, 400),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
-	time.Sleep(100 * time.Millisecond)
+	// Poll for the sweeper to process the overshoot and emit the log.
+	// Search the raw buffer for the sweeper_overshoot message to avoid
+	// JSON parsing partial lines written concurrently by the sweeper.
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return bytes.Contains(buf.Bytes(), []byte(`"sweeper_overshoot"`))
+	})
 	h.Close(ctx)
 
 	records := parseLogRecords(t, &mu, &buf)

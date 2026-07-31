@@ -11,24 +11,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
 
 func waitForAddr(t *testing.T, l *Listener, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	poll.Eventually(t, timeout, 10*time.Millisecond, func() bool {
 		addr := l.Addr()
-		if addr != "" && addr != l.Addr() || addr != "" {
-			conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
-			if err == nil {
-				conn.Close()
-				return
-			}
+		if addr == "" {
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("listener not ready after %v", timeout)
+		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	})
 }
 
 func echo200() http.Handler {

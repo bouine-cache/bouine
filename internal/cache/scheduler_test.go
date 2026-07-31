@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -252,15 +253,9 @@ func TestSchedulerIndexConsistency(t *testing.T) {
 	// Wait for all three to pop.
 	// Key 2 pops first (60ms), then key 3 (70ms), then key 1 (80ms).
 	total := int64(1 + 2 + 3)
-	deadline := time.After(2 * time.Second)
-	for popped.Load() != total {
-		select {
-		case <-deadline:
-			t.Fatalf("popped total = %d, want %d", popped.Load(), total)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		return popped.Load() == total
+	})
 	if s.Len() != 0 {
 		t.Fatalf("heap len after all pops = %d, want 0", s.Len())
 	}

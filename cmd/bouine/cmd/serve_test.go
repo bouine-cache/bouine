@@ -14,23 +14,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
 
 // waitForPort polls until addr accepts TCP connections or the 3s timeout expires.
 func waitForPort(t *testing.T, addr string) {
 	t.Helper()
-	const timeout = 3 * time.Second
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	poll.Eventually(t, 3*time.Second, 10*time.Millisecond, func() bool {
 		conn, err := net.DialTimeout("tcp", addr, 20*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return
+		if err != nil {
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("port %s not ready after %v", addr, timeout)
+		conn.Close()
+		return true
+	})
 }
 
 func TestProxyEndToEnd(t *testing.T) {

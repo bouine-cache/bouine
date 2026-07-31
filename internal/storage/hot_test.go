@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -643,8 +644,9 @@ func TestHotOverflowLatency(t *testing.T) {
 		}()
 	}
 
-	time.Sleep(duration)
-	stop.Store(true)
+	// Run the load for a fixed window. A timer stops the workers after
+	// the duration; the main goroutine waits via wg.Wait instead of sleeping.
+	time.AfterFunc(duration, func() { stop.Store(true) })
 	wg.Wait()
 
 	// p99 latency gate.
@@ -680,26 +682,19 @@ func TestHotClose(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	// Poll for the sweeper goroutine to start — 10 ms sleeps are
 	// unreliable on 2-core CI runners.
-	var goroutinesWithSweeper int
-	for range 50 {
-		goroutinesWithSweeper = runtime.NumGoroutine()
-		if goroutinesWithSweeper > before {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	poll.Eventually(t, 500*time.Millisecond, 10*time.Millisecond, func() bool {
+		return runtime.NumGoroutine() > before
+	})
+	goroutinesWithSweeper := runtime.NumGoroutine()
 	if goroutinesWithSweeper <= before {
 		t.Error("expected sweeper goroutine to be running after NewHotStore")
 	}
 
 	_ = s.Close(context.Background())
 	// Poll for the goroutine to exit.
-	for range 50 {
-		if runtime.NumGoroutine() <= before+1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	poll.Eventually(t, 500*time.Millisecond, 10*time.Millisecond, func() bool {
+		return runtime.NumGoroutine() <= before+1
+	})
 	after := runtime.NumGoroutine()
 	if after > before+1 { // +1 for test harness variance
 		t.Errorf("goroutine leak: before=%d after close=%d", before, after)

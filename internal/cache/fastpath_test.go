@@ -47,7 +47,7 @@ func TestFastPathHandler_TryHit(t *testing.T) {
 		TTL:      60 * time.Second,
 	}
 	err := store.Put(context.Background(), key, obj)
-	require.NoErrorf(t, err, "Put failed: %v", err)
+	require.NoError(t, err, "Put failed")
 
 	now := time.Now()
 	resp, ok := fp.TryHit(req, now)
@@ -146,7 +146,7 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 	}, nil)
 	obj.Key = key
 	err := store.Put(context.Background(), key, obj)
-	require.NoErrorf(t, err, "Put failed: %v", err)
+	require.NoError(t, err, "Put failed")
 
 	req := &api.RawRequest{
 		Method: "HEAD",
@@ -191,7 +191,7 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 	}, nil)
 	obj.Key = key
 	err := store.Put(context.Background(), key, obj)
-	require.NoErrorf(t, err, "Put failed: %v", err)
+	require.NoError(t, err, "Put failed")
 
 	req := &api.RawRequest{
 		Method: "GET",
@@ -371,7 +371,7 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 	}, nil)
 	obj.Key = key
 	err := store.Put(context.Background(), key, obj)
-	require.NoErrorf(t, err, "Put failed: %v", err)
+	require.NoError(t, err, "Put failed")
 
 	req := &api.RawRequest{
 		Method:      "GET",
@@ -398,7 +398,7 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 
 		written, err := io.ReadAll(r)
 		r.Close()
-		require.NoErrorf(t, err, "ReadAll error on iteration %d: %v", i, err)
+		require.NoErrorf(t, err, "ReadAll error on iteration %d", i)
 
 		// After WriteTo, Buffers should be consumed (len=0).
 		assert.Len(t, resp.Buffers, 0)

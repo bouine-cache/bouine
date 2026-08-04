@@ -42,9 +42,9 @@ func TestHotStore_PutGet(t *testing.T) {
 	o := obj(k, 100)
 
 	err := s.Put(context.Background(), k, o)
-	require.NoErrorf(t, err, "put: %v", err)
+	require.NoError(t, err, "put")
 	got, src, err := s.Get(context.Background(), k)
-	require.NoErrorf(t, err, "get: %v", err)
+	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, 200, got.StatusCode)
 	require.Equal(t, uint64(1), got.Hits)
@@ -56,7 +56,7 @@ func TestHotStore_Miss(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
 	got, src, err := s.Get(context.Background(), 999)
-	require.NoErrorf(t, err, "get: %v", err)
+	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
 	st := s.Stats()
@@ -70,10 +70,10 @@ func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	o := obj(k, 100)
 
 	err := s.Put(context.Background(), k, o)
-	require.NoErrorf(t, err, "put: %v", err)
+	require.NoError(t, err, "put")
 
 	got, _, err := s.Get(context.Background(), k)
-	require.NoErrorf(t, err, "Get: %v", err)
+	require.NoError(t, err, "Get")
 	require.NotNil(t, got)
 }
 
@@ -635,7 +635,7 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "example\\.com"})
-	require.NoErrorf(t, err, "ban: %v", err)
+	require.NoError(t, err, "ban")
 	require.Equal(t, 1, count)
 
 	got, _, _ := s.Get(context.Background(), k)
@@ -654,7 +654,7 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me"})
-	require.NoErrorf(t, err, "ban: %v", err)
+	require.NoError(t, err, "ban")
 	require.Equal(t, 1, count)
 
 	got, _, _ := s.Get(context.Background(), k)
@@ -671,7 +671,7 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 		HostRegex: "example\\.com",
 		CreatedAt: banTime,
 	})
-	require.NoErrorf(t, err, "ban: %v", err)
+	require.NoError(t, err, "ban")
 	require.Equal(t, 0, count)
 
 	// Simulate peer replication: Put an object with StoredAt before the ban.
@@ -708,7 +708,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 		HostRegex: "example\\.com",
 		CreatedAt: time.Now(),
 	})
-	require.NoErrorf(t, err, "ban: %v", err)
+	require.NoError(t, err, "ban")
 
 	got, _, _ = s.Get(context.Background(), k)
 	require.Nil(t, got)
@@ -724,7 +724,7 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 		HostRegex: "example\\.com",
 		CreatedAt: banTime,
 	})
-	require.NoErrorf(t, err, "ban: %v", err)
+	require.NoError(t, err, "ban")
 
 	// Object stored AFTER the ban — should be exempt from lazy eviction.
 	k := KeyHash([]byte("exempt"))

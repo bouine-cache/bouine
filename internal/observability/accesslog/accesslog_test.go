@@ -38,7 +38,7 @@ func TestMiddleware_LogsAccess(t *testing.T) {
 
 	var rec map[string]any
 	err := json.Unmarshal(buf.Bytes(), &rec)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	assert.Equal(t, "POST", rec["method"])
 	assert.Equal(t, float64(201), rec["status"])
 	assert.Equal(t, "/api/test", rec["path"])
@@ -74,7 +74,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 
 	var rec map[string]any
 	err := json.Unmarshal(buf.Bytes(), &rec)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	assert.Equal(t, "served cache hit", rec["msg"])
 	assert.Equal(t, "2a", rec["key"])
 }
@@ -99,7 +99,7 @@ func TestMiddleware_200WithoutKeyLogsInfo(t *testing.T) {
 
 	var rec map[string]any
 	err := json.Unmarshal(buf.Bytes(), &rec)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	assert.Equal(t, "served cache miss", rec["msg"])
 }
 

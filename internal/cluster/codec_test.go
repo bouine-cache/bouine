@@ -20,17 +20,17 @@ func TestEncodeDecodePurge_RoundTrip(t *testing.T) {
 	}
 	// gossip
 	buf, err := EncodePurgeGossip(evt)
-	require.NoErrorf(t, err, "encode gossip: %v", err)
+	require.NoError(t, err, "encode gossip")
 	got, err := DecodePurgeGossip(buf)
-	require.NoErrorf(t, err, "decode gossip: %v", err)
+	require.NoError(t, err, "decode gossip")
 	got.IssuedAt = got.IssuedAt.UTC()
 	evt.IssuedAt = evt.IssuedAt.UTC()
 	require.Equal(t, evt, got)
 	// HTTP
 	hbuf, err := EncodePurgeHTTP(evt)
-	require.NoErrorf(t, err, "encode http: %v", err)
+	require.NoError(t, err, "encode http")
 	got2, err := DecodePurgeHTTP(hbuf)
-	require.NoErrorf(t, err, "decode http: %v", err)
+	require.NoError(t, err, "decode http")
 	got2.IssuedAt = got2.IssuedAt.UTC()
 	evt.IssuedAt = evt.IssuedAt.UTC()
 	require.Equal(t, evt, got2)
@@ -46,9 +46,9 @@ func TestEncodeDecodePurge_EmptyStrings(t *testing.T) {
 		Seq:      0,
 	}
 	buf, err := EncodePurgeGossip(evt)
-	require.NoErrorf(t, err, "encode: %v", err)
+	require.NoError(t, err, "encode")
 	got, err := DecodePurgeGossip(buf)
-	require.NoErrorf(t, err, "decode: %v", err)
+	require.NoError(t, err, "decode")
 	got.IssuedAt = got.IssuedAt.UTC()
 	evt.IssuedAt = evt.IssuedAt.UTC()
 	require.Equal(t, evt, got)
@@ -83,9 +83,9 @@ func TestEncodeDecodeBan_RoundTrip(t *testing.T) {
 	}
 	// gossip
 	buf, err := EncodeBanGossip(evt)
-	require.NoErrorf(t, err, "encode gossip: %v", err)
+	require.NoError(t, err, "encode gossip")
 	got, err := DecodeBanGossip(buf)
-	require.NoErrorf(t, err, "decode gossip: %v", err)
+	require.NoError(t, err, "decode gossip")
 	got.Predicate.CreatedAt = got.Predicate.CreatedAt.UTC()
 	got.IssuedAt = got.IssuedAt.UTC()
 	evt.Predicate.CreatedAt = evt.Predicate.CreatedAt.UTC()
@@ -93,9 +93,9 @@ func TestEncodeDecodeBan_RoundTrip(t *testing.T) {
 	require.Equal(t, evt, got)
 	// HTTP
 	hbuf, err := EncodeBanHTTP(evt)
-	require.NoErrorf(t, err, "encode http: %v", err)
+	require.NoError(t, err, "encode http")
 	got2, err := DecodeBanHTTP(hbuf)
-	require.NoErrorf(t, err, "decode http: %v", err)
+	require.NoError(t, err, "decode http")
 	got2.Predicate.CreatedAt = got2.Predicate.CreatedAt.UTC()
 	got2.IssuedAt = got2.IssuedAt.UTC()
 	evt.Predicate.CreatedAt = evt.Predicate.CreatedAt.UTC()
@@ -111,9 +111,9 @@ func TestEncodeDecodeBan_EmptyPredicate(t *testing.T) {
 		Seq:      1,
 	}
 	buf, err := EncodeBanGossip(evt)
-	require.NoErrorf(t, err, "encode: %v", err)
+	require.NoError(t, err, "encode")
 	got, err := DecodeBanGossip(buf)
-	require.NoErrorf(t, err, "decode: %v", err)
+	require.NoError(t, err, "decode")
 	got.Predicate.CreatedAt = got.Predicate.CreatedAt.UTC()
 	got.IssuedAt = got.IssuedAt.UTC()
 	evt.Predicate.CreatedAt = evt.Predicate.CreatedAt.UTC()

@@ -74,22 +74,22 @@ func writeFile(t *testing.T, path string, content string) {
 func TestRaiseFileLimit(t *testing.T) {
 	var before unix.Rlimit
 	err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before)
-	require.NoErrorf(t, err, "getrlimit: %v", err)
+	require.NoError(t, err, "getrlimit")
 
 	got, err := RaiseFileLimit(65536)
-	require.NoErrorf(t, err, "RaiseFileLimit: %v", err)
+	require.NoError(t, err, "RaiseFileLimit")
 	if got < 65536 && got < before.Max {
 		t.Fatalf("soft limit = %d, want >= 65536 (or capped at hard limit %d)", got, before.Max)
 	}
 
 	var after unix.Rlimit
 	err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after)
-	require.NoErrorf(t, err, "getrlimit after: %v", err)
+	require.NoError(t, err, "getrlimit after")
 	if after.Cur < 65536 && after.Cur < before.Max {
 		t.Fatalf("soft limit after = %d, want >= 65536 (or capped at hard limit %d)", after.Cur, before.Max)
 	}
 
 	// Calling again with the same value should be a no-op.
 	_, err := RaiseFileLimit(65536)
-	require.NoErrorf(t, err, "RaiseFileLimit idempotent: %v", err)
+	require.NoError(t, err, "RaiseFileLimit idempotent")
 }

@@ -111,7 +111,7 @@ func TestConnLimitListener_RejectsOverLimit(t *testing.T) {
 	pl.conns <- server1
 
 	c1, err := lim.Accept()
-	require.NoErrorf(t, err, "first accept: %v", err)
+	require.NoError(t, err, "first accept")
 	_ = c1
 
 	// Second connection should be rejected with a temporary error.
@@ -267,7 +267,7 @@ func TestConnLimitListener_ConcurrentClose(t *testing.T) {
 		_, s := net.Pipe()
 		pl.conns <- s
 		c, err := lim.Accept()
-		require.NoErrorf(t, err, "accept %d: %v", i, err)
+		require.NoErrorf(t, err, "accept %d", i)
 		accepted[i] = c
 	}
 
@@ -286,7 +286,7 @@ func TestConnLimitListener_ConcurrentClose(t *testing.T) {
 		_, s := net.Pipe()
 		pl.conns <- s
 		c, err := lim.Accept()
-		require.NoErrorf(t, err, "re-accept %d: %v (slots not released?)", i, err)
+		require.NoErrorf(t, err, "re-accept %d (slots not released?)", i)
 		_ = c.Close()
 		_ = s.Close()
 	}

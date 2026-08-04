@@ -92,7 +92,7 @@ func TestCluster_LocalMode(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	members := c.Members()
@@ -105,15 +105,15 @@ func TestCluster_LocalMode(t *testing.T) {
 func TestCluster_TwoNodeJoin(t *testing.T) {
 	t.Parallel()
 	c1, err := New(defaultConfig(t, "node1", "127.0.0.1:17900"))
-	require.NoErrorf(t, err, "c1: %v", err)
+	require.NoError(t, err, "c1")
 	defer func() { _ = c1.Leave(t.Context()) }()
 
 	c2, err := New(defaultConfig(t, "node2", "127.0.0.1:17901"))
-	require.NoErrorf(t, err, "c2: %v", err)
+	require.NoError(t, err, "c2")
 	defer func() { _ = c2.Leave(t.Context()) }()
 
 	_, err = c2.Join([]string{"127.0.0.1:17900"})
-	require.NoErrorf(t, err, "join: %v", err)
+	require.NoError(t, err, "join")
 
 	// Wait for gossip to propagate.
 	for range 50 {
@@ -129,7 +129,7 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var called atomic.Int32
@@ -152,7 +152,7 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var called atomic.Int32
@@ -175,7 +175,7 @@ func TestNotifyMsg_MalformedPayload(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// Should not panic on invalid data.
@@ -189,7 +189,7 @@ func TestNotifyMsg_WhenNoCallbacks(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// Should not panic when no invalidator is set.
@@ -203,7 +203,7 @@ func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	cfg.GossipApplyTimeout = 50 * time.Millisecond
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var got atomic.Pointer[context.Context]
@@ -227,7 +227,7 @@ func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var got atomic.Pointer[context.Context]
@@ -251,7 +251,7 @@ func TestNotifyMsg_DefaultApplyTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	require.Equal(t, 100*time.Millisecond, c.cfg.GossipApplyTimeout)
@@ -262,7 +262,7 @@ func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	cfg.GossipApplyTimeout = 10 * time.Millisecond
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	c.SetInvalidator(Invalidator{
@@ -286,7 +286,7 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	cfg.GossipApplyTimeout = 10 * time.Millisecond
 	c, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	reg := prometheus.NewRegistry()
@@ -304,7 +304,7 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 	c.NotifyMsg(msg)
 
 	metrics, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	for _, mf := range metrics {
 		if mf.GetName() != "bouine_cluster_invalidations_gossip_total" {
 			continue

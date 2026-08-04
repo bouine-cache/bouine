@@ -117,7 +117,7 @@ func TestRouteRing_Sparkline(t *testing.T) {
 		r.Flush(now.Add(time.Duration(i) * time.Minute))
 	}
 	stats := r.RouteStats(30)
-	require.NotEqual(t, 0, len(stats))
+	require.NotEmpty(t, stats)
 	assert.Len(t, stats[0].Sparkline, sparklinePoints)
 }
 
@@ -155,11 +155,11 @@ func TestRings_SaveLoad(t *testing.T) {
 	ri.Route.Flush(time.Now())
 
 	err := ri.Save(path)
-	require.NoErrorf(t, err, "Save: %v", err)
+	require.NoError(t, err, "Save")
 
 	ri2 := NewRings("node-1")
 	err = ri2.Load(path)
-	require.NoErrorf(t, err, "Load: %v", err)
+	require.NoError(t, err, "Load")
 
 	snap := ri2.Request.Snapshot(requestBuckets)
 	require.Len(t, snap, requestBuckets)

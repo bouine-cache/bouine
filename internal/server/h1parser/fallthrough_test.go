@@ -66,12 +66,12 @@ func TestPrefixedConn_Read(t *testing.T) {
 
 	buf := make([]byte, 32)
 	n, err := pc.Read(buf)
-	require.NoErrorf(t, err, "first Read: %v", err)
+	require.NoError(t, err, "first Read")
 	require.Len(t, prefix, n)
 	assert.Equal(t, "PREFIX_DATA", string(buf[:n]))
 
 	n, err = pc.Read(buf)
-	require.NoErrorf(t, err, "second Read: %v", err)
+	require.NoError(t, err, "second Read")
 	assert.Equal(t, "_BACKEND", string(buf[:n]))
 }
 
@@ -79,7 +79,7 @@ func TestPrefixedConn_Read(t *testing.T) {
 func dialTCPPair(t *testing.T) (client, server net.Conn) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoErrorf(t, err, "Listen: %v", err)
+	require.NoError(t, err, "Listen")
 	t.Cleanup(func() { ln.Close() })
 
 	type acceptResult struct {
@@ -93,7 +93,7 @@ func dialTCPPair(t *testing.T) (client, server net.Conn) {
 	}()
 
 	c, err := net.Dial("tcp", ln.Addr().String())
-	require.NoErrorf(t, err, "Dial: %v", err)
+	require.NoError(t, err, "Dial")
 
 	res := <-ch
 	require.Nil(t, res.err)
@@ -135,7 +135,7 @@ func TestHandleFallThrough_ServesResponseBeforeClose(t *testing.T) {
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "GET"})
-	require.NoErrorf(t, err, "ReadResponse: %v", err)
+	require.NoError(t, err, "ReadResponse")
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
@@ -189,7 +189,7 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "GET"})
-	require.NoErrorf(t, err, "ReadResponse: %v", err)
+	require.NoError(t, err, "ReadResponse")
 	resp.Body.Close()
 
 	select {
@@ -247,7 +247,7 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "POST"})
-	require.NoErrorf(t, err, "ReadResponse: %v", err)
+	require.NoError(t, err, "ReadResponse")
 	resp.Body.Close()
 
 	select {
@@ -271,7 +271,7 @@ func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
 	}
 
 	err := c.Close()
-	require.NoErrorf(t, err, "Close: %v", err)
+	require.NoError(t, err, "Close")
 
 	select {
 	case <-c.done:
@@ -280,7 +280,7 @@ func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
 	}
 
 	err = c.Close()
-	require.NoErrorf(t, err, "second Close: %v", err)
+	require.NoError(t, err, "second Close")
 }
 
 type mockConn struct {

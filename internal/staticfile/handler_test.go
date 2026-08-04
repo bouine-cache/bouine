@@ -24,7 +24,7 @@ func newTestHandler(t *testing.T, files map[string]string, cfg Config) *Handler 
 	}
 	cfg.Root = dir
 	h, err := New(cfg)
-	require.NoErrorf(t, err, "New: %v", err)
+	require.NoError(t, err, "New")
 	return h
 }
 
@@ -333,7 +333,7 @@ func TestHandler_SymlinkRoot(t *testing.T) {
 	err = os.Symlink(realDir, linkDir)
 	require.NoError(t, err)
 	h, err := New(Config{Root: linkDir})
-	require.NoErrorf(t, err, "New with symlink root: %v", err)
+	require.NoError(t, err, "New with symlink root")
 	w := doRequest(t, h, "GET", "/file.txt")
 	require.Equal(t, 200, w.Code)
 	require.Equal(t, "via symlink", w.Body.String())

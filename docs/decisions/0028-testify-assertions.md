@@ -12,8 +12,10 @@ The test suite used hand-rolled assertion helpers (`t.Fatalf` with
 (`assertPurgeEqual`, `assertBanEqual`, and `assertMetricExists`-style
 duplicates). The bespoke helpers drift from the fields they compare:
 `internal/cluster/codec_test.go:151-186` reimplemented `Equal`
-*incorrectly* for `time.Time` (it papered over the loc-pointer trap
-described below instead of normalizing, hiding the root cause).
+*bespoke-style* for `time.Time` (it used `.Equal()` for instant
+comparison, which was correct but inconsistent with whole-struct
+comparison — the loc-pointer trap described below was avoided by
+not using whole-struct `Equal` in the first place).
 
 `testify` is listed under "Planned additions" in `docs/deps.md`, which
 `AGENTS.md §5` treats as pre-approved for test-only use. This ADR

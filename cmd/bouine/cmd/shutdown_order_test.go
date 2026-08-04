@@ -79,14 +79,14 @@ routes:
 
 	select {
 	case err := <-reqDone:
-		require.NoErrorf(t, err, "in-flight request failed during shutdown: %v", err)
+		require.NoError(t, err, "in-flight request failed during shutdown")
 	case <-time.After(10 * time.Second):
 		t.Fatal("in-flight request did not complete within timeout")
 	}
 
 	select {
 	case err := <-errCh:
-		require.NoErrorf(t, err, "serve returned error: %v", err)
+		require.NoError(t, err, "serve returned error")
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not shut down in time")
 	}
@@ -139,7 +139,7 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 
 	select {
 	case err := <-shutdownDone:
-		require.NoErrorf(t, err, "listener shutdown failed: %v", err)
+		require.NoError(t, err, "listener shutdown failed")
 		require.True(t, inflightDone.Load())
 	case <-time.After(5 * time.Second):
 		t.Fatal("listener.Shutdown did not return within timeout")
@@ -147,7 +147,7 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 
 	select {
 	case err := <-reqDone:
-		require.NoErrorf(t, err, "in-flight request failed: %v", err)
+		require.NoError(t, err, "in-flight request failed")
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-flight request did not complete")
 	}

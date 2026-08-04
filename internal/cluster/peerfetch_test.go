@@ -31,7 +31,7 @@ func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(req)
-	require.NoErrorf(t, err, "marshal: %v", err)
+	require.NoError(t, err, "marshal")
 	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerFetchPath, bytes.NewReader(body))
 	r.Header.Set(header.ContentType, "application/json")
 	if hop > 0 {
@@ -52,7 +52,7 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 	require.Equal(t, 200, rr.Code)
 	obj, err := storage.DecodeObject(rr.Body.Bytes())
-	require.NoErrorf(t, err, "binary decode: %v", err)
+	require.NoError(t, err, "binary decode")
 	if obj.Key != key || obj.StatusCode != 200 {
 		t.Fatalf("decoded mismatch: key=%d status=%d", obj.Key, obj.StatusCode)
 	}
@@ -83,7 +83,7 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	require.Equal(t, "application/octet-stream", ct)
 
 	decoded, err := storage.DecodeObject(rr.Body.Bytes())
-	require.NoErrorf(t, err, "binary decode: %v", err)
+	require.NoError(t, err, "binary decode")
 	if decoded.Key != obj.Key || decoded.StatusCode != obj.StatusCode {
 		t.Fatalf("decoded mismatch: key=%d status=%d", decoded.Key, decoded.StatusCode)
 	}
@@ -114,7 +114,7 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: key})
-	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NoError(t, err, "fetch")
 	require.NotNil(t, got)
 	if got.Key != key || string(got.Body) != "roundtrip" {
 		t.Fatalf("got key=%d body=%q", got.Key, got.Body)
@@ -171,7 +171,7 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
-	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NoError(t, err, "fetch")
 	require.NotNil(t, obj)
 
 	hits, _, _, latN, latSumMs := f.PeerFetchStats()
@@ -213,7 +213,7 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: key})
-	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NoError(t, err, "fetch")
 	require.NotNil(t, got)
 	require.Equal(t, obj.TTL, got.TTL)
 	require.Equal(t, obj.StaleWhileRevalidate, got.StaleWhileRevalidate)
@@ -238,7 +238,7 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
-	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NoError(t, err, "fetch")
 	require.Nil(t, obj)
 	hits, misses, _, _, _ := f.PeerFetchStats()
 	require.Equal(t, int64(0), hits)
@@ -250,7 +250,7 @@ func TestPeerFetcher_HopLimitReached(t *testing.T) {
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
 		api.PeerFetchRequest{Key: 1, Hops: MaxHops})
-	require.NoErrorf(t, err, "hop limit should return nil,nil: %v", err)
+	require.NoError(t, err, "hop limit should return nil,nil")
 	require.Nil(t, obj)
 }
 

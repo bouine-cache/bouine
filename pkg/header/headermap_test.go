@@ -178,11 +178,11 @@ func TestMap_MarshalJSON(t *testing.T) {
 	h.Set("Cache-Control", "public, max-age=3600")
 
 	data, err := json.Marshal(h)
-	require.NoErrorf(t, err, "MarshalJSON: %v", err)
+	require.NoError(t, err, "MarshalJSON")
 
 	var m map[string][]string
 	err = json.Unmarshal(data, &m)
-	require.NoErrorf(t, err, "unmarshal result: %v", err)
+	require.NoError(t, err, "unmarshal result")
 
 	if vals, ok := m["Content-Type"]; !ok || len(vals) != 1 || vals[0] != "text/html" {
 		t.Errorf("Content-Type not in JSON: %v", m)
@@ -195,7 +195,7 @@ func TestMap_MarshalJSON(t *testing.T) {
 func TestMap_MarshalJSON_Empty(t *testing.T) {
 	h := Map{}
 	data, err := json.Marshal(h)
-	require.NoErrorf(t, err, "MarshalJSON: %v", err)
+	require.NoError(t, err, "MarshalJSON")
 	assert.Equal(t, "{}", string(data))
 }
 
@@ -204,7 +204,7 @@ func TestMap_UnmarshalJSON(t *testing.T) {
 
 	var h Map
 	err := json.Unmarshal([]byte(input), &h)
-	require.NoErrorf(t, err, "UnmarshalJSON: %v", err)
+	require.NoError(t, err, "UnmarshalJSON")
 
 	got := h.Get("Content-Type")
 	assert.Equal(t, "text/html", got)
@@ -222,11 +222,11 @@ func TestMap_JSONRoundTrip(t *testing.T) {
 	original.Set("Vary", "Accept-Encoding")
 
 	data, err := json.Marshal(original)
-	require.NoErrorf(t, err, "marshal: %v", err)
+	require.NoError(t, err, "marshal")
 
 	var decoded Map
 	err = json.Unmarshal(data, &decoded)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 
 	original.Range(func(key, value string) bool {
 		got := decoded.Get(key)

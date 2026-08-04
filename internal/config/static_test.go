@@ -15,7 +15,7 @@ func TestValidateRoute_StaticOnly(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	require.NoErrorf(t, err, "static-only route should validate: %v", err)
+	require.NoError(t, err, "static-only route should validate")
 }
 
 func TestValidateRoute_BothPoolAndStatic(t *testing.T) {
@@ -94,7 +94,7 @@ func TestValidateRoute_StaticWithPoolStillWorks(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	require.NoErrorf(t, err, "mixed pool + static routes should validate: %v", err)
+	require.NoError(t, err, "mixed pool + static routes should validate")
 }
 
 func TestParse_StaticRoute(t *testing.T) {
@@ -111,7 +111,7 @@ routes:
       strip_prefix: /assets/
 `
 	cfg, err := Parse([]byte(yaml))
-	require.NoErrorf(t, err, "Parse: %v", err)
+	require.NoError(t, err, "Parse")
 	require.Len(t, cfg.Routes, 1)
 	require.Equal(t, "/var/www/assets", cfg.Routes[0].Static.Root)
 	require.Equal(t, "/assets/", cfg.Routes[0].Request.StripPrefix)

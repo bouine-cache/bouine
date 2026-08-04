@@ -22,13 +22,13 @@ func TestEvictToFitBatch_MultiEvict(t *testing.T) {
 	dir := t.TempDir()
 	seedBudget := int64(seedEntries) * (HeaderLen + seedBody + FooterLen)
 	s, err := NewStore(Config{Dir: dir, MaxBytes: seedBudget, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	var evicted atomic.Int64
@@ -68,7 +68,7 @@ func TestEvictToFitBatch_NoEvictionNeeded(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 20, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	var evicted atomic.Int64
@@ -77,7 +77,7 @@ func TestEvictToFitBatch_NoEvictionNeeded(t *testing.T) {
 	}
 
 	_, _, err = s.Put(1, make([]byte, 100))
-	require.NoErrorf(t, err, "Put: %v", err)
+	require.NoError(t, err, "Put")
 
 	// Small record, plenty of budget left.
 	s.mu.RLock()
@@ -97,7 +97,7 @@ func TestEvictToFitBatch_OverBudget(t *testing.T) {
 	dir := t.TempDir()
 	budget := int64(1000)
 	s, err := NewStore(Config{Dir: dir, MaxBytes: budget, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	var evicted atomic.Int64
@@ -106,7 +106,7 @@ func TestEvictToFitBatch_OverBudget(t *testing.T) {
 	}
 
 	_, _, err = s.Put(1, make([]byte, 100))
-	require.NoErrorf(t, err, "Put: %v", err)
+	require.NoError(t, err, "Put")
 
 	// Record larger than entire budget.
 	hugeRec := budget + 1
@@ -132,13 +132,13 @@ func TestEvictToFitBatch_PutIntegration(t *testing.T) {
 	dir := t.TempDir()
 	seedBudget := int64(seedEntries) * (HeaderLen + seedBody + FooterLen)
 	s, err := NewStore(Config{Dir: dir, MaxBytes: seedBudget, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	var evicted atomic.Int64
@@ -149,7 +149,7 @@ func TestEvictToFitBatch_PutIntegration(t *testing.T) {
 	// Put a large record that forces multiple evictions.
 	largeBody := make([]byte, 10*(HeaderLen+seedBody+FooterLen))
 	_, _, err = s.Put(999, largeBody)
-	require.NoErrorf(t, err, "Put with batch eviction: %v", err)
+	require.NoError(t, err, "Put with batch eviction")
 
 	if evicted.Load() < 10 {
 		t.Errorf("OnEvict fired %d times, want >= 10", evicted.Load())
@@ -166,7 +166,7 @@ func TestEvictToFitBatch_EmptyStore(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 1000, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Small record fits in empty budget.
@@ -186,12 +186,12 @@ func TestEvictToFitBatch_NoVictimsAvailable(t *testing.T) {
 	dir := t.TempDir()
 	budget := int64(HeaderLen + 100 + FooterLen)
 	s, err := NewStore(Config{Dir: dir, MaxBytes: budget, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Insert one entry that fills the budget.
 	_, _, err = s.Put(1, make([]byte, 100))
-	require.NoErrorf(t, err, "Put: %v", err)
+	require.NoError(t, err, "Put")
 
 	// Mark it protected so pickEvictVictim skips it.
 	s.idxMu.Lock()
@@ -225,13 +225,13 @@ func TestEvictToFitBatch_MidBatchFailure(t *testing.T) {
 	dir := t.TempDir()
 	seedBudget := int64(seedEntries) * (HeaderLen + seedBody + FooterLen)
 	s, err := NewStore(Config{Dir: dir, MaxBytes: seedBudget, SegMax: 1 << 20, SegmentCacheSize: -1})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	var evictedCount atomic.Int64
@@ -283,13 +283,13 @@ func TestOverBudget_EntryCap(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 20, MaxEntries: 5, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100)
 	for i := range 5 {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	require.True(t, s.OverBudget())
@@ -302,13 +302,13 @@ func TestOverBudget_EntryCapNotReached(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 20, MaxEntries: 10, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100)
 	for i := range 5 {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	require.False(t, s.OverBudget())
@@ -322,13 +322,13 @@ func TestPut_EntryCapRejects(t *testing.T) {
 	dir := t.TempDir()
 	// No byte budget, only entry cap. 3 entries max.
 	s, err := NewStore(Config{Dir: dir, MaxEntries: 3, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100)
 	for i := range 3 {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	// Mark all entries protected so eviction cannot find a victim.
@@ -353,18 +353,18 @@ func TestPut_EntryCapEvictsAndSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	// No byte budget, only entry cap. 3 entries max.
 	s, err := NewStore(Config{Dir: dir, MaxEntries: 3, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100)
 	for i := range 3 {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	// 4th Put should evict one entry and succeed.
 	_, _, err = s.Put(99, body)
-	require.NoErrorf(t, err, "Put with entry cap eviction: %v", err)
+	require.NoError(t, err, "Put with entry cap eviction")
 
 	assert.Equal(t, int64(3), s.stats.entries.Load())
 }

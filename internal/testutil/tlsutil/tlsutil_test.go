@@ -34,7 +34,7 @@ func TestServerConfig_DefaultsSane(t *testing.T) {
 	if cfg.MinVersion < tls.VersionTLS12 {
 		t.Fatalf("MinVersion = %d, want >= TLS 1.2", cfg.MinVersion)
 	}
-	require.NotEqual(t, 0, len(cfg.NextProtos))
+	require.NotEmpty(t, cfg.NextProtos)
 }
 
 func TestWriteCertFiles_RoundTrip(t *testing.T) {
@@ -46,25 +46,25 @@ func TestWriteCertFiles_RoundTrip(t *testing.T) {
 
 	// Cert PEM parses.
 	pemBytes, err := os.ReadFile(certPath) //nolint:gosec // test file
-	require.NoErrorf(t, err, "read cert: %v", err)
+	require.NoError(t, err, "read cert")
 	block, _ := pem.Decode(pemBytes)
 	if block == nil || block.Type != "CERTIFICATE" {
 		t.Fatal("invalid cert PEM")
 	}
 	_, err = x509.ParseCertificate(block.Bytes)
-	require.NoErrorf(t, err, "parse cert: %v", err)
+	require.NoError(t, err, "parse cert")
 
 	// Cert file is 0600.
 	cst, err := os.Stat(certPath)
-	require.NoErrorf(t, err, "stat cert: %v", err)
+	require.NoError(t, err, "stat cert")
 	require.Equal(t, os.FileMode(0o600), cst.Mode().Perm())
 
 	// Key file is 0600.
 	st, err := os.Stat(keyPath)
-	require.NoErrorf(t, err, "stat key: %v", err)
+	require.NoError(t, err, "stat key")
 	require.Equal(t, os.FileMode(0o600), st.Mode().Perm())
 
 	// Round-trip with tls.LoadX509KeyPair.
 	_, err = tls.LoadX509KeyPair(certPath, keyPath)
-	require.NoErrorf(t, err, "LoadX509KeyPair: %v", err)
+	require.NoError(t, err, "LoadX509KeyPair")
 }

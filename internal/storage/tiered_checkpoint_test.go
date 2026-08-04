@@ -25,7 +25,7 @@ func newTieredStoreWithDir(t *testing.T, dir string) *TieredStore {
 		WALDir:        filepath.Join(dir, "index.wal"),
 		BodyThreshold: 1024,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 	return ts
 }
 
@@ -38,21 +38,21 @@ func TestCheckpointAndSnapshotRestart(t *testing.T) {
 		k := api.Key(i + 1)
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put %d: %v", i, err)
+		require.NoErrorf(t, err, "put %d", i)
 	}
 
 	err := ts.checkpoint()
-	require.NoErrorf(t, err, "checkpoint: %v", err)
+	require.NoError(t, err, "checkpoint")
 
 	require.Equal(t, int64(0), ts.walEntryCount.Load())
 
 	snapPath := ts.warm.SnapshotPath()
 	require.NotEqual(t, "", snapPath)
 	_, err = os.Stat(snapPath)
-	require.NoErrorf(t, err, "snapshot file not created by checkpoint: %v", err)
+	require.NoError(t, err, "snapshot file not created by checkpoint")
 
 	err = ts.Close(context.Background())
-	require.NoErrorf(t, err, "close: %v", err)
+	require.NoError(t, err, "close")
 
 	ts2 := newTieredStoreWithDir(t, dir)
 	defer func() { _ = ts2.Close(context.Background()) }()
@@ -60,7 +60,7 @@ func TestCheckpointAndSnapshotRestart(t *testing.T) {
 	for i := range 20 {
 		k := api.Key(i + 1)
 		obj, src, err := ts2.Get(context.Background(), k)
-		require.NoErrorf(t, err, "get %d after restart: %v", i, err)
+		require.NoErrorf(t, err, "get %d after restart", i)
 		require.NotNil(t, obj)
 		require.Equal(t, api.SourceWarm, src)
 	}
@@ -75,11 +75,11 @@ func TestSnapshotFallbackOnMissingSnapshot(t *testing.T) {
 		k := api.Key(i + 1)
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put %d: %v", i, err)
+		require.NoErrorf(t, err, "put %d", i)
 	}
 
 	err := ts.Close(context.Background())
-	require.NoErrorf(t, err, "close: %v", err)
+	require.NoError(t, err, "close")
 
 	snapPath := filepath.Join(dir, "warm", "index.snap")
 	_ = os.Remove(snapPath)
@@ -90,7 +90,7 @@ func TestSnapshotFallbackOnMissingSnapshot(t *testing.T) {
 	for i := range 10 {
 		k := api.Key(i + 1)
 		obj, _, err := ts2.Get(context.Background(), k)
-		require.NoErrorf(t, err, "get %d: %v", i, err)
+		require.NoErrorf(t, err, "get %d", i)
 		require.NotNil(t, obj)
 	}
 }
@@ -104,36 +104,36 @@ func TestSnapshotWithWALDelta(t *testing.T) {
 		k := api.Key(i + 1)
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put %d: %v", i, err)
+		require.NoErrorf(t, err, "put %d", i)
 	}
 
 	err := ts.checkpoint()
-	require.NoErrorf(t, err, "checkpoint: %v", err)
+	require.NoError(t, err, "checkpoint")
 
 	for i := 10; i < 20; i++ {
 		k := api.Key(i + 1)
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put delta %d: %v", i, err)
+		require.NoErrorf(t, err, "put delta %d", i)
 	}
 
 	err = ts.Delete(context.Background(), api.Key(1))
-	require.NoErrorf(t, err, "delete: %v", err)
+	require.NoError(t, err, "delete")
 
 	err = ts.Close(context.Background())
-	require.NoErrorf(t, err, "close: %v", err)
+	require.NoError(t, err, "close")
 
 	ts2 := newTieredStoreWithDir(t, dir)
 	defer func() { _ = ts2.Close(context.Background()) }()
 
 	obj, _, err := ts2.Get(context.Background(), api.Key(1))
-	require.NoErrorf(t, err, "get deleted key: %v", err)
+	require.NoError(t, err, "get deleted key")
 	require.Nil(t, obj)
 
 	for i := 1; i < 20; i++ {
 		k := api.Key(i + 1)
 		obj, _, err := ts2.Get(context.Background(), k)
-		require.NoErrorf(t, err, "get %d: %v", i, err)
+		require.NoErrorf(t, err, "get %d", i)
 		require.NotNil(t, obj)
 	}
 }
@@ -148,13 +148,13 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 		k := api.Key(i + 1)
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put %d: %v", i, err)
+		require.NoErrorf(t, err, "put %d", i)
 	}
 
 	require.Equal(t, int64(5), ts.walEntryCount.Load())
 
 	err := ts.checkpoint()
-	require.NoErrorf(t, err, "checkpoint: %v", err)
+	require.NoError(t, err, "checkpoint")
 
 	require.Equal(t, int64(0), ts.walEntryCount.Load())
 
@@ -162,7 +162,7 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 		k := api.Key(i + 1)
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put %d: %v", i, err)
+		require.NoErrorf(t, err, "put %d", i)
 	}
 
 	require.Equal(t, int64(5), ts.walEntryCount.Load())

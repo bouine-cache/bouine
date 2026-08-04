@@ -126,7 +126,7 @@ routes:
 	cancel()
 	select {
 	case err := <-errCh:
-		require.NoErrorf(t, err, "serve: %v", err)
+		require.NoError(t, err, "serve")
 	case <-time.After(3 * time.Second):
 		t.Fatal("daemon did not shut down")
 	}

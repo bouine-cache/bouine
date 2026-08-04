@@ -36,7 +36,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 
 	got, err := decodeObject(encodeObject(orig))
-	require.NoErrorf(t, err, "decode: %v", err)
+	require.NoError(t, err, "decode")
 
 	if got.Key != orig.Key || got.VaryKey != orig.VaryKey || got.StatusCode != orig.StatusCode {
 		t.Errorf("identity fields mismatch: %+v", got)
@@ -74,7 +74,7 @@ func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 		// round-trip (ADR-0015 risk).
 	}
 	got, err := decodeObject(encodeObject(orig))
-	require.NoErrorf(t, err, "decode: %v", err)
+	require.NoError(t, err, "decode")
 	assert.True(t, got.LastModified.IsZero())
 	assert.True(t, got.StoredAt.IsZero())
 	if len(got.Body) != 0 || got.BodySize != 0 {

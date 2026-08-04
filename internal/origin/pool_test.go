@@ -36,7 +36,7 @@ func pool(t *testing.T, targets ...string) *Pool {
 		Targets: targets,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	require.NoErrorf(t, err, "NewPool: %v", err)
+	require.NoError(t, err, "NewPool")
 	return p
 }
 

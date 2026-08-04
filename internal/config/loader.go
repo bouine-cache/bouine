@@ -31,7 +31,6 @@ func Defaults() Config {
 			Admin: ":9000",
 		},
 		TLS: TLS{
-			ALPN:       []string{"h2", "http/1.1"},
 			MinVersion: "1.2",
 		},
 		Cluster: Cluster{
@@ -138,16 +137,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	// hot_max_bytes_ratio range check. Zero means "use default" and is valid.
-	if r := c.Storage.HotMaxBytesRatio; r < 0 || r > 100 {
-		return fmt.Errorf("config: storage.hot_max_bytes_ratio must be 0–100, got %d", r)
-	}
-
-	// warm_max_entries_ratio range check. Zero means "use default" and is valid.
-	if r := c.Storage.WarmMaxEntriesRatio; r < 0 || r > 100 {
-		return fmt.Errorf("config: storage.warm_max_entries_ratio must be 0–100, got %d", r)
-	}
-
 	// SO_REUSEPORT is only supported on Linux. The config package is a
 	// leaf and cannot import internal/platform, so we check GOOS directly.
 	// platform.ReusePortSupported mirrors this check.
@@ -189,11 +178,7 @@ func (s *Storage) ResolveHotMaxBytes(goMemLimit string) {
 	if err != nil || n <= 0 {
 		return
 	}
-	ratio := s.HotMaxBytesRatio
-	if ratio == 0 {
-		ratio = defaultHotMaxBytesRatio
-	}
-	s.HotMaxBytes = ByteSize(n * int64(ratio) / 100)
+	s.HotMaxBytes = ByteSize(n * int64(defaultHotMaxBytesRatio) / 100)
 }
 
 // ResolveWarmMaxEntries derives the warm index entry cap from the
@@ -218,17 +203,15 @@ func (s *Storage) ResolveWarmMaxEntries(goMemLimit string) {
 	if err != nil || n <= 0 {
 		return
 	}
-	ratio := s.WarmMaxEntriesRatio
-	if ratio == 0 {
-		ratio = defaultWarmMaxEntriesRatio
-	}
 	// 128 = warm.EstimatedWarmLocHeapBytes. Inlined to avoid circular
 	// import (config -> warm -> storage). Update both if warmLoc changes.
-	s.WarmMaxEntries = n * int64(ratio) / (100 * 128)
+	s.WarmMaxEntries = n * int64(defaultWarmMaxEntriesRatio) / (100 * 128)
 }
 
 // validateRoute checks a single route entry and normalises its fields.
 // A route must specify exactly one of Pool or Static.Root.
+//
+//nolint:gocyclo // 16: flat checklist + name derivation, no sub-functions to extract
 func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	r := &c.Routes[i]
 	hasPool := r.Pool != ""
@@ -247,6 +230,19 @@ func (c *Config) validateRoute(i int, pools map[string]struct{}) error {
 	if hasStatic {
 		if err := validateStatic(i, r.Static); err != nil {
 			return err
+		}
+	}
+	// Auto-derive Route.Name when empty so Prometheus metrics and the
+	// dashboard have consistent route labels without requiring operators
+	// to name every route.
+	if r.Name == "" {
+		switch {
+		case r.Match.Host != "":
+			r.Name = r.Match.Host + ":" + r.Match.PathPrefix
+		case r.Match.PathPrefix != "":
+			r.Name = r.Match.PathPrefix
+		default:
+			r.Name = "_catch-all"
 		}
 	}
 	for j, m := range r.Match.Methods {
@@ -406,9 +402,10 @@ func validatePoolDurations(p *UpstreamPool) error {
 	return nil
 }
 
-// validateCluster checks and normalises cluster configuration.
+// validateCluster checks and normalises cluster configuration. The
+// cluster is considered enabled when Listen.Cluster is non-empty.
 func (c *Config) validateCluster() error {
-	if c.Cluster.Enabled {
+	if c.Listen.Cluster != "" {
 		c.Cluster.Mode = strings.TrimSpace(c.Cluster.Mode)
 		switch c.Cluster.Mode {
 		case ClusterModeStrong, ClusterModeEventual:
@@ -416,11 +413,11 @@ func (c *Config) validateCluster() error {
 		case "":
 			c.Cluster.Mode = ClusterModeStrong
 		default:
-			return fmt.Errorf("config: cluster.mode must be %q or %q, got %q (full mode has been removed; use strong with replicas >= 2 for redundancy)",
+			return fmt.Errorf("config: cluster.mode must be %q or %q, got %q",
 				ClusterModeStrong, ClusterModeEventual, c.Cluster.Mode)
 		}
 	} else if c.Cluster.Mode != "" && c.Cluster.Mode != ClusterModeStrong {
-		return fmt.Errorf("config: cluster.mode %q requires cluster.enabled = true", c.Cluster.Mode)
+		return fmt.Errorf("config: cluster.mode %q requires listen.cluster to be set", c.Cluster.Mode)
 	}
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong

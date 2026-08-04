@@ -169,7 +169,7 @@ func TestClusterMode_DefaultIsStrong(t *testing.T) {
 
 func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true}}
+	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 func TestClusterMode_ValidModes(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual} {
-		cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: mode}}
+		cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: mode}}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("mode %q: unexpected error: %v", mode, err)
 		}
@@ -193,7 +193,7 @@ func TestClusterMode_ValidModes(t *testing.T) {
 
 func TestClusterMode_InvalidValue(t *testing.T) {
 	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: "invalid"}}
+	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "invalid"}}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error for invalid cluster mode")
@@ -203,23 +203,56 @@ func TestClusterMode_InvalidValue(t *testing.T) {
 	}
 }
 
-func TestClusterMode_NonStrongRequiresEnabled(t *testing.T) {
+func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: false, Mode: ClusterModeEventual}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("expected error for eventual mode without cluster enabled")
+		t.Fatal("expected error for eventual mode without cluster listener")
 	}
-	if !strings.Contains(err.Error(), "requires cluster.enabled") {
+	if !strings.Contains(err.Error(), "requires listen.cluster") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestClusterMode_StrongWithoutEnabled(t *testing.T) {
+func TestClusterMode_StrongWithoutListener(t *testing.T) {
 	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: false, Mode: ClusterModeStrong}}
+	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeStrong}}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("strong mode without enabled should be valid: %v", err)
+		t.Fatalf("strong mode without listener should be valid: %v", err)
+	}
+}
+
+// --- Route.Name auto-derivation ---
+
+func TestValidate_RouteNameAutoDerived(t *testing.T) {
+	t.Parallel()
+	pool := UpstreamPool{Name: "app", Targets: []string{"a:1"}}
+	cases := []struct {
+		name     string
+		route    Route
+		wantName string
+	}{
+		{"host+prefix", Route{Match: RouteMatch{Host: "api.example.com", PathPrefix: "/v1"}, Pool: "app"}, "api.example.com:/v1"},
+		{"prefix only", Route{Match: RouteMatch{PathPrefix: "/products"}, Pool: "app"}, "/products"},
+		{"catch-all", Route{Match: RouteMatch{}, Pool: "app"}, "_catch-all"},
+		{"explicit name kept", Route{Name: "custom", Match: RouteMatch{PathPrefix: "/"}, Pool: "app"}, "custom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Config{
+				Listen:        Listen{Admin: ":9000"},
+				UpstreamPools: []UpstreamPool{pool},
+				Routes:        []Route{tc.route},
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			if cfg.Routes[0].Name != tc.wantName {
+				t.Fatalf("Name = %q, want %q", cfg.Routes[0].Name, tc.wantName)
+			}
+		})
 	}
 }
 
@@ -415,17 +448,14 @@ func TestResolveHotMaxBytes_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
 		name  string
 		limit string
 		want  int64
-		ratio int
 	}{
-		{"24GiB default 75%", "24GiB", int64(24<<30) * 75 / 100, 0},
-		{"3GiB default 75%", "3GiB", int64(3<<30) * 75 / 100, 0},
-		{"24GiB ratio 70", "24GiB", int64(24<<30) * 70 / 100, 70},
-		{"24GiB ratio 80", "24GiB", int64(24<<30) * 80 / 100, 80},
+		{"24GiB default 75%", "24GiB", int64(24<<30) * 75 / 100},
+		{"3GiB default 75%", "3GiB", int64(3<<30) * 75 / 100},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := Storage{HotMaxBytesRatio: tc.ratio}
+			s := Storage{}
 			s.ResolveHotMaxBytes(tc.limit)
 			if got := s.HotMaxBytes.Bytes(); got != tc.want {
 				t.Fatalf("HotMaxBytes = %d, want %d", got, tc.want)
@@ -467,8 +497,7 @@ func TestParse_DerivesHotMaxBytesFromGomemLimitEnv(t *testing.T) {
 listen:
   admin: ":9000"
 storage:
-  eviction: sieve
-`
+  warm_dir: /tmp`
 	cfg, err := Parse([]byte(yamlSrc))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -520,41 +549,14 @@ storage:
 	}
 }
 
-func TestValidate_HotMaxBytesRatioOutOfRange(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name  string
-		ratio int
-	}{
-		{"negative", -1},
-		{"over 100", 101},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := Config{
-				Listen:  Listen{Admin: ":9000"},
-				Storage: Storage{HotMaxBytesRatio: tc.ratio},
-			}
-			err := cfg.Validate()
-			if err == nil {
-				t.Fatalf("expected error for ratio %d", tc.ratio)
-			}
-			if !strings.Contains(err.Error(), "hot_max_bytes_ratio") {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
 func TestCluster_FullMode_Rejected(t *testing.T) {
 	t.Parallel()
-	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Enabled: true, Mode: "full"}}
+	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "full"}}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error for mode 'full' which has been removed")
 	}
-	if !strings.Contains(err.Error(), "full mode has been removed") {
+	if !strings.Contains(err.Error(), "cluster.mode must be") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -597,11 +599,11 @@ func TestResolveWarmMaxEntries_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
 	}
 }
 
-func TestResolveWarmMaxEntries_CustomRatio(t *testing.T) {
+func TestResolveWarmMaxEntries_DefaultRatio(t *testing.T) {
 	t.Parallel()
 	limit := int64(14 << 30)
-	want := limit * 10 / (100 * 128)
-	s := Storage{WarmMaxEntriesRatio: 10}
+	want := limit * 15 / (100 * 128)
+	s := Storage{}
 	s.ResolveWarmMaxEntries("14GiB")
 	if s.WarmMaxEntries != want {
 		t.Fatalf("WarmMaxEntries = %d, want %d", s.WarmMaxEntries, want)
@@ -632,35 +634,6 @@ func TestResolveWarmMaxEntries_InvalidGomemLimitIgnored(t *testing.T) {
 	s.ResolveWarmMaxEntries("garbage")
 	if s.WarmMaxEntries != 0 {
 		t.Fatalf("expected 0 for invalid GOMEMLIMIT, got %d", s.WarmMaxEntries)
-	}
-}
-
-func TestValidate_WarmMaxEntriesRatioRange(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name  string
-		ratio int
-		ok    bool
-	}{
-		{"zero is valid (use default)", 0, true},
-		{"1 is valid", 1, true},
-		{"100 is valid", 100, true},
-		{"negative is invalid", -1, false},
-		{"101 is invalid", 101, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			c := Defaults()
-			c.Storage.WarmMaxEntriesRatio = tc.ratio
-			err := c.Validate()
-			if tc.ok && err != nil {
-				t.Fatalf("expected no error, got %v", err)
-			}
-			if !tc.ok && err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
 	}
 }
 

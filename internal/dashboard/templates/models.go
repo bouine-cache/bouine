@@ -402,14 +402,13 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 				{Key: "hot_max_bytes", Value: cfg.Storage.HotMaxBytes.String(), Kind: "num", Hint: "in-RAM SIEVE cache"},
 				{Key: "warm_dir", Value: fmt.Sprintf("%q", cfg.Storage.WarmDir), Kind: "str", Hint: "mmap segments path"},
 				{Key: "warm_max_bytes", Value: cfg.Storage.WarmMaxBytes.String(), Kind: "num", Hint: "max warm tier size"},
-				{Key: "eviction", Value: cfg.Storage.Eviction, Kind: "str", Hint: "sieve"},
 			},
 		},
 	}
 
 	clusterBadgeKind := ""
 	clusterBadge := "disabled"
-	if cfg.Cluster.Enabled {
+	if cfg.Listen.Cluster != "" {
 		clusterBadgeKind = "g"
 		clusterBadge = cfg.Cluster.Mode
 	}
@@ -417,9 +416,7 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 	sections = append(sections, ConfigSection{
 		Icon: "◎", Title: "cluster", Badge: clusterBadge, BadgeKind: clusterBadgeKind,
 		Rows: []ConfigRow{
-			{Key: "enabled", Value: fmt.Sprintf("%v", cfg.Cluster.Enabled), Kind: boolKind(cfg.Cluster.Enabled), Hint: "gossip membership"},
 			{Key: "mode", Value: cfg.Cluster.Mode, Kind: "str", Hint: modeHint},
-			{Key: "replicas", Value: fmt.Sprintf("%d", cfg.Cluster.Replicas), Kind: "num", Hint: "write replication factor"},
 			{Key: "hop_limit", Value: fmt.Sprintf("%d", cfg.Cluster.HopLimit), Kind: "num", Hint: "max peer-fetch hops (strong only)"},
 		},
 	})
@@ -442,13 +439,6 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		Routes: routeEntries,
 	})
 	return sections
-}
-
-func boolKind(v bool) string {
-	if v {
-		return "bool-t"
-	}
-	return "bool-f"
 }
 
 // ── Peer results ──────────────────────────────────────────────────────
@@ -663,16 +653,6 @@ func BuildRouteRows(cfgRoutes []config.Route, stats []observability.RouteStat) [
 	rows := make([]RouteRow, 0, len(cfgRoutes))
 	for _, rc := range cfgRoutes {
 		label := rc.Name
-		if label == "" {
-			switch {
-			case rc.Match.Host != "":
-				label = rc.Match.Host + ":" + rc.Match.PathPrefix
-			case rc.Match.PathPrefix != "":
-				label = rc.Match.PathPrefix
-			default:
-				label = "_catch-all"
-			}
-		}
 		stat := byName[label]
 		row := RouteRow{
 			Name:        label,

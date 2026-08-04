@@ -15,11 +15,8 @@ storage:
   hot_max_bytes: 2Go
   warm_dir: /var/lib/bouine
   warm_max_bytes: 20Go
-  eviction: sieve
 
 cluster:
-  enabled: true
-  replicas: 2
   hop_limit: 2
 
 upstream_pools:

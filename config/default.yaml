@@ -7,7 +7,6 @@ listen:
 
 storage:
   hot_max_bytes: 512MiB
-  eviction: sieve
   # wal_sync_interval controls the async WAL fsync batching interval.
   # Default 100ms. Entries are enqueued to a bounded channel and
   # fsynced in batches by a background goroutine. Set to -1 for

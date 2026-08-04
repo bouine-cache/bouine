@@ -26,15 +26,11 @@ config:
     hot_max_bytes: 2GiB
     warm_dir: /var/lib/bouine
     warm_max_bytes: 20GiB
-    eviction: sieve
     warm_sync_interval: 60s  # hot→warm background sync (default); set to -1 to disable
     # warm_sync_batch_size: 5000
     # body_threshold: 64KiB
   cluster:
-    enabled: true
     join: []  # populated from headless service DNS
-    replicas: 2
-    hop_limit: 2
   # admin:
   #   drain_duration: 10s  # /drain endpoint block time (preStop hook)
   upstream_pools: []

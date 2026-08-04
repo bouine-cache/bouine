@@ -362,7 +362,7 @@ func (e *engine) initCluster(
 	ctx context.Context,
 	store storage.Store,
 ) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.Metrics) {
-	if !e.cfg.Cluster.Enabled || e.cfg.Listen.Cluster == "" {
+	if e.cfg.Listen.Cluster == "" {
 		return nil, nil, nil, nil, nil
 	}
 
@@ -385,7 +385,7 @@ func (e *engine) initCluster(
 	clusterMetrics.SetMode(e.cfg.Cluster.Mode)
 	clusterNode.SetMetrics(clusterMetrics)
 
-	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry)
+	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry, e.cfg.Cluster.HopLimit)
 	broadcaster := cluster.NewBroadcaster(clusterNode, nil, "")
 
 	clusterNode.SetInvalidator(cluster.Invalidator{
@@ -599,7 +599,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
 		}),
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store),
+		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit),
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:   dashMux,
 		FaviconHandler:     webdash.FaviconHandler(),

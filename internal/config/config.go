@@ -97,10 +97,8 @@ type Listen struct {
 // TLS configures the data-plane TLS handshake. Multiple certs are
 // supported via SNI; the first matching cert wins.
 type TLS struct {
-	Certs        []TLSCert `yaml:"certs,omitempty" json:"certs,omitempty"`
-	ALPN         []string  `yaml:"alpn,omitempty" json:"alpn,omitempty"`
-	MinVersion   string    `yaml:"min_version,omitempty" json:"min_version,omitempty"`
-	OCSPStapling string    `yaml:"ocsp_stapling,omitempty" json:"ocsp_stapling,omitempty"`
+	Certs      []TLSCert `yaml:"certs,omitempty" json:"certs,omitempty"`
+	MinVersion string    `yaml:"min_version,omitempty" json:"min_version,omitempty"`
 }
 
 // TLSCert is a single cert/key pair plus its SNI matches.
@@ -113,14 +111,6 @@ type TLSCert struct {
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
 	HotMaxBytes ByteSize `yaml:"hot_max_bytes,omitempty" json:"hot_max_bytes,omitempty"`
-	// HotMaxBytesRatio is the percentage of GOMEMLIMIT used to derive
-	// HotMaxBytes when hot_max_bytes is not explicitly set. Zero means
-	// use the default (75); otherwise the value must be 1–100. Deriving
-	// from GOMEMLIMIT keeps SIEVE eviction headroom below the Go runtime
-	// soft memory limit so the GC does not enter a death spiral as the
-	// cache fills (issue #161). An explicit hot_max_bytes always takes
-	// precedence.
-	HotMaxBytesRatio int `yaml:"hot_max_bytes_ratio,omitempty" json:"hot_max_bytes_ratio,omitempty"`
 	// HotMmapSlab enables the mmap'd slab allocator for hot store body
 	// bytes. When true, bodies are allocated from mmap'd regions instead
 	// of Go heap, reducing GC pressure. Default false (Go heap).
@@ -131,12 +121,6 @@ type Storage struct {
 	// derive from GOMEMLIMIT (see WarmMaxEntriesRatio). A positive value
 	// overrides the derived limit. Negative means unlimited.
 	WarmMaxEntries int64 `yaml:"warm_max_entries,omitempty" json:"warm_max_entries,omitempty"`
-	// WarmMaxEntriesRatio is the percentage of GOMEMLIMIT used to derive
-	// WarmMaxEntries when warm_max_entries is not explicitly set. Zero
-	// means use the default (15). At 14 GiB GOMEMLIMIT with 15%, the
-	// warm index is capped at ~16M entries (~2 GiB heap).
-	WarmMaxEntriesRatio int    `yaml:"warm_max_entries_ratio,omitempty" json:"warm_max_entries_ratio,omitempty"`
-	Eviction            string `yaml:"eviction,omitempty" json:"eviction,omitempty"`
 	// WarmMaxDiskBytes caps the total physical disk usage of warm-tier
 	// segment files (live + dead bytes). Unlike WarmMaxBytes which limits
 	// logical bytes in the index, this limits actual disk consumption.
@@ -219,9 +203,9 @@ const (
 	ClusterModeEventual = "eventual"
 )
 
-// Cluster controls peer membership and fan-out. Phase 4+.
+// Cluster controls peer membership and fan-out. The cluster is enabled
+// when Listen.Cluster is non-empty; there is no separate enabled flag.
 type Cluster struct {
-	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// NodeName overrides the hostname used for gossip membership. When
 	// empty, defaults to os.Hostname(). Required when running multiple
 	// nodes on the same host (e.g. integration tests).
@@ -232,7 +216,6 @@ type Cluster struct {
 	// Empty defaults to "strong" for backward compatibility.
 	Mode     string   `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Join     []string `yaml:"join,omitempty" json:"join,omitempty"`
-	Replicas int      `yaml:"replicas,omitempty" json:"replicas,omitempty"`
 	HopLimit int      `yaml:"hop_limit,omitempty" json:"hop_limit,omitempty"`
 	// JoinTimeout is the maximum time to wait for cluster join before
 	// giving up. In strong mode, the pod stays not-ready if join fails
@@ -257,28 +240,13 @@ type ClusterTLS struct {
 	KeyFile string `yaml:"key_file,omitempty" json:"key_file,omitempty"`
 }
 
-// UpstreamPool is a named set of origin targets with a shared TLS
-// profile and health policy.
+// UpstreamPool is a named set of origin targets with a shared health
+// policy and connect policy.
 type UpstreamPool struct {
 	Name    string        `yaml:"name,omitempty" json:"name,omitempty"`
 	Targets []string      `yaml:"targets,omitempty" json:"targets,omitempty"`
-	TLS     UpstreamTLS   `yaml:"tls,omitempty" json:"tls,omitempty"`
 	Health  HealthPolicy  `yaml:"health,omitempty" json:"health,omitempty"`
 	Connect ConnectPolicy `yaml:"connect,omitempty" json:"connect,omitempty"`
-}
-
-// UpstreamTLS configures TLS to origin. insecure_skip_verify is
-// refused at startup in release builds.
-type UpstreamTLS struct {
-	Enabled            bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	ServerName         string   `yaml:"server_name,omitempty" json:"server_name,omitempty"`
-	CABundle           string   `yaml:"ca_bundle,omitempty" json:"ca_bundle,omitempty"`
-	ClientCert         string   `yaml:"client_cert,omitempty" json:"client_cert,omitempty"`
-	ClientKey          string   `yaml:"client_key,omitempty" json:"client_key,omitempty"`
-	MinVersion         string   `yaml:"min_version,omitempty" json:"min_version,omitempty"`
-	ALPN               []string `yaml:"alpn,omitempty" json:"alpn,omitempty"`
-	PinnedSPKISHA256   []string `yaml:"pinned_spki_sha256,omitempty" json:"pinned_spki_sha256,omitempty"`
-	InsecureSkipVerify bool     `yaml:"insecure_skip_verify,omitempty" json:"insecure_skip_verify,omitempty"`
 }
 
 // HealthPolicy aggregates active + passive health checks.

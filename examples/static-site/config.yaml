@@ -9,7 +9,6 @@ listen:
 
 storage:
   hot_max_bytes: 1Go
-  eviction: sieve
 
 upstream_pools:
   - name: origin

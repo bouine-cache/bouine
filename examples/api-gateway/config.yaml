@@ -10,10 +10,6 @@ listen:
 
 storage:
   hot_max_bytes: 512Mo
-  eviction: sieve
-
-cluster:
-  enabled: true
 
 upstream_pools:
   - name: api

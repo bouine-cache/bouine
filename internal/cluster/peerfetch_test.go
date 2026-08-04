@@ -48,7 +48,7 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	store := &stubStore{objects: map[api.Key]*api.Object{
 		key: {Key: key, StatusCode: 200, Body: []byte("cached")},
 	}}
-	h := NewPeerFetchHandler(store)
+	h := NewPeerFetchHandler(store, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 	if rr.Code != 200 {
 		t.Fatalf("hit: status=%d", rr.Code)
@@ -79,7 +79,7 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	obj.Header = header.NewMap(1)
 	obj.Header.AppendEntry("Content-Type", "text/plain")
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
-	h := NewPeerFetchHandler(store)
+	h := NewPeerFetchHandler(store, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 
 	if rr.Code != 200 {
@@ -122,10 +122,10 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 
 	srv := httptest.NewServer(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
 		key: obj,
-	}}))
+	}}, 0))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: key})
@@ -145,7 +145,7 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 
 func TestPeerFetchHandler_Miss(t *testing.T) {
 	t.Parallel()
-	h := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}})
+	h := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 999}, 0)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("miss: status=%d", rr.Code)
@@ -154,16 +154,32 @@ func TestPeerFetchHandler_Miss(t *testing.T) {
 
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
-	h := NewPeerFetchHandler(&stubStore{})
+	h := NewPeerFetchHandler(&stubStore{}, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 1}, MaxHops)
 	if rr.Code != http.StatusLoopDetected {
 		t.Fatalf("expected 508, got %d", rr.Code)
 	}
 }
 
+func TestPeerFetchHandler_CustomHopLimit(t *testing.T) {
+	t.Parallel()
+	// hopLimit=1: a request at hop 1 should be rejected.
+	h := NewPeerFetchHandler(&stubStore{}, 1)
+	rr := postFetch(t, h, api.PeerFetchRequest{Key: 1}, 1)
+	if rr.Code != http.StatusLoopDetected {
+		t.Fatalf("hopLimit=1, hops=1: expected 508, got %d", rr.Code)
+	}
+	// hopLimit=3: a request at hop 2 should pass through (not rejected).
+	h3 := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 3)
+	rr3 := postFetch(t, h3, api.PeerFetchRequest{Key: 1}, 2)
+	if rr3.Code == http.StatusLoopDetected {
+		t.Fatalf("hopLimit=3, hops=2: expected pass-through, got 508")
+	}
+}
+
 func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 	t.Parallel()
-	h := NewPeerFetchHandler(&stubStore{})
+	h := NewPeerFetchHandler(&stubStore{}, 0)
 	rr := httptest.NewRecorder()
 	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerFetchPath, nil)
 	h.ServeHTTP(rr, r)
@@ -182,7 +198,7 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
@@ -225,10 +241,10 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 
 	srv := httptest.NewServer(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
 		key: obj,
-	}}))
+	}}, 0))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: key})
@@ -267,7 +283,7 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
@@ -288,7 +304,7 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 
 func TestPeerFetcher_HopLimitReached(t *testing.T) {
 	t.Parallel()
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
 		api.PeerFetchRequest{Key: 1, Hops: MaxHops})
 	if err != nil {
@@ -313,7 +329,7 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	f.maxBodyBytes = int64(len(validResp) - 1)
 
 	obj, err := f.Fetch(context.Background(),
@@ -346,7 +362,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 
 	var wg sync.WaitGroup
 	for i := 0; i < defaultPeerFetchConcurrency*3; i++ {
@@ -376,7 +392,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	defer srv.Close()
 	defer close(block)
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 
 	var wg sync.WaitGroup
 	for i := 0; i < defaultPeerFetchConcurrency; i++ {
@@ -421,7 +437,7 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 		)
 	}
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
-	h := NewPeerFetchHandler(store)
+	h := NewPeerFetchHandler(store, 0)
 
 	reqBody, _ := json.Marshal(api.PeerFetchRequest{Key: key})
 	b.ReportAllocs()
@@ -465,7 +481,7 @@ func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 	}))
 	defer srv.Close()
 
-	f := NewPeerFetcher(nil, nil)
+	f := NewPeerFetcher(nil, nil, 0)
 	peer := api.PeerInfo{AdminAddr: srv.Listener.Addr().String()}
 
 	b.ReportAllocs()

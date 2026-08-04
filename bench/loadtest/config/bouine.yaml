@@ -10,7 +10,6 @@ admin:
 
 storage:
   hot_max_bytes: 1GiB
-  eviction: sieve
 
 upstream_pools:
   - name: origin

@@ -111,30 +111,30 @@ func TestParseMemberlistLine(t *testing.T) {
 			wantLvl: "WARN",
 			wantMsg: "some other prefix: thing happened",
 		},
-		// Production patterns observed in preprod Loki (2026-07-05).
+		// Representative memberlist log patterns (synthetic).
 		{
-			name:    "prod: UDP probe failure warning",
-			line:    "2026/07/05 11:35:30 [WARN] memberlist: Was able to connect to bouine-4 over TCP but UDP probes failed, network may be misconfigured",
+			name:    "UDP probe failure warning",
+			line:    "2026/01/15 10:15:30 [WARN] memberlist: Was able to connect to node-4 over TCP but UDP probes failed, network may be misconfigured",
 			wantLvl: "WARN",
-			wantMsg: "Was able to connect to bouine-4 over TCP but UDP probes failed, network may be misconfigured",
+			wantMsg: "Was able to connect to node-4 over TCP but UDP probes failed, network may be misconfigured",
 		},
 		{
-			name:    "prod: suspect node failure",
-			line:    "2026/07/05 11:35:27 [INFO] memberlist: Suspect bouine-2 has failed, no acks received",
+			name:    "suspect node failure",
+			line:    "2026/01/15 10:15:27 [INFO] memberlist: Suspect node-2 has failed, no acks received",
 			wantLvl: "INFO",
-			wantMsg: "Suspect bouine-2 has failed, no acks received",
+			wantMsg: "Suspect node-2 has failed, no acks received",
 		},
 		{
-			name:    "prod: marking node failed with peer confirmations",
-			line:    "2026/07/05 11:35:30 [INFO] memberlist: Marking bouine-3 as failed, suspect timeout reached (2 peer confirmations)",
+			name:    "marking node failed with peer confirmations",
+			line:    "2026/01/15 10:15:30 [INFO] memberlist: Marking node-3 as failed, suspect timeout reached (2 peer confirmations)",
 			wantLvl: "INFO",
-			wantMsg: "Marking bouine-3 as failed, suspect timeout reached (2 peer confirmations)",
+			wantMsg: "Marking node-3 as failed, suspect timeout reached (2 peer confirmations)",
 		},
 		{
-			name:    "prod: refuting suspect message",
-			line:    "2026/07/05 11:35:24 [WARN] memberlist: Refuting a suspect message (from: bouine-3)",
+			name:    "refuting suspect message",
+			line:    "2026/01/15 10:15:24 [WARN] memberlist: Refuting a suspect message (from: node-3)",
 			wantLvl: "WARN",
-			wantMsg: "Refuting a suspect message (from: bouine-3)",
+			wantMsg: "Refuting a suspect message (from: node-3)",
 		},
 	}
 	for _, tc := range cases {

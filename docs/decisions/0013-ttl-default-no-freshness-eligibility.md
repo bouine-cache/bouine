@@ -14,7 +14,7 @@ ADR-0011, which describes it as the fallback applied when the origin
 provides nothing.
 
 In practice the field had no effect for the very case it documents. A
-real preprod deployment fronting an internal service (`rules-engine-board`)
+real preprod deployment fronting an internal service (`internal-api-service`)
 returned bare `200 OK` responses with no `Cache-Control`, `Expires`, or
 `Last-Modified`. Every request returned `X-Cache: MISS`, despite
 `ttl_default: 5s` (and `ttl_override: 5s`) being configured.

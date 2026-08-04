@@ -83,7 +83,7 @@ func TestBuildKey_LongURLNoPanic(t *testing.T) {
 	t.Parallel()
 	// Regression: URLs whose canonical key exceeds 512 bytes must not
 	// panic with "index out of range [512]". This was a production crash
-	// in preprod-eu (see key.go:67).
+	// in a staging deployment (see key.go:67).
 	longPath := strings.Repeat("a", 600)
 	r := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1", nil)
 	// Must not panic.

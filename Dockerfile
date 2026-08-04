@@ -5,7 +5,7 @@
 # TARGETOS / TARGETARCH: populated automatically by BuildKit from --platform;
 #   no defaults so the build fails loudly when called without a platform rather
 #   than silently producing an amd64 binary on an arm64 host.
-FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed53c355c899582bbb2113 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ---- Final stage ----
 # Pinned digest ensures local and CI builds use the exact same base layer.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 
 COPY --from=build /bouine /bouine
 COPY config/default.yaml /etc/bouine/config.yaml

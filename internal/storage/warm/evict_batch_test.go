@@ -40,9 +40,12 @@ func TestEvictToFitBatch_MultiEvict(t *testing.T) {
 	largeRecSize := int64(10 * (HeaderLen + seedBody + FooterLen))
 	beforeEntries := s.stats.entries.Load()
 
-	if err := s.evictToFitBatch(largeRecSize); err != nil {
-		t.Fatalf("evictToFitBatch: %v", err)
+	s.mu.RLock()
+	if err := s.evictToFitBatchLocked(largeRecSize); err != nil {
+		s.mu.RUnlock()
+		t.Fatalf("evictToFitBatchLocked: %v", err)
 	}
+	s.mu.RUnlock()
 
 	afterEntries := s.stats.entries.Load()
 	afterBytes := s.stats.bytes.Load()
@@ -82,9 +85,12 @@ func TestEvictToFitBatch_NoEvictionNeeded(t *testing.T) {
 	}
 
 	// Small record, plenty of budget left.
-	if err := s.evictToFitBatch(int64(HeaderLen + 100 + FooterLen)); err != nil {
-		t.Fatalf("evictToFitBatch: %v", err)
+	s.mu.RLock()
+	if err := s.evictToFitBatchLocked(int64(HeaderLen + 100 + FooterLen)); err != nil {
+		s.mu.RUnlock()
+		t.Fatalf("evictToFitBatchLocked: %v", err)
 	}
+	s.mu.RUnlock()
 	if evicted.Load() != 0 {
 		t.Errorf("OnEvict fired %d times, want 0", evicted.Load())
 	}
@@ -114,9 +120,12 @@ func TestEvictToFitBatch_OverBudget(t *testing.T) {
 
 	// Record larger than entire budget.
 	hugeRec := budget + 1
-	if err := s.evictToFitBatch(hugeRec); err == nil {
+	s.mu.RLock()
+	if err := s.evictToFitBatchLocked(hugeRec); err == nil {
+		s.mu.RUnlock()
 		t.Fatal("expected ErrOverBudget, got nil")
 	}
+	s.mu.RUnlock()
 	if evicted.Load() != 0 {
 		t.Errorf("OnEvict fired %d times, want 0 (no eviction for oversized record)", evicted.Load())
 	}
@@ -180,9 +189,12 @@ func TestEvictToFitBatch_EmptyStore(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Small record fits in empty budget.
-	if err := s.evictToFitBatch(int64(HeaderLen + 100 + FooterLen)); err != nil {
-		t.Fatalf("evictToFitBatch on empty store: %v", err)
+	s.mu.RLock()
+	if err := s.evictToFitBatchLocked(int64(HeaderLen + 100 + FooterLen)); err != nil {
+		s.mu.RUnlock()
+		t.Fatalf("evictToFitBatchLocked on empty store: %v", err)
 	}
+	s.mu.RUnlock()
 }
 
 // TestEvictToFitBatch_NoVictimsAvailable verifies that when all entries
@@ -212,9 +224,12 @@ func TestEvictToFitBatch_NoVictimsAvailable(t *testing.T) {
 	s.idxMu.Unlock()
 
 	// Try to insert a record that requires eviction — should fail.
-	if err := s.evictToFitBatch(int64(HeaderLen + 100 + FooterLen)); err == nil {
+	s.mu.RLock()
+	if err := s.evictToFitBatchLocked(int64(HeaderLen + 100 + FooterLen)); err == nil {
+		s.mu.RUnlock()
 		t.Fatal("expected ErrOverBudget, got nil")
 	}
+	s.mu.RUnlock()
 }
 
 // TestEvictToFitBatch_MidBatchFailure verifies that if a tombstone write
@@ -253,25 +268,28 @@ func TestEvictToFitBatch_MidBatchFailure(t *testing.T) {
 	// seg.f non-nil so openLocked is not triggered. writeRecordAt will
 	// get a "bad file descriptor" error from the OS, simulating an I/O
 	// failure on the first tombstone write in the batch.
-	seg, err := s.activeSeg()
+	s.mu.RLock()
+	seg, err := s.activeSegRLocked()
 	if err != nil {
-		t.Fatalf("activeSeg: %v", err)
+		s.mu.RUnlock()
+		t.Fatalf("activeSegRLocked: %v", err)
 	}
 	seg.mu.Lock()
 	if seg.f != nil {
 		// Close the raw fd without setting seg.f = nil, so the
-		// seg.f == nil guard in evictToFitBatch does not reopen it.
+		// seg.f == nil guard in evictToFitBatchLocked does not reopen it.
 		_ = seg.f.Close()
 	}
 	seg.mu.Unlock()
 
 	// Require 5 evictions. The first writeTombstoneLocked will fail
-	// because the OS file descriptor is closed. evictToFitBatch should
-	// return ErrOverBudget with zero evictions.
+	// because the OS file descriptor is closed. evictToFitBatchLocked
+	// should return ErrOverBudget with zero evictions.
 	recSize := int64(5 * (HeaderLen + seedBody + FooterLen))
-	err = s.evictToFitBatch(recSize)
+	err = s.evictToFitBatchLocked(recSize)
+	s.mu.RUnlock()
 	if err == nil {
-		t.Fatal("expected error from evictToFitBatch with closed file descriptor, got nil")
+		t.Fatal("expected error from evictToFitBatchLocked with closed file descriptor, got nil")
 	}
 
 	// No evictions should have completed because the first tombstone

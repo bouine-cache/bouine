@@ -3,6 +3,8 @@ package shutdown
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/observability"
 )
 
@@ -15,27 +17,19 @@ func TestReadinessGate_AllConditionsTrue(t *testing.T) {
 	g.Register("store-loaded")
 	g.Register("listeners-bound")
 
-	if g.AllReady() {
-		t.Fatal("expected not ready with unmarked conditions")
-	}
+	require.False(t, g.AllReady())
 
 	g.MarkReady("store-loaded")
-	if g.AllReady() {
-		t.Fatal("expected not ready with one condition false")
-	}
+	require.False(t, g.AllReady())
 
 	g.MarkReady("listeners-bound")
-	if !g.AllReady() {
-		t.Fatal("expected ready with all conditions true")
-	}
+	require.True(t, g.AllReady())
 }
 
 func TestReadinessGate_MarkReadyUnregistered(t *testing.T) {
 	g := NewReadinessGate()
 	g.MarkReady("nonexistent") // should be a no-op
-	if !g.AllReady() {
-		t.Fatal("expected ready with no registered conditions")
-	}
+	require.True(t, g.AllReady())
 }
 
 func TestReadinessGate_DuplicateRegister(t *testing.T) {
@@ -43,9 +37,7 @@ func TestReadinessGate_DuplicateRegister(t *testing.T) {
 	g.Register("store-loaded")
 	g.Register("store-loaded") // should not reset to false
 	g.MarkReady("store-loaded")
-	if !g.AllReady() {
-		t.Fatal("expected ready after marking the single condition")
-	}
+	require.True(t, g.AllReady())
 }
 
 func TestSequencer_IsReady_GateConditions(t *testing.T) {
@@ -53,32 +45,22 @@ func TestSequencer_IsReady_GateConditions(t *testing.T) {
 	s.Gate().Register("store-loaded")
 	s.Gate().Register("listeners-bound")
 
-	if s.IsReady() {
-		t.Fatal("expected not ready before conditions are marked")
-	}
+	require.False(t, s.IsReady())
 
 	s.Gate().MarkReady("store-loaded")
-	if s.IsReady() {
-		t.Fatal("expected not ready with one condition false")
-	}
+	require.False(t, s.IsReady())
 
 	s.Gate().MarkReady("listeners-bound")
-	if !s.IsReady() {
-		t.Fatal("expected ready with all conditions true and not shutting down")
-	}
+	require.True(t, s.IsReady())
 }
 
 func TestSequencer_IsReady_ShutdownFlipsFalse(t *testing.T) {
 	s := NewSequencer(newTestLogger())
 	// No conditions registered → AllReady returns true.
-	if !s.IsReady() {
-		t.Fatal("expected ready with no conditions and not shutting down")
-	}
+	require.True(t, s.IsReady())
 
 	s.markShuttingDown()
-	if s.IsReady() {
-		t.Fatal("expected not ready after markShuttingDown")
-	}
+	require.False(t, s.IsReady())
 }
 
 func TestSequencer_Drain_MarksNotReady(t *testing.T) {
@@ -86,14 +68,10 @@ func TestSequencer_Drain_MarksNotReady(t *testing.T) {
 	s.Gate().Register("store-loaded")
 	s.Gate().MarkReady("store-loaded")
 
-	if !s.IsReady() {
-		t.Fatal("expected ready after all conditions met")
-	}
+	require.True(t, s.IsReady())
 
 	s.Drain()
-	if s.IsReady() {
-		t.Fatal("expected not ready after Drain")
-	}
+	require.False(t, s.IsReady())
 }
 
 func TestReadinessGate_Conditions(t *testing.T) {
@@ -102,9 +80,7 @@ func TestReadinessGate_Conditions(t *testing.T) {
 	g.Register("listeners-bound")
 
 	conds := g.Conditions()
-	if len(conds) != 2 {
-		t.Fatalf("expected 2 conditions, got %d", len(conds))
-	}
+	require.Len(t, conds, 2)
 	// Conditions are sorted alphabetically.
 	if conds[0].Name != "listeners-bound" || conds[0].Ready {
 		t.Fatalf("expected listeners-bound=false first, got %s=%v", conds[0].Name, conds[0].Ready)
@@ -115,18 +91,12 @@ func TestReadinessGate_Conditions(t *testing.T) {
 
 	g.MarkReady("store-loaded")
 	conds = g.Conditions()
-	if !conds[1].Ready {
-		t.Fatal("expected store-loaded=true after MarkReady")
-	}
-	if conds[0].Ready {
-		t.Fatal("expected listeners-bound=false")
-	}
+	require.True(t, conds[1].Ready)
+	require.False(t, conds[0].Ready)
 }
 
 func TestReadinessGate_ConditionsEmpty(t *testing.T) {
 	g := NewReadinessGate()
 	conds := g.Conditions()
-	if len(conds) != 0 {
-		t.Fatalf("expected 0 conditions, got %d", len(conds))
-	}
+	require.Len(t, conds, 0)
 }

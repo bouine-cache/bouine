@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/server"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
@@ -45,8 +47,9 @@ routes:
     pool: echo
 `, originSrv.Listener.Addr().String())
 	cfgPath := filepath.Join(dir, "bouine.yaml")
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
+	{
+		err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
+		require.NoError(t, err)
 	}
 
 	root := Root()
@@ -78,18 +81,14 @@ routes:
 
 	select {
 	case err := <-reqDone:
-		if err != nil {
-			t.Fatalf("in-flight request failed during shutdown: %v", err)
-		}
+		require.NoErrorf(t, err, "in-flight request failed during shutdown: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("in-flight request did not complete within timeout")
 	}
 
 	select {
 	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("serve returned error: %v", err)
-		}
+		require.NoErrorf(t, err, "serve returned error: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not shut down in time")
 	}
@@ -119,9 +118,7 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
 		return ln.Addr() != "127.0.0.1:0"
 	})
-	if ln.Addr() == "127.0.0.1:0" {
-		t.Fatal("listener did not bind")
-	}
+	require.NotEqual(t, "127.0.0.1:0", ln.Addr())
 
 	reqDone := make(chan error, 1)
 	go func() {
@@ -144,21 +141,15 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 
 	select {
 	case err := <-shutdownDone:
-		if err != nil {
-			t.Fatalf("listener shutdown failed: %v", err)
-		}
-		if !inflightDone.Load() {
-			t.Fatal("listener.Shutdown returned before in-flight request completed")
-		}
+		require.NoErrorf(t, err, "listener shutdown failed: %v", err)
+		require.True(t, inflightDone.Load())
 	case <-time.After(5 * time.Second):
 		t.Fatal("listener.Shutdown did not return within timeout")
 	}
 
 	select {
 	case err := <-reqDone:
-		if err != nil {
-			t.Fatalf("in-flight request failed: %v", err)
-		}
+		require.NoErrorf(t, err, "in-flight request failed: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-flight request did not complete")
 	}
@@ -192,9 +183,7 @@ func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
 		return ln.Addr() != "127.0.0.1:0"
 	})
-	if ln.Addr() == "127.0.0.1:0" {
-		t.Fatal("listener did not bind")
-	}
+	require.NotEqual(t, "127.0.0.1:0", ln.Addr())
 
 	go func() {
 		resp, _ := http.Get("http://" + ln.Addr() + "/test")
@@ -220,12 +209,8 @@ func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 
 	seq.Execute(context.Background())
 
-	if storeCloseStartedAt.Load() == 0 {
-		t.Fatal("flush-store step did not run")
-	}
-	if requestCompletedAt.Load() == 0 {
-		t.Fatal("in-flight request did not complete")
-	}
+	require.NotEqual(t, 0, storeCloseStartedAt.Load())
+	require.NotEqual(t, 0, requestCompletedAt.Load())
 	if storeCloseStartedAt.Load() < requestCompletedAt.Load() {
 		t.Fatalf("store.Close started before in-flight request completed: store=%d req=%d",
 			storeCloseStartedAt.Load(), requestCompletedAt.Load())

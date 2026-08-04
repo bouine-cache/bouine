@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func quietLogger() *slog.Logger {
@@ -23,12 +25,11 @@ func TestGroup_HappyPath(t *testing.T) {
 	g.Go("a", func(_ context.Context) error { ran.Add(1); return nil })
 	g.Go("b", func(_ context.Context) error { ran.Add(1); return nil })
 
-	if err := g.Wait(); err != nil {
-		t.Fatalf("wait: %v", err)
+	{
+		err := g.Wait()
+		require.NoErrorf(t, err, "wait: %v", err)
 	}
-	if ran.Load() != 2 {
-		t.Fatalf("ran = %d, want 2", ran.Load())
-	}
+	require.Equal(t, int32(2), ran.Load())
 }
 
 func TestGroup_FirstErrorCancelsSiblings(t *testing.T) {
@@ -72,7 +73,8 @@ func TestGroup_NilLoggerAllowed(t *testing.T) {
 	t.Parallel()
 	g := NewGroup(context.Background(), nil)
 	g.Go("ok", func(_ context.Context) error { return nil })
-	if err := g.Wait(); err != nil {
-		t.Fatalf("wait: %v", err)
+	{
+		err := g.Wait()
+		require.NoErrorf(t, err, "wait: %v", err)
 	}
 }

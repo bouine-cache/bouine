@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -34,9 +37,7 @@ func TestReconstructRawRequest(t *testing.T) {
 		"Content-Type: application/json\r\n" +
 		"Content-Length: 18\r\n" +
 		"\r\n"
-	if string(raw) != want {
-		t.Errorf("reconstructRawRequest mismatch:\ngot:  %q\nwant: %q", raw, want)
-	}
+	assert.Equal(t, want, string(raw))
 }
 
 func TestReconstructRawRequest_NoQuery(t *testing.T) {
@@ -52,9 +53,7 @@ func TestReconstructRawRequest_NoQuery(t *testing.T) {
 
 	raw := reconstructRawRequest(req)
 	want := "GET /healthz HTTP/1.0\r\nHost: localhost:8080\r\n\r\n"
-	if string(raw) != want {
-		t.Errorf("reconstructRawRequest mismatch:\ngot:  %q\nwant: %q", raw, want)
-	}
+	assert.Equal(t, want, string(raw))
 }
 
 func TestPrefixedConn_Read(t *testing.T) {
@@ -67,32 +66,20 @@ func TestPrefixedConn_Read(t *testing.T) {
 
 	buf := make([]byte, 32)
 	n, err := pc.Read(buf)
-	if err != nil {
-		t.Fatalf("first Read: %v", err)
-	}
-	if n != len(prefix) {
-		t.Fatalf("first Read returned %d bytes, want %d", n, len(prefix))
-	}
-	if string(buf[:n]) != "PREFIX_DATA" {
-		t.Errorf("first Read got %q, want %q", buf[:n], "PREFIX_DATA")
-	}
+	require.NoErrorf(t, err, "first Read: %v", err)
+	require.Len(t, prefix, n)
+	assert.Equal(t, "PREFIX_DATA", string(buf[:n]))
 
 	n, err = pc.Read(buf)
-	if err != nil {
-		t.Fatalf("second Read: %v", err)
-	}
-	if string(buf[:n]) != "_BACKEND" {
-		t.Errorf("second Read got %q, want %q", buf[:n], "_BACKEND")
-	}
+	require.NoErrorf(t, err, "second Read: %v", err)
+	assert.Equal(t, "_BACKEND", string(buf[:n]))
 }
 
 // dialTCPPair creates a real TCP connection pair for testing.
 func dialTCPPair(t *testing.T) (client, server net.Conn) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoErrorf(t, err, "Listen: %v", err)
 	t.Cleanup(func() { ln.Close() })
 
 	type acceptResult struct {
@@ -106,14 +93,10 @@ func dialTCPPair(t *testing.T) (client, server net.Conn) {
 	}()
 
 	c, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoErrorf(t, err, "Dial: %v", err)
 
 	res := <-ch
-	if res.err != nil {
-		t.Fatalf("Accept: %v", res.err)
-	}
+	require.Nil(t, res.err)
 
 	return c, res.conn
 }
@@ -152,24 +135,16 @@ func TestHandleFallThrough_ServesResponseBeforeClose(t *testing.T) {
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "GET"})
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	require.NoErrorf(t, err, "ReadResponse: %v", err)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status=%d want %d", resp.StatusCode, http.StatusOK)
-	}
-	if !bytes.Equal(body, responseBody) {
-		t.Errorf("body=%q want %q", body, responseBody)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.True(t, bytes.Equal(body, responseBody))
 
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Errorf("handleFallThrough returned error: %v", err)
-		}
+		assert.Nil(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleFallThrough did not return within 5s — closeNotifyConn race fix not working")
 	}
@@ -214,26 +189,24 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "GET"})
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	require.NoErrorf(t, err, "ReadResponse: %v", err)
 	resp.Body.Close()
 
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Errorf("handleFallThrough returned error: %v", err)
-		}
+		assert.Nil(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleFallThrough did not return within 5s")
 	}
 
 	wg.Wait()
-	if got := gotHeaders.Get("Accept"); got != "text/html" {
-		t.Errorf("Accept header=%q want %q", got, "text/html")
+	{
+		got := gotHeaders.Get("Accept")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := gotHeaders.Get("X-Custom"); got != "custom-value" {
-		t.Errorf("X-Custom header=%q want %q", got, "custom-value")
+	{
+		got := gotHeaders.Get("X-Custom")
+		assert.Equal(t, "custom-value", got)
 	}
 }
 
@@ -278,24 +251,18 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "POST"})
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	require.NoErrorf(t, err, "ReadResponse: %v", err)
 	resp.Body.Close()
 
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Errorf("handleFallThrough returned error: %v", err)
-		}
+		assert.Nil(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleFallThrough did not return within 5s")
 	}
 
 	wg.Wait()
-	if !bytes.Equal(gotBody, excess) {
-		t.Errorf("body=%q want %q", gotBody, excess)
-	}
+	assert.True(t, bytes.Equal(gotBody, excess))
 }
 
 func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
@@ -307,8 +274,9 @@ func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
 	default:
 	}
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	{
+		err := c.Close()
+		require.NoErrorf(t, err, "Close: %v", err)
 	}
 
 	select {
@@ -317,8 +285,9 @@ func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
 		t.Fatal("done channel not closed after Close")
 	}
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
+	{
+		err := c.Close()
+		require.NoErrorf(t, err, "second Close: %v", err)
 	}
 }
 

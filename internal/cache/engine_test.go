@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -28,18 +31,14 @@ func TestEvaluate_Hit(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Minute)
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != Hit {
-		t.Fatalf("expected Hit, got %d", d.Decision)
-	}
+	require.Equal(t, Hit, d.Decision)
 }
 
 func TestEvaluate_Miss(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	d := Evaluate(r, nil, time.Now())
-	if d.Decision != Miss {
-		t.Fatalf("expected Miss, got %d", d.Decision)
-	}
+	require.Equal(t, Miss, d.Decision)
 }
 
 func TestEvaluate_BypassOnPost(t *testing.T) {
@@ -48,9 +47,7 @@ func TestEvaluate_BypassOnPost(t *testing.T) {
 	// Evaluate returns Bypass for all non-GET/HEAD methods.
 	r := httptest.NewRequest("POST", "/", nil)
 	d := Evaluate(r, nil, time.Now())
-	if d.Decision != Bypass {
-		t.Fatalf("expected Bypass for POST, got %d", d.Decision)
-	}
+	require.Equal(t, Bypass, d.Decision)
 }
 
 func TestEvaluate_BypassOnRequestNoStore(t *testing.T) {
@@ -58,9 +55,7 @@ func TestEvaluate_BypassOnRequestNoStore(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.CacheControl, "no-store")
 	d := Evaluate(r, freshObj(time.Minute), time.Now())
-	if d.Decision != Bypass {
-		t.Fatalf("expected Bypass for no-store, got %d", d.Decision)
-	}
+	require.Equal(t, Bypass, d.Decision)
 }
 
 func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
@@ -70,9 +65,7 @@ func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
 	obj.Header.Set(header.CacheControl, "no-cache")
 	obj.CacheControl = "no-cache"
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != Revalidate {
-		t.Fatalf("expected Revalidate for no-cache, got %d", d.Decision)
-	}
+	require.Equal(t, Revalidate, d.Decision)
 }
 
 func TestEvaluate_RevalidateOnRequestNoCache(t *testing.T) {
@@ -81,9 +74,7 @@ func TestEvaluate_RevalidateOnRequestNoCache(t *testing.T) {
 	r.Header.Set(header.CacheControl, "no-cache")
 	obj := freshObj(time.Minute)
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != Revalidate {
-		t.Fatalf("expected Revalidate, got %d", d.Decision)
-	}
+	require.Equal(t, Revalidate, d.Decision)
 }
 
 func TestEvaluate_StaleWithSWR(t *testing.T) {
@@ -93,9 +84,7 @@ func TestEvaluate_StaleWithSWR(t *testing.T) {
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // 1s past TTL
 	obj.StaleWhileRevalidate = 30 * time.Second
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != StaleHit {
-		t.Fatalf("expected StaleHit in SWR window, got %d", d.Decision)
-	}
+	require.Equal(t, StaleHit, d.Decision)
 }
 
 func TestEvaluate_StaleWithSIE(t *testing.T) {
@@ -109,9 +98,7 @@ func TestEvaluate_StaleWithSIE(t *testing.T) {
 	// RFC 5861 §4: stale-if-error requires the cache to attempt
 	// revalidation first; only serve stale if origin returns an error.
 	// Unlike SWR, SIE must NOT short-circuit to StaleHit.
-	if d.Decision != Revalidate {
-		t.Fatalf("expected Revalidate (SIE must attempt origin first), got %d", d.Decision)
-	}
+	require.Equal(t, Revalidate, d.Decision)
 }
 
 func TestEvaluate_StaleWithMaxStale(t *testing.T) {
@@ -121,9 +108,7 @@ func TestEvaluate_StaleWithMaxStale(t *testing.T) {
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-10 * time.Second) // 9s past TTL
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != StaleHit {
-		t.Fatalf("expected StaleHit with max-stale, got %d", d.Decision)
-	}
+	require.Equal(t, StaleHit, d.Decision)
 }
 
 func TestEvaluate_MustRevalidate(t *testing.T) {
@@ -134,9 +119,7 @@ func TestEvaluate_MustRevalidate(t *testing.T) {
 	obj.Header.Set(header.CacheControl, "max-age=1, must-revalidate")
 	obj.CacheControl = "max-age=1, must-revalidate"
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != Revalidate {
-		t.Fatalf("expected Revalidate for must-revalidate, got %d", d.Decision)
-	}
+	require.Equal(t, Revalidate, d.Decision)
 }
 
 func TestEvaluate_RequestMaxAge(t *testing.T) {
@@ -146,9 +129,7 @@ func TestEvaluate_RequestMaxAge(t *testing.T) {
 	obj := freshObj(time.Minute)
 	d := Evaluate(r, obj, time.Now())
 	// max-age=0 from request means the object is considered stale.
-	if d.Decision == Hit {
-		t.Fatal("max-age=0 from request should not produce Hit")
-	}
+	require.NotEqual(t, Hit, d.Decision)
 }
 
 func TestEvaluate_OriginAgeNotDoubleCounted(t *testing.T) {
@@ -161,9 +142,7 @@ func TestEvaluate_OriginAgeNotDoubleCounted(t *testing.T) {
 	obj.OriginAge = 20 * time.Second
 	obj.StoredAt = time.Now().Add(-10 * time.Second)
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != Hit {
-		t.Fatalf("OriginAge double-counted: expected Hit, got %d", d.Decision)
-	}
+	require.Equal(t, Hit, d.Decision)
 }
 
 func TestEvaluate_MinFresh_OriginAge(t *testing.T) {
@@ -176,9 +155,7 @@ func TestEvaluate_MinFresh_OriginAge(t *testing.T) {
 	obj.OriginAge = 20 * time.Second
 	obj.StoredAt = time.Now().Add(-10 * time.Second)
 	d := Evaluate(r, obj, time.Now())
-	if d.Decision != Hit {
-		t.Fatalf("min-fresh with OriginAge: expected Hit, got %d", d.Decision)
-	}
+	require.Equal(t, Hit, d.Decision)
 }
 
 func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
@@ -186,9 +163,7 @@ func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.CacheControl, "only-if-cached")
 	d := Evaluate(r, nil, time.Now())
-	if d.Decision != Bypass {
-		t.Fatalf("expected Bypass for only-if-cached + miss, got %d", d.Decision)
-	}
+	require.Equal(t, Bypass, d.Decision)
 }
 
 func TestConditionalHeaders(t *testing.T) {
@@ -199,10 +174,6 @@ func TestConditionalHeaders(t *testing.T) {
 		LastModified: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 	ConditionalHeaders(r, obj)
-	if r.Header.Get(header.IfNoneMatch) != `W/"xyz"` {
-		t.Errorf("INM = %q", r.Header.Get(header.IfNoneMatch))
-	}
-	if r.Header.Get(header.IfModifiedSince) == "" {
-		t.Error("IMS not set")
-	}
+	assert.Equal(t, `W/"xyz"`, r.Header.Get(header.IfNoneMatch))
+	assert.NotEqual(t, "", r.Header.Get(header.IfModifiedSince))
 }

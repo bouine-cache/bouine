@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -44,12 +46,8 @@ func TestPurge_CallsOnPurged(t *testing.T) {
 	req.Header.Set(header.ContentType, "application/json")
 	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rr.Code)
-	}
-	if gotURL != "https://example.com/products/123" {
-		t.Fatalf("OnPurged url = %q, want %q", gotURL, "https://example.com/products/123")
-	}
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "https://example.com/products/123", gotURL)
 }
 
 // TestRefresh_CallsOnRefreshed verifies that a successful refresh calls the
@@ -71,12 +69,8 @@ func TestRefresh_CallsOnRefreshed(t *testing.T) {
 	req.Header.Set(header.ContentType, "application/json")
 	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rr.Code)
-	}
-	if gotURL != "https://example.com/img/logo.png" {
-		t.Fatalf("OnRefreshed url = %q, want %q", gotURL, "https://example.com/img/logo.png")
-	}
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "https://example.com/img/logo.png", gotURL)
 }
 
 // TestBan_CallsOnBanned verifies that a successful ban calls the OnBanned
@@ -98,15 +92,9 @@ func TestBan_CallsOnBanned(t *testing.T) {
 	req.Header.Set(header.ContentType, "application/json")
 	req.Header.Set(header.Authorization, "Bearer test")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rr.Code)
-	}
-	if gotExpr.HostRegex != "cdn.example.com" {
-		t.Fatalf("OnBanned host_regex = %q, want %q", gotExpr.HostRegex, "cdn.example.com")
-	}
-	if gotExpr.PathRegex != "/api/v2/.*" {
-		t.Fatalf("OnBanned path_regex = %q, want %q", gotExpr.PathRegex, "/api/v2/.*")
-	}
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "cdn.example.com", gotExpr.HostRegex)
+	require.Equal(t, "/api/v2/.*", gotExpr.PathRegex)
 }
 
 // TestCloudflareStatus_Endpoint verifies that GET /v1/cloudflare/status returns
@@ -127,22 +115,15 @@ func TestCloudflareStatus_Endpoint(t *testing.T) {
 		},
 	})
 	status, body := getAuth(t, s, "/v1/cloudflare/status")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 	var got map[string]any
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &got)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if got["enabled"] != true {
-		t.Fatalf("enabled = %v, want true", got["enabled"])
-	}
-	if got["zone_id"] != "abc123" {
-		t.Fatalf("zone_id = %v, want abc123", got["zone_id"])
-	}
-	if got["async"] != true {
-		t.Fatalf("async = %v, want true", got["async"])
-	}
+	require.Equal(t, true, got["enabled"])
+	require.Equal(t, "abc123", got["zone_id"])
+	require.Equal(t, true, got["async"])
 }
 
 // TestCloudflareStatus_Disabled verifies that the endpoint returns 404 when
@@ -155,9 +136,7 @@ func TestCloudflareStatus_Disabled(t *testing.T) {
 		// CFStatusFn is nil — CF not configured.
 	})
 	status, _ := getAuth(t, s, "/v1/cloudflare/status")
-	if status != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", status)
-	}
+	require.Equal(t, http.StatusNotFound, status)
 }
 
 // TestPurge_OnPurgedNotCalledOnError verifies that OnPurged is NOT called
@@ -182,7 +161,5 @@ func TestPurge_OnPurgedNotCalledOnError(t *testing.T) {
 	// Purge failed, so the handler still returns 500 and OnPurged should not fire.
 	_ = rr.Code // status is 500 but we only care that OnPurged was not called
 	time.Sleep(10 * time.Millisecond)
-	if called.Load() {
-		t.Fatal("OnPurged should not be called when purge fails")
-	}
+	require.False(t, called.Load())
 }

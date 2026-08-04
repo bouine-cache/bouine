@@ -2,6 +2,8 @@ package warm
 
 import (
 	"errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -12,9 +14,7 @@ import (
 func metricValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	for _, mf := range mfs {
 		if mf.GetName() != name {
 			continue
@@ -38,9 +38,7 @@ func metricValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 func assertMetricExists(t *testing.T, reg *prometheus.Registry, name string) {
 	t.Helper()
 	mfs, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	for _, mf := range mfs {
 		if mf.GetName() == name {
 			return
@@ -84,16 +82,15 @@ func TestMetrics_OverBudgetIncrements(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20, Metrics: m})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Fill the budget with protected entries so eviction cannot free space.
 	smallBody := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 4; i++ {
-		if _, _, err := s.Put(uint64(i), smallBody); err != nil {
-			t.Fatalf("Put %d: %v", i, err)
+		{
+			_, _, err := s.Put(uint64(i), smallBody)
+			require.NoErrorf(t, err, "Put %d: %v", i, err)
 		}
 	}
 	for i := 0; i < 4; i++ {
@@ -102,14 +99,10 @@ func TestMetrics_OverBudgetIncrements(t *testing.T) {
 
 	// This Put must be rejected with ErrOverBudget.
 	_, _, err = s.Put(99, smallBody)
-	if !errors.Is(err, ErrOverBudget) {
-		t.Fatalf("Put over budget: err=%v, want ErrOverBudget", err)
-	}
+	require.True(t, errors.Is(err, ErrOverBudget))
 
 	got := metricValue(t, reg, "bouine_warm_over_budget_total")
-	if got != 1 {
-		t.Errorf("over_budget_total = %v, want 1", got)
-	}
+	assert.Equal(t, float64(1), got)
 }
 
 func TestMetrics_EvictionsIncrements(t *testing.T) {
@@ -120,20 +113,20 @@ func TestMetrics_EvictionsIncrements(t *testing.T) {
 	dir := t.TempDir()
 	// Small budget so Put triggers eviction.
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 360, SegMax: 1 << 20, Metrics: m})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	smallBody := make([]byte, 100) // 120 bytes per record
 	// 3 records × 120 = 360 = budget. The 4th Put must evict to fit.
 	for i := 0; i < 3; i++ {
-		if _, _, err := s.Put(uint64(i), smallBody); err != nil {
-			t.Fatalf("Put %d: %v", i, err)
+		{
+			_, _, err := s.Put(uint64(i), smallBody)
+			require.NoErrorf(t, err, "Put %d: %v", i, err)
 		}
 	}
-	if _, _, err := s.Put(99, smallBody); err != nil {
-		t.Fatalf("Put 99 with eviction: %v", err)
+	{
+		_, _, err := s.Put(99, smallBody)
+		require.NoErrorf(t, err, "Put 99 with eviction: %v", err)
 	}
 
 	got := metricValue(t, reg, "bouine_warm_evictions_total")
@@ -149,19 +142,16 @@ func TestMetrics_CompactionTriggeredIncrements(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20, Metrics: m})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	if err := s.Compact(); err != nil {
-		t.Fatalf("Compact: %v", err)
+	{
+		err := s.Compact()
+		require.NoErrorf(t, err, "Compact: %v", err)
 	}
 
 	got := metricValue(t, reg, "bouine_warm_compaction_triggered_total")
-	if got != 1 {
-		t.Errorf("compaction_triggered_total = %v, want 1", got)
-	}
+	assert.Equal(t, float64(1), got)
 }
 
 func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
@@ -171,15 +161,14 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20, Metrics: m})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 5; i++ {
-		if _, _, err := s.Put(uint64(i), body); err != nil {
-			t.Fatalf("Put %d: %v", i, err)
+		{
+			_, _, err := s.Put(uint64(i), body)
+			require.NoErrorf(t, err, "Put %d: %v", i, err)
 		}
 	}
 
@@ -187,16 +176,12 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 	// records of 120 bytes each is 600 bytes.
 	got := s.DiskBytes()
 	want := int64(5 * (HeaderLen + len(body) + FooterLen))
-	if got != want {
-		t.Errorf("DiskBytes = %d, want %d", got, want)
-	}
+	assert.Equal(t, want, got)
 
 	// Verify the gauge is not yet set (engine polls it). Set it and check.
 	m.SetDiskBytes(got)
 	regVal := metricValue(t, reg, "bouine_warm_disk_bytes")
-	if regVal != float64(want) {
-		t.Errorf("warm_disk_bytes gauge = %v, want %v", regVal, float64(want))
-	}
+	assert.Equal(t, float64(want), regVal)
 }
 
 func TestMetrics_MaxBytesGauge(t *testing.T) {
@@ -207,19 +192,16 @@ func TestMetrics_MaxBytesGauge(t *testing.T) {
 	dir := t.TempDir()
 	const maxBytes = 1 << 20 // 1 MiB
 	s, err := NewStore(Config{Dir: dir, MaxBytes: maxBytes, SegMax: 1 << 20, Metrics: m})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	if got := s.MaxBytes(); got != maxBytes {
-		t.Errorf("MaxBytes = %d, want %d", got, maxBytes)
+	{
+		got := s.MaxBytes()
+		assert.Equal(t, int64(maxBytes), got)
 	}
 
 	regVal := metricValue(t, reg, "bouine_warm_max_bytes")
-	if regVal != float64(maxBytes) {
-		t.Errorf("warm_max_bytes gauge = %v, want %v", regVal, float64(maxBytes))
-	}
+	assert.Equal(t, float64(maxBytes), regVal)
 }
 
 func TestMetrics_MaxBytesZeroGauge(t *testing.T) {
@@ -229,15 +211,11 @@ func TestMetrics_MaxBytesZeroGauge(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20, Metrics: m})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	regVal := metricValue(t, reg, "bouine_warm_max_bytes")
-	if regVal != 0 {
-		t.Errorf("warm_max_bytes gauge = %v, want 0 (unlimited)", regVal)
-	}
+	assert.Equal(t, float64(0), regVal)
 }
 
 // TestMetrics_NilMetricsSafe verifies that a store constructed without
@@ -246,16 +224,15 @@ func TestMetrics_NilMetricsSafe(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100)
 	for i := 0; i < 5; i++ {
 		_, _, _ = s.Put(uint64(i), body) // some may be rejected, must not panic
 	}
-	if err := s.Compact(); err != nil {
-		t.Fatalf("Compact with nil metrics: %v", err)
+	{
+		err := s.Compact()
+		require.NoErrorf(t, err, "Compact with nil metrics: %v", err)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -24,21 +26,14 @@ func TestServeRange_SingleRange(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false, api.SourceHot)
-	if !ok {
-		t.Fatal("expected range served")
-	}
-	if rr.Code != http.StatusPartialContent {
-		t.Fatalf("status = %d, want 206", rr.Code)
-	}
-	if rr.Body.String() != "Hello" {
-		t.Fatalf("body = %q, want Hello", rr.Body.String())
-	}
+	require.True(t, ok)
+	require.Equal(t, http.StatusPartialContent, rr.Code)
+	require.Equal(t, "Hello", rr.Body.String())
 	cr := rr.Header().Get(header.ContentRange)
-	if cr != "bytes 0-4/13" {
-		t.Fatalf("Content-Range = %q", cr)
-	}
-	if xc := rr.Header().Get(header.XCache); xc != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", xc)
+	require.Equal(t, "bytes 0-4/13", cr)
+	{
+		xc := rr.Header().Get(header.XCache)
+		require.Equal(t, "HIT", xc)
 	}
 }
 
@@ -56,12 +51,8 @@ func TestServeRange_SuffixRange(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false, api.SourceHot)
-	if !ok {
-		t.Fatal("expected range served")
-	}
-	if rr.Body.String() != "hij" {
-		t.Fatalf("body = %q, want hij", rr.Body.String())
-	}
+	require.True(t, ok)
+	require.Equal(t, "hij", rr.Body.String())
 }
 
 func TestServeRange_OpenEnded(t *testing.T) {
@@ -78,12 +69,8 @@ func TestServeRange_OpenEnded(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false, api.SourceHot)
-	if !ok {
-		t.Fatal("expected range served")
-	}
-	if rr.Body.String() != "de" {
-		t.Fatalf("body = %q, want de", rr.Body.String())
-	}
+	require.True(t, ok)
+	require.Equal(t, "de", rr.Body.String())
 }
 
 func TestServeRange_Unsatisfiable(t *testing.T) {
@@ -100,12 +87,8 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false, api.SourceHot)
-	if !ok {
-		t.Fatal("expected range handled (416)")
-	}
-	if rr.Code != http.StatusRequestedRangeNotSatisfiable {
-		t.Fatalf("status = %d, want 416", rr.Code)
-	}
+	require.True(t, ok)
+	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rr.Code)
 }
 
 func TestServeRange_NoRangeHeader(t *testing.T) {
@@ -115,9 +98,7 @@ func TestServeRange_NoRangeHeader(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false, api.SourceHot)
-	if ok {
-		t.Fatal("no Range header should return false")
-	}
+	require.False(t, ok)
 }
 
 func TestServeRange_MultiRange(t *testing.T) {
@@ -128,17 +109,12 @@ func TestServeRange_MultiRange(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	ok := ServeRange(rr, r, obj, false, api.SourceHot)
-	if !ok {
-		t.Fatal("multi-range should be served as multipart/byteranges")
-	}
-	if rr.Code != 206 {
-		t.Fatalf("expected 206, got %d", rr.Code)
-	}
+	require.True(t, ok)
+	require.Equal(t, 206, rr.Code)
 	ct := rr.Header().Get(header.ContentType)
-	if !strings.HasPrefix(ct, "multipart/byteranges") {
-		t.Fatalf("expected multipart/byteranges Content-Type, got %q", ct)
-	}
-	if xc := rr.Header().Get(header.XCache); xc != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", xc)
+	require.True(t, strings.HasPrefix(ct, "multipart/byteranges"))
+	{
+		xc := rr.Header().Get(header.XCache)
+		require.Equal(t, "HIT", xc)
 	}
 }

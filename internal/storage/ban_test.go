@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -30,16 +33,13 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "example\\.com"})
-	if err != nil {
-		t.Fatalf("Ban: %v", err)
-	}
-	if count != n {
-		t.Fatalf("ban count = %d, want %d", count, n)
-	}
+	require.NoErrorf(t, err, "Ban: %v", err)
+	require.Equal(t, n, count)
 
 	for i := range n {
-		if got, _, _ := s.Get(context.Background(), api.Key(i)); got != nil {
-			t.Errorf("key %d still present after ban", i)
+		{
+			got, _, _ := s.Get(context.Background(), api.Key(i))
+			assert.Nil(t, got)
 		}
 	}
 }
@@ -61,16 +61,13 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "^/never-matches$"})
-	if err != nil {
-		t.Fatalf("Ban: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("ban count = %d, want 0", count)
-	}
+	require.NoErrorf(t, err, "Ban: %v", err)
+	require.Equal(t, 0, count)
 
 	for i := range n {
-		if got, _, _ := s.Get(context.Background(), api.Key(i)); got == nil {
-			t.Errorf("key %d missing after non-matching ban", i)
+		{
+			got, _, _ := s.Get(context.Background(), api.Key(i))
+			assert.NotNil(t, got)
 		}
 	}
 }
@@ -96,23 +93,15 @@ func TestBan_ParallelPartialMatch(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me$"})
-	if err != nil {
-		t.Fatalf("Ban: %v", err)
-	}
-	if count != n/2 {
-		t.Fatalf("ban count = %d, want %d", count, n/2)
-	}
+	require.NoErrorf(t, err, "Ban: %v", err)
+	require.Equal(t, n/2, count)
 
 	for i := range n {
 		got, _, _ := s.Get(context.Background(), api.Key(i))
 		if i%2 == 0 {
-			if got != nil {
-				t.Errorf("key %d should have been banned", i)
-			}
+			assert.Nil(t, got)
 		} else {
-			if got == nil {
-				t.Errorf("key %d should still be present", i)
-			}
+			assert.NotNil(t, got)
 		}
 	}
 }
@@ -135,17 +124,11 @@ func TestBan_ParallelEvictionCount(t *testing.T) {
 
 	before := s.stats.evictions.Load()
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "evict\\.example\\.com"})
-	if err != nil {
-		t.Fatalf("Ban: %v", err)
-	}
+	require.NoErrorf(t, err, "Ban: %v", err)
 	after := s.stats.evictions.Load()
 
-	if count != n {
-		t.Fatalf("ban count = %d, want %d", count, n)
-	}
-	if after-before != int64(n) {
-		t.Fatalf("eviction counter delta = %d, want %d", after-before, n)
-	}
+	require.Equal(t, n, count)
+	require.Equal(t, int64(n), after-before)
 }
 
 // TestBan_ParallelSurrogateKey verifies that parallel Ban correctly
@@ -169,24 +152,16 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "target"})
-	if err != nil {
-		t.Fatalf("Ban: %v", err)
-	}
+	require.NoErrorf(t, err, "Ban: %v", err)
 	want := n / 3
-	if count != want {
-		t.Fatalf("ban count = %d, want %d", count, want)
-	}
+	require.Equal(t, want, count)
 
 	for i := range n {
 		got, _, _ := s.Get(context.Background(), api.Key(i))
 		if i%3 == 0 {
-			if got != nil {
-				t.Errorf("key %d with surrogate 'target' should have been banned", i)
-			}
+			assert.Nil(t, got)
 		} else {
-			if got == nil {
-				t.Errorf("key %d with surrogate 'other' should still be present", i)
-			}
+			assert.NotNil(t, got)
 		}
 	}
 }
@@ -241,12 +216,14 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 
 	// Both bans match disjoint host patterns, so every entry is
 	// evicted by exactly one ban. total must equal n.
-	if got := total.Load(); got != int64(n) {
-		t.Fatalf("total evicted = %d, want %d", got, n)
+	{
+		got := total.Load()
+		require.Equal(t, int64(n), got)
 	}
 	for i := range n {
-		if got, _, _ := s.Get(context.Background(), api.Key(i)); got != nil {
-			t.Errorf("key %d still present after both bans", i)
+		{
+			got, _, _ := s.Get(context.Background(), api.Key(i))
+			assert.Nil(t, got)
 		}
 	}
 }

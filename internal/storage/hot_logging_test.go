@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -45,8 +47,9 @@ func parseLogRecords(t *testing.T, mu *sync.Mutex, buf *bytes.Buffer) []map[stri
 			continue
 		}
 		var rec map[string]any
-		if err := json.Unmarshal(line, &rec); err != nil {
-			t.Fatalf("unmarshal log line: %v\nline: %s", err, line)
+		{
+			err := json.Unmarshal(line, &rec)
+			require.NoErrorf(t, err, "unmarshal log line: %v\nline: %s", err, line)
 		}
 		records = append(records, rec)
 	}
@@ -87,9 +90,7 @@ func TestEvictionLogging_BackedSkipped(t *testing.T) {
 	// hot_store_evictions_total metric.
 	records := parseLogRecords(t, &mu, &buf)
 	for _, rec := range records {
-		if rec["msg"] == "evicted from hot store" {
-			t.Fatalf("did not expect any eviction log for backed entry, got: %v", rec)
-		}
+		require.NotEqual(t, "evicted from hot store", rec["msg"])
 	}
 }
 
@@ -126,9 +127,7 @@ func TestEvictionLogging_NoBackup(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("expected a no-backup eviction log at Warn level")
-	}
+	require.True(t, found)
 }
 
 func TestEvictionLogging_Expired(t *testing.T) {
@@ -158,9 +157,7 @@ func TestEvictionLogging_Expired(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("expected an expired eviction log")
-	}
+	require.True(t, found)
 }
 
 func TestEvictionLogging_SweeperOvershoot(t *testing.T) {
@@ -223,9 +220,7 @@ func TestEvictionLogging_SweeperOvershoot(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("expected a sweeper_overshoot eviction log")
-	}
+	require.True(t, found)
 }
 
 func TestEvictionLogging_ConcurrentSafe(t *testing.T) {

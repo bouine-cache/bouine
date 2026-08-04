@@ -3,20 +3,18 @@ package cache
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRefreshRateLimiter_Allows(t *testing.T) {
 	t.Parallel()
 	rl := newRefreshRateLimiter(5)
 	now := time.Now()
-	for i := range 5 {
-		if !rl.Allow(now) {
-			t.Fatalf("call %d: expected Allow=true, got false", i)
-		}
+	for range 5 {
+		require.True(t, rl.Allow(now))
 	}
-	if rl.Allow(now) {
-		t.Fatalf("6th call: expected Allow=false (bucket empty), got true")
-	}
+	require.False(t, rl.Allow(now))
 }
 
 func TestRefreshRateLimiter_Refill(t *testing.T) {
@@ -26,13 +24,9 @@ func TestRefreshRateLimiter_Refill(t *testing.T) {
 	for range 3 {
 		rl.Allow(now)
 	}
-	if rl.Allow(now) {
-		t.Fatalf("bucket should be empty")
-	}
+	require.False(t, rl.Allow(now))
 	later := now.Add(time.Second)
-	if !rl.Allow(later) {
-		t.Fatalf("after 1s: expected Allow=true (refilled), got false")
-	}
+	require.True(t, rl.Allow(later))
 }
 
 func TestRefreshRateLimiter_NoLeak(t *testing.T) {
@@ -67,7 +61,5 @@ func TestRefreshRateLimiter_CappedAtMax(t *testing.T) {
 			count++
 		}
 	}
-	if count != 5 {
-		t.Fatalf("expected 5 tokens (capped at max), got %d", count)
-	}
+	require.Equal(t, 5, count)
 }

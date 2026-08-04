@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
@@ -58,8 +61,9 @@ routes:
     pool: echo
 `, certPath, keyPath, originSrv.Listener.Addr().String())
 	cfgPath := filepath.Join(dir, "bouine.yaml")
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
+	{
+		err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
+		require.NoError(t, err)
 	}
 
 	root := Root()
@@ -82,15 +86,14 @@ routes:
 		t.Fatalf("HTTP GET: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if cerr := resp.Body.Close(); cerr != nil {
-		t.Errorf("close: %v", cerr)
+	{
+		cerr := resp.Body.Close()
+		assert.Nil(t, cerr)
 	}
 	if resp.StatusCode != 200 || string(body) != "proxied!" {
 		t.Fatalf("HTTP: status=%d body=%q", resp.StatusCode, body)
 	}
-	if resp.Header.Get("X-Origin") != "yes" {
-		t.Fatal("origin header not forwarded")
-	}
+	require.Equal(t, "yes", resp.Header.Get("X-Origin"))
 
 	// HTTPS / HTTP/2 proxy test.
 	client := &http.Client{
@@ -105,15 +108,14 @@ routes:
 		t.Fatalf("HTTPS GET: %v", err)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
-	if cerr := resp2.Body.Close(); cerr != nil {
-		t.Errorf("close: %v", cerr)
+	{
+		cerr := resp2.Body.Close()
+		assert.Nil(t, cerr)
 	}
 	if resp2.StatusCode != 200 || string(body2) != "proxied!" {
 		t.Fatalf("HTTPS: status=%d body=%q", resp2.StatusCode, body2)
 	}
-	if resp2.Proto != "HTTP/2.0" {
-		t.Fatalf("expected HTTP/2.0, got %q", resp2.Proto)
-	}
+	require.Equal(t, "HTTP/2.0", resp2.Proto)
 
 	// POST with body.
 	resp3, err := http.Post("http://127.0.0.1:18090/echo", "text/plain",
@@ -122,20 +124,17 @@ routes:
 		cancel()
 		t.Fatalf("POST: %v", err)
 	}
-	body3, _ := io.ReadAll(resp3.Body)
-	if cerr := resp3.Body.Close(); cerr != nil {
-		t.Errorf("close: %v", cerr)
+	_, _ = io.ReadAll(resp3.Body)
+	{
+		cerr := resp3.Body.Close()
+		assert.Nil(t, cerr)
 	}
-	if resp3.StatusCode != 200 {
-		t.Fatalf("POST: status=%d body=%q", resp3.StatusCode, body3)
-	}
+	require.Equal(t, 200, resp3.StatusCode)
 
 	cancel()
 	select {
 	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("serve: %v", err)
-		}
+		require.NoErrorf(t, err, "serve: %v", err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("daemon did not shut down")
 	}

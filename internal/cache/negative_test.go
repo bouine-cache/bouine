@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -25,8 +27,9 @@ func TestIsNegativeCacheable(t *testing.T) {
 		{502, false},
 	}
 	for _, tt := range tests {
-		if got := IsNegativeCacheable(tt.status); got != tt.want {
-			t.Errorf("IsNegativeCacheable(%d) = %v, want %v", tt.status, got, tt.want)
+		{
+			got := IsNegativeCacheable(tt.status)
+			assert.Equal(t, tt.want, got)
 		}
 	}
 }
@@ -86,15 +89,9 @@ func TestSoftPurge(t *testing.T) {
 
 	SoftPurge(obj, now)
 
-	if obj.Fresh(now) {
-		t.Error("object should be stale after soft-purge")
-	}
-	if obj.TTL != 30*time.Second {
-		t.Errorf("TTL = %v, want 30s (now - StoredAt)", obj.TTL)
-	}
-	if obj.ETag != `"abc"` {
-		t.Error("soft-purge should preserve ETag for revalidation")
-	}
+	assert.False(t, obj.Fresh(now))
+	assert.Equal(t, 30*time.Second, obj.TTL)
+	assert.Equal(t, `"abc"`, obj.ETag)
 
 	t.Run("nil_safe", func(t *testing.T) {
 		SoftPurge(nil, now)

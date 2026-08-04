@@ -1,6 +1,10 @@
 package sieve
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestEvictBounded_AllVisited_ReturnsFalse(t *testing.T) {
 	t.Parallel()
@@ -20,12 +24,8 @@ func TestEvictBounded_AllVisited_ReturnsFalse(t *testing.T) {
 	// The hand clears visited bits as it advances, but 5 probes
 	// cannot clear all 10 and find an unvisited one.
 	_, ok := l.EvictBounded(5)
-	if ok {
-		t.Fatal("EvictBounded(5) on 10 all-visited entries should return false")
-	}
-	if l.Len() != 10 {
-		t.Fatalf("len = %d, want 10 (no eviction should occur)", l.Len())
-	}
+	require.False(t, ok)
+	require.Equal(t, 10, l.Len())
 }
 
 func TestEvictBounded_AllVisited_FindsAfterClearing(t *testing.T) {
@@ -46,12 +46,8 @@ func TestEvictBounded_AllVisited_FindsAfterClearing(t *testing.T) {
 	// then the next probe finds an unvisited entry. So maxProbes=5
 	// (4 clears + 1 find) should succeed.
 	key, ok := l.EvictBounded(5)
-	if !ok {
-		t.Fatal("EvictBounded(5) on 4 all-visited entries should succeed")
-	}
-	if l.Len() != 3 {
-		t.Fatalf("len = %d, want 3 after one eviction", l.Len())
-	}
+	require.True(t, ok)
+	require.Equal(t, 3, l.Len())
 	// The evicted key should be the one the hand lands on after
 	// clearing all 4 visited bits and wrapping around.
 	delete(m, key)
@@ -74,9 +70,7 @@ func TestEvictBounded_PreservesUnvisitedEntries(t *testing.T) {
 	// EvictBounded(10) should return false (all visited, 10 probes
 	// only clears 10 bits, no unvisited entry found).
 	_, ok := l.EvictBounded(10)
-	if ok {
-		t.Fatal("EvictBounded(10) on 100 all-visited entries should return false")
-	}
+	require.False(t, ok)
 
 	// Entries beyond the 10 probed should still have visited=true.
 	// The hand started at tail and advanced 10 positions. Entries
@@ -89,9 +83,7 @@ func TestEvictBounded_PreservesUnvisitedEntries(t *testing.T) {
 		}
 	}
 	// After 10 probes clearing 10 bits, 90 should still be visited.
-	if visitedCount != 90 {
-		t.Fatalf("expected 90 visited entries, got %d", visitedCount)
-	}
+	require.Equal(t, 90, visitedCount)
 }
 
 func TestEvictBounded_Zero_ReturnsFalse(t *testing.T) {
@@ -102,12 +94,8 @@ func TestEvictBounded_Zero_ReturnsFalse(t *testing.T) {
 	_, _ = l.Access(1, func(uint64) *Entry[uint64] { return nil })
 
 	_, ok := l.EvictBounded(0)
-	if ok {
-		t.Fatal("EvictBounded(0) should return false immediately")
-	}
-	if l.Len() != 1 {
-		t.Fatalf("len = %d, want 1 (no eviction)", l.Len())
-	}
+	require.False(t, ok)
+	require.Equal(t, 1, l.Len())
 }
 
 func TestEvictBounded_Negative_ReturnsFalse(t *testing.T) {
@@ -117,9 +105,7 @@ func TestEvictBounded_Negative_ReturnsFalse(t *testing.T) {
 	_, _ = l.Access(1, func(uint64) *Entry[uint64] { return nil })
 
 	_, ok := l.EvictBounded(-1)
-	if ok {
-		t.Fatal("EvictBounded(-1) should return false")
-	}
+	require.False(t, ok)
 }
 
 func TestEvictBounded_EmptyList_ReturnsFalse(t *testing.T) {
@@ -127,9 +113,7 @@ func TestEvictBounded_EmptyList_ReturnsFalse(t *testing.T) {
 	l := NewList[uint64]()
 
 	_, ok := l.EvictBounded(128)
-	if ok {
-		t.Fatal("EvictBounded on empty list should return false")
-	}
+	require.False(t, ok)
 }
 
 func TestEvictBounded_UnvisitedEntryEvictedImmediately(t *testing.T) {
@@ -140,15 +124,9 @@ func TestEvictBounded_UnvisitedEntryEvictedImmediately(t *testing.T) {
 	_, _ = l.Access(42, func(uint64) *Entry[uint64] { return nil })
 
 	key, ok := l.EvictBounded(128)
-	if !ok {
-		t.Fatal("EvictBounded should evict unvisited entry")
-	}
-	if key != 42 {
-		t.Fatalf("evicted key = %d, want 42", key)
-	}
-	if l.Len() != 0 {
-		t.Fatalf("len = %d, want 0", l.Len())
-	}
+	require.True(t, ok)
+	require.Equal(t, uint64(42), key)
+	require.Equal(t, 0, l.Len())
 }
 
 func TestEvictBounded_ProgressAcrossCalls(t *testing.T) {
@@ -167,9 +145,7 @@ func TestEvictBounded_ProgressAcrossCalls(t *testing.T) {
 
 	// First call: 128 probes clear 128 visited bits, no eviction.
 	_, ok := l.EvictBounded(128)
-	if ok {
-		t.Fatal("first EvictBounded(128) should return false (all visited, only 128 cleared)")
-	}
+	require.False(t, ok)
 
 	// Second call: the hand resumes from the advanced position. The
 	// next 72 entries still have visited=true (cleared in this call),
@@ -177,13 +153,9 @@ func TestEvictBounded_ProgressAcrossCalls(t *testing.T) {
 	// (visited=false). So within 73 probes it should find an
 	// evictable entry.
 	key, ok := l.EvictBounded(128)
-	if !ok {
-		t.Fatal("second EvictBounded(128) should find an entry cleared by the first call")
-	}
+	require.True(t, ok)
 	delete(m, key)
-	if l.Len() != 199 {
-		t.Fatalf("len = %d, want 199", l.Len())
-	}
+	require.Equal(t, 199, l.Len())
 }
 
 func TestEvict_EquivalentToEvictBoundedLen2(t *testing.T) {
@@ -198,21 +170,13 @@ func TestEvict_EquivalentToEvictBoundedLen2(t *testing.T) {
 
 	// Evict() should behave the same as EvictBounded(l.len * 2) = EvictBounded(6).
 	key, ok := l.Evict()
-	if !ok {
-		t.Fatal("Evict should succeed")
-	}
-	if l.Len() != 2 {
-		t.Fatalf("len = %d, want 2", l.Len())
-	}
+	require.True(t, ok)
+	require.Equal(t, 2, l.Len())
 	delete(m, key)
 
 	// EvictBounded(l.len * 2) on the remaining should also work.
 	key2, ok2 := l.EvictBounded(l.Len() * 2)
-	if !ok2 {
-		t.Fatal("EvictBounded(len*2) should succeed")
-	}
-	if l.Len() != 1 {
-		t.Fatalf("len = %d, want 1", l.Len())
-	}
+	require.True(t, ok2)
+	require.Equal(t, 1, l.Len())
 	delete(m, key2)
 }

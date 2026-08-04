@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -43,24 +46,18 @@ func TestFetchStoresRightSizedBody(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/right-sized", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("expected MISS, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 
 	key := BuildKey(req, nil)
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("stored object not found: obj=%v err=%v", obj, err)
 	}
-	if len(obj.Body) != bodySize {
-		t.Fatalf("stored body len = %d, want %d", len(obj.Body), bodySize)
-	}
+	require.Len(t, obj.Body, bodySize)
 	slack := cap(obj.Body) - len(obj.Body)
 	t.Logf("stored body: len=%d cap=%d slack=%d bytes (%.1f%%)",
 		len(obj.Body), cap(obj.Body), slack, 100*float64(slack)/float64(len(obj.Body)))
-	if cap(obj.Body) != len(obj.Body) {
-		t.Errorf("stored body has %d bytes of slack capacity; expected a right-sized copy (cap == len)", slack)
-	}
+	assert.Len(t, obj.Body, cap(obj.Body))
 }
 
 // TestFetchProducesRightSizedBody proves that doFetch produces a
@@ -75,16 +72,9 @@ func TestFetchProducesRightSizedBody(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "http://example.com/transfer", nil)
 	res := h.doFetch(req)
-	if res.Err != nil {
-		t.Fatalf("doFetch: %v", res.Err)
-	}
-	if len(res.Body) != bodySize {
-		t.Fatalf("body len = %d, want %d", len(res.Body), bodySize)
-	}
-	if cap(res.Body) != len(res.Body) {
-		t.Errorf("body cap = %d, len = %d; expected right-sized copy (cap == len)",
-			cap(res.Body), len(res.Body))
-	}
+	require.Nil(t, res.Err)
+	require.Len(t, res.Body, bodySize)
+	assert.Len(t, res.Body, cap(res.Body))
 }
 
 // TestWriteHeaderPreSizesBuffer proves that WriteHeader pre-allocates the

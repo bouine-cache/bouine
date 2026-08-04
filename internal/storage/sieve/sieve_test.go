@@ -1,6 +1,10 @@
 package sieve
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestSieve_InsertAndAccess(t *testing.T) {
 	t.Parallel()
@@ -8,29 +12,19 @@ func TestSieve_InsertAndAccess(t *testing.T) {
 	m := map[uint64]*Entry[uint64]{}
 
 	e1, ins := l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
-	if !ins {
-		t.Fatal("expected insert")
-	}
+	require.True(t, ins)
 	m[1] = e1
 
 	e2, ins := l.Access(2, func(k uint64) *Entry[uint64] { return m[k] })
-	if !ins {
-		t.Fatal("expected insert")
-	}
+	require.True(t, ins)
 	m[2] = e2
 
-	if l.Len() != 2 {
-		t.Fatalf("len = %d, want 2", l.Len())
-	}
+	require.Equal(t, 2, l.Len())
 
 	// Re-access key 1 — should not insert, should mark visited.
 	_, ins = l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
-	if ins {
-		t.Fatal("expected hit, not insert")
-	}
-	if l.Len() != 2 {
-		t.Fatalf("len = %d after re-access", l.Len())
-	}
+	require.False(t, ins)
+	require.Equal(t, 2, l.Len())
 }
 
 func TestSieve_EvictsLeastRecent(t *testing.T) {
@@ -50,17 +44,11 @@ func TestSieve_EvictsLeastRecent(t *testing.T) {
 
 	// Evict — should evict 2 (not visited, at tail after 1 was visited).
 	key, ok := l.Evict()
-	if !ok {
-		t.Fatal("expected eviction")
-	}
+	require.True(t, ok)
 	delete(m, key)
 
-	if key != 2 {
-		t.Fatalf("evicted %d, want 2", key)
-	}
-	if l.Len() != 2 {
-		t.Fatalf("len = %d, want 2", l.Len())
-	}
+	require.Equal(t, uint64(2), key)
+	require.Equal(t, 2, l.Len())
 }
 
 func TestSieve_EvictAll(t *testing.T) {
@@ -76,24 +64,16 @@ func TestSieve_EvictAll(t *testing.T) {
 	evicted := map[uint64]bool{}
 	for range 3 {
 		k, ok := l.Evict()
-		if !ok {
-			t.Fatal("expected eviction")
-		}
+		require.True(t, ok)
 		evicted[k] = true
 		delete(m, k)
 	}
 
-	if len(evicted) != 3 {
-		t.Fatalf("evicted %d keys, want 3", len(evicted))
-	}
-	if l.Len() != 0 {
-		t.Fatalf("len = %d, want 0", l.Len())
-	}
+	require.Len(t, evicted, 3)
+	require.Equal(t, 0, l.Len())
 
 	_, ok := l.Evict()
-	if ok {
-		t.Fatal("evict on empty should return false")
-	}
+	require.False(t, ok)
 }
 
 func TestSieve_Remove(t *testing.T) {
@@ -109,22 +89,16 @@ func TestSieve_Remove(t *testing.T) {
 	l.Remove(m[2])
 	delete(m, 2)
 
-	if l.Len() != 2 {
-		t.Fatalf("len = %d, want 2", l.Len())
-	}
+	require.Equal(t, 2, l.Len())
 
 	// Evict remaining — should get 1 and 3 in some order.
 	var keys []uint64
 	for range 2 {
 		k, ok := l.Evict()
-		if !ok {
-			t.Fatal("expected eviction")
-		}
+		require.True(t, ok)
 		keys = append(keys, k)
 	}
-	if len(keys) != 2 {
-		t.Fatalf("got %d keys", len(keys))
-	}
+	require.Len(t, keys, 2)
 }
 
 func TestSieve_SecondChance(t *testing.T) {
@@ -145,13 +119,9 @@ func TestSieve_SecondChance(t *testing.T) {
 	// First evict: both visited, so both get second chance; then one
 	// is evicted (the one the hand lands on after clearing visited).
 	k1, ok := l.Evict()
-	if !ok {
-		t.Fatal("expected eviction")
-	}
+	require.True(t, ok)
 	delete(m, k1)
-	if l.Len() != 1 {
-		t.Fatalf("len = %d", l.Len())
-	}
+	require.Equal(t, 1, l.Len())
 }
 
 func TestSieve_Defer_PreservesVisitedBit(t *testing.T) {
@@ -166,34 +136,24 @@ func TestSieve_Defer_PreservesVisitedBit(t *testing.T) {
 
 	// Visit key 1 (visited=true).
 	l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
-	if !m[1].Visited() {
-		t.Fatal("key 1 should have visited=true after Access")
-	}
+	require.True(t, m[1].Visited())
 
 	// Defer key 1 — move to head, preserve visited bit.
 	l.Defer(m[1])
 
-	if !m[1].Visited() {
-		t.Fatal("key 1 visited bit should be preserved after Defer")
-	}
-	if l.Len() != 3 {
-		t.Fatalf("len = %d after Defer, want 3", l.Len())
-	}
+	require.True(t, m[1].Visited())
+	require.Equal(t, 3, l.Len())
 
 	// Key 1 should now get a second chance during eviction.
 	// Evict twice — key 1 (visited) should survive the first evict.
 	evicted := []uint64{}
 	for range 2 {
 		k, ok := l.Evict()
-		if !ok {
-			t.Fatal("expected eviction")
-		}
+		require.True(t, ok)
 		evicted = append(evicted, k)
 		delete(m, k)
 	}
 	for _, k := range evicted {
-		if k == 1 {
-			t.Fatalf("key 1 (visited, deferred) should not have been evicted before non-visited keys, evicted: %v", evicted)
-		}
+		require.NotEqual(t, 1, k)
 	}
 }

@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,8 +17,9 @@ func TestEffectiveGOMAXPROCS_CgroupV2NestedPath(t *testing.T) {
 
 	withCgroupPaths(t, root, proc)
 
-	if got := EffectiveGOMAXPROCS(); got != 3 {
-		t.Fatalf("EffectiveGOMAXPROCS() = %d, want 3", got)
+	{
+		got := EffectiveGOMAXPROCS()
+		require.Equal(t, 3, got)
 	}
 }
 
@@ -28,8 +30,9 @@ func TestEffectiveGOMAXPROCS_CgroupV1NestedPath(t *testing.T) {
 
 	withCgroupPaths(t, root, proc)
 
-	if got := EffectiveGOMAXPROCS(); got != 2 {
-		t.Fatalf("EffectiveGOMAXPROCS() = %d, want 2", got)
+	{
+		got := EffectiveGOMAXPROCS()
+		require.Equal(t, 2, got)
 	}
 }
 
@@ -66,38 +69,41 @@ func withCgroupPaths(t *testing.T, root string, proc string) {
 
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
+	{
+		err := os.MkdirAll(filepath.Dir(path), 0o755)
+		require.NoError(t, err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+	{
+		err := os.WriteFile(path, []byte(content), 0o600)
+		require.NoError(t, err)
 	}
 }
 
 func TestRaiseFileLimit(t *testing.T) {
 	var before unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before); err != nil {
-		t.Fatalf("getrlimit: %v", err)
+	{
+		err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before)
+		require.NoErrorf(t, err, "getrlimit: %v", err)
 	}
 
 	got, err := RaiseFileLimit(65536)
-	if err != nil {
-		t.Fatalf("RaiseFileLimit: %v", err)
-	}
+	require.NoErrorf(t, err, "RaiseFileLimit: %v", err)
 	if got < 65536 && got < before.Max {
 		t.Fatalf("soft limit = %d, want >= 65536 (or capped at hard limit %d)", got, before.Max)
 	}
 
 	var after unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after); err != nil {
-		t.Fatalf("getrlimit after: %v", err)
+	{
+		err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after)
+		require.NoErrorf(t, err, "getrlimit after: %v", err)
 	}
 	if after.Cur < 65536 && after.Cur < before.Max {
 		t.Fatalf("soft limit after = %d, want >= 65536 (or capped at hard limit %d)", after.Cur, before.Max)
 	}
 
 	// Calling again with the same value should be a no-op.
-	if _, err := RaiseFileLimit(65536); err != nil {
-		t.Fatalf("RaiseFileLimit idempotent: %v", err)
+	{
+		_, err := RaiseFileLimit(65536)
+		require.NoErrorf(t, err, "RaiseFileLimit idempotent: %v", err)
 	}
 }

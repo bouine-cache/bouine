@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVersionCmdRuns(t *testing.T) {
@@ -13,13 +16,12 @@ func TestVersionCmdRuns(t *testing.T) {
 	root.SetOut(&stdout)
 	root.SetErr(&stdout)
 	root.SetArgs([]string{"version"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
+	{
+		err := root.Execute()
+		require.NoErrorf(t, err, "execute: %v", err)
 	}
 	out := stdout.String()
-	if !strings.HasPrefix(out, "bouine ") {
-		t.Fatalf("unexpected output: %q", out)
-	}
+	require.True(t, strings.HasPrefix(out, "bouine "))
 }
 
 func TestRootHasExpectedCommands(t *testing.T) {
@@ -34,8 +36,6 @@ func TestRootHasExpectedCommands(t *testing.T) {
 		}
 	}
 	for name, found := range want {
-		if !found {
-			t.Errorf("missing subcommand: %s", name)
-		}
+		assert.Truef(t, found, "missing subcommand: %s", name)
 	}
 }

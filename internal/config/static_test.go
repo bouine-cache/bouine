@@ -2,6 +2,8 @@ package config
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateRoute_StaticOnly(t *testing.T) {
@@ -12,8 +14,9 @@ func TestValidateRoute_StaticOnly(t *testing.T) {
 			{Static: StaticConfig{Root: "/var/www"}},
 		},
 	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("static-only route should validate: %v", err)
+	{
+		err := cfg.Validate()
+		require.NoErrorf(t, err, "static-only route should validate: %v", err)
 	}
 }
 
@@ -29,9 +32,7 @@ func TestValidateRoute_BothPoolAndStatic(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("route with both pool and static should fail validation")
-	}
+	require.Error(t, err)
 }
 
 func TestValidateRoute_NeitherPoolNorStatic(t *testing.T) {
@@ -43,9 +44,7 @@ func TestValidateRoute_NeitherPoolNorStatic(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("route with neither pool nor static should fail validation")
-	}
+	require.Error(t, err)
 }
 
 func TestValidateRoute_StaticRelativeRoot(t *testing.T) {
@@ -57,9 +56,7 @@ func TestValidateRoute_StaticRelativeRoot(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("static.root must be absolute")
-	}
+	require.Error(t, err)
 }
 
 func TestValidateRoute_StaticIndexWithSlash(t *testing.T) {
@@ -71,9 +68,7 @@ func TestValidateRoute_StaticIndexWithSlash(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("static.index with '/' should fail validation")
-	}
+	require.Error(t, err)
 }
 
 func TestValidateRoute_StaticNegativeMaxFileSize(t *testing.T) {
@@ -85,9 +80,7 @@ func TestValidateRoute_StaticNegativeMaxFileSize(t *testing.T) {
 		},
 	}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("static.max_file_size < 0 should fail validation")
-	}
+	require.Error(t, err)
 }
 
 func TestValidateRoute_StaticWithPoolStillWorks(t *testing.T) {
@@ -102,8 +95,9 @@ func TestValidateRoute_StaticWithPoolStillWorks(t *testing.T) {
 			{Match: RouteMatch{PathPrefix: "/assets/"}, Static: StaticConfig{Root: "/var/www/assets"}},
 		},
 	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("mixed pool + static routes should validate: %v", err)
+	{
+		err := cfg.Validate()
+		require.NoErrorf(t, err, "mixed pool + static routes should validate: %v", err)
 	}
 }
 
@@ -121,16 +115,8 @@ routes:
       strip_prefix: /assets/
 `
 	cfg, err := Parse([]byte(yaml))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.Routes) != 1 {
-		t.Fatalf("expected 1 route, got %d", len(cfg.Routes))
-	}
-	if cfg.Routes[0].Static.Root != "/var/www/assets" {
-		t.Fatalf("static.root: got %q", cfg.Routes[0].Static.Root)
-	}
-	if cfg.Routes[0].Request.StripPrefix != "/assets/" {
-		t.Fatalf("strip_prefix: got %q", cfg.Routes[0].Request.StripPrefix)
-	}
+	require.NoErrorf(t, err, "Parse: %v", err)
+	require.Len(t, cfg.Routes, 1)
+	require.Equal(t, "/var/www/assets", cfg.Routes[0].Static.Root)
+	require.Equal(t, "/assets/", cfg.Routes[0].Request.StripPrefix)
 }

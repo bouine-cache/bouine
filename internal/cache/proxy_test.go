@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -29,18 +31,10 @@ func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 201 {
-		t.Fatalf("status = %d, want 201; body = %q", rr.Code, rr.Body.String())
-	}
-	if gotMethod != "PUT" {
-		t.Fatalf("upstream method = %q, want PUT", gotMethod)
-	}
-	if gotPath != "/config/test-uuid" {
-		t.Fatalf("upstream path = %q, want /config/test-uuid", gotPath)
-	}
-	if gotBody != body {
-		t.Fatalf("upstream body = %q, want %q", gotBody, body)
-	}
+	require.Equal(t, 201, rr.Code)
+	require.Equal(t, "PUT", gotMethod)
+	require.Equal(t, "/config/test-uuid", gotPath)
+	require.Equal(t, body, gotBody)
 }
 
 func TestHandler_GETAfterPUTConfigSetup(t *testing.T) {
@@ -72,21 +66,13 @@ func TestHandler_GETAfterPUTConfigSetup(t *testing.T) {
 	putRR := httptest.NewRecorder()
 	h.ServeHTTP(putRR, putReq)
 
-	if putRR.Code != 201 {
-		t.Fatalf("PUT status = %d, want 201", putRR.Code)
-	}
-	if configuredBody != `{"test":"data"}` {
-		t.Fatalf("config body = %q", configuredBody)
-	}
+	require.Equal(t, 201, putRR.Code)
+	require.Equal(t, `{"test":"data"}`, configuredBody)
 
 	// Step 2: GET test (should be a MISS, fetched from origin).
 	getRR := httptest.NewRecorder()
 	h.ServeHTTP(getRR, httptest.NewRequest("GET", "http://example.com/test/abc123", nil))
 
-	if getRR.Code != 200 {
-		t.Fatalf("GET status = %d, want 200", getRR.Code)
-	}
-	if getRR.Body.String() != "test-response" {
-		t.Fatalf("GET body = %q", getRR.Body.String())
-	}
+	require.Equal(t, 200, getRR.Code)
+	require.Equal(t, "test-response", getRR.Body.String())
 }

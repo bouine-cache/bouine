@@ -3,6 +3,9 @@ package cache
 import (
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildKey_KeepQueryParams(t *testing.T) {
@@ -15,9 +18,7 @@ func TestBuildKey_KeepQueryParams(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, policy)
 
-	if k1 != k2 {
-		t.Errorf("keys should match with keep_query_params: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_KeepQueryParams_EmptyValue(t *testing.T) {
@@ -30,9 +31,7 @@ func TestBuildKey_KeepQueryParams_EmptyValue(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, policy)
 
-	if k1 != k2 {
-		t.Errorf("allowlisted param with empty value should be kept: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_StripQueryPrefix(t *testing.T) {
@@ -45,9 +44,7 @@ func TestBuildKey_StripQueryPrefix(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, policy)
 
-	if k1 != k2 {
-		t.Errorf("keys should match with strip_query_prefix: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_StripEmptyParams(t *testing.T) {
@@ -60,9 +57,7 @@ func TestBuildKey_StripEmptyParams(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, policy)
 
-	if k1 != k2 {
-		t.Errorf("keys should match with strip_empty_params: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_DedupQueryParams(t *testing.T) {
@@ -75,9 +70,7 @@ func TestBuildKey_DedupQueryParams(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, policy)
 
-	if k1 != k2 {
-		t.Errorf("keys should match with dedup (first in request order): got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_Dedup_WithoutDedup(t *testing.T) {
@@ -89,9 +82,7 @@ func TestBuildKey_Dedup_WithoutDedup(t *testing.T) {
 	k1 := BuildKey(r1, nil)
 	k2 := BuildKey(r2, nil)
 
-	if k1 != k2 {
-		t.Errorf("without dedup, sorted multi-value params should produce same key: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_AllFeaturesCombined(t *testing.T) {
@@ -110,9 +101,7 @@ func TestBuildKey_AllFeaturesCombined(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, policy)
 
-	if k1 != k2 {
-		t.Errorf("keys should match with all features combined: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_NoPolicyParity(t *testing.T) {
@@ -121,16 +110,12 @@ func TestBuildKey_NoPolicyParity(t *testing.T) {
 	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&c=3", nil)
 	k := BuildKey(r, nil)
 
-	if k == 0 {
-		t.Fatal("key should not be zero")
-	}
+	require.NotEqual(t, 0, k)
 
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&c=3", nil)
 	k2 := BuildKey(r2, nil)
 
-	if k != k2 {
-		t.Errorf("same URL should produce same key with nil policy: got %v vs %v", k, k2)
-	}
+	assert.Equal(t, k2, k)
 }
 
 func TestBuildKey_FastSlowPathParity(t *testing.T) {
@@ -143,7 +128,5 @@ func TestBuildKey_FastSlowPathParity(t *testing.T) {
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&a=3", nil)
 	k2 := BuildKey(r2, nil)
 
-	if k1 != k2 {
-		t.Errorf("fast and slow paths should produce same key: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }

@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -40,12 +43,8 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), api.Key(42), "")
 
-	if len(received) != 1 {
-		t.Fatalf("expected 1 purge, got %d", len(received))
-	}
-	if received[0].Key != 42 {
-		t.Errorf("key = %d, want 42", received[0].Key)
-	}
+	require.Len(t, received, 1)
+	assert.Equal(t, api.Key(42), received[0].Key)
 }
 
 func TestBroadcaster_BroadcastBan(t *testing.T) {
@@ -77,12 +76,8 @@ func TestBroadcaster_BroadcastBan(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 
-	if len(received) != 1 {
-		t.Fatalf("expected 1 ban, got %d", len(received))
-	}
-	if received[0].Predicate.HostRegex != "example.com" {
-		t.Errorf("host_regex = %q, want example.com", received[0].Predicate.HostRegex)
-	}
+	require.Len(t, received, 1)
+	assert.Equal(t, "example.com", received[0].Predicate.HostRegex)
 }
 
 func TestBroadcaster_SkipsSelf(t *testing.T) {
@@ -107,9 +102,7 @@ func TestBroadcaster_SkipsSelf(t *testing.T) {
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), api.Key(1), "")
 
-	if called != 1 {
-		t.Errorf("expected 1 call (self skipped), got %d", called)
-	}
+	assert.Equal(t, 1, called)
 }
 
 func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
@@ -130,9 +123,7 @@ func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), api.Key(99), "/v")
 
-	if httpCalled != 0 {
-		t.Fatalf("eventual mode should not POST to peers, got %d HTTP calls", httpCalled)
-	}
+	require.Equal(t, 0, httpCalled)
 }
 
 func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
@@ -153,9 +144,7 @@ func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), api.Key(7), "")
 
-	if httpCalled != 1 {
-		t.Fatalf("strong mode should POST to peer, got %d HTTP calls", httpCalled)
-	}
+	require.Equal(t, 1, httpCalled)
 }
 
 func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
@@ -176,9 +165,7 @@ func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 	b := NewBroadcaster(c, nil)
 	b.BroadcastBan(context.Background(), api.BanExpr{HostRegex: "test\\.com"})
 
-	if httpCalled != 0 {
-		t.Fatalf("eventual mode should not POST bans, got %d HTTP calls", httpCalled)
-	}
+	require.Equal(t, 0, httpCalled)
 }
 
 func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
@@ -202,9 +189,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 	b.BroadcastPurge(context.Background(), api.Key(1), "")
 
 	families, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	var got float64
 	for _, f := range families {
 		if f.GetName() != "bouine_cluster_broadcast_failures_total" {
@@ -214,9 +199,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 			got += m.GetCounter().GetValue()
 		}
 	}
-	if got != 1 {
-		t.Errorf("expected 1 broadcast failure, got %v", got)
-	}
+	assert.Equal(t, float64(1), got)
 }
 
 func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {

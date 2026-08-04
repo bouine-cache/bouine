@@ -9,6 +9,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -31,32 +34,19 @@ func TestMiddleware_LogsAccess(t *testing.T) {
 	req.Host = "example.com"
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 201 {
-		t.Fatalf("status = %d", rr.Code)
-	}
+	require.Equal(t, 201, rr.Code)
 
 	var rec map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(buf.Bytes(), &rec)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if rec["method"] != "POST" {
-		t.Errorf("method = %v", rec["method"])
-	}
-	if rec["status"] != float64(201) {
-		t.Errorf("status = %v", rec["status"])
-	}
-	if rec["path"] != "/api/test" {
-		t.Errorf("path = %v", rec["path"])
-	}
-	if rec["host"] != "example.com" {
-		t.Errorf("host = %v", rec["host"])
-	}
-	if rec["bytes_out"] != float64(2) {
-		t.Errorf("bytes_out = %v", rec["bytes_out"])
-	}
-	if rec["msg"] != "request completed with error" {
-		t.Errorf("msg = %v, want 'request completed with error'", rec["msg"])
-	}
+	assert.Equal(t, "POST", rec["method"])
+	assert.Equal(t, float64(201), rec["status"])
+	assert.Equal(t, "/api/test", rec["path"])
+	assert.Equal(t, "example.com", rec["host"])
+	assert.Equal(t, float64(2), rec["bytes_out"])
+	assert.Equal(t, "request completed with error", rec["msg"])
 }
 
 func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
@@ -85,15 +75,12 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 	h.ServeHTTP(rr, req)
 
 	var rec map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(buf.Bytes(), &rec)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if rec["msg"] != "served cache hit" {
-		t.Errorf("msg = %v, want 'served cache hit'", rec["msg"])
-	}
-	if rec["key"] != "2a" {
-		t.Errorf("key = %v, want 2a", rec["key"])
-	}
+	assert.Equal(t, "served cache hit", rec["msg"])
+	assert.Equal(t, "2a", rec["key"])
 }
 
 func TestMiddleware_200WithoutKeyLogsInfo(t *testing.T) {
@@ -115,12 +102,11 @@ func TestMiddleware_200WithoutKeyLogsInfo(t *testing.T) {
 	h.ServeHTTP(rr, req)
 
 	var rec map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(buf.Bytes(), &rec)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if rec["msg"] != "served cache miss" {
-		t.Errorf("msg = %v, want 'served cache miss'", rec["msg"])
-	}
+	assert.Equal(t, "served cache miss", rec["msg"])
 }
 
 func TestMiddleware_Non200LogsWarn(t *testing.T) {
@@ -141,9 +127,7 @@ func TestMiddleware_Non200LogsWarn(t *testing.T) {
 	req := httptest.NewRequest("GET", "/error", nil)
 	h.ServeHTTP(rr, req)
 
-	if buf.Len() == 0 {
-		t.Fatal("non-200 should always log (Warn is never sampled)")
-	}
+	require.NotEqual(t, 0, buf.Len())
 }
 
 func TestRequestMessage(t *testing.T) {
@@ -165,9 +149,6 @@ func TestRequestMessage(t *testing.T) {
 	}
 	for _, tc := range tests {
 		got := requestMessage(tc.cacheResult, tc.status)
-		if got != tc.want {
-			t.Errorf("requestMessage(%q, %d) = %q, want %q",
-				tc.cacheResult, tc.status, got, tc.want)
-		}
+		assert.Equal(t, tc.want, got)
 	}
 }

@@ -8,6 +8,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/observability"
 )
 
@@ -47,8 +50,9 @@ func parseAdapterRecords(t *testing.T, mu *sync.Mutex, buf *bytes.Buffer) []map[
 			continue
 		}
 		var rec map[string]any
-		if err := json.Unmarshal(line, &rec); err != nil {
-			t.Fatalf("unmarshal log line: %v\nline: %s", err, line)
+		{
+			err := json.Unmarshal(line, &rec)
+			require.NoErrorf(t, err, "unmarshal log line: %v\nline: %s", err, line)
 		}
 		records = append(records, rec)
 	}
@@ -163,15 +167,14 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"2026/07/05 09:37:37 [INFO] memberlist: Marking node bouine-2 as failed\n",
 	}
 	for _, l := range lines {
-		if _, err := a.Write([]byte(l)); err != nil {
-			t.Fatalf("Write: %v", err)
+		{
+			_, err := a.Write([]byte(l))
+			require.NoErrorf(t, err, "Write: %v", err)
 		}
 	}
 
 	records := parseAdapterRecords(t, mu, buf)
-	if len(records) != len(lines) {
-		t.Fatalf("got %d records, want %d", len(records), len(lines))
-	}
+	require.Len(t, records, len(lines))
 
 	wantLevels := []string{"WARN", "ERROR", "DEBUG", "INFO"}
 	wantMsgs := []string{
@@ -181,15 +184,9 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"Marking node bouine-2 as failed",
 	}
 	for i, rec := range records {
-		if rec["level"] != wantLevels[i] {
-			t.Errorf("record %d level = %v, want %q", i, rec["level"], wantLevels[i])
-		}
-		if rec["msg"] != wantMsgs[i] {
-			t.Errorf("record %d msg = %v, want %q", i, rec["msg"], wantMsgs[i])
-		}
-		if rec["component"] != "memberlist" {
-			t.Errorf("record %d component = %v, want %q", i, rec["component"], "memberlist")
-		}
+		assert.Equal(t, wantLevels[i], rec["level"])
+		assert.Equal(t, wantMsgs[i], rec["msg"])
+		assert.Equal(t, "memberlist", rec["component"])
 	}
 }
 
@@ -200,25 +197,22 @@ func TestSlogAdapter_BuffersPartialLines(t *testing.T) {
 
 	// Write a line in two chunks; no record should be emitted until the
 	// newline arrives.
-	if _, err := a.Write([]byte("2026/07/05 09:37:34 [WARN] memberlist: partial")); err != nil {
-		t.Fatalf("Write 1: %v", err)
+	{
+		_, err := a.Write([]byte("2026/07/05 09:37:34 [WARN] memberlist: partial"))
+		require.NoErrorf(t, err, "Write 1: %v", err)
 	}
-	if got := parseAdapterRecords(t, mu, buf); len(got) != 0 {
-		t.Fatalf("expected 0 records before newline, got %d", len(got))
+	{
+		got := parseAdapterRecords(t, mu, buf)
+		require.Len(t, got, 0)
 	}
-	if _, err := a.Write([]byte(" message\n")); err != nil {
-		t.Fatalf("Write 2: %v", err)
+	{
+		_, err := a.Write([]byte(" message\n"))
+		require.NoErrorf(t, err, "Write 2: %v", err)
 	}
 	records := parseAdapterRecords(t, mu, buf)
-	if len(records) != 1 {
-		t.Fatalf("expected 1 record after newline, got %d", len(records))
-	}
-	if records[0]["msg"] != "partial message" {
-		t.Errorf("msg = %v, want %q", records[0]["msg"], "partial message")
-	}
-	if records[0]["level"] != "WARN" {
-		t.Errorf("level = %v, want WARN", records[0]["level"])
-	}
+	require.Len(t, records, 1)
+	assert.Equal(t, "partial message", records[0]["msg"])
+	assert.Equal(t, "WARN", records[0]["level"])
 }
 
 func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
@@ -230,13 +224,12 @@ func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
 		"2026/07/05 09:37:34 [WARN] memberlist: first\n",
 		"2026/07/05 09:37:35 [ERR] memberlist: second\n",
 	}, "")
-	if _, err := a.Write([]byte(blob)); err != nil {
-		t.Fatalf("Write: %v", err)
+	{
+		_, err := a.Write([]byte(blob))
+		require.NoErrorf(t, err, "Write: %v", err)
 	}
 	records := parseAdapterRecords(t, mu, buf)
-	if len(records) != 2 {
-		t.Fatalf("expected 2 records, got %d", len(records))
-	}
+	require.Len(t, records, 2)
 	if records[0]["msg"] != "first" || records[1]["msg"] != "second" {
 		t.Errorf("msgs = %v, %v; want first, second", records[0]["msg"], records[1]["msg"])
 	}
@@ -247,10 +240,12 @@ func TestSlogAdapter_EmptyLinesDropped(t *testing.T) {
 	logger, mu, buf := captureLogger(t)
 	a := newSlogAdapter(logger)
 
-	if _, err := a.Write([]byte("\n\n")); err != nil {
-		t.Fatalf("Write: %v", err)
+	{
+		_, err := a.Write([]byte("\n\n"))
+		require.NoErrorf(t, err, "Write: %v", err)
 	}
-	if got := parseAdapterRecords(t, mu, buf); len(got) != 0 {
-		t.Fatalf("expected 0 records for empty lines, got %d", len(got))
+	{
+		got := parseAdapterRecords(t, mu, buf)
+		require.Len(t, got, 0)
 	}
 }

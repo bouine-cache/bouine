@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -29,9 +31,7 @@ func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	require.NoErrorf(t, err, "marshal: %v", err)
 	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerFetchPath, bytes.NewReader(body))
 	r.Header.Set(header.ContentType, "application/json")
 	if hop > 0 {
@@ -50,13 +50,9 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	}}
 	h := NewPeerFetchHandler(store, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
-	if rr.Code != 200 {
-		t.Fatalf("hit: status=%d", rr.Code)
-	}
+	require.Equal(t, 200, rr.Code)
 	obj, err := storage.DecodeObject(rr.Body.Bytes())
-	if err != nil {
-		t.Fatalf("binary decode: %v", err)
-	}
+	require.NoErrorf(t, err, "binary decode: %v", err)
 	if obj.Key != key || obj.StatusCode != 200 {
 		t.Fatalf("decoded mismatch: key=%d status=%d", obj.Key, obj.StatusCode)
 	}
@@ -82,29 +78,20 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	h := NewPeerFetchHandler(store, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 
-	if rr.Code != 200 {
-		t.Fatalf("hit: status=%d", rr.Code)
-	}
-	if ct := rr.Header().Get(header.ContentType); ct != "application/octet-stream" {
-		t.Fatalf("content-type=%q, want application/octet-stream", ct)
+	require.Equal(t, 200, rr.Code)
+	{
+		ct := rr.Header().Get(header.ContentType)
+		require.Equal(t, "application/octet-stream", ct)
 	}
 
 	decoded, err := storage.DecodeObject(rr.Body.Bytes())
-	if err != nil {
-		t.Fatalf("binary decode: %v", err)
-	}
+	require.NoErrorf(t, err, "binary decode: %v", err)
 	if decoded.Key != obj.Key || decoded.StatusCode != obj.StatusCode {
 		t.Fatalf("decoded mismatch: key=%d status=%d", decoded.Key, decoded.StatusCode)
 	}
-	if string(decoded.Body) != "cached-body" {
-		t.Fatalf("body=%q, want %q", decoded.Body, "cached-body")
-	}
-	if decoded.ETag != obj.ETag {
-		t.Fatalf("etag=%q, want %q", decoded.ETag, obj.ETag)
-	}
-	if decoded.Header.Len() != 1 {
-		t.Fatalf("header entries=%d, want 1", decoded.Header.Len())
-	}
+	require.Equal(t, "cached-body", string(decoded.Body))
+	require.Equal(t, obj.ETag, decoded.ETag)
+	require.Equal(t, 1, decoded.Header.Len())
 }
 
 // TestPeerFetcher_BinaryRoundTrip verifies the full client→server
@@ -129,36 +116,26 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: key})
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected hit object")
-	}
+	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NotNil(t, got)
 	if got.Key != key || string(got.Body) != "roundtrip" {
 		t.Fatalf("got key=%d body=%q", got.Key, got.Body)
 	}
-	if got.Header.Len() != 1 {
-		t.Fatalf("header entries=%d, want 1", got.Header.Len())
-	}
+	require.Equal(t, 1, got.Header.Len())
 }
 
 func TestPeerFetchHandler_Miss(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 999}, 0)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("miss: status=%d", rr.Code)
-	}
+	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 1}, MaxHops)
-	if rr.Code != http.StatusLoopDetected {
-		t.Fatalf("expected 508, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusLoopDetected, rr.Code)
 }
 
 func TestPeerFetchHandler_CustomHopLimit(t *testing.T) {
@@ -166,15 +143,11 @@ func TestPeerFetchHandler_CustomHopLimit(t *testing.T) {
 	// hopLimit=1: a request at hop 1 should be rejected.
 	h := NewPeerFetchHandler(&stubStore{}, 1)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: 1}, 1)
-	if rr.Code != http.StatusLoopDetected {
-		t.Fatalf("hopLimit=1, hops=1: expected 508, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusLoopDetected, rr.Code)
 	// hopLimit=3: a request at hop 2 should pass through (not rejected).
 	h3 := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 3)
 	rr3 := postFetch(t, h3, api.PeerFetchRequest{Key: 1}, 2)
-	if rr3.Code == http.StatusLoopDetected {
-		t.Fatalf("hopLimit=3, hops=2: expected pass-through, got 508")
-	}
+	require.NotEqual(t, http.StatusLoopDetected, rr3.Code)
 }
 
 func TestPeerFetchHandler_WrongMethod(t *testing.T) {
@@ -183,9 +156,7 @@ func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerFetchPath, nil)
 	h.ServeHTTP(rr, r)
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
 func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
@@ -202,12 +173,8 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if obj == nil {
-		t.Fatal("expected hit object")
-	}
+	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NotNil(t, obj)
 
 	hits, _, _, latN, latSumMs := f.PeerFetchStats()
 	if hits != 1 || latN != 1 {
@@ -248,27 +215,13 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: key})
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected hit object")
-	}
-	if got.TTL != obj.TTL {
-		t.Fatalf("TTL=%v, want %v", got.TTL, obj.TTL)
-	}
-	if got.StaleWhileRevalidate != obj.StaleWhileRevalidate {
-		t.Fatalf("SWR=%v, want %v", got.StaleWhileRevalidate, obj.StaleWhileRevalidate)
-	}
-	if got.StaleIfError != obj.StaleIfError {
-		t.Fatalf("SIE=%v, want %v", got.StaleIfError, obj.StaleIfError)
-	}
-	if !got.StoredAt.Equal(obj.StoredAt) {
-		t.Fatalf("StoredAt=%v, want %v", got.StoredAt, obj.StoredAt)
-	}
-	if !got.LastModified.Equal(obj.LastModified) {
-		t.Fatalf("LastModified=%v, want %v", got.LastModified, obj.LastModified)
-	}
+	require.NoErrorf(t, err, "fetch: %v", err)
+	require.NotNil(t, got)
+	require.Equal(t, obj.TTL, got.TTL)
+	require.Equal(t, obj.StaleWhileRevalidate, got.StaleWhileRevalidate)
+	require.Equal(t, obj.StaleIfError, got.StaleIfError)
+	require.True(t, got.StoredAt.Equal(obj.StoredAt))
+	require.True(t, got.LastModified.Equal(obj.LastModified))
 }
 
 // TestPeerFetcher_MissIncrementsCounter pins that a 404 response
@@ -287,19 +240,11 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	if obj != nil {
-		t.Fatal("expected nil object on miss")
-	}
+	require.NoErrorf(t, err, "fetch: %v", err)
+	require.Nil(t, obj)
 	hits, misses, _, _, _ := f.PeerFetchStats()
-	if hits != 0 {
-		t.Fatalf("hits=%d, want 0", hits)
-	}
-	if misses != 1 {
-		t.Fatalf("misses=%d, want 1", misses)
-	}
+	require.Equal(t, int64(0), hits)
+	require.Equal(t, int64(1), misses)
 }
 
 func TestPeerFetcher_HopLimitReached(t *testing.T) {
@@ -307,12 +252,8 @@ func TestPeerFetcher_HopLimitReached(t *testing.T) {
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
 		api.PeerFetchRequest{Key: 1, Hops: MaxHops})
-	if err != nil {
-		t.Fatalf("hop limit should return nil,nil: %v", err)
-	}
-	if obj != nil {
-		t.Fatal("hop limit should return nil object")
-	}
+	require.NoErrorf(t, err, "hop limit should return nil,nil: %v", err)
+	require.Nil(t, obj)
 }
 
 func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
@@ -335,12 +276,8 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 1})
-	if err == nil {
-		t.Fatal("expected error from oversized peer response, got nil")
-	}
-	if obj != nil {
-		t.Fatalf("expected nil object on decode error, got %+v", obj)
-	}
+	require.Error(t, err)
+	require.Nil(t, obj)
 }
 
 func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
@@ -410,9 +347,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	_, err := f.Fetch(ctx,
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
 		api.PeerFetchRequest{Key: 2})
-	if err == nil {
-		t.Fatal("expected error when context cancelled while waiting for semaphore")
-	}
+	require.Error(t, err)
 
 	wg.Wait()
 }

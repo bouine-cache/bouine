@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func ok200(body string) http.Handler {
@@ -21,9 +24,7 @@ func TestRouter_FirstMatchWins(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/a/b", nil))
-	if rr.Body.String() != "first" {
-		t.Fatalf("expected first match, got %q", rr.Body.String())
-	}
+	require.Equal(t, "first", rr.Body.String())
 }
 
 func TestRouter_HostMatch(t *testing.T) {
@@ -36,9 +37,7 @@ func TestRouter_HostMatch(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = "api.example.com"
 	rt.ServeHTTP(rr, req)
-	if rr.Body.String() != "api" {
-		t.Fatalf("expected api, got %q", rr.Body.String())
-	}
+	require.Equal(t, "api", rr.Body.String())
 }
 
 func TestRouter_HostWithPort(t *testing.T) {
@@ -50,9 +49,7 @@ func TestRouter_HostWithPort(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = "api.example.com:443"
 	rt.ServeHTTP(rr, req)
-	if rr.Body.String() != "api" {
-		t.Fatalf("expected api, got %q", rr.Body.String())
-	}
+	require.Equal(t, "api", rr.Body.String())
 }
 
 func TestRouter_NoRoute(t *testing.T) {
@@ -64,9 +61,7 @@ func TestRouter_NoRoute(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = "other.com"
 	rt.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestRouter_PathPrefix(t *testing.T) {
@@ -77,15 +72,11 @@ func TestRouter_PathPrefix(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/foo", nil))
-	if rr.Body.String() != "api" {
-		t.Fatalf("expected api, got %q", rr.Body.String())
-	}
+	require.Equal(t, "api", rr.Body.String())
 
 	rr2 := httptest.NewRecorder()
 	rt.ServeHTTP(rr2, httptest.NewRequest("GET", "/other", nil))
-	if rr2.Body.String() != "root" {
-		t.Fatalf("expected root, got %q", rr2.Body.String())
-	}
+	require.Equal(t, "root", rr2.Body.String())
 }
 
 func TestRouter_CatchAll(t *testing.T) {
@@ -95,9 +86,7 @@ func TestRouter_CatchAll(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/anything", nil))
-	if rr.Body.String() != "all" {
-		t.Fatalf("expected all, got %q", rr.Body.String())
-	}
+	require.Equal(t, "all", rr.Body.String())
 }
 
 func TestRouter_MethodMatch(t *testing.T) {
@@ -108,15 +97,11 @@ func TestRouter_MethodMatch(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/foo", nil))
-	if rr.Body.String() != "read" {
-		t.Fatalf("GET expected read, got %q", rr.Body.String())
-	}
+	require.Equal(t, "read", rr.Body.String())
 
 	rr2 := httptest.NewRecorder()
 	rt.ServeHTTP(rr2, httptest.NewRequest("POST", "/api/v1/foo", nil))
-	if rr2.Body.String() != "write" {
-		t.Fatalf("POST expected write, got %q", rr2.Body.String())
-	}
+	require.Equal(t, "write", rr2.Body.String())
 }
 
 func TestRouter_MethodNoMatch(t *testing.T) {
@@ -126,9 +111,7 @@ func TestRouter_MethodNoMatch(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("DELETE", "/api/v1/foo", nil))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("DELETE should not match GET-only route, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestRouter_MethodFallthrough(t *testing.T) {
@@ -139,15 +122,11 @@ func TestRouter_MethodFallthrough(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/page", nil))
-	if rr.Body.String() != "cached" {
-		t.Fatalf("GET expected cached, got %q", rr.Body.String())
-	}
+	require.Equal(t, "cached", rr.Body.String())
 
 	rr2 := httptest.NewRecorder()
 	rt.ServeHTTP(rr2, httptest.NewRequest("POST", "/page", nil))
-	if rr2.Body.String() != "passthrough" {
-		t.Fatalf("POST should fall through to catch-all, got %q", rr2.Body.String())
-	}
+	require.Equal(t, "passthrough", rr2.Body.String())
 }
 
 func TestRouter_NilMethodsMatchAll(t *testing.T) {
@@ -158,9 +137,7 @@ func TestRouter_NilMethodsMatchAll(t *testing.T) {
 	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
 		rr := httptest.NewRecorder()
 		rt.ServeHTTP(rr, httptest.NewRequest(m, "/x", nil))
-		if rr.Body.String() != "any" {
-			t.Errorf("%s expected any, got %q", m, rr.Body.String())
-		}
+		assert.Equal(t, "any", rr.Body.String())
 	}
 }
 

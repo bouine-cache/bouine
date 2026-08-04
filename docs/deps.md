@@ -48,6 +48,7 @@ aren't `slog`-compatible, HTTP servers other than
 | `golang.org/x/sys`                              | BSD-3      | (transitive)             | Low-level syscalls. |
 | `golang.org/x/text`                             | BSD-3      | (transitive)             | Unicode handling. |
 | `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`   | YAML config parsing. Standard for Go config files. |
+| `github.com/stretchr/testify`                 | MIT        | `*_test.go` across packages | Test assertions (`require` + `assert` only). Pre-approved in `AGENTS.md §5`. See ADR-0028. |
 
 > **Fiber removed in ADR-0006.** `gofiber/fiber/v3`, `gofiber/utils`,
 > `gofiber/schema`, `valyala/fasthttp`, `valyala/bytebufferpool`,
@@ -67,7 +68,6 @@ without code requires a justification in the PR.
 | `github.com/quic-go/quic-go`                 | 1     | HTTP/3 listener (see ADR-0002). |
 | `github.com/hashicorp/memberlist`            | 4     | Gossip membership. |
 | `go.opentelemetry.io/otel`                   | 1     | Tracing. |
-| `github.com/stretchr/testify`                | any   | Test assertions (tests only). |
 | `golang.org/x/sync`                          | 1     | errgroup, semaphore. |
 | `golang.org/x/vuln`                          | 0     | govulncheck (tool, not module dep). |
 

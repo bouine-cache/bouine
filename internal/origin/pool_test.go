@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func echoServer(t *testing.T) *httptest.Server {
@@ -34,9 +36,7 @@ func pool(t *testing.T, targets ...string) *Pool {
 		Targets: targets,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	if err != nil {
-		t.Fatalf("NewPool: %v", err)
-	}
+	require.NoErrorf(t, err, "NewPool: %v", err)
 	return p
 }
 
@@ -55,15 +55,11 @@ func TestPool_RoundRobin(t *testing.T) {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "/hello", nil)
 		h.ServeHTTP(rr, req)
-		if rr.Code != 200 {
-			t.Fatalf("status = %d", rr.Code)
-		}
+		require.Equal(t, 200, rr.Code)
 		host := rr.Header().Get("X-Echo-Host")
 		hits[host]++
 	}
-	if len(hits) != 2 {
-		t.Fatalf("expected traffic to 2 targets, got %v", hits)
-	}
+	require.Len(t, hits, 2)
 }
 
 func TestPool_PassiveHealth(t *testing.T) {
@@ -83,9 +79,7 @@ func TestPool_PassiveHealth(t *testing.T) {
 		h.ServeHTTP(rr, req)
 	}
 
-	if len(p.Healthy()) != 0 {
-		t.Fatalf("expected 0 healthy targets after ejection, got %v", p.Healthy())
-	}
+	require.Len(t, p.Healthy(), 0)
 
 	// Now add the bad target back + a good one and verify good stays.
 	p.MarkHealthy(bad.Listener.Addr().String())
@@ -100,12 +94,8 @@ func TestPool_PassiveHealth(t *testing.T) {
 	}
 
 	healthy := p2.Healthy()
-	if len(healthy) != 1 {
-		t.Fatalf("expected 1 healthy target, got %v", healthy)
-	}
-	if healthy[0] != good.Listener.Addr().String() {
-		t.Fatalf("wrong healthy target: %s", healthy[0])
-	}
+	require.Len(t, healthy, 1)
+	require.Equal(t, good.Listener.Addr().String(), healthy[0])
 }
 
 func TestPool_AllDown(t *testing.T) {
@@ -123,9 +113,7 @@ func TestPool_AllDown(t *testing.T) {
 	// Second request: no healthy targets.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/", nil))
-	if rr2.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502, got %d", rr2.Code)
-	}
+	require.Equal(t, http.StatusBadGateway, rr2.Code)
 }
 
 func TestPool_MarkHealthy(t *testing.T) {
@@ -139,14 +127,10 @@ func TestPool_MarkHealthy(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 
-	if len(p.Healthy()) != 0 {
-		t.Fatal("should be ejected")
-	}
+	require.Len(t, p.Healthy(), 0)
 
 	p.MarkHealthy(bad.Listener.Addr().String())
-	if len(p.Healthy()) != 1 {
-		t.Fatal("should be healthy after MarkHealthy")
-	}
+	require.Len(t, p.Healthy(), 1)
 }
 
 func TestPool_NoTargetsError(t *testing.T) {
@@ -170,11 +154,10 @@ func TestPool_ProxiesBody(t *testing.T) {
 	req := httptest.NewRequest("POST", "/echo", strings.NewReader(body))
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 200 {
-		t.Fatalf("status = %d", rr.Code)
-	}
-	if got := rr.Body.String(); got != body {
-		t.Fatalf("body = %q, want %q", got, body)
+	require.Equal(t, 200, rr.Code)
+	{
+		got := rr.Body.String()
+		require.Equal(t, body, got)
 	}
 }
 
@@ -198,7 +181,5 @@ func TestPool_ResponseHeaderTimeout(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("expected 502 from response header timeout, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusBadGateway, rr.Code)
 }

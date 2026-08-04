@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -41,15 +44,12 @@ func TestHotOnly_PutAddsKey(t *testing.T) {
 	ctx := context.Background()
 
 	k := KeyHash([]byte("hot-put"))
-	if err := s.Put(ctx, k, obj(k, 100)); err != nil {
-		t.Fatal(err)
+	{
+		err := s.Put(ctx, k, obj(k, 100))
+		require.NoError(t, err)
 	}
-	if !hotOnlyContains(s, k) {
-		t.Fatal("key should be in hotOnly after Put")
-	}
-	if hotOnlyCount(s) != 1 {
-		t.Fatalf("HotOnlyCount = %d, want 1", hotOnlyCount(s))
-	}
+	require.True(t, hotOnlyContains(s, k))
+	require.Equal(t, 1, hotOnlyCount(s))
 }
 
 func TestHotOnly_SetBackedRemovesKey(t *testing.T) {
@@ -59,16 +59,10 @@ func TestHotOnly_SetBackedRemovesKey(t *testing.T) {
 
 	k := KeyHash([]byte("backed-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
-	if !hotOnlyContains(s, k) {
-		t.Fatal("key should be in hotOnly before SetBacked")
-	}
+	require.True(t, hotOnlyContains(s, k))
 	s.SetBacked(k)
-	if hotOnlyContains(s, k) {
-		t.Fatal("key should not be in hotOnly after SetBacked")
-	}
-	if hotOnlyCount(s) != 0 {
-		t.Fatalf("HotOnlyCount = %d, want 0", hotOnlyCount(s))
-	}
+	require.False(t, hotOnlyContains(s, k))
+	require.Equal(t, 0, hotOnlyCount(s))
 }
 
 func TestHotOnly_ClearBackedReaddsKey(t *testing.T) {
@@ -79,16 +73,10 @@ func TestHotOnly_ClearBackedReaddsKey(t *testing.T) {
 	k := KeyHash([]byte("clear-backed-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	s.SetBacked(k)
-	if hotOnlyContains(s, k) {
-		t.Fatal("key should not be in hotOnly after SetBacked")
-	}
+	require.False(t, hotOnlyContains(s, k))
 	s.ClearBacked(k)
-	if !hotOnlyContains(s, k) {
-		t.Fatal("key should be in hotOnly after ClearBacked")
-	}
-	if hotOnlyCount(s) != 1 {
-		t.Fatalf("HotOnlyCount = %d, want 1", hotOnlyCount(s))
-	}
+	require.True(t, hotOnlyContains(s, k))
+	require.Equal(t, 1, hotOnlyCount(s))
 }
 
 func TestHotOnly_DeleteRemovesKey(t *testing.T) {
@@ -98,18 +86,13 @@ func TestHotOnly_DeleteRemovesKey(t *testing.T) {
 
 	k := KeyHash([]byte("delete-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
-	if !hotOnlyContains(s, k) {
-		t.Fatal("key should be in hotOnly before Delete")
+	require.True(t, hotOnlyContains(s, k))
+	{
+		err := s.Delete(ctx, k)
+		require.NoError(t, err)
 	}
-	if err := s.Delete(ctx, k); err != nil {
-		t.Fatal(err)
-	}
-	if hotOnlyContains(s, k) {
-		t.Fatal("key should not be in hotOnly after Delete")
-	}
-	if hotOnlyCount(s) != 0 {
-		t.Fatalf("HotOnlyCount = %d, want 0", hotOnlyCount(s))
-	}
+	require.False(t, hotOnlyContains(s, k))
+	require.Equal(t, 0, hotOnlyCount(s))
 }
 
 func TestHotOnly_BanRemovesKey(t *testing.T) {
@@ -124,22 +107,12 @@ func TestHotOnly_BanRemovesKey(t *testing.T) {
 	o.Header.Set(header.XBouinePath, "/ban-me")
 	_ = s.Put(ctx, k, o)
 
-	if !hotOnlyContains(s, k) {
-		t.Fatal("key should be in hotOnly before Ban")
-	}
+	require.True(t, hotOnlyContains(s, k))
 	count, err := s.Ban(ctx, api.BanExpr{PathRegex: "^/ban-me"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("ban count = %d, want 1", count)
-	}
-	if hotOnlyContains(s, k) {
-		t.Fatal("key should not be in hotOnly after Ban")
-	}
-	if hotOnlyCount(s) != 0 {
-		t.Fatalf("HotOnlyCount = %d, want 0", hotOnlyCount(s))
-	}
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.False(t, hotOnlyContains(s, k))
+	require.Equal(t, 0, hotOnlyCount(s))
 }
 
 func TestHotOnly_EvictionRemovesKey(t *testing.T) {
@@ -157,9 +130,7 @@ func TestHotOnly_EvictionRemovesKey(t *testing.T) {
 	// One of k1/k2 was evicted; the survivor should still be in hotOnly,
 	// the evicted one should not.
 	total := hotOnlyCount(s)
-	if total != 1 {
-		t.Fatalf("HotOnlyCount = %d, want 1 (one entry evicted)", total)
-	}
+	require.Equal(t, 1, total)
 	if hotOnlyContains(s, k1) && hotOnlyContains(s, k2) {
 		t.Fatal("both keys in hotOnly — expected one to be evicted")
 	}
@@ -201,13 +172,9 @@ func TestHotOnly_SweeperEvictionRemovesKey(t *testing.T) {
 		_, inEntries = sh.entries[k]
 		sh.mu.RUnlock()
 		if inEntries {
-			if !hotOnlyContains(s, k) {
-				t.Errorf("key %d in entries but not in hotOnly", k)
-			}
+			assert.True(t, hotOnlyContains(s, k))
 		} else {
-			if hotOnlyContains(s, k) {
-				t.Errorf("key %d not in entries but still in hotOnly (sweeper did not clean up)", k)
-			}
+			assert.False(t, hotOnlyContains(s, k))
 		}
 	}
 }
@@ -220,14 +187,10 @@ func TestHotOnly_ReplaceBackedWithNonBacked(t *testing.T) {
 	k := KeyHash([]byte("replace-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	s.SetBacked(k)
-	if hotOnlyContains(s, k) {
-		t.Fatal("key should not be in hotOnly after SetBacked")
-	}
+	require.False(t, hotOnlyContains(s, k))
 	// Put again — replaces the backed entry with a new non-backed one.
 	_ = s.Put(ctx, k, obj(k, 100))
-	if !hotOnlyContains(s, k) {
-		t.Fatal("key should be back in hotOnly after replacing backed entry")
-	}
+	require.True(t, hotOnlyContains(s, k))
 }
 
 func TestHotOnly_KeysRotation(t *testing.T) {
@@ -241,50 +204,39 @@ func TestHotOnly_KeysRotation(t *testing.T) {
 		_ = s.Put(ctx, k, obj(k, 10))
 	}
 
-	if hotOnlyCount(s) != 10 {
-		t.Fatalf("HotOnlyCount = %d, want 10", hotOnlyCount(s))
-	}
+	require.Equal(t, 10, hotOnlyCount(s))
 
 	// A batch with limit < total returns at most limit keys.
 	batch, _ := s.HotOnlyKeys(0, 3)
 	if len(batch) > 3 {
 		t.Fatalf("batch len = %d, want <= 3", len(batch))
 	}
-	if len(batch) == 0 {
-		t.Fatal("batch should not be empty")
-	}
+	require.NotEqual(t, 0, len(batch))
 
 	// All returned keys must be valid hot-only entries.
 	for _, k := range batch {
-		if !hotOnlyContains(s, k) {
-			t.Fatalf("key %d in batch but not in hotOnly", k)
-		}
+		require.True(t, hotOnlyContains(s, k))
 	}
 
 	// A large limit returns all 10 keys.
 	all, _ := s.HotOnlyKeys(0, 100)
-	if len(all) != 10 {
-		t.Fatalf("all len = %d, want 10", len(all))
-	}
+	require.Len(t, all, 10)
 
 	// Verify all keys are covered by the full batch.
 	seen := make(map[api.Key]struct{}, 10)
 	for _, k := range all {
 		seen[k] = struct{}{}
 	}
-	if len(seen) != 10 {
-		t.Fatalf("unique keys in full batch = %d, want 10", len(seen))
-	}
+	require.Len(t, seen, 10)
 }
 
 func TestHotOnly_KeysEmpty(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
-	if hotOnlyCount(s) != 0 {
-		t.Fatalf("HotOnlyCount = %d, want 0", hotOnlyCount(s))
-	}
-	if keys, _ := s.HotOnlyKeys(0, 10); keys != nil {
-		t.Fatalf("HotOnlyKeys = %v, want nil", keys)
+	require.Equal(t, 0, hotOnlyCount(s))
+	{
+		keys, _ := s.HotOnlyKeys(0, 10)
+		require.Nil(t, keys)
 	}
 }
 
@@ -293,7 +245,8 @@ func TestHotOnly_KeysLimitZero(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 	_ = s.Put(ctx, KeyHash([]byte("k")), obj(KeyHash([]byte("k")), 10))
-	if keys, _ := s.HotOnlyKeys(0, 0); keys != nil {
-		t.Fatalf("HotOnlyKeys with limit=0 = %v, want nil", keys)
+	{
+		keys, _ := s.HotOnlyKeys(0, 0)
+		require.Nil(t, keys)
 	}
 }

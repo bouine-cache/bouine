@@ -258,6 +258,9 @@ L1 → L7, /pkg/api
   (`-skip` with a tracking issue) within one business day.
 - **Determinism**: no `time.Now()` in tests; use the injected clock. No
   random ports; use `:0` and read back.
+- **Assertions**: use `testify` (`require` + `assert` only). See
+  ADR-0028 for the require-vs-assert convention and the `time.Time`
+  comparison exception. `suite`/`mock`/`httpmock` are not approved.
 
 ---
 

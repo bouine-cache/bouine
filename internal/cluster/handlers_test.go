@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -24,12 +27,8 @@ func TestPeerPurgeHandler_DecodesAndCalls(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if received.Key != api.Key(42) {
-		t.Errorf("key = %d, want 42", received.Key)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, api.Key(42), received.Key)
 }
 
 func TestPeerPurgeHandler_BadBody(t *testing.T) {
@@ -43,9 +42,7 @@ func TestPeerPurgeHandler_BadBody(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
-	}
+	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestPeerBanHandler_DecodesAndCalls(t *testing.T) {
@@ -63,12 +60,8 @@ func TestPeerBanHandler_DecodesAndCalls(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if received.Predicate.HostRegex != "example.com" {
-		t.Errorf("host_regex = %q, want example.com", received.Predicate.HostRegex)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "example.com", received.Predicate.HostRegex)
 }
 
 type byteReader struct {

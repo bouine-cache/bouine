@@ -1,7 +1,8 @@
 package cloudflare_test
 
 import (
-	"strings"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 
 	cf "github.com/bouine-cache/bouine/internal/cloudflare"
@@ -18,9 +19,7 @@ func TestMapURL(t *testing.T) {
 func TestMapURL_Empty(t *testing.T) {
 	t.Parallel()
 	r := cf.MapURL("")
-	if !r.Skipped {
-		t.Fatal("empty URL should be skipped")
-	}
+	require.True(t, r.Skipped)
 }
 
 func TestMapSurrogateKey(t *testing.T) {
@@ -40,9 +39,7 @@ func TestMapPathRegex_PlainPrefix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		r := cf.MapPathRegex(tc.in)
-		if r.Skipped {
-			t.Errorf("%q: unexpected skip: %s", tc.in, r.SkipReason)
-		}
+		assert.False(t, r.Skipped)
 		if len(r.Prefixes) == 0 || r.Prefixes[0] != tc.want {
 			t.Errorf("%q: want prefix %q, got %v", tc.in, tc.want, r.Prefixes)
 		}
@@ -54,12 +51,8 @@ func TestMapPathRegex_Metacharacters(t *testing.T) {
 	cases := []string{"^/api/[a-z]+", "^/api/.*", "/api/(v1|v2)"}
 	for _, tc := range cases {
 		r := cf.MapPathRegex(tc)
-		if !r.Skipped {
-			t.Errorf("%q: expected skip for metacharacters", tc)
-		}
-		if !strings.Contains(r.SkipReason, "metacharacters") {
-			t.Errorf("%q: skip reason should mention metacharacters: %s", tc, r.SkipReason)
-		}
+		assert.True(t, r.Skipped)
+		assert.Contains(t, r.SkipReason, "metacharacters")
 	}
 }
 
@@ -72,9 +65,7 @@ func TestMapHostRegex_Literal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		r := cf.MapHostRegex(tc.in)
-		if r.Skipped {
-			t.Errorf("%q: unexpected skip: %s", tc.in, r.SkipReason)
-		}
+		assert.False(t, r.Skipped)
 		if len(r.Hosts) == 0 || r.Hosts[0] != tc.want {
 			t.Errorf("%q: want host %q, got %v", tc.in, tc.want, r.Hosts)
 		}
@@ -86,9 +77,7 @@ func TestMapHostRegex_Metacharacters(t *testing.T) {
 	cases := []string{".*\\.example\\.com", "(api|www)\\.example\\.com"}
 	for _, tc := range cases {
 		r := cf.MapHostRegex(tc)
-		if !r.Skipped {
-			t.Errorf("%q: expected skip for metacharacters", tc)
-		}
+		assert.True(t, r.Skipped)
 	}
 }
 
@@ -97,12 +86,8 @@ func TestMapPathRegex_SuffixAnchor(t *testing.T) {
 	cases := []string{"^/api/v1/$", "/exact$"}
 	for _, tc := range cases {
 		r := cf.MapPathRegex(tc)
-		if !r.Skipped {
-			t.Errorf("%q: expected skip for suffix anchor", tc)
-		}
-		if !strings.Contains(r.SkipReason, "suffix anchor") {
-			t.Errorf("%q: skip reason should mention suffix anchor: %s", tc, r.SkipReason)
-		}
+		assert.True(t, r.Skipped)
+		assert.Contains(t, r.SkipReason, "suffix anchor")
 	}
 }
 
@@ -111,12 +96,8 @@ func TestMapHostRegex_Anchor(t *testing.T) {
 	cases := []string{"^example.com", "^api\\.example\\.com"}
 	for _, tc := range cases {
 		r := cf.MapHostRegex(tc)
-		if !r.Skipped {
-			t.Errorf("%q: expected skip for anchor", tc)
-		}
-		if !strings.Contains(r.SkipReason, "anchors") {
-			t.Errorf("%q: skip reason should mention anchors: %s", tc, r.SkipReason)
-		}
+		assert.True(t, r.Skipped)
+		assert.Contains(t, r.SkipReason, "anchors")
 	}
 }
 
@@ -154,7 +135,5 @@ func TestMergeResults(t *testing.T) {
 	if len(m.URLs) != 1 || len(m.Tags) != 1 || len(m.Prefixes) != 1 {
 		t.Fatalf("merge failed: %+v", m)
 	}
-	if m.Skipped {
-		t.Fatal("merge of non-skipped results should not be skipped")
-	}
+	require.False(t, m.Skipped)
 }

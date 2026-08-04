@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -25,12 +27,8 @@ func TestSlabAllocator_AllocFree(t *testing.T) {
 	sizes := []int{1, 100, 255, 256, 257, 1024, 4095, 4096, 10000, 65536, 100000, 262144, 500000, 1048576}
 	for _, size := range sizes {
 		buf := slab.Alloc(size)
-		if buf == nil {
-			t.Fatalf("Alloc(%d) returned nil", size)
-		}
-		if len(buf) != size {
-			t.Fatalf("Alloc(%d) returned len=%d", size, len(buf))
-		}
+		require.NotNil(t, buf)
+		require.Len(t, buf, size)
 		// Write to the entire buffer to verify it's writable.
 		for i := range buf {
 			buf[i] = byte(i % 256)
@@ -39,12 +37,8 @@ func TestSlabAllocator_AllocFree(t *testing.T) {
 	}
 
 	allocs, frees, fallback := slab.Stats()
-	if allocs == 0 {
-		t.Fatal("expected non-zero allocs")
-	}
-	if frees == 0 {
-		t.Fatal("expected non-zero frees")
-	}
+	require.NotEqual(t, 0, allocs)
+	require.NotEqual(t, 0, frees)
 	if fallback > 0 {
 		t.Logf("fallback=%d (some sizes may exceed slab classes)", fallback)
 	}
@@ -66,15 +60,9 @@ func TestSlabAllocator_FreeHeapBuffer(t *testing.T) {
 	slab.Free(heapBuf)
 
 	allocs, frees, fallback := slab.Stats()
-	if allocs != 0 {
-		t.Fatalf("expected 0 allocs, got %d", allocs)
-	}
-	if frees != 0 {
-		t.Fatalf("expected 0 frees for heap buffer, got %d", frees)
-	}
-	if fallback != 0 {
-		t.Fatalf("expected 0 fallback, got %d", fallback)
-	}
+	require.Equal(t, 0, allocs)
+	require.Equal(t, 0, frees)
+	require.Equal(t, 0, fallback)
 }
 
 func TestSlabAllocator_ReuseSlots(t *testing.T) {
@@ -92,21 +80,15 @@ func TestSlabAllocator_ReuseSlots(t *testing.T) {
 	// recycle slots, so allocs should stay steady and fallback should
 	// stay zero.
 	size := 100
-	for i := range 100 {
+	for range 100 {
 		buf := slab.Alloc(size)
-		if buf == nil {
-			t.Fatalf("iteration %d: Alloc returned nil", i)
-		}
+		require.NotNil(t, buf)
 		slab.Free(buf)
 	}
 
 	allocs, frees, _ := slab.Stats()
-	if allocs != 100 {
-		t.Fatalf("expected 100 allocs, got %d", allocs)
-	}
-	if frees != 100 {
-		t.Fatalf("expected 100 frees, got %d", frees)
-	}
+	require.Equal(t, 100, allocs)
+	require.Equal(t, 100, frees)
 }
 
 func TestSlabAllocator_Growable(t *testing.T) {
@@ -146,12 +128,8 @@ func TestSlabAllocator_Growable(t *testing.T) {
 		slab.Free(b)
 	}
 	allocs, frees, fallback := slab.Stats()
-	if allocs == 0 {
-		t.Fatal("expected non-zero allocs")
-	}
-	if frees == 0 {
-		t.Fatal("expected non-zero frees")
-	}
+	require.NotEqual(t, 0, allocs)
+	require.NotEqual(t, 0, frees)
 	if fallback > 0 {
 		t.Logf("fallback=%d (some sizes may exceed slab classes)", fallback)
 	}
@@ -170,19 +148,13 @@ func TestSlabAllocator_OversizedFallback(t *testing.T) {
 
 	// Size larger than the biggest class (1MB) should fall back to heap.
 	buf := slab.Alloc(2 * 1024 * 1024)
-	if buf == nil {
-		t.Fatal("Alloc(2MB) returned nil")
-	}
-	if len(buf) != 2*1024*1024 {
-		t.Fatalf("Alloc(2MB) returned len=%d", len(buf))
-	}
+	require.NotNil(t, buf)
+	require.Len(t, buf, 2*1024*1024)
 	// Freeing a heap buffer must be safe.
 	slab.Free(buf)
 
 	_, _, fallback := slab.Stats()
-	if fallback == 0 {
-		t.Fatal("expected fallback for oversized allocation")
-	}
+	require.NotEqual(t, 0, fallback)
 }
 
 func TestSlabAllocator_NilAndZero(t *testing.T) {
@@ -196,11 +168,13 @@ func TestSlabAllocator_NilAndZero(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = slab.Close() })
 
-	if buf := slab.Alloc(0); buf != nil {
-		t.Fatal("Alloc(0) should return nil")
+	{
+		buf := slab.Alloc(0)
+		require.Nil(t, buf)
 	}
-	if buf := slab.Alloc(-1); buf != nil {
-		t.Fatal("Alloc(-1) should return nil")
+	{
+		buf := slab.Alloc(-1)
+		require.Nil(t, buf)
 	}
 	// Free of nil must not panic.
 	slab.Free(nil)
@@ -230,18 +204,14 @@ func TestSlabAllocator_DataIntegrity(t *testing.T) {
 	slab.Free(buf1)
 
 	buf2 := slab.Alloc(size)
-	if len(buf2) != size {
-		t.Fatalf("re-alloc: expected len %d, got %d", size, len(buf2))
-	}
+	require.Len(t, buf2, size)
 	// Write new data to verify the buffer is writable after reuse.
 	for i := range buf2 {
 		buf2[i] = byte(i % 128)
 	}
 	// Verify data integrity after write.
 	for i := range buf2 {
-		if buf2[i] != byte(i%128) {
-			t.Fatalf("byte %d: expected %d, got %d", i, byte(i%128), buf2[i])
-		}
+		require.Equal(t, byte(i%128), buf2[i])
 	}
 	slab.Free(buf2)
 }
@@ -264,9 +234,7 @@ func TestSlabAllocator_DoubleFree(t *testing.T) {
 	slab.Free(buf)
 
 	_, frees, _ := slab.Stats()
-	if frees != 1 {
-		t.Fatalf("expected 1 free (double-free should be no-op), got %d", frees)
-	}
+	require.Equal(t, 1, frees)
 }
 
 func TestHotStore_SlabPutGet(t *testing.T) {
@@ -288,34 +256,22 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 		o.Body[i] = byte(i % 256)
 	}
 
-	if err := s.Put(context.Background(), k, o); err != nil {
-		t.Fatalf("put: %v", err)
+	{
+		err := s.Put(context.Background(), k, o)
+		require.NoErrorf(t, err, "put: %v", err)
 	}
 	// Verify Put did not mutate the caller's obj.Body — the caller
 	// (TieredStore.Put) may still need to read it for warm-tier encoding.
 	for i := range o.Body {
-		if o.Body[i] != byte(i%256) {
-			t.Fatalf("Put mutated caller obj.Body at byte %d: expected %d, got %d",
-				i, byte(i%256), o.Body[i])
-		}
+		require.Equal(t, byte(i%256), o.Body[i])
 	}
 	got, src, err := s.Get(context.Background(), k)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected hit, got miss")
-	}
-	if src != api.SourceHot {
-		t.Fatalf("expected SourceHot, got %s", src)
-	}
-	if len(got.Body) != 500 {
-		t.Fatalf("body len: expected 500, got %d", len(got.Body))
-	}
+	require.NoErrorf(t, err, "get: %v", err)
+	require.NotNil(t, got)
+	require.Equal(t, api.SourceHot, src)
+	require.Len(t, got.Body, 500)
 	for i := range got.Body {
-		if got.Body[i] != byte(i%256) {
-			t.Fatalf("byte %d: expected %d, got %d", i, byte(i%256), got.Body[i])
-		}
+		require.Equal(t, byte(i%256), got.Body[i])
 	}
 }
 
@@ -335,23 +291,18 @@ func TestHotStore_SlabEviction(t *testing.T) {
 	for i := range 20 {
 		k := KeyHash([]byte{byte(i)})
 		o := obj(k, 200)
-		if err := s.Put(context.Background(), k, o); err != nil {
-			t.Fatalf("put %d: %v", i, err)
+		{
+			err := s.Put(context.Background(), k, o)
+			require.NoErrorf(t, err, "put %d: %v", i, err)
 		}
 	}
 	// Verify that slab frees actually happened during evictions.
 	// With 20 puts of 200B each into a 4096B store, at least some
 	// entries must have been evicted, and their slab slots freed.
-	if s.slab == nil {
-		t.Fatal("slab should be initialized on Linux")
-	}
+	require.NotNil(t, s.slab)
 	allocs, frees, _ := s.slab.Stats()
-	if allocs == 0 {
-		t.Fatal("expected slab allocations during puts")
-	}
-	if frees == 0 {
-		t.Fatal("expected slab frees during evictions")
-	}
+	require.NotEqual(t, 0, allocs)
+	require.NotEqual(t, 0, frees)
 }
 
 // TestHotStore_SlabConcurrentGetEviction proves the use-after-free fix:
@@ -381,8 +332,9 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 	for i := range o.Body {
 		o.Body[i] = byte(i % 256)
 	}
-	if err := s.Put(context.Background(), key, o); err != nil {
-		t.Fatalf("put: %v", err)
+	{
+		err := s.Put(context.Background(), key, o)
+		require.NoErrorf(t, err, "put: %v", err)
 	}
 
 	var wg sync.WaitGroup

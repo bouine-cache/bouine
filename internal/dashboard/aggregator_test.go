@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -29,16 +32,12 @@ func TestAggregator_CollectSingleNode(t *testing.T) {
 	agg := NewAggregator(rings, nil, "", nil)
 	merged, peers := agg.Collect(t.Context())
 
-	if len(peers) != 1 {
-		t.Errorf("expected 1 peer result (self), got %d", len(peers))
-	}
+	assert.Len(t, peers, 1)
 	var totalReq int64
 	for _, b := range merged.RequestSnap {
 		totalReq += b.Requests
 	}
-	if totalReq != 1 {
-		t.Errorf("expected 1 total request in merged, got %d", totalReq)
-	}
+	assert.Equal(t, int64(1), totalReq)
 }
 
 func TestAggregator_CollectWithPeer(t *testing.T) {
@@ -67,9 +66,7 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	agg := NewAggregator(rings, peersFn, "127.0.0.1:9999", nil)
 	merged, peers := agg.Collect(t.Context())
 
-	if len(peers) != 2 {
-		t.Errorf("expected 2 peer results, got %d", len(peers))
-	}
+	assert.Len(t, peers, 2)
 	livePeers := 0
 	for _, p := range peers {
 		if !p.Stale {
@@ -84,9 +81,7 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	for _, b := range merged.RequestSnap {
 		totalReq += b.Requests
 	}
-	if totalReq != 51 {
-		t.Errorf("merged total requests: want 51, got %d", totalReq)
-	}
+	assert.Equal(t, int64(51), totalReq)
 }
 
 func TestAggregator_PeerTimeout(t *testing.T) {
@@ -142,9 +137,7 @@ func TestAggregator_LastKnownOnStale(t *testing.T) {
 			got99 = true
 		}
 	}
-	if !got99 {
-		t.Error("expected live peer in first collect")
-	}
+	assert.True(t, got99)
 	liveSrv.Close()
 
 	// Second call — peer is now down; should use last-known snapshot.
@@ -157,14 +150,10 @@ func TestAggregator_LastKnownOnStale(t *testing.T) {
 			for _, b := range p.Summary.RequestSnap {
 				total += b.Requests
 			}
-			if total != 99 {
-				t.Errorf("last-known stale requests: want 99, got %d", total)
-			}
+			assert.Equal(t, int64(99), total)
 		}
 	}
-	if !staleFound {
-		t.Error("expected stale peer with last-known data in second collect")
-	}
+	assert.True(t, staleFound)
 }
 
 func TestPeerMetricsHandler(t *testing.T) {
@@ -178,21 +167,16 @@ func TestPeerMetricsHandler(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/v1/peer/metrics", nil)
 	h.ServeHTTP(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d", w.Code)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 	var sum observability.MetricsSummary
-	if err := json.NewDecoder(w.Body).Decode(&sum); err != nil {
-		t.Fatalf("decode: %v", err)
+	{
+		err := json.NewDecoder(w.Body).Decode(&sum)
+		require.NoErrorf(t, err, "decode: %v", err)
 	}
-	if sum.NodeName != "node-x" {
-		t.Errorf("NodeName: want node-x, got %q", sum.NodeName)
-	}
+	assert.Equal(t, "node-x", sum.NodeName)
 	var total int64
 	for _, b := range sum.RequestSnap {
 		total += b.Requests
 	}
-	if total != 1 {
-		t.Errorf("total requests: want 1, got %d", total)
-	}
+	assert.Equal(t, int64(1), total)
 }

@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
@@ -25,8 +28,9 @@ func TestNormaliseSource(t *testing.T) {
 		{"unknown", ""},
 	}
 	for _, c := range cases {
-		if got := normaliseSource(c.input); got != c.want {
-			t.Errorf("normaliseSource(%q) = %q, want %q", c.input, got, c.want)
+		{
+			got := normaliseSource(c.input)
+			assert.Equal(t, c.want, got)
 		}
 	}
 }
@@ -47,9 +51,7 @@ func TestMiddleware_SourceLabel(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
 
 	got, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	var foundRequests, foundBytes bool
 	for _, mf := range got {
 		switch mf.GetName() {
@@ -67,12 +69,8 @@ func TestMiddleware_SourceLabel(t *testing.T) {
 			}
 		}
 	}
-	if !foundRequests {
-		t.Error("requests_total: no series with source=hot, cache_result=HIT")
-	}
-	if !foundBytes {
-		t.Error("response_bytes_total: no series with source=hot, cache_result=HIT")
-	}
+	assert.True(t, foundRequests)
+	assert.True(t, foundBytes)
 }
 
 func TestMiddleware_SourceLabel_Empty(t *testing.T) {
@@ -89,9 +87,7 @@ func TestMiddleware_SourceLabel_Empty(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
 
 	got, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	for _, mf := range got {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
@@ -121,18 +117,14 @@ func TestResponseBytesOut_HasCacheResultAndSource(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
 
 	got, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	for _, mf := range got {
 		if mf.GetName() != "bouine_response_bytes_total" {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
 			if labelValue(m, "cache_result") == "MISS" && labelValue(m, "source") == "origin" {
-				if int(m.GetCounter().GetValue()) != len("body") {
-					t.Errorf("bytes = %f, want %d", m.GetCounter().GetValue(), len("body"))
-				}
+				assert.Len(t, "body", int(m.GetCounter().GetValue()))
 				return
 			}
 		}

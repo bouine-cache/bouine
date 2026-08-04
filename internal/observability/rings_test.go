@@ -4,6 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequestRing_RecordAndFlush(t *testing.T) {
@@ -17,28 +20,14 @@ func TestRequestRing_RecordAndFlush(t *testing.T) {
 	r.Flush(time.Now())
 
 	snap := r.Snapshot(1)
-	if len(snap) != 1 {
-		t.Fatalf("expected 1 bucket, got %d", len(snap))
-	}
+	require.Len(t, snap, 1)
 	b := snap[0]
-	if b.Requests != 3 {
-		t.Errorf("Requests: want 3, got %d", b.Requests)
-	}
-	if b.Hits != 2 {
-		t.Errorf("Hits: want 2, got %d", b.Hits)
-	}
-	if b.Misses != 1 {
-		t.Errorf("Misses: want 1, got %d", b.Misses)
-	}
-	if b.Errors != 1 {
-		t.Errorf("Errors: want 1, got %d", b.Errors)
-	}
-	if b.P99MS != 15 {
-		t.Errorf("P99MS: want 15, got %d", b.P99MS)
-	}
-	if r.liveRequests.Load() != 0 {
-		t.Errorf("live counters must be zero after flush")
-	}
+	assert.Equal(t, int64(3), b.Requests)
+	assert.Equal(t, int64(2), b.Hits)
+	assert.Equal(t, int64(1), b.Misses)
+	assert.Equal(t, int64(1), b.Errors)
+	assert.Equal(t, int64(15), b.P99MS)
+	assert.Equal(t, int64(0), r.liveRequests.Load())
 }
 
 func TestRequestRing_AllCategories(t *testing.T) {
@@ -52,9 +41,7 @@ func TestRequestRing_AllCategories(t *testing.T) {
 	r.Flush(time.Now())
 	snap := r.Snapshot(1)
 	b := snap[0]
-	if b.Requests != 5 {
-		t.Errorf("want 5 requests, got %d", b.Requests)
-	}
+	assert.Equal(t, int64(5), b.Requests)
 	if b.Hits != 1 || b.Misses != 1 || b.StaleHits != 1 || b.Bypasses != 1 || b.Revalidated != 1 {
 		t.Errorf("category counts wrong: %+v", b)
 	}
@@ -71,9 +58,7 @@ func TestRequestRing_SnapshotOrder(t *testing.T) {
 	}
 
 	snap := r.Snapshot(5)
-	if len(snap) != 5 {
-		t.Fatalf("expected 5 buckets, got %d", len(snap))
-	}
+	require.Len(t, snap, 5)
 	for i := range 4 {
 		if snap[i].Timestamp > snap[i+1].Timestamp {
 			t.Errorf("buckets not in ascending order at index %d: %d > %d",
@@ -91,9 +76,7 @@ func TestRequestRing_SnapshotWraparound(t *testing.T) {
 		r.Flush(now.Add(time.Duration(i) * requestBucketSecs * time.Second))
 	}
 	snap := r.Snapshot(requestBuckets)
-	if len(snap) != requestBuckets {
-		t.Errorf("expected %d buckets, got %d", requestBuckets, len(snap))
-	}
+	assert.Len(t, snap, requestBuckets)
 }
 
 func TestRouteRing_RecordAndFlush(t *testing.T) {
@@ -112,20 +95,12 @@ func TestRouteRing_RecordAndFlush(t *testing.T) {
 	}
 
 	api, ok := byRoute["/api/v1"]
-	if !ok {
-		t.Fatal("/api/v1 not found in route stats")
-	}
-	if api.Requests != 3 {
-		t.Errorf("/api/v1 Requests: want 3, got %d", api.Requests)
-	}
-	if api.Hits != 2 {
-		t.Errorf("/api/v1 Hits: want 2, got %d", api.Hits)
-	}
+	require.True(t, ok)
+	assert.Equal(t, int64(3), api.Requests)
+	assert.Equal(t, int64(2), api.Hits)
 
 	st, ok := byRoute["/static"]
-	if !ok {
-		t.Fatal("/static not found in route stats")
-	}
+	require.True(t, ok)
 	if st.HitPct < 99.9 {
 		t.Errorf("/static HitPct: want ~100, got %.1f", st.HitPct)
 	}
@@ -142,12 +117,8 @@ func TestRouteRing_Sparkline(t *testing.T) {
 		r.Flush(now.Add(time.Duration(i) * time.Minute))
 	}
 	stats := r.RouteStats(30)
-	if len(stats) == 0 {
-		t.Fatal("expected at least one route stat")
-	}
-	if len(stats[0].Sparkline) != sparklinePoints {
-		t.Errorf("sparkline len: want %d, got %d", sparklinePoints, len(stats[0].Sparkline))
-	}
+	require.NotEqual(t, 0, len(stats))
+	assert.Len(t, stats[0].Sparkline, sparklinePoints)
 }
 
 func TestOpsLogRing_RecordAndSnapshot(t *testing.T) {
@@ -157,15 +128,9 @@ func TestOpsLogRing_RecordAndSnapshot(t *testing.T) {
 	r.Record("ban", "^/api/", "ok")
 
 	snap := r.Snapshot(10)
-	if len(snap) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(snap))
-	}
-	if snap[0].Op != "purge" {
-		t.Errorf("oldest entry op: want purge, got %s", snap[0].Op)
-	}
-	if snap[1].Op != "ban" {
-		t.Errorf("newest entry op: want ban, got %s", snap[1].Op)
-	}
+	require.Len(t, snap, 2)
+	assert.Equal(t, "purge", snap[0].Op)
+	assert.Equal(t, "ban", snap[1].Op)
 }
 
 func TestOpsLogRing_Wraparound(t *testing.T) {
@@ -175,9 +140,7 @@ func TestOpsLogRing_Wraparound(t *testing.T) {
 		r.Record("purge", "url", "ok")
 	}
 	snap := r.Snapshot(opsLogCap)
-	if len(snap) != opsLogCap {
-		t.Errorf("expected %d entries, got %d", opsLogCap, len(snap))
-	}
+	assert.Len(t, snap, opsLogCap)
 }
 
 func TestRings_SaveLoad(t *testing.T) {
@@ -191,38 +154,35 @@ func TestRings_SaveLoad(t *testing.T) {
 	ri.Route.RecordRoute("/test", "HIT", 200, 10)
 	ri.Route.Flush(time.Now())
 
-	if err := ri.Save(path); err != nil {
-		t.Fatalf("Save: %v", err)
+	{
+		err := ri.Save(path)
+		require.NoErrorf(t, err, "Save: %v", err)
 	}
 
 	ri2 := NewRings("node-1")
-	if err := ri2.Load(path); err != nil {
-		t.Fatalf("Load: %v", err)
+	{
+		err := ri2.Load(path)
+		require.NoErrorf(t, err, "Load: %v", err)
 	}
 
 	snap := ri2.Request.Snapshot(requestBuckets)
-	if len(snap) != requestBuckets {
-		t.Fatalf("expected %d buckets, got %d", requestBuckets, len(snap))
-	}
+	require.Len(t, snap, requestBuckets)
 	var found bool
 	for _, b := range snap {
 		if b.Requests > 0 {
-			if b.Requests != 1 {
-				t.Errorf("expected 1 request, got %d", b.Requests)
-			}
+			assert.Equal(t, int64(1), b.Requests)
 			found = true
 		}
 	}
-	if !found {
-		t.Error("expected at least one non-zero bucket after load")
-	}
+	assert.True(t, found)
 }
 
 func TestRings_LoadMissingFile(t *testing.T) {
 	t.Parallel()
 	ri := NewRings("node-x")
-	if err := ri.Load("/tmp/bouine-nonexistent-snap-12345.snap"); err != nil {
-		t.Errorf("expected nil error for missing file, got %v", err)
+	{
+		err := ri.Load("/tmp/bouine-nonexistent-snap-12345.snap")
+		assert.Nil(t, err)
 	}
 }
 
@@ -246,29 +206,17 @@ func TestMergeSummaries(t *testing.T) {
 	b.RequestSnap[0] = RequestBucket{Requests: 50, Hits: 30, P99MS: 50}
 
 	merged := MergeSummaries([]MetricsSummary{a, b})
-	if merged.RequestSnap[0].Requests != 150 {
-		t.Errorf("merged Requests: want 150, got %d", merged.RequestSnap[0].Requests)
-	}
-	if merged.RequestSnap[0].Hits != 110 {
-		t.Errorf("merged Hits: want 110, got %d", merged.RequestSnap[0].Hits)
-	}
-	if merged.RequestSnap[0].P99MS != 50 {
-		t.Errorf("merged P99MS: want 50 (max), got %d", merged.RequestSnap[0].P99MS)
-	}
-	if len(merged.RouteStats) != 1 {
-		t.Fatalf("expected 1 route stat, got %d", len(merged.RouteStats))
-	}
-	if merged.RouteStats[0].Requests != 15 {
-		t.Errorf("merged route Requests: want 15, got %d", merged.RouteStats[0].Requests)
-	}
+	assert.Equal(t, int64(150), merged.RequestSnap[0].Requests)
+	assert.Equal(t, int64(110), merged.RequestSnap[0].Hits)
+	assert.Equal(t, int64(50), merged.RequestSnap[0].P99MS)
+	require.Len(t, merged.RouteStats, 1)
+	assert.Equal(t, int64(15), merged.RouteStats[0].Requests)
 }
 
 func TestMergeSummaries_Empty(t *testing.T) {
 	t.Parallel()
 	m := MergeSummaries(nil)
-	if m.NodeName != "" {
-		t.Errorf("expected empty NodeName, got %q", m.NodeName)
-	}
+	assert.Equal(t, "", m.NodeName)
 }
 
 // TestRequestRing_RecordRequestZeroAllocs asserts the hot-path constraint
@@ -280,9 +228,7 @@ func TestRequestRing_RecordRequestZeroAllocs(t *testing.T) {
 	allocs := testing.AllocsPerRun(200, func() {
 		r.RecordRequest("HIT", 200, 5)
 	})
-	if allocs != 0 {
-		t.Errorf("RecordRequest: want 0 allocs/op on hot path, got %v", allocs)
-	}
+	assert.Equal(t, float64(0), allocs)
 }
 
 // TestRouteRing_RecordRouteZeroAllocs asserts zero allocations for the
@@ -293,9 +239,7 @@ func TestRouteRing_RecordRouteZeroAllocs(t *testing.T) {
 	allocs := testing.AllocsPerRun(200, func() {
 		r.RecordRoute("/api/v1", "HIT", 200, 10)
 	})
-	if allocs != 0 {
-		t.Errorf("RecordRoute: want 0 allocs/op on hot path, got %v", allocs)
-	}
+	assert.Equal(t, float64(0), allocs)
 }
 
 // BenchmarkRequestRing_RecordRequest measures hot-path throughput and
@@ -322,25 +266,29 @@ func BenchmarkRouteRing_RecordRoute(b *testing.B) {
 
 func TestLatencyHistogram_Percentile(t *testing.T) {
 	var h LatencyHistogram
-	if got := h.Percentile(0.5); got != 0 {
-		t.Fatalf("empty histogram p50 = %d, want 0", got)
+	{
+		got := h.Percentile(0.5)
+		require.Equal(t, int64(0), got)
 	}
 	// 100 requests all in the ≤10ms bucket (index 3, bound 10).
 	h[3] = 100
 	for _, p := range []float64{0.5, 0.9, 0.99} {
-		if got := h.Percentile(p); got != 10 {
-			t.Fatalf("p%.0f = %d, want 10", p*100, got)
+		{
+			got := h.Percentile(p)
+			require.Equal(t, int64(10), got)
 		}
 	}
 	// Mixed: 90 fast (≤1ms idx0), 10 slow (overflow idx10).
 	h = LatencyHistogram{}
 	h[0] = 90
 	h[latencyHistBuckets-1] = 10
-	if got := h.Percentile(0.5); got != 1 {
-		t.Fatalf("mixed p50 = %d, want 1", got)
+	{
+		got := h.Percentile(0.5)
+		require.Equal(t, int64(1), got)
 	}
-	if got := h.Percentile(0.99); got != LatencyBoundsMs[len(LatencyBoundsMs)-1] {
-		t.Fatalf("mixed p99 = %d, want %d", got, LatencyBoundsMs[len(LatencyBoundsMs)-1])
+	{
+		got := h.Percentile(0.99)
+		require.Equal(t, LatencyBoundsMs[len(LatencyBoundsMs)-1], got)
 	}
 }
 
@@ -353,8 +301,9 @@ func TestLatencyBucketIndex(t *testing.T) {
 		{1000, 9}, {1001, latencyHistBuckets - 1}, {99999, latencyHistBuckets - 1},
 	}
 	for _, c := range cases {
-		if got := latencyBucketIndex(c.durMs); got != c.want {
-			t.Fatalf("latencyBucketIndex(%d) = %d, want %d", c.durMs, got, c.want)
+		{
+			got := latencyBucketIndex(c.durMs)
+			require.Equal(t, c.want, got)
 		}
 	}
 }
@@ -410,10 +359,8 @@ func TestMergeSummaries_LatencyHistogram(t *testing.T) {
 	for i := range requestBuckets {
 		if i != 0 && i != last {
 			h := merged.RequestSnap[i].LatHist
-			for j, v := range h {
-				if v != 0 {
-					t.Fatalf("merged LatHist[%d][%d] = %d, want 0", i, j, v)
-				}
+			for _, v := range h {
+				require.Equal(t, int64(0), v)
 			}
 		}
 	}

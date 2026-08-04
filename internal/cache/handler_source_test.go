@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -20,15 +22,17 @@ func TestHandler_XCacheSource_MissThenHit(t *testing.T) {
 	// MISS → origin
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if got := rr1.Header().Get(header.XCacheSource); got != string(api.SourceOrigin) {
-		t.Fatalf("MISS source = %q, want %q", got, api.SourceOrigin)
+	{
+		got := rr1.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceOrigin), got)
 	}
 
 	// HIT → hot
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if got := rr2.Header().Get(header.XCacheSource); got != string(api.SourceHot) {
-		t.Fatalf("HIT source = %q, want %q", got, api.SourceHot)
+	{
+		got := rr2.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceHot), got)
 	}
 }
 
@@ -41,13 +45,15 @@ func TestHandler_XCacheSource_Bypass(t *testing.T) {
 	req.Header.Set(header.CacheControl, "no-store")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if got := rr.Header().Get(header.XCache); got != "BYPASS" {
-		t.Fatalf("X-Cache = %q, want BYPASS", got)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "BYPASS", got)
 	}
 	// BYPASS → source should be empty (origin was contacted but not
 	// attributed to a cache tier).
-	if got := rr.Header().Get(header.XCacheSource); got != "" {
-		t.Fatalf("BYPASS source = %q, want empty", got)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, "", got)
 	}
 }
 
@@ -61,14 +67,14 @@ func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 504 {
-		t.Fatalf("status = %d, want 504", rr.Code)
+	require.Equal(t, 504, rr.Code)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "MISS", got)
 	}
-	if got := rr.Header().Get(header.XCache); got != "MISS" {
-		t.Fatalf("X-Cache = %q, want MISS", got)
-	}
-	if got := rr.Header().Get(header.XCacheSource); got != "" {
-		t.Fatalf("504 source = %q, want empty", got)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, "", got)
 	}
 }
 
@@ -79,8 +85,9 @@ func TestHandler_XCacheSource_InvalidateAndProxy_Origin(t *testing.T) {
 	// POST → invalidateAndProxy → source=origin
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data")))
-	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourceOrigin) {
-		t.Fatalf("POST source = %q, want %q", got, api.SourceOrigin)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceOrigin), got)
 	}
 }
 
@@ -103,11 +110,10 @@ func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/fail", nil))
 
-	if rr.Code != 502 {
-		t.Fatalf("status = %d, want 502", rr.Code)
-	}
-	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourceOrigin) {
-		t.Fatalf("fetch error source = %q, want %q", got, api.SourceOrigin)
+	require.Equal(t, 502, rr.Code)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceOrigin), got)
 	}
 }
 
@@ -124,14 +130,14 @@ func TestHandler_XCacheSource_Conditional304_Hot(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 304 {
-		t.Fatalf("status = %d, want 304", rr.Code)
+	require.Equal(t, 304, rr.Code)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "HIT", got)
 	}
-	if got := rr.Header().Get(header.XCache); got != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", got)
-	}
-	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourceHot) {
-		t.Fatalf("304 source = %q, want %q", got, api.SourceHot)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceHot), got)
 	}
 }
 
@@ -163,11 +169,13 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/peer", nil))
 
-	if got := rr.Header().Get(header.XCache); got != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", got)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "HIT", got)
 	}
-	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourcePeer) {
-		t.Fatalf("peer hit source = %q, want %q", got, api.SourcePeer)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourcePeer), got)
 	}
 }
 
@@ -189,14 +197,14 @@ func TestHandler_XCacheSource_Range_Hot(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 206 {
-		t.Fatalf("status = %d, want 206", rr.Code)
+	require.Equal(t, 206, rr.Code)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "HIT", got)
 	}
-	if got := rr.Header().Get(header.XCache); got != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", got)
-	}
-	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourceHot) {
-		t.Fatalf("range source = %q, want %q", got, api.SourceHot)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceHot), got)
 	}
 }
 
@@ -218,11 +226,13 @@ func TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/spoof", strings.NewReader("data")))
 
-	if got := rr.Header().Get(header.XCacheSource); got != string(api.SourceOrigin) {
-		t.Fatalf("origin spoof: X-Cache-Source = %q, want %q (origin must overwrite spoofed value)", got, api.SourceOrigin)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, string(api.SourceOrigin), got)
 	}
-	if got := rr.Header().Get(header.XCache); got != "MISS" {
-		t.Fatalf("origin spoof: X-Cache = %q, want MISS", got)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "MISS", got)
 	}
 }
 
@@ -245,11 +255,13 @@ func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if got := rr.Header().Get(header.XCache); got != "BYPASS" {
-		t.Fatalf("bypass spoof: X-Cache = %q, want BYPASS", got)
+	{
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "BYPASS", got)
 	}
-	if got := rr.Header().Get(header.XCacheSource); got != "" {
-		t.Fatalf("bypass spoof: X-Cache-Source = %q, want empty (origin spoof must be stripped)", got)
+	{
+		got := rr.Header().Get(header.XCacheSource)
+		require.Equal(t, "", got)
 	}
 }
 
@@ -269,12 +281,11 @@ func TestHandler_Conditional304_ETagCanonical(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 304 {
-		t.Fatalf("status = %d, want 304", rr.Code)
-	}
+	require.Equal(t, 304, rr.Code)
 	// Header.Get canonicalises the key — this will fail if the header
 	// was stored under a non-canonical key like "ETag" instead of "Etag".
-	if got := rr.Header().Get(header.ETag); got != `"v1"` {
-		t.Fatalf("ETag = %q, want %q (header must be stored under canonical key)", got, `"v1"`)
+	{
+		got := rr.Header().Get(header.ETag)
+		require.Equal(t, `"v1"`, got)
 	}
 }

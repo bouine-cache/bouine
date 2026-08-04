@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -16,9 +18,7 @@ func TestVariantKey_NoVary(t *testing.T) {
 	t.Parallel()
 	primary := api.Key(100)
 	got := VariantKey(primary, "", nil, nil)
-	if got != primary {
-		t.Fatalf("no Vary should return primary key")
-	}
+	require.Equal(t, primary, got)
 }
 
 func TestVariantKey_DifferentHeaders(t *testing.T) {
@@ -28,9 +28,7 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 	h2 := http.Header{header.AcceptEncoding: {"br"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h1, nil)
 	k2 := VariantKey(primary, "Accept-Encoding", h2, nil)
-	if k1 == k2 {
-		t.Fatal("different Accept-Encoding should produce different keys")
-	}
+	require.NotEqual(t, k2, k1)
 	if k1 == primary || k2 == primary {
 		t.Fatal("variant key should differ from primary")
 	}
@@ -42,9 +40,7 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 	h := http.Header{header.AcceptEncoding: {"gzip"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h, nil)
 	k2 := VariantKey(primary, "Accept-Encoding", h, nil)
-	if k1 != k2 {
-		t.Fatal("same headers should produce same variant key")
-	}
+	require.Equal(t, k2, k1)
 }
 
 func TestVariantKey_VaryStar(t *testing.T) {
@@ -54,9 +50,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	h2 := http.Header{header.Accept: {"application/json"}}
 	k1 := VariantKey(primary, "*", h1, nil)
 	k2 := VariantKey(primary, "*", h2, nil)
-	if k1 == k2 {
-		t.Fatal("Vary: * with different headers should differ")
-	}
+	require.NotEqual(t, k2, k1)
 }
 
 func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
@@ -70,20 +64,14 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	h2 := http.Header{"X-Request-ID": {"xyz"}}
 	k1 := VariantKey(primary, "X-Request-ID", h1, excludePolicy)
 	k2 := VariantKey(primary, "X-Request-ID", h2, excludePolicy)
-	if k1 != k2 {
-		t.Fatal("exclude lookup should be case-insensitive")
-	}
-	if k1 != primary {
-		t.Fatal("excluding all Vary fields should collapse to primary key")
-	}
+	require.Equal(t, k2, k1)
+	require.Equal(t, primary, k1)
 
 	// Partial exclude: non-excluded Vary field must still produce a
 	// variant key distinct from primary.
 	hGzip := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-ID": {"abc"}}
 	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", hGzip, excludePolicy)
-	if kPartial == primary {
-		t.Fatal("non-excluded Vary field should still produce a variant key")
-	}
+	require.NotEqual(t, primary, kPartial)
 }
 
 func TestHandler_VaryAwareStorage(t *testing.T) {
@@ -103,30 +91,22 @@ func TestHandler_VaryAwareStorage(t *testing.T) {
 	r1.Header.Set(header.AcceptEncoding, "gzip")
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, r1)
-	if rr1.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("gzip first: X-Cache = %q", rr1.Header().Get(header.XCache))
-	}
+	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
 
 	// br request — different variant, should MISS.
 	r2 := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	r2.Header.Set(header.AcceptEncoding, "br")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, r2)
-	if rr2.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("br first: X-Cache = %q", rr2.Header().Get(header.XCache))
-	}
+	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
 
 	// gzip again — should HIT.
 	r3 := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	r3.Header.Set(header.AcceptEncoding, "gzip")
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, r3)
-	if rr3.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("gzip second: X-Cache = %q, want HIT", rr3.Header().Get(header.XCache))
-	}
-	if rr3.Body.String() != "body-gzip" {
-		t.Fatalf("body = %q, want body-gzip", rr3.Body.String())
-	}
+	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
+	require.Equal(t, "body-gzip", rr3.Body.String())
 }
 
 func TestHandler_RangeOnCachedObject(t *testing.T) {
@@ -142,23 +122,18 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 	// Populate cache with full body.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/range", nil))
-	if rr.Code != 200 {
-		t.Fatalf("status = %d", rr.Code)
-	}
+	require.Equal(t, 200, rr.Code)
 
 	// Range request on cached object.
 	rangeReq := httptest.NewRequest("GET", "http://example.com/range", nil)
 	rangeReq.Header.Set(header.Range, "bytes=0-4")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, rangeReq)
-	if rr2.Code != http.StatusPartialContent {
-		t.Fatalf("range status = %d, want 206", rr2.Code)
-	}
-	if rr2.Body.String() != "Hello" {
-		t.Fatalf("range body = %q, want Hello", rr2.Body.String())
-	}
-	if xc := rr2.Header().Get(header.XCache); xc != "HIT" {
-		t.Fatalf("range X-Cache = %q, want HIT", xc)
+	require.Equal(t, http.StatusPartialContent, rr2.Code)
+	require.Equal(t, "Hello", rr2.Body.String())
+	{
+		xc := rr2.Header().Get(header.XCache)
+		require.Equal(t, "HIT", xc)
 	}
 }
 
@@ -177,9 +152,7 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
-	if obj == nil {
-		t.Fatal("object not stored")
-	}
+	require.NotNil(t, obj)
 	stale := obj.CloneForRefresh()
 	stale.StoredAt = time.Now().Add(-2 * time.Second)
 	_ = h.store.Put(context.Background(), key, stale)
@@ -189,16 +162,14 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, rangeReq)
 
-	if rr.Code != http.StatusPartialContent {
-		t.Fatalf("status = %d, want 206", rr.Code)
+	require.Equal(t, http.StatusPartialContent, rr.Code)
+	require.Equal(t, "Hello", rr.Body.String())
+	{
+		xc := rr.Header().Get(header.XCache)
+		require.Equal(t, "STALE", xc)
 	}
-	if rr.Body.String() != "Hello" {
-		t.Fatalf("body = %q, want Hello", rr.Body.String())
-	}
-	if xc := rr.Header().Get(header.XCache); xc != "STALE" {
-		t.Fatalf("stale range X-Cache = %q, want STALE", xc)
-	}
-	if w := rr.Header().Get(header.Warning); !strings.HasPrefix(w, "110") {
-		t.Fatalf("Warning = %q, want 110 prefix", w)
+	{
+		w := rr.Header().Get(header.Warning)
+		require.True(t, strings.HasPrefix(w, "110"))
 	}
 }

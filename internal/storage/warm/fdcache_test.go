@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestFDCache_TouchAndEvict(t *testing.T) {
@@ -19,14 +21,10 @@ func TestFDCache_TouchAndEvict(t *testing.T) {
 	for _, seg := range segs[:2] {
 		c.touch(seg)
 	}
-	if c.Len() != 2 {
-		t.Fatalf("Len = %d, want 2", c.Len())
-	}
+	require.Equal(t, 2, c.Len())
 
 	c.touch(segs[2])
-	if c.Len() != 2 {
-		t.Fatalf("Len after eviction = %d, want 2", c.Len())
-	}
+	require.Equal(t, 2, c.Len())
 }
 
 func TestFDCache_LRUTouchToFront(t *testing.T) {
@@ -43,43 +41,33 @@ func TestFDCache_LRUTouchToFront(t *testing.T) {
 	c.touch(segs[0])
 
 	c.touch(segs[2])
-	if c.Len() != 2 {
-		t.Fatalf("Len = %d, want 2", c.Len())
-	}
+	require.Equal(t, 2, c.Len())
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.entries[segs[0].ID]; !ok {
-		t.Fatal("seg 0 should still be cached (was recently touched)")
+	{
+		_, ok := c.entries[segs[0].ID]
+		require.True(t, ok)
 	}
-	if _, ok := c.entries[segs[1].ID]; ok {
-		t.Fatal("seg 1 should have been evicted (LRU)")
+	{
+		_, ok := c.entries[segs[1].ID]
+		require.False(t, ok)
 	}
 }
 
 func TestFDCache_ReaderProtection(t *testing.T) {
 	t.Parallel()
 	f, err := os.CreateTemp(t.TempDir(), "seg")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
+	require.NoErrorf(t, err, "CreateTemp: %v", err)
 	seg := &Segment{ID: 0, Path: f.Name(), f: f}
 	seg.opened.Store(true)
 	seg.readers.Add(1)
 
-	if seg.closeIfIdle() {
-		t.Fatal("closeIfIdle should return false with active readers")
-	}
-	if seg.f == nil {
-		t.Fatal("fd should not be closed with active readers")
-	}
+	require.False(t, seg.closeIfIdle())
+	require.NotNil(t, seg.f)
 	seg.readers.Add(-1)
-	if !seg.closeIfIdle() {
-		t.Fatal("closeIfIdle should return true with no readers")
-	}
-	if seg.f != nil {
-		t.Fatal("fd should be closed after closeIfIdle with no readers")
-	}
+	require.True(t, seg.closeIfIdle())
+	require.Nil(t, seg.f)
 }
 
 func TestFDCache_EvictionSkipsReaders(t *testing.T) {
@@ -89,9 +77,7 @@ func TestFDCache_EvictionSkipsReaders(t *testing.T) {
 	segs := make([]*Segment, 3)
 	for i := range segs {
 		f, err := os.CreateTemp(t.TempDir(), "seg")
-		if err != nil {
-			t.Fatalf("CreateTemp: %v", err)
-		}
+		require.NoErrorf(t, err, "CreateTemp: %v", err)
 		segs[i] = &Segment{ID: i, Path: f.Name(), f: f}
 		segs[i].opened.Store(true)
 	}
@@ -106,21 +92,20 @@ func TestFDCache_EvictionSkipsReaders(t *testing.T) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.entries[segs[0].ID]; !ok {
-		t.Fatal("seg 0 with readers should still be in cache (moved to front, not evicted)")
+	{
+		_, ok := c.entries[segs[0].ID]
+		require.True(t, ok)
 	}
-	if _, ok := c.entries[segs[1].ID]; ok {
-		t.Fatal("seg 1 should have been evicted (was LRU with no readers)")
+	{
+		_, ok := c.entries[segs[1].ID]
+		require.False(t, ok)
 	}
-	if _, ok := c.entries[segs[2].ID]; !ok {
-		t.Fatal("seg 2 should be in cache")
+	{
+		_, ok := c.entries[segs[2].ID]
+		require.True(t, ok)
 	}
-	if segs[0].f == nil {
-		t.Fatal("seg 0 fd should still be open (protected by readers)")
-	}
-	if segs[1].f != nil {
-		t.Fatal("seg 1 fd should be closed (evicted)")
-	}
+	require.NotNil(t, segs[0].f)
+	require.Nil(t, segs[1].f)
 }
 
 func TestFDCache_Clear(t *testing.T) {
@@ -130,14 +115,10 @@ func TestFDCache_Clear(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		c.touch(&Segment{ID: i, Path: t.TempDir()})
 	}
-	if c.Len() != 5 {
-		t.Fatalf("Len = %d, want 5", c.Len())
-	}
+	require.Equal(t, 5, c.Len())
 
 	c.clear()
-	if c.Len() != 0 {
-		t.Fatalf("Len after clear = %d, want 0", c.Len())
-	}
+	require.Equal(t, 0, c.Len())
 }
 
 func TestFDCache_EvictionAllReadersNoInfiniteLoop(t *testing.T) {
@@ -147,9 +128,7 @@ func TestFDCache_EvictionAllReadersNoInfiniteLoop(t *testing.T) {
 	segs := make([]*Segment, 3)
 	for i := range segs {
 		f, err := os.CreateTemp(t.TempDir(), "seg")
-		if err != nil {
-			t.Fatalf("CreateTemp: %v", err)
-		}
+		require.NoErrorf(t, err, "CreateTemp: %v", err)
 		segs[i] = &Segment{ID: i, Path: f.Name(), f: f}
 		segs[i].opened.Store(true)
 	}
@@ -180,9 +159,7 @@ func TestFDCache_UnlimitedNil(t *testing.T) {
 	var c *fdCache
 	c.touch(&Segment{ID: 0})
 	c.clear()
-	if c.Len() != 0 {
-		t.Fatalf("Len = %d, want 0 for nil cache", c.Len())
-	}
+	require.Equal(t, 0, c.Len())
 }
 
 func TestFDCache_CapacityZeroUnlimited(t *testing.T) {
@@ -192,9 +169,7 @@ func TestFDCache_CapacityZeroUnlimited(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		c.touch(&Segment{ID: i, Path: t.TempDir()})
 	}
-	if c.Len() != 0 {
-		t.Fatalf("Len = %d, want 0 for unlimited cache", c.Len())
-	}
+	require.Equal(t, 0, c.Len())
 }
 
 func TestStore_SegmentCacheSizeEviction(t *testing.T) {
@@ -206,21 +181,15 @@ func TestStore_SegmentCacheSizeEviction(t *testing.T) {
 		SegMax:           512,
 		SegmentCacheSize: 1,
 	})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 5; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 500))
-		if err != nil {
-			t.Fatalf("Put %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
-	if s.fdCache == nil {
-		t.Fatal("fdCache should be non-nil with SegmentCacheSize=1")
-	}
+	require.NotNil(t, s.fdCache)
 	if s.fdCache.Len() > 1 {
 		t.Fatalf("fdCache.Len = %d, want <= 1", s.fdCache.Len())
 	}
@@ -235,14 +204,10 @@ func TestStore_SegmentCacheSizeUnlimited(t *testing.T) {
 		SegMax:           1 << 20,
 		SegmentCacheSize: -1,
 	})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	if s.fdCache != nil {
-		t.Fatal("fdCache should be nil with SegmentCacheSize=-1")
-	}
+	require.Nil(t, s.fdCache)
 }
 
 func TestStore_FDCacheClearedOnCompact(t *testing.T) {
@@ -254,29 +219,22 @@ func TestStore_FDCacheClearedOnCompact(t *testing.T) {
 		SegMax:           1 << 20,
 		SegmentCacheSize: 256,
 	})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 3; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 100))
-		if err != nil {
-			t.Fatalf("Put %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
-	if s.fdCache.Len() == 0 {
-		t.Fatal("fdCache should have entries before compact")
+	require.NotEqual(t, 0, s.fdCache.Len())
+
+	{
+		err := s.Compact()
+		require.NoErrorf(t, err, "Compact: %v", err)
 	}
 
-	if err := s.Compact(); err != nil {
-		t.Fatalf("Compact: %v", err)
-	}
-
-	if s.fdCache.Len() != 0 {
-		t.Fatalf("fdCache.Len after compact = %d, want 0", s.fdCache.Len())
-	}
+	require.Equal(t, 0, s.fdCache.Len())
 }
 
 func TestStore_FDCacheConcurrentReaders(t *testing.T) {
@@ -288,16 +246,12 @@ func TestStore_FDCacheConcurrentReaders(t *testing.T) {
 		SegMax:           512,
 		SegmentCacheSize: 2,
 	})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 10; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 500))
-		if err != nil {
-			t.Fatalf("Put %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	var wg sync.WaitGroup
@@ -320,26 +274,19 @@ func TestStore_FDCacheClearedOnClose(t *testing.T) {
 		SegMax:           512,
 		SegmentCacheSize: 256,
 	})
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStore: %v", err)
 
 	for i := 0; i < 3; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 500))
-		if err != nil {
-			t.Fatalf("Put %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
-	if s.fdCache.Len() == 0 {
-		t.Fatal("fdCache should have entries before close")
+	require.NotEqual(t, 0, s.fdCache.Len())
+
+	{
+		err := s.Close()
+		require.NoErrorf(t, err, "Close: %v", err)
 	}
 
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	if s.fdCache.Len() != 0 {
-		t.Fatalf("fdCache.Len after close = %d, want 0", s.fdCache.Len())
-	}
+	require.Equal(t, 0, s.fdCache.Len())
 }

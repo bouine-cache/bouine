@@ -13,11 +13,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
 </p>
 
-`bouine` is a cloud-native HTTP cache in Go — RFC 9111
+bouine is a cloud-native HTTP cache in Go — RFC 9111
 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
-It targets the same problem space as a classic HTTP cache (RFC 9111 cache,
-fast purge, predicate-based bans) but is designed from day one for
-Kubernetes, multi-instance clustering, and first-class observability.
+It targets the same problem space as a classic HTTP cache but is designed from day one for Kubernetes, multi-instance clustering, and first-class observability.
 
 > Status: **v1.0-rc** — core caching, clustering, negative caching,
 > jittered TTLs, soft-purge, and the Go SDK are shipped. Validated on k3s
@@ -46,51 +44,65 @@ Kubernetes, multi-instance clustering, and first-class observability.
 
 ---
 
-## Quickstart
+## Quick Start
+
+Run bouine with Docker and cache a request in under a minute.
+
+Create a minimal config:
+
+```bash
+cat > bouine.yaml <<EOF
+listen:
+  http: ":8080"
+  admin: ":9000"
+
+upstream_pools:
+  - name: origin
+    targets: ["httpbin.org:80"]
+
+routes:
+  - match: {}
+    pool: origin
+    cache:
+      ttl_default: 60s
+EOF
+```
+
+Run bouine:
+
+```bash
+docker run -d --name bouine -p 8080:8080 -p 9000:9000 \
+  -v "$PWD/bouine.yaml:/etc/bouine/config.yaml" \
+  bouinecache/bouine:latest serve --config /etc/bouine/config.yaml
+```
+
+Test it — first request is a MISS, second is a HIT:
+
+```bash
+curl -s -I http://localhost:8080/get | grep x-cache
+# X-Cache: MISS
+
+curl -s -I http://localhost:8080/get | grep x-cache
+# X-Cache: HIT
+```
+
+Check the admin endpoint:
+
+```bash
+curl -s http://localhost:9000/healthz
+# ok
+```
+
+### Building from source
 
 ```bash
 git clone https://github.com/bouine-cache/bouine.git
 cd bouine
-
-# One-time setup: install prek hooks (mandatory, see AGENTS.md §2.11).
-make hooks
-
-# Build, test, lint.
-make build       # -> ./bin/bouine
-make test        # -> go test -race ./...
-make lint        # -> golangci-lint run
-
-# Verify the binary runs and the admin port responds.
-./bin/bouine version
-./bin/bouine serve &
-curl -sf http://127.0.0.1:9000/healthz
-kill %1
+make build   # -> ./bin/bouine
+./bin/bouine serve --config bouine.yaml
 ```
 
-### Admin authentication
-
-All write endpoints on the admin port require a bearer token.
-Set it in your config:
-
-```yaml
-admin:
-  token: your-secret-token
-```
-
-If no token is configured, bouine generates a random one at startup
-and logs it as a `WARN`. Retrieve it with:
-
-```bash
-make admin-token CONFIG=path/to/config.yaml  # from config file
-# or from logs if auto-generated:
-./bin/bouine serve ... 2>&1 | grep 'admin token'
-```
-
-Use it in CLI commands with `--token`:
-
-```bash
-bouine purge https://example.com/page --token your-secret-token
-```
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 
 ---
 

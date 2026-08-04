@@ -1209,10 +1209,12 @@ func (h *Handler) writeAndMaybeStore(
 			// The two objects share Header and Body, which are immutable
 			// after buildObject. Hits are per-pointer (HotStore.Get
 			// increments entry.obj.Hits on the specific stored pointer).
-			// CloneForReturn shares the pre-computed serializedHead via a
-			// new atomic.Pointer so the primary-key copy does not
-			// value-copy the atomic word (copylocks) and does not
-			// recompute the header block on its first fast-path hit.
+			// CloneForReturn (not a value copy) avoids copylocks: Object
+			// embeds atomic.Pointer[[]byte]. serializedHead is nil for
+			// both copies today (buildObject never computes it) and
+			// lazy-inits independently on each copy's first fast-path hit;
+			// if buildObject ever pre-computes it, CloneForReturn's
+			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
 			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)

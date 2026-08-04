@@ -49,6 +49,9 @@ type Target struct {
 // the ModifyResponse (5xx) and ErrorHandler (connection error) paths. The
 // source string is included in the ejection log for operator visibility.
 func (t *Target) recordPassiveError(threshold int, logger observability.Logger, poolName, source string) {
+	if threshold <= 0 {
+		return
+	}
 	cnt := t.passiveErrors.Add(1)
 	if t.metrics != nil {
 		t.metrics.incPassiveError(poolName, t.addr)
@@ -72,6 +75,9 @@ func (t *Target) recordPassiveError(threshold int, logger observability.Logger, 
 // active health checker. Counter increments are lock-free; the CAS on
 // healthy ensures the log and flag always agree.
 func (t *Target) recordProbeError(threshold int, logger observability.Logger, poolName string) {
+	if threshold <= 0 {
+		return
+	}
 	cnt := t.probeErrors.Add(1)
 	if t.metrics != nil {
 		t.metrics.incProbeError(poolName, t.addr)
@@ -96,12 +102,13 @@ func (t *Target) recordProbeError(threshold int, logger observability.Logger, po
 func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, poolName string) {
 	t.probeErrors.Store(0)
 	if t.healthy.Load() {
+		t.successes.Store(0)
 		return
 	}
 	cnt := t.successes.Add(1)
 	if cnt >= int64(threshold) {
+		t.successes.Store(0)
 		if t.healthy.CompareAndSwap(false, true) {
-			t.successes.Store(0)
 			if t.metrics != nil {
 				t.metrics.incRestore(poolName, t.addr, "active")
 			}

@@ -180,6 +180,39 @@ func TestMarkHealthy_CAS(t *testing.T) {
 	}
 }
 
+// TestRecordProbeSuccess_ResetsSuccessesOnCASFailure verifies that
+// successes is reset to 0 even when the CAS to restore the target
+// fails (because MarkHealthy or another goroutine already set it
+// healthy). Without the reset, the next ejection cycle would restore
+// after a single probe success instead of threshold successes.
+func TestRecordProbeSuccess_ResetsSuccessesOnCASFailure(t *testing.T) {
+	t.Parallel()
+	srv := echoServer(t)
+	defer srv.Close()
+
+	p := pool(t, srv.Listener.Addr().String())
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Eject the target.
+	p.targets[0].healthy.Store(false)
+	p.targets[0].probeErrors.Store(5)
+
+	// Simulate MarkHealthy racing with recordProbeSuccess: MarkHealthy
+	// sets healthy=true first, so the CAS in recordProbeSuccess fails.
+	p.MarkHealthy(srv.Listener.Addr().String())
+	if len(p.Healthy()) != 1 {
+		t.Fatal("should be healthy after MarkHealthy")
+	}
+
+	// Now call recordProbeSuccess. The CAS will fail (already healthy),
+	// but successes must still be reset.
+	p.targets[0].successes.Store(99)
+	p.targets[0].recordProbeSuccess(3, logger, "test")
+	if got := p.targets[0].successes.Load(); got != 0 {
+		t.Fatalf("successes = %d, want 0 (must reset even on CAS failure)", got)
+	}
+}
+
 // TestConcurrent_ActiveAndPassive verifies that active and passive
 // health paths do not interfere when run concurrently. The passive
 // counter and the probe counter must be independent.

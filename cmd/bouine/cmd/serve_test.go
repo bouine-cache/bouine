@@ -61,10 +61,8 @@ routes:
     pool: echo
 `, certPath, keyPath, originSrv.Listener.Addr().String())
 	cfgPath := filepath.Join(dir, "bouine.yaml")
-	{
-		err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
-		require.NoError(t, err)
-	}
+	err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
+	require.NoError(t, err)
 
 	root := Root()
 	root.SetArgs([]string{"serve", "--config", cfgPath, "--log-format", "text"})
@@ -86,10 +84,8 @@ routes:
 		t.Fatalf("HTTP GET: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	{
-		cerr := resp.Body.Close()
-		assert.Nil(t, cerr)
-	}
+	cerr := resp.Body.Close()
+	assert.Nil(t, cerr)
 	if resp.StatusCode != 200 || string(body) != "proxied!" {
 		t.Fatalf("HTTP: status=%d body=%q", resp.StatusCode, body)
 	}
@@ -108,10 +104,8 @@ routes:
 		t.Fatalf("HTTPS GET: %v", err)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
-	{
-		cerr := resp2.Body.Close()
-		assert.Nil(t, cerr)
-	}
+	cerr = resp2.Body.Close()
+	assert.Nil(t, cerr)
 	if resp2.StatusCode != 200 || string(body2) != "proxied!" {
 		t.Fatalf("HTTPS: status=%d body=%q", resp2.StatusCode, body2)
 	}
@@ -125,10 +119,8 @@ routes:
 		t.Fatalf("POST: %v", err)
 	}
 	_, _ = io.ReadAll(resp3.Body)
-	{
-		cerr := resp3.Body.Close()
-		assert.Nil(t, cerr)
-	}
+	cerr = resp3.Body.Close()
+	assert.Nil(t, cerr)
 	require.Equal(t, 200, resp3.StatusCode)
 
 	cancel()

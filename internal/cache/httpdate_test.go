@@ -23,10 +23,8 @@ func TestComputeAge_PrefersStoredOriginAge(t *testing.T) {
 		OriginAge: 30 * time.Second,
 		Header:    header.FromHTTP(http.Header{header.Age: {"5"}}),
 	}
-	{
-		got := ComputeAge(obj, now)
-		require.Equal(t, 30*time.Second, got)
-	}
+	got := ComputeAge(obj, now)
+	require.Equal(t, 30*time.Second, got)
 }
 
 // TestComputeAge_FallsBackToHeader covers the warm-tier / legacy path where the
@@ -39,8 +37,6 @@ func TestComputeAge_FallsBackToHeader(t *testing.T) {
 		StoredAt: now,
 		Header:   header.FromHTTP(http.Header{header.Age: {"42"}}),
 	}
-	{
-		got := ComputeAge(obj, now)
-		require.Equal(t, 42*time.Second, got)
-	}
+	got := ComputeAge(obj, now)
+	require.Equal(t, 42*time.Second, got)
 }

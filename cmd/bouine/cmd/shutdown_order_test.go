@@ -47,10 +47,8 @@ routes:
     pool: echo
 `, originSrv.Listener.Addr().String())
 	cfgPath := filepath.Join(dir, "bouine.yaml")
-	{
-		err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
-		require.NoError(t, err)
-	}
+	err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
+	require.NoError(t, err)
 
 	root := Root()
 	root.SetArgs([]string{"serve", "--config", cfgPath, "--log-format", "text"})

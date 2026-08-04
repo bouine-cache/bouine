@@ -45,14 +45,10 @@ func TestFDCache_LRUTouchToFront(t *testing.T) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	{
-		_, ok := c.entries[segs[0].ID]
-		require.True(t, ok)
-	}
-	{
-		_, ok := c.entries[segs[1].ID]
-		require.False(t, ok)
-	}
+	_, ok := c.entries[segs[0].ID]
+	require.True(t, ok)
+	_, ok = c.entries[segs[1].ID]
+	require.False(t, ok)
 }
 
 func TestFDCache_ReaderProtection(t *testing.T) {
@@ -92,18 +88,12 @@ func TestFDCache_EvictionSkipsReaders(t *testing.T) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	{
-		_, ok := c.entries[segs[0].ID]
-		require.True(t, ok)
-	}
-	{
-		_, ok := c.entries[segs[1].ID]
-		require.False(t, ok)
-	}
-	{
-		_, ok := c.entries[segs[2].ID]
-		require.True(t, ok)
-	}
+	_, ok := c.entries[segs[0].ID]
+	require.True(t, ok)
+	_, ok = c.entries[segs[1].ID]
+	require.False(t, ok)
+	_, ok = c.entries[segs[2].ID]
+	require.True(t, ok)
 	require.NotNil(t, segs[0].f)
 	require.Nil(t, segs[1].f)
 }
@@ -229,10 +219,8 @@ func TestStore_FDCacheClearedOnCompact(t *testing.T) {
 
 	require.NotEqual(t, 0, s.fdCache.Len())
 
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact: %v", err)
 
 	require.Equal(t, 0, s.fdCache.Len())
 }
@@ -283,10 +271,8 @@ func TestStore_FDCacheClearedOnClose(t *testing.T) {
 
 	require.NotEqual(t, 0, s.fdCache.Len())
 
-	{
-		err := s.Close()
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err = s.Close()
+	require.NoErrorf(t, err, "Close: %v", err)
 
 	require.Equal(t, 0, s.fdCache.Len())
 }

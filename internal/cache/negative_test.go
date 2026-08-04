@@ -27,10 +27,8 @@ func TestIsNegativeCacheable(t *testing.T) {
 		{502, false},
 	}
 	for _, tt := range tests {
-		{
-			got := IsNegativeCacheable(tt.status)
-			assert.Equal(t, tt.want, got)
-		}
+		got := IsNegativeCacheable(tt.status)
+		assert.Equal(t, tt.want, got)
 	}
 }
 

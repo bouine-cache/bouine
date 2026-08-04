@@ -14,10 +14,8 @@ func TestValidateRoute_StaticOnly(t *testing.T) {
 			{Static: StaticConfig{Root: "/var/www"}},
 		},
 	}
-	{
-		err := cfg.Validate()
-		require.NoErrorf(t, err, "static-only route should validate: %v", err)
-	}
+	err := cfg.Validate()
+	require.NoErrorf(t, err, "static-only route should validate: %v", err)
 }
 
 func TestValidateRoute_BothPoolAndStatic(t *testing.T) {
@@ -95,10 +93,8 @@ func TestValidateRoute_StaticWithPoolStillWorks(t *testing.T) {
 			{Match: RouteMatch{PathPrefix: "/assets/"}, Static: StaticConfig{Root: "/var/www/assets"}},
 		},
 	}
-	{
-		err := cfg.Validate()
-		require.NoErrorf(t, err, "mixed pool + static routes should validate: %v", err)
-	}
+	err := cfg.Validate()
+	require.NoErrorf(t, err, "mixed pool + static routes should validate: %v", err)
 }
 
 func TestParse_StaticRoute(t *testing.T) {

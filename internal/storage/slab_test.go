@@ -168,14 +168,10 @@ func TestSlabAllocator_NilAndZero(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = slab.Close() })
 
-	{
-		buf := slab.Alloc(0)
-		require.Nil(t, buf)
-	}
-	{
-		buf := slab.Alloc(-1)
-		require.Nil(t, buf)
-	}
+	buf := slab.Alloc(0)
+	require.Nil(t, buf)
+	buf = slab.Alloc(-1)
+	require.Nil(t, buf)
 	// Free of nil must not panic.
 	slab.Free(nil)
 }
@@ -256,10 +252,8 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 		o.Body[i] = byte(i % 256)
 	}
 
-	{
-		err := s.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := s.Put(context.Background(), k, o)
+	require.NoErrorf(t, err, "put: %v", err)
 	// Verify Put did not mutate the caller's obj.Body — the caller
 	// (TieredStore.Put) may still need to read it for warm-tier encoding.
 	for i := range o.Body {
@@ -291,10 +285,8 @@ func TestHotStore_SlabEviction(t *testing.T) {
 	for i := range 20 {
 		k := KeyHash([]byte{byte(i)})
 		o := obj(k, 200)
-		{
-			err := s.Put(context.Background(), k, o)
-			require.NoErrorf(t, err, "put %d: %v", i, err)
-		}
+		err := s.Put(context.Background(), k, o)
+		require.NoErrorf(t, err, "put %d: %v", i, err)
 	}
 	// Verify that slab frees actually happened during evictions.
 	// With 20 puts of 200B each into a 4096B store, at least some
@@ -332,10 +324,8 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 	for i := range o.Body {
 		o.Body[i] = byte(i % 256)
 	}
-	{
-		err := s.Put(context.Background(), key, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := s.Put(context.Background(), key, o)
+	require.NoErrorf(t, err, "put: %v", err)
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

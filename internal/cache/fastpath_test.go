@@ -46,10 +46,8 @@ func TestFastPathHandler_TryHit(t *testing.T) {
 		StoredAt: time.Now(),
 		TTL:      60 * time.Second,
 	}
-	{
-		err := store.Put(context.Background(), key, obj)
-		require.NoErrorf(t, err, "Put failed: %v", err)
-	}
+	err := store.Put(context.Background(), key, obj)
+	require.NoErrorf(t, err, "Put failed: %v", err)
 
 	now := time.Now()
 	resp, ok := fp.TryHit(req, now)
@@ -147,10 +145,8 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
-	{
-		err := store.Put(context.Background(), key, obj)
-		require.NoErrorf(t, err, "Put failed: %v", err)
-	}
+	err := store.Put(context.Background(), key, obj)
+	require.NoErrorf(t, err, "Put failed: %v", err)
 
 	req := &api.RawRequest{
 		Method: "HEAD",
@@ -194,10 +190,8 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
-	{
-		err := store.Put(context.Background(), key, obj)
-		require.NoErrorf(t, err, "Put failed: %v", err)
-	}
+	err := store.Put(context.Background(), key, obj)
+	require.NoErrorf(t, err, "Put failed: %v", err)
 
 	req := &api.RawRequest{
 		Method: "GET",
@@ -376,10 +370,8 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
-	{
-		err := store.Put(context.Background(), key, obj)
-		require.NoErrorf(t, err, "Put failed: %v", err)
-	}
+	err := store.Put(context.Background(), key, obj)
+	require.NoErrorf(t, err, "Put failed: %v", err)
 
 	req := &api.RawRequest{
 		Method:      "GET",

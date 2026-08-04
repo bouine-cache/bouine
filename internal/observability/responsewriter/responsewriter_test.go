@@ -153,18 +153,12 @@ func TestReadFromFallbackCopy(t *testing.T) {
 func TestInterfaceGuards(t *testing.T) {
 	rw := Acquire(httptest.NewRecorder())
 	defer Release(rw)
-	{
-		_, ok := any(rw).(http.Flusher)
-		require.True(t, ok)
-	}
-	{
-		_, ok := any(rw).(http.Hijacker)
-		require.True(t, ok)
-	}
-	{
-		_, ok := any(rw).(io.ReaderFrom)
-		require.True(t, ok)
-	}
+	_, ok := any(rw).(http.Flusher)
+	require.True(t, ok)
+	_, ok = any(rw).(http.Hijacker)
+	require.True(t, ok)
+	_, ok = any(rw).(io.ReaderFrom)
+	require.True(t, ok)
 }
 
 func BenchmarkResponseWriterPool_AcquireRelease(b *testing.B) {

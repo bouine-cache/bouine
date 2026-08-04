@@ -23,10 +23,8 @@ func TestNew_DefaultsToInfoJSON(t *testing.T) {
 
 	// JSON parse the info line.
 	var rec map[string]any
-	{
-		err := json.Unmarshal([]byte(out), &rec)
-		require.NoErrorf(t, err, "expected JSON output, got %q: %v", out, err)
-	}
+	err := json.Unmarshal([]byte(out), &rec)
+	require.NoErrorf(t, err, "expected JSON output, got %q: %v", out, err)
 	if rec["msg"] != "hello" || rec["k"] != "v" {
 		t.Fatalf("unexpected record: %v", rec)
 	}

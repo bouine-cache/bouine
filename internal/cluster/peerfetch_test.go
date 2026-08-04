@@ -79,10 +79,8 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 
 	require.Equal(t, 200, rr.Code)
-	{
-		ct := rr.Header().Get(header.ContentType)
-		require.Equal(t, "application/octet-stream", ct)
-	}
+	ct := rr.Header().Get(header.ContentType)
+	require.Equal(t, "application/octet-stream", ct)
 
 	decoded, err := storage.DecodeObject(rr.Body.Bytes())
 	require.NoErrorf(t, err, "binary decode: %v", err)

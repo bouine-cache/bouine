@@ -44,10 +44,8 @@ func TestHotOnly_PutAddsKey(t *testing.T) {
 	ctx := context.Background()
 
 	k := KeyHash([]byte("hot-put"))
-	{
-		err := s.Put(ctx, k, obj(k, 100))
-		require.NoError(t, err)
-	}
+	err := s.Put(ctx, k, obj(k, 100))
+	require.NoError(t, err)
 	require.True(t, hotOnlyContains(s, k))
 	require.Equal(t, 1, hotOnlyCount(s))
 }
@@ -87,10 +85,8 @@ func TestHotOnly_DeleteRemovesKey(t *testing.T) {
 	k := KeyHash([]byte("delete-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	require.True(t, hotOnlyContains(s, k))
-	{
-		err := s.Delete(ctx, k)
-		require.NoError(t, err)
-	}
+	err := s.Delete(ctx, k)
+	require.NoError(t, err)
 	require.False(t, hotOnlyContains(s, k))
 	require.Equal(t, 0, hotOnlyCount(s))
 }
@@ -234,10 +230,8 @@ func TestHotOnly_KeysEmpty(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	require.Equal(t, 0, hotOnlyCount(s))
-	{
-		keys, _ := s.HotOnlyKeys(0, 10)
-		require.Nil(t, keys)
-	}
+	keys, _ := s.HotOnlyKeys(0, 10)
+	require.Nil(t, keys)
 }
 
 func TestHotOnly_KeysLimitZero(t *testing.T) {
@@ -245,8 +239,6 @@ func TestHotOnly_KeysLimitZero(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 	_ = s.Put(ctx, KeyHash([]byte("k")), obj(KeyHash([]byte("k")), 10))
-	{
-		keys, _ := s.HotOnlyKeys(0, 0)
-		require.Nil(t, keys)
-	}
+	keys, _ := s.HotOnlyKeys(0, 0)
+	require.Nil(t, keys)
 }

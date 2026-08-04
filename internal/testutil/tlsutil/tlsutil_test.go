@@ -51,10 +51,8 @@ func TestWriteCertFiles_RoundTrip(t *testing.T) {
 	if block == nil || block.Type != "CERTIFICATE" {
 		t.Fatal("invalid cert PEM")
 	}
-	{
-		_, err := x509.ParseCertificate(block.Bytes)
-		require.NoErrorf(t, err, "parse cert: %v", err)
-	}
+	_, err = x509.ParseCertificate(block.Bytes)
+	require.NoErrorf(t, err, "parse cert: %v", err)
 
 	// Cert file is 0600.
 	cst, err := os.Stat(certPath)
@@ -67,8 +65,6 @@ func TestWriteCertFiles_RoundTrip(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), st.Mode().Perm())
 
 	// Round-trip with tls.LoadX509KeyPair.
-	{
-		_, err := tls.LoadX509KeyPair(certPath, keyPath)
-		require.NoErrorf(t, err, "LoadX509KeyPair: %v", err)
-	}
+	_, err = tls.LoadX509KeyPair(certPath, keyPath)
+	require.NoErrorf(t, err, "LoadX509KeyPair: %v", err)
 }

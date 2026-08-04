@@ -92,10 +92,8 @@ func TestInfoZeroRateAlwaysLogs(t *testing.T) {
 	l.Info("test message", "key", api.Key(42))
 	require.NotEqual(t, 0, buf.Len())
 	var rec map[string]any
-	{
-		err := json.Unmarshal(buf.Bytes(), &rec)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err := json.Unmarshal(buf.Bytes(), &rec)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	assert.Equal(t, "test message", rec["msg"])
 }
 

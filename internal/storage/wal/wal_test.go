@@ -29,10 +29,8 @@ func TestAppendAndReplay(t *testing.T) {
 		PutEntry(300, 1, 0),
 	}
 	for _, e := range entries {
-		{
-			err := l.Append(e)
-			require.NoErrorf(t, err, "append: %v", err)
-		}
+		err := l.Append(e)
+		require.NoErrorf(t, err, "append: %v", err)
 	}
 
 	var replayed []Entry
@@ -73,10 +71,8 @@ func TestReplay_MissingFile(t *testing.T) {
 func TestReplay_TruncatedRecord(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
-	{
-		err := l.Append(PutEntry(1, 0, 0))
-		require.NoErrorf(t, err, "append: %v", err)
-	}
+	err := l.Append(PutEntry(1, 0, 0))
+	require.NoErrorf(t, err, "append: %v", err)
 	_ = l.Close()
 
 	// Truncate the file to simulate a partial write.
@@ -96,18 +92,14 @@ func TestTruncate(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
 	for range 5 {
-		{
-			err := l.Append(PutEntry(1, 0, 0))
-			require.NoErrorf(t, err, "append: %v", err)
-		}
+		err := l.Append(PutEntry(1, 0, 0))
+		require.NoErrorf(t, err, "append: %v", err)
 	}
-	{
-		err := l.Truncate()
-		require.NoErrorf(t, err, "truncate: %v", err)
-	}
+	err := l.Truncate()
+	require.NoErrorf(t, err, "truncate: %v", err)
 
 	var count int
-	err := Replay(path, func(_ Entry) error { count++; return nil })
+	err = Replay(path, func(_ Entry) error { count++; return nil })
 	require.NoErrorf(t, err, "replay: %v", err)
 	require.Equal(t, 0, count)
 }
@@ -144,19 +136,15 @@ func TestAsyncEnqueueSyncReplay(t *testing.T) {
 		PutEntry(300, 1, 0),
 	}
 	for _, e := range entries {
-		{
-			err := l.Enqueue(e)
-			require.NoErrorf(t, err, "enqueue: %v", err)
-		}
+		err := l.Enqueue(e)
+		require.NoErrorf(t, err, "enqueue: %v", err)
 	}
 
-	{
-		err := l.Sync()
-		require.NoErrorf(t, err, "sync: %v", err)
-	}
+	err := l.Sync()
+	require.NoErrorf(t, err, "sync: %v", err)
 
 	var replayed []Entry
-	err := Replay(path, func(e Entry) error {
+	err = Replay(path, func(e Entry) error {
 		replayed = append(replayed, e)
 		return nil
 	})
@@ -182,13 +170,11 @@ func TestAsyncEnqueueBatchSyncReplay(t *testing.T) {
 	}
 	l.EnqueueBatch(entries)
 
-	{
-		err := l.Sync()
-		require.NoErrorf(t, err, "sync: %v", err)
-	}
+	err := l.Sync()
+	require.NoErrorf(t, err, "sync: %v", err)
 
 	var count int
-	err := Replay(path, func(_ Entry) error { count++; return nil })
+	err = Replay(path, func(_ Entry) error { count++; return nil })
 	require.NoErrorf(t, err, "replay: %v", err)
 	require.Len(t, entries, count)
 }
@@ -200,16 +186,12 @@ func TestAsyncCloseFlushesPending(t *testing.T) {
 	require.NoErrorf(t, err, "open: %v", err)
 
 	for i := range 10 {
-		{
-			err := l.Enqueue(PutEntry(uint64(i+1), 0, int64(i*100)))
-			require.NoErrorf(t, err, "enqueue: %v", err)
-		}
+		err := l.Enqueue(PutEntry(uint64(i+1), 0, int64(i*100)))
+		require.NoErrorf(t, err, "enqueue: %v", err)
 	}
 
-	{
-		err := l.Close()
-		require.NoErrorf(t, err, "close: %v", err)
-	}
+	err = l.Close()
+	require.NoErrorf(t, err, "close: %v", err)
 
 	var count int
 	err = Replay(path, func(_ Entry) error { count++; return nil })
@@ -242,10 +224,8 @@ func TestOpenSyncVsAsync(t *testing.T) {
 	require.Nil(t, syncLog.syncCh)
 	// Enqueue on sync log falls back to Append — data is immediately
 	// durable without calling Sync.
-	{
-		err := syncLog.Enqueue(PutEntry(42, 0, 0))
-		require.NoErrorf(t, err, "enqueue on sync log: %v", err)
-	}
+	err := syncLog.Enqueue(PutEntry(42, 0, 0))
+	require.NoErrorf(t, err, "enqueue on sync log: %v", err)
 	var count int
 	_ = Replay(syncPath, func(_ Entry) error { count++; return nil })
 	require.Equal(t, 1, count)
@@ -265,10 +245,8 @@ func TestOpenAsyncSyncIntervalNeg1Fallback(t *testing.T) {
 	require.Nil(t, l.syncCh)
 
 	// Enqueue falls back to Append (synchronous).
-	{
-		err := l.Enqueue(PutEntry(42, 0, 0))
-		require.NoErrorf(t, err, "enqueue: %v", err)
-	}
+	err = l.Enqueue(PutEntry(42, 0, 0))
+	require.NoErrorf(t, err, "enqueue: %v", err)
 
 	// Data should be immediately durable (no async delay).
 	var count int
@@ -284,14 +262,10 @@ func TestAsyncTornRecord(t *testing.T) {
 	require.NoErrorf(t, err, "open: %v", err)
 
 	// Enqueue one valid entry and Sync to flush it.
-	{
-		err := l.Enqueue(PutEntry(1, 0, 0))
-		require.NoErrorf(t, err, "enqueue: %v", err)
-	}
-	{
-		err := l.Sync()
-		require.NoErrorf(t, err, "sync: %v", err)
-	}
+	err = l.Enqueue(PutEntry(1, 0, 0))
+	require.NoErrorf(t, err, "enqueue: %v", err)
+	err = l.Sync()
+	require.NoErrorf(t, err, "sync: %v", err)
 
 	// Now write a partial record directly to the file (simulating a
 	// crash mid-batch-write: Write succeeded but the full 25 bytes
@@ -300,10 +274,8 @@ func TestAsyncTornRecord(t *testing.T) {
 	_, _ = l.f.Write([]byte{opPut, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) // 9 of 25 bytes
 	l.mu.Unlock()
 
-	{
-		err := l.Close()
-		require.NoErrorf(t, err, "close: %v", err)
-	}
+	err = l.Close()
+	require.NoErrorf(t, err, "close: %v", err)
 
 	// Replay must return the valid entry and skip the torn tail.
 	var count int
@@ -319,14 +291,10 @@ func TestLastSyncTime(t *testing.T) {
 	// Initially zero (never synced).
 	require.True(t, l.LastSyncTime().IsZero())
 
-	{
-		err := l.Enqueue(PutEntry(1, 0, 0))
-		require.NoErrorf(t, err, "enqueue: %v", err)
-	}
-	{
-		err := l.Sync()
-		require.NoErrorf(t, err, "sync: %v", err)
-	}
+	err := l.Enqueue(PutEntry(1, 0, 0))
+	require.NoErrorf(t, err, "enqueue: %v", err)
+	err = l.Sync()
+	require.NoErrorf(t, err, "sync: %v", err)
 
 	// After Sync, LastSyncTime should be recent.
 	last := l.LastSyncTime()

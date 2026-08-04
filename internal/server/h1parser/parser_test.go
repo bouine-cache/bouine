@@ -88,18 +88,12 @@ func TestRawRequest_Header(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
-	{
-		v := req.Header("host")
-		assert.Equal(t, "example.com", v)
-	}
-	{
-		v := req.Header("ACCEPT")
-		assert.Equal(t, "text/html", v)
-	}
-	{
-		v := req.Header("X-Custom")
-		assert.Equal(t, "", v)
-	}
+	v := req.Header("host")
+	assert.Equal(t, "example.com", v)
+	v = req.Header("ACCEPT")
+	assert.Equal(t, "text/html", v)
+	v = req.Header("X-Custom")
+	assert.Equal(t, "", v)
 }
 
 func BenchmarkH1Parse_Get(b *testing.B) {

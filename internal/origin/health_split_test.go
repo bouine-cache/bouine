@@ -131,10 +131,8 @@ func TestPassiveHealth_DisabledDoesNotZeroCounters(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 
-	{
-		got := p.targets[0].passiveErrors.Load()
-		require.Equal(t, int64(42), got)
-	}
+	got := p.targets[0].passiveErrors.Load()
+	require.Equal(t, int64(42), got)
 }
 
 // TestMarkHealthy_CAS verifies that MarkHealthy uses CompareAndSwap so
@@ -160,18 +158,12 @@ func TestMarkHealthy_CAS(t *testing.T) {
 	p.MarkHealthy(bad.Listener.Addr().String())
 	require.Len(t, p.Healthy(), 1)
 
-	{
-		got := p.targets[0].passiveErrors.Load()
-		require.Equal(t, int64(0), got)
-	}
-	{
-		got := p.targets[0].probeErrors.Load()
-		require.Equal(t, int64(0), got)
-	}
-	{
-		got := p.targets[0].successes.Load()
-		require.Equal(t, int64(0), got)
-	}
+	got := p.targets[0].passiveErrors.Load()
+	require.Equal(t, int64(0), got)
+	got = p.targets[0].probeErrors.Load()
+	require.Equal(t, int64(0), got)
+	got = p.targets[0].successes.Load()
+	require.Equal(t, int64(0), got)
 }
 
 // TestConcurrent_ActiveAndPassive verifies that active and passive

@@ -89,10 +89,8 @@ routes:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoErrorf(t, err, "parse: %v", err)
-	{
-		got := cfg.Storage.HotMaxBytes.Bytes()
-		require.Equal(t, int64(2_000_000_000), got)
-	}
+	got := cfg.Storage.HotMaxBytes.Bytes()
+	require.Equal(t, int64(2_000_000_000), got)
 	if len(cfg.Routes) != 1 || cfg.Routes[0].Pool != "app" {
 		t.Fatalf("unexpected routes: %+v", cfg.Routes)
 	}
@@ -103,10 +101,8 @@ func TestLoad_FromDisk(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
-	{
-		err := os.WriteFile(path, []byte("listen:\n  admin: ':9001'\n"), 0o600)
-		require.NoErrorf(t, err, "write: %v", err)
-	}
+	err := os.WriteFile(path, []byte("listen:\n  admin: ':9001'\n"), 0o600)
+	require.NoErrorf(t, err, "write: %v", err)
 	cfg, err := Load(path)
 	require.NoErrorf(t, err, "load: %v", err)
 	require.Equal(t, ":9001", cfg.Listen.Admin)
@@ -155,10 +151,8 @@ func TestClusterMode_DefaultIsStrong(t *testing.T) {
 func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{}}
-	{
-		err := cfg.Validate()
-		require.NoErrorf(t, err, "validate: %v", err)
-	}
+	err := cfg.Validate()
+	require.NoErrorf(t, err, "validate: %v", err)
 	require.Equal(t, ClusterModeStrong, cfg.Cluster.Mode)
 }
 
@@ -166,10 +160,8 @@ func TestClusterMode_ValidModes(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual} {
 		cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: mode}}
-		{
-			err := cfg.Validate()
-			assert.Nil(t, err)
-		}
+		err := cfg.Validate()
+		assert.Nil(t, err)
 		assert.Equal(t, mode, cfg.Cluster.Mode)
 	}
 }
@@ -193,10 +185,8 @@ func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 func TestClusterMode_StrongWithoutListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeStrong}}
-	{
-		err := cfg.Validate()
-		require.NoErrorf(t, err, "strong mode without listener should be valid: %v", err)
-	}
+	err := cfg.Validate()
+	require.NoErrorf(t, err, "strong mode without listener should be valid: %v", err)
 }
 
 // --- Route.Name auto-derivation ---
@@ -428,10 +418,8 @@ func TestResolveHotMaxBytes_ExplicitOverrideKept(t *testing.T) {
 	t.Parallel()
 	s := Storage{HotMaxBytes: ByteSize(1 << 30)} // 1 GiB explicit
 	s.ResolveHotMaxBytes("24GiB")
-	{
-		got := s.HotMaxBytes.Bytes()
-		require.Equal(t, int64(1)<<30, got)
-	}
+	got := s.HotMaxBytes.Bytes()
+	require.Equal(t, int64(1)<<30, got)
 }
 
 func TestResolveHotMaxBytes_NoGomemLimitStaysZero(t *testing.T) {
@@ -458,10 +446,8 @@ storage:
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoErrorf(t, err, "parse: %v", err)
 	want := int64(24<<30) * 75 / 100
-	{
-		got := cfg.Storage.HotMaxBytes.Bytes()
-		require.Equal(t, want, got)
-	}
+	got := cfg.Storage.HotMaxBytes.Bytes()
+	require.Equal(t, want, got)
 }
 
 func TestParse_EmptyConfigDerivesHotMaxBytesFromGomemLimit(t *testing.T) {
@@ -469,10 +455,8 @@ func TestParse_EmptyConfigDerivesHotMaxBytesFromGomemLimit(t *testing.T) {
 	cfg, err := Parse(nil)
 	require.NoErrorf(t, err, "parse: %v", err)
 	want := int64(3<<30) * 75 / 100
-	{
-		got := cfg.Storage.HotMaxBytes.Bytes()
-		require.Equal(t, want, got)
-	}
+	got := cfg.Storage.HotMaxBytes.Bytes()
+	require.Equal(t, want, got)
 }
 
 func TestResolveHotMaxBytes_PlainIntegerBytes(t *testing.T) {
@@ -482,10 +466,8 @@ func TestResolveHotMaxBytes_PlainIntegerBytes(t *testing.T) {
 	s := Storage{}
 	s.ResolveHotMaxBytes("3221225472") // 3 GiB
 	want := int64(3221225472) * 75 / 100
-	{
-		got := s.HotMaxBytes.Bytes()
-		require.Equal(t, want, got)
-	}
+	got := s.HotMaxBytes.Bytes()
+	require.Equal(t, want, got)
 }
 
 func TestParse_ExplicitHotMaxBytesNotOverriddenByGomemLimit(t *testing.T) {
@@ -498,10 +480,8 @@ storage:
 `
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoErrorf(t, err, "parse: %v", err)
-	{
-		got := cfg.Storage.HotMaxBytes.Bytes()
-		require.Equal(t, int64(2<<30), got)
-	}
+	got := cfg.Storage.HotMaxBytes.Bytes()
+	require.Equal(t, int64(2<<30), got)
 }
 
 func TestCluster_FullMode_Rejected(t *testing.T) {
@@ -529,10 +509,8 @@ func TestWALSyncInterval_NegativeOneAccepted(t *testing.T) {
 		Listen:  Listen{Admin: ":9000"},
 		Storage: Storage{WALSyncInterval: -1},
 	}
-	{
-		err := cfg.Validate()
-		require.NoErrorf(t, err, "wal_sync_interval = -1 should be accepted, got: %v", err)
-	}
+	err := cfg.Validate()
+	require.NoErrorf(t, err, "wal_sync_interval = -1 should be accepted, got: %v", err)
 }
 
 func TestResolveWarmMaxEntries_DerivesFromGomemLimitDefaultRatio(t *testing.T) {

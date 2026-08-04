@@ -44,10 +44,8 @@ func TestHealthz(t *testing.T) {
 	status, body := get(t, s, "/healthz")
 	require.Equal(t, http.StatusOK, status)
 	var got map[string]string
-	{
-		err := json.Unmarshal(body, &got)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err := json.Unmarshal(body, &got)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	require.Equal(t, "ok", got["status"])
 }
 
@@ -80,10 +78,8 @@ func TestReadyz_Detail_NotReady(t *testing.T) {
 	status, body := get(t, s, "/readyz?detail=1")
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	var resp map[string]any
-	{
-		err := json.Unmarshal(body, &resp)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err := json.Unmarshal(body, &resp)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	require.Equal(t, "not-ready", resp["status"])
 	conds, ok := resp["conditions"].([]any)
 	require.True(t, ok)
@@ -105,10 +101,8 @@ func TestReadyz_Detail_Ready(t *testing.T) {
 	status, body := get(t, s, "/readyz?detail=1")
 	require.Equal(t, http.StatusOK, status)
 	var resp map[string]any
-	{
-		err := json.Unmarshal(body, &resp)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err := json.Unmarshal(body, &resp)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	require.Equal(t, "ready", resp["status"])
 	conds, ok := resp["conditions"].([]any)
 	require.True(t, ok)
@@ -121,10 +115,8 @@ func TestReadyz_Detail_NoConditionsFn(t *testing.T) {
 	status, body := get(t, s, "/readyz?detail=1")
 	require.Equal(t, http.StatusOK, status)
 	var resp map[string]any
-	{
-		err := json.Unmarshal(body, &resp)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err := json.Unmarshal(body, &resp)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	conds, ok := resp["conditions"].([]any)
 	require.True(t, ok)
 	require.Len(t, conds, 0)
@@ -217,10 +209,8 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/peer/metrics", nil)
 	s.Handler().ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
-	{
-		body := rr.Body.String()
-		require.Equal(t, "{}", body)
-	}
+	body := rr.Body.String()
+	require.Equal(t, "{}", body)
 }
 
 func TestDrain_NoDrainFn(t *testing.T) {
@@ -229,10 +219,8 @@ func TestDrain_NoDrainFn(t *testing.T) {
 	status, body := get(t, s, "/drain")
 	require.Equal(t, http.StatusOK, status)
 	var got map[string]string
-	{
-		err := json.Unmarshal(body, &got)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err := json.Unmarshal(body, &got)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	require.Equal(t, "drained", got["status"])
 }
 
@@ -285,10 +273,8 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoErrorf(t, err, "read body: %v", err)
 	var got map[string]string
-	{
-		err := json.Unmarshal(body, &got)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err = json.Unmarshal(body, &got)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 	require.Equal(t, "drained", got["status"])
 
 	// DrainFn must have been called synchronously — the response is

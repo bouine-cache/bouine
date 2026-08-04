@@ -28,10 +28,8 @@ func TestNormaliseSource(t *testing.T) {
 		{"unknown", ""},
 	}
 	for _, c := range cases {
-		{
-			got := normaliseSource(c.input)
-			assert.Equal(t, c.want, got)
-		}
+		got := normaliseSource(c.input)
+		assert.Equal(t, c.want, got)
 	}
 }
 

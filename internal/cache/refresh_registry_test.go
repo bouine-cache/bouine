@@ -31,15 +31,11 @@ func TestRefreshRegistryRegisterLookup(t *testing.T) {
 	require.Equal(t, http.MethodGet, entry.method)
 	require.Equal(t, "https://example.com/foo", entry.url)
 	// Accept-Encoding should be stored (always stored).
-	{
-		ae := entry.header.Get("Accept-Encoding")
-		require.Equal(t, "gzip", ae)
-	}
+	ae := entry.header.Get("Accept-Encoding")
+	require.Equal(t, "gzip", ae)
 	// X-Test should NOT be stored (not a Vary header).
-	{
-		x := entry.header.Get("X-Test")
-		require.Equal(t, "", x)
-	}
+	x := entry.header.Get("X-Test")
+	require.Equal(t, "", x)
 }
 
 func TestRefreshRegistryVaryHeaders(t *testing.T) {
@@ -62,19 +58,13 @@ func TestRefreshRegistryVaryHeaders(t *testing.T) {
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
 	// Accept and Accept-Language should be stored (in Vary).
-	{
-		v := entry.header.Get("Accept")
-		require.Equal(t, "application/json", v)
-	}
-	{
-		v := entry.header.Get("Accept-Language")
-		require.Equal(t, "en-US", v)
-	}
+	v := entry.header.Get("Accept")
+	require.Equal(t, "application/json", v)
+	v = entry.header.Get("Accept-Language")
+	require.Equal(t, "en-US", v)
 	// X-Trace-Id should NOT be stored (not in Vary).
-	{
-		v := entry.header.Get("X-Trace-Id")
-		require.Equal(t, "", v)
-	}
+	v = entry.header.Get("X-Trace-Id")
+	require.Equal(t, "", v)
 }
 
 func TestRefreshRegistryUnregister(t *testing.T) {
@@ -94,10 +84,8 @@ func TestRefreshRegistryUnregister(t *testing.T) {
 	r.Unregister(key)
 	require.Equal(t, 0, r.Len())
 
-	{
-		entry := r.Lookup(key)
-		require.Nil(t, entry)
-	}
+	entry := r.Lookup(key)
+	require.Nil(t, entry)
 }
 
 func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
@@ -121,10 +109,8 @@ func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
 	// The registry should still have the original value.
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
-	{
-		v := entry.header.Get("Accept-Encoding")
-		require.Equal(t, "gzip", v)
-	}
+	v := entry.header.Get("Accept-Encoding")
+	require.Equal(t, "gzip", v)
 }
 
 func TestRefreshRegistryLen(t *testing.T) {

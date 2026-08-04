@@ -80,10 +80,8 @@ func TestMmapGetAfterSegmentRotation(t *testing.T) {
 	var keys []uint64
 	for i := uint64(0); i < 10; i++ {
 		key := uint64(100 + i)
-		{
-			_, _, err := s.Put(key, body)
-			require.NoErrorf(t, err, "Put(%d): %v", key, err)
-		}
+		_, _, err := s.Put(key, body)
+		require.NoErrorf(t, err, "Put(%d): %v", key, err)
 		keys = append(keys, key)
 	}
 
@@ -115,23 +113,17 @@ func TestMmapGetAfterCompact(t *testing.T) {
 
 	body := []byte("compact test body")
 	for i := uint64(0); i < 100; i++ {
-		{
-			_, _, err := s.Put(i, body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(i, body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 	// Delete some to create tombstones for compaction.
 	for i := uint64(0); i < 50; i++ {
-		{
-			_, err := s.Delete(i)
-			require.NoErrorf(t, err, "Delete(%d): %v", i, err)
-		}
+		_, err := s.Delete(i)
+		require.NoErrorf(t, err, "Delete(%d): %v", i, err)
 	}
 
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact: %v", err)
 
 	// Reads from live keys should succeed.
 	for i := uint64(50); i < 100; i++ {
@@ -167,17 +159,13 @@ func TestMmapFdCacheEviction(t *testing.T) {
 	}
 	// Write enough to create 2 segments.
 	for i := uint64(0); i < 10; i++ {
-		{
-			_, _, err := s.Put(i, body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(i, body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	// Read from the old segment to trigger lazy mmap init (on Linux).
-	{
-		_, err := s.Get(0)
-		require.NoErrorf(t, err, "Get(0) before eviction: %v", err)
-	}
+	_, err = s.Get(0)
+	require.NoErrorf(t, err, "Get(0) before eviction: %v", err)
 
 	// Close the old segment's fd to simulate fdCache eviction.
 	s.mu.RLock()
@@ -212,17 +200,13 @@ func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 
 	body := []byte("concurrent compact test body")
 	for i := uint64(0); i < 500; i++ {
-		{
-			_, _, err := s.Put(i, body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(i, body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 	// Delete half to create tombstones.
 	for i := uint64(0); i < 250; i++ {
-		{
-			_, err := s.Delete(i)
-			require.NoErrorf(t, err, "Delete(%d): %v", i, err)
-		}
+		_, err := s.Delete(i)
+		require.NoErrorf(t, err, "Delete(%d): %v", i, err)
 	}
 
 	var wg sync.WaitGroup
@@ -284,10 +268,8 @@ func TestMmapNonLinuxStubs(t *testing.T) {
 		body[i] = byte(i)
 	}
 	for i := uint64(0); i < 10; i++ {
-		{
-			_, _, err := s.Put(i, body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(i, body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	// tryMmap is a no-op → seg.mmap stays nil.

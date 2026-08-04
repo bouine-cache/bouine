@@ -18,20 +18,14 @@ func TestEventual_IndependentCaching(t *testing.T) {
 	path := "/hit?x=eventual-independent"
 
 	r := s.Get(t, 0, path)
-	{
-		got := r.Header.Get("X-Cache")
-		require.Equal(t, "MISS", got)
-	}
+	got := r.Header.Get("X-Cache")
+	require.Equal(t, "MISS", got)
 	r = s.Get(t, 0, path)
-	{
-		got := r.Header.Get("X-Cache")
-		require.Equal(t, "HIT", got)
-	}
+	got := r.Header.Get("X-Cache")
+	require.Equal(t, "HIT", got)
 	r = s.Get(t, 1, path)
-	{
-		got := r.Header.Get("X-Cache")
-		require.Equal(t, "MISS", got)
-	}
+	got := r.Header.Get("X-Cache")
+	require.Equal(t, "MISS", got)
 }
 
 func TestEventual_NoPeerFetch(t *testing.T) {

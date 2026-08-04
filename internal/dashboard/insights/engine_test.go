@@ -422,30 +422,6 @@ func TestRuleConfigTLSBelow12(t *testing.T) {
 	}
 }
 
-func TestRuleConfigNoOCSPStapling(t *testing.T) {
-	t.Parallel()
-	cfg := baseConfig()
-	cfg.Listen.HTTPS = ":443"
-	data := InsightData{Config: cfg}
-	ins := ruleConfigNoOCSPStapling(data)
-	if ins == nil {
-		t.Fatal("expected insight when OCSP not configured")
-	}
-
-	cfg.TLS.OCSPStapling = "on"
-	ins = ruleConfigNoOCSPStapling(data)
-	if ins != nil {
-		t.Fatal("expected no insight when OCSP stapling on")
-	}
-
-	cfg.Listen.HTTPS = ""
-	cfg.TLS.OCSPStapling = ""
-	ins = ruleConfigNoOCSPStapling(data)
-	if ins != nil {
-		t.Fatal("expected no insight when HTTPS not configured")
-	}
-}
-
 func TestRuleConfigTracingSamplingZero(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
@@ -471,29 +447,28 @@ func TestRuleConfigTracingSamplingZero(t *testing.T) {
 	}
 }
 
-func TestRuleConfigClusterDisabledWithPeers(t *testing.T) {
+func TestRuleConfigClusterJoinNoListener(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
-	cfg.Cluster.Enabled = false
 	cfg.Cluster.Join = []string{"node-1:7946"}
 	data := InsightData{Config: cfg}
-	ins := ruleConfigClusterDisabledWithPeers(data)
+	ins := ruleConfigClusterJoinNoListener(data)
 	if ins == nil {
-		t.Fatal("expected insight when cluster disabled with join addresses")
+		t.Fatal("expected insight when join addresses set but no cluster listener")
 	}
 	if ins.Severity != SeverityMed {
 		t.Errorf("severity: want MED, got %s", ins.Severity)
 	}
 
-	cfg.Cluster.Enabled = true
-	ins = ruleConfigClusterDisabledWithPeers(data)
+	cfg.Listen.Cluster = ":8443"
+	ins = ruleConfigClusterJoinNoListener(data)
 	if ins != nil {
-		t.Fatal("expected no insight when cluster enabled")
+		t.Fatal("expected no insight when cluster listener is set")
 	}
 
-	cfg.Cluster.Enabled = false
+	cfg.Listen.Cluster = ""
 	cfg.Cluster.Join = nil
-	ins = ruleConfigClusterDisabledWithPeers(data)
+	ins = ruleConfigClusterJoinNoListener(data)
 	if ins != nil {
 		t.Fatal("expected no insight when no join addresses")
 	}

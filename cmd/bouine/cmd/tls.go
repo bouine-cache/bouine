@@ -37,7 +37,7 @@ func buildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 	return &tls.Config{ //nolint:gosec // G402: MinVersion is enforced >= 1.2 by the switch above; gosec can't trace through the variable
 		Certificates: certs,
 		MinVersion:   minVer,
-		NextProtos:   cfg.TLS.ALPN,
+		NextProtos:   []string{"h2", "http/1.1"},
 	}, nil
 }
 

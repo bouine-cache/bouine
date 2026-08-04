@@ -36,9 +36,8 @@ func init() {
 		ruleConfigJitterZero,
 		// Tier 1: config-derived standing insights.
 		ruleConfigTLSBelow12,
-		ruleConfigNoOCSPStapling,
 		ruleConfigTracingSamplingZero,
-		ruleConfigClusterDisabledWithPeers,
+		ruleConfigClusterJoinNoListener,
 		ruleConfigPoolNoTimeout,
 		ruleConfigPoolNoMaxConnections,
 		ruleConfigMaxObjectSizeUnset,
@@ -703,21 +702,20 @@ func ruleConfigTLSBelow12(data InsightData) *Insight {
 	}
 }
 
-func ruleConfigNoOCSPStapling(data InsightData) *Insight {
-	if data.Config.Listen.HTTPS == "" {
+func ruleConfigClusterJoinNoListener(data InsightData) *Insight {
+	if data.Config.Listen.Cluster != "" {
 		return nil
 	}
-	ocsp := data.Config.TLS.OCSPStapling
-	if ocsp != "" && ocsp != "off" {
+	if len(data.Config.Cluster.Join) == 0 {
 		return nil
 	}
 	return &Insight{
-		ID:       "config-no-ocsp-stapling",
-		Severity: SeverityLow,
+		ID:       "config-cluster-join-no-listener",
+		Severity: SeverityMed,
 		Category: CategoryConfig,
-		Title:    "OCSP stapling not configured",
-		Detail:   "Without OCSP stapling, clients must contact the CA to verify certificate revocation status",
-		Evidence: fmt.Sprintf("ocsp_stapling: %q", ocsp),
+		Title:    "Cluster join addresses configured but no cluster listener",
+		Detail:   fmt.Sprintf("%d join address(es) configured but listen.cluster is empty", len(data.Config.Cluster.Join)),
+		Evidence: fmt.Sprintf("join: %d entries, listen.cluster: empty", len(data.Config.Cluster.Join)),
 		Action:   "/dashboard/config",
 	}
 }
@@ -736,24 +734,6 @@ func ruleConfigTracingSamplingZero(data InsightData) *Insight {
 		Title:    "Tracing endpoint configured but sampling rate is 0",
 		Detail:   "Traces are exported to the collector but nothing is sampled — no traces will be sent",
 		Evidence: fmt.Sprintf("endpoint: %s, sampling: 0", data.Config.Tracing.Endpoint),
-		Action:   "/dashboard/config",
-	}
-}
-
-func ruleConfigClusterDisabledWithPeers(data InsightData) *Insight {
-	if data.Config.Cluster.Enabled {
-		return nil
-	}
-	if len(data.Config.Cluster.Join) == 0 {
-		return nil
-	}
-	return &Insight{
-		ID:       "config-cluster-disabled-with-peers",
-		Severity: SeverityMed,
-		Category: CategoryConfig,
-		Title:    "Cluster disabled but join addresses configured",
-		Detail:   fmt.Sprintf("%d join address(es) configured but cluster.enabled is false", len(data.Config.Cluster.Join)),
-		Evidence: fmt.Sprintf("join: %d entries, enabled: false", len(data.Config.Cluster.Join)),
 		Action:   "/dashboard/config",
 	}
 }

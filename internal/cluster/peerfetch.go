@@ -81,6 +81,7 @@ const maxPeerFetchBytes int64 = 64 << 20
 type PeerFetcher struct {
 	client       *http.Client
 	useTLS       bool
+	hopLimit     int
 	hits         atomic.Int64
 	misses       atomic.Int64
 	latSumMs     atomic.Int64
@@ -113,8 +114,9 @@ func (f *PeerFetcher) Close(_ context.Context) error {
 // NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
 // mTLS credentials. If nil a plain HTTP client is used (test-only).
 // reg, if non-nil, receives Prometheus metric registration.
-func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer) *PeerFetcher {
-	return NewPeerFetcherWithLogger(tlsCfg, reg, nil)
+// hopLimit caps the number of peers a request may traverse; 0 uses MaxHops.
+func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer, hopLimit int) *PeerFetcher {
+	return NewPeerFetcherWithLogger(tlsCfg, reg, nil, hopLimit)
 }
 
 // newClusterTransport builds a tuned *http.Transport for cluster-internal
@@ -139,14 +141,18 @@ func newClusterTransport(tlsCfg *tls.Config) *http.Transport {
 }
 
 // NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
-func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger) *PeerFetcher {
+func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger, hopLimit int) *PeerFetcher {
 	transport := newClusterTransport(tlsCfg)
+	if hopLimit <= 0 {
+		hopLimit = MaxHops
+	}
 	f := &PeerFetcher{
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   peerFetchTimeout,
 		},
 		useTLS:       tlsCfg != nil,
+		hopLimit:     hopLimit,
 		maxBodyBytes: maxPeerFetchBytes,
 		fetchSem:     make(chan struct{}, defaultPeerFetchConcurrency),
 		logger:       observability.ResolveLogger(logger),
@@ -216,7 +222,7 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 //
 //nolint:gocyclo // 16: hop/error/decode branches are inherently branchy
 func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest) (*api.Object, error) {
-	if req.Hops >= MaxHops {
+	if req.Hops >= f.hopLimit {
 		f.hopLimitHits.Add(1)
 		if f.pHopLimit != nil {
 			f.pHopLimit.Inc()
@@ -303,8 +309,9 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 // PeerFetchHandler returns an http.Handler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
 type PeerFetchHandler struct {
-	store  PeerStore
-	logger observability.Logger
+	store    PeerStore
+	hopLimit int
+	logger   observability.Logger
 }
 
 // PeerStore is the minimal storage interface needed by peer fetch.
@@ -314,14 +321,18 @@ type PeerStore interface {
 }
 
 // NewPeerFetchHandler creates a peer-fetch handler backed by store.
-func NewPeerFetchHandler(store PeerStore) *PeerFetchHandler {
-	return NewPeerFetchHandlerWithLogger(store, nil)
+// hopLimit caps the hop count for incoming requests; 0 uses MaxHops.
+func NewPeerFetchHandler(store PeerStore, hopLimit int) *PeerFetchHandler {
+	return NewPeerFetchHandlerWithLogger(store, nil, hopLimit)
 }
 
 // NewPeerFetchHandlerWithLogger creates a peer-fetch handler with a
 // structured logger.
-func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger) *PeerFetchHandler {
-	return &PeerFetchHandler{store: store, logger: observability.ResolveLogger(logger)}
+func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger, hopLimit int) *PeerFetchHandler {
+	if hopLimit <= 0 {
+		hopLimit = MaxHops
+	}
+	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
 }
 
 // ServeHTTP handles peer fetch requests.
@@ -335,7 +346,7 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hopStr := r.Header.Get(BouineHopHeader)
 	var hops int
 	if hopStr != "" {
-		if _, err := fmt.Sscanf(hopStr, "%d", &hops); err == nil && hops >= MaxHops {
+		if _, err := fmt.Sscanf(hopStr, "%d", &hops); err == nil && hops >= h.hopLimit {
 			http.Error(w, "hop limit", http.StatusLoopDetected)
 			return
 		}

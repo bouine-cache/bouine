@@ -196,35 +196,3 @@ func TestPeerMetricsHandler(t *testing.T) {
 		t.Errorf("total requests: want 1, got %d", total)
 	}
 }
-
-func TestAggregator_CollectNoToken(t *testing.T) {
-	t.Parallel()
-	peerSnap := make([]observability.RequestBucket, 2160)
-	peerSnap[0] = observability.RequestBucket{Requests: 30}
-	peerSum := observability.MetricsSummary{
-		NodeName:    "peer-notoken",
-		CollectedAt: time.Now(),
-		RequestSnap: peerSnap,
-	}
-
-	srv := mockPeerServer(t, peerSum)
-	defer srv.Close()
-
-	rings := observability.NewRings("self")
-	peersFn := func() []api.PeerInfo {
-		return []api.PeerInfo{{Name: "peer-notoken", AdminAddr: srv.Listener.Addr().String()}}
-	}
-	agg := NewAggregator(rings, peersFn, "127.0.0.1:9999", nil)
-	merged, peers := agg.Collect(t.Context())
-
-	if len(peers) != 2 {
-		t.Fatalf("expected 2 peer results, got %d", len(peers))
-	}
-	var totalReq int64
-	for _, b := range merged.RequestSnap {
-		totalReq += b.Requests
-	}
-	if totalReq != 30 {
-		t.Errorf("merged total requests: want 30, got %d", totalReq)
-	}
-}

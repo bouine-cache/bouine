@@ -257,6 +257,9 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("no token: got %d, want 200 (peer metrics should be exempt)", rr.Code)
 	}
+	if body := rr.Body.String(); body != "{}" {
+		t.Fatalf("response body: want {}, got %q", body)
+	}
 }
 
 func TestDrain_NoDrainFn(t *testing.T) {

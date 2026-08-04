@@ -311,7 +311,21 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["status"] != "drained" {
+		t.Fatalf("status field = %q, want drained", got["status"])
+	}
 
+	// DrainFn must have been called synchronously — the response is
+	// only written after it returns, so the channel must already be
+	// closed.
 	select {
 	case <-drainStarted:
 	default:

@@ -235,7 +235,8 @@ func (e *engine) run(ctx context.Context) error {
 // initSubsystems creates all subsystem instances and wires them together.
 // Returns the bundled state and a tracer shutdown func.
 func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*runState, func(), error) {
-	pools, err := e.buildPools()
+	originMetrics := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(originMetrics)
 	if err != nil {
 		return nil, func() {}, err
 	}

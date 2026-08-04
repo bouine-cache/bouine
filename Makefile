@@ -230,7 +230,7 @@ loadtest-cluster: ## Run cluster and stress scenarios (requires K8s).
 loadtest-dashboard: ## Run dashboard-under-load scenarios.
 	@mkdir -p $(RESULTS_DIR)
 	@for scenario in 5.6a_dashboard_polling 5.6b_fanout_saturation \
-	                  5.6c_dashboard_invalidation 5.6d_config_reload; do \
+	                  5.6c_dashboard_invalidation; do \
 		echo "--- Running $$scenario ---"; \
 		bash $(LOADTEST_DIR)/scenarios/$$scenario/run.sh; \
 	done

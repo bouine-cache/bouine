@@ -626,30 +626,17 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		SelfAddr:     addr,
 		Token:        rs.token,
 		Logger:       e.logger,
-		SnapshotPath: rs.snapshotPath,
 		StoreFn:      rs.store.Stats,
 		HotMaxBytes:  e.cfg.Storage.HotMaxBytes.Bytes(),
 		WarmMaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(),
 		Config:       e.cfg,
 		ConfigPath:   e.configPath,
 		StartTime:    e.startTime,
-		ReloadFn: func(_ *config.Config) error {
-			if e.configPath == "" {
-				return nil
-			}
-			cfg, err := config.Load(e.configPath)
-			if err != nil {
-				return err
-			}
-			e.cfg = cfg
-			e.logger.Info("config reloaded", "path", e.configPath)
-			return nil
-		},
-		RingFn:      ringFn,
-		ClusterMeta: clusterMeta,
-		PurgeFn:     ops.PurgeFn,
-		BanFn:       ops.BanFn,
-		RefreshFn:   ops.RefreshFn,
+		RingFn:       ringFn,
+		ClusterMeta:  clusterMeta,
+		PurgeFn:      ops.PurgeFn,
+		BanFn:        ops.BanFn,
+		RefreshFn:    ops.RefreshFn,
 		PeerFetchStatsFn: func() templates.PeerFetchStats {
 			if rs.peerFetcher == nil {
 				return templates.PeerFetchStats{}

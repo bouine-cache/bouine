@@ -118,5 +118,5 @@ readinessProbe:
 
 ## Related runbooks
 
-- [00-lifecycle.md](./00-lifecycle.md) — start, stop, hot-reload
+- [00-lifecycle.md](./00-lifecycle.md) — start, stop, config updates
 - [20-purge-ban.md](./20-purge-ban.md) — cache invalidation

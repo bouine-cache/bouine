@@ -50,8 +50,8 @@ VCL gives you programmatic control at the cost of:
 - Debugging difficulty (no stack traces, limited introspection)
 
 bouine's declarative model:
-- Hot-reloadable config (watch mode on SIGUSR1 or file change)
-- Configuration validation before reload (`bouine config validate`)
+- Configuration applied by rolling the pod (standard Kubernetes rolling update)
+- Configuration validation before deploy (`bouine config validate`)
 - Structured error reporting with line numbers
 
 ### 1.2 Request processing model

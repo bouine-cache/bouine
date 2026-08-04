@@ -153,11 +153,11 @@ The high-level Go module layout follows the layered architecture in
 /internal/cache              L3 — RFC 9111 state machine, Vary, conditionals, negative cache
 /internal/origin             L4 — upstream pool, health, hedge, circuit breaker
 /internal/cluster            L5 — gossip, consistent hash, peer fetch, broadcast
-/internal/admin              L6 — net/http admin: purge, ban, refresh, config reload
+/internal/admin              L6 — net/http admin: purge, ban, refresh, config viewer
 /internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
 /internal/observability      L7 — Prometheus, OpenTelemetry, slog, pprof
 /internal/cloudflare         Cloudflare Cache API invalidation propagation
-/internal/config             config loader, schema, hot reload
+/internal/config             config loader, schema, validation
 /internal/runtime            supervised goroutines, graceful shutdown sequencer
 /pkg/bouineapi               public Go SDK
 /pkg/api                     shared wire types (SDK, admin server, dashboard)

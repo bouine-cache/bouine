@@ -224,7 +224,6 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /version", s.version)
 	mux.HandleFunc("GET /drain", s.drain)
 	s.mountOptionalRoutes(mux, cfg)
-	mux.HandleFunc("POST /v1/config/reload", s.configReload)
 
 	topHandler := s.authMiddleware(mux)
 	if cfg.RateLimitPerSecond > 0 {
@@ -488,10 +487,6 @@ func (s *Server) ban(w http.ResponseWriter, r *http.Request) {
 		s.cfg.OnBanned(r.Context(), expr)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "banned", "count": count})
-}
-
-func (s *Server) configReload(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reload-requested"})
 }
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {

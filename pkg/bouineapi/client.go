@@ -153,20 +153,6 @@ func (c *Client) Refresh(ctx context.Context, url string) (*RefreshResult, error
 	return &out, nil
 }
 
-// ReloadResult is the response from a config reload.
-type ReloadResult struct {
-	Status string `json:"status"`
-}
-
-// Reload triggers a config reload on the server.
-func (c *Client) Reload(ctx context.Context) (*ReloadResult, error) {
-	var out ReloadResult
-	if err := c.post(ctx, "/v1/config/reload", nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {

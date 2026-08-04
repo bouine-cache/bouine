@@ -48,7 +48,6 @@ aren't `slog`-compatible, HTTP servers other than
 | `golang.org/x/sys`                              | BSD-3      | (transitive)             | Low-level syscalls. |
 | `golang.org/x/text`                             | BSD-3      | (transitive)             | Unicode handling. |
 | `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`   | YAML config parsing. Standard for Go config files. |
-| `github.com/fsnotify/fsnotify`                  | BSD-3      | `internal/config`        | Filesystem change notifications for config hot-reload. |
 
 > **Fiber removed in ADR-0006.** `gofiber/fiber/v3`, `gofiber/utils`,
 > `gofiber/schema`, `valyala/fasthttp`, `valyala/bytebufferpool`,
@@ -79,7 +78,6 @@ without code requires a justification in the PR.
 - A CVE in any entry above triggers a security review pass against the
   threat model.
 | `github.com/a-h/templ`                          | MIT        | `internal/dashboard/templates` | Type-safe HTML templating for the operator dashboard. |
-| `github.com/fsnotify/fsnotify`                  | BSD-3      | `internal/config`              | File-system watcher for SIGHUP + fsnotify hot reload. |
 | `gopkg.in/yaml.v3`                              | MIT + Apache-2.0 | `internal/config`    | YAML config parsing. Chosen for strict mode and good error messages. |
 | `go.opentelemetry.io/otel`                      | Apache-2.0 | `internal/observability/tracing` | OTel API; no-op by default, wired to OTLP exporter via config. |
 | `go.opentelemetry.io/otel/trace`                | Apache-2.0 | `internal/observability/tracing` | OTel trace types. |

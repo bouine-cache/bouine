@@ -3,11 +3,11 @@
 package platform
 
 import (
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
@@ -67,29 +67,34 @@ func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
 	err := os.MkdirAll(filepath.Dir(path), 0o755)
 	require.NoError(t, err)
-	err := os.WriteFile(path, []byte(content), 0o600)
+	err = os.WriteFile(path, []byte(content), 0o600)
 	require.NoError(t, err)
 }
 
 func TestRaiseFileLimit(t *testing.T) {
 	var before unix.Rlimit
-	err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before)
-	require.NoError(t, err, "getrlimit")
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before); err != nil {
+		t.Fatalf("getrlimit: %v", err)
+	}
 
 	got, err := RaiseFileLimit(65536)
-	require.NoError(t, err, "RaiseFileLimit")
+	if err != nil {
+		t.Fatalf("RaiseFileLimit: %v", err)
+	}
 	if got < 65536 && got < before.Max {
 		t.Fatalf("soft limit = %d, want >= 65536 (or capped at hard limit %d)", got, before.Max)
 	}
 
 	var after unix.Rlimit
-	err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after)
-	require.NoError(t, err, "getrlimit after")
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after); err != nil {
+		t.Fatalf("getrlimit after: %v", err)
+	}
 	if after.Cur < 65536 && after.Cur < before.Max {
 		t.Fatalf("soft limit after = %d, want >= 65536 (or capped at hard limit %d)", after.Cur, before.Max)
 	}
 
 	// Calling again with the same value should be a no-op.
-	_, err := RaiseFileLimit(65536)
-	require.NoError(t, err, "RaiseFileLimit idempotent")
+	if _, err := RaiseFileLimit(65536); err != nil {
+		t.Fatalf("RaiseFileLimit idempotent: %v", err)
+	}
 }

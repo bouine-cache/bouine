@@ -83,7 +83,6 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 // gossip only (no HTTP fan-out).
 func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey string) {
 	evt := api.PurgeEvent{
-		Type:     api.GossipTypePurge,
 		Key:      key,
 		VaryKey:  varyKey,
 		Issuer:   b.cluster.cfg.NodeName,
@@ -142,7 +141,6 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 // mode it sends via gossip only.
 func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	evt := api.BanEvent{
-		Type:      api.GossipTypeBan,
 		Predicate: expr,
 		Issuer:    b.cluster.cfg.NodeName,
 		IssuedAt:  time.Now(),

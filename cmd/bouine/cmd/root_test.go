@@ -16,10 +16,8 @@ func TestVersionCmdRuns(t *testing.T) {
 	root.SetOut(&stdout)
 	root.SetErr(&stdout)
 	root.SetArgs([]string{"version"})
-	{
-		err := root.Execute()
-		require.NoErrorf(t, err, "execute: %v", err)
-	}
+	err := root.Execute()
+	require.NoErrorf(t, err, "execute: %v", err)
 	out := stdout.String()
 	require.True(t, strings.HasPrefix(out, "bouine "))
 }

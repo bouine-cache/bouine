@@ -131,10 +131,8 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 	h.ServeHTTP(rr2, rangeReq)
 	require.Equal(t, http.StatusPartialContent, rr2.Code)
 	require.Equal(t, "Hello", rr2.Body.String())
-	{
-		xc := rr2.Header().Get(header.XCache)
-		require.Equal(t, "HIT", xc)
-	}
+	xc := rr2.Header().Get(header.XCache)
+	require.Equal(t, "HIT", xc)
 }
 
 func TestHandler_RangeOnStaleObject(t *testing.T) {
@@ -164,12 +162,8 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 
 	require.Equal(t, http.StatusPartialContent, rr.Code)
 	require.Equal(t, "Hello", rr.Body.String())
-	{
-		xc := rr.Header().Get(header.XCache)
-		require.Equal(t, "STALE", xc)
-	}
-	{
-		w := rr.Header().Get(header.Warning)
-		require.True(t, strings.HasPrefix(w, "110"))
-	}
+	xc := rr.Header().Get(header.XCache)
+	require.Equal(t, "STALE", xc)
+	w := rr.Header().Get(header.Warning)
+	require.True(t, strings.HasPrefix(w, "110"))
 }

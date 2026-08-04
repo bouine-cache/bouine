@@ -62,10 +62,8 @@ func TestTiered_HotOnly(t *testing.T) {
 	k := KeyHash([]byte("hot-only"))
 	o := bigObj(k, 100) // below threshold, hot only
 
-	{
-		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := ts.Put(context.Background(), k, o)
+	require.NoErrorf(t, err, "put: %v", err)
 	got, src, err := ts.Get(context.Background(), k)
 	require.NoErrorf(t, err, "get: %v", err)
 	require.NotNil(t, got)
@@ -78,10 +76,8 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	k := KeyHash([]byte("big-object"))
 	o := bigObj(k, 8192) // above 1024 threshold
 
-	{
-		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := ts.Put(context.Background(), k, o)
+	require.NoErrorf(t, err, "put: %v", err)
 
 	// Should be in hot tier.
 	got, src, err := ts.Get(context.Background(), k)
@@ -107,16 +103,12 @@ func TestTiered_LargeObjectReadPath(t *testing.T) {
 	k := KeyHash([]byte("big-read"))
 	o := bigObj(k, 8192) // above 1024 threshold
 
-	{
-		err := ts.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := ts.Put(context.Background(), k, o)
+	require.NoErrorf(t, err, "put: %v", err)
 
 	// Evict from hot tier so the next Get falls through to warm.
-	{
-		err := ts.hot.Delete(context.Background(), k)
-		require.NoErrorf(t, err, "delete from hot: %v", err)
-	}
+	err = ts.hot.Delete(context.Background(), k)
+	require.NoErrorf(t, err, "delete from hot: %v", err)
 
 	got, src, err := ts.Get(context.Background(), k)
 	require.NoErrorf(t, err, "Get: %v", err)
@@ -157,10 +149,8 @@ func TestTiered_Stats_WarmDiskAndMaxBytes(t *testing.T) {
 
 	// Put a large object so the warm tier has on-disk bytes.
 	k := KeyHash([]byte("disk-bytes"))
-	{
-		err := ts.Put(context.Background(), k, bigObj(k, 2048))
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err = ts.Put(context.Background(), k, bigObj(k, 2048))
+	require.NoErrorf(t, err, "put: %v", err)
 
 	st := ts.Stats()
 	assert.Equal(t, int64(maxBytes), st.WarmMaxBytes)
@@ -254,20 +244,14 @@ func TestTiered_WarmGet(t *testing.T) {
 	ts1 := newStore()
 	k := KeyHash([]byte("warm-get-key"))
 	obj := bigObj(k, 1024)
-	{
-		err := ts1.Put(ctx, k, obj)
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	err := ts1.Put(ctx, k, obj)
+	require.NoErrorf(t, err, "Put: %v", err)
 	// Warm entry must be present.
-	{
-		st := ts1.Stats()
-		require.NotEqual(t, 0, st.WarmEntries)
-	}
+	st := ts1.Stats()
+	require.NotEqual(t, 0, st.WarmEntries)
 	// Delete from hot tier so next Get must fall through to warm.
-	{
-		err := ts1.hot.Delete(ctx, k)
-		require.NoErrorf(t, err, "hot delete: %v", err)
-	}
+	err = ts1.hot.Delete(ctx, k)
+	require.NoErrorf(t, err, "hot delete: %v", err)
 	got, _, err := ts1.Get(ctx, k)
 	require.NoErrorf(t, err, "Get after hot eviction: %v", err)
 	if got == nil || got.StatusCode != 200 {
@@ -312,10 +296,8 @@ func TestTiered_WarmStatsRestoredAfterReopen(t *testing.T) {
 	ts1 := newStore()
 	for i := range 5 {
 		k := KeyHash([]byte(fmt.Sprintf("stats-key-%d", i)))
-		{
-			err := ts1.Put(ctx, k, bigObj(k, 1024))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		err := ts1.Put(ctx, k, bigObj(k, 1024))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	st1 := ts1.Stats()
 	require.Equal(t, int64(5), st1.WarmEntries)
@@ -343,10 +325,8 @@ func TestTieredStore_CloseStopsCompaction(t *testing.T) {
 	require.NoError(t, err)
 
 	before := runtime.NumGoroutine()
-	{
-		err := ts.Close(context.Background())
-		require.NoError(t, err)
-	}
+	err = ts.Close(context.Background())
+	require.NoError(t, err)
 
 	// Poll for the goroutine to exit, matching the pattern in TestHotClose.
 	poll.Eventually(t, 500*time.Millisecond, 10*time.Millisecond, func() bool {
@@ -381,20 +361,14 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 	// Two large objects that exceed the hot budget; both go to warm.
 	k1 := KeyHash([]byte("union-key-1"))
 	k2 := KeyHash([]byte("union-key-2"))
-	{
-		err := ts.Put(ctx, k1, bigObj(k1, 1024))
-		require.NoErrorf(t, err, "Put k1: %v", err)
-	}
-	{
-		err := ts.Put(ctx, k2, bigObj(k2, 1024))
-		require.NoErrorf(t, err, "Put k2: %v", err)
-	}
+	err = ts.Put(ctx, k1, bigObj(k1, 1024))
+	require.NoErrorf(t, err, "Put k1: %v", err)
+	err = ts.Put(ctx, k2, bigObj(k2, 1024))
+	require.NoErrorf(t, err, "Put k2: %v", err)
 
 	// Evict k1 from the hot tier only; it remains in warm.
-	{
-		err := ts.hot.Delete(ctx, k1)
-		require.NoErrorf(t, err, "hot delete k1: %v", err)
-	}
+	err = ts.hot.Delete(ctx, k1)
+	require.NoErrorf(t, err, "hot delete k1: %v", err)
 
 	got := ts.Keys()
 	gotSet := make(map[api.Key]bool, len(got))
@@ -424,10 +398,8 @@ func TestTieredStore_OverBudget(t *testing.T) {
 
 	// Under-budget store is not over budget.
 	k := KeyHash([]byte("small"))
-	{
-		err := ts.Put(ctx, k, bigObj(k, 256))
-		require.NoErrorf(t, err, "Put small: %v", err)
-	}
+	err = ts.Put(ctx, k, bigObj(k, 256))
+	require.NoErrorf(t, err, "Put small: %v", err)
 	require.False(t, ts.OverBudget())
 
 	// Stop the sweeper so the overshoot from an oversized object is
@@ -438,10 +410,8 @@ func TestTieredStore_OverBudget(t *testing.T) {
 	close(ts.hot.done)
 
 	overK := KeyHash([]byte("oversized"))
-	{
-		err := ts.Put(ctx, overK, bigObj(overK, maxBytes*2))
-		require.NoErrorf(t, err, "Put oversized: %v", err)
-	}
+	err = ts.Put(ctx, overK, bigObj(overK, maxBytes*2))
+	require.NoErrorf(t, err, "Put oversized: %v", err)
 	require.True(t, ts.OverBudget())
 }
 
@@ -456,10 +426,8 @@ func TestTieredStore_ImplementsKeyLister(t *testing.T) {
 		KeyHash([]byte("k3")),
 	}
 	for _, k := range keys {
-		{
-			err := ts.Put(ctx, k, bigObj(k, 100))
-			require.NoErrorf(t, err, "Put: %v", err)
-		}
+		err := ts.Put(ctx, k, bigObj(k, 100))
+		require.NoErrorf(t, err, "Put: %v", err)
 	}
 
 	kl, ok := any(ts).(KeyLister)
@@ -510,10 +478,8 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
 	segID, offset, err := ts1.warm.Put(uint64(k), legacyBlob)
 	require.NoErrorf(t, err, "warm.Put: %v", err)
-	{
-		err := ts1.wal.Append(wal.PutEntry(uint64(k), int32(segID), offset))
-		require.NoErrorf(t, err, "wal.Append: %v", err)
-	}
+	err = ts1.wal.Append(wal.PutEntry(uint64(k), int32(segID), offset))
+	require.NoErrorf(t, err, "wal.Append: %v", err)
 
 	// Get must treat the undecodable blob as a miss, not an error.
 	got, _, err := ts1.Get(ctx, k)
@@ -522,22 +488,16 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 
 	// The warm-tier index must no longer contain the key: warm.Get
 	// returns nil after the tombstone + index removal.
-	{
-		body, _ := ts1.warm.Get(uint64(k))
-		require.Nil(t, body)
-	}
+	body, _ := ts1.warm.Get(uint64(k))
+	require.Nil(t, body)
 
 	// A fresh Put of a v2 object for the same key must be readable
 	// from the warm tier after hot eviction.
 	fresh := bigObj(k, 1024)
-	{
-		err := ts1.Put(ctx, k, fresh)
-		require.NoErrorf(t, err, "Put fresh: %v", err)
-	}
-	{
-		err := ts1.hot.Delete(ctx, k)
-		require.NoErrorf(t, err, "hot.Delete: %v", err)
-	}
+	err = ts1.Put(ctx, k, fresh)
+	require.NoErrorf(t, err, "Put fresh: %v", err)
+	err = ts1.hot.Delete(ctx, k)
+	require.NoErrorf(t, err, "hot.Delete: %v", err)
 	gotFresh, _, err := ts1.Get(ctx, k)
 	require.NoErrorf(t, err, "Get fresh from warm: %v", err)
 	if gotFresh == nil || gotFresh.StatusCode != 200 {
@@ -547,10 +507,8 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	// The heal must survive restart: WAL replay processes the Put
 	// (legacy), the Delete (eviction), then the Put (fresh). The key
 	// must resolve to the fresh v2 blob, not the legacy one.
-	{
-		err := ts1.Close(ctx)
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err = ts1.Close(ctx)
+	require.NoErrorf(t, err, "Close: %v", err)
 	ts2 := newStore()
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 	// Evict from hot so Get falls through to warm.
@@ -578,18 +536,14 @@ func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
 		Header:     header.FromHTTP(http.Header{"A": {"b"}}),
 		Body:       []byte("xx"),
 	})[:4]
-	{
-		_, _, err := ts.warm.Put(uint64(k), corruptBlob)
-		require.NoErrorf(t, err, "warm.Put: %v", err)
-	}
+	_, _, err := ts.warm.Put(uint64(k), corruptBlob)
+	require.NoErrorf(t, err, "warm.Put: %v", err)
 
 	got, _, err := ts.Get(ctx, k)
 	require.NoErrorf(t, err, "Get: expected nil error for corrupt blob, got %v", err)
 	require.Nil(t, got)
-	{
-		body, _ := ts.warm.Get(uint64(k))
-		require.Nil(t, body)
-	}
+	body, _ := ts.warm.Get(uint64(k))
+	require.Nil(t, body)
 }
 
 // TestTiered_EvictsLegacyBlobAfterReopen is the production scenario from
@@ -617,22 +571,16 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 	ts1, err := NewTieredStore(cfg)
 	require.NoErrorf(t, err, "ts1: %v", err)
 	goodKey := KeyHash([]byte("good-object"))
-	{
-		err := ts1.Put(ctx, goodKey, bigObj(goodKey, 1024))
-		require.NoErrorf(t, err, "Put good: %v", err)
-	}
+	err = ts1.Put(ctx, goodKey, bigObj(goodKey, 1024))
+	require.NoErrorf(t, err, "Put good: %v", err)
 	legacyKey := KeyHash([]byte("legacy-after-reopen"))
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
 	segID, offset, err := ts1.warm.Put(uint64(legacyKey), legacyBlob)
 	require.NoErrorf(t, err, "warm.Put legacy: %v", err)
-	{
-		err := ts1.wal.Append(wal.PutEntry(uint64(legacyKey), int32(segID), offset))
-		require.NoErrorf(t, err, "wal.Append: %v", err)
-	}
-	{
-		err := ts1.Close(ctx)
-		require.NoErrorf(t, err, "ts1.Close: %v", err)
-	}
+	err = ts1.wal.Append(wal.PutEntry(uint64(legacyKey), int32(segID), offset))
+	require.NoErrorf(t, err, "wal.Append: %v", err)
+	err = ts1.Close(ctx)
+	require.NoErrorf(t, err, "ts1.Close: %v", err)
 
 	// Phase 2: reopen. WAL replay re-indexes both keys. Get on the
 	// legacy key must evict it (clean miss). Get on the good key must
@@ -676,14 +624,10 @@ func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 	k := KeyHash([]byte("torn-write-key"))
-	{
-		err := ts1.Put(ctx, k, bigObj(k, 1024))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
-	{
-		err := ts1.Close(ctx)
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err = ts1.Put(ctx, k, bigObj(k, 1024))
+	require.NoErrorf(t, err, "Put: %v", err)
+	err = ts1.Close(ctx)
+	require.NoErrorf(t, err, "Close: %v", err)
 
 	truncateLastSegmentRecord(t, warmDir)
 
@@ -720,14 +664,10 @@ func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 	k := KeyHash([]byte("durable-key"))
-	{
-		err := ts1.Put(ctx, k, bigObj(k, 1024))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
-	{
-		err := ts1.Close(ctx)
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err = ts1.Put(ctx, k, bigObj(k, 1024))
+	require.NoErrorf(t, err, "Put: %v", err)
+	err = ts1.Close(ctx)
+	require.NoErrorf(t, err, "Close: %v", err)
 
 	ts2, err := NewTieredStore(TieredConfig{
 		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
@@ -782,10 +722,8 @@ func truncateLastSegmentRecord(t *testing.T, warmDir string) {
 	_ = scan.Close()
 
 	cutAt := lastOff + 20
-	{
-		err := os.Truncate(segFile, cutAt)
-		require.NoErrorf(t, err, "truncate: %v", err)
-	}
+	err = os.Truncate(segFile, cutAt)
+	require.NoErrorf(t, err, "truncate: %v", err)
 }
 
 // TestTiered_WALReplayRestoresIndex verifies that after a close/reopen
@@ -821,15 +759,11 @@ func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 	for i := range 10 {
 		k := KeyHash([]byte(fmt.Sprintf("replay-key-%d", i)))
 		keys[i] = k
-		{
-			err := ts1.Put(ctx, k, bigObj(k, 1024))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		err := ts1.Put(ctx, k, bigObj(k, 1024))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
-	{
-		err := ts1.Close(ctx)
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err := ts1.Close(ctx)
+	require.NoErrorf(t, err, "Close: %v", err)
 
 	// Reopen: WAL replay should restore all 10 entries.
 	ts2 := newStore()
@@ -885,10 +819,8 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Fill the warm tier to exactly the budget. Protect all entries so
 	// the eviction policy can't free space.
 	for i := range numFill {
-		{
-			_, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize))
-			require.NoErrorf(t, err, "warm.Put %d under budget: %v", i, err)
-		}
+		_, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize))
+		require.NoErrorf(t, err, "warm.Put %d under budget: %v", i, err)
 	}
 	for i := range numFill {
 		ts.warm.Protect(uint64(i))
@@ -901,10 +833,8 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// hot-only and candidates for warm sync promotion).
 	for i := range 10 {
 		k := api.Key(1000 + i)
-		{
-			err := ts.Put(ctx, k, obj(k, 100))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		err := ts.Put(ctx, k, obj(k, 100))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Run a sync cycle. It should skip promotion because warm is over budget.
@@ -913,10 +843,8 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Verify none of the hot-only keys were promoted to warm.
 	for i := range 10 {
 		k := uint64(1000 + i)
-		{
-			_, _, ok := ts.warm.Lookup(k)
-			assert.False(t, ok)
-		}
+		_, _, ok := ts.warm.Lookup(k)
+		assert.False(t, ok)
 	}
 
 	// The warm entry count should not have increased from the promotion
@@ -968,10 +896,8 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	const numHotOnly = 5
 	for i := range numHotOnly {
 		k := api.Key(1000 + i)
-		{
-			err := ts.Put(ctx, k, obj(k, 100))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		err := ts.Put(ctx, k, obj(k, 100))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Run a sync cycle. The first fillCount keys should be promoted;

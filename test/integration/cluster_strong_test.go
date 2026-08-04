@@ -19,15 +19,11 @@ func TestStrong_MissThenHit(t *testing.T) {
 	// Fresh URL — first request must be a MISS, second must be a HIT.
 	// Both requests go to the same node; the owner caches the response.
 	resp := s.Get(t, 0, "/hit?x=strong-miss-then-hit-a")
-	{
-		got := resp.Header.Get("X-Cache")
-		require.Equal(t, "MISS", got)
-	}
+	got := resp.Header.Get("X-Cache")
+	require.Equal(t, "MISS", got)
 	resp = s.Get(t, 0, "/hit?x=strong-miss-then-hit-a")
-	{
-		got := resp.Header.Get("X-Cache")
-		require.Equal(t, "HIT", got)
-	}
+	got := resp.Header.Get("X-Cache")
+	require.Equal(t, "HIT", got)
 }
 
 func TestStrong_PeerFetch(t *testing.T) {
@@ -80,10 +76,8 @@ func TestStrong_PurgePropagation(t *testing.T) {
 
 	// Node 0 is immediately cleared (direct store.Delete).
 	resp := s.Get(t, 0, path)
-	{
-		got := resp.Header.Get("X-Cache")
-		require.Equal(t, "MISS", got)
-	}
+	got := resp.Header.Get("X-Cache")
+	require.Equal(t, "MISS", got)
 
 	// The gossip-purge message carries a cache key derived from node 0's
 	// HTTP address (127.0.0.1:18081). On nodes 1 and 2 the peer-fetched
@@ -128,10 +122,8 @@ func TestStrong_BanPropagation(t *testing.T) {
 	// immediately (no gossip wait needed).
 	for i := range s.Nodes {
 		resp := s.Get(t, i, path)
-		{
-			got := resp.Header.Get("X-Cache")
-			assert.NotEqual(t, "HIT", got)
-		}
+		got := resp.Header.Get("X-Cache")
+		assert.NotEqual(t, "HIT", got)
 	}
 }
 

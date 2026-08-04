@@ -155,10 +155,8 @@ func TestPool_ProxiesBody(t *testing.T) {
 	h.ServeHTTP(rr, req)
 
 	require.Equal(t, 200, rr.Code)
-	{
-		got := rr.Body.String()
-		require.Equal(t, body, got)
-	}
+	got := rr.Body.String()
+	require.Equal(t, body, got)
 }
 
 func TestPool_ResponseHeaderTimeout(t *testing.T) {

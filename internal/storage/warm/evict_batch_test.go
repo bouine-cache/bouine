@@ -27,10 +27,8 @@ func TestEvictToFitBatch_MultiEvict(t *testing.T) {
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	var evicted atomic.Int64
@@ -78,10 +76,8 @@ func TestEvictToFitBatch_NoEvictionNeeded(t *testing.T) {
 		evicted.Add(1)
 	}
 
-	{
-		_, _, err := s.Put(1, make([]byte, 100))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	_, _, err = s.Put(1, make([]byte, 100))
+	require.NoErrorf(t, err, "Put: %v", err)
 
 	// Small record, plenty of budget left.
 	s.mu.RLock()
@@ -109,10 +105,8 @@ func TestEvictToFitBatch_OverBudget(t *testing.T) {
 		evicted.Add(1)
 	}
 
-	{
-		_, _, err := s.Put(1, make([]byte, 100))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	_, _, err = s.Put(1, make([]byte, 100))
+	require.NoErrorf(t, err, "Put: %v", err)
 
 	// Record larger than entire budget.
 	hugeRec := budget + 1
@@ -143,10 +137,8 @@ func TestEvictToFitBatch_PutIntegration(t *testing.T) {
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	var evicted atomic.Int64
@@ -156,20 +148,16 @@ func TestEvictToFitBatch_PutIntegration(t *testing.T) {
 
 	// Put a large record that forces multiple evictions.
 	largeBody := make([]byte, 10*(HeaderLen+seedBody+FooterLen))
-	{
-		_, _, err := s.Put(999, largeBody)
-		require.NoErrorf(t, err, "Put with batch eviction: %v", err)
-	}
+	_, _, err = s.Put(999, largeBody)
+	require.NoErrorf(t, err, "Put with batch eviction: %v", err)
 
 	if evicted.Load() < 10 {
 		t.Errorf("OnEvict fired %d times, want >= 10", evicted.Load())
 	}
 
 	// Verify the large key is retrievable.
-	{
-		_, _, ok := s.Lookup(999)
-		require.True(t, ok)
-	}
+	_, _, ok := s.Lookup(999)
+	require.True(t, ok)
 }
 
 // TestEvictToFitBatch_EmptyStore verifies behavior on an empty warm tier.
@@ -202,10 +190,8 @@ func TestEvictToFitBatch_NoVictimsAvailable(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Insert one entry that fills the budget.
-	{
-		_, _, err := s.Put(1, make([]byte, 100))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	_, _, err = s.Put(1, make([]byte, 100))
+	require.NoErrorf(t, err, "Put: %v", err)
 
 	// Mark it protected so pickEvictVictim skips it.
 	s.idxMu.Lock()
@@ -244,10 +230,8 @@ func TestEvictToFitBatch_MidBatchFailure(t *testing.T) {
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	var evictedCount atomic.Int64
@@ -304,10 +288,8 @@ func TestOverBudget_EntryCap(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := range 5 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	require.True(t, s.OverBudget())
@@ -325,10 +307,8 @@ func TestOverBudget_EntryCapNotReached(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := range 5 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	require.False(t, s.OverBudget())
@@ -347,10 +327,8 @@ func TestPut_EntryCapRejects(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := range 3 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	// Mark all entries protected so eviction cannot find a victim.
@@ -380,17 +358,13 @@ func TestPut_EntryCapEvictsAndSucceeds(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := range 3 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put(%d): %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put(%d): %v", i, err)
 	}
 
 	// 4th Put should evict one entry and succeed.
-	{
-		_, _, err := s.Put(99, body)
-		require.NoErrorf(t, err, "Put with entry cap eviction: %v", err)
-	}
+	_, _, err = s.Put(99, body)
+	require.NoErrorf(t, err, "Put with entry cap eviction: %v", err)
 
 	assert.Equal(t, int64(3), s.stats.entries.Load())
 }

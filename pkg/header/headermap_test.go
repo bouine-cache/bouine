@@ -15,35 +15,23 @@ func TestMap_GetSetDel(t *testing.T) {
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("X-Custom", "value1")
 
-	{
-		got := h.Get("Content-Type")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := h.Get("content-type")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := h.Get("CACHE-CONTROL")
-		assert.Equal(t, "public, max-age=3600", got)
-	}
-	{
-		got := h.Get("Missing")
-		assert.Equal(t, "", got)
-	}
+	got := h.Get("Content-Type")
+	assert.Equal(t, "text/html", got)
+	got = h.Get("content-type")
+	assert.Equal(t, "text/html", got)
+	got = h.Get("CACHE-CONTROL")
+	assert.Equal(t, "public, max-age=3600", got)
+	got = h.Get("Missing")
+	assert.Equal(t, "", got)
 
 	h.Set("Content-Type", "application/json")
-	{
-		got := h.Get("Content-Type")
-		assert.Equal(t, "application/json", got)
-	}
+	got = h.Get("Content-Type")
+	assert.Equal(t, "application/json", got)
 
 	h.Del("X-Custom")
 	assert.False(t, h.Has("X-Custom"))
-	{
-		got := h.Get("X-Custom")
-		assert.Equal(t, "", got)
-	}
+	got = h.Get("X-Custom")
+	assert.Equal(t, "", got)
 }
 
 func TestMap_FromHTTP(t *testing.T) {
@@ -56,14 +44,10 @@ func TestMap_FromHTTP(t *testing.T) {
 
 	hm := FromHTTP(src)
 
-	{
-		got := hm.Get("Content-Type")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := hm.Get("X-Multi")
-		assert.Equal(t, "a, b, c", got)
-	}
+	got := hm.Get("Content-Type")
+	assert.Equal(t, "text/html", got)
+	got = hm.Get("X-Multi")
+	assert.Equal(t, "a, b, c", got)
 	assert.Equal(t, 3, hm.Len())
 }
 
@@ -80,20 +64,14 @@ func TestMap_Clone(t *testing.T) {
 	h.Set("ETag", `"abc123"`)
 
 	c := h.Clone()
-	{
-		got := c.Get("Content-Type")
-		assert.Equal(t, "text/html", got)
-	}
+	got := c.Get("Content-Type")
+	assert.Equal(t, "text/html", got)
 
 	c.Set("Content-Type", "application/json")
-	{
-		got := h.Get("Content-Type")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := c.Get("Content-Type")
-		assert.Equal(t, "application/json", got)
-	}
+	got = h.Get("Content-Type")
+	assert.Equal(t, "text/html", got)
+	got = c.Get("Content-Type")
+	assert.Equal(t, "application/json", got)
 }
 
 func TestMap_WriteTo(t *testing.T) {
@@ -105,18 +83,12 @@ func TestMap_WriteTo(t *testing.T) {
 	dst := make(http.Header, 3)
 	h.WriteTo(dst)
 
-	{
-		got := dst.Get("Content-Type")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := dst.Get("Cache-Control")
-		assert.Equal(t, "public, max-age=3600", got)
-	}
-	{
-		got := dst.Get("X-Custom")
-		assert.Equal(t, "value", got)
-	}
+	got := dst.Get("Content-Type")
+	assert.Equal(t, "text/html", got)
+	got = dst.Get("Cache-Control")
+	assert.Equal(t, "public, max-age=3600", got)
+	got = dst.Get("X-Custom")
+	assert.Equal(t, "value", got)
 }
 
 func TestMap_Range(t *testing.T) {
@@ -178,16 +150,12 @@ func TestMap_Range_StopEarly(t *testing.T) {
 func TestMap_SetValues(t *testing.T) {
 	h := Map{}
 	h.SetValues("X-Multi", []string{"a", "b", "c"})
-	{
-		got := h.Get("X-Multi")
-		assert.Equal(t, "a, b, c", got)
-	}
+	got := h.Get("X-Multi")
+	assert.Equal(t, "a, b, c", got)
 
 	h.SetValues("X-Single", []string{"only"})
-	{
-		got := h.Get("X-Single")
-		assert.Equal(t, "only", got)
-	}
+	got = h.Get("X-Single")
+	assert.Equal(t, "only", got)
 
 	h.SetValues("X-Multi", []string{})
 	assert.False(t, h.Has("X-Multi"))
@@ -213,10 +181,8 @@ func TestMap_MarshalJSON(t *testing.T) {
 	require.NoErrorf(t, err, "MarshalJSON: %v", err)
 
 	var m map[string][]string
-	{
-		err := json.Unmarshal(data, &m)
-		require.NoErrorf(t, err, "unmarshal result: %v", err)
-	}
+	err = json.Unmarshal(data, &m)
+	require.NoErrorf(t, err, "unmarshal result: %v", err)
 
 	if vals, ok := m["Content-Type"]; !ok || len(vals) != 1 || vals[0] != "text/html" {
 		t.Errorf("Content-Type not in JSON: %v", m)
@@ -237,23 +203,15 @@ func TestMap_UnmarshalJSON(t *testing.T) {
 	input := `{"Content-Type": ["text/html"], "Cache-Control": ["public, max-age=3600"], "X-Multi": ["a", "b"]}`
 
 	var h Map
-	{
-		err := json.Unmarshal([]byte(input), &h)
-		require.NoErrorf(t, err, "UnmarshalJSON: %v", err)
-	}
+	err := json.Unmarshal([]byte(input), &h)
+	require.NoErrorf(t, err, "UnmarshalJSON: %v", err)
 
-	{
-		got := h.Get("Content-Type")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := h.Get("Cache-Control")
-		assert.Equal(t, "public, max-age=3600", got)
-	}
-	{
-		got := h.Get("X-Multi")
-		assert.Equal(t, "a, b", got)
-	}
+	got := h.Get("Content-Type")
+	assert.Equal(t, "text/html", got)
+	got = h.Get("Cache-Control")
+	assert.Equal(t, "public, max-age=3600", got)
+	got = h.Get("X-Multi")
+	assert.Equal(t, "a, b", got)
 }
 
 func TestMap_JSONRoundTrip(t *testing.T) {
@@ -267,10 +225,8 @@ func TestMap_JSONRoundTrip(t *testing.T) {
 	require.NoErrorf(t, err, "marshal: %v", err)
 
 	var decoded Map
-	{
-		err := json.Unmarshal(data, &decoded)
-		require.NoErrorf(t, err, "unmarshal: %v", err)
-	}
+	err = json.Unmarshal(data, &decoded)
+	require.NoErrorf(t, err, "unmarshal: %v", err)
 
 	original.Range(func(key, value string) bool {
 		got := decoded.Get(key)

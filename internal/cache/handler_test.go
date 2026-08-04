@@ -864,14 +864,10 @@ func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
 
 	// Internal headers must not leak to the client.
-	{
-		v := rr.Header().Get(header.XBouinePath)
-		require.Equal(t, "", v)
-	}
-	{
-		v := rr.Header().Get(header.XBouineHost)
-		require.Equal(t, "", v)
-	}
+	v := rr.Header().Get(header.XBouinePath)
+	require.Equal(t, "", v)
+	v = rr.Header().Get(header.XBouineHost)
+	require.Equal(t, "", v)
 }
 func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
 	// sync.Pool is per-P and may be cleared by GC, both of which mask the
@@ -883,10 +879,8 @@ func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
 	t.Cleanup(func() { runtime.GOMAXPROCS(prevProcs) })
 
 	rec := acquireRecorder(0)
-	{
-		_, err := rec.body.Write(make([]byte, maxRecorderCap+1))
-		require.NoErrorf(t, err, "write: %v", err)
-	}
+	_, err := rec.body.Write(make([]byte, maxRecorderCap+1))
+	require.NoErrorf(t, err, "write: %v", err)
 	releaseRecorder(rec)
 
 	fresh := acquireRecorder(0)
@@ -1146,10 +1140,8 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 1, scheduled)
-	}
+	scheduled := h.scheduler.Len()
+	require.Equal(t, 1, scheduled)
 
 	// Clear scheduler to detect next re-schedule.
 	h.scheduler.Stop()
@@ -1158,10 +1150,8 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 2: persist=2 → decrement to 1, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 1, scheduled)
-	}
+	scheduled = h.scheduler.Len()
+	require.Equal(t, 1, scheduled)
 
 	h.scheduler.Stop()
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
@@ -1169,10 +1159,8 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 3: persist=1 → decrement to 0, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 1, scheduled)
-	}
+	scheduled = h.scheduler.Len()
+	require.Equal(t, 1, scheduled)
 
 	h.scheduler.Stop()
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
@@ -1180,10 +1168,8 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 4: persist=0 → gate blocks, no re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 0, scheduled)
-	}
+	scheduled = h.scheduler.Len()
+	require.Equal(t, 0, scheduled)
 }
 
 func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
@@ -1212,10 +1198,8 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	// Unpopular refresh: windowHits=0 < minHits=2 → persist 2→1, re-scheduled.
 	staleHits := h.store.WindowHits(key)
 	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 1, scheduled)
-	}
+	scheduled := h.scheduler.Len()
+	require.Equal(t, 1, scheduled)
 	entry := h.refreshRegistry.Lookup(key)
 	if entry == nil || entry.persistCycles != 1 {
 		t.Fatalf("after unpopular refresh: persist should be 1, got %v", entry)
@@ -1244,10 +1228,8 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	// Popular refresh: windowHits >= minHits → Register called → persist RESET to 2.
 	staleHits = h.store.WindowHits(key)
 	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 1, scheduled)
-	}
+	scheduled = h.scheduler.Len()
+	require.Equal(t, 1, scheduled)
 	entry = h.refreshRegistry.Lookup(key)
 	require.NotNil(t, entry)
 	require.Equal(t, 2, entry.persistCycles)
@@ -1275,10 +1257,8 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 
 	// Hits=1 < minHits=2, persist=0 → gate blocks immediately.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	{
-		scheduled := h.scheduler.Len()
-		require.Equal(t, 0, scheduled)
-	}
+	scheduled := h.scheduler.Len()
+	require.Equal(t, 0, scheduled)
 }
 
 func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {

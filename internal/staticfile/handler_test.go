@@ -17,14 +17,10 @@ func newTestHandler(t *testing.T, files map[string]string, cfg Config) *Handler 
 	dir := t.TempDir()
 	for rel, content := range files {
 		full := filepath.Join(dir, rel)
-		{
-			err := os.MkdirAll(filepath.Dir(full), 0o755)
-			require.NoError(t, err)
-		}
-		{
-			err := os.WriteFile(full, []byte(content), 0o644)
-			require.NoError(t, err)
-		}
+		err := os.MkdirAll(filepath.Dir(full), 0o755)
+		require.NoError(t, err)
+		err = os.WriteFile(full, []byte(content), 0o644)
+		require.NoError(t, err)
 	}
 	cfg.Root = dir
 	h, err := New(cfg)
@@ -49,14 +45,10 @@ func TestHandler_ServeFile(t *testing.T) {
 	w := doRequest(t, h, "GET", "/index.html")
 	require.Equal(t, 200, w.Code)
 	require.Equal(t, "<h1>hello</h1>", w.Body.String())
-	{
-		ct := w.Header().Get("Content-Type")
-		require.Equal(t, "text/html; charset=utf-8", ct)
-	}
-	{
-		cl := w.Header().Get("Content-Length")
-		require.Equal(t, "14", cl)
-	}
+	ct := w.Header().Get("Content-Type")
+	require.Equal(t, "text/html; charset=utf-8", ct)
+	cl := w.Header().Get("Content-Length")
+	require.Equal(t, "14", cl)
 }
 
 func TestHandler_ContentTypes(t *testing.T) {
@@ -79,10 +71,8 @@ func TestHandler_ContentTypes(t *testing.T) {
 	for _, tt := range tests {
 		w := doRequest(t, h, "GET", "/"+tt.path)
 		assert.Equal(t, 200, w.Code)
-		{
-			got := w.Header().Get("Content-Type")
-			assert.Equal(t, tt.wantCT, got)
-		}
+		got := w.Header().Get("Content-Type")
+		assert.Equal(t, tt.wantCT, got)
 	}
 }
 
@@ -111,14 +101,10 @@ func TestHandler_PathTraversal_Escapes(t *testing.T) {
 	dir := t.TempDir()
 	secretDir := filepath.Join(filepath.Dir(dir), "bouine-secret-test")
 	t.Cleanup(func() { os.RemoveAll(secretDir) })
-	{
-		err := os.MkdirAll(secretDir, 0o755)
-		require.NoError(t, err)
-	}
-	{
-		err := os.WriteFile(filepath.Join(secretDir, "secret.txt"), []byte("secret"), 0o644)
-		require.NoError(t, err)
-	}
+	err := os.MkdirAll(secretDir, 0o755)
+	require.NoError(t, err)
+	err = os.WriteFile(filepath.Join(secretDir, "secret.txt"), []byte("secret"), 0o644)
+	require.NoError(t, err)
 
 	h, err := New(Config{Root: dir})
 	require.NoError(t, err)
@@ -174,10 +160,8 @@ func TestHandler_HeadRequest(t *testing.T) {
 	w := doRequest(t, h, "HEAD", "/file.txt")
 	require.Equal(t, 200, w.Code)
 	require.Equal(t, 0, w.Body.Len())
-	{
-		cl := w.Header().Get("Content-Length")
-		require.Equal(t, "11", cl)
-	}
+	cl := w.Header().Get("Content-Length")
+	require.Equal(t, "11", cl)
 }
 
 func TestHandler_PostNotAllowed(t *testing.T) {
@@ -267,14 +251,10 @@ func TestHandler_RangeSingle(t *testing.T) {
 	h.ServeHTTP(w, r)
 	require.Equal(t, http.StatusPartialContent, w.Code)
 	require.Equal(t, "2345", w.Body.String())
-	{
-		cr := w.Header().Get("Content-Range")
-		require.Equal(t, "bytes 2-5/10", cr)
-	}
-	{
-		cl := w.Header().Get("Content-Length")
-		require.Equal(t, "4", cl)
-	}
+	cr := w.Header().Get("Content-Range")
+	require.Equal(t, "bytes 2-5/10", cr)
+	cl := w.Header().Get("Content-Length")
+	require.Equal(t, "4", cl)
 }
 
 func TestHandler_RangeMultipart_CollapsesToFirst(t *testing.T) {
@@ -339,25 +319,19 @@ func TestHandler_RangeHead(t *testing.T) {
 	h.ServeHTTP(w, r)
 	require.Equal(t, http.StatusPartialContent, w.Code)
 	require.Equal(t, 0, w.Body.Len())
-	{
-		cl := w.Header().Get("Content-Length")
-		require.Equal(t, "4", cl)
-	}
+	cl := w.Header().Get("Content-Length")
+	require.Equal(t, "4", cl)
 }
 
 func TestHandler_SymlinkRoot(t *testing.T) {
 	t.Parallel()
 	realDir := t.TempDir()
-	{
-		err := os.WriteFile(filepath.Join(realDir, "file.txt"), []byte("via symlink"), 0o644)
-		require.NoError(t, err)
-	}
+	err := os.WriteFile(filepath.Join(realDir, "file.txt"), []byte("via symlink"), 0o644)
+	require.NoError(t, err)
 	// Create a symlink to realDir.
 	linkDir := filepath.Join(t.TempDir(), "link")
-	{
-		err := os.Symlink(realDir, linkDir)
-		require.NoError(t, err)
-	}
+	err = os.Symlink(realDir, linkDir)
+	require.NoError(t, err)
 	h, err := New(Config{Root: linkDir})
 	require.NoErrorf(t, err, "New with symlink root: %v", err)
 	w := doRequest(t, h, "GET", "/file.txt")
@@ -374,11 +348,9 @@ func TestHandler_NewRootNotExists(t *testing.T) {
 func TestHandler_NewRootNotDirectory(t *testing.T) {
 	t.Parallel()
 	f := filepath.Join(t.TempDir(), "file.txt")
-	{
-		err := os.WriteFile(f, []byte("x"), 0o644)
-		require.NoError(t, err)
-	}
-	_, err := New(Config{Root: f})
+	err := os.WriteFile(f, []byte("x"), 0o644)
+	require.NoError(t, err)
+	_, err = New(Config{Root: f})
 	require.Error(t, err)
 }
 
@@ -400,10 +372,8 @@ func TestHandler_LastModifiedSet(t *testing.T) {
 		"file.txt": "hello",
 	}, Config{})
 	w := doRequest(t, h, "GET", "/file.txt")
-	{
-		lm := w.Header().Get("Last-Modified")
-		require.NotEqual(t, "", lm)
-	}
+	lm := w.Header().Get("Last-Modified")
+	require.NotEqual(t, "", lm)
 }
 
 func TestHandler_UnknownExtension(t *testing.T) {
@@ -413,10 +383,8 @@ func TestHandler_UnknownExtension(t *testing.T) {
 	}, Config{})
 	w := doRequest(t, h, "GET", "/file.zzzunknown")
 	require.Equal(t, 200, w.Code)
-	{
-		ct := w.Header().Get("Content-Type")
-		require.Equal(t, "application/octet-stream", ct)
-	}
+	ct := w.Header().Get("Content-Type")
+	require.Equal(t, "application/octet-stream", ct)
 }
 
 func TestHandler_BodyStreamed(t *testing.T) {
@@ -453,10 +421,8 @@ func TestIsETagMatch(t *testing.T) {
 		{`"abc123", "def"`, true},
 	}
 	for _, tt := range tests {
-		{
-			got := isETagMatch(tt.header, etag)
-			assert.Equal(t, tt.want, got)
-		}
+		got := isETagMatch(tt.header, etag)
+		assert.Equal(t, tt.want, got)
 	}
 }
 

@@ -119,9 +119,7 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 		"truncated":   encodeObject(&api.Object{Header: header.FromHTTP(http.Header{"A": {"b"}}), Body: []byte("xx")})[:4],
 	}
 	for name, blob := range cases {
-		{
-			_, err := decodeObject(blob)
-			assert.NotNilf(t, err, "case %s", name)
-		}
+		_, err := decodeObject(blob)
+		assert.NotNilf(t, err, "case %s", name)
 	}
 }

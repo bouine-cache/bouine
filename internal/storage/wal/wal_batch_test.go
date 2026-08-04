@@ -21,10 +21,8 @@ func TestAppendBatch(t *testing.T) {
 		DeleteEntry(10),
 		PutEntry(30, 2, 1024),
 	}
-	{
-		err := l.AppendBatch(entries)
-		require.NoErrorf(t, err, "AppendBatch: %v", err)
-	}
+	err = l.AppendBatch(entries)
+	require.NoErrorf(t, err, "AppendBatch: %v", err)
 
 	var replayed []Entry
 	err = Replay(path, func(e Entry) error {
@@ -44,13 +42,11 @@ func TestAppendBatch(t *testing.T) {
 func TestAppendBatch_Empty(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
-	{
-		err := l.AppendBatch(nil)
-		require.NoErrorf(t, err, "AppendBatch(nil): %v", err)
-	}
+	err := l.AppendBatch(nil)
+	require.NoErrorf(t, err, "AppendBatch(nil): %v", err)
 
 	var count int
-	err := Replay(path, func(_ Entry) error { count++; return nil })
+	err = Replay(path, func(_ Entry) error { count++; return nil })
 	require.NoErrorf(t, err, "replay: %v", err)
 	require.Equal(t, 0, count)
 }
@@ -65,10 +61,8 @@ func TestAppendBatch_Atomicity(t *testing.T) {
 		PutEntry(100, 0, 0),
 		PutEntry(200, 0, 256),
 	}
-	{
-		err := l.AppendBatch(entries)
-		require.NoErrorf(t, err, "AppendBatch: %v", err)
-	}
+	err = l.AppendBatch(entries)
+	require.NoErrorf(t, err, "AppendBatch: %v", err)
 
 	// Verify file size matches 2 records.
 	info, err := os.Stat(path)

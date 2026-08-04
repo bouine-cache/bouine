@@ -42,18 +42,14 @@ func TestWarmSync_WritesHotOnlyEntriesToWarm(t *testing.T) {
 	}
 
 	// Verify warm is empty before sync.
-	{
-		keys := ts.warm.Keys()
-		require.Len(t, keys, 0)
-	}
+	keys := ts.warm.Keys()
+	require.Len(t, keys, 0)
 
 	ts.runWarmSyncCycle(context.Background())
 
 	// Verify warm now has the entries.
-	{
-		keys := ts.warm.Keys()
-		require.Len(t, keys, 10)
-	}
+	keys = ts.warm.Keys()
+	require.Len(t, keys, 10)
 }
 
 func TestWarmSync_SkipsWarmBackedEntries(t *testing.T) {
@@ -83,17 +79,13 @@ func TestWarmSync_RespectsBatchSize(t *testing.T) {
 	}
 
 	ts.runWarmSyncCycle(context.Background())
-	{
-		keys := ts.warm.Keys()
-		require.Len(t, keys, 3)
-	}
+	keys := ts.warm.Keys()
+	require.Len(t, keys, 3)
 
 	// Second cycle should sync more.
 	ts.runWarmSyncCycle(context.Background())
-	{
-		keys := ts.warm.Keys()
-		require.Len(t, keys, 6)
-	}
+	keys = ts.warm.Keys()
+	require.Len(t, keys, 6)
 }
 
 func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
@@ -233,10 +225,8 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 	require.NoErrorf(t, err, "reopen: %v", err)
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
-	{
-		keys := ts2.warm.Keys()
-		require.Len(t, keys, 5)
-	}
+	keys := ts2.warm.Keys()
+	require.Len(t, keys, 5)
 
 	// Verify warm hits work.
 	for i := range 5 {
@@ -314,10 +304,8 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 	require.NoErrorf(t, err, "reopen: %v", err)
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
-	{
-		keys := ts2.warm.Keys()
-		require.Len(t, keys, 3)
-	}
+	keys := ts2.warm.Keys()
+	require.Len(t, keys, 3)
 }
 
 // TestWarmSync_RebuildIndexFromScanHonoursTombstones verifies that the
@@ -345,10 +333,8 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		k := api.Key(900 + i)
 		_ = ts1.Put(context.Background(), k, bigObj(k, 2000))
 	}
-	{
-		err := ts1.Delete(context.Background(), api.Key(901))
-		require.NoErrorf(t, err, "Delete: %v", err)
-	}
+	err = ts1.Delete(context.Background(), api.Key(901))
+	require.NoErrorf(t, err, "Delete: %v", err)
 	_ = ts1.Close(context.Background())
 
 	// Delete the WAL to force the segment-scan fallback.
@@ -367,10 +353,8 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 
 	// Keys 900 and 902 should be live; 901 should NOT have been
 	// resurrected by the segment scan.
-	{
-		keys := ts2.warm.Keys()
-		require.Len(t, keys, 2)
-	}
+	keys := ts2.warm.Keys()
+	require.Len(t, keys, 2)
 	got, _, err := ts2.Get(context.Background(), api.Key(901))
 	require.NoErrorf(t, err, "Get(901): %v", err)
 	require.Nil(t, got)
@@ -389,10 +373,8 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	k := api.Key(1100)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
-	{
-		keys := ts.warm.Keys()
-		require.Len(t, keys, 1)
-	}
+	keys := ts.warm.Keys()
+	require.Len(t, keys, 1)
 
 	// Replace with a small object — below bodyThreshold, does not
 	// write to warm. The old backed entry is replaced in hot,

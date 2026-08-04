@@ -170,10 +170,8 @@ func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {
 
 	// Even keys (0,2,4,6,8) are live and should remain.
 	// Odd keys (1,3,5,7,9) are dead and should be removed.
-	{
-		got := s.Len()
-		require.Equal(t, 5, got)
-	}
+	got := s.Len()
+	require.Equal(t, 5, got)
 }
 
 func TestSchedulerEmptyHeapBlocksOnReady(t *testing.T) {

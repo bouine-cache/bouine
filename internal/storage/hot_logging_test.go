@@ -47,10 +47,8 @@ func parseLogRecords(t *testing.T, mu *sync.Mutex, buf *bytes.Buffer) []map[stri
 			continue
 		}
 		var rec map[string]any
-		{
-			err := json.Unmarshal(line, &rec)
-			require.NoErrorf(t, err, "unmarshal log line: %v\nline: %s", err, line)
-		}
+		err := json.Unmarshal(line, &rec)
+		require.NoErrorf(t, err, "unmarshal log line: %v\nline: %s", err, line)
 		records = append(records, rec)
 	}
 	return records

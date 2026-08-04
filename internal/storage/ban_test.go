@@ -37,10 +37,8 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 	require.Equal(t, n, count)
 
 	for i := range n {
-		{
-			got, _, _ := s.Get(context.Background(), api.Key(i))
-			assert.Nil(t, got)
-		}
+		got, _, _ := s.Get(context.Background(), api.Key(i))
+		assert.Nil(t, got)
 	}
 }
 
@@ -65,10 +63,8 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 	require.Equal(t, 0, count)
 
 	for i := range n {
-		{
-			got, _, _ := s.Get(context.Background(), api.Key(i))
-			assert.NotNil(t, got)
-		}
+		got, _, _ := s.Get(context.Background(), api.Key(i))
+		assert.NotNil(t, got)
 	}
 }
 
@@ -216,14 +212,10 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 
 	// Both bans match disjoint host patterns, so every entry is
 	// evicted by exactly one ban. total must equal n.
-	{
-		got := total.Load()
-		require.Equal(t, int64(n), got)
-	}
+	got := total.Load()
+	require.Equal(t, int64(n), got)
 	for i := range n {
-		{
-			got, _, _ := s.Get(context.Background(), api.Key(i))
-			assert.Nil(t, got)
-		}
+		got, _, _ := s.Get(context.Background(), api.Key(i))
+		assert.Nil(t, got)
 	}
 }

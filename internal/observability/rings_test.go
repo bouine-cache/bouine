@@ -154,16 +154,12 @@ func TestRings_SaveLoad(t *testing.T) {
 	ri.Route.RecordRoute("/test", "HIT", 200, 10)
 	ri.Route.Flush(time.Now())
 
-	{
-		err := ri.Save(path)
-		require.NoErrorf(t, err, "Save: %v", err)
-	}
+	err := ri.Save(path)
+	require.NoErrorf(t, err, "Save: %v", err)
 
 	ri2 := NewRings("node-1")
-	{
-		err := ri2.Load(path)
-		require.NoErrorf(t, err, "Load: %v", err)
-	}
+	err = ri2.Load(path)
+	require.NoErrorf(t, err, "Load: %v", err)
 
 	snap := ri2.Request.Snapshot(requestBuckets)
 	require.Len(t, snap, requestBuckets)
@@ -180,10 +176,8 @@ func TestRings_SaveLoad(t *testing.T) {
 func TestRings_LoadMissingFile(t *testing.T) {
 	t.Parallel()
 	ri := NewRings("node-x")
-	{
-		err := ri.Load("/tmp/bouine-nonexistent-snap-12345.snap")
-		assert.Nil(t, err)
-	}
+	err := ri.Load("/tmp/bouine-nonexistent-snap-12345.snap")
+	assert.Nil(t, err)
 }
 
 func TestMergeSummaries(t *testing.T) {
@@ -266,30 +260,22 @@ func BenchmarkRouteRing_RecordRoute(b *testing.B) {
 
 func TestLatencyHistogram_Percentile(t *testing.T) {
 	var h LatencyHistogram
-	{
-		got := h.Percentile(0.5)
-		require.Equal(t, int64(0), got)
-	}
+	got := h.Percentile(0.5)
+	require.Equal(t, int64(0), got)
 	// 100 requests all in the ≤10ms bucket (index 3, bound 10).
 	h[3] = 100
 	for _, p := range []float64{0.5, 0.9, 0.99} {
-		{
-			got := h.Percentile(p)
-			require.Equal(t, int64(10), got)
-		}
+		got := h.Percentile(p)
+		require.Equal(t, int64(10), got)
 	}
 	// Mixed: 90 fast (≤1ms idx0), 10 slow (overflow idx10).
 	h = LatencyHistogram{}
 	h[0] = 90
 	h[latencyHistBuckets-1] = 10
-	{
-		got := h.Percentile(0.5)
-		require.Equal(t, int64(1), got)
-	}
-	{
-		got := h.Percentile(0.99)
-		require.Equal(t, LatencyBoundsMs[len(LatencyBoundsMs)-1], got)
-	}
+	got = h.Percentile(0.5)
+	require.Equal(t, int64(1), got)
+	got = h.Percentile(0.99)
+	require.Equal(t, LatencyBoundsMs[len(LatencyBoundsMs)-1], got)
 }
 
 func TestLatencyBucketIndex(t *testing.T) {
@@ -301,10 +287,8 @@ func TestLatencyBucketIndex(t *testing.T) {
 		{1000, 9}, {1001, latencyHistBuckets - 1}, {99999, latencyHistBuckets - 1},
 	}
 	for _, c := range cases {
-		{
-			got := latencyBucketIndex(c.durMs)
-			require.Equal(t, c.want, got)
-		}
+		got := latencyBucketIndex(c.durMs)
+		require.Equal(t, c.want, got)
 	}
 }
 

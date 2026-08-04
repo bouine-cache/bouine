@@ -88,17 +88,13 @@ func TestDefaultTTL_CachesHeaderlessResponse(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/r", nil)
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, req)
-	{
-		got := rr1.Header().Get(header.XCache)
-		require.Equal(t, "MISS", got)
-	}
+	got := rr1.Header().Get(header.XCache)
+	require.Equal(t, "MISS", got)
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/r", nil))
-	{
-		got := rr2.Header().Get(header.XCache)
-		require.Equal(t, "HIT", got)
-	}
+	got = rr2.Header().Get(header.XCache)
+	require.Equal(t, "HIT", got)
 	assert.Equal(t, 1, hits)
 }
 
@@ -115,10 +111,8 @@ func TestDefaultTTL_DisabledKeepsMISS(t *testing.T) {
 	for range 2 {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
-		{
-			got := rr.Header().Get(header.XCache)
-			require.Equal(t, "MISS", got)
-		}
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "MISS", got)
 	}
 }
 
@@ -136,9 +130,7 @@ func TestDefaultTTL_NoStoreStillBypasses(t *testing.T) {
 	for range 2 {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
-		{
-			got := rr.Header().Get(header.XCache)
-			require.Equal(t, "MISS", got)
-		}
+		got := rr.Header().Get(header.XCache)
+		require.Equal(t, "MISS", got)
 	}
 }

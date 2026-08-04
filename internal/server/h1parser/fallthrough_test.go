@@ -200,14 +200,10 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 	}
 
 	wg.Wait()
-	{
-		got := gotHeaders.Get("Accept")
-		assert.Equal(t, "text/html", got)
-	}
-	{
-		got := gotHeaders.Get("X-Custom")
-		assert.Equal(t, "custom-value", got)
-	}
+	got := gotHeaders.Get("Accept")
+	assert.Equal(t, "text/html", got)
+	got = gotHeaders.Get("X-Custom")
+	assert.Equal(t, "custom-value", got)
 }
 
 func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
@@ -274,10 +270,8 @@ func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
 	default:
 	}
 
-	{
-		err := c.Close()
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err := c.Close()
+	require.NoErrorf(t, err, "Close: %v", err)
 
 	select {
 	case <-c.done:
@@ -285,10 +279,8 @@ func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
 		t.Fatal("done channel not closed after Close")
 	}
 
-	{
-		err := c.Close()
-		require.NoErrorf(t, err, "second Close: %v", err)
-	}
+	err = c.Close()
+	require.NoErrorf(t, err, "second Close: %v", err)
 }
 
 type mockConn struct {

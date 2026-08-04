@@ -112,10 +112,8 @@ func TestCluster_TwoNodeJoin(t *testing.T) {
 	require.NoErrorf(t, err, "c2: %v", err)
 	defer func() { _ = c2.Leave(t.Context()) }()
 
-	{
-		_, err := c2.Join([]string{"127.0.0.1:17900"})
-		require.NoErrorf(t, err, "join: %v", err)
-	}
+	_, err = c2.Join([]string{"127.0.0.1:17900"})
+	require.NoErrorf(t, err, "join: %v", err)
 
 	// Wait for gossip to propagate.
 	for range 50 {
@@ -146,10 +144,8 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
-	{
-		got := called.Load()
-		require.Equal(t, int32(1), got)
-	}
+	got := called.Load()
+	require.Equal(t, int32(1), got)
 }
 
 func TestNotifyMsg_BanEvent(t *testing.T) {
@@ -171,10 +167,8 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 	msg, _ := EncodeBanGossip(evt)
 	c.NotifyMsg(msg)
 
-	{
-		got := called.Load()
-		require.Equal(t, int32(1), got)
-	}
+	got := called.Load()
+	require.Equal(t, int32(1), got)
 }
 
 func TestNotifyMsg_MalformedPayload(t *testing.T) {
@@ -225,10 +219,8 @@ func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
 
 	ctx := *got.Load()
 	require.NotNil(t, ctx)
-	{
-		_, ok := ctx.Deadline()
-		require.True(t, ok)
-	}
+	_, ok := ctx.Deadline()
+	require.True(t, ok)
 }
 
 func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
@@ -251,10 +243,8 @@ func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
 
 	ctx := *got.Load()
 	require.NotNil(t, ctx)
-	{
-		_, ok := ctx.Deadline()
-		require.True(t, ok)
-	}
+	_, ok := ctx.Deadline()
+	require.True(t, ok)
 }
 
 func TestNotifyMsg_DefaultApplyTimeout(t *testing.T) {

@@ -41,10 +41,8 @@ func TestClient_PurgeURLs_Success(t *testing.T) {
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
-	{
-		err := c.PurgeURLs(context.Background(), []string{"https://example.com/page"})
-		require.NoErrorf(t, err, "PurgeURLs: %v", err)
-	}
+	err := c.PurgeURLs(context.Background(), []string{"https://example.com/page"})
+	require.NoErrorf(t, err, "PurgeURLs: %v", err)
 	require.Len(t, purger.calls, 1)
 }
 
@@ -53,24 +51,18 @@ func TestClient_PurgeTags_Success(t *testing.T) {
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
-	{
-		err := c.PurgeTags(context.Background(), []string{"product-123"})
-		require.NoErrorf(t, err, "PurgeTags: %v", err)
-	}
+	err := c.PurgeTags(context.Background(), []string{"product-123"})
+	require.NoErrorf(t, err, "PurgeTags: %v", err)
 	require.Len(t, purger.calls, 1)
 }
 
 func TestClient_NilSafe(t *testing.T) {
 	t.Parallel()
 	var c *cf.Client
-	{
-		err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-		require.NoErrorf(t, err, "nil client PurgeURLs should no-op, got %v", err)
-	}
-	{
-		err := c.PurgeTags(context.Background(), []string{"tag"})
-		require.NoErrorf(t, err, "nil client PurgeTags should no-op, got %v", err)
-	}
+	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
+	require.NoErrorf(t, err, "nil client PurgeURLs should no-op, got %v", err)
+	err = c.PurgeTags(context.Background(), []string{"tag"})
+	require.NoErrorf(t, err, "nil client PurgeTags should no-op, got %v", err)
 }
 
 func TestClient_EmptySlice_NoOp(t *testing.T) {
@@ -78,10 +70,8 @@ func TestClient_EmptySlice_NoOp(t *testing.T) {
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
-	{
-		err := c.PurgeURLs(context.Background(), nil)
-		require.NoErrorf(t, err, "empty PurgeURLs should no-op, got %v", err)
-	}
+	err := c.PurgeURLs(context.Background(), nil)
+	require.NoErrorf(t, err, "empty PurgeURLs should no-op, got %v", err)
 	require.Len(t, purger.calls, 0)
 }
 
@@ -112,20 +102,16 @@ func TestNew_MissingZone(t *testing.T) {
 	t.Parallel()
 	_, err := cf.New(cf.Config{ZoneID: "", APIToken: "tok"})
 	require.Error(t, err)
-	{
-		_, ok := err.(*cf.ZoneConfigError)
-		require.True(t, ok)
-	}
+	_, ok := err.(*cf.ZoneConfigError)
+	require.True(t, ok)
 }
 
 func TestNew_MissingToken(t *testing.T) {
 	t.Parallel()
 	_, err := cf.New(cf.Config{ZoneID: "zone1", APIToken: ""})
 	require.Error(t, err)
-	{
-		_, ok := err.(*cf.ZoneConfigError)
-		require.True(t, ok)
-	}
+	_, ok := err.(*cf.ZoneConfigError)
+	require.True(t, ok)
 }
 
 // asSDKError wraps a status code and optional response in a real

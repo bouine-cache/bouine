@@ -47,10 +47,8 @@ func TestTombstone(t *testing.T) {
 
 	_, _, err := s.Put(99, []byte("data"))
 	require.NoErrorf(t, err, "put: %v", err)
-	{
-		_, err := s.Delete(99)
-		require.NoErrorf(t, err, "delete: %v", err)
-	}
+	_, err = s.Delete(99)
+	require.NoErrorf(t, err, "delete: %v", err)
 
 	var found []Record
 	err = s.Scan(func(r Record) error {
@@ -70,10 +68,8 @@ func TestSegmentRollover(t *testing.T) {
 
 	// Write enough to trigger segment rollover (1 MiB segments).
 	for range 4 {
-		{
-			_, _, err := s.Put(1, bigBody)
-			require.NoErrorf(t, err, "put: %v", err)
-		}
+		_, _, err := s.Put(1, bigBody)
+		require.NoErrorf(t, err, "put: %v", err)
 	}
 
 	s.mu.RLock()
@@ -122,10 +118,8 @@ func TestScan_MultipleRecords(t *testing.T) {
 
 	for i := range 10 {
 		body := []byte("record-" + string(rune('A'+i)))
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "put %d: %v", i, err)
 	}
 
 	var count int
@@ -163,10 +157,8 @@ func TestStats(t *testing.T) {
 	t.Parallel()
 	s := tmpStore(t)
 	for i := range 5 {
-		{
-			_, _, err := s.Put(uint64(i), make([]byte, 100))
-			require.NoErrorf(t, err, "put: %v", err)
-		}
+		_, _, err := s.Put(uint64(i), make([]byte, 100))
+		require.NoErrorf(t, err, "put: %v", err)
 	}
 	ent, byt := s.Stats()
 	require.Equal(t, int64(5), ent)
@@ -202,10 +194,8 @@ func TestRecomputeStats_ScanError(t *testing.T) {
 	wantEntries, wantBytes := s.Stats()
 	require.Equal(t, int64(1), wantEntries)
 
-	{
-		err := s.RecomputeStats()
-		require.Error(t, err)
-	}
+	err = s.RecomputeStats()
+	require.Error(t, err)
 
 	ent, byt := s.Stats()
 	if ent != wantEntries || byt != wantBytes {
@@ -238,10 +228,8 @@ func TestGet_IndexMaintained(t *testing.T) {
 	s := tmpStore(t)
 
 	body := []byte("warm get test")
-	{
-		_, _, err := s.Put(77, body)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	_, _, err := s.Put(77, body)
+	require.NoErrorf(t, err, "put: %v", err)
 
 	got, err := s.Get(77)
 	require.NoErrorf(t, err, "Get: %v", err)
@@ -260,14 +248,10 @@ func TestGet_AfterDelete(t *testing.T) {
 	t.Parallel()
 	s := tmpStore(t)
 
-	{
-		_, _, err := s.Put(55, []byte("to be deleted"))
-		require.NoErrorf(t, err, "put: %v", err)
-	}
-	{
-		_, err := s.Delete(55)
-		require.NoErrorf(t, err, "delete: %v", err)
-	}
+	_, _, err := s.Put(55, []byte("to be deleted"))
+	require.NoErrorf(t, err, "put: %v", err)
+	_, err = s.Delete(55)
+	require.NoErrorf(t, err, "delete: %v", err)
 
 	got, err := s.Get(55)
 	require.NoErrorf(t, err, "Get after delete: %v", err)
@@ -317,10 +301,8 @@ func TestStore_ConcurrentGetCompact(t *testing.T) {
 	}
 	// Delete half to create tombstones.
 	for i := uint64(0); i < 250; i++ {
-		{
-			_, err := s.Delete(i)
-			require.NoError(t, err)
-		}
+		_, err := s.Delete(i)
+		require.NoError(t, err)
 	}
 
 	var wg sync.WaitGroup
@@ -366,10 +348,8 @@ func TestStore_ConcurrentGetPut(t *testing.T) {
 	// Pre-populate keys so readers have something to find.
 	for i := uint64(0); i < 100; i++ {
 		body := []byte(fmt.Sprintf("initial-%d", i))
-		{
-			_, _, err := s.Put(i, body)
-			require.NoError(t, err)
-		}
+		_, _, err := s.Put(i, body)
+		require.NoError(t, err)
 	}
 
 	var wg sync.WaitGroup
@@ -680,10 +660,8 @@ func TestStore_CompactStreamsLiveRecords(t *testing.T) {
 		s.SetIndex(uint64(i), segID, off)
 	}
 	for i := range 100 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 	for i := 100; i < liveKeys; i++ {
 		body := []byte(fmt.Sprintf("v2-%d", i))
@@ -692,10 +670,8 @@ func TestStore_CompactStreamsLiveRecords(t *testing.T) {
 		s.SetIndex(uint64(i), segID, off)
 	}
 
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact: %v", err)
 
 	for i := range liveKeys {
 		got, err := s.Get(uint64(i))
@@ -709,10 +685,8 @@ func TestStore_CompactStreamsLiveRecords(t *testing.T) {
 	}
 
 	entries, _ := s.Stats()
-	{
-		want := int64(liveKeys - 100)
-		require.Equal(t, want, entries)
-	}
+	want := int64(liveKeys - 100)
+	require.Equal(t, want, entries)
 }
 
 // TestStore_CompactReadOnlyParent verifies that compaction works when the
@@ -728,10 +702,8 @@ func TestStore_CompactReadOnlyParent(t *testing.T) {
 	// Create the warm dir and make the parent read-only so that creating
 	// a sibling directory (dir+".compact") would fail with EROFS.
 	warmDir := filepath.Join(parent, "warm")
-	{
-		err := os.MkdirAll(warmDir, 0o750)
-		require.NoError(t, err)
-	}
+	err := os.MkdirAll(warmDir, 0o750)
+	require.NoError(t, err)
 	// Store must be created before the parent goes read-only.
 	s, err := NewStore(Config{Dir: warmDir, MaxBytes: 256 << 20, SegMax: 1 << 20})
 	require.NoError(t, err)
@@ -748,24 +720,18 @@ func TestStore_CompactReadOnlyParent(t *testing.T) {
 		s.SetIndex(uint64(i), segID, off)
 	}
 	for i := range 100 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	// Make the parent read-only: a sibling compactDir would fail.
-	{
-		err := os.Chmod(parent, 0o500)
-		require.NoError(t, err)
-	}
+	err = os.Chmod(parent, 0o500)
+	require.NoError(t, err)
 
 	// Compact must succeed — the compact dir is a subdirectory of warmDir
 	// which lives on the writable PVC, not a sibling on the read-only parent.
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact with read-only parent: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact with read-only parent: %v", err)
 
 	// Verify live keys survived.
 	for i := 100; i < 200; i++ {
@@ -794,10 +760,8 @@ func truncateLastRecord(t *testing.T, s *Store, segID int, lastOff int64) {
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 	cutAt := lastOff + HeaderLen + 4 // header + partial body
-	{
-		err := seg.f.Truncate(cutAt)
-		require.NoErrorf(t, err, "truncate: %v", err)
-	}
+	err := seg.f.Truncate(cutAt)
+	require.NoErrorf(t, err, "truncate: %v", err)
 }
 
 func TestTornRecord_GetReturnsMiss(t *testing.T) {
@@ -850,13 +814,11 @@ func TestTornRecord_ScanSkipsTrailing(t *testing.T) {
 	truncateLastRecord(t, s, lastSegID, lastOff)
 
 	var count int
-	{
-		err := s.Scan(func(_ Record) error {
-			count++
-			return nil
-		})
-		require.NoErrorf(t, err, "Scan with torn trailing record: expected nil error, got %v", err)
-	}
+	err := s.Scan(func(_ Record) error {
+		count++
+		return nil
+	})
+	require.NoErrorf(t, err, "Scan with torn trailing record: expected nil error, got %v", err)
 	require.Equal(t, 4, count)
 }
 
@@ -874,10 +836,8 @@ func TestTornRecord_RecomputeStatsSucceeds(t *testing.T) {
 
 	truncateLastRecord(t, s, lastSegID, lastOff)
 
-	{
-		err := s.RecomputeStats()
-		require.NoErrorf(t, err, "RecomputeStats with torn trailing record: %v", err)
-	}
+	err := s.RecomputeStats()
+	require.NoErrorf(t, err, "RecomputeStats with torn trailing record: %v", err)
 }
 
 func TestTornRecord_CompactSucceeds(t *testing.T) {
@@ -888,16 +848,12 @@ func TestTornRecord_CompactSucceeds(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := range 10 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("compact-me"))
-			require.NoErrorf(t, err, "put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("compact-me"))
+		require.NoErrorf(t, err, "put %d: %v", i, err)
 	}
 	for i := range 5 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "delete %d: %v", i, err)
 	}
 
 	var lastSegID int
@@ -907,10 +863,8 @@ func TestTornRecord_CompactSucceeds(t *testing.T) {
 
 	truncateLastRecord(t, s, lastSegID, lastOff)
 
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact with torn trailing record: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact with torn trailing record: %v", err)
 
 	for i := 5; i < 10; i++ {
 		got, err := s.Get(uint64(i))
@@ -931,10 +885,8 @@ func TestGet_StaleSegmentSelfHeals(t *testing.T) {
 	// Populate the store so there is at least one real segment, then
 	// inject an index entry pointing at a segment ID that does not
 	// exist in s.segs (mimicking the Put/Compact race from #193).
-	{
-		_, _, err := s.Put(1, []byte("real"))
-		require.NoErrorf(t, err, "Put real: %v", err)
-	}
+	_, _, err := s.Put(1, []byte("real"))
+	require.NoErrorf(t, err, "Put real: %v", err)
 	const staleKey = uint64(99)
 	s.SetIndex(staleKey, 9999, 0)
 
@@ -948,21 +900,15 @@ func TestGet_StaleSegmentSelfHeals(t *testing.T) {
 	require.False(t, ok)
 
 	// The self-heal counter must reflect the drop.
-	{
-		n := s.SelfHeals()
-		require.Equal(t, int64(1), n)
-	}
+	n := s.SelfHeals()
+	require.Equal(t, int64(1), n)
 
 	// A second Get must also be a clean miss — no error, no entry, and
 	// must not re-increment the counter (no entry to drop).
-	{
-		_, err := s.Get(staleKey)
-		require.NoErrorf(t, err, "second Get stale key: expected nil error, got %v", err)
-	}
-	{
-		n := s.SelfHeals()
-		require.Equal(t, int64(1), n)
-	}
+	_, err = s.Get(staleKey)
+	require.NoErrorf(t, err, "second Get stale key: expected nil error, got %v", err)
+	n = s.SelfHeals()
+	require.Equal(t, int64(1), n)
 }
 
 // TestGet_StaleSegmentConcurrentCompact verifies that Get never returns
@@ -979,16 +925,12 @@ func TestGet_StaleSegmentConcurrentCompact(t *testing.T) {
 	// Write enough live records to make compaction worthwhile, plus a
 	// batch of tombstones so Compact actually reclaims space.
 	for i := range 500 {
-		{
-			_, _, err := s.Put(uint64(i), []byte(fmt.Sprintf("body-%d", i)))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte(fmt.Sprintf("body-%d", i)))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	for i := range 250 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	// Inject a stale entry pointing at a non-existent segment (mimics
@@ -1039,10 +981,8 @@ func TestGet_DropStaleIndexDoesNotClobberConcurrentPut(t *testing.T) {
 
 	// Write a real record so there is a valid segment, then inject a
 	// stale entry for a key that points at a non-existent segment.
-	{
-		_, _, err := s.Put(1, []byte("real"))
-		require.NoErrorf(t, err, "Put real: %v", err)
-	}
+	_, _, err := s.Put(1, []byte("real"))
+	require.NoErrorf(t, err, "Put real: %v", err)
 	const key = uint64(42)
 	s.SetIndex(key, 9999, 0)
 
@@ -1055,10 +995,8 @@ func TestGet_DropStaleIndexDoesNotClobberConcurrentPut(t *testing.T) {
 
 	// Write a valid record for the same key.
 	validBody := []byte("valid-after-compact")
-	{
-		_, _, err := s.Put(key, validBody)
-		require.NoErrorf(t, err, "Put valid: %v", err)
-	}
+	_, _, err = s.Put(key, validBody)
+	require.NoErrorf(t, err, "Put valid: %v", err)
 
 	// Now call dropStaleIndex with the *old* stale location. The
 	// entry now points at the valid Put, so the compare-and-delete
@@ -1077,10 +1015,8 @@ func TestGet_DropStaleIndexDoesNotClobberConcurrentPut(t *testing.T) {
 	require.Equal(t, "valid-after-compact", string(got))
 
 	// The self-heal counter must NOT have incremented — nothing was dropped.
-	{
-		n := s.SelfHeals()
-		require.Equal(t, int64(0), n)
-	}
+	n := s.SelfHeals()
+	require.Equal(t, int64(0), n)
 }
 
 func TestPut_OverBudget(t *testing.T) {
@@ -1097,10 +1033,8 @@ func TestPut_OverBudget(t *testing.T) {
 	// arbitrarily many.
 	smallBody := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 4; i++ {
-		{
-			_, _, err := s.Put(uint64(i), smallBody)
-			require.NoErrorf(t, err, "Put %d under budget: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), smallBody)
+		require.NoErrorf(t, err, "Put %d under budget: %v", i, err)
 	}
 	// 4 records × 120 = 480 live bytes. One more 120-byte record would
 	// push live bytes to 600 > 512, but eviction frees 120 bytes first
@@ -1123,10 +1057,8 @@ func TestPut_UnderBudgetSucceeds(t *testing.T) {
 
 	body := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 8; i++ {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d under budget: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d under budget: %v", i, err)
 	}
 	// 8 × 120 = 960 < 1024. All should succeed.
 	got, err := s.Get(7)
@@ -1146,10 +1078,8 @@ func TestPut_MaxBytesZeroDisablesEnforcement(t *testing.T) {
 	// must not return ErrOverBudget.
 	body := make([]byte, 100)
 	for i := 0; i < 100; i++ {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d with maxBytes=0: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d with maxBytes=0: %v", i, err)
 	}
 }
 
@@ -1177,10 +1107,8 @@ func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	// does not cause Put rejection — but it does affect NeedsCompaction,
 	// which compares live bytes to diskBytes for the dead-space ratio.
 	for i := 0; i < 15; i++ {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 	// Verify diskBytes exceeds maxBytes: tombstones accumulate past the
 	// budget on disk even though live bytes (stats.bytes) are under it.
@@ -1191,10 +1119,8 @@ func TestCompact_SucceedsWhenDiskExceedsMaxBytes(t *testing.T) {
 	// Compaction must succeed even though diskBytes > maxBytes.
 	// Live records (15 * 120 = 1800 bytes, well under maxBytes)
 	// fit in the temp store regardless of its budget setting.
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact with diskBytes > maxBytes: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact with diskBytes > maxBytes: %v", err)
 
 	// Verify live keys survived.
 	for i := 15; i < 30; i++ {
@@ -1214,10 +1140,8 @@ func TestDelete_UpdatesStats(t *testing.T) {
 
 	body := []byte("hello warm tier")
 	for i := 0; i < 5; i++ {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	entriesBefore, bytesBefore := s.Stats()
@@ -1228,10 +1152,8 @@ func TestDelete_UpdatesStats(t *testing.T) {
 
 	// Delete keys 0, 1, 2.
 	for i := 0; i < 3; i++ {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	entriesAfter, bytesAfter := s.Stats()
@@ -1241,10 +1163,8 @@ func TestDelete_UpdatesStats(t *testing.T) {
 
 	// Delete remaining keys so the store is empty.
 	for i := 3; i < 5; i++ {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	entriesEmpty, bytesEmpty := s.Stats()
@@ -1261,18 +1181,14 @@ func TestDelete_NonExistentKey_NoStatChange(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Put one key.
-	{
-		_, _, err := s.Put(42, []byte("data"))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	_, _, err = s.Put(42, []byte("data"))
+	require.NoErrorf(t, err, "Put: %v", err)
 
 	entriesBefore, bytesBefore := s.Stats()
 
 	// Delete a key that was never put — should not change stats.
-	{
-		_, err := s.Delete(999)
-		require.NoErrorf(t, err, "Delete non-existent: %v", err)
-	}
+	_, err = s.Delete(999)
+	require.NoErrorf(t, err, "Delete non-existent: %v", err)
 
 	entriesAfter, bytesAfter := s.Stats()
 	require.Equal(t, entriesBefore, entriesAfter)
@@ -1291,21 +1207,15 @@ func TestStats_AccurateAfterDeleteWithoutRecompute(t *testing.T) {
 	bodyA := []byte("AAAA")     // 4 bytes
 	bodyB := []byte("BBBBBBBB") // 8 bytes
 
-	{
-		_, _, err := s.Put(1, bodyA)
-		require.NoErrorf(t, err, "Put A: %v", err)
-	}
+	_, _, err = s.Put(1, bodyA)
+	require.NoErrorf(t, err, "Put A: %v", err)
 
-	{
-		_, _, err := s.Put(2, bodyB)
-		require.NoErrorf(t, err, "Put B: %v", err)
-	}
+	_, _, err = s.Put(2, bodyB)
+	require.NoErrorf(t, err, "Put B: %v", err)
 
 	// Delete key 1. Stats must reflect only key 2's bytes.
-	{
-		_, err := s.Delete(1)
-		require.NoErrorf(t, err, "Delete 1: %v", err)
-	}
+	_, err = s.Delete(1)
+	require.NoErrorf(t, err, "Delete 1: %v", err)
 
 	entries, bytes := s.Stats()
 	require.Equal(t, int64(1), entries)
@@ -1334,10 +1244,8 @@ func TestDelete_SetIndexEntry_SkipsBytesDecrement(t *testing.T) {
 	segID, off, err := s2.Put(1, body)
 	require.NoErrorf(t, err, "Put: %v", err)
 	// Remove key 1 so the only index entry in s2 is the SetIndex one.
-	{
-		_, err := s2.Delete(1)
-		require.NoErrorf(t, err, "Delete 1: %v", err)
-	}
+	_, err = s2.Delete(1)
+	require.NoErrorf(t, err, "Delete 1: %v", err)
 	// Now stats are zero. Inject a SetIndex entry (size=0).
 	s2.SetIndex(2, segID, off)
 
@@ -1352,10 +1260,8 @@ func TestDelete_SetIndexEntry_SkipsBytesDecrement(t *testing.T) {
 	// negative) because SetIndex never counted the entry. This is the
 	// documented tradeoff: SetIndex is replay-only and RecomputeStats
 	// runs after replay to restore accuracy.
-	{
-		_, err := s2.Delete(2)
-		require.NoErrorf(t, err, "Delete SetIndex entry: %v", err)
-	}
+	_, err = s2.Delete(2)
+	require.NoErrorf(t, err, "Delete SetIndex entry: %v", err)
 
 	entriesAfter, bytesAfter := s2.Stats()
 	// entries was 0, Delete subtracts 1 → -1 (wraps in int64). This is
@@ -1377,18 +1283,14 @@ func TestEvict_FreesSpaceUnderPressure(t *testing.T) {
 	// Each record = HeaderLen(16) + 100 + FooterLen(4) = 120 bytes.
 	body := make([]byte, 100)
 	for i := range 4 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	// 4 * 120 = 480 bytes. Access keys 0-2 so SIEVE marks them visited,
 	// leave key 3 unvisited (never accessed after Put).
 	for i := range 3 {
-		{
-			_, err := s.Get(uint64(i))
-			require.NoErrorf(t, err, "Get %d: %v", i, err)
-		}
+		_, err := s.Get(uint64(i))
+		require.NoErrorf(t, err, "Get %d: %v", i, err)
 	}
 
 	entriesBefore, bytesBefore := s.Stats()
@@ -1424,18 +1326,14 @@ func TestEvict_PrefersLeastRecentlyAccessed(t *testing.T) {
 	// the tail, clearing visited bits; after one full sweep all bits are
 	// clear and the tail (key 0) is evicted.
 	for i := range 5 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("data"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("data"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Access all so every entry gets a visited bit.
 	for i := range 5 {
-		{
-			_, err := s.Get(uint64(i))
-			require.NoErrorf(t, err, "Get %d: %v", i, err)
-		}
+		_, err := s.Get(uint64(i))
+		require.NoErrorf(t, err, "Get %d: %v", i, err)
 	}
 
 	// Evict should select key 0 (tail, first to have its visited bit
@@ -1460,10 +1358,8 @@ func TestEvict_TombstonesEvictedKey(t *testing.T) {
 	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	{
-		_, _, err := s.Put(42, []byte("evict-me"))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	_, _, err = s.Put(42, []byte("evict-me"))
+	require.NoErrorf(t, err, "Put: %v", err)
 
 	evicted, ok := s.evictOne()
 	require.True(t, ok)
@@ -1471,15 +1367,13 @@ func TestEvict_TombstonesEvictedKey(t *testing.T) {
 
 	// Verify a tombstone was written for the key.
 	var tombCount int
-	{
-		err := s.Scan(func(r Record) error {
-			if r.IsTomb && r.Key == 42 {
-				tombCount++
-			}
-			return nil
-		})
-		require.NoErrorf(t, err, "Scan: %v", err)
-	}
+	err = s.Scan(func(r Record) error {
+		if r.IsTomb && r.Key == 42 {
+			tombCount++
+		}
+		return nil
+	})
+	require.NoErrorf(t, err, "Scan: %v", err)
 	require.Equal(t, 1, tombCount)
 }
 
@@ -1492,10 +1386,8 @@ func TestEvict_SkipsProtectedEntries(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := range 4 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("data"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("data"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Mark keys 0 and 1 as protected (in hot tier).
@@ -1505,10 +1397,8 @@ func TestEvict_SkipsProtectedEntries(t *testing.T) {
 	// Access all so SIEVE visited bits are set — the only differentiator
 	// is protection.
 	for i := range 4 {
-		{
-			_, err := s.Get(uint64(i))
-			require.NoErrorf(t, err, "Get %d: %v", i, err)
-		}
+		_, err := s.Get(uint64(i))
+		require.NoErrorf(t, err, "Get %d: %v", i, err)
 	}
 
 	// evictOne should skip protected entries and pick a cold one.
@@ -1528,20 +1418,16 @@ func TestEvict_AllProtectedReturnsFalse(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := range 3 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("data"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("data"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	// All protected — evictOne skips them and returns false within
 	// the skip budget rather than scanning the whole list under idxMu.
 	for i := range 3 {
 		s.Protect(uint64(i))
 	}
-	{
-		_, ok := s.evictOne()
-		require.False(t, ok)
-	}
+	_, ok := s.evictOne()
+	require.False(t, ok)
 	// Entries must still be present and accounted for.
 	entries, _ := s.Stats()
 	require.Equal(t, int64(3), entries)
@@ -1558,19 +1444,15 @@ func TestPut_EvictsBeforeRejectingOverBudget(t *testing.T) {
 	// Each record = 120 bytes. 4 records = 480 live bytes.
 	body := make([]byte, 100)
 	for i := range 4 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Access keys 0-2 so SIEVE marks them visited. Key 3 (unvisited,
 	// at the tail) is the eviction victim.
 	for i := range 3 {
-		{
-			_, err := s.Get(uint64(i))
-			require.NoErrorf(t, err, "Get %d: %v", i, err)
-		}
+		_, err := s.Get(uint64(i))
+		require.NoErrorf(t, err, "Get %d: %v", i, err)
 	}
 
 	// Put a 5th key: live bytes 480 + 120 = 600 > 512, but Evict can
@@ -1603,10 +1485,8 @@ func TestEvict_CallbackNotifiesHotTier(t *testing.T) {
 		evicted.Store(int64(key))
 	}
 
-	{
-		_, _, err := s.Put(42, []byte("data"))
-		require.NoErrorf(t, err, "Put: %v", err)
-	}
+	_, _, err = s.Put(42, []byte("data"))
+	require.NoErrorf(t, err, "Put: %v", err)
 
 	got, ok := s.evictOne()
 	require.True(t, ok)
@@ -1623,10 +1503,8 @@ func TestEvict_ConcurrentEvictAndGet(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := range 100 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("data"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("data"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	var evictedKeys sync.Map
@@ -1657,10 +1535,8 @@ func TestEvict_ConcurrentEvictAndGet(t *testing.T) {
 
 	// Every evicted key must be absent from the index.
 	for _, k := range idxKeys {
-		{
-			_, evicted := evictedKeys.Load(k)
-			require.False(t, evicted)
-		}
+		_, evicted := evictedKeys.Load(k)
+		require.False(t, evicted)
 	}
 }
 
@@ -1680,10 +1556,8 @@ func TestEvict_ConcurrentEvictAndPutPreservesData(t *testing.T) {
 
 	// Seed with 50 entries, none protected so evictOne can pick them.
 	for i := range 50 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("seed"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("seed"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	var wg sync.WaitGroup
@@ -1734,10 +1608,8 @@ func TestScanSegment_MmapCorrectness(t *testing.T) {
 	const numRecords = 1000
 	for i := range numRecords {
 		body := []byte(fmt.Sprintf("body-%d-padding", i))
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	var count int
@@ -1763,10 +1635,8 @@ func TestScanSegment_MmapTornTrailing(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := range 10 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("body"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("body"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Truncate the last segment to simulate a torn write.
@@ -1777,10 +1647,8 @@ func TestScanSegment_MmapTornTrailing(t *testing.T) {
 	info, _ := seg.f.Stat()
 	seg.mu.Unlock()
 	if info.Size() > 0 {
-		{
-			err := os.Truncate(seg.Path, info.Size()-2)
-			require.NoErrorf(t, err, "Truncate: %v", err)
-		}
+		err := os.Truncate(seg.Path, info.Size()-2)
+		require.NoErrorf(t, err, "Truncate: %v", err)
 	}
 
 	// Scan should skip the torn trailing record, not error.
@@ -1847,18 +1715,14 @@ func TestDelete_RemovesSIEVEEntry(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := range 10 {
-		{
-			_, _, err := s.Put(uint64(i), []byte("data"))
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte("data"))
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// Delete all entries — the SIEVE list must be empty after this.
 	for i := range 10 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	s.idxMu.RLock()
@@ -1883,10 +1747,8 @@ func TestPut_OverwriteDoesNotInflateStats(t *testing.T) {
 	body := make([]byte, 100) // 120 bytes per record
 	// Overwrite the same key 5 times.
 	for range 5 {
-		{
-			_, _, err := s.Put(42, body)
-			require.NoErrorf(t, err, "Put: %v", err)
-		}
+		_, _, err := s.Put(42, body)
+		require.NoErrorf(t, err, "Put: %v", err)
 	}
 
 	entries, bytes := s.Stats()
@@ -1912,17 +1774,13 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := range 50 {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	// Delete half to create tombstones so compaction has work to do.
 	for i := range 25 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	entriesBefore, bytesBefore := s.Stats()
@@ -1930,10 +1788,8 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 	wantBytes := int64(25 * (HeaderLen + len(body) + FooterLen))
 	require.Equal(t, wantBytes, bytesBefore)
 
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact: %v", err)
 
 	// After compact: entries must match, and stats.bytes must be
 	// recomputed from the index (not 0).
@@ -1952,25 +1808,19 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 
 	smallBody := make([]byte, 50) // 70 bytes per record, ~58 in 4 KiB
 	for i := range 40 {
-		{
-			_, _, err := s2.Put(uint64(i), smallBody)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s2.Put(uint64(i), smallBody)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
-	{
-		err := s2.Compact()
-		require.NoErrorf(t, err, "Compact s2: %v", err)
-	}
+	err = s2.Compact()
+	require.NoErrorf(t, err, "Compact s2: %v", err)
 	_, bytesAfterCompact := s2.Stats()
 	require.NotEqual(t, 0, bytesAfterCompact)
 	// A new Put should trigger eviction, not be rejected outright.
 	// If stats.bytes were 0, the budget check (0 + 70 <= 4096) would
 	// pass and no eviction would fire — the tier would grow unbounded.
 	for i := 40; i < 100; i++ {
-		{
-			_, _, err := s2.Put(uint64(i), smallBody)
-			require.NoErrorf(t, err, "Put %d after compact: %v (evictToFit should evict, not reject)", i, err)
-		}
+		_, _, err := s2.Put(uint64(i), smallBody)
+		require.NoErrorf(t, err, "Put %d after compact: %v (evictToFit should evict, not reject)", i, err)
 	}
 }
 
@@ -1995,16 +1845,12 @@ func TestCompact_ConcurrentPutNoDataLoss(t *testing.T) {
 	// delete half to create tombstones so Compact has dead bytes to
 	// reclaim.
 	for i := range 400 {
-		{
-			_, _, err := s.Put(uint64(i), []byte{byte(i)})
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	for i := range 200 {
-		{
-			_, err := s.Delete(uint64(i))
-			require.NoErrorf(t, err, "Delete %d: %v", i, err)
-		}
+		_, err := s.Delete(uint64(i))
+		require.NoErrorf(t, err, "Delete %d: %v", i, err)
 	}
 
 	// keys written during compaction, collected under a mutex so the
@@ -2051,10 +1897,8 @@ func TestCompact_ConcurrentPutNoDataLoss(t *testing.T) {
 	// Wait until the Put goroutine has written at least one key before
 	// starting compaction, guaranteeing overlap.
 	<-started
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact: %v", err)
 	close(stop)
 	wg.Wait()
 
@@ -2100,8 +1944,6 @@ func TestSync_PreallocatedNilFd(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Sync should not panic on segments with f == nil.
-	{
-		err := s.Sync()
-		require.NoErrorf(t, err, "Sync on preallocated (nil-fd) segments: %v", err)
-	}
+	err = s.Sync()
+	require.NoErrorf(t, err, "Sync on preallocated (nil-fd) segments: %v", err)
 }

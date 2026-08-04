@@ -88,10 +88,8 @@ func TestMetrics_OverBudgetIncrements(t *testing.T) {
 	// Fill the budget with protected entries so eviction cannot free space.
 	smallBody := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 4; i++ {
-		{
-			_, _, err := s.Put(uint64(i), smallBody)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), smallBody)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 	for i := 0; i < 4; i++ {
 		s.Protect(uint64(i))
@@ -119,15 +117,11 @@ func TestMetrics_EvictionsIncrements(t *testing.T) {
 	smallBody := make([]byte, 100) // 120 bytes per record
 	// 3 records × 120 = 360 = budget. The 4th Put must evict to fit.
 	for i := 0; i < 3; i++ {
-		{
-			_, _, err := s.Put(uint64(i), smallBody)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), smallBody)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
-	{
-		_, _, err := s.Put(99, smallBody)
-		require.NoErrorf(t, err, "Put 99 with eviction: %v", err)
-	}
+	_, _, err = s.Put(99, smallBody)
+	require.NoErrorf(t, err, "Put 99 with eviction: %v", err)
 
 	got := metricValue(t, reg, "bouine_warm_evictions_total")
 	if got < 1 {
@@ -145,10 +139,8 @@ func TestMetrics_CompactionTriggeredIncrements(t *testing.T) {
 	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact: %v", err)
 
 	got := metricValue(t, reg, "bouine_warm_compaction_triggered_total")
 	assert.Equal(t, float64(1), got)
@@ -166,10 +158,8 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 
 	body := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 5; i++ {
-		{
-			_, _, err := s.Put(uint64(i), body)
-			require.NoErrorf(t, err, "Put %d: %v", i, err)
-		}
+		_, _, err := s.Put(uint64(i), body)
+		require.NoErrorf(t, err, "Put %d: %v", i, err)
 	}
 
 	// DiskBytes should equal the sum of segment file sizes, which for 5
@@ -195,10 +185,8 @@ func TestMetrics_MaxBytesGauge(t *testing.T) {
 	require.NoErrorf(t, err, "NewStore: %v", err)
 	t.Cleanup(func() { _ = s.Close() })
 
-	{
-		got := s.MaxBytes()
-		assert.Equal(t, int64(maxBytes), got)
-	}
+	got := s.MaxBytes()
+	assert.Equal(t, int64(maxBytes), got)
 
 	regVal := metricValue(t, reg, "bouine_warm_max_bytes")
 	assert.Equal(t, float64(maxBytes), regVal)
@@ -231,8 +219,6 @@ func TestMetrics_NilMetricsSafe(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		_, _, _ = s.Put(uint64(i), body) // some may be rejected, must not panic
 	}
-	{
-		err := s.Compact()
-		require.NoErrorf(t, err, "Compact with nil metrics: %v", err)
-	}
+	err = s.Compact()
+	require.NoErrorf(t, err, "Compact with nil metrics: %v", err)
 }

@@ -71,10 +71,8 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 	}
 
 	cancel()
-	{
-		err := <-errCh
-		require.NoErrorf(t, err, "serve: %v", err)
-	}
+	err = <-errCh
+	require.NoErrorf(t, err, "serve: %v", err)
 }
 
 func TestHTTPS_ListenAndServe_H2(t *testing.T) {
@@ -125,8 +123,6 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	require.Equal(t, "HTTP/2.0", proto)
 
 	cancel()
-	{
-		err := <-errCh
-		require.NoErrorf(t, err, "serve: %v", err)
-	}
+	err = <-errCh
+	require.NoErrorf(t, err, "serve: %v", err)
 }

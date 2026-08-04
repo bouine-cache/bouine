@@ -41,10 +41,8 @@ func TestHotStore_PutGet(t *testing.T) {
 	k := KeyHash([]byte("test-key"))
 	o := obj(k, 100)
 
-	{
-		err := s.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := s.Put(context.Background(), k, o)
+	require.NoErrorf(t, err, "put: %v", err)
 	got, src, err := s.Get(context.Background(), k)
 	require.NoErrorf(t, err, "get: %v", err)
 	require.NotNil(t, got)
@@ -71,10 +69,8 @@ func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	k := KeyHash([]byte("delegate"))
 	o := obj(k, 100)
 
-	{
-		err := s.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put: %v", err)
-	}
+	err := s.Put(context.Background(), k, o)
+	require.NoErrorf(t, err, "put: %v", err)
 
 	got, _, err := s.Get(context.Background(), k)
 	require.NoErrorf(t, err, "Get: %v", err)
@@ -216,18 +212,12 @@ func TestObjSize_AccountsForHeaders(t *testing.T) {
 
 func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 	t.Parallel()
-	{
-		want := int64(unsafe.Sizeof(api.Object{}))
-		assert.Equal(t, want, objectStructSize)
-	}
-	{
-		want := int64(unsafe.Sizeof(hotEntry{}))
-		assert.Equal(t, want, hotEntrySize)
-	}
-	{
-		want := int64(unsafe.Sizeof(sieve.Entry[api.Key]{}))
-		assert.Equal(t, want, sieveEntrySize)
-	}
+	want := int64(unsafe.Sizeof(api.Object{}))
+	assert.Equal(t, want, objectStructSize)
+	want = int64(unsafe.Sizeof(hotEntry{}))
+	assert.Equal(t, want, hotEntrySize)
+	want = int64(unsafe.Sizeof(sieve.Entry[api.Key]{}))
+	assert.Equal(t, want, sieveEntrySize)
 }
 
 func TestObjSize_MapOverheadConstant(t *testing.T) {
@@ -404,10 +394,8 @@ func TestHotStore_SetBacked(t *testing.T) {
 
 	k := KeyHash([]byte("warm-key"))
 	o := obj(k, 512)
-	{
-		err := s.Put(context.Background(), k, o)
-		require.NoError(t, err)
-	}
+	err := s.Put(context.Background(), k, o)
+	require.NoError(t, err)
 
 	s.SetBacked(k)
 
@@ -438,14 +426,10 @@ func TestHotStore_EvictPreferBacked(t *testing.T) {
 	// k2 triggers eviction. k1 (backed) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
-	{
-		got, _, _ := s.Get(ctx, k1)
-		assert.Nil(t, got)
-	}
-	{
-		got, _, _ := s.Get(ctx, k2)
-		assert.NotNil(t, got)
-	}
+	got, _, _ := s.Get(ctx, k1)
+	assert.Nil(t, got)
+	got, _, _ = s.Get(ctx, k2)
+	assert.NotNil(t, got)
 }
 
 func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
@@ -473,14 +457,10 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	k3 := KeyHash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	{
-		got, _, _ := s.Get(ctx, k1)
-		assert.NotNil(t, got)
-	}
-	{
-		got, _, _ := s.Get(ctx, k2)
-		assert.Nil(t, got)
-	}
+	got, _, _ := s.Get(ctx, k1)
+	assert.NotNil(t, got)
+	got, _, _ = s.Get(ctx, k2)
+	assert.Nil(t, got)
 }
 
 func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
@@ -494,16 +474,12 @@ func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	_ = s.Put(ctx, k2, obj(k2, 1000))
 
 	k3 := KeyHash([]byte("z"))
-	{
-		err := s.Put(ctx, k3, obj(k3, 1000))
-		require.NoError(t, err)
-	}
+	err := s.Put(ctx, k3, obj(k3, 1000))
+	require.NoError(t, err)
 
 	// k3 must have been inserted (eviction loop allowed it).
-	{
-		_, _, err := s.Get(ctx, k3)
-		require.Nil(t, err)
-	}
+	_, _, err = s.Get(ctx, k3)
+	require.Nil(t, err)
 }
 
 func TestHotStore_BackedCountConsistency(t *testing.T) {

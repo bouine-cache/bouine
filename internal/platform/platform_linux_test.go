@@ -17,10 +17,8 @@ func TestEffectiveGOMAXPROCS_CgroupV2NestedPath(t *testing.T) {
 
 	withCgroupPaths(t, root, proc)
 
-	{
-		got := EffectiveGOMAXPROCS()
-		require.Equal(t, 3, got)
-	}
+	got := EffectiveGOMAXPROCS()
+	require.Equal(t, 3, got)
 }
 
 func TestEffectiveGOMAXPROCS_CgroupV1NestedPath(t *testing.T) {
@@ -30,10 +28,8 @@ func TestEffectiveGOMAXPROCS_CgroupV1NestedPath(t *testing.T) {
 
 	withCgroupPaths(t, root, proc)
 
-	{
-		got := EffectiveGOMAXPROCS()
-		require.Equal(t, 2, got)
-	}
+	got := EffectiveGOMAXPROCS()
+	require.Equal(t, 2, got)
 }
 
 func TestEffectiveGOMAXPROCS_UnlimitedFallsBack(t *testing.T) {
@@ -69,22 +65,16 @@ func withCgroupPaths(t *testing.T, root string, proc string) {
 
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
-	{
-		err := os.MkdirAll(filepath.Dir(path), 0o755)
-		require.NoError(t, err)
-	}
-	{
-		err := os.WriteFile(path, []byte(content), 0o600)
-		require.NoError(t, err)
-	}
+	err := os.MkdirAll(filepath.Dir(path), 0o755)
+	require.NoError(t, err)
+	err := os.WriteFile(path, []byte(content), 0o600)
+	require.NoError(t, err)
 }
 
 func TestRaiseFileLimit(t *testing.T) {
 	var before unix.Rlimit
-	{
-		err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before)
-		require.NoErrorf(t, err, "getrlimit: %v", err)
-	}
+	err := unix.Getrlimit(unix.RLIMIT_NOFILE, &before)
+	require.NoErrorf(t, err, "getrlimit: %v", err)
 
 	got, err := RaiseFileLimit(65536)
 	require.NoErrorf(t, err, "RaiseFileLimit: %v", err)
@@ -93,17 +83,13 @@ func TestRaiseFileLimit(t *testing.T) {
 	}
 
 	var after unix.Rlimit
-	{
-		err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after)
-		require.NoErrorf(t, err, "getrlimit after: %v", err)
-	}
+	err := unix.Getrlimit(unix.RLIMIT_NOFILE, &after)
+	require.NoErrorf(t, err, "getrlimit after: %v", err)
 	if after.Cur < 65536 && after.Cur < before.Max {
 		t.Fatalf("soft limit after = %d, want >= 65536 (or capped at hard limit %d)", after.Cur, before.Max)
 	}
 
 	// Calling again with the same value should be a no-op.
-	{
-		_, err := RaiseFileLimit(65536)
-		require.NoErrorf(t, err, "RaiseFileLimit idempotent: %v", err)
-	}
+	_, err := RaiseFileLimit(65536)
+	require.NoErrorf(t, err, "RaiseFileLimit idempotent: %v", err)
 }

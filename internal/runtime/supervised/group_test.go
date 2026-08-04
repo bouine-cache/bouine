@@ -25,10 +25,8 @@ func TestGroup_HappyPath(t *testing.T) {
 	g.Go("a", func(_ context.Context) error { ran.Add(1); return nil })
 	g.Go("b", func(_ context.Context) error { ran.Add(1); return nil })
 
-	{
-		err := g.Wait()
-		require.NoErrorf(t, err, "wait: %v", err)
-	}
+	err := g.Wait()
+	require.NoErrorf(t, err, "wait: %v", err)
 	require.Equal(t, int32(2), ran.Load())
 }
 
@@ -73,8 +71,6 @@ func TestGroup_NilLoggerAllowed(t *testing.T) {
 	t.Parallel()
 	g := NewGroup(context.Background(), nil)
 	g.Go("ok", func(_ context.Context) error { return nil })
-	{
-		err := g.Wait()
-		require.NoErrorf(t, err, "wait: %v", err)
-	}
+	err := g.Wait()
+	require.NoErrorf(t, err, "wait: %v", err)
 }

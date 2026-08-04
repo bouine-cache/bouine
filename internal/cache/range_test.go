@@ -31,10 +31,8 @@ func TestServeRange_SingleRange(t *testing.T) {
 	require.Equal(t, "Hello", rr.Body.String())
 	cr := rr.Header().Get(header.ContentRange)
 	require.Equal(t, "bytes 0-4/13", cr)
-	{
-		xc := rr.Header().Get(header.XCache)
-		require.Equal(t, "HIT", xc)
-	}
+	xc := rr.Header().Get(header.XCache)
+	require.Equal(t, "HIT", xc)
 }
 
 func TestServeRange_SuffixRange(t *testing.T) {
@@ -113,8 +111,6 @@ func TestServeRange_MultiRange(t *testing.T) {
 	require.Equal(t, 206, rr.Code)
 	ct := rr.Header().Get(header.ContentType)
 	require.True(t, strings.HasPrefix(ct, "multipart/byteranges"))
-	{
-		xc := rr.Header().Get(header.XCache)
-		require.Equal(t, "HIT", xc)
-	}
+	xc := rr.Header().Get(header.XCache)
+	require.Equal(t, "HIT", xc)
 }

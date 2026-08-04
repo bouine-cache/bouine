@@ -82,10 +82,8 @@ func TestCFPropagator_PropagateForPurge_Async(t *testing.T) {
 	p.PropagateForPurge(context.Background(), "https://example.com/page")
 
 	// Async: wait for the goroutine to finish.
-	{
-		err := p.Close(context.Background())
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err := p.Close(context.Background())
+	require.NoErrorf(t, err, "Close: %v", err)
 
 	urls, _, _, _ := inv.counts()
 	require.Equal(t, 1, urls)
@@ -230,10 +228,8 @@ func TestCFPropagator_Close_WaitsForInFlight(t *testing.T) {
 
 	// Close should block until the delayed call finishes.
 	start := time.Now()
-	{
-		err := p.Close(context.Background())
-		require.NoErrorf(t, err, "Close: %v", err)
-	}
+	err := p.Close(context.Background())
+	require.NoErrorf(t, err, "Close: %v", err)
 	elapsed := time.Since(start)
 	if elapsed < 50*time.Millisecond {
 		t.Fatalf("Close returned too quickly (%v), expected to wait for in-flight call", elapsed)

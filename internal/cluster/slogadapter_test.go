@@ -50,10 +50,8 @@ func parseAdapterRecords(t *testing.T, mu *sync.Mutex, buf *bytes.Buffer) []map[
 			continue
 		}
 		var rec map[string]any
-		{
-			err := json.Unmarshal(line, &rec)
-			require.NoErrorf(t, err, "unmarshal log line: %v\nline: %s", err, line)
-		}
+		err := json.Unmarshal(line, &rec)
+		require.NoErrorf(t, err, "unmarshal log line: %v\nline: %s", err, line)
 		records = append(records, rec)
 	}
 	return records
@@ -167,10 +165,8 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 		"2026/07/05 09:37:37 [INFO] memberlist: Marking node bouine-2 as failed\n",
 	}
 	for _, l := range lines {
-		{
-			_, err := a.Write([]byte(l))
-			require.NoErrorf(t, err, "Write: %v", err)
-		}
+		_, err := a.Write([]byte(l))
+		require.NoErrorf(t, err, "Write: %v", err)
 	}
 
 	records := parseAdapterRecords(t, mu, buf)
@@ -197,18 +193,12 @@ func TestSlogAdapter_BuffersPartialLines(t *testing.T) {
 
 	// Write a line in two chunks; no record should be emitted until the
 	// newline arrives.
-	{
-		_, err := a.Write([]byte("2026/07/05 09:37:34 [WARN] memberlist: partial"))
-		require.NoErrorf(t, err, "Write 1: %v", err)
-	}
-	{
-		got := parseAdapterRecords(t, mu, buf)
-		require.Len(t, got, 0)
-	}
-	{
-		_, err := a.Write([]byte(" message\n"))
-		require.NoErrorf(t, err, "Write 2: %v", err)
-	}
+	_, err := a.Write([]byte("2026/07/05 09:37:34 [WARN] memberlist: partial"))
+	require.NoErrorf(t, err, "Write 1: %v", err)
+	got := parseAdapterRecords(t, mu, buf)
+	require.Len(t, got, 0)
+	_, err = a.Write([]byte(" message\n"))
+	require.NoErrorf(t, err, "Write 2: %v", err)
 	records := parseAdapterRecords(t, mu, buf)
 	require.Len(t, records, 1)
 	assert.Equal(t, "partial message", records[0]["msg"])
@@ -224,10 +214,8 @@ func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
 		"2026/07/05 09:37:34 [WARN] memberlist: first\n",
 		"2026/07/05 09:37:35 [ERR] memberlist: second\n",
 	}, "")
-	{
-		_, err := a.Write([]byte(blob))
-		require.NoErrorf(t, err, "Write: %v", err)
-	}
+	_, err := a.Write([]byte(blob))
+	require.NoErrorf(t, err, "Write: %v", err)
 	records := parseAdapterRecords(t, mu, buf)
 	require.Len(t, records, 2)
 	if records[0]["msg"] != "first" || records[1]["msg"] != "second" {
@@ -240,12 +228,8 @@ func TestSlogAdapter_EmptyLinesDropped(t *testing.T) {
 	logger, mu, buf := captureLogger(t)
 	a := newSlogAdapter(logger)
 
-	{
-		_, err := a.Write([]byte("\n\n"))
-		require.NoErrorf(t, err, "Write: %v", err)
-	}
-	{
-		got := parseAdapterRecords(t, mu, buf)
-		require.Len(t, got, 0)
-	}
+	_, err := a.Write([]byte("\n\n"))
+	require.NoErrorf(t, err, "Write: %v", err)
+	got := parseAdapterRecords(t, mu, buf)
+	require.Len(t, got, 0)
 }

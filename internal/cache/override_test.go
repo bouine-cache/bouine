@@ -272,9 +272,9 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 	if obj == nil {
 		t.Fatal("object not stored after phase 0")
 	}
-	expired := *obj
+	expired := obj.CloneForRefresh()
 	expired.StoredAt = time.Now().Add(-(override + time.Second))
-	_ = h.store.Put(context.Background(), key, &expired)
+	_ = h.store.Put(context.Background(), key, expired)
 
 	// Phase 1: 304 revalidation.
 	phase = 1

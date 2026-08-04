@@ -1071,14 +1071,14 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 // goroutine that looked up the same object, and MergeHeaders304's writes would
 // race with their reads. Do not remove the Clone.
 func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object {
-	refreshed := *stale
+	refreshed := stale.CloneForRefresh()
 	refreshed.Header = stale.Header.Clone()
 	refreshed.StoredAt = time.Now()
 	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
 	// eviction signal; the per-window popularity gate uses windowHits
 	// from the store, not Object.Hits.
 	refreshed.Hits = 0
-	MergeHeaders304(&refreshed, res.Header)
+	MergeHeaders304(refreshed, res.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
@@ -1093,7 +1093,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 	if newETag := res.Header.Get(header.ETag); newETag != "" {
 		refreshed.ETag = newETag
 	}
-	return &refreshed
+	return refreshed
 }
 
 // triggerBgRevalidate fires a background goroutine that fetches a fresh
@@ -1209,9 +1209,13 @@ func (h *Handler) writeAndMaybeStore(
 			// The two objects share Header and Body, which are immutable
 			// after buildObject. Hits are per-pointer (HotStore.Get
 			// increments entry.obj.Hits on the specific stored pointer).
-			primaryObj := *obj
+			// CloneForReturn shares the pre-computed serializedHead via a
+			// new atomic.Pointer so the primary-key copy does not
+			// value-copy the atomic word (copylocks) and does not
+			// recompute the header block on its first fast-path hit.
+			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
-			h.storeObject(r.Context(), primaryKey, &primaryObj, r, false, 0)
+			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)
 		}
 	}
 }

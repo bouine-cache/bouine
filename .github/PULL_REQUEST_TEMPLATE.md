@@ -14,16 +14,15 @@
 - [ ] chore / build / ci — tooling
 
 ## Architectural layer(s) touched
-<!-- See AGENTS.md §3 and PLAN.md §2 -->
-- [ ] L1 listeners
-- [ ] L2 pipeline
-- [ ] L3 storage
-- [ ] L4 cache engine
-- [ ] L5 origin
-- [ ] L6 cluster
-- [ ] L7 control plane (admin/Fiber)
-- [ ] L8 observability
-- [ ] L9 AI / dashboard
+<!-- See AGENTS.md §3 and docs/architecture.md §2 -->
+- [ ] L1 server (HTTP/1.1, /2, TLS, routing)
+- [ ] L2 storage (RAM hot tier, mmap warm tier, WAL, eviction)
+- [ ] L3 cache engine (RFC 9111, Vary, conditionals, negative cache)
+- [ ] L4 origin (upstream pool, health, hedge, circuit breaker)
+- [ ] L5 cluster (gossip, consistent hash, peer fetch)
+- [ ] L6 control plane (admin API, purge, dashboard)
+- [ ] L7 observability (metrics, traces, logs, pprof)
+- [ ] L8 AI / dashboard (design target, not yet implemented)
 - [ ] config / SDK / CLI / docs
 
 ## Checklist (mirrors AGENTS.md §17)
@@ -36,7 +35,7 @@
       the description).
 - [ ] If cache logic: `cache-tests` score not regressed
       (attach harness output).
-- [ ] If config: JSON schema regenerated (`make schema`).
+- [ ] If config: `config.Validate` updated and new field documented.
 - [ ] If public API: SDK types updated, semver impact noted below.
 - [ ] If a threat row is affected: `docs/security/threat-model.md`
       updated in this PR (cite Txx IDs).

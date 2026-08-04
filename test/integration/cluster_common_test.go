@@ -39,17 +39,17 @@ func TestCluster_SingleNodeFailure(t *testing.T) {
 				// copy that survives the kill without an origin fetch.
 				for _, n := range []int{0, 1} {
 					s.Get(t, n, path)
-					<-time.After(100 * time.Millisecond)
+					time.Sleep(100 * time.Millisecond)
 					s.Get(t, n, path)
 				}
 			} else {
 				// Strong mode: prime via node 0 (owner caches it).
 				s.Get(t, 0, path)
-				<-time.After(200 * time.Millisecond)
+				time.Sleep(200 * time.Millisecond)
 			}
 
 			s.KillNode(t, 2)
-			<-time.After(2 * time.Second)
+			time.Sleep(2 * time.Second)
 
 			for _, n := range []int{0, 1} {
 				resp := s.Get(t, n, path)

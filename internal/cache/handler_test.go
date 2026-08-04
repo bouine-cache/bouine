@@ -535,7 +535,7 @@ func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 	}
 
 	// Wait for the object to expire (max-age=1, no stale-if-error).
-	<-time.After(1500 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 
 	// Second request triggers revalidation; upstream returns 5xx.
 	// Without a stale-if-error window, the 5xx must be forwarded.
@@ -576,7 +576,7 @@ func TestHandler_Revalidate_5xx_MustRevalidateWithSIE(t *testing.T) {
 		t.Fatalf("seed: status = %d", seed.Code)
 	}
 
-	<-time.After(1500 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
@@ -604,7 +604,7 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 			_, _ = io.WriteString(w, "age-body")
 			return
 		}
-		<-time.After(upstreamDelay)
+		time.Sleep(upstreamDelay)
 		w.WriteHeader(503)
 	})
 
@@ -1008,7 +1008,7 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 				break
 			}
 		}
-		<-time.After(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 		inFlight.Add(-1)
 		w.Header().Set("Cache-Control", "max-age=0")
 		w.WriteHeader(200)
@@ -1524,7 +1524,7 @@ func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
 	h.fetchTimeout = 50 * time.Millisecond
 	req := httptest.NewRequest("GET", "/", nil)
 	go func() {
-		<-time.After(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		<-h.fetchSem // release the slot after 100ms > fetchTimeout
 	}()
 	res := h.doFetch(req)

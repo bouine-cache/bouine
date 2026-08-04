@@ -368,10 +368,10 @@ func (s *ClusterStack) FlapOrigin(t *testing.T, n int, pause time.Duration) {
 	t.Helper()
 	for i := range n {
 		s.originCtl.forceErr.Store(true)
-		<-time.After(pause)
+		time.Sleep(pause)
 		s.originCtl.forceErr.Store(false)
 		t.Logf("origin flap %d/%d: toggled error→ok", i+1, n)
-		<-time.After(pause)
+		time.Sleep(pause)
 	}
 }
 

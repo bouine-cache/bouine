@@ -2242,6 +2242,107 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 	}
 }
 
+// TestCompact_ConcurrentPutNoDataLoss reproduces issue #280: Compact
+// races with concurrent Put, silently dropping keys written during the
+// compaction window. The test fills the store with tombstones so
+// compaction has work to do, then runs Put in a tight loop while
+// Compact executes, and finally verifies every key written during the
+// compaction window is still retrievable. A very small SegMax forces
+// frequent segment rollover, maximizing the chance a Put creates a new
+// segment during the unlocked scan window (the pre-fix bug).
+func TestCompact_ConcurrentPutNoDataLoss(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// SegMax just large enough for a few records so Put rolls into new
+	// segments frequently during compaction.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Populate with live records spread across many segments, then
+	// delete half to create tombstones so Compact has dead bytes to
+	// reclaim.
+	for i := range 400 {
+		if _, _, err := s.Put(uint64(i), []byte{byte(i)}); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	for i := range 200 {
+		if _, err := s.Delete(uint64(i)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	// keys written during compaction, collected under a mutex so the
+	// verification phase can read them after Compact returns. Each
+	// write uses a unique key so the verification can distinguish a key
+	// preserved by compaction from one re-written after compaction.
+	var mu sync.Mutex
+	var written []uint64
+	stop := make(chan struct{})
+	var keyCounter atomic.Uint64
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			key := keyCounter.Add(1)
+			if _, _, err := s.Put(key, []byte{byte(key)}); err != nil {
+				t.Errorf("Put during compact: %v", err)
+				return
+			}
+			mu.Lock()
+			written = append(written, key)
+			mu.Unlock()
+		}
+	}()
+
+	// Run compaction. Under the pre-fix bug, segments and index entries
+	// created by the concurrent Put loop are silently dropped.
+	if err := s.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	close(stop)
+	wg.Wait()
+
+	// Every key written during the compaction window must be
+	// retrievable. Under the bug, the index entry is clobbered by
+	// s.index = newIndex and the segment file is removed by
+	// swapSegmentFiles, so Get returns nil (miss).
+	mu.Lock()
+	keys := written
+	mu.Unlock()
+	if len(keys) == 0 {
+		t.Fatal("no keys were written during compaction — test setup is broken")
+	}
+	seen := make(map[uint64]bool)
+	var missing []uint64
+	for _, k := range keys {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		got, err := s.Get(k)
+		if err != nil {
+			t.Fatalf("Get %d after compact: %v", k, err)
+		}
+		if got == nil {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("Compact dropped %d keys written during compaction: %v", len(missing), missing[:min(len(missing), 10)])
+	}
+}
+
 // TestSync_PreallocatedNilFd tests that Sync does not panic on
 // preallocated segments that have never been opened (f == nil).
 // Regression test for #288.

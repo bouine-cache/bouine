@@ -601,8 +601,9 @@ func (s *Server) rateLimitMiddleware(next http.Handler, perSecond int) http.Hand
 }
 
 // authMiddleware enforces bearer token authentication on all
-// requests except paths in the exempt map. Exempt paths include K8s
-// probes, Prometheus scrape, and cluster-internal peer RPCs.
+// requests except paths in the exempt map and (when enabled) pprof
+// endpoints matched by the prefix check below. Exempt paths include
+// K8s probes, Prometheus scrape, and cluster-internal peer RPCs.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	// Paths exempt from auth (K8s probes, Prometheus scrape, cluster RPCs).
 	exempt := map[string]bool{

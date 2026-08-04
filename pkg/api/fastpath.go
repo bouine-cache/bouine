@@ -131,4 +131,8 @@ func EqualFold(a, b string) bool {
 // Unstable.
 type FastPathMetrics interface {
 	RecordHit(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	// IncrementSmugglingRejected is called when the h1parser detects an
+	// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
+	// obs-fold). The implementation increments a Prometheus counter.
+	IncrementSmugglingRejected()
 }

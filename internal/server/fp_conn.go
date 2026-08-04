@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -34,6 +33,7 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithIdleReadTimeout(10*time.Second),
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
+		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),
 		h1parser.WithFallbackServer(s.inner),
 	)
 
@@ -118,18 +118,12 @@ func (s *Listener) handleCleartextFastPath(conn net.Conn, parser *h1parser.Parse
 	}
 }
 
-// reportFastPathError sends a non-fatal parser error to errCh using a
-// non-blocking send. Expected errors (EOF, closed, fall-through) are
-// silently discarded.
-func reportFastPathError(err error, errCh chan<- error) {
-	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, h1parser.ErrFallThrough) {
-		return
-	}
-	select {
-	case errCh <- err:
-	default:
-	}
-}
+// reportFastPathError handles errors from parser.Serve. All errors from
+// the parser are per-connection: EOF, closed, fall-through, malformed
+// request, timeout, smuggling detection, write failure. None are
+// listener-level failures. Dropping them prevents masking real listener
+// errors (e.g. Accept loop failures).
+func reportFastPathError(_ error, _ chan<- error) {}
 
 // serveConnWithHTTP hands a single connection to net/http via a
 // one-shot listener. The closeNotifyConn ensures Serve does not return

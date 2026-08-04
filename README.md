@@ -5,7 +5,7 @@
 <h1 align="center">bouine</h1>
 
 <p align="center">
-  <em>/bwin/</em>
+  <em>pronounce: /bwin/</em>
 </p>
 
 <p align="center">

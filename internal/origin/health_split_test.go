@@ -293,3 +293,45 @@ func TestTargetStatus_SplitCounters(t *testing.T) {
 		t.Fatalf("ConsecutiveErrors = %d, want 10", s.ConsecutiveErrors)
 	}
 }
+
+// TestActiveRestore_ResetsPassiveErrors verifies that a successful
+// active health restore resets passiveErrors to zero. Without this, a
+// restored target carries stale passive error debt and gets re-ejected
+// on the first passive 5xx response.
+func TestActiveRestore_ResetsPassiveErrors(t *testing.T) {
+	t.Parallel()
+	srv := echoServer(t)
+	defer srv.Close()
+
+	p := pool(t, srv.Listener.Addr().String())
+
+	// Simulate a target that was passively ejected: healthy=false,
+	// passiveErrors at threshold.
+	p.targets[0].healthy.Store(false)
+	p.targets[0].passiveErrors.Store(3)
+	p.targets[0].probeErrors.Store(0)
+
+	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
+		Path:               "/",
+		Interval:           10 * time.Millisecond,
+		Timeout:            1 * time.Second,
+		HealthyThreshold:   2,
+		UnhealthyThreshold: 3,
+		ExpectedCodes:      []int{200},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = hc.Run(ctx)
+
+	// Target should be restored.
+	if len(p.Healthy()) != 1 {
+		t.Fatalf("expected 1 healthy target after restore, got %v", p.Healthy())
+	}
+
+	// passiveErrors must be reset — otherwise the first 5xx response
+	// would increment to 4 >= threshold and re-eject immediately.
+	if got := p.targets[0].passiveErrors.Load(); got != 0 {
+		t.Fatalf("passiveErrors = %d after restore, want 0 (stale passive debt)", got)
+	}
+}

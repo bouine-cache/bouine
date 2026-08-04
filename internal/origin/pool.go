@@ -97,8 +97,9 @@ func (t *Target) recordProbeError(threshold int, logger observability.Logger, po
 
 // recordProbeSuccess increments the probe success counter and restores
 // the target via CompareAndSwap if the healthy threshold is reached.
-// Does NOT touch passiveErrors — passive and active counters are
-// independent.
+// On restore, passiveErrors is reset to give the target a clean passive
+// slate — a restored target should not carry stale passive error debt
+// that would cause immediate re-ejection on the first passive 5xx.
 func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, poolName string) {
 	t.probeErrors.Store(0)
 	if t.healthy.Load() {
@@ -109,6 +110,7 @@ func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, 
 	if cnt >= int64(threshold) {
 		t.successes.Store(0)
 		if t.healthy.CompareAndSwap(false, true) {
+			t.passiveErrors.Store(0)
 			if t.metrics != nil {
 				t.metrics.incRestore(poolName, t.addr, "active")
 			}

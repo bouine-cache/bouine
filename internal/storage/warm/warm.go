@@ -18,8 +18,10 @@
 // magic 0x44454144 ("DEAD"). Compaction rewrites live records into a
 // new segment, skipping tombstones and keys that have been superseded.
 //
-// The warm tier is NOT goroutine-safe by itself; the TieredStore
-// serializes writes through the hot-tier shard lock and the WAL.
+// The warm tier serializes concurrent access internally: s.mu protects the
+// segment list and s.idxMu protects the index. Compact holds s.mu.Lock for
+// its entire duration to prevent concurrent Put/Delete from creating segments
+// or index entries that the swap would silently drop (issue #280).
 package warm
 
 import (
@@ -117,6 +119,12 @@ var ErrTornRecord = errors.New("warm: torn trailing record")
 // skipping the warm-tier write (the acceleration tier already holds the
 // object).
 var ErrOverBudget = errors.New("warm: over maxBytes budget")
+
+// errSegFull is returned by activeSegRLocked when the current active
+// segment is full and a new one must be created. The caller releases
+// s.mu.RLock, calls newSegment (which acquires s.mu.Lock), then
+// re-acquires s.mu.RLock and retries.
+var errSegFull = errors.New("warm: active segment full")
 
 // Record is a single warm-tier entry read from a segment.
 type Record struct {
@@ -588,110 +596,167 @@ func (s *Store) preallocateSegments() error {
 // stats.bytes keeps the gate and the eviction loop on the same metric
 // so operators see a consistent story: if Put succeeds, live bytes fit.
 // The entry budget bounds the Go heap cost of the warm index map.
+//
+// Put holds s.mu.RLock for its entire duration so that Compact's
+// s.mu.Lock cannot take the index snapshot or swap segments while a Put is
+// in flight (issue #280). If the active segment is full, Put releases
+// s.mu.RLock, calls newSegment (which acquires s.mu.Lock), then re-acquires
+// s.mu.RLock and retries. The retry loop converges because a freshly created
+// segment has room.
+//
+// Lock ordering: s.mu.RLock → seg.mu.Lock → idxMu.Lock. Compact holds
+// s.mu.Lock → seg.mu.Lock → idxMu.Lock. No deadlock: Put's s.mu.RLock blocks
+// Compact's s.mu.Lock, and Put releases s.mu.RLock before calling newSegment.
 func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error) {
 	recSize := int64(HeaderLen + len(body) + FooterLen)
 
-	// Enforce both budgets before appending. A zero budget means
-	// no limit (backward compatible with the default). When over
-	// either budget, attempt eviction to free space before rejecting.
-	if s.maxBytes > 0 || s.maxEntries > 0 {
-		if !s.fitsBudgets(recSize) {
-			if evictErr := s.evictToFitBatch(recSize); evictErr != nil {
-				s.metrics.IncOverBudget()
-				return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for {
+		// Enforce both budgets before appending. A zero budget means
+		// no limit (backward compatible with the default). When over
+		// either budget, attempt eviction to free space before rejecting.
+		if s.maxBytes > 0 || s.maxEntries > 0 {
+			if !s.fitsBudgets(recSize) {
+				evictErr := s.evictToFitBatchLocked(recSize)
+				if evictErr != nil && !errors.Is(evictErr, errSegFull) {
+					s.metrics.IncOverBudget()
+					return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
+				}
+				if errors.Is(evictErr, errSegFull) {
+					// Active segment is full; create a new one and retry.
+					s.mu.RUnlock()
+					if _, nErr := s.newSegment(); nErr != nil {
+						s.mu.RLock()
+						return 0, 0, nErr
+					}
+					s.mu.RLock()
+					continue
+				}
 			}
 		}
-	}
 
-	seg, err := s.activeSeg()
-	if err != nil {
-		return 0, 0, err
-	}
-
-	seg.mu.Lock()
-	defer seg.mu.Unlock()
-
-	if seg.f == nil {
-		if err := seg.openLocked(); err != nil {
-			return 0, 0, err
+		seg, segErr := s.activeSegRLocked()
+		if segErr != nil {
+			if errors.Is(segErr, errSegFull) {
+				// Release RLock so newSegment can acquire Lock,
+				// then re-acquire RLock and retry.
+				s.mu.RUnlock()
+				if _, nErr := s.newSegment(); nErr != nil {
+					s.mu.RLock() // re-acquire so deferred unlock doesn't panic
+					return 0, 0, nErr
+				}
+				s.mu.RLock()
+				continue
+			}
+			return 0, 0, segErr
 		}
-	}
 
-	off := seg.size
-	if err := writeRecordAt(seg.f, off, magicLive, key, body); err != nil {
-		return 0, 0, fmt.Errorf("warm: write: %w", err)
-	}
-	seg.size += recSize
-
-	s.idxMu.Lock()
-	// Subtract the old entry's bytes on overwrite so stats.bytes
-	// reflects only live records. Without this, repeated overwrites
-	// inflate the counter and evictToFit evicts unnecessarily.
-	if old, ok := s.index[key]; ok {
-		if old.size > 0 {
-			s.stats.bytes.Add(-old.size)
+		seg.mu.Lock()
+		if seg.f == nil {
+			if err := seg.openLocked(); err != nil {
+				seg.mu.Unlock()
+				return 0, 0, err
+			}
 		}
-	} else {
-		s.stats.entries.Add(1)
-	}
-	s.stats.bytes.Add(recSize)
-	// Insert into the SIEVE list. If the key already exists (overwrite),
-	// reuse the existing entry and mark it visited. Otherwise, insert a
-	// new entry at head with visited=false. The bool return (newly
-	// inserted) is discarded — the entry pointer is sufficient.
-	e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
-		if loc, ok := s.index[k]; ok {
-			return loc.sieve
-		}
-		return nil
-	})
-	s.index[key] = warmLoc{segID: seg.ID, offset: off, size: recSize, sieve: e}
-	s.idxMu.Unlock()
 
-	return seg.ID, off, nil
+		off := seg.size
+		if err := writeRecordAt(seg.f, off, magicLive, key, body); err != nil {
+			seg.mu.Unlock()
+			return 0, 0, fmt.Errorf("warm: write: %w", err)
+		}
+		seg.size += recSize
+		seg.mu.Unlock()
+
+		s.idxMu.Lock()
+		// Subtract the old entry's bytes on overwrite so stats.bytes
+		// reflects only live records. Without this, repeated overwrites
+		// inflate the counter and evictToFit evicts unnecessarily.
+		if old, ok := s.index[key]; ok {
+			if old.size > 0 {
+				s.stats.bytes.Add(-old.size)
+			}
+		} else {
+			s.stats.entries.Add(1)
+		}
+		s.stats.bytes.Add(recSize)
+		// Insert into the SIEVE list. If the key already exists (overwrite),
+		// reuse the existing entry and mark it visited. Otherwise, insert a
+		// new entry at head with visited=false. The bool return (newly
+		// inserted) is discarded — the entry pointer is sufficient.
+		e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
+			if loc, ok := s.index[k]; ok {
+				return loc.sieve
+			}
+			return nil
+		})
+		s.index[key] = warmLoc{segID: seg.ID, offset: off, size: recSize, sieve: e}
+		s.idxMu.Unlock()
+
+		return seg.ID, off, nil
+	}
 }
 
 // Delete writes a tombstone for the key and removes it from the index.
 // Returns the segment ID the tombstone was written to, so callers can
 // sync that segment before appending to the WAL.
+//
+// Like Put, Delete holds s.mu.RLock for its entire duration to prevent
+// Compact from swapping segments mid-operation (issue #280).
 func (s *Store) Delete(key uint64) (segID int, err error) {
-	seg, err := s.activeSeg()
-	if err != nil {
-		return 0, err
-	}
-	seg.mu.Lock()
-	defer seg.mu.Unlock()
-
-	if seg.f == nil {
-		if err := seg.openLocked(); err != nil {
-			return 0, err
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for {
+		seg, segErr := s.activeSegRLocked()
+		if segErr != nil {
+			if errors.Is(segErr, errSegFull) {
+				s.mu.RUnlock()
+				if _, nErr := s.newSegment(); nErr != nil {
+					s.mu.RLock()
+					return 0, nErr
+				}
+				s.mu.RLock()
+				continue
+			}
+			return 0, segErr
 		}
-	}
 
-	off := seg.size
-	if err := writeRecordAt(seg.f, off, magicDead, key, nil); err != nil {
-		return 0, fmt.Errorf("warm: tombstone: %w", err)
-	}
-	recSize := int64(HeaderLen + FooterLen)
-	seg.size += recSize
+		seg.mu.Lock()
+		if seg.f == nil {
+			if err := seg.openLocked(); err != nil {
+				seg.mu.Unlock()
+				return 0, err
+			}
+		}
 
-	// Decrement stats counters for the deleted entry. The index entry
-	// holds the on-disk record size so we can subtract it without
-	// re-reading the record from disk.
-	s.idxMu.Lock()
-	loc, existed := s.index[key]
-	if existed {
-		if loc.sieve != nil {
-			s.evictList.Remove(loc.sieve)
+		off := seg.size
+		if err := writeRecordAt(seg.f, off, magicDead, key, nil); err != nil {
+			seg.mu.Unlock()
+			return 0, fmt.Errorf("warm: tombstone: %w", err)
 		}
-		delete(s.index, key)
-		s.stats.entries.Add(-1)
-		if loc.size > 0 {
-			s.stats.bytes.Add(-loc.size)
+		recSize := int64(HeaderLen + FooterLen)
+		seg.size += recSize
+		seg.mu.Unlock()
+
+		// Decrement stats counters for the deleted entry. The index entry
+		// holds the on-disk record size so we can subtract it without
+		// re-reading the record from disk.
+		s.idxMu.Lock()
+		loc, existed := s.index[key]
+		if existed {
+			if loc.sieve != nil {
+				s.evictList.Remove(loc.sieve)
+			}
+			delete(s.index, key)
+			s.stats.entries.Add(-1)
+			if loc.size > 0 {
+				s.stats.bytes.Add(-loc.size)
+			}
 		}
+		s.idxMu.Unlock()
+		return seg.ID, nil
 	}
-	s.idxMu.Unlock()
-	return seg.ID, nil
 }
 
 // Get returns the raw body bytes stored for key, or nil if the key
@@ -1166,8 +1231,13 @@ func (s *Store) evictOneLocked(seg *Segment) (uint64, bool) {
 //
 // For batch eviction (multiple victims in a single lock acquisition),
 // use evictToFitBatch instead.
+//
+// evictOne holds s.mu.RLock for its entire duration to prevent Compact
+// from swapping segments during eviction (issue #280).
 func (s *Store) evictOne() (uint64, bool) {
-	seg, err := s.activeSeg()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seg, err := s.activeSegRLocked()
 	if err != nil {
 		return 0, false
 	}
@@ -1193,8 +1263,9 @@ func (s *Store) fitsBudgets(recSize int64) bool {
 // seg.mu and idxMu once, then loops evictOneLocked until recSize fits
 // under both the byte and entry-count budgets, or no victim is
 // available. This amortizes lock acquisition across N evictions,
-// reducing contention and syscall overhead. Put calls this instead
-// of evictToFit.
+// reducing contention and syscall overhead. Put calls this (via
+// evictToFitBatchLocked) from under s.mu.RLock so Compact cannot
+// swap segments during eviction.
 func (s *Store) evictToFitBatch(recSize int64) error {
 	if s.maxBytes <= 0 && s.maxEntries <= 0 {
 		return nil
@@ -1208,7 +1279,30 @@ func (s *Store) evictToFitBatch(recSize int64) error {
 		return nil
 	}
 
-	seg, err := s.activeSeg()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.evictToFitBatchLocked(recSize)
+}
+
+// evictToFitBatchLocked is the core eviction loop assuming the caller
+// already holds s.mu.RLock. It uses activeSegRLocked instead of
+// activeSeg to avoid a re-entrant s.mu.RLock. If the active segment is
+// full, it returns errSegFull so the caller (Put) can create a new
+// segment and retry.
+func (s *Store) evictToFitBatchLocked(recSize int64) error {
+	if s.maxBytes <= 0 && s.maxEntries <= 0 {
+		return nil
+	}
+	if s.maxBytes > 0 && recSize > s.maxBytes {
+		return ErrOverBudget
+	}
+
+	// Fast path: already fits both budgets.
+	if s.fitsBudgets(recSize) {
+		return nil
+	}
+
+	seg, err := s.activeSegRLocked()
 	if err != nil {
 		return err
 	}
@@ -1455,6 +1549,28 @@ func (s *Store) activeSeg() (*Segment, error) {
 	s.mu.RUnlock()
 
 	return s.newSegment()
+}
+
+// activeSegRLocked returns the active segment assuming the caller already
+// holds s.mu.RLock. It does NOT acquire s.mu. If the active segment is full,
+// it returns errSegFull — the caller must release s.mu.RLock, call
+// newSegment (which acquires s.mu.Lock), then re-acquire s.mu.RLock and
+// retry. This avoids a re-entrant s.mu.RLock → s.mu.Lock deadlock.
+func (s *Store) activeSegRLocked() (*Segment, error) {
+	if len(s.segs) > 0 {
+		last := s.segs[len(s.segs)-1]
+		last.mu.Lock()
+		full := last.size >= last.maxBytes
+		last.mu.Unlock()
+		if !full {
+			if err := last.ensureOpen(); err != nil {
+				return nil, err
+			}
+			s.fdCache.touch(last)
+			return last, nil
+		}
+	}
+	return nil, errSegFull
 }
 
 func (s *Store) newSegment() (*Segment, error) {
@@ -1810,6 +1926,14 @@ func (s *Store) NeedsCompaction() bool {
 // and overwritten keys. The old segments are deleted after a successful
 // compaction.
 //
+// Compact holds s.mu.Lock for its entire duration. This blocks concurrent
+// Put/Delete/Get for the compaction window — the scan, the SIEVE rebuild,
+// and the segment-file swap all run under the lock. Without the full-method
+// lock, a concurrent Put could create a new segment and write an index entry
+// that the swap silently drops, causing data loss (issue #280). The lock is
+// also necessary because swapSegmentFiles removes every *.seg file in the
+// directory, including any a concurrent Put just created.
+//
 // Records are streamed per-segment: live records from one segment are
 // collected, the segment lock is released, and only then written to the
 // temp store. Peak heap is O(1 segment) instead of O(total live bytes).
@@ -1817,6 +1941,15 @@ func (s *Store) NeedsCompaction() bool {
 //nolint:funlen // munmapAll adds 1 statement over the limit; extracting would harm readability
 func (s *Store) Compact() error {
 	s.metrics.IncCompactionTriggered()
+
+	// Hold s.mu.Lock for the entire compaction to prevent concurrent
+	// Put/Delete from creating segments or index entries that the swap
+	// would silently drop. sync.RWMutex is not re-entrant, so
+	// compactSegments receives the segment slice directly instead of
+	// acquiring s.mu.RLock internally.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.idxMu.RLock()
 	idxSnap := make(map[uint64]warmLoc, len(s.index))
 	for k, v := range s.index {
@@ -1831,7 +1964,7 @@ func (s *Store) Compact() error {
 	if err != nil {
 		return fmt.Errorf("compact: create temp store: %w", err)
 	}
-	newIndex, orderedKeys, written, err := s.compactSegments(tmp, idxSnap, compactDir, s.compactKeysBuf)
+	newIndex, orderedKeys, written, err := s.compactSegments(tmp, s.segs, idxSnap, compactDir, s.compactKeysBuf)
 	if err != nil {
 		return err
 	}
@@ -1844,11 +1977,8 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("compact: close temp: %w", err)
 	}
 
-	// Build the SIEVE list and compute live bytes outside any lock.
-	// This is the O(N) step that was previously inside s.mu.Lock +
-	// idxMu.Lock, blocking all Gets and Puts for 100-500 ms at 1M
-	// entries. Moving it here reduces the lock hold to a few pointer
-	// assignments (~1 µs).
+	// Build the SIEVE list and compute live bytes. This is O(N) but
+	// runs under s.mu.Lock so the index cannot change concurrently.
 	newEvictList := sieve.NewList[uint64]()
 	for _, key := range orderedKeys {
 		e, _ := newEvictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
@@ -1860,15 +1990,6 @@ func (s *Store) Compact() error {
 	for _, loc := range newIndex {
 		liveBytes += loc.size
 	}
-
-	// Hold s.mu.Lock only for the segment-file swap + pointer
-	// assignments. This blocks concurrent Put/Delete (which call
-	// activeSeg → newSegment → openSegment) from hitting missing
-	// files during the rename. The lock is held for filesystem ops
-	// + struct creation only — the O(N) SIEVE rebuild is already
-	// done above.
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Munmap all old segments before swapping files. The old mappings
 	// point at file offsets that will be replaced by swapSegmentFiles.
@@ -1893,9 +2014,10 @@ func (s *Store) Compact() error {
 	s.segs = fresh.segs
 	s.segByID = fresh.segByID
 
-	// Atomic pointer swap: replace the index and SIEVE list in one
-	// short idxMu.Lock critical section. The new index already has
-	// sieve pointers set (built above), so no O(N) work here.
+	// Replace the index and SIEVE list. s.mu.Lock is already held, so
+	// no concurrent Put/Delete can interleave. idxMu.Lock is still
+	// needed to serialize with Get, which acquires idxMu.RLock under
+	// s.mu.RLock.
 	s.idxMu.Lock()
 	s.index = newIndex
 	s.evictList = newEvictList
@@ -1954,12 +2076,10 @@ type pendingRec struct {
 // during cross-store writes. The ordered keys are appended to keysBuf
 // (reset to zero length on entry), which the caller provides — typically
 // a reusable buffer on the Store — to avoid a per-compaction allocation.
-func (s *Store) compactSegments(tmp *Store, idxSnap map[uint64]warmLoc, compactDir string, keysBuf []uint64) (map[uint64]warmLoc, []uint64, int, error) {
-	s.mu.RLock()
-	segs := make([]*Segment, len(s.segs))
-	copy(segs, s.segs)
-	s.mu.RUnlock()
-
+//
+// The caller MUST hold s.mu.Lock: segs is passed in to avoid a re-entrant
+// s.mu.RLock (sync.RWMutex is not re-entrant).
+func (s *Store) compactSegments(tmp *Store, segs []*Segment, idxSnap map[uint64]warmLoc, compactDir string, keysBuf []uint64) (map[uint64]warmLoc, []uint64, int, error) {
 	orderedKeys := keysBuf[:0]
 	newIndex := make(map[uint64]warmLoc, len(idxSnap))
 	written := 0

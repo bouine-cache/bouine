@@ -33,8 +33,7 @@ const (
 
 	// GossipConvergence is the max time for gossip to propagate
 	// invalidations across the in-process cluster.
-	GossipConvergence   = 15 * time.Second
-	ReplicationDeadline = 10 * time.Second
+	GossipConvergence = 15 * time.Second
 )
 
 // ClusterNode describes one bouine node.

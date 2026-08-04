@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // readBufferSize is the size of the pooled read buffer. 16 KB covers
@@ -39,6 +40,7 @@ type Parser struct {
 	writeTime      time.Duration
 	scheme         string
 	metricsHook    func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	smugglingHook  func()
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -109,6 +111,14 @@ func WithFallbackServer(srv *http.Server) Option {
 // through the middleware chain.
 func WithMetricsHook(fn func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)) Option {
 	return func(p *Parser) { p.metricsHook = fn }
+}
+
+// WithSmugglingHook sets a callback invoked when the parser detects an
+// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
+// obs-fold). Used by the listener to increment the
+// bouine_http_smuggling_rejected_total counter.
+func WithSmugglingHook(fn func()) Option {
+	return func(p *Parser) { p.smugglingHook = fn }
 }
 
 // ErrFallThrough signals that the parser cannot handle the connection
@@ -203,6 +213,17 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*ap
 		return nil, true, nil, err
 	}
 
+	// Smuggling defense (RFC 9110 §6.6.2, AGENTS.md §6). Detect CL+TE
+	// conflict and duplicate Content-Length. On violation, fall through
+	// to net/http with the fully parsed request so it can return a
+	// proper 400 — not a silent connection close.
+	if smugglingDetected(req) {
+		if p.smugglingHook != nil {
+			p.smugglingHook()
+		}
+		return req, true, nil, nil
+	}
+
 	// excess contains body bytes that were read past the header end.
 	// These are returned to the caller so handleFallThrough can use
 	// them as the start of the request body for non-GET/HEAD methods.
@@ -289,8 +310,14 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 			break
 		}
 
+		// obs-fold: a header line continuation starts with SP or HTAB
+		// (RFC 9110 §5.5). Reject by falling through to net/http.
+		if buf[pos] == ' ' || buf[pos] == '\t' {
+			return ErrFallThrough
+		}
+
 		if req.NHeaders >= api.MaxRawHeaders {
-			return errors.New("h1parser: too many headers")
+			return ErrFallThrough
 		}
 
 		appendHeader(req, buf[pos:lineEnd])
@@ -316,6 +343,35 @@ func skipRequestLine(buf []byte) int {
 		pos++
 	}
 	return pos + 2
+}
+
+// smugglingDetected checks for HTTP request smuggling indicators per
+// RFC 9110 §6.6.2 and AGENTS.md §6:
+//   - Content-Length + Transfer-Encoding conflict
+//   - Duplicate Content-Length headers
+//
+// On any violation the parser falls through to net/http, which has
+// proper RFC validation and returns 400.
+func smugglingDetected(req *api.RawRequest) bool {
+	var hasCL, hasTE bool
+	var clCount int
+	for i := 0; i < req.NHeaders; i++ {
+		h := &req.Headers[i]
+		if api.EqualFold(h.Key, header.ContentLength) {
+			clCount++
+			hasCL = true
+		}
+		if api.EqualFold(h.Key, header.TransferEncoding) {
+			hasTE = true
+		}
+	}
+	if hasCL && hasTE {
+		return true
+	}
+	if clCount > 1 {
+		return true
+	}
+	return false
 }
 
 // appendHeader parses a single header line and appends it to req.

@@ -138,6 +138,12 @@ func qualifiesForFastPath(req *api.RawRequest) bool {
 			api.EqualFold(h.Key, "If-Match"):
 			return false
 		}
+		// Reject requests with Transfer-Encoding or Content-Length.
+		// A GET/HEAD with a body or chunked encoding is not cacheable
+		// and must go through net/http for proper validation.
+		if api.EqualFold(h.Key, header.TransferEncoding) || api.EqualFold(h.Key, header.ContentLength) {
+			return false
+		}
 	}
 	// Check Cache-Control: no-cache / no-store and Pragma: no-cache.
 	cc := req.Header(header.CacheControl)

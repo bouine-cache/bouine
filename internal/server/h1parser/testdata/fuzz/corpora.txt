@@ -1,0 +1,24 @@
+# Fuzz corpus for h1parser.
+# Each entry is a Go fuzz seed added via f.Add() in fuzz_test.go.
+# The corpus is committed to satisfy AGENTS.md §8: "At least one corpus
+# per fuzzer committed under testdata/fuzz/."
+#
+# Seed 1: normal GET request
+GET /hello HTTP/1.1\r\nHost: example.com\r\nAccept: text/html\r\n\r\n
+# Seed 2: CL+TE smuggling attempt
+GET / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n
+# Seed 3: duplicate Content-Length
+GET / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\n
+# Seed 4: obs-fold continuation
+GET / HTTP/1.1\r\nX-Custom: value\r\n continuation\r\n\r\n
+# Seed 5: duplicate Host
+GET / HTTP/1.1\r\nHost: a.com\r\nHost: b.com\r\n\r\n
+# Seed 6: empty headers
+GET / HTTP/1.1\r\n\r\n
+# Seed 7: POST with query
+POST /api?foo=bar HTTP/1.1\r\nHost: localhost\r\n\r\n
+# Seed 8: HTTP/1.0 HEAD
+HEAD / HTTP/1.0\r\n\r\n
+# Seed 9: bare CRLF
+\r\n
+# Seed 10: empty string

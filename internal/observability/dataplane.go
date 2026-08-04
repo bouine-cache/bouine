@@ -84,6 +84,9 @@ type DataPlaneMetrics struct {
 	// WALLastSyncTimestamp is a gauge set from the WAL log's LastSyncTime.
 	WALDroppedEntries    prometheus.Counter
 	WALLastSyncTimestamp prometheus.Gauge
+	// HTTP smuggling rejection counter. Incremented when the h1parser
+	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
+	HTTPSmugglingRejected prometheus.Counter
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -148,13 +151,19 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	})
 	m.initRefreshMetrics()
 	m.initWALMetrics()
+	m.HTTPSmugglingRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "http_smuggling_rejected_total",
+		Help:      "Total HTTP smuggling attempts rejected by the h1parser (CL+TE conflict, duplicate Content-Length, obs-fold).",
+	})
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
-		m.WALDroppedEntries, m.WALLastSyncTimestamp)
+		m.WALDroppedEntries, m.WALLastSyncTimestamp,
+		m.HTTPSmugglingRejected)
 	return m
 }
 
@@ -630,6 +639,13 @@ func (m *DataPlaneMetrics) RecordHit(method, route, cacheResult, source string, 
 	m.RequestsTotal.WithLabelValues(method, strconv.Itoa(status), cacheResult, source, route).Inc()
 	m.RequestDuration.WithLabelValues(method, strconv.Itoa(status), cacheResult, source, route).Observe(dur)
 	m.ResponseBytesOut.WithLabelValues(method, cacheResult, source, route).Add(float64(bytesOut))
+}
+
+// IncrementSmugglingRejected increments the HTTP smuggling rejection
+// counter. Called by the h1parser when it detects CL+TE conflict,
+// duplicate Content-Length, or obs-fold.
+func (m *DataPlaneMetrics) IncrementSmugglingRejected() {
+	m.HTTPSmugglingRejected.Inc()
 }
 
 // recordRings updates the dashboard ring buffers for non-HIT requests.

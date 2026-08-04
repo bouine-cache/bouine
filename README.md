@@ -48,10 +48,9 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 | | bouine | Varnish | NGINX |
 |---|---|---|---|
 | Architecture | Reverse-proxy cache | Reverse-proxy cache | Reverse proxy + cache |
-| External deps | None (embedded storage) | None | None |
 | Clustering | Gossip + consistent hash (built-in) | Varnish Plus only | Upstream hash (no cluster state) |
 | Cache invalidation | Purge + ban (predicate) + soft-purge | Purge + ban | Purge only (no ban) |
-| Observability | Prometheus + OTel + slog (built-in) | Vmod-based | Third-party modules |
+| Observability | Prometheus + OTel + slog (built-in) | Vmod-based | Third-party or NGINX plus |
 | Config | YAML (declarative) | VCL (imperative) | NGINX.conf |
 | Kubernetes | StatefulSet + Helm chart, first-class | Sidecar / external | Ingress controller pattern |
 

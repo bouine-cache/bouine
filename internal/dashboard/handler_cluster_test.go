@@ -29,7 +29,7 @@ func TestHandler_ClusterWithStoreData(t *testing.T) {
 			Rings: rings,
 		},
 		auth: newSessionAuth("test"),
-		agg:  NewAggregator(rings, nil, "self:9999", "test", nil),
+		agg:  NewAggregator(rings, nil, "self:9999", nil),
 	}
 
 	w := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestHandler_ClusterWithoutStoreData(t *testing.T) {
 	h := &Handler{
 		cfg:  Config{Token: "test", Rings: rings},
 		auth: newSessionAuth("test"),
-		agg:  NewAggregator(rings, nil, "self:9999", "test", nil),
+		agg:  NewAggregator(rings, nil, "self:9999", nil),
 	}
 
 	w := httptest.NewRecorder()

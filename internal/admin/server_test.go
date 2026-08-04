@@ -239,6 +239,26 @@ func TestAuth_ReadEndpointsExempt(t *testing.T) {
 	}
 }
 
+func TestAuth_PeerMetricsExempt(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerMetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{}"))
+		}),
+	})
+
+	// GET without token should succeed (auth-exempt like other peer RPCs).
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/peer/metrics", nil)
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("no token: got %d, want 200 (peer metrics should be exempt)", rr.Code)
+	}
+}
+
 func TestDrain_NoDrainFn(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })

@@ -57,6 +57,8 @@ func BenchmarkWarmEvictToFit_MultiEvict(b *testing.B) {
 		}
 		b.StartTimer()
 
-		_ = s.evictToFitBatch(largeRecSize)
+		s.mu.RLock()
+		_ = s.evictToFitBatchLocked(largeRecSize)
+		s.mu.RUnlock()
 	}
 }

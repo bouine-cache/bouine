@@ -601,8 +601,10 @@ func (s *Store) preallocateSegments() error {
 // s.mu.Lock cannot take the index snapshot or swap segments while a Put is
 // in flight (issue #280). If the active segment is full, Put releases
 // s.mu.RLock, calls newSegment (which acquires s.mu.Lock), then re-acquires
-// s.mu.RLock and retries. The retry loop converges because a freshly created
-// segment has room.
+// s.mu.RLock and retries. The retry loop converges because newSegment
+// double-checks whether the last segment is still full under s.mu.Lock —
+// so N goroutines that hit errSegFull simultaneously create exactly one
+// new segment, not N.
 //
 // Lock ordering: s.mu.RLock → seg.mu.Lock → idxMu.Lock. Compact holds
 // s.mu.Lock → seg.mu.Lock → idxMu.Lock. No deadlock: Put's s.mu.RLock blocks
@@ -1230,7 +1232,7 @@ func (s *Store) evictOneLocked(seg *Segment) (uint64, bool) {
 // time is negligible.
 //
 // For batch eviction (multiple victims in a single lock acquisition),
-// use evictToFitBatch instead.
+// use evictToFitBatchLocked instead.
 //
 // evictOne holds s.mu.RLock for its entire duration to prevent Compact
 // from swapping segments during eviction (issue #280).
@@ -1259,36 +1261,11 @@ func (s *Store) fitsBudgets(recSize int64) bool {
 	return bytesOK && entriesOK
 }
 
-// evictToFitBatch is the batch version of evictToFit: it acquires
-// seg.mu and idxMu once, then loops evictOneLocked until recSize fits
-// under both the byte and entry-count budgets, or no victim is
-// available. This amortizes lock acquisition across N evictions,
-// reducing contention and syscall overhead. Put calls this (via
-// evictToFitBatchLocked) from under s.mu.RLock so Compact cannot
-// swap segments during eviction.
-func (s *Store) evictToFitBatch(recSize int64) error {
-	if s.maxBytes <= 0 && s.maxEntries <= 0 {
-		return nil
-	}
-	if s.maxBytes > 0 && recSize > s.maxBytes {
-		return ErrOverBudget
-	}
-
-	// Fast path: already fits both budgets.
-	if s.fitsBudgets(recSize) {
-		return nil
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.evictToFitBatchLocked(recSize)
-}
-
-// evictToFitBatchLocked is the core eviction loop assuming the caller
-// already holds s.mu.RLock. It uses activeSegRLocked instead of
-// activeSeg to avoid a re-entrant s.mu.RLock. If the active segment is
-// full, it returns errSegFull so the caller (Put) can create a new
-// segment and retry.
+// evictToFitBatchLocked is the core eviction loop. The caller MUST hold
+// s.mu.RLock so Compact cannot swap segments during eviction. It uses
+// activeSegRLocked instead of activeSeg to avoid a re-entrant s.mu.RLock.
+// If the active segment is full, it returns errSegFull so the caller (Put)
+// can release s.mu.RLock, create a new segment, and retry.
 func (s *Store) evictToFitBatchLocked(recSize int64) error {
 	if s.maxBytes <= 0 && s.maxEntries <= 0 {
 		return nil
@@ -1528,27 +1505,6 @@ func (s *Store) DiskOverBudget() bool {
 		}
 	}
 	return false
-}
-
-func (s *Store) activeSeg() (*Segment, error) {
-	s.mu.RLock()
-	if len(s.segs) > 0 {
-		last := s.segs[len(s.segs)-1]
-		last.mu.Lock()
-		full := last.size >= last.maxBytes
-		last.mu.Unlock()
-		if !full {
-			s.mu.RUnlock()
-			if err := last.ensureOpen(); err != nil {
-				return nil, err
-			}
-			s.fdCache.touch(last)
-			return last, nil
-		}
-	}
-	s.mu.RUnlock()
-
-	return s.newSegment()
 }
 
 // activeSegRLocked returns the active segment assuming the caller already

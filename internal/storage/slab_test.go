@@ -60,9 +60,9 @@ func TestSlabAllocator_FreeHeapBuffer(t *testing.T) {
 	slab.Free(heapBuf)
 
 	allocs, frees, fallback := slab.Stats()
-	require.Equal(t, 0, allocs)
-	require.Equal(t, 0, frees)
-	require.Equal(t, 0, fallback)
+	require.Equal(t, int64(0), allocs)
+	require.Equal(t, int64(0), frees)
+	require.Equal(t, int64(0), fallback)
 }
 
 func TestSlabAllocator_ReuseSlots(t *testing.T) {
@@ -87,8 +87,8 @@ func TestSlabAllocator_ReuseSlots(t *testing.T) {
 	}
 
 	allocs, frees, _ := slab.Stats()
-	require.Equal(t, 100, allocs)
-	require.Equal(t, 100, frees)
+	require.Equal(t, int64(100), allocs)
+	require.Equal(t, int64(100), frees)
 }
 
 func TestSlabAllocator_Growable(t *testing.T) {
@@ -230,7 +230,7 @@ func TestSlabAllocator_DoubleFree(t *testing.T) {
 	slab.Free(buf)
 
 	_, frees, _ := slab.Stats()
-	require.Equal(t, 1, frees)
+	require.Equal(t, int64(1), frees)
 }
 
 func TestHotStore_SlabPutGet(t *testing.T) {

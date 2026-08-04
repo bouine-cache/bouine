@@ -140,33 +140,15 @@ func (hc *ActiveHealthChecker) isExpectedCode(code int) bool {
 	return false
 }
 
-// Track consecutive successes/failures per target using the existing
-// atomic error counter. Successes decrement toward zero (healthy);
-// failures increment toward the threshold.
+// recordSuccess resets the probe error counter and counts consecutive
+// probe successes toward the healthy threshold for restore. It does
+// NOT touch passiveErrors — passive and active counters are
+// independent so passive traffic cannot wipe active probe state.
 func (hc *ActiveHealthChecker) recordSuccess(t *Target) {
-	t.errors.Store(0)
-	if t.healthy.Load() {
-		return
-	}
-	cnt := t.successes.Add(1)
-	if cnt >= int64(hc.cfg.HealthyThreshold) {
-		t.healthy.Store(true)
-		t.successes.Store(0)
-		hc.logger.Info("target restored by active health check",
-			"pool", hc.pool.Name,
-			"target", t.addr,
-			"consecutive_successes", cnt)
-	}
+	t.recordProbeSuccess(hc.cfg.HealthyThreshold, hc.logger, hc.pool.Name)
 }
 
 func (hc *ActiveHealthChecker) recordFailure(t *Target) {
 	t.successes.Store(0)
-	cnt := t.errors.Add(1)
-	if cnt >= int64(hc.cfg.UnhealthyThreshold) && t.healthy.Load() {
-		t.healthy.Store(false)
-		hc.logger.Warn("target ejected by active health check",
-			"pool", hc.pool.Name,
-			"target", t.addr,
-			"consecutive_failures", cnt)
-	}
+	t.recordProbeError(hc.cfg.UnhealthyThreshold, hc.logger, hc.pool.Name)
 }

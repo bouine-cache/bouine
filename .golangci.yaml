@@ -150,6 +150,7 @@ linters:
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
+            - github.com/prometheus/client_golang
             - golang.org/x/sync
         staticfile-L4:
           list-mode: strict

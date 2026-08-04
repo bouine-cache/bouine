@@ -83,6 +83,7 @@ rules:
       - github.com/bouine-cache/bouine/internal/observability
       - github.com/bouine-cache/bouine/pkg/api
       - github.com/bouine-cache/bouine/pkg/header
+      - github.com/prometheus/client_golang
       - golang.org/x/sync
 
   # L5 may depend on L2, L3, L7.

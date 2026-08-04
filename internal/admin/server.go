@@ -76,7 +76,6 @@ type Config struct {
 	OnRefreshed func(ctx context.Context, url string)
 	// OnBanned, if non-nil, is called after a successful ban.
 	OnBanned func(ctx context.Context, expr api.BanExpr)
-	// PeerFetchHandler, if non-nil, serves peer cache-lookup requests
 	// PeerFetchHandler, if non-nil, handles peer-fetch RPCs
 	// from other cluster nodes. Mounted at POST /v1/peer/fetch (no auth
 	// required — callers are trusted cluster peers on the internal

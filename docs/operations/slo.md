@@ -36,7 +36,6 @@ on a 3-node StatefulSet with 4 vCPU / 4 GiB per pod.
 | SLO ID | Objective | SLI | Measurement window | Alert threshold |
 |--------|-----------|-----|--------------------|-----------------|
 | AP-1 | `/healthz` p99 latency ≤ 5 ms | `histogram_quantile(0.99, rate(bouine_admin_request_duration_seconds_bucket{path="/healthz"}[5m]))` | 30-day rolling | > 20 ms for 5 min |
-| AP-2 | Hot-reload completes in ≤ 500 ms | Time from SIGHUP / POST `/v1/config/reload` to new config active | Per-config change | > 2 s |
 
 ---
 

@@ -104,7 +104,7 @@ without explicit override), it must not be stored — see T13/T14 below.
 | C3 — Hostile origin | Compromised or misconfigured backend | Can send arbitrary responses. |
 | C4 — On-path attacker | Untrusted network between bouine and origin | Read/modify if TLS missing. |
 | C5 — Compromised peer | One bouine pod is rooted | Has cluster mTLS cert, can talk gossip + peer-fetch. |
-| C6 — Insider / operator misuse | Operator with admin token | Can purge, reload, read config. |
+| C6 — Insider / operator misuse | Operator with admin token | Can purge, read config. |
 | C7 — Co-tenant on same node | Another container on same K8s node | Can probe localhost, inspect cgroup metrics. |
 | C8 — Supply-chain | Malicious dependency, container base, build runner | Code-level access. |
 
@@ -188,7 +188,7 @@ risk after controls.
 
 | ID  | Threat | STRIDE | Attackers | Assets | Controls | Residual |
 |-----|--------|--------|-----------|--------|----------|----------|
-| T41 | Admin token theft → cluster-wide purge | E | C1,C8 | A3,A6 | ✓ Tokens short-lived (operator policy); rotation supported by reading from file on SIGHUP; `bouine config reload` checks token equality in constant time. Cobra never accepts a token via flag (env var / file only). | Medium |
+| T41 | Admin token theft → cluster-wide purge | E | C1,C8 | A3,A6 | ✓ Tokens short-lived (operator policy); rotation supported by reading from file; admin write endpoints (purge/ban/refresh) check token equality in constant time. Cobra never accepts a token via flag (env var / file only). | Medium |
 | T42 | VCL shim escape to host code | E | C6 (malicious VCL) | process | ✓ Shim is a translator to the native config tree; no embedded interpreter, no eval; no inline-C support (out of scope in `PLAN.md §17.4`). | Low |
 | T43 | Path traversal in storage layout | E | C1,C2 | A10 | ✓ Disk paths derived from `xxhash64(key)` hex, never from user input. Static analysis bans `os.Open` with user input. | Low |
 | T44 | Supply-chain code injection via dependency | E | C8 | process | ✓ Dependency allow-list (`docs/deps.md`), `govulncheck` in CI, signed container images (cosign), SBOM (syft), Dependabot reviews. | Medium |

@@ -357,14 +357,10 @@ type ConfigRouteEntry struct {
 // ConfigData is the view model for the config page.
 type ConfigData struct {
 	LayoutProps
-	ConfigPath   string
-	SnapshotPath string
-	Flash        string
-	LastReload   string // "2h ago · success" or ""
-	Uptime       string // "3d 14h 22m"
-	Sections     []ConfigSection
-	RawJSON      string // pretty-printed JSON of the running config
-	RawYAML      string // pretty-printed YAML of the running config
+	ConfigPath string
+	Sections   []ConfigSection
+	RawJSON    string // pretty-printed JSON of the running config
+	RawYAML    string // pretty-printed YAML of the running config
 	// Storage capacity (live usage vs configured max).
 	HotBytes     int64
 	HotMaxBytes  int64
@@ -554,23 +550,6 @@ func FmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%.0fs", d.Seconds())
 	}
 	return fmt.Sprintf("%dms", d.Milliseconds())
-}
-
-// FmtUptime formats a duration as "Xd Yh Zm".
-func FmtUptime(d time.Duration) string {
-	if d <= 0 {
-		return "—"
-	}
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
-	if days > 0 {
-		return fmt.Sprintf("%dd %dh %dm", days, hours, mins)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm", hours, mins)
-	}
-	return fmt.Sprintf("%dm", mins)
 }
 
 // fmtVersion normalises the build version for the sidebar badge.

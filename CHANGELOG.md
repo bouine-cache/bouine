@@ -10,6 +10,16 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Removed
+- **Breaking (SDK):** removed `bouineapi.Client.Reload` and `ReloadResult`.
+  The admin `POST /v1/config/reload` endpoint, the dashboard "Reload config"
+  button, and the dashboard `ReloadFn` field are gone. bouine does not support
+  live config reload — configuration is sourced from version control and
+  applied by rolling the pod (standard Kubernetes rolling update). The
+  `pkg/bouineapi` SDK surface moves to v2.0; callers using `Client.Reload`
+  must remove that call. Config and TLS changes take effect on the next pod
+  restart.
+
 ## [0.1.2] - 2026-06-15
 
 ### Added

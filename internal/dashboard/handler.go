@@ -25,12 +25,11 @@ import (
 
 // Config controls the dashboard server.
 type Config struct {
-	Rings        *observability.Rings
-	PeersFn      func() []api.PeerInfo
-	SelfAddr     string
-	Token        string
-	Logger       observability.Logger
-	SnapshotPath string
+	Rings    *observability.Rings
+	PeersFn  func() []api.PeerInfo
+	SelfAddr string
+	Token    string
+	Logger   observability.Logger
 	// Version is the build version shown in the dashboard sidebar.
 	Version string
 	// Storage stats.
@@ -41,11 +40,10 @@ type Config struct {
 	PurgeFn   func(ctx context.Context, urlStr string) error
 	BanFn     func(ctx context.Context, hostRegex, pathRegex string) (int, error)
 	RefreshFn func(ctx context.Context, urlStr string) error
-	// Config viewer + reload.
+	// Config viewer.
 	Config     *config.Config
 	ConfigPath string
 	StartTime  time.Time
-	ReloadFn   func(*config.Config) error
 	// Cluster metadata for the cluster page ring stats box.
 	ClusterMeta templates.ClusterMeta
 	// RingFn returns consistent-hash ring ownership segments.
@@ -102,7 +100,6 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 	protected.HandleFunc("GET /dashboard/invalidation", h.invalidation)
 	protected.HandleFunc("GET /dashboard/config", h.config)
 	protected.HandleFunc("GET /dashboard/insights", h.insights)
-	protected.HandleFunc("POST /dashboard/config/reload", h.configReload)
 	protected.HandleFunc("POST /dashboard/api/purge", h.apiPurge)
 	protected.HandleFunc("POST /dashboard/api/ban", h.apiBan)
 	protected.HandleFunc("POST /dashboard/api/refresh", h.apiRefresh)
@@ -450,7 +447,7 @@ const (
 )
 
 // maxAdminFormBytes caps the request body for admin form handlers (login,
-// purge, ban, refresh, config reload). These accept only short tokens, URLs,
+// purge, ban, refresh). These accept only short tokens, URLs,
 // and regex patterns — 4 KiB is generous and prevents memory exhaustion.
 const maxAdminFormBytes = 4 << 10
 
@@ -599,7 +596,6 @@ func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
-	uptime := templates.FmtUptime(time.Since(h.cfg.StartTime))
 	var rawJSON string
 	var rawYAML string
 	if h.cfg.Config != nil {
@@ -614,8 +610,6 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, templates.Config(templates.ConfigData{
 		LayoutProps:  h.layoutProps("config", "Config", timeRange),
 		ConfigPath:   h.cfg.ConfigPath,
-		SnapshotPath: h.cfg.SnapshotPath,
-		Uptime:       uptime,
 		Sections:     templates.BuildConfigSections(h.cfg.Config),
 		RawJSON:      rawJSON,
 		RawYAML:      rawYAML,
@@ -626,48 +620,6 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 		WarmMaxBytes: warmMax,
 		WarmEntries:  warmEntries,
 	}))
-}
-
-func (h *Handler) configReload(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set(header.ContentType, "text/html")
-	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
-
-	if h.cfg.ConfigPath == "" {
-		_, _ = fmt.Fprint(w, `<div class="flash-err">✗ Config path not configured</div>`)
-		return
-	}
-
-	parsed, err := config.Load(h.cfg.ConfigPath)
-	if err != nil {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = fmt.Fprintf(w, `<div class="flash-err">✗ Config parse error: %s</div>`, err.Error())
-		return
-	}
-
-	confirmed := r.FormValue("confirm") == "1"
-	if !confirmed {
-		_, _ = fmt.Fprint(w, `<div id="reload-confirm" class="confirm-box show">
-  <p>Config validated successfully. Apply new configuration?</p>
-  <form hx-post="/dashboard/config/reload" hx-target="#reload-section" hx-swap="outerHTML">
-    <input type="hidden" name="confirm" value="1"/>
-    <div style="display:flex;gap:.5rem;margin-top:.75rem">
-      <button class="btn bp" type="submit">Apply</button>
-      <button class="btn bo" type="button" onclick="this.closest('.confirm-box').remove()">Cancel</button>
-    </div>
-  </form>
-</div>`)
-		return
-	}
-
-	if h.cfg.ReloadFn != nil {
-		if err := h.cfg.ReloadFn(parsed); err != nil {
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = fmt.Fprintf(w, `<div id="reload-section"><div class="flash-err">✗ Apply failed: %s</div></div>`, err.Error())
-			return
-		}
-	}
-	_, _ = fmt.Fprintf(w, `<div id="reload-section"><div class="flash-ok">✓ Config reloaded at %s</div></div>`,
-		time.Now().Format("15:04:05"))
 }
 
 // ── Proxy handlers ────────────────────────────────────────────────────

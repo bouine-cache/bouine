@@ -23,7 +23,7 @@ For pending work see [`PLAN.md`](../PLAN.md).
   by a benchmark CI job (≥ Varnish single-node RPS for the canonical workload).
 - **Fault tolerance** — active and passive upstream health checks, hedged
   requests, circuit breakers, request collapsing.
-- **Operator UX** — Cobra-based CLI, declarative YAML config, hot reload,
+- **Operator UX** — Cobra-based CLI, declarative YAML config,
   purge & ban APIs (URL, regex, full).
 - **Observability built-in** — OpenTelemetry traces, Prometheus metrics,
   slog structured access logs, pprof.
@@ -103,7 +103,7 @@ surface that serves ≤ 10 RPS.
 /internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
 /internal/observability      L7 — OTEL, Prom, slog, pprof
 /internal/cloudflare         Cloudflare Cache API invalidation propagation
-/internal/config             config loader, schema, hot reload
+/internal/config             config loader, schema, validation
 /internal/runtime            supervised goroutines, graceful shutdown
 /web/dashboard               embedded dashboard assets (embed.FS)
 /pkg/bouineapi               public Go SDK (purge/ban/refresh/stats client)
@@ -333,7 +333,6 @@ L1 owns sockets, TLS, and ALPN. L1 pipeline stages (configurable, ordered):
 | `POST /v1/ban` | Predicate ban (regex on host/path/header) |
 | `POST /v1/refresh` | Soft purge: mark stale, revalidate on next request |
 | `GET /v1/config` | Current effective config |
-| `POST /v1/config/reload` | Re-read config from disk |
 | `GET /v1/cluster/peers` | Gossip view |
 | `GET /v1/stats` | JSON snapshot of counters |
 | `GET /healthz` `/readyz` | K8s probes |
@@ -354,7 +353,8 @@ All write endpoints require a bearer token or mTLS.
 
 ## 9. Configuration
 
-YAML by default, with envvar interpolation. Hot-reloadable except where noted.
+YAML by default, with envvar interpolation. Applied by rolling the pod
+(no live reload).
 Validated by a JSON-schema generated from struct tags (`bouine config schema`).
 
 ```yaml
@@ -372,9 +372,6 @@ tls:
   alpn: [h2, http/1.1]
   min_version: "1.2"
   ocsp_stapling: auto
-  reload:
-    fsnotify: true
-    sighup:   true
 
 storage:
   hot_max_bytes:  2Go
@@ -532,7 +529,7 @@ be used.
 | SDK and HTTP API drift apart | Single source of truth in `pkg/api`; contract tests run both surfaces against the same fixtures. |
 | Cache poisoning via unkeyed input | Default policy forbids implicit header keying; Vary cap; T06/T07/T09 wired to CI fuzz corpus. |
 | HTTP request smuggling | Strict RFC 9112 parser, ambiguous-framing rejection, fuzz corpus seeded with PortSwigger inputs. |
-| TLS cert rotation race causing 5xx | fsnotify + SIGHUP reload tested in CI; reload is atomic (load + parse + swap). |
+| TLS cert rotation race causing 5xx | TLS certs are file-backed and rotated by updating the mounted Secret/ConfigMap and rolling the pod; no in-process reload. |
 | Mixed-version cluster deadlocks | Wire-protocol versioning with N/N-1 compatibility window. |
 | Operator destructive purge with no audit trail | Admin write audit log with token-ID hash, IP, predicate, count, seq. |
 
@@ -558,8 +555,10 @@ These decisions are locked in for v1.0. See also
 6. **Cookie policy: ignore by default, opt-in per route** — `Cookie` not in
    cache key; `Set-Cookie` responses not stored unless explicitly opted in.
    `Authorization` follows RFC 9111 §3.5 strictly.
-7. **TLS cert lifecycle: file-backed, hot reload** — fsnotify + SIGHUP;
-   multiple certs via SNI rules; OCSP staples forwarded when present.
+7. **TLS cert lifecycle: file-backed** — certs read from mounted files
+   at startup; multiple certs via SNI rules; OCSP staples forwarded when
+   present. Rotation by updating the mounted Secret/ConfigMap and rolling
+   the pod.
 8. **Upstream TLS is a first-class config** — mTLS to origin, custom CA,
    optional SPKI pinning, `insecure_skip_verify` only in dev builds.
 9. **Cluster wire protocol is versioned** — magic bytes + `uint16` version;

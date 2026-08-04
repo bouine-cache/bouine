@@ -5,5 +5,9 @@
 // The SDK and the Cobra CLI share the same wire types (pkg/api) and
 // the same auth model (bearer token or mTLS).
 //
-// Stable — v1.0 surface.
+// Stable — v2.0 surface.
+//
+// v2.0 removes the Client.Reload method and ReloadResult type. Config
+// changes are applied by rolling the pod (standard Kubernetes rolling
+// update); there is no live config-reload endpoint.
 package bouineapi

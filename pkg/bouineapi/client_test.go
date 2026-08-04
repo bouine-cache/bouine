@@ -110,24 +110,6 @@ func TestClient_Refresh(t *testing.T) {
 	}
 }
 
-func TestClient_Reload(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "application/json")
-		_ = json.NewEncoder(w).Encode(ReloadResult{Status: "reload-requested"})
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL)
-	got, err := c.Reload(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != "reload-requested" {
-		t.Errorf("status = %q, want reload-requested", got.Status)
-	}
-}
-
 func TestClient_WithToken(t *testing.T) {
 	t.Parallel()
 	var gotAuth string

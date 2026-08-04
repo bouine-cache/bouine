@@ -9,7 +9,7 @@ code change that introduces a new failure mode.
 
 | File | Topic |
 |---|---|
-| [00-lifecycle.md](00-lifecycle.md) | Start, stop, reload, and drain procedures. |
+| [00-lifecycle.md](00-lifecycle.md) | Start, stop, config updates, and drain procedures. |
 | [10-cluster-modes.md](10-cluster-modes.md) | Verify, diagnose, and switch between `strong`, `eventual`, and `full`. |
 | [20-purge-ban.md](20-purge-ban.md) | Purge (exact), ban (predicate), and refresh (soft-purge). |
 | [30-rolling-restart.md](30-rolling-restart.md) | Zero-5xx rolling restart in a Kubernetes StatefulSet. |
@@ -20,7 +20,7 @@ code change that introduces a new failure mode.
 
 `NN-topic.md` where `NN` is a two-digit category:
 
-- `00-` — daily ops (start, stop, reload, drain)
+- `00-` — daily ops (start, stop, config updates, drain)
 - `10-` — capacity & scaling
 - `20-` — purge & cache invalidation
 - `30-` — cluster operations

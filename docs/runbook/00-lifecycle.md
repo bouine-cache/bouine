@@ -1,6 +1,6 @@
 # 00 — Lifecycle operations
 
-Start, stop, reload, and drain procedures for bouine.
+Start, stop, config updates, and drain procedures for bouine.
 
 ---
 
@@ -75,55 +75,22 @@ kill — avoid if possible.
 
 ---
 
-## Reload (hot)
+## Configuration updates
 
-bouine supports hot reload of configuration and TLS certificates without
-restarting the process. The `internal/config.Watcher` uses `fsnotify`
-for file changes and also listens for `SIGHUP`.
-
-### Via signal
-
-```bash
-kill -HUP <pid>
-```
-
-### Via admin API
+bouine does not support live config reload. Configuration is sourced
+from version control and rolled out through standard Kubernetes
+mechanisms (ConfigMap + rolling restart, GitOps, etc.). Applying a
+config change means rolling the pod so the new pod starts with the
+updated config — there is no in-process reload path, no admin endpoint,
+and no `SIGHUP` handler. This keeps what is running on the fleet
+identical to what is in git, with an audit trail and a rollback path.
 
 ```bash
-curl -X POST http://127.0.0.1:9000/v1/config/reload
+kubectl rollout restart statefulset/bouine
 ```
 
-### Via CLI
-
-```bash
-bouine refresh <url>   # not the same — this is a soft-purge
-```
-
-> **Note**: config reload via API currently returns `200` immediately.
-> The actual reload happens asynchronously via the Watcher.
-
-### What is reloaded
-
-| Component          | Hot-reloadable | Notes                              |
-|--------------------|----------------|------------------------------------|
-| Routes             | Yes            | New routes take effect immediately.|
-| Upstream pools     | Yes            | Targets, health check config.      |
-| Cache TTLs         | Yes            | Per-route cache settings.          |
-| TLS certificates   | Yes            | Cert + key files watched.          |
-| Listen addresses   | **No**         | Requires restart.                  |
-| Storage settings   | **No**         | Requires restart.                  |
-| Cluster settings   | **No**         | Requires restart.                  |
-
-### Reload failure
-
-If the new config file is invalid YAML or fails validation, the old
-config stays in effect. The error is logged at `error` level:
-
-```json
-{"level":"ERROR","msg":"config reload failed","error":"..."}
-```
-
-Monitor `bouine_config_reload_total{result="error"}` in Prometheus.
+TLS certificates are rotated the same way: update the mounted
+Secret/ConfigMap, then roll the pod.
 
 ---
 

@@ -445,12 +445,12 @@ html[data-theme="dark"] .pd{box-shadow:0 0 5px var(--g)}
 
   <!-- ── CONFIG ── -->
   <div class="body" id="pg-config">
-    <div class="pg-hd"><div><h2>Config reload</h2><div class="sub">validate · confirm · apply — running config is never altered by parse errors</div></div></div>
+    <div class="pg-hd"><div><h2>Config</h2><div class="sub">running configuration — read-only; apply changes by rolling the pod</div></div></div>
     <div class="r2">
       <div class="bc" style="overflow:auto">
         <div class="bc-t" style="display:flex;justify-content:space-between;align-items:center">
           Current config (read-only)
-          <span style="font-size:.6rem;color:var(--m);font-family:'JetBrains Mono',monospace">/etc/bouine/config.yaml · reloaded 2h ago</span>
+          <span style="font-size:.6rem;color:var(--m);font-family:'JetBrains Mono',monospace">/etc/bouine/config.yaml</span>
         </div>
 
         <!-- listen -->
@@ -506,26 +506,6 @@ html[data-theme="dark"] .pd{box-shadow:0 0 5px var(--g)}
           <div style="font-size:.65rem;color:var(--m);padding:.3rem .4rem">+ 3 more routes · click Routes to see all</div>
         </div>
 
-      </div>
-      <div class="bc">
-        <div class="bc-t">Reload config</div>
-        <div style="font-size:.75rem;color:var(--m);line-height:1.7;margin-bottom:1rem">
-          Reads the config file from disk, runs full validation, and only applies if parsing succeeds. The running configuration is <strong style="color:var(--t)">never affected</strong> by parse errors.
-        </div>
-        <div style="margin-bottom:.85rem">
-          <div class="stat-row"><span class="stat-k">config path</span><span class="stat-v" style="font-size:.68rem">/etc/bouine/config.yaml</span></div>
-          <div class="stat-row"><span class="stat-k">last reload</span><span class="stat-v">2h ago · success</span></div>
-          <div class="stat-row"><span class="stat-k">uptime</span><span class="stat-v">3d 14h 22m</span></div>
-        </div>
-        <button class="btn bp" style="width:100%;margin-bottom:.5rem" onclick="document.getElementById('confirm-box').classList.toggle('show')">↻ Reload config</button>
-        <div class="confirm-box" id="confirm-box">
-          <p>Config file validated successfully. Apply new configuration?</p>
-          <div style="display:flex;gap:.5rem">
-            <button class="btn bp" onclick="document.getElementById('confirm-box').classList.remove('show');alert('Config applied.')">Apply</button>
-            <button class="btn bo" onclick="document.getElementById('confirm-box').classList.remove('show')">Cancel</button>
-          </div>
-        </div>
-        <div style="font-size:.68rem;color:var(--m);margin-top:.5rem">Hot-reloadable: routes, pools, TTLs, TLS certs. Not reloadable: listen addresses, storage, cluster settings.</div>
       </div>
     </div>
   </div>

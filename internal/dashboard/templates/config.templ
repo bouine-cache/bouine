@@ -2,15 +2,15 @@ package templates
 
 import "fmt"
 
-// Config renders the config-reload view. The left panel has a Structured /
+// Config renders the read-only config view. The left panel has a Structured /
 // JSON / YAML toggle so operators can switch between the visual section view,
 // a raw pretty-printed JSON, or a raw YAML dump of the running config.
 templ Config(d ConfigData) {
 	@Layout(d.LayoutProps) {
 		<div class="pg-hd">
 			<div>
-				<h2>Config reload</h2>
-				<div class="sub">validate · confirm · apply — running config is never altered by parse errors</div>
+				<h2>Config</h2>
+				<div class="sub">running configuration — read-only; apply changes by rolling the pod</div>
 			</div>
 			<div class="tg" role="group" aria-label="Config view mode">
 				<a
@@ -44,9 +44,6 @@ templ Config(d ConfigData) {
 					if d.ConfigPath != "" {
 						<span style="font-size:.6rem;color:var(--m);font-family:'JetBrains Mono',monospace">
 							{ d.ConfigPath }
-							if d.LastReload != "" {
-								· { d.LastReload }
-							}
 						</span>
 					}
 				</div>
@@ -147,56 +144,6 @@ templ Config(d ConfigData) {
 					} else {
 						<div style="font-size:.72rem;color:var(--m);padding:.5rem 0">Config not available.</div>
 					}
-				</div>
-			</div>
-			<!-- right: reload action -->
-			<div class="bc">
-				<div class="bc-t">Reload config</div>
-				<div style="font-size:.75rem;color:var(--m);line-height:1.7;margin-bottom:.85rem">
-					Reads the config file from disk, runs full validation, and only applies if
-					parsing succeeds. The running configuration is <strong style="color:var(--t)">never affected</strong> by parse errors.
-				</div>
-				<div style="margin-bottom:.85rem">
-					<div class="stat-row">
-						<span class="stat-k">config path</span>
-						<span class="stat-v" style="font-size:.65rem">
-							if d.ConfigPath != "" {
-								{ d.ConfigPath }
-							} else {
-								not configured
-							}
-						</span>
-					</div>
-					<div class="stat-row">
-						<span class="stat-k">last reload</span>
-						<span class="stat-v">
-							if d.LastReload != "" {
-								{ d.LastReload }
-							} else {
-								—
-							}
-						</span>
-					</div>
-					<div class="stat-row">
-						<span class="stat-k">uptime</span>
-						<span class="stat-v">{ d.Uptime }</span>
-					</div>
-					if d.SnapshotPath != "" {
-						<div class="stat-row">
-							<span class="stat-k">snapshot path</span>
-							<span class="stat-v" style="font-size:.65rem">{ d.SnapshotPath }</span>
-						</div>
-					}
-				</div>
-				if d.Flash != "" {
-					<div class="flash-ok" style="margin-bottom:.75rem">{ d.Flash }</div>
-				}
-				<div id="reload-section">
-					<button class="btn bp" style="width:100%;margin-bottom:.5rem" hx-post="/dashboard/config/reload" hx-target="#reload-section" hx-swap="innerHTML">↻ Reload config</button>
-				</div>
-				<div style="font-size:.68rem;color:var(--m);margin-top:.5rem">
-					Hot-reloadable: routes, pools, TTLs, TLS certs.<br/>
-					Not reloadable: listen addresses, storage, cluster settings.
 				</div>
 			</div>
 		</div>

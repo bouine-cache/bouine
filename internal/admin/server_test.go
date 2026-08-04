@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -267,6 +269,53 @@ func TestDrain_CallsDrainFn(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected DrainFn to be called")
+	}
+}
+
+// TestDrain_LongDrainFnSurvivesWriteTimeout verifies that the /drain
+// endpoint returns 200 even when DrainFn blocks longer than the admin
+// server's WriteTimeout. This reproduces the K8s preStop hook failure
+// where a 10s drain sleep exceeds the 5s WriteTimeout and net/http kills
+// the connection before the response is written.
+func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
+	t.Parallel()
+
+	drainStarted := make(chan struct{})
+	s := New(Config{
+		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		ReadyFn: func() bool { return true },
+		DrainFn: func() {
+			close(drainStarted)
+			time.Sleep(200 * time.Millisecond)
+		},
+	})
+
+	// Shrink the write timeout below the drain sleep so the test
+	// reproduces the production failure (5s WriteTimeout vs 10s drain).
+	s.inner.WriteTimeout = 50 * time.Millisecond
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go s.inner.Serve(ln)
+	defer s.inner.Close()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/drain")
+	if err != nil {
+		t.Fatalf("drain request failed (write timeout killed connection): %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	select {
+	case <-drainStarted:
+	default:
+		t.Fatal("expected DrainFn to be called before response is written")
 	}
 }
 

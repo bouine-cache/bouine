@@ -357,6 +357,23 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) drain(w http.ResponseWriter, _ *http.Request) {
+	// The drain handler blocks for the configured drain duration (default
+	// 10s) so the K8s preStop httpGet hook holds the gate until SIGTERM
+	// arrives. The admin server's WriteTimeout (5s) would kill the
+	// connection before the response is written. Clear the per-request
+	// write deadline so the blocking sleep survives. This is scoped to
+	// /drain only — all other admin endpoints keep the server-level
+	// WriteTimeout. http.ResponseController is the idiomatic way to
+	// manipulate per-request deadlines (Go 1.20+).
+	//
+	// ReadDeadline is not cleared: the preStop hook is a bodyless GET, so
+	// the read completes immediately and ReadTimeout never fires during
+	// the drain sleep. If drain ever accepts a body, clear ReadDeadline
+	// here too.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		s.cfg.Logger.Warn("drain: could not clear write deadline", "err", err)
+	}
 	if s.cfg.DrainFn != nil {
 		s.cfg.DrainFn()
 	}

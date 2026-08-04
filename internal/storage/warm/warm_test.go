@@ -2284,10 +2284,17 @@ func TestCompact_ConcurrentPutNoDataLoss(t *testing.T) {
 	stop := make(chan struct{})
 	var keyCounter atomic.Uint64
 
+	// started signals that the Put goroutine has written at least one
+	// key, so Compact is guaranteed to overlap with in-flight Puts
+	// rather than completing before the goroutine is scheduled (which
+	// happens on fast CI runners).
+	started := make(chan struct{})
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		first := true
 		for {
 			select {
 			case <-stop:
@@ -2302,11 +2309,16 @@ func TestCompact_ConcurrentPutNoDataLoss(t *testing.T) {
 			mu.Lock()
 			written = append(written, key)
 			mu.Unlock()
+			if first {
+				first = false
+				close(started)
+			}
 		}
 	}()
 
-	// Run compaction. Under the pre-fix bug, segments and index entries
-	// created by the concurrent Put loop are silently dropped.
+	// Wait until the Put goroutine has written at least one key before
+	// starting compaction, guaranteeing overlap.
+	<-started
 	if err := s.Compact(); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}

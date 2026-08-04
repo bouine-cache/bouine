@@ -296,12 +296,12 @@ type HandlerConfig struct {
 	// fetch is aborted and the client receives a 502. This is distinct
 	// from MaxObjectSize, which only prevents storage after the body has
 	// already been fully buffered. Zero (default) applies a safe built-in
-	// limit (64 MiB).
+	// limit (4 MiB).
 	MaxResponseBytes int64
 	// MaxFetchConcurrency bounds the number of concurrent foreground
 	// origin fetches. When the limit is reached, additional fetches
 	// block until a slot frees or the request context is cancelled.
-	// Zero (default) applies a safe built-in limit (64).
+	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the caller receives

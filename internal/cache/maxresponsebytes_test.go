@@ -110,10 +110,11 @@ func TestMaxResponseBytes_DefaultAppliedWhenZero(t *testing.T) {
 			_, _ = io.WriteString(w, "small")
 		}),
 		Store:            store,
-		MaxResponseBytes: 0, // should default to 64 MiB
+		MaxResponseBytes: 0, // should default to 4 MiB
 	})
-	if h.maxResponseBytes != defaultMaxResponseBytes {
-		t.Fatalf("zero MaxResponseBytes should default to %d, got %d", defaultMaxResponseBytes, h.maxResponseBytes)
+	const wantDefault = 4 << 20 // 4 MiB — matches defaultMaxResponseBytes
+	if h.maxResponseBytes != wantDefault {
+		t.Fatalf("zero MaxResponseBytes should default to %d (4 MiB), got %d", wantDefault, h.maxResponseBytes)
 	}
 }
 

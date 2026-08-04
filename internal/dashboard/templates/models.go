@@ -240,7 +240,6 @@ type RoutesData struct {
 // ClusterMeta holds static cluster configuration shown in the ring stats box.
 type ClusterMeta struct {
 	VirtualNodes     int
-	LoadFactor       float64
 	HopLimit         int
 	PeerFetchTimeout string
 	ProtocolVersion  string

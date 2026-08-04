@@ -76,7 +76,7 @@ Effort: **S** < 30 min · **M** 1–3 h. Data: ✅ available · ⚠️ partial w
 | ID | Description | Effort | Data |
 |----|-------------|--------|------|
 | G-C2 | Peer table: replace columns with `Node \| Data addr \| Admin addr \| Weight \| Joined \| Status` | S | ✅ |
-| G-C3 | Ring stats box: virtual nodes/real, load factor, hop limit, peer fetch timeout, protocol version | S | ⚠️ |
+| G-C3 | Ring stats box: virtual nodes/real, hop limit, peer fetch timeout, protocol version | S | ⚠️ |
 | G-C4 | Replace horizontal band ring SVG with circular donut (220×220, `stroke-dasharray` arcs) | M | ✅ |
 | G-C5 | Peer fetch stats box: peer hits/misses (6h), avg hop count, fan-out timeout | S | ⚠️ |
 

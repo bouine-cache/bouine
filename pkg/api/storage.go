@@ -151,6 +151,38 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 	return clone
 }
 
+// CloneForRefresh returns a shallow copy of o with serializedHead left
+// nil so the clone lazy-inits its own header block independently. Use
+// this whenever the caller will mutate fields that affect the serialized
+// header block (Header, StatusCode, ETag, etc.) — the original's cached
+// serializedHead is no longer valid for the clone and sharing it would
+// serve a stale pre-rendered block.
+//
+// Body, Header, and other slices are shared with o (immutable after
+// construction); callers that mutate Header should call Header.Clone()
+// on the result. Exists to avoid copylocks violations from value-copying
+// Object, which contains an atomic.Pointer.
+func (o *Object) CloneForRefresh() *Object {
+	return &Object{
+		Key:                  o.Key,
+		VaryKey:              o.VaryKey,
+		StatusCode:           o.StatusCode,
+		Header:               o.Header,
+		Body:                 o.Body,
+		BodySize:             o.BodySize,
+		StoredAt:             o.StoredAt,
+		TTL:                  o.TTL,
+		StaleWhileRevalidate: o.StaleWhileRevalidate,
+		StaleIfError:         o.StaleIfError,
+		ETag:                 o.ETag,
+		LastModified:         o.LastModified,
+		SurrogateKeys:        o.SurrogateKeys,
+		Hits:                 o.Hits,
+		CacheControl:         o.CacheControl,
+		OriginAge:            o.OriginAge,
+	}
+}
+
 // Fresh reports whether the object is still within its freshness lifetime
 // relative to now. This is the single source of truth for object
 // freshness: every other freshness/staleness decision in the cache layer is

@@ -180,9 +180,9 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	if obj == nil {
 		t.Fatal("object not stored")
 	}
-	stale := *obj
+	stale := obj.CloneForRefresh()
 	stale.StoredAt = time.Now().Add(-2 * time.Second)
-	_ = h.store.Put(context.Background(), key, &stale)
+	_ = h.store.Put(context.Background(), key, stale)
 
 	rangeReq := httptest.NewRequest("GET", url, nil)
 	rangeReq.Header.Set(header.Range, "bytes=0-4")

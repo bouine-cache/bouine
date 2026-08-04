@@ -618,9 +618,9 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	if obj == nil {
 		t.Fatal("object not stored after seed")
 	}
-	stale := *obj
+	stale := obj.CloneForRefresh()
 	stale.StoredAt = time.Now().Add(-staleAge)
-	_ = h.store.Put(context.Background(), key, &stale)
+	_ = h.store.Put(context.Background(), key, stale)
 
 	reqStart := time.Now()
 	rr := httptest.NewRecorder()

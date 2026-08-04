@@ -54,3 +54,5 @@ field to `Superseded by ADR-NNNN`.
 | 0023   | Warm-tier eviction (SIEVE)                            | Accepted |
 | 0024   | Async WAL fsync for miss-path throughput              | Proposed |
 | 0025   | Remove full cluster mode                             | Accepted |
+| 0026   | SIEVE sweep cap                                      | Accepted |
+| 0027   | Remove dead Stable wire types from pkg/api           | Accepted |

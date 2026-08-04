@@ -7,10 +7,32 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
+
+// defaultClientTimeout is applied to the client constructed by New when
+// the caller does not provide an HTTPClient. It bounds hung admin
+// endpoints so the SDK caller cannot block forever (AGENTS.md §11:
+// cancellation honored within 10 ms — the client timeout is the
+// coarse-grained backstop above per-call context deadlines).
+const defaultClientTimeout = 10 * time.Second
+
+// defaultHTTPClient is the fallback used by httpClient() when the
+// caller constructs a Client literal without going through New. It is
+// package-scoped so the timeout is enforced even on the bypass path.
+var defaultHTTPClient = &http.Client{Timeout: defaultClientTimeout}
+
+// maxErrorBody caps how many bytes of an error response body are read
+// and embedded in the returned error. A misconfigured upstream can
+// return megabytes of HTML in a 502; without a cap the entire body
+// lands in err.Error() and in any log line that prints it. 4 KiB is
+// enough to capture a useful error payload while keeping the error
+// string bounded.
+const maxErrorBody = 4096
 
 // Client is the bouine admin API client.
 //
@@ -20,14 +42,22 @@ type Client struct {
 	BaseURL string
 	// Token is the optional bearer token for admin authentication.
 	Token string
-	// HTTPClient is the underlying HTTP client. Defaults to
-	// http.DefaultClient if nil.
+	// HTTPClient is the underlying HTTP client. If nil, New constructs
+	// a client with a 10s Timeout; httpClient() falls back to the same
+	// package default if the caller constructs a Client literal without
+	// going through New. Set this field to override the timeout or
+	// transport.
 	HTTPClient *http.Client
 }
 
-// New creates a Client with the given base URL.
+// New creates a Client with the given base URL. The returned client
+// uses a fresh *http.Client with a 10s Timeout so a hung admin
+// endpoint cannot block the caller indefinitely; override
+// Client.HTTPClient to change this. A fresh client is allocated per
+// call so callers cannot mutate the timeout of unrelated clients
+// through a shared singleton.
 func New(baseURL string) *Client {
-	return &Client{BaseURL: baseURL}
+	return &Client{BaseURL: baseURL, HTTPClient: &http.Client{Timeout: defaultClientTimeout}}
 }
 
 // WithToken returns a copy of the client with the given bearer token.
@@ -41,7 +71,7 @@ func (c *Client) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return http.DefaultClient
+	return defaultHTTPClient
 }
 
 // Healthz checks the health endpoint.
@@ -195,18 +225,51 @@ func (c *Client) doJSON(req *http.Request, out any) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Capped read: a misconfigured upstream can return megabytes of
+		// HTML in a 502; without a cap the whole body lands in err.Error()
+		// and any log line that prints it. Read one byte past the cap so
+		// truncation is detectable.
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
+		if err != nil {
+			return fmt.Errorf("bouineapi: %s %s: status %d: (read error: %w)",
+				req.Method, req.URL.Path, resp.StatusCode, err)
+		}
+		return fmt.Errorf("bouineapi: %s %s: status %d: %s",
+			req.Method, req.URL.Path, resp.StatusCode, sanitizeErrorBody(body))
+	}
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("bouineapi: %s %s: status %d: %s",
-			req.Method, req.URL.Path, resp.StatusCode, respBody)
 	}
 
 	if out != nil && len(respBody) > 0 {
 		return json.Unmarshal(respBody, out)
 	}
 	return nil
+}
+
+// sanitizeErrorBody truncates the body to maxErrorBody bytes and strips
+// control characters so a malicious or buggy upstream cannot inject
+// fake log lines via newlines, carriage returns, or ANSI escapes into
+// the caller's err.Error() output. Control runes are dropped (not
+// escaped) — the goal is single-line output, not preservation of the
+// attack payload.
+func sanitizeErrorBody(body []byte) string {
+	truncated := false
+	if len(body) > maxErrorBody {
+		body = body[:maxErrorBody]
+		truncated = true
+	}
+	s := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, string(body))
+	if truncated {
+		s += " … (truncated)"
+	}
+	return s
 }

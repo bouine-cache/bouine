@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -52,22 +55,14 @@ func TestSetCookie_DefaultBlocksCaching(t *testing.T) {
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
 
-	if rr1.Code != 200 {
-		t.Fatalf("req1 status = %d", rr1.Code)
-	}
-	if rr1.Header().Get(header.SetCookie) != "session=abc123; Path=/" {
-		t.Errorf("first client should receive Set-Cookie, got %q", rr1.Header().Get(header.SetCookie))
-	}
+	require.Equal(t, 200, rr1.Code)
+	assert.Equal(t, "session=abc123; Path=/", rr1.Header().Get(header.SetCookie))
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
 
-	if calls != 2 {
-		t.Errorf("origin called %d times, want 2 (response must not be cached)", calls)
-	}
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Error("second request must not be a HIT when allow_set_cookie is false")
-	}
+	assert.Equal(t, 2, calls)
+	assert.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 // TestSetCookie_AllowTrueStoresWithoutCookie verifies that when
@@ -92,25 +87,15 @@ func TestSetCookie_AllowTrueStoresWithoutCookie(t *testing.T) {
 	// First request: MISS — client gets Set-Cookie from the origin.
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
-	if rr1.Code != 200 {
-		t.Fatalf("req1 status = %d", rr1.Code)
-	}
-	if rr1.Header().Get(header.SetCookie) == "" {
-		t.Error("first client (MISS) should receive Set-Cookie from origin")
-	}
+	require.Equal(t, 200, rr1.Code)
+	assert.NotEqual(t, "", rr1.Header().Get(header.SetCookie))
 
 	// Second request: HIT — must NOT have Set-Cookie.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("second request should be HIT, got X-Cache=%q", rr2.Header().Get(header.XCache))
-	}
-	if rr2.Header().Get(header.SetCookie) != "" {
-		t.Errorf("cached response must NOT contain Set-Cookie, got %q", rr2.Header().Get(header.SetCookie))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1 (response should be cached)", calls)
-	}
+	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	assert.Equal(t, "", rr2.Header().Get(header.SetCookie))
+	assert.Equal(t, 1, calls)
 }
 
 // TestSetCookie_NoStoreStillBlocks verifies that no-store is honoured
@@ -131,9 +116,7 @@ func TestSetCookie_NoStoreStillBlocks(t *testing.T) {
 	for range 3 {
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 	}
-	if calls != 3 {
-		t.Errorf("origin called %d times, want 3 (no-store must always bypass)", calls)
-	}
+	assert.Equal(t, 3, calls)
 }
 
 // TestSetCookie_NoSetCookieHeaderUnaffected confirms that responses
@@ -154,12 +137,8 @@ func TestSetCookie_NoSetCookieHeaderUnaffected(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
 
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("response without Set-Cookie should be cached, got X-Cache=%q", rr2.Header().Get(header.XCache))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1", calls)
-	}
+	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	assert.Equal(t, 1, calls)
 }
 
 // TestSetCookie_DefaultBlocksEvenWithExplicitFreshness is the security
@@ -176,7 +155,5 @@ func TestSetCookie_DefaultBlocksEvenWithExplicitFreshness(t *testing.T) {
 	// Verify the object was NOT stored.
 	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)
-	if obj != nil {
-		t.Fatal("response with Set-Cookie must NOT be stored when allow_set_cookie is false")
-	}
+	require.Nil(t, obj)
 }

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/cache"
 	"github.com/cloudflare/cloudflare-go/v4/option"
@@ -39,12 +41,11 @@ func TestClient_PurgeURLs_Success(t *testing.T) {
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
-	if err := c.PurgeURLs(context.Background(), []string{"https://example.com/page"}); err != nil {
-		t.Fatalf("PurgeURLs: %v", err)
+	{
+		err := c.PurgeURLs(context.Background(), []string{"https://example.com/page"})
+		require.NoErrorf(t, err, "PurgeURLs: %v", err)
 	}
-	if len(purger.calls) != 1 {
-		t.Fatalf("expected 1 API call, got %d", len(purger.calls))
-	}
+	require.Len(t, purger.calls, 1)
 }
 
 func TestClient_PurgeTags_Success(t *testing.T) {
@@ -52,22 +53,23 @@ func TestClient_PurgeTags_Success(t *testing.T) {
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
-	if err := c.PurgeTags(context.Background(), []string{"product-123"}); err != nil {
-		t.Fatalf("PurgeTags: %v", err)
+	{
+		err := c.PurgeTags(context.Background(), []string{"product-123"})
+		require.NoErrorf(t, err, "PurgeTags: %v", err)
 	}
-	if len(purger.calls) != 1 {
-		t.Fatalf("expected 1 API call, got %d", len(purger.calls))
-	}
+	require.Len(t, purger.calls, 1)
 }
 
 func TestClient_NilSafe(t *testing.T) {
 	t.Parallel()
 	var c *cf.Client
-	if err := c.PurgeURLs(context.Background(), []string{"https://x.com/"}); err != nil {
-		t.Fatalf("nil client PurgeURLs should no-op, got %v", err)
+	{
+		err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
+		require.NoErrorf(t, err, "nil client PurgeURLs should no-op, got %v", err)
 	}
-	if err := c.PurgeTags(context.Background(), []string{"tag"}); err != nil {
-		t.Fatalf("nil client PurgeTags should no-op, got %v", err)
+	{
+		err := c.PurgeTags(context.Background(), []string{"tag"})
+		require.NoErrorf(t, err, "nil client PurgeTags should no-op, got %v", err)
 	}
 }
 
@@ -76,12 +78,11 @@ func TestClient_EmptySlice_NoOp(t *testing.T) {
 	purger := &fakePurger{}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
-	if err := c.PurgeURLs(context.Background(), nil); err != nil {
-		t.Fatalf("empty PurgeURLs should no-op, got %v", err)
+	{
+		err := c.PurgeURLs(context.Background(), nil)
+		require.NoErrorf(t, err, "empty PurgeURLs should no-op, got %v", err)
 	}
-	if len(purger.calls) != 0 {
-		t.Fatalf("expected 0 API calls for empty slice, got %d", len(purger.calls))
-	}
+	require.Len(t, purger.calls, 0)
 }
 
 func TestClient_NetworkError_RetriesThenSucceeds(t *testing.T) {
@@ -90,13 +91,9 @@ func TestClient_NetworkError_RetriesThenSucceeds(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err != nil {
-		t.Fatalf("expected success after retry, got: %v", err)
-	}
+	require.NoErrorf(t, err, "expected success after retry, got: %v", err)
 	// Two calls — first fails with network error, retry succeeds.
-	if len(purger.calls) != 2 {
-		t.Fatalf("expected 2 calls (retry on network error), got %d", len(purger.calls))
-	}
+	require.Len(t, purger.calls, 2)
 }
 
 func TestClient_NetworkError_RetriesExhausted(t *testing.T) {
@@ -106,34 +103,28 @@ func TestClient_NetworkError_RetriesExhausted(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err == nil {
-		t.Fatal("expected error after exhausting retries")
-	}
+	require.Error(t, err)
 	// maxRetries=2 → 3 total attempts.
-	if len(purger.calls) != 3 {
-		t.Fatalf("expected 3 calls (2 retries), got %d", len(purger.calls))
-	}
+	require.Len(t, purger.calls, 3)
 }
 
 func TestNew_MissingZone(t *testing.T) {
 	t.Parallel()
 	_, err := cf.New(cf.Config{ZoneID: "", APIToken: "tok"})
-	if err == nil {
-		t.Fatal("expected error for missing zone_id")
-	}
-	if _, ok := err.(*cf.ZoneConfigError); !ok {
-		t.Fatalf("expected *ZoneConfigError, got %T: %v", err, err)
+	require.Error(t, err)
+	{
+		_, ok := err.(*cf.ZoneConfigError)
+		require.True(t, ok)
 	}
 }
 
 func TestNew_MissingToken(t *testing.T) {
 	t.Parallel()
 	_, err := cf.New(cf.Config{ZoneID: "zone1", APIToken: ""})
-	if err == nil {
-		t.Fatal("expected error for missing api_token")
-	}
-	if _, ok := err.(*cf.ZoneConfigError); !ok {
-		t.Fatalf("expected *ZoneConfigError, got %T: %v", err, err)
+	require.Error(t, err)
+	{
+		_, ok := err.(*cf.ZoneConfigError)
+		require.True(t, ok)
 	}
 }
 
@@ -162,12 +153,8 @@ func TestRetry_RateLimit_WithRetryAfter(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err != nil {
-		t.Fatalf("expected success after retries, got %v", err)
-	}
-	if len(purger.calls) != 3 {
-		t.Fatalf("expected 3 calls (2 retries), got %d", len(purger.calls))
-	}
+	require.NoErrorf(t, err, "expected success after retries, got %v", err)
+	require.Len(t, purger.calls, 3)
 }
 
 func TestRetry_500_ThenSuccess(t *testing.T) {
@@ -181,12 +168,8 @@ func TestRetry_500_ThenSuccess(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err != nil {
-		t.Fatalf("expected success after 5xx retry, got %v", err)
-	}
-	if len(purger.calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(purger.calls))
-	}
+	require.NoErrorf(t, err, "expected success after 5xx retry, got %v", err)
+	require.Len(t, purger.calls, 2)
 }
 
 func TestRetry_RateLimit_Exhausted(t *testing.T) {
@@ -203,13 +186,9 @@ func TestRetry_RateLimit_Exhausted(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err == nil {
-		t.Fatal("expected rate limit error after retries exhausted")
-	}
+	require.Error(t, err)
 	var rlErr *cf.RateLimitError
-	if !errors.As(err, &rlErr) {
-		t.Fatalf("expected *RateLimitError, got %T: %v", err, err)
-	}
+	require.True(t, errors.As(err, &rlErr))
 }
 
 func TestRetry_HTTPDateRetryAfter(t *testing.T) {
@@ -227,12 +206,8 @@ func TestRetry_HTTPDateRetryAfter(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err != nil {
-		t.Fatalf("expected success after retry, got %v", err)
-	}
-	if len(purger.calls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(purger.calls))
-	}
+	require.NoErrorf(t, err, "expected success after retry, got %v", err)
+	require.Len(t, purger.calls, 2)
 }
 
 func TestRetry_PastHTTPDate_FallsBackToDefault(t *testing.T) {
@@ -251,12 +226,8 @@ func TestRetry_PastHTTPDate_FallsBackToDefault(t *testing.T) {
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
 
 	err := c.PurgeURLs(context.Background(), []string{"https://x.com/"})
-	if err != nil {
-		t.Fatalf("expected success after retry with past date, got %v", err)
-	}
-	if len(purger.calls) != 2 {
-		t.Fatalf("expected 2 calls (retry with fallback delay), got %d", len(purger.calls))
-	}
+	require.NoErrorf(t, err, "expected success after retry with past date, got %v", err)
+	require.Len(t, purger.calls, 2)
 }
 
 func TestErrorType(t *testing.T) {

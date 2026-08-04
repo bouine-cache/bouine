@@ -2,6 +2,8 @@ package h1parser
 
 import (
 	"bytes"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -16,9 +18,7 @@ func TestSmugglingDetected_CLPlusTE(t *testing.T) {
 		},
 		NHeaders: 3,
 	}
-	if !smugglingDetected(req) {
-		t.Error("smugglingDetected should return true for CL+TE conflict")
-	}
+	assert.True(t, smugglingDetected(req))
 }
 
 func TestSmugglingDetected_DuplicateCL(t *testing.T) {
@@ -30,9 +30,7 @@ func TestSmugglingDetected_DuplicateCL(t *testing.T) {
 		},
 		NHeaders: 3,
 	}
-	if !smugglingDetected(req) {
-		t.Error("smugglingDetected should return true for duplicate Content-Length")
-	}
+	assert.True(t, smugglingDetected(req))
 }
 
 func TestSmugglingDetected_NoSmuggling(t *testing.T) {
@@ -43,9 +41,7 @@ func TestSmugglingDetected_NoSmuggling(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
-	if smugglingDetected(req) {
-		t.Error("smugglingDetected should return false for normal request")
-	}
+	assert.False(t, smugglingDetected(req))
 }
 
 func TestSmugglingDetected_OnlyTE(t *testing.T) {
@@ -56,9 +52,7 @@ func TestSmugglingDetected_OnlyTE(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
-	if smugglingDetected(req) {
-		t.Error("smugglingDetected should return false for TE without CL")
-	}
+	assert.False(t, smugglingDetected(req))
 }
 
 func TestSmugglingDetected_OnlyCL(t *testing.T) {
@@ -69,9 +63,7 @@ func TestSmugglingDetected_OnlyCL(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
-	if smugglingDetected(req) {
-		t.Error("smugglingDetected should return false for single Content-Length")
-	}
+	assert.False(t, smugglingDetected(req))
 }
 
 func TestParseHeaders_ObsFold(t *testing.T) {
@@ -114,16 +106,8 @@ func TestSmugglingHookCalled(t *testing.T) {
 	// parseRequest should detect smuggling, call the hook, and fall
 	// through with the parsed request so net/http can return 400.
 	req, fallThrough, _, err := parser.parseRequest(conn, &readBuf)
-	if err != nil {
-		t.Fatalf("parseRequest returned error: %v", err)
-	}
-	if !fallThrough {
-		t.Error("parseRequest should fall through on smuggling")
-	}
-	if req == nil {
-		t.Error("parseRequest should return the parsed request for net/http to reject")
-	}
-	if !called {
-		t.Error("smugglingHook was not called")
-	}
+	require.NoErrorf(t, err, "parseRequest returned error: %v", err)
+	assert.True(t, fallThrough)
+	assert.NotNil(t, req)
+	assert.True(t, called)
 }

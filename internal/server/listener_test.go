@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
@@ -69,8 +71,9 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 	}
 
 	cancel()
-	if err := <-errCh; err != nil {
-		t.Fatalf("serve: %v", err)
+	{
+		err := <-errCh
+		require.NoErrorf(t, err, "serve: %v", err)
 	}
 }
 
@@ -119,12 +122,11 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	}
 
 	proto := resp.Header.Get("X-Proto")
-	if proto != "HTTP/2.0" {
-		t.Fatalf("expected HTTP/2.0, got %q", proto)
-	}
+	require.Equal(t, "HTTP/2.0", proto)
 
 	cancel()
-	if err := <-errCh; err != nil {
-		t.Fatalf("serve: %v", err)
+	{
+		err := <-errCh
+		require.NoErrorf(t, err, "serve: %v", err)
 	}
 }

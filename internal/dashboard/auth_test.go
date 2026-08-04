@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -15,23 +18,15 @@ func TestSessionAuth_SignAndValidate(t *testing.T) {
 	sa := newSessionAuth("secret-token")
 
 	tok, err := sa.makeToken()
-	if err != nil {
-		t.Fatalf("makeToken: %v", err)
-	}
-	if !sa.valid(tok) {
-		t.Error("freshly minted token must be valid")
-	}
+	require.NoErrorf(t, err, "makeToken: %v", err)
+	assert.True(t, sa.valid(tok))
 }
 
 func TestSessionAuth_ValidRejectsShort(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("secret-token")
-	if sa.valid("short") {
-		t.Error("short token should be invalid")
-	}
-	if sa.valid("") {
-		t.Error("empty token should be invalid")
-	}
+	assert.False(t, sa.valid("short"))
+	assert.False(t, sa.valid(""))
 }
 
 func TestSessionAuth_ValidRejectsTamperedSig(t *testing.T) {
@@ -40,9 +35,7 @@ func TestSessionAuth_ValidRejectsTamperedSig(t *testing.T) {
 	tok, _ := sa.makeToken()
 	// Flip last character.
 	tampered := tok[:len(tok)-1] + "X"
-	if sa.valid(tampered) {
-		t.Error("tampered token should be invalid")
-	}
+	assert.False(t, sa.valid(tampered))
 }
 
 func TestSessionAuth_DifferentKeyRejects(t *testing.T) {
@@ -50,9 +43,7 @@ func TestSessionAuth_DifferentKeyRejects(t *testing.T) {
 	sa1 := newSessionAuth("token-a")
 	sa2 := newSessionAuth("token-b")
 	tok, _ := sa1.makeToken()
-	if sa2.valid(tok) {
-		t.Error("token from sa1 must not validate against sa2")
-	}
+	assert.False(t, sa2.valid(tok))
 }
 
 func TestSessionAuth_LoginGet(t *testing.T) {
@@ -61,12 +52,8 @@ func TestSessionAuth_LoginGet(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
 	sa.LoginHandler(w, r)
-	if w.Code != http.StatusOK {
-		t.Errorf("GET login: want 200, got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "bouine") {
-		t.Error("login page should contain brand name")
-	}
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "bouine")
 }
 
 func TestSessionAuth_LoginPostWrongToken(t *testing.T) {
@@ -78,9 +65,7 @@ func TestSessionAuth_LoginPostWrongToken(t *testing.T) {
 		strings.NewReader(body))
 	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
 	sa.LoginHandler(w, r)
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("wrong token: want 401, got %d", w.Code)
-	}
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestSessionAuth_LoginPostCorrectToken(t *testing.T) {
@@ -92,13 +77,9 @@ func TestSessionAuth_LoginPostCorrectToken(t *testing.T) {
 		strings.NewReader(body))
 	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
 	sa.LoginHandler(w, r)
-	if w.Code != http.StatusSeeOther {
-		t.Errorf("correct token: want 303, got %d", w.Code)
-	}
+	assert.Equal(t, http.StatusSeeOther, w.Code)
 	cookie := w.Header().Get(header.SetCookie)
-	if !strings.Contains(cookie, sessionCookieName) {
-		t.Errorf("expected session cookie in Set-Cookie, got: %q", cookie)
-	}
+	assert.Contains(t, cookie, sessionCookieName)
 }
 
 func TestSessionAuth_MiddlewareRedirectsWithoutCookie(t *testing.T) {
@@ -110,18 +91,14 @@ func TestSessionAuth_MiddlewareRedirectsWithoutCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
 	sa.Middleware(next).ServeHTTP(w, r)
-	if w.Code != http.StatusFound {
-		t.Errorf("no cookie: want 302, got %d", w.Code)
-	}
+	assert.Equal(t, http.StatusFound, w.Code)
 }
 
 func TestSessionAuth_MiddlewarePassesValidCookie(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("tok")
 	tok, err := sa.makeToken()
-	if err != nil {
-		t.Fatalf("makeToken: %v", err)
-	}
+	require.NoErrorf(t, err, "makeToken: %v", err)
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -130,7 +107,5 @@ func TestSessionAuth_MiddlewarePassesValidCookie(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: tok})
 	sa.Middleware(next).ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Errorf("valid cookie: want 200, got %d", w.Code)
-	}
+	assert.Equal(t, http.StatusOK, w.Code)
 }

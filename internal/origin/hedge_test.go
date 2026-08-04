@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 )
 
@@ -26,17 +28,11 @@ func TestHedgedTransport_FastResponse(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/fast", nil)
 	resp, err := ht.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
+	require.NoErrorf(t, err, "RoundTrip: %v", err)
+	require.Equal(t, 200, resp.StatusCode)
 	_ = resp.Body.Close()
 	// Fast response: hedge should not fire.
-	if calls.Load() != 1 {
-		t.Fatalf("calls = %d, want 1", calls.Load())
-	}
+	require.Equal(t, int32(1), calls.Load())
 }
 
 func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
@@ -57,13 +53,9 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/slow", nil)
 	resp, err := ht.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
+	require.NoErrorf(t, err, "RoundTrip: %v", err)
 	_ = resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
+	require.Equal(t, 200, resp.StatusCode)
 	// Hedge should have fired.
 	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
 		return calls.Load() >= 2
@@ -88,9 +80,7 @@ func TestHedgedTransport_NoGoroutineLeak(t *testing.T) {
 	for range iterations {
 		req, _ := http.NewRequest("GET", srv.URL+"/slow", nil)
 		resp, err := ht.RoundTrip(req)
-		if err != nil {
-			t.Fatalf("RoundTrip: %v", err)
-		}
+		require.NoErrorf(t, err, "RoundTrip: %v", err)
 		_ = resp.Body.Close()
 	}
 
@@ -116,9 +106,7 @@ func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
 	}
 	req, _ := http.NewRequest("POST", srv.URL+"/post", nil)
 	resp, err := ht.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
+	require.NoErrorf(t, err, "RoundTrip: %v", err)
 	_ = resp.Body.Close()
 	// POST should never fire a hedge. Poll that calls stays at 1.
 	poll.Eventually(t, 100*time.Millisecond, 10*time.Millisecond, func() bool {

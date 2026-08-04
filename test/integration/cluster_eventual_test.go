@@ -3,6 +3,8 @@
 package integration_test
 
 import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 
@@ -16,16 +18,19 @@ func TestEventual_IndependentCaching(t *testing.T) {
 	path := "/hit?x=eventual-independent"
 
 	r := s.Get(t, 0, path)
-	if got := r.Header.Get("X-Cache"); got != "MISS" {
-		t.Fatalf("node 0 first: X-Cache = %q, want MISS", got)
+	{
+		got := r.Header.Get("X-Cache")
+		require.Equal(t, "MISS", got)
 	}
 	r = s.Get(t, 0, path)
-	if got := r.Header.Get("X-Cache"); got != "HIT" {
-		t.Fatalf("node 0 second: X-Cache = %q, want HIT", got)
+	{
+		got := r.Header.Get("X-Cache")
+		require.Equal(t, "HIT", got)
 	}
 	r = s.Get(t, 1, path)
-	if got := r.Header.Get("X-Cache"); got != "MISS" {
-		t.Fatalf("node 1 (eventual, no replication): X-Cache = %q, want MISS", got)
+	{
+		got := r.Header.Get("X-Cache")
+		require.Equal(t, "MISS", got)
 	}
 }
 
@@ -36,9 +41,7 @@ func TestEventual_NoPeerFetch(t *testing.T) {
 	}
 	for i := range s.Nodes {
 		hits := s.MetricValue(t, i, "bouine_peer_fetch_hits_total")
-		if hits != 0 {
-			t.Errorf("node %d: peer_fetch_hits_total = %.0f, want 0", i, hits)
-		}
+		assert.Equal(t, 0, hits)
 	}
 }
 

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -36,22 +39,14 @@ func TestMaxResponseBytes_OverLimitReturns502(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/too-big", nil))
 
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("oversized response should return 502, got %d", rr.Code)
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1", calls)
-	}
+	require.Equal(t, http.StatusBadGateway, rr.Code)
+	assert.Equal(t, 1, calls)
 
 	// Second request should also miss (nothing cached).
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/too-big", nil))
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Error("truncated response must not be cached")
-	}
-	if calls != 2 {
-		t.Errorf("origin called %d times, want 2 (nothing cached)", calls)
-	}
+	assert.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
+	assert.Equal(t, 2, calls)
 }
 
 func TestMaxResponseBytes_UnderLimitSucceeds(t *testing.T) {
@@ -75,12 +70,8 @@ func TestMaxResponseBytes_UnderLimitSucceeds(t *testing.T) {
 	// Should be cached.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/ok", nil))
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("response under limit should be cached, got X-Cache=%q", rr2.Header().Get(header.XCache))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1 (cached)", calls)
-	}
+	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	assert.Equal(t, 1, calls)
 }
 
 func TestMaxResponseBytes_ExactBoundarySucceeds(t *testing.T) {
@@ -113,9 +104,7 @@ func TestMaxResponseBytes_DefaultAppliedWhenZero(t *testing.T) {
 		MaxResponseBytes: 0, // should default to 4 MiB
 	})
 	const wantDefault = 4 << 20 // 4 MiB — matches defaultMaxResponseBytes
-	if h.maxResponseBytes != wantDefault {
-		t.Fatalf("zero MaxResponseBytes should default to %d (4 MiB), got %d", wantDefault, h.maxResponseBytes)
-	}
+	require.Equal(t, int64(wantDefault), h.maxResponseBytes)
 }
 
 func TestMaxResponseBytes_InvalidateAndProxyOverLimit(t *testing.T) {
@@ -133,7 +122,5 @@ func TestMaxResponseBytes_InvalidateAndProxyOverLimit(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/post", strings.NewReader("")))
 
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("oversized POST response should return 502, got %d", rr.Code)
-	}
+	require.Equal(t, http.StatusBadGateway, rr.Code)
 }

@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -43,36 +46,25 @@ func TestFastPathHandler_TryHit(t *testing.T) {
 		StoredAt: time.Now(),
 		TTL:      60 * time.Second,
 	}
-	if err := store.Put(context.Background(), key, obj); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	{
+		err := store.Put(context.Background(), key, obj)
+		require.NoErrorf(t, err, "Put failed: %v", err)
 	}
 
 	now := time.Now()
 	resp, ok := fp.TryHit(req, now)
-	if !ok {
-		t.Fatal("TryHit returned false, expected hit")
-	}
-	if resp == nil {
-		t.Fatal("TryHit returned nil response")
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("StatusCode=%d want 200", resp.StatusCode)
-	}
-	if resp.CacheResult != "HIT" {
-		t.Errorf("CacheResult=%q want HIT", resp.CacheResult)
-	}
-	if resp.BytesOut != 13 {
-		t.Errorf("BytesOut=%d want 13", resp.BytesOut)
-	}
+	require.True(t, ok)
+	require.NotNil(t, resp)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, 13, resp.BytesOut)
 
 	// Verify the response contains the body.
 	if len(resp.Buffers) < 3 {
 		t.Fatalf("Buffers has %d elements, want >= 3", len(resp.Buffers))
 	}
 	body := resp.Buffers[2]
-	if string(body) != "Hello, World!" {
-		t.Errorf("body=%q want %q", string(body), "Hello, World!")
-	}
+	assert.Equal(t, "Hello, World!", string(body))
 
 	// Release the pooled response.
 	fp.Release(resp)
@@ -90,12 +82,8 @@ func TestFastPathHandler_Miss(t *testing.T) {
 	}
 
 	resp, ok := fp.TryHit(req, time.Now())
-	if ok {
-		t.Fatal("TryHit returned true for miss, expected false")
-	}
-	if resp != nil {
-		t.Fatal("TryHit returned non-nil response for miss")
-	}
+	require.False(t, ok)
+	require.Nil(t, resp)
 }
 
 func TestFastPathHandler_ConditionalHeadersFallthrough(t *testing.T) {
@@ -113,12 +101,8 @@ func TestFastPathHandler_ConditionalHeadersFallthrough(t *testing.T) {
 	req.NHeaders = 1
 
 	resp, ok := fp.TryHit(req, time.Now())
-	if ok {
-		t.Fatal("TryHit returned true for conditional request, expected false")
-	}
-	if resp != nil {
-		t.Fatal("TryHit returned non-nil response for conditional request")
-	}
+	require.False(t, ok)
+	require.Nil(t, resp)
 }
 
 func TestFastPathHandler_NoCacheFallthrough(t *testing.T) {
@@ -135,9 +119,7 @@ func TestFastPathHandler_NoCacheFallthrough(t *testing.T) {
 	req.NHeaders = 1
 
 	resp, ok := fp.TryHit(req, time.Now())
-	if ok {
-		t.Fatal("TryHit returned true for no-cache request, expected false")
-	}
+	require.False(t, ok)
 	_ = resp
 }
 
@@ -165,8 +147,9 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
-	if err := store.Put(context.Background(), key, obj); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	{
+		err := store.Put(context.Background(), key, obj)
+		require.NoErrorf(t, err, "Put failed: %v", err)
 	}
 
 	req := &api.RawRequest{
@@ -177,12 +160,8 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 	}
 
 	resp, ok := fp.TryHit(req, time.Now())
-	if !ok {
-		t.Fatal("TryHit returned false for HEAD hit, expected true")
-	}
-	if resp.BytesOut != 0 {
-		t.Errorf("BytesOut=%d want 0 for HEAD", resp.BytesOut)
-	}
+	require.True(t, ok)
+	assert.Equal(t, 0, resp.BytesOut)
 	// Body should be nil for HEAD.
 	if len(resp.Buffers) >= 3 && resp.Buffers[2] != nil {
 		t.Errorf("body should be nil for HEAD request")
@@ -215,8 +194,9 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
-	if err := store.Put(context.Background(), key, obj); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	{
+		err := store.Put(context.Background(), key, obj)
+		require.NoErrorf(t, err, "Put failed: %v", err)
 	}
 
 	req := &api.RawRequest{
@@ -227,12 +207,8 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 	}
 
 	resp, ok := fp.TryHit(req, time.Now())
-	if !ok {
-		t.Fatal("TryHit returned false for stale-hit, expected true")
-	}
-	if resp.CacheResult != "STALE" {
-		t.Errorf("CacheResult=%q want STALE", resp.CacheResult)
-	}
+	require.True(t, ok)
+	assert.Equal(t, "STALE", resp.CacheResult)
 	fp.Release(resp)
 }
 
@@ -400,8 +376,9 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
-	if err := store.Put(context.Background(), key, obj); err != nil {
-		t.Fatalf("Put failed: %v", err)
+	{
+		err := store.Put(context.Background(), key, obj)
+		require.NoErrorf(t, err, "Put failed: %v", err)
 	}
 
 	req := &api.RawRequest{
@@ -415,9 +392,7 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		resp, ok := fp.TryHit(req, now)
-		if !ok {
-			t.Fatalf("TryHit %d returned false", i)
-		}
+		require.True(t, ok)
 
 		// Simulate WriteTo via a pipe — this consumes the Buffers slice.
 		r, w := net.Pipe()
@@ -431,22 +406,14 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 
 		written, err := io.ReadAll(r)
 		r.Close()
-		if err != nil {
-			t.Fatalf("ReadAll error on iteration %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "ReadAll error on iteration %d: %v", i, err)
 
 		// After WriteTo, Buffers should be consumed (len=0).
-		if len(resp.Buffers) != 0 {
-			t.Errorf("iteration %d: after WriteTo, Buffers len=%d, want 0", i, len(resp.Buffers))
-		}
+		assert.Len(t, resp.Buffers, 0)
 
 		// Verify the response bytes are correct.
-		if !bytes.Contains(written, []byte("Hello, World!")) {
-			t.Errorf("iteration %d: response missing body, got %q", i, written)
-		}
-		if !bytes.Contains(written, []byte("HTTP/1.1 200")) {
-			t.Errorf("iteration %d: response missing status line, got %q", i, written)
-		}
+		assert.True(t, bytes.Contains(written, []byte("Hello, World!")))
+		assert.True(t, bytes.Contains(written, []byte("HTTP/1.1 200")))
 
 		fp.Release(resp)
 	}

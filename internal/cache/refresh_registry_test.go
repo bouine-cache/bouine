@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -25,22 +27,18 @@ func TestRefreshRegistryRegisterLookup(t *testing.T) {
 	r.Register(key, req, "", 0)
 
 	entry := r.Lookup(key)
-	if entry == nil {
-		t.Fatal("Lookup returned nil after Register")
-	}
-	if entry.method != http.MethodGet {
-		t.Fatalf("method = %q, want GET", entry.method)
-	}
-	if entry.url != "https://example.com/foo" {
-		t.Fatalf("url = %q, want https://example.com/foo", entry.url)
-	}
+	require.NotNil(t, entry)
+	require.Equal(t, http.MethodGet, entry.method)
+	require.Equal(t, "https://example.com/foo", entry.url)
 	// Accept-Encoding should be stored (always stored).
-	if ae := entry.header.Get("Accept-Encoding"); ae != "gzip" {
-		t.Fatalf("Accept-Encoding = %q, want gzip", ae)
+	{
+		ae := entry.header.Get("Accept-Encoding")
+		require.Equal(t, "gzip", ae)
 	}
 	// X-Test should NOT be stored (not a Vary header).
-	if x := entry.header.Get("X-Test"); x != "" {
-		t.Fatalf("X-Test = %q, should not be stored", x)
+	{
+		x := entry.header.Get("X-Test")
+		require.Equal(t, "", x)
 	}
 }
 
@@ -62,19 +60,20 @@ func TestRefreshRegistryVaryHeaders(t *testing.T) {
 	r.Register(key, req, "Accept, Accept-Language", 0)
 
 	entry := r.Lookup(key)
-	if entry == nil {
-		t.Fatal("Lookup returned nil")
-	}
+	require.NotNil(t, entry)
 	// Accept and Accept-Language should be stored (in Vary).
-	if v := entry.header.Get("Accept"); v != "application/json" {
-		t.Fatalf("Accept = %q, want application/json", v)
+	{
+		v := entry.header.Get("Accept")
+		require.Equal(t, "application/json", v)
 	}
-	if v := entry.header.Get("Accept-Language"); v != "en-US" {
-		t.Fatalf("Accept-Language = %q, want en-US", v)
+	{
+		v := entry.header.Get("Accept-Language")
+		require.Equal(t, "en-US", v)
 	}
 	// X-Trace-Id should NOT be stored (not in Vary).
-	if v := entry.header.Get("X-Trace-Id"); v != "" {
-		t.Fatalf("X-Trace-Id = %q, should not be stored", v)
+	{
+		v := entry.header.Get("X-Trace-Id")
+		require.Equal(t, "", v)
 	}
 }
 
@@ -90,17 +89,14 @@ func TestRefreshRegistryUnregister(t *testing.T) {
 
 	key := api.Key(1)
 	r.Register(key, req, "", 0)
-	if r.Len() != 1 {
-		t.Fatalf("Len = %d, want 1", r.Len())
-	}
+	require.Equal(t, 1, r.Len())
 
 	r.Unregister(key)
-	if r.Len() != 0 {
-		t.Fatalf("Len after Unregister = %d, want 0", r.Len())
-	}
+	require.Equal(t, 0, r.Len())
 
-	if entry := r.Lookup(key); entry != nil {
-		t.Fatal("Lookup returned non-nil after Unregister")
+	{
+		entry := r.Lookup(key)
+		require.Nil(t, entry)
 	}
 }
 
@@ -124,11 +120,10 @@ func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
 
 	// The registry should still have the original value.
 	entry := r.Lookup(key)
-	if entry == nil {
-		t.Fatal("Lookup returned nil")
-	}
-	if v := entry.header.Get("Accept-Encoding"); v != "gzip" {
-		t.Fatalf("Accept-Encoding = %q, want gzip (snapshot)", v)
+	require.NotNil(t, entry)
+	{
+		v := entry.header.Get("Accept-Encoding")
+		require.Equal(t, "gzip", v)
 	}
 }
 
@@ -145,7 +140,5 @@ func TestRefreshRegistryLen(t *testing.T) {
 	for i := range 5 {
 		r.Register(api.Key(i), req, "", 0)
 	}
-	if r.Len() != 5 {
-		t.Fatalf("Len = %d, want 5", r.Len())
-	}
+	require.Equal(t, 5, r.Len())
 }

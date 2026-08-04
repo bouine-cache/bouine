@@ -3,6 +3,8 @@ package h1parser
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -86,14 +88,17 @@ func TestRawRequest_Header(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
-	if v := req.Header("host"); v != "example.com" {
-		t.Errorf("Header(host)=%q want example.com", v)
+	{
+		v := req.Header("host")
+		assert.Equal(t, "example.com", v)
 	}
-	if v := req.Header("ACCEPT"); v != "text/html" {
-		t.Errorf("Header(ACCEPT)=%q want text/html", v)
+	{
+		v := req.Header("ACCEPT")
+		assert.Equal(t, "text/html", v)
 	}
-	if v := req.Header("X-Custom"); v != "" {
-		t.Errorf("Header(X-Custom)=%q want empty", v)
+	{
+		v := req.Header("X-Custom")
+		assert.Equal(t, "", v)
 	}
 }
 

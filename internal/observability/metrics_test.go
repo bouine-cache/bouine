@@ -3,8 +3,9 @@ package observability
 import (
 	"context"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -12,16 +13,10 @@ import (
 func TestNewMetrics_Defaults(t *testing.T) {
 	t.Parallel()
 	m := NewMetrics()
-	if m.Registry == nil {
-		t.Fatal("registry nil")
-	}
+	require.NotNil(t, m.Registry)
 	got, err := m.Registry.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
-	if len(got) == 0 {
-		t.Fatal("default collectors registered nothing")
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
+	require.NotEqual(t, 0, len(got))
 }
 
 func TestMetrics_Handler_ExposesRegisteredCollector(t *testing.T) {
@@ -38,11 +33,7 @@ func TestMetrics_Handler_ExposesRegisteredCollector(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	m.Handler().ServeHTTP(rr, req)
 
-	if rr.Code != 200 {
-		t.Fatalf("status = %d", rr.Code)
-	}
+	require.Equal(t, 200, rr.Code)
 	body := rr.Body.String()
-	if !strings.Contains(body, "bouine_test_counter 1") {
-		t.Fatalf("metric not exposed: %s", body)
-	}
+	require.Contains(t, body, "bouine_test_counter 1")
 }

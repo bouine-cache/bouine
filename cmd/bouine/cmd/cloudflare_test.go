@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -80,14 +82,13 @@ func TestCFPropagator_PropagateForPurge_Async(t *testing.T) {
 	p.PropagateForPurge(context.Background(), "https://example.com/page")
 
 	// Async: wait for the goroutine to finish.
-	if err := p.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
+	{
+		err := p.Close(context.Background())
+		require.NoErrorf(t, err, "Close: %v", err)
 	}
 
 	urls, _, _, _ := inv.counts()
-	if urls != 1 {
-		t.Fatalf("expected 1 PurgeURLs call, got %d", urls)
-	}
+	require.Equal(t, 1, urls)
 }
 
 func TestCFPropagator_PropagateForPurge_Sync(t *testing.T) {
@@ -103,9 +104,7 @@ func TestCFPropagator_PropagateForPurge_Sync(t *testing.T) {
 
 	// Sync: call completed inline, no need to Close.
 	urls, _, _, _ := inv.counts()
-	if urls != 1 {
-		t.Fatalf("expected 1 PurgeURLs call, got %d", urls)
-	}
+	require.Equal(t, 1, urls)
 }
 
 func TestCFPropagator_PropagateForPurge_Disabled(t *testing.T) {
@@ -118,9 +117,7 @@ func TestCFPropagator_PropagateForPurge_Disabled(t *testing.T) {
 	_ = p.Close(context.Background())
 
 	urls, _, _, _ := inv.counts()
-	if urls != 0 {
-		t.Fatalf("expected 0 calls when purge disabled, got %d", urls)
-	}
+	require.Equal(t, 0, urls)
 }
 
 func TestCFPropagator_PropagateForPurge_NilInvalidator(t *testing.T) {
@@ -143,9 +140,7 @@ func TestCFPropagator_PropagateForBan_SurrogateKey(t *testing.T) {
 	_ = p.Close(context.Background())
 
 	_, tags, _, _ := inv.counts()
-	if tags != 1 {
-		t.Fatalf("expected 1 PurgeTags call, got %d", tags)
-	}
+	require.Equal(t, 1, tags)
 }
 
 func TestCFPropagator_PropagateForBan_PathRegex(t *testing.T) {
@@ -158,9 +153,7 @@ func TestCFPropagator_PropagateForBan_PathRegex(t *testing.T) {
 	_ = p.Close(context.Background())
 
 	_, _, prefixes, _ := inv.counts()
-	if prefixes != 1 {
-		t.Fatalf("expected 1 PurgePrefixes call, got %d", prefixes)
-	}
+	require.Equal(t, 1, prefixes)
 }
 
 func TestCFPropagator_PropagateForBan_CompoundSkipped(t *testing.T) {
@@ -177,10 +170,7 @@ func TestCFPropagator_PropagateForBan_CompoundSkipped(t *testing.T) {
 
 	// Compound bans should be skipped — no CF calls at all.
 	urls, tags, prefixes, hosts := inv.counts()
-	if urls+tags+prefixes+hosts != 0 {
-		t.Fatalf("expected 0 calls for compound ban, got urls=%d tags=%d prefixes=%d hosts=%d",
-			urls, tags, prefixes, hosts)
-	}
+	require.Equal(t, 0, urls+tags+prefixes+hosts)
 }
 
 func TestCFPropagator_PropagateForRefresh(t *testing.T) {
@@ -193,9 +183,7 @@ func TestCFPropagator_PropagateForRefresh(t *testing.T) {
 	_ = p.Close(context.Background())
 
 	urls, _, _, _ := inv.counts()
-	if urls != 1 {
-		t.Fatalf("expected 1 PurgeURLs call, got %d", urls)
-	}
+	require.Equal(t, 1, urls)
 }
 
 func TestCFPropagator_Status(t *testing.T) {
@@ -206,24 +194,16 @@ func TestCFPropagator_Status(t *testing.T) {
 
 	// Before any propagation: no last error or success.
 	status := p.Status()
-	if status.LastError != nil {
-		t.Fatalf("expected nil last error before any call, got %v", *status.LastError)
-	}
-	if status.LastSuccessAt != nil {
-		t.Fatalf("expected nil last success before any call, got %v", *status.LastSuccessAt)
-	}
+	require.Nil(t, status.LastError)
+	require.Nil(t, status.LastSuccessAt)
 
 	// After a successful propagation.
 	p.PropagateForPurge(context.Background(), "https://example.com/page")
 	_ = p.Close(context.Background())
 
 	status = p.Status()
-	if status.LastError != nil {
-		t.Fatalf("expected nil last error after success, got %v", *status.LastError)
-	}
-	if status.LastSuccessAt == nil {
-		t.Fatal("expected non-nil last success after successful propagation")
-	}
+	require.Nil(t, status.LastError)
+	require.NotNil(t, status.LastSuccessAt)
 }
 
 func TestCFPropagator_Status_ErrorRecorded(t *testing.T) {
@@ -236,12 +216,8 @@ func TestCFPropagator_Status_ErrorRecorded(t *testing.T) {
 	_ = p.Close(context.Background())
 
 	status := p.Status()
-	if status.LastError == nil {
-		t.Fatal("expected non-nil last error after failed propagation")
-	}
-	if *status.LastError == "" {
-		t.Fatal("expected non-empty error message")
-	}
+	require.NotNil(t, status.LastError)
+	require.NotEqual(t, "", *status.LastError)
 }
 
 func TestCFPropagator_Close_WaitsForInFlight(t *testing.T) {
@@ -254,8 +230,9 @@ func TestCFPropagator_Close_WaitsForInFlight(t *testing.T) {
 
 	// Close should block until the delayed call finishes.
 	start := time.Now()
-	if err := p.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
+	{
+		err := p.Close(context.Background())
+		require.NoErrorf(t, err, "Close: %v", err)
 	}
 	elapsed := time.Since(start)
 	if elapsed < 50*time.Millisecond {
@@ -263,9 +240,7 @@ func TestCFPropagator_Close_WaitsForInFlight(t *testing.T) {
 	}
 
 	urls, _, _, _ := inv.counts()
-	if urls != 1 {
-		t.Fatalf("expected 1 PurgeURLs call after Close, got %d", urls)
-	}
+	require.Equal(t, 1, urls)
 }
 
 func TestCFPropagator_Close_ContextCancellation(t *testing.T) {
@@ -281,9 +256,7 @@ func TestCFPropagator_Close_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	err := p.Close(ctx)
-	if err == nil {
-		t.Fatal("expected context deadline exceeded error from Close")
-	}
+	require.Error(t, err)
 }
 
 func TestCFPropagator_AsyncContextCancellation(t *testing.T) {

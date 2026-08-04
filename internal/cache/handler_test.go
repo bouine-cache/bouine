@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -58,38 +60,22 @@ func TestHandler_MissThenHit(t *testing.T) {
 	// First request — MISS, fetches from origin.
 	rr1 := httptest.NewRecorder()
 	h.ServeHTTP(rr1, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if rr1.Code != 200 {
-		t.Fatalf("req1 status = %d", rr1.Code)
-	}
-	if rr1.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("req1 X-Cache = %q", rr1.Header().Get(header.XCache))
-	}
-	if rr1.Body.String() != "cached-body" {
-		t.Fatalf("req1 body = %q", rr1.Body.String())
-	}
+	require.Equal(t, 200, rr1.Code)
+	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+	require.Equal(t, "cached-body", rr1.Body.String())
 
 	// Second request — HIT, served from cache.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if rr2.Code != 200 {
-		t.Fatalf("req2 status = %d", rr2.Code)
-	}
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("req2 X-Cache = %q", rr2.Header().Get(header.XCache))
-	}
-	if rr2.Body.String() != "cached-body" {
-		t.Fatalf("req2 body = %q", rr2.Body.String())
-	}
+	require.Equal(t, 200, rr2.Code)
+	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	require.Equal(t, "cached-body", rr2.Body.String())
 
 	// Age header should be present.
-	if rr2.Header().Get(header.Age) == "" {
-		t.Fatal("req2 missing Age header")
-	}
+	require.NotEqual(t, "", rr2.Header().Get(header.Age))
 
 	// Origin should have been called only once.
-	if originCalls != 1 {
-		t.Fatalf("origin called %d times, want 1", originCalls)
-	}
+	require.Equal(t, 1, originCalls)
 }
 
 func TestHandler_NoStoreNotCached(t *testing.T) {
@@ -105,13 +91,9 @@ func TestHandler_NoStoreNotCached(t *testing.T) {
 	for range 3 {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/x", nil))
-		if rr.Code != 200 {
-			t.Fatalf("status = %d", rr.Code)
-		}
+		require.Equal(t, 200, rr.Code)
 	}
-	if calls != 3 {
-		t.Fatalf("origin called %d times, want 3 (not cached)", calls)
-	}
+	require.Equal(t, 3, calls)
 }
 
 func TestHandler_PostInvalidatesAndStores(t *testing.T) {
@@ -123,9 +105,7 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	// Populate cache with GET.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/res", nil))
-	if rr.Header().Get(header.XCache) != "MISS" {
-		t.Fatal("expected MISS for initial GET")
-	}
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 
 	// POST invalidates cache AND stores the cacheable response under GET key.
 	rr2 := httptest.NewRecorder()
@@ -134,9 +114,7 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	// GET — should be HIT (POST response stored after invalidation).
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, httptest.NewRequest("GET", "http://example.com/res", nil))
-	if rr3.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("expected HIT for GET after POST (cacheable), got %q", rr3.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
 }
 
 func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
@@ -153,18 +131,14 @@ func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("precondition: expected HIT for /other, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
 
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/other", nil))
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Fatalf("Content-Location /other was not invalidated by POST /submit")
-	}
+	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
@@ -184,9 +158,7 @@ func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
-	if rr.Header().Get(header.XCache) == "HIT" {
-		t.Fatalf("POST query string leaked into Content-Location key; /other not invalidated")
-	}
+	require.NotEqual(t, "HIT", rr.Header().Get(header.XCache))
 }
 
 func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
@@ -203,18 +175,14 @@ func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
 
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Fatalf("absolute Content-Location was not invalidated")
-	}
+	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
@@ -231,18 +199,14 @@ func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
 
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest("POST", "http://example.com/api/sub/submit", strings.NewReader("data")))
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Fatalf("relative Content-Location ../v2.json was not invalidated")
-	}
+	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
@@ -259,18 +223,14 @@ func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
 
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Fatalf("cross-host Content-Location was not invalidated")
-	}
+	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
@@ -287,18 +247,14 @@ func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("precondition: expected HIT, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
 
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest("POST", "http://example.com/create", strings.NewReader("data")))
 
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Fatalf("Location header was not invalidated")
-	}
+	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 func TestHandler_BypassOnRequestNoStore(t *testing.T) {
@@ -314,9 +270,7 @@ func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 	req.Header.Set(header.CacheControl, "no-store")
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, req)
-	if rr2.Code != 200 {
-		t.Fatalf("bypass status = %d", rr2.Code)
-	}
+	require.Equal(t, 200, rr2.Code)
 }
 
 func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
@@ -365,15 +319,9 @@ func TestHandler_HeadServedFromCache(t *testing.T) {
 	// HEAD should hit cache but not return body.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("HEAD", "http://example.com/hd", nil))
-	if rr2.Code != 200 {
-		t.Fatalf("HEAD status = %d", rr2.Code)
-	}
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("HEAD X-Cache = %q", rr2.Header().Get(header.XCache))
-	}
-	if rr2.Body.Len() != 0 {
-		t.Fatalf("HEAD should have empty body, got %d bytes", rr2.Body.Len())
-	}
+	require.Equal(t, 200, rr2.Code)
+	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	require.Equal(t, 0, rr2.Body.Len())
 }
 
 func testHandlerStayinAlive(t *testing.T, upstream http.Handler) *Handler {
@@ -530,9 +478,7 @@ func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 
 	seed := httptest.NewRecorder()
 	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
-	if seed.Code != 200 {
-		t.Fatalf("seed: status = %d", seed.Code)
-	}
+	require.Equal(t, 200, seed.Code)
 
 	// Wait for the object to expire (max-age=1, no stale-if-error).
 	time.Sleep(1500 * time.Millisecond)
@@ -541,12 +487,8 @@ func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 	// Without a stale-if-error window, the 5xx must be forwarded.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
-	if rr.Code != 503 {
-		t.Fatalf("revalidate 5xx without SIE: status = %d, want 503 (stale must NOT be served outside SIE window)", rr.Code)
-	}
-	if rr.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("revalidate 5xx without SIE: X-Cache = %q, want MISS", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, 503, rr.Code)
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 }
 
 // TestHandler_Revalidate_5xx_MustRevalidateWithSIE verifies that an object
@@ -572,17 +514,13 @@ func TestHandler_Revalidate_5xx_MustRevalidateWithSIE(t *testing.T) {
 
 	seed := httptest.NewRecorder()
 	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
-	if seed.Code != 200 {
-		t.Fatalf("seed: status = %d", seed.Code)
-	}
+	require.Equal(t, 200, seed.Code)
 
 	time.Sleep(1500 * time.Millisecond)
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
-	if rr.Code != 503 {
-		t.Fatalf("revalidate 5xx with must-revalidate: status = %d, want 503 (must-revalidate forbids stale on error)", rr.Code)
-	}
+	require.Equal(t, 503, rr.Code)
 }
 
 // TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency verifies that when
@@ -615,9 +553,7 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
-	if obj == nil {
-		t.Fatal("object not stored after seed")
-	}
+	require.NotNil(t, obj)
 	stale := obj.CloneForRefresh()
 	stale.StoredAt = time.Now().Add(-staleAge)
 	_ = h.store.Put(context.Background(), key, stale)
@@ -628,15 +564,11 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	req.Header.Set(header.CacheControl, "no-cache")
 	h.ServeHTTP(rr, req)
 
-	if rr.Code != 200 {
-		t.Fatalf("status = %d, want 200 (stale served)", rr.Code)
-	}
+	require.Equal(t, 200, rr.Code)
 
 	ageStr := rr.Header().Get(header.Age)
 	ageSecs, err := strconv.Atoi(ageStr)
-	if err != nil {
-		t.Fatalf("Age header = %q, not an integer: %v", ageStr, err)
-	}
+	require.NoErrorf(t, err, "Age header = %q, not an integer: %v", ageStr, err)
 
 	expectedMin := int(reqStart.Sub(stale.StoredAt).Seconds())
 	expectedMax := int(reqStart.Add(50 * time.Millisecond).Sub(stale.StoredAt).Seconds())
@@ -677,18 +609,14 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 		req.Header.Set("X-Test-Variant", strconv.Itoa(i))
 		h.ServeHTTP(rr, req)
 	}
-	if hitCount != 0 {
-		t.Fatalf("expected 0 cap hits before limit, got %d", hitCount)
-	}
+	require.Equal(t, 0, hitCount)
 
 	// One more should trip the cap.
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	req.Header.Set("X-Test-Variant", "overflow")
 	h.ServeHTTP(rr, req)
-	if hitCount != 1 {
-		t.Fatalf("expected 1 cap hit, got %d", hitCount)
-	}
+	require.Equal(t, 1, hitCount)
 }
 
 type counterFunc func()
@@ -719,9 +647,7 @@ func TestMaxVariants_OverwriteDoesNotDoubleCount(t *testing.T) {
 		req.Header.Set("X-Test-Variant", "same")
 		h.ServeHTTP(rr, req)
 	}
-	if hitCount != 0 {
-		t.Fatalf("expected 0 cap hits for repeated overwrite, got %d", hitCount)
-	}
+	require.Equal(t, 0, hitCount)
 }
 
 func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
@@ -798,9 +724,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	_ = store.Delete(context.Background(), storeKey)
 
 	pkObj, _, _ := store.Get(context.Background(), primaryKey)
-	if pkObj != nil {
-		t.Fatal("primary key should be gone from store")
-	}
+	require.Nil(t, pkObj)
 
 	// Request a new variant. The handler should detect the evicted
 	// primary key and reset the stale variant set.
@@ -848,22 +772,14 @@ func TestHandler_EventualNoPeerFetch(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/e", nil))
-	if rr.Code != 200 {
-		t.Fatalf("status = %d", rr.Code)
-	}
-	if originCalls != 1 {
-		t.Fatalf("expected 1 origin call, got %d", originCalls)
-	}
-	if rr.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("X-Cache = %q, want MISS", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, 200, rr.Code)
+	require.Equal(t, 1, originCalls)
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 
 	// Second request should be a HIT — served from local cache.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/e", nil))
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("X-Cache = %q, want HIT", rr2.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
 }
 func TestHandler_BanByPathRegex(t *testing.T) {
 	t.Parallel()
@@ -883,34 +799,24 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 	// Warm the cache.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	if rr.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("warmup should be MISS, got %q", rr.Header().Get(header.XCache))
-	}
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 
 	// Second request — HIT.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	if rr2.Header().Get(header.XCache) != "HIT" {
-		t.Fatalf("expected HIT, got %q", rr2.Header().Get(header.XCache))
-	}
+	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
 
 	// Ban by path regex.
 	count, err := store.Ban(context.Background(), api.BanExpr{
 		PathRegex: "^/ban-me",
 	})
-	if err != nil {
-		t.Fatalf("ban failed: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("ban count = %d, want 1", count)
-	}
+	require.NoErrorf(t, err, "ban failed: %v", err)
+	require.Equal(t, 1, count)
 
 	// After ban — should be MISS (re-fetch from origin).
 	rr3 := httptest.NewRecorder()
 	h.ServeHTTP(rr3, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	if rr3.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("after ban expected MISS, got %q", rr3.Header().Get(header.XCache))
-	}
+	require.Equal(t, "MISS", rr3.Header().Get(header.XCache))
 }
 
 func TestHandler_BanByHostRegex(t *testing.T) {
@@ -929,27 +835,19 @@ func TestHandler_BanByHostRegex(t *testing.T) {
 	// Warm the cache.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if rr.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("warmup should be MISS")
-	}
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 
 	// Ban by host regex.
 	count, err := store.Ban(context.Background(), api.BanExpr{
 		HostRegex: "example.com",
 	})
-	if err != nil {
-		t.Fatalf("ban failed: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("ban count = %d, want 1", count)
-	}
+	require.NoErrorf(t, err, "ban failed: %v", err)
+	require.Equal(t, 1, count)
 
 	// After ban — should be MISS.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	if rr2.Header().Get(header.XCache) != "MISS" {
-		t.Fatalf("after ban expected MISS, got %q", rr2.Header().Get(header.XCache))
-	}
+	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
 }
 
 func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
@@ -966,11 +864,13 @@ func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
 
 	// Internal headers must not leak to the client.
-	if v := rr.Header().Get(header.XBouinePath); v != "" {
-		t.Fatalf("X-Bouine-Path leaked to client: %q", v)
+	{
+		v := rr.Header().Get(header.XBouinePath)
+		require.Equal(t, "", v)
 	}
-	if v := rr.Header().Get(header.XBouineHost); v != "" {
-		t.Fatalf("X-Bouine-Host leaked to client: %q", v)
+	{
+		v := rr.Header().Get(header.XBouineHost)
+		require.Equal(t, "", v)
 	}
 }
 func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
@@ -983,8 +883,9 @@ func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
 	t.Cleanup(func() { runtime.GOMAXPROCS(prevProcs) })
 
 	rec := acquireRecorder(0)
-	if _, err := rec.body.Write(make([]byte, maxRecorderCap+1)); err != nil {
-		t.Fatalf("write: %v", err)
+	{
+		_, err := rec.body.Write(make([]byte, maxRecorderCap+1))
+		require.NoErrorf(t, err, "write: %v", err)
 	}
 	releaseRecorder(rec)
 
@@ -1104,17 +1005,13 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 	}
 	// After the test's Get, Hits=1 (first access, slow path). With
 	// minHits=2, the gate should block re-scheduling.
-	if obj.Hits != 1 {
-		t.Fatalf("expected 1 hit after Get, got %d", obj.Hits)
-	}
+	require.Equal(t, uint64(1), obj.Hits)
 	h.doBackgroundRefresh(ctx, key, obj, 0)
 
 	// After refresh with Hits=1 < minHits=2, the object should NOT be
 	// re-scheduled. The scheduler should still be empty.
 	scheduled := h.scheduler.Len()
-	if scheduled != 0 {
-		t.Fatalf("expected 0 scheduled entries after unpopular refresh, got %d", scheduled)
-	}
+	require.Equal(t, 0, scheduled)
 }
 
 func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
@@ -1149,9 +1046,7 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
 
 	scheduled := h.scheduler.Len()
-	if scheduled != 1 {
-		t.Fatalf("expected 1 scheduled entry after popular refresh, got %d", scheduled)
-	}
+	require.Equal(t, 1, scheduled)
 }
 
 func TestRefreshMinHits_InitialStoreAlwaysSchedules(t *testing.T) {
@@ -1165,9 +1060,7 @@ func TestRefreshMinHits_InitialStoreAlwaysSchedules(t *testing.T) {
 		httptest.NewRequest("GET", "http://example.com/first-chance", nil))
 
 	scheduled := h.scheduler.Len()
-	if scheduled != 1 {
-		t.Fatalf("initial store should schedule 1 entry, got %d", scheduled)
-	}
+	require.Equal(t, 1, scheduled)
 }
 
 func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
@@ -1253,8 +1146,9 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	if scheduled := h.scheduler.Len(); scheduled != 1 {
-		t.Fatalf("after 1st persist refresh: expected 1 scheduled, got %d", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 1, scheduled)
 	}
 
 	// Clear scheduler to detect next re-schedule.
@@ -1264,8 +1158,9 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 2: persist=2 → decrement to 1, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	if scheduled := h.scheduler.Len(); scheduled != 1 {
-		t.Fatalf("after 2nd persist refresh: expected 1 scheduled, got %d", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 1, scheduled)
 	}
 
 	h.scheduler.Stop()
@@ -1274,8 +1169,9 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 3: persist=1 → decrement to 0, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	if scheduled := h.scheduler.Len(); scheduled != 1 {
-		t.Fatalf("after 3rd persist refresh: expected 1 scheduled, got %d", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 1, scheduled)
 	}
 
 	h.scheduler.Stop()
@@ -1284,8 +1180,9 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 
 	// Refresh 4: persist=0 → gate blocks, no re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	if scheduled := h.scheduler.Len(); scheduled != 0 {
-		t.Fatalf("after persist exhausted: expected 0 scheduled, got %d", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 0, scheduled)
 	}
 }
 
@@ -1310,15 +1207,14 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits != 1 {
-		t.Fatalf("expected 1 hit after MISS, got %d", obj.Hits)
-	}
+	require.Equal(t, uint64(1), obj.Hits)
 
 	// Unpopular refresh: windowHits=0 < minHits=2 → persist 2→1, re-scheduled.
 	staleHits := h.store.WindowHits(key)
 	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
-	if scheduled := h.scheduler.Len(); scheduled != 1 {
-		t.Fatalf("persist should re-schedule, got %d", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 1, scheduled)
 	}
 	entry := h.refreshRegistry.Lookup(key)
 	if entry == nil || entry.persistCycles != 1 {
@@ -1348,16 +1244,13 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	// Popular refresh: windowHits >= minHits → Register called → persist RESET to 2.
 	staleHits = h.store.WindowHits(key)
 	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
-	if scheduled := h.scheduler.Len(); scheduled != 1 {
-		t.Fatalf("popular refresh should re-schedule, got %d", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 1, scheduled)
 	}
 	entry = h.refreshRegistry.Lookup(key)
-	if entry == nil {
-		t.Fatal("registry entry should exist after popular refresh")
-	}
-	if entry.persistCycles != 2 {
-		t.Fatalf("persist should be reset to 2 after popular refresh, got %d", entry.persistCycles)
-	}
+	require.NotNil(t, entry)
+	require.Equal(t, 2, entry.persistCycles)
 }
 
 func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
@@ -1378,14 +1271,13 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits != 1 {
-		t.Fatalf("expected 1 hit, got %d", obj.Hits)
-	}
+	require.Equal(t, uint64(1), obj.Hits)
 
 	// Hits=1 < minHits=2, persist=0 → gate blocks immediately.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
-	if scheduled := h.scheduler.Len(); scheduled != 0 {
-		t.Fatalf("with persist=0, gate should block immediately, got %d scheduled", scheduled)
+	{
+		scheduled := h.scheduler.Len()
+		require.Equal(t, 0, scheduled)
 	}
 }
 
@@ -1395,25 +1287,17 @@ func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	key := api.Key(42)
 
 	// Key not registered → DecrementPersist returns false.
-	if r.DecrementPersist(key) {
-		t.Fatal("DecrementPersist should return false for unregistered key")
-	}
+	require.False(t, r.DecrementPersist(key))
 
 	req := httptest.NewRequest("GET", "http://example.com/test", nil)
 	r.Register(key, req, "", 2)
 
 	// persist=2 → decrement to 1.
-	if !r.DecrementPersist(key) {
-		t.Fatal("DecrementPersist should return true with persist=2")
-	}
+	require.True(t, r.DecrementPersist(key))
 	// persist=1 → decrement to 0.
-	if !r.DecrementPersist(key) {
-		t.Fatal("DecrementPersist should return true with persist=1")
-	}
+	require.True(t, r.DecrementPersist(key))
 	// persist=0 → returns false.
-	if r.DecrementPersist(key) {
-		t.Fatal("DecrementPersist should return false when persist exhausted")
-	}
+	require.False(t, r.DecrementPersist(key))
 }
 
 func TestDoFetchErrAbortHandler(t *testing.T) {
@@ -1423,12 +1307,8 @@ func TestDoFetchErrAbortHandler(t *testing.T) {
 	}))
 	req := httptest.NewRequest("GET", "/", nil)
 	res := h.doFetch(req)
-	if res.Err == nil {
-		t.Fatal("expected error from ErrAbortHandler, got nil")
-	}
-	if !errors.Is(res.Err, http.ErrAbortHandler) {
-		t.Fatalf("expected error wrapping http.ErrAbortHandler, got %v", res.Err)
-	}
+	require.NotNil(t, res.Err)
+	require.True(t, errors.Is(res.Err, http.ErrAbortHandler))
 }
 
 func TestDoFetchRealPanicPropagates(t *testing.T) {
@@ -1475,12 +1355,8 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 	}))
 	req := httptest.NewRequest("GET", "/", nil)
 	res := h.collapsedFetch(req, 0)
-	if res.Err == nil {
-		t.Fatal("expected error from collapsedFetch after ErrAbortHandler, got nil")
-	}
-	if !errors.Is(res.Err, http.ErrAbortHandler) {
-		t.Fatalf("expected error wrapping http.ErrAbortHandler, got %v", res.Err)
-	}
+	require.NotNil(t, res.Err)
+	require.True(t, errors.Is(res.Err, http.ErrAbortHandler))
 }
 
 func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
@@ -1501,9 +1377,7 @@ func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
 	h.fetchTimeout = 100 * time.Millisecond
 	req := httptest.NewRequest("GET", "/", nil)
 	res := h.doFetch(req)
-	if res.Err == nil {
-		t.Fatal("expected error from fetch timeout, got nil")
-	}
+	require.NotNil(t, res.Err)
 }
 
 func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
@@ -1535,9 +1409,7 @@ func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("origin never called — fetch timeout fired during semaphore wait: %v", res.Err)
 	}
-	if res.Err != nil {
-		t.Fatalf("expected no error, got %v", res.Err)
-	}
+	require.Nil(t, res.Err)
 }
 
 func TestDoFetchCanceledContextKeepsValidResponse(t *testing.T) {
@@ -1556,15 +1428,9 @@ func TestDoFetchCanceledContextKeepsValidResponse(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	req = req.WithContext(ctx)
 	res := h.doFetch(req)
-	if res.Err != nil {
-		t.Fatalf("expected no error for completed response with cancelled context, got %v", res.Err)
-	}
-	if res.StatusCode != 200 {
-		t.Fatalf("expected status 200, got %d", res.StatusCode)
-	}
-	if string(res.Body) != "cached-body" {
-		t.Fatalf("expected body %q, got %q", "cached-body", res.Body)
-	}
+	require.Nil(t, res.Err)
+	require.Equal(t, 200, res.StatusCode)
+	require.Equal(t, "cached-body", string(res.Body))
 }
 
 func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
@@ -1592,22 +1458,12 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	refreshed := h.refreshFrom304(stale, res)
 
 	// SerializedHead is lazy — must be nil after refresh (not eagerly computed).
-	if refreshed.LoadSerializedHead() != nil {
-		t.Fatalf("SerializedHead should be nil after refresh (lazy), got non-nil")
-	}
+	require.Nil(t, refreshed.LoadSerializedHead())
 
 	// Verify that serializeHead(refreshed) produces the correct result.
 	expected := serializeHead(refreshed)
-	if !bytes.Equal(expected, serializeHead(refreshed)) {
-		t.Fatalf("serializeHead not deterministic after 304 refresh")
-	}
-	if !bytes.Contains(expected, []byte("max-age=3600")) {
-		t.Fatalf("serializeHead does not contain updated Cache-Control: %q", expected)
-	}
-	if bytes.Contains(expected, []byte("max-age=60")) {
-		t.Fatalf("serializeHead still contains old Cache-Control value")
-	}
-	if bytes.Contains(expected, []byte("X-Sensitive: secret")) {
-		t.Fatalf("serializeHead contains X-Sensitive header, which should be skipped by no-cache directive: %q", expected)
-	}
+	require.True(t, bytes.Equal(expected, serializeHead(refreshed)))
+	require.True(t, bytes.Contains(expected, []byte("max-age=3600")))
+	require.False(t, bytes.Contains(expected, []byte("max-age=60")))
+	require.False(t, bytes.Contains(expected, []byte("X-Sensitive: secret")))
 }

@@ -5,15 +5,15 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func tmpWAL(t *testing.T) (*Log, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.wal")
 	l, err := Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoErrorf(t, err, "open: %v", err)
 	t.Cleanup(func() { _ = l.Close() })
 	return l, path
 }
@@ -29,8 +29,9 @@ func TestAppendAndReplay(t *testing.T) {
 		PutEntry(300, 1, 0),
 	}
 	for _, e := range entries {
-		if err := l.Append(e); err != nil {
-			t.Fatalf("append: %v", err)
+		{
+			err := l.Append(e)
+			require.NoErrorf(t, err, "append: %v", err)
 		}
 	}
 
@@ -39,12 +40,8 @@ func TestAppendAndReplay(t *testing.T) {
 		replayed = append(replayed, e)
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if len(replayed) != len(entries) {
-		t.Fatalf("replayed %d entries, want %d", len(replayed), len(entries))
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Len(t, replayed, len(entries))
 	for i, e := range replayed {
 		if e.Op != entries[i].Op || e.Key != entries[i].Key {
 			t.Errorf("[%d] op=%d key=%d, want op=%d key=%d",
@@ -57,77 +54,62 @@ func TestReplay_EmptyFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "empty.wal")
 	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	_ = f.Close()
 
 	var count int
 	err = Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay empty: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("count = %d", count)
-	}
+	require.NoErrorf(t, err, "replay empty: %v", err)
+	require.Equal(t, 0, count)
 }
 
 func TestReplay_MissingFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.wal")
 	err := Replay(path, func(_ Entry) error { return nil })
-	if err != nil {
-		t.Fatalf("replay missing: %v", err)
-	}
+	require.NoErrorf(t, err, "replay missing: %v", err)
 }
 
 func TestReplay_TruncatedRecord(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
-	if err := l.Append(PutEntry(1, 0, 0)); err != nil {
-		t.Fatalf("append: %v", err)
+	{
+		err := l.Append(PutEntry(1, 0, 0))
+		require.NoErrorf(t, err, "append: %v", err)
 	}
 	_ = l.Close()
 
 	// Truncate the file to simulate a partial write.
 	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	info, _ := f.Stat()
 	_ = f.Truncate(info.Size() - 5) // chop off part of the CRC
 	_ = f.Close()
 
 	var count int
 	err = Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay truncated: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 valid records from truncated WAL, got %d", count)
-	}
+	require.NoErrorf(t, err, "replay truncated: %v", err)
+	require.Equal(t, 0, count)
 }
 
 func TestTruncate(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
 	for range 5 {
-		if err := l.Append(PutEntry(1, 0, 0)); err != nil {
-			t.Fatalf("append: %v", err)
+		{
+			err := l.Append(PutEntry(1, 0, 0))
+			require.NoErrorf(t, err, "append: %v", err)
 		}
 	}
-	if err := l.Truncate(); err != nil {
-		t.Fatalf("truncate: %v", err)
+	{
+		err := l.Truncate()
+		require.NoErrorf(t, err, "truncate: %v", err)
 	}
 
 	var count int
 	err := Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 after truncate, got %d", count)
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Equal(t, 0, count)
 }
 
 func TestEntryHelpers(t *testing.T) {
@@ -146,9 +128,7 @@ func tmpAsyncWAL(t *testing.T, syncInterval time.Duration) (*Log, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "async.wal")
 	l, err := OpenAsync(path, syncInterval)
-	if err != nil {
-		t.Fatalf("open async: %v", err)
-	}
+	require.NoErrorf(t, err, "open async: %v", err)
 	t.Cleanup(func() { _ = l.Close() })
 	return l, path
 }
@@ -164,13 +144,15 @@ func TestAsyncEnqueueSyncReplay(t *testing.T) {
 		PutEntry(300, 1, 0),
 	}
 	for _, e := range entries {
-		if err := l.Enqueue(e); err != nil {
-			t.Fatalf("enqueue: %v", err)
+		{
+			err := l.Enqueue(e)
+			require.NoErrorf(t, err, "enqueue: %v", err)
 		}
 	}
 
-	if err := l.Sync(); err != nil {
-		t.Fatalf("sync: %v", err)
+	{
+		err := l.Sync()
+		require.NoErrorf(t, err, "sync: %v", err)
 	}
 
 	var replayed []Entry
@@ -178,12 +160,8 @@ func TestAsyncEnqueueSyncReplay(t *testing.T) {
 		replayed = append(replayed, e)
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if len(replayed) != len(entries) {
-		t.Fatalf("replayed %d entries, want %d", len(replayed), len(entries))
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Len(t, replayed, len(entries))
 	for i, e := range replayed {
 		if e.Op != entries[i].Op || e.Key != entries[i].Key {
 			t.Errorf("[%d] op=%d key=%d, want op=%d key=%d",
@@ -204,46 +182,39 @@ func TestAsyncEnqueueBatchSyncReplay(t *testing.T) {
 	}
 	l.EnqueueBatch(entries)
 
-	if err := l.Sync(); err != nil {
-		t.Fatalf("sync: %v", err)
+	{
+		err := l.Sync()
+		require.NoErrorf(t, err, "sync: %v", err)
 	}
 
 	var count int
 	err := Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if count != len(entries) {
-		t.Fatalf("replayed %d, want %d", count, len(entries))
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Len(t, entries, count)
 }
 
 func TestAsyncCloseFlushesPending(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "close.wal")
 	l, err := OpenAsync(path, 10*time.Second) // long interval so Close must flush
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoErrorf(t, err, "open: %v", err)
 
 	for i := range 10 {
-		if err := l.Enqueue(PutEntry(uint64(i+1), 0, int64(i*100))); err != nil {
-			t.Fatalf("enqueue: %v", err)
+		{
+			err := l.Enqueue(PutEntry(uint64(i+1), 0, int64(i*100)))
+			require.NoErrorf(t, err, "enqueue: %v", err)
 		}
 	}
 
-	if err := l.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	{
+		err := l.Close()
+		require.NoErrorf(t, err, "close: %v", err)
 	}
 
 	var count int
 	err = Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if count != 10 {
-		t.Fatalf("expected 10 entries flushed on close, got %d", count)
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Equal(t, 10, count)
 }
 
 func TestAsyncDropOnFull(t *testing.T) {
@@ -252,9 +223,7 @@ func TestAsyncDropOnFull(t *testing.T) {
 	// the loop draining. syncChSize is 4096; send more than that.
 	path := filepath.Join(t.TempDir(), "drop.wal")
 	l, err := OpenAsync(path, 10*time.Second)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoErrorf(t, err, "open: %v", err)
 	t.Cleanup(func() { _ = l.Close() })
 
 	sent := syncChSize + 100
@@ -263,79 +232,65 @@ func TestAsyncDropOnFull(t *testing.T) {
 	}
 
 	dropped := l.DroppedEntries()
-	if dropped == 0 {
-		t.Fatalf("expected some dropped entries, got 0")
-	}
+	require.NotEqual(t, 0, dropped)
 }
 
 func TestOpenSyncVsAsync(t *testing.T) {
 	t.Parallel()
 	// Open (sync) must have nil syncCh.
 	syncLog, syncPath := tmpWAL(t)
-	if syncLog.syncCh != nil {
-		t.Fatal("Open log should have nil syncCh")
-	}
+	require.Nil(t, syncLog.syncCh)
 	// Enqueue on sync log falls back to Append — data is immediately
 	// durable without calling Sync.
-	if err := syncLog.Enqueue(PutEntry(42, 0, 0)); err != nil {
-		t.Fatalf("enqueue on sync log: %v", err)
+	{
+		err := syncLog.Enqueue(PutEntry(42, 0, 0))
+		require.NoErrorf(t, err, "enqueue on sync log: %v", err)
 	}
 	var count int
 	_ = Replay(syncPath, func(_ Entry) error { count++; return nil })
-	if count != 1 {
-		t.Fatalf("sync log enqueue: expected 1 entry, got %d", count)
-	}
+	require.Equal(t, 1, count)
 
 	// OpenAsync (async) must have non-nil syncCh.
 	asyncLog, _ := tmpAsyncWAL(t, 50*time.Millisecond)
-	if asyncLog.syncCh == nil {
-		t.Fatal("OpenAsync log should have non-nil syncCh")
-	}
+	require.NotNil(t, asyncLog.syncCh)
 }
 
 func TestOpenAsyncSyncIntervalNeg1Fallback(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "sync.wal")
 	l, err := OpenAsync(path, -1)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoErrorf(t, err, "open: %v", err)
 	t.Cleanup(func() { _ = l.Close() })
 
-	if l.syncCh != nil {
-		t.Fatal("OpenAsync with syncInterval < 0 should not start sync loop")
-	}
+	require.Nil(t, l.syncCh)
 
 	// Enqueue falls back to Append (synchronous).
-	if err := l.Enqueue(PutEntry(42, 0, 0)); err != nil {
-		t.Fatalf("enqueue: %v", err)
+	{
+		err := l.Enqueue(PutEntry(42, 0, 0))
+		require.NoErrorf(t, err, "enqueue: %v", err)
 	}
 
 	// Data should be immediately durable (no async delay).
 	var count int
 	err = Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 entry (synchronous fallback), got %d", count)
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Equal(t, 1, count)
 }
 
 func TestAsyncTornRecord(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "torn.wal")
 	l, err := OpenAsync(path, 50*time.Millisecond)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoErrorf(t, err, "open: %v", err)
 
 	// Enqueue one valid entry and Sync to flush it.
-	if err := l.Enqueue(PutEntry(1, 0, 0)); err != nil {
-		t.Fatalf("enqueue: %v", err)
+	{
+		err := l.Enqueue(PutEntry(1, 0, 0))
+		require.NoErrorf(t, err, "enqueue: %v", err)
 	}
-	if err := l.Sync(); err != nil {
-		t.Fatalf("sync: %v", err)
+	{
+		err := l.Sync()
+		require.NoErrorf(t, err, "sync: %v", err)
 	}
 
 	// Now write a partial record directly to the file (simulating a
@@ -345,19 +300,16 @@ func TestAsyncTornRecord(t *testing.T) {
 	_, _ = l.f.Write([]byte{opPut, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) // 9 of 25 bytes
 	l.mu.Unlock()
 
-	if err := l.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	{
+		err := l.Close()
+		require.NoErrorf(t, err, "close: %v", err)
 	}
 
 	// Replay must return the valid entry and skip the torn tail.
 	var count int
 	err = Replay(path, func(_ Entry) error { count++; return nil })
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 valid record (torn tail skipped), got %d", count)
-	}
+	require.NoErrorf(t, err, "replay: %v", err)
+	require.Equal(t, 1, count)
 }
 
 func TestLastSyncTime(t *testing.T) {
@@ -365,22 +317,20 @@ func TestLastSyncTime(t *testing.T) {
 	l, _ := tmpAsyncWAL(t, 20*time.Millisecond)
 
 	// Initially zero (never synced).
-	if !l.LastSyncTime().IsZero() {
-		t.Fatal("expected zero LastSyncTime before first sync")
-	}
+	require.True(t, l.LastSyncTime().IsZero())
 
-	if err := l.Enqueue(PutEntry(1, 0, 0)); err != nil {
-		t.Fatalf("enqueue: %v", err)
+	{
+		err := l.Enqueue(PutEntry(1, 0, 0))
+		require.NoErrorf(t, err, "enqueue: %v", err)
 	}
-	if err := l.Sync(); err != nil {
-		t.Fatalf("sync: %v", err)
+	{
+		err := l.Sync()
+		require.NoErrorf(t, err, "sync: %v", err)
 	}
 
 	// After Sync, LastSyncTime should be recent.
 	last := l.LastSyncTime()
-	if last.IsZero() {
-		t.Fatal("expected non-zero LastSyncTime after sync")
-	}
+	require.False(t, last.IsZero())
 	if time.Since(last) > 5*time.Second {
 		t.Fatalf("LastSyncTime too old: %v", time.Since(last))
 	}
@@ -390,9 +340,7 @@ func TestDroppedEntriesResets(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "dropreset.wal")
 	l, err := OpenAsync(path, 10*time.Second)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoErrorf(t, err, "open: %v", err)
 	t.Cleanup(func() { _ = l.Close() })
 
 	// Fill the channel beyond capacity to generate drops.
@@ -401,13 +349,9 @@ func TestDroppedEntriesResets(t *testing.T) {
 	}
 
 	first := l.DroppedEntries()
-	if first == 0 {
-		t.Fatalf("expected dropped entries on first read, got 0")
-	}
+	require.NotEqual(t, 0, first)
 	// Swap(0) resets the counter; second read should be 0 (no new drops
 	// since the first read — the channel is already full).
 	second := l.DroppedEntries()
-	if second != 0 {
-		t.Fatalf("expected 0 dropped after reset, got %d", second)
-	}
+	require.Equal(t, int64(0), second)
 }

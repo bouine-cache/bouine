@@ -4,6 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
@@ -43,9 +46,7 @@ func TestEvaluateEmptyDataNoPanic(t *testing.T) {
 	results := e.Evaluate(t.Context(), InsightData{Config: baseConfig()})
 	// With empty data, some rules may still fire (e.g. CDN not configured).
 	for _, r := range results {
-		if r.ID == "" {
-			t.Error("insight with empty ID returned")
-		}
+		assert.NotEqual(t, "", r.ID)
 	}
 }
 
@@ -120,13 +121,9 @@ func TestRuleCacheLowHitRateEvidenceUsesWorstRoute(t *testing.T) {
 		},
 	}
 	ins := ruleCacheLowHitRate(data)
-	if ins == nil {
-		t.Fatal("expected insight")
-	}
+	require.NotNil(t, ins)
 	// Evidence should reference /slow's request count (200), not /api's (500).
-	if ins.Evidence != "hit%: 25.0, requests: 200" {
-		t.Errorf("evidence: want 'hit%%: 25.0, requests: 200', got %q", ins.Evidence)
-	}
+	assert.Equal(t, "hit%: 25.0, requests: 200", ins.Evidence)
 }
 
 func TestRuleCacheNoNegTTL(t *testing.T) {
@@ -140,16 +137,12 @@ func TestRuleCacheNoNegTTL(t *testing.T) {
 		},
 	}
 	ins := ruleCacheNoNegTTL(data)
-	if ins == nil {
-		t.Fatal("expected insight when errors present and NegativeTTL=0")
-	}
+	require.NotNil(t, ins)
 
 	// No errors → should not fire.
 	data.RouteStats[0].Errors = 0
 	ins = ruleCacheNoNegTTL(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no errors")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleUpstreamUnhealthyTarget(t *testing.T) {
@@ -215,30 +208,20 @@ func TestRuleUpstreamHigh5xx(t *testing.T) {
 		},
 	}
 	ins := ruleUpstreamHigh5xx(data)
-	if ins == nil {
-		t.Fatal("expected insight for 10% 5xx")
-	}
-	if ins.Severity != SeverityHigh {
-		t.Errorf("severity: want HIGH, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity)
 }
 
 func TestRuleCDNNotConfigured(t *testing.T) {
 	t.Parallel()
 	data := InsightData{Config: baseConfig(), CFStatus: CFStatus{Enabled: false}}
 	ins := ruleCDNNotConfigured(data)
-	if ins == nil {
-		t.Fatal("expected insight when CDN not configured")
-	}
-	if ins.Severity != SeverityLow {
-		t.Errorf("severity: want LOW, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityLow, ins.Severity)
 
 	data.CFStatus.Enabled = true
 	ins = ruleCDNNotConfigured(data)
-	if ins != nil {
-		t.Fatal("expected no insight when CDN configured")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleClusterPeerStale(t *testing.T) {
@@ -248,18 +231,12 @@ func TestRuleClusterPeerStale(t *testing.T) {
 		PeerResults: []PeerInfo{{Name: "node-1", Stale: false}, {Name: "node-2", Stale: true}},
 	}
 	ins := ruleClusterPeerStale(data)
-	if ins == nil {
-		t.Fatal("expected insight for stale peer")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	data.PeerResults[1].Stale = false
 	ins = ruleClusterPeerStale(data)
-	if ins != nil {
-		t.Fatal("expected no insight when all peers healthy")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCacheWarmNearFull(t *testing.T) {
@@ -271,18 +248,12 @@ func TestRuleCacheWarmNearFull(t *testing.T) {
 		StoreStats: api.Stats{WarmBytes: 960_000},
 	}
 	ins := ruleCacheWarmNearFull(data)
-	if ins == nil {
-		t.Fatal("expected insight at 95% fill")
-	}
-	if ins.Severity != SeverityHigh {
-		t.Errorf("severity at 95%%: want HIGH, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity)
 
 	data.StoreStats.WarmBytes = 800_000
 	ins = ruleCacheWarmNearFull(data)
-	if ins != nil {
-		t.Fatal("expected no insight at 80% fill")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigJitterZero(t *testing.T) {
@@ -292,15 +263,11 @@ func TestRuleConfigJitterZero(t *testing.T) {
 	cfg.Routes[0].Cache.JitterPercent = 0
 	data := InsightData{Config: cfg}
 	ins := ruleConfigJitterZero(data)
-	if ins == nil {
-		t.Fatal("expected insight for zero jitter with TTL")
-	}
+	require.NotNil(t, ins)
 
 	cfg.Routes[0].Cache.JitterPercent = 10
 	ins = ruleConfigJitterZero(data)
-	if ins != nil {
-		t.Fatal("expected no insight when jitter set")
-	}
+	require.Nil(t, ins)
 }
 
 func TestEvaluateSortsBySeverity(t *testing.T) {
@@ -337,37 +304,25 @@ func TestRuleCacheNoCacheControl(t *testing.T) {
 		},
 	}
 	ins := ruleUpstreamNoCacheControl(data)
-	if ins == nil {
-		t.Fatal("expected insight for 70% missing Cache-Control")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	// Below sample threshold.
 	data.HeaderAudit["api-pool"] = observability.HeaderAuditSummary{SampleCount: 10}
 	ins = ruleUpstreamNoCacheControl(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 50 samples")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCacheVaryExplosion(t *testing.T) {
 	t.Parallel()
 	data := InsightData{Config: baseConfig(), VaryCapHits: 5}
 	ins := ruleCacheVaryExplosion(data)
-	if ins == nil {
-		t.Fatal("expected insight for Vary cap hits")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	data.VaryCapHits = 0
 	ins = ruleCacheVaryExplosion(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no Vary cap hits")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleAnomalyBypassFlood(t *testing.T) {
@@ -379,18 +334,12 @@ func TestRuleAnomalyBypassFlood(t *testing.T) {
 		},
 	}
 	ins := ruleAnomalyBypassFlood(data)
-	if ins == nil {
-		t.Fatal("expected insight for 60% bypass rate")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	data.RequestBuckets[0].Bypasses = 10
 	ins = ruleAnomalyBypassFlood(data)
-	if ins != nil {
-		t.Fatal("expected no insight at 10% bypass")
-	}
+	require.Nil(t, ins)
 }
 
 // ── Tier 1 tests ─────────────────────────────────────────────────────
@@ -402,24 +351,16 @@ func TestRuleConfigTLSBelow12(t *testing.T) {
 	cfg.TLS.MinVersion = "1.0"
 	data := InsightData{Config: cfg}
 	ins := ruleConfigTLSBelow12(data)
-	if ins == nil {
-		t.Fatal("expected insight for TLS 1.0")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	cfg.TLS.MinVersion = "1.2"
 	ins = ruleConfigTLSBelow12(data)
-	if ins != nil {
-		t.Fatal("expected no insight for TLS 1.2")
-	}
+	require.Nil(t, ins)
 
 	cfg.TLS.MinVersion = ""
 	ins = ruleConfigTLSBelow12(data)
-	if ins != nil {
-		t.Fatal("expected no insight when min version unset")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigTracingSamplingZero(t *testing.T) {
@@ -429,22 +370,16 @@ func TestRuleConfigTracingSamplingZero(t *testing.T) {
 	cfg.Tracing.SamplingRate = 0
 	data := InsightData{Config: cfg}
 	ins := ruleConfigTracingSamplingZero(data)
-	if ins == nil {
-		t.Fatal("expected insight for zero sampling with endpoint")
-	}
+	require.NotNil(t, ins)
 
 	cfg.Tracing.SamplingRate = 0.5
 	ins = ruleConfigTracingSamplingZero(data)
-	if ins != nil {
-		t.Fatal("expected no insight when sampling > 0")
-	}
+	require.Nil(t, ins)
 
 	cfg.Tracing.Endpoint = ""
 	cfg.Tracing.SamplingRate = 0
 	ins = ruleConfigTracingSamplingZero(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no endpoint")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigClusterJoinNoListener(t *testing.T) {
@@ -453,25 +388,17 @@ func TestRuleConfigClusterJoinNoListener(t *testing.T) {
 	cfg.Cluster.Join = []string{"node-1:7946"}
 	data := InsightData{Config: cfg}
 	ins := ruleConfigClusterJoinNoListener(data)
-	if ins == nil {
-		t.Fatal("expected insight when join addresses set but no cluster listener")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	cfg.Listen.Cluster = ":8443"
 	ins = ruleConfigClusterJoinNoListener(data)
-	if ins != nil {
-		t.Fatal("expected no insight when cluster listener is set")
-	}
+	require.Nil(t, ins)
 
 	cfg.Listen.Cluster = ""
 	cfg.Cluster.Join = nil
 	ins = ruleConfigClusterJoinNoListener(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no join addresses")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigPoolNoTimeout(t *testing.T) {
@@ -480,18 +407,12 @@ func TestRuleConfigPoolNoTimeout(t *testing.T) {
 	cfg.UpstreamPools[0].Connect.Timeout = 0
 	data := InsightData{Config: cfg}
 	ins := ruleConfigPoolNoTimeout(data)
-	if ins == nil {
-		t.Fatal("expected insight for no connect timeout")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	cfg.UpstreamPools[0].Connect.Timeout = 5 * time.Second
 	ins = ruleConfigPoolNoTimeout(data)
-	if ins != nil {
-		t.Fatal("expected no insight when timeout set")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigPoolNoMaxConnections(t *testing.T) {
@@ -500,15 +421,11 @@ func TestRuleConfigPoolNoMaxConnections(t *testing.T) {
 	cfg.UpstreamPools[0].Connect.MaxConnections = 0
 	data := InsightData{Config: cfg}
 	ins := ruleConfigPoolNoMaxConnections(data)
-	if ins == nil {
-		t.Fatal("expected insight for no max connections")
-	}
+	require.NotNil(t, ins)
 
 	cfg.UpstreamPools[0].Connect.MaxConnections = 100
 	ins = ruleConfigPoolNoMaxConnections(data)
-	if ins != nil {
-		t.Fatal("expected no insight when max connections set")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigMaxObjectSizeUnset(t *testing.T) {
@@ -517,15 +434,11 @@ func TestRuleConfigMaxObjectSizeUnset(t *testing.T) {
 	cfg.Routes[0].Cache.MaxObjectSize = 0
 	data := InsightData{Config: cfg}
 	ins := ruleConfigMaxObjectSizeUnset(data)
-	if ins == nil {
-		t.Fatal("expected insight for no max object size")
-	}
+	require.NotNil(t, ins)
 
 	cfg.Routes[0].Cache.MaxObjectSize = 1048576
 	ins = ruleConfigMaxObjectSizeUnset(data)
-	if ins != nil {
-		t.Fatal("expected no insight when max object size set")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigRouteStripsCacheHeaders(t *testing.T) {
@@ -534,18 +447,12 @@ func TestRuleConfigRouteStripsCacheHeaders(t *testing.T) {
 	cfg.Routes[0].Response.HeaderRemove = []string{header.CacheControl, "X-Custom"}
 	data := InsightData{Config: cfg}
 	ins := ruleConfigRouteStripsCacheHeaders(data)
-	if ins == nil {
-		t.Fatal("expected insight for stripping Cache-Control")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	cfg.Routes[0].Response.HeaderRemove = []string{"X-Custom"}
 	ins = ruleConfigRouteStripsCacheHeaders(data)
-	if ins != nil {
-		t.Fatal("expected no insight when only non-cache headers removed")
-	}
+	require.Nil(t, ins)
 }
 
 // ── Tier 2 tests ─────────────────────────────────────────────────────
@@ -559,24 +466,16 @@ func TestRuleCacheHighEvictionRate(t *testing.T) {
 		PrevStoreStats: api.Stats{HotEntries: 200, Evictions: 10},
 	}
 	ins := ruleCacheHighEvictionRate(data)
-	if ins == nil {
-		t.Fatal("expected insight for 10% eviction rate")
-	}
-	if ins.Severity != SeverityHigh {
-		t.Errorf("severity: want HIGH, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity)
 
 	data.StoreStats.Evictions = 16 // 3% ratio
 	ins = ruleCacheHighEvictionRate(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 5% eviction")
-	}
+	require.Nil(t, ins)
 
 	data.StoreStats.HotEntries = 50
 	ins = ruleCacheHighEvictionRate(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 100 hot entries")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCacheStaleHitRatioHigh(t *testing.T) {
@@ -588,15 +487,11 @@ func TestRuleCacheStaleHitRatioHigh(t *testing.T) {
 		},
 	}
 	ins := ruleCacheStaleHitRatioHigh(data)
-	if ins == nil {
-		t.Fatal("expected insight for 25% stale ratio")
-	}
+	require.NotNil(t, ins)
 
 	data.RequestBuckets[0].StaleHits = 10 // 5%
 	ins = ruleCacheStaleHitRatioHigh(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 20% stale ratio")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCacheSWRConfiguredButUnused(t *testing.T) {
@@ -610,22 +505,16 @@ func TestRuleCacheSWRConfiguredButUnused(t *testing.T) {
 		},
 	}
 	ins := ruleCacheSWRConfiguredButUnused(data)
-	if ins == nil {
-		t.Fatal("expected insight for SWR configured but 0 stale hits")
-	}
+	require.NotNil(t, ins)
 
 	data.RequestBuckets[0].StaleHits = 5
 	ins = ruleCacheSWRConfiguredButUnused(data)
-	if ins != nil {
-		t.Fatal("expected no insight when stale hits > 0")
-	}
+	require.Nil(t, ins)
 
 	data.RequestBuckets[0].StaleHits = 0
 	data.RequestBuckets[0].Misses = 50
 	ins = ruleCacheSWRConfiguredButUnused(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 100 misses")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleAnomalyLatencyP99Spike(t *testing.T) {
@@ -643,21 +532,15 @@ func TestRuleAnomalyLatencyP99Spike(t *testing.T) {
 	buckets[6] = observability.RequestBucket{LatHist: highHist}
 	data := InsightData{Config: baseConfig(), RequestBuckets: buckets}
 	ins := ruleAnomalyLatencyP99Spike(data)
-	if ins == nil {
-		t.Fatal("expected insight for p99 spike")
-	}
-	if ins.Severity != SeverityHigh {
-		t.Errorf("severity: want HIGH for >3x spike, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity)
 
 	// No spike — all same latency.
 	for i := range 7 {
 		buckets[i] = observability.RequestBucket{LatHist: lowHist}
 	}
 	ins = ruleAnomalyLatencyP99Spike(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no spike")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleAnomalyRevalidationStorm(t *testing.T) {
@@ -669,15 +552,11 @@ func TestRuleAnomalyRevalidationStorm(t *testing.T) {
 	buckets[6] = observability.RequestBucket{Revalidated: 50}
 	data := InsightData{Config: baseConfig(), RequestBuckets: buckets}
 	ins := ruleAnomalyRevalidationStorm(data)
-	if ins == nil {
-		t.Fatal("expected insight for 5x revalidation spike")
-	}
+	require.NotNil(t, ins)
 
 	buckets[6].Revalidated = 15 // 1.5x
 	ins = ruleAnomalyRevalidationStorm(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 3x spike")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleUpstreamTargetErrorStreak(t *testing.T) {
@@ -690,22 +569,16 @@ func TestRuleUpstreamTargetErrorStreak(t *testing.T) {
 	}
 	data.PoolHealth["p"][0].ConsecutiveErrors = 5
 	ins := ruleUpstreamTargetErrorStreak(data)
-	if ins == nil {
-		t.Fatal("expected insight for 5 consecutive errors while healthy")
-	}
+	require.NotNil(t, ins)
 
 	data.PoolHealth["p"][0].ConsecutiveErrors = 2
 	ins = ruleUpstreamTargetErrorStreak(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 5 errors")
-	}
+	require.Nil(t, ins)
 
 	data.PoolHealth["p"][0].ConsecutiveErrors = 5
 	data.PoolHealth["p"][0].Healthy = false
 	ins = ruleUpstreamTargetErrorStreak(data)
-	if ins != nil {
-		t.Fatal("expected no insight when target already unhealthy")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCacheHotTierCritical(t *testing.T) {
@@ -717,18 +590,12 @@ func TestRuleCacheHotTierCritical(t *testing.T) {
 		StoreStats: api.Stats{HotBytes: 960_000},
 	}
 	ins := ruleCacheHotTierCritical(data)
-	if ins == nil {
-		t.Fatal("expected insight at 96% hot tier fill")
-	}
-	if ins.Severity != SeverityHigh {
-		t.Errorf("severity: want HIGH, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity)
 
 	data.StoreStats.HotBytes = 800_000
 	ins = ruleCacheHotTierCritical(data)
-	if ins != nil {
-		t.Fatal("expected no insight below 95%")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCacheWarmEntriesZero(t *testing.T) {
@@ -740,22 +607,16 @@ func TestRuleCacheWarmEntriesZero(t *testing.T) {
 		StoreStats: api.Stats{WarmEntries: 0},
 	}
 	ins := ruleCacheWarmEntriesZero(data)
-	if ins == nil {
-		t.Fatal("expected insight for warm tier configured but empty")
-	}
+	require.NotNil(t, ins)
 
 	data.StoreStats.WarmEntries = 10
 	ins = ruleCacheWarmEntriesZero(data)
-	if ins != nil {
-		t.Fatal("expected no insight when warm entries > 0")
-	}
+	require.Nil(t, ins)
 
 	cfg.Storage.WarmMaxBytes = 0
 	data.StoreStats.WarmEntries = 0
 	ins = ruleCacheWarmEntriesZero(data)
-	if ins != nil {
-		t.Fatal("expected no insight when warm tier not configured")
-	}
+	require.Nil(t, ins)
 }
 
 // ── Tier 3 tests ─────────────────────────────────────────────────────
@@ -764,18 +625,12 @@ func TestRuleClusterBroadcastFailures(t *testing.T) {
 	t.Parallel()
 	data := InsightData{Config: baseConfig(), BroadcastFailures: 5}
 	ins := ruleClusterBroadcastFailures(data)
-	if ins == nil {
-		t.Fatal("expected insight for broadcast failures")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	data.BroadcastFailures = 0
 	ins = ruleClusterBroadcastFailures(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no failures")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCDNLastError(t *testing.T) {
@@ -785,37 +640,27 @@ func TestRuleCDNLastError(t *testing.T) {
 		CFStatus: CFStatus{Enabled: true, LastError: "rate limited"},
 	}
 	ins := ruleCDNLastError(data)
-	if ins == nil {
-		t.Fatal("expected insight for CF last error")
-	}
+	require.NotNil(t, ins)
 
 	data.CFStatus.LastError = ""
 	ins = ruleCDNLastError(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no error")
-	}
+	require.Nil(t, ins)
 
 	data.CFStatus.LastError = "rate limited"
 	data.CFStatus.Enabled = false
 	ins = ruleCDNLastError(data)
-	if ins != nil {
-		t.Fatal("expected no insight when CF disabled")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleCDNPurgeSkipped(t *testing.T) {
 	t.Parallel()
 	data := InsightData{Config: baseConfig(), CFPurgeSkipped: 3}
 	ins := ruleCDNPurgeSkipped(data)
-	if ins == nil {
-		t.Fatal("expected insight for skipped purges")
-	}
+	require.NotNil(t, ins)
 
 	data.CFPurgeSkipped = 0
 	ins = ruleCDNPurgeSkipped(data)
-	if ins != nil {
-		t.Fatal("expected no insight when no purges skipped")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleConfigPoolPassiveEjectForever(t *testing.T) {
@@ -825,25 +670,17 @@ func TestRuleConfigPoolPassiveEjectForever(t *testing.T) {
 	cfg.UpstreamPools[0].Health.Active.Path = ""
 	data := InsightData{Config: cfg}
 	ins := ruleConfigPoolPassiveEjectForever(data)
-	if ins == nil {
-		t.Fatal("expected insight for passive eject forever")
-	}
-	if ins.Severity != SeverityMed {
-		t.Errorf("severity: want MED, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityMed, ins.Severity)
 
 	cfg.UpstreamPools[0].Health.Passive.EjectFor = 30 * time.Second
 	ins = ruleConfigPoolPassiveEjectForever(data)
-	if ins != nil {
-		t.Fatal("expected no insight when EjectFor set")
-	}
+	require.Nil(t, ins)
 
 	cfg.UpstreamPools[0].Health.Passive.EjectFor = 0
 	cfg.UpstreamPools[0].Health.Active.Path = "/health"
 	ins = ruleConfigPoolPassiveEjectForever(data)
-	if ins != nil {
-		t.Fatal("expected no insight when active health check configured")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleClusterPeerHealthDegraded(t *testing.T) {
@@ -855,15 +692,11 @@ func TestRuleClusterPeerHealthDegraded(t *testing.T) {
 		},
 	}
 	ins := ruleClusterPeerHealthDegraded(data)
-	if ins == nil {
-		t.Fatal("expected insight for degraded peer uptime")
-	}
+	require.NotNil(t, ins)
 
 	data.PeerHealth["node-1"] = 95.0
 	ins = ruleClusterPeerHealthDegraded(data)
-	if ins != nil {
-		t.Fatal("expected no insight when uptime >= 90%")
-	}
+	require.Nil(t, ins)
 }
 
 func TestRuleUpstreamPoolNoTraffic(t *testing.T) {
@@ -877,18 +710,12 @@ func TestRuleUpstreamPoolNoTraffic(t *testing.T) {
 		},
 	}
 	ins := ruleUpstreamPoolNoTraffic(data)
-	if ins == nil {
-		t.Fatal("expected insight for pool with no traffic")
-	}
-	if ins.Severity != SeverityLow {
-		t.Errorf("severity: want LOW, got %s", ins.Severity)
-	}
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityLow, ins.Severity)
 
 	// All pools have traffic → no insight.
 	cfg.UpstreamPools = cfg.UpstreamPools[:1]
 	data.Config = cfg
 	ins = ruleUpstreamPoolNoTraffic(data)
-	if ins != nil {
-		t.Fatal("expected no insight when all pools have traffic")
-	}
+	require.Nil(t, ins)
 }

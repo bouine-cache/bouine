@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_DefaultsToInfoJSON(t *testing.T) {
@@ -16,14 +19,13 @@ func TestNew_DefaultsToInfoJSON(t *testing.T) {
 	log.Info("hello", "k", "v")
 
 	out := strings.TrimSpace(buf.String())
-	if strings.Contains(out, "hidden") {
-		t.Fatalf("debug should not appear at default level: %q", out)
-	}
+	require.False(t, strings.Contains(out, "hidden"))
 
 	// JSON parse the info line.
 	var rec map[string]any
-	if err := json.Unmarshal([]byte(out), &rec); err != nil {
-		t.Fatalf("expected JSON output, got %q: %v", out, err)
+	{
+		err := json.Unmarshal([]byte(out), &rec)
+		require.NoErrorf(t, err, "expected JSON output, got %q: %v", out, err)
 	}
 	if rec["msg"] != "hello" || rec["k"] != "v" {
 		t.Fatalf("unexpected record: %v", rec)
@@ -36,9 +38,7 @@ func TestNew_TextFormat(t *testing.T) {
 	log := New(Options{Format: "text", Output: &buf})
 	log.Info("plain")
 
-	if !strings.Contains(buf.String(), "msg=plain") {
-		t.Fatalf("expected text format, got %q", buf.String())
-	}
+	require.Contains(t, buf.String(), "msg=plain")
 }
 
 func TestParseLevel(t *testing.T) {
@@ -57,8 +57,6 @@ func TestParseLevel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got := parseLevel(tc.in).String()
-		if got != tc.want {
-			t.Errorf("parseLevel(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		assert.Equal(t, tc.want, got)
 	}
 }

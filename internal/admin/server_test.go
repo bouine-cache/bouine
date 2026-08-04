@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -39,34 +42,27 @@ func TestHealthz(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/healthz")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 	var got map[string]string
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &got)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if got["status"] != "ok" {
-		t.Fatalf("status field = %q, want ok", got["status"])
-	}
+	require.Equal(t, "ok", got["status"])
 }
 
 func TestReadyz_Ready(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, _ := get(t, s, "/readyz")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 }
 
 func TestReadyz_NotReady(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return false })
 	status, _ := get(t, s, "/readyz")
-	if status != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", status)
-	}
+	require.Equal(t, http.StatusServiceUnavailable, status)
 }
 
 func TestReadyz_Detail_NotReady(t *testing.T) {
@@ -82,23 +78,16 @@ func TestReadyz_Detail_NotReady(t *testing.T) {
 		},
 	})
 	status, body := get(t, s, "/readyz?detail=1")
-	if status != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", status)
-	}
+	require.Equal(t, http.StatusServiceUnavailable, status)
 	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &resp)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if resp["status"] != "not-ready" {
-		t.Fatalf("status = %v, want not-ready", resp["status"])
-	}
+	require.Equal(t, "not-ready", resp["status"])
 	conds, ok := resp["conditions"].([]any)
-	if !ok {
-		t.Fatal("missing conditions array")
-	}
-	if len(conds) != 2 {
-		t.Fatalf("expected 2 conditions, got %d", len(conds))
-	}
+	require.True(t, ok)
+	require.Len(t, conds, 2)
 }
 
 func TestReadyz_Detail_Ready(t *testing.T) {
@@ -114,55 +103,39 @@ func TestReadyz_Detail_Ready(t *testing.T) {
 		},
 	})
 	status, body := get(t, s, "/readyz?detail=1")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &resp)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if resp["status"] != "ready" {
-		t.Fatalf("status = %v, want ready", resp["status"])
-	}
+	require.Equal(t, "ready", resp["status"])
 	conds, ok := resp["conditions"].([]any)
-	if !ok {
-		t.Fatal("missing conditions array")
-	}
-	if len(conds) != 2 {
-		t.Fatalf("expected 2 conditions, got %d", len(conds))
-	}
+	require.True(t, ok)
+	require.Len(t, conds, 2)
 }
 
 func TestReadyz_Detail_NoConditionsFn(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, body := get(t, s, "/readyz?detail=1")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 	var resp map[string]any
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &resp)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
 	conds, ok := resp["conditions"].([]any)
-	if !ok {
-		t.Fatal("missing conditions array")
-	}
-	if len(conds) != 0 {
-		t.Fatalf("expected 0 conditions, got %d", len(conds))
-	}
+	require.True(t, ok)
+	require.Len(t, conds, 0)
 }
 
 func TestVersion(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/version")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !bytes.Contains(body, []byte("version")) {
-		t.Fatalf("missing version field: %s", body)
-	}
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, bytes.Contains(body, []byte("version")))
 }
 
 func TestMetrics_Mounted(t *testing.T) {
@@ -173,12 +146,8 @@ func TestMetrics_Mounted(t *testing.T) {
 		Metrics: m,
 	})
 	status, body := get(t, s, "/metrics")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !bytes.Contains(body, []byte("go_info")) {
-		t.Fatalf("expected go_info metric, got: %s", body[:min(len(body), 200)])
-	}
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, bytes.Contains(body, []byte("go_info")))
 }
 
 func TestAuth_WriteRequiresToken(t *testing.T) {
@@ -195,9 +164,7 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 		bytes.NewBufferString(`{"url":"https://example.com/"}`))
 	req.Header.Set(header.ContentType, "application/json")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("no token: got %d, want 401", rr.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
 
 	// Write with wrong token → 401.
 	rr = httptest.NewRecorder()
@@ -206,9 +173,7 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	req.Header.Set(header.ContentType, "application/json")
 	req.Header.Set(header.Authorization, "Bearer wrong")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong token: got %d, want 401", rr.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
 
 	// Write with correct token → 200.
 	rr = httptest.NewRecorder()
@@ -217,9 +182,7 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	req.Header.Set(header.ContentType, "application/json")
 	req.Header.Set(header.Authorization, "Bearer secret")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("correct token: got %d, want 200", rr.Code)
-	}
+	require.Equal(t, http.StatusOK, rr.Code)
 }
 
 func TestAuth_ReadEndpointsExempt(t *testing.T) {
@@ -233,9 +196,7 @@ func TestAuth_ReadEndpointsExempt(t *testing.T) {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
 		s.Handler().ServeHTTP(rr, req)
-		if rr.Code == http.StatusUnauthorized {
-			t.Errorf("%s returned 401 (should be exempt)", path)
-		}
+		assert.NotEqual(t, http.StatusUnauthorized, rr.Code)
 	}
 }
 
@@ -255,11 +216,10 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/peer/metrics", nil)
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("exempt path: got %d, want 200", rr.Code)
-	}
-	if body := rr.Body.String(); body != "{}" {
-		t.Fatalf("response body: want {}, got %q", body)
+	require.Equal(t, http.StatusOK, rr.Code)
+	{
+		body := rr.Body.String()
+		require.Equal(t, "{}", body)
 	}
 }
 
@@ -267,16 +227,13 @@ func TestDrain_NoDrainFn(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, body := get(t, s, "/drain")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 	var got map[string]string
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &got)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if got["status"] != "drained" {
-		t.Fatalf("status field = %q, want drained", got["status"])
-	}
+	require.Equal(t, "drained", got["status"])
 }
 
 func TestDrain_CallsDrainFn(t *testing.T) {
@@ -288,12 +245,8 @@ func TestDrain_CallsDrainFn(t *testing.T) {
 		DrainFn: func() { called = true },
 	})
 	status, _ := get(t, s, "/drain")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !called {
-		t.Fatal("expected DrainFn to be called")
-	}
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, called)
 }
 
 // TestDrain_LongDrainFnSurvivesWriteTimeout verifies that the /drain
@@ -319,33 +272,24 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	s.inner.WriteTimeout = 50 * time.Millisecond
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoErrorf(t, err, "listen: %v", err)
 	defer ln.Close()
 
 	go s.inner.Serve(ln)
 	defer s.inner.Close()
 
 	resp, err := http.Get("http://" + ln.Addr().String() + "/drain")
-	if err != nil {
-		t.Fatalf("drain request failed (write timeout killed connection): %v", err)
-	}
+	require.NoErrorf(t, err, "drain request failed (write timeout killed connection): %v", err)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
+	require.NoErrorf(t, err, "read body: %v", err)
 	var got map[string]string
-	if err := json.Unmarshal(body, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(body, &got)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if got["status"] != "drained" {
-		t.Fatalf("status field = %q, want drained", got["status"])
-	}
+	require.Equal(t, "drained", got["status"])
 
 	// DrainFn must have been called synchronously — the response is
 	// only written after it returns, so the channel must already be
@@ -376,12 +320,8 @@ func TestPurge_EmptyURL(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, body := postWithToken(t, s, "/v1/purge", `{}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
-	if !bytes.Contains(body, []byte("url field is required")) {
-		t.Fatalf("expected url error, got: %s", body)
-	}
+	require.Equal(t, http.StatusBadRequest, code)
+	require.True(t, bytes.Contains(body, []byte("url field is required")))
 }
 
 func TestPurge_UnknownField(t *testing.T) {
@@ -391,10 +331,8 @@ func TestPurge_UnknownField(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	code, body := postWithToken(t, s, "/v1/purge", `{"patdddh_regex":"^/reviews/"}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
+	code, _ := postWithToken(t, s, "/v1/purge", `{"patdddh_regex":"^/reviews/"}`)
+	require.Equal(t, http.StatusBadRequest, code)
 }
 
 func TestPurge_MalformedJSON(t *testing.T) {
@@ -405,9 +343,7 @@ func TestPurge_MalformedJSON(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge", `{not json`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400", code)
-	}
+	require.Equal(t, http.StatusBadRequest, code)
 }
 
 func TestPurge_Valid(t *testing.T) {
@@ -417,10 +353,8 @@ func TestPurge_Valid(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	code, body := postWithToken(t, s, "/v1/purge", `{"url":"https://example.com/reviews/1"}`)
-	if code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", code, body)
-	}
+	code, _ := postWithToken(t, s, "/v1/purge", `{"url":"https://example.com/reviews/1"}`)
+	require.Equal(t, http.StatusOK, code)
 }
 
 func TestRefresh_EmptyURL(t *testing.T) {
@@ -431,12 +365,8 @@ func TestRefresh_EmptyURL(t *testing.T) {
 		RefreshFn: func(_ api.Key) error { return nil },
 	})
 	code, body := postWithToken(t, s, "/v1/refresh", `{}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
-	if !bytes.Contains(body, []byte("url field is required")) {
-		t.Fatalf("expected url error, got: %s", body)
-	}
+	require.Equal(t, http.StatusBadRequest, code)
+	require.True(t, bytes.Contains(body, []byte("url field is required")))
 }
 
 func TestRefresh_UnknownField(t *testing.T) {
@@ -446,10 +376,8 @@ func TestRefresh_UnknownField(t *testing.T) {
 		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		RefreshFn: func(_ api.Key) error { return nil },
 	})
-	code, body := postWithToken(t, s, "/v1/refresh", `{"patdddh_regex":"^/reviews/"}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
+	code, _ := postWithToken(t, s, "/v1/refresh", `{"patdddh_regex":"^/reviews/"}`)
+	require.Equal(t, http.StatusBadRequest, code)
 }
 
 func TestRefresh_Valid(t *testing.T) {
@@ -459,10 +387,8 @@ func TestRefresh_Valid(t *testing.T) {
 		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		RefreshFn: func(_ api.Key) error { return nil },
 	})
-	code, body := postWithToken(t, s, "/v1/refresh", `{"url":"https://example.com/reviews/1"}`)
-	if code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", code, body)
-	}
+	code, _ := postWithToken(t, s, "/v1/refresh", `{"url":"https://example.com/reviews/1"}`)
+	require.Equal(t, http.StatusOK, code)
 }
 
 func TestBan_EmptyExpr(t *testing.T) {
@@ -473,12 +399,8 @@ func TestBan_EmptyExpr(t *testing.T) {
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
 	})
 	code, body := postWithToken(t, s, "/v1/ban", `{}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
-	if !bytes.Contains(body, []byte("at least one of")) {
-		t.Fatalf("expected predicate error, got: %s", body)
-	}
+	require.Equal(t, http.StatusBadRequest, code)
+	require.True(t, bytes.Contains(body, []byte("at least one of")))
 }
 
 func TestBan_UnknownField(t *testing.T) {
@@ -488,10 +410,8 @@ func TestBan_UnknownField(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
 	})
-	code, body := postWithToken(t, s, "/v1/ban", `{"patdddh_regex":"^/reviews/"}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
+	code, _ := postWithToken(t, s, "/v1/ban", `{"patdddh_regex":"^/reviews/"}`)
+	require.Equal(t, http.StatusBadRequest, code)
 }
 
 func TestBan_Valid(t *testing.T) {
@@ -502,12 +422,8 @@ func TestBan_Valid(t *testing.T) {
 		BanFn:  func(_ api.BanExpr) (int, error) { return 42, nil },
 	})
 	code, body := postWithToken(t, s, "/v1/ban", `{"path_regex":"^/reviews/"}`)
-	if code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", code, body)
-	}
-	if !bytes.Contains(body, []byte("42")) {
-		t.Fatalf("expected count 42 in response, got: %s", body)
-	}
+	require.Equal(t, http.StatusOK, code)
+	require.True(t, bytes.Contains(body, []byte("42")))
 }
 
 func TestPurgeBatch_Success(t *testing.T) {
@@ -523,18 +439,10 @@ func TestPurgeBatch_Success(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	if code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", code, respBody)
-	}
-	if len(purgedKeys) != 3 {
-		t.Fatalf("expected 3 purged keys, got %d", len(purgedKeys))
-	}
-	if !bytes.Contains(respBody, []byte(`"count":3`)) {
-		t.Fatalf("expected count 3, got: %s", respBody)
-	}
-	if !bytes.Contains(respBody, []byte(`"failed":0`)) {
-		t.Fatalf("expected failed 0, got: %s", respBody)
-	}
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, purgedKeys, 3)
+	require.True(t, bytes.Contains(respBody, []byte(`"count":3`)))
+	require.True(t, bytes.Contains(respBody, []byte(`"failed":0`)))
 }
 
 func TestPurgeBatch_PartialFailure(t *testing.T) {
@@ -551,15 +459,9 @@ func TestPurgeBatch_PartialFailure(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	if code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", code, respBody)
-	}
-	if !bytes.Contains(respBody, []byte(`"count":2`)) {
-		t.Fatalf("expected count 2 (one failed), got: %s", respBody)
-	}
-	if !bytes.Contains(respBody, []byte(`"failed":1`)) {
-		t.Fatalf("expected failed 1, got: %s", respBody)
-	}
+	require.Equal(t, http.StatusOK, code)
+	require.True(t, bytes.Contains(respBody, []byte(`"count":2`)))
+	require.True(t, bytes.Contains(respBody, []byte(`"failed":1`)))
 }
 
 func TestPurgeBatch_Empty(t *testing.T) {
@@ -569,10 +471,8 @@ func TestPurgeBatch_Empty(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	code, body := postWithToken(t, s, "/v1/purge/batch", `{"urls":[]}`)
-	if code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400: %s", code, body)
-	}
+	code, _ := postWithToken(t, s, "/v1/purge/batch", `{"urls":[]}`)
+	require.Equal(t, http.StatusBadRequest, code)
 }
 
 func TestPurgeBatch_ExceedsMax(t *testing.T) {
@@ -584,10 +484,8 @@ func TestPurgeBatch_ExceedsMax(t *testing.T) {
 		MaxBatchSize: 2,
 	})
 	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
-	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	if code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("got %d, want 413: %s", code, respBody)
-	}
+	code, _ := postWithToken(t, s, "/v1/purge/batch", body)
+	require.Equal(t, http.StatusRequestEntityTooLarge, code)
 }
 
 func TestAuthCheck_WithToken(t *testing.T) {
@@ -598,17 +496,13 @@ func TestAuthCheck_WithToken(t *testing.T) {
 	})
 	// Without token → 401.
 	status, _ := get(t, s, "/v1/auth/check")
-	if status != http.StatusUnauthorized {
-		t.Fatalf("no token: got %d, want 401", status)
-	}
+	require.Equal(t, http.StatusUnauthorized, status)
 	// With token → 200.
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/auth/check", nil)
 	req.Header.Set(header.Authorization, "Bearer secret")
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("with token: got %d, want 200", rr.Code)
-	}
+	require.Equal(t, http.StatusOK, rr.Code)
 }
 
 func TestRateLimit_PostRejected(t *testing.T) {
@@ -621,19 +515,13 @@ func TestRateLimit_PostRejected(t *testing.T) {
 	})
 	// First POST succeeds (consumes the single token).
 	code, _ := postWithToken(t, s, "/v1/purge", `{"url":"https://a.com/"}`)
-	if code != http.StatusOK {
-		t.Fatalf("first POST: got %d, want 200", code)
-	}
+	require.Equal(t, http.StatusOK, code)
 	// Second POST immediately → 429 (bucket empty, refill not yet).
-	code, body := postWithToken(t, s, "/v1/purge", `{"url":"https://b.com/"}`)
-	if code != http.StatusTooManyRequests {
-		t.Fatalf("second POST: got %d, want 429: %s", code, body)
-	}
+	code, _ = postWithToken(t, s, "/v1/purge", `{"url":"https://b.com/"}`)
+	require.Equal(t, http.StatusTooManyRequests, code)
 	// GET still works (rate limiter skips GET).
 	status, _ := get(t, s, "/healthz")
-	if status != http.StatusOK {
-		t.Fatalf("GET during rate limit: got %d, want 200", status)
-	}
+	require.Equal(t, http.StatusOK, status)
 }
 
 // --- pprof tests ---
@@ -649,9 +537,7 @@ func TestPprof_DisabledByDefault(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/debug/pprof/heap", nil)
 	req.Header.Set(header.Authorization, "Bearer secret")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("pprof disabled: got %d, want 404", rr.Code)
-	}
+	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestPprof_Enabled_HeapDebug(t *testing.T) {
@@ -661,12 +547,8 @@ func TestPprof_Enabled_HeapDebug(t *testing.T) {
 		PprofEnabled: true,
 	})
 	code, body := get(t, s, "/debug/pprof/heap?debug=1")
-	if code != http.StatusOK {
-		t.Fatalf("heap pprof: got %d, want 200", code)
-	}
-	if !bytes.Contains(body, []byte("heap")) {
-		t.Fatalf("heap pprof: body does not contain 'heap': %s", body[:min(len(body), 200)])
-	}
+	require.Equal(t, http.StatusOK, code)
+	require.True(t, bytes.Contains(body, []byte("heap")))
 }
 
 func TestPprof_NoAuthRequired(t *testing.T) {
@@ -678,9 +560,7 @@ func TestPprof_NoAuthRequired(t *testing.T) {
 	})
 	// No Authorization header — pprof must still be reachable.
 	code, _ := get(t, s, "/debug/pprof/heap?debug=1")
-	if code != http.StatusOK {
-		t.Fatalf("pprof without auth: got %d, want 200", code)
-	}
+	require.Equal(t, http.StatusOK, code)
 }
 
 func TestPprof_GoroutineDebug(t *testing.T) {
@@ -690,12 +570,8 @@ func TestPprof_GoroutineDebug(t *testing.T) {
 		PprofEnabled: true,
 	})
 	code, body := get(t, s, "/debug/pprof/goroutine?debug=1")
-	if code != http.StatusOK {
-		t.Fatalf("goroutine pprof: got %d, want 200", code)
-	}
-	if !bytes.Contains(body, []byte("goroutine")) {
-		t.Fatalf("goroutine pprof: body does not contain 'goroutine': %s", body[:min(len(body), 200)])
-	}
+	require.Equal(t, http.StatusOK, code)
+	require.True(t, bytes.Contains(body, []byte("goroutine")))
 }
 
 func TestPprof_Index(t *testing.T) {
@@ -705,12 +581,8 @@ func TestPprof_Index(t *testing.T) {
 		PprofEnabled: true,
 	})
 	code, body := get(t, s, "/debug/pprof/")
-	if code != http.StatusOK {
-		t.Fatalf("pprof index: got %d, want 200", code)
-	}
-	if !bytes.Contains(body, []byte("pprof")) {
-		t.Fatalf("pprof index: body does not contain 'pprof': %s", body[:min(len(body), 200)])
-	}
+	require.Equal(t, http.StatusOK, code)
+	require.True(t, bytes.Contains(body, []byte("pprof")))
 }
 
 // TestPprof_AuthStillEnforcedOnOtherEndpoints proves the auth exemption
@@ -730,7 +602,5 @@ func TestPprof_AuthStillEnforcedOnOtherEndpoints(t *testing.T) {
 		bytes.NewBufferString(`{"url":"https://a.com/"}`))
 	req.Header.Set(header.ContentType, "application/json")
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("purge without auth (pprof enabled): got %d, want 401", rr.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
 }

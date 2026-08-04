@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -21,16 +23,12 @@ func TestRefreshHeapOrdering(t *testing.T) {
 	heapPush(1, 100)
 	heapPush(2, 200)
 
-	if h.Len() != 3 {
-		t.Fatalf("heap len = %d, want 3", h.Len())
-	}
+	require.Equal(t, 3, h.Len())
 	// Pop in order.
 	want := []api.Key{1, 2, 3}
-	for i, w := range want {
+	for _, w := range want {
 		got := heap.Pop(&h).(*heapEntry).key
-		if got != w {
-			t.Fatalf("pop %d: got key %d, want %d", i, got, w)
-		}
+		require.Equal(t, w, got)
 	}
 }
 
@@ -53,9 +51,7 @@ func TestSchedulerScheduleAndStop(t *testing.T) {
 
 	select {
 	case got := <-popped:
-		if got != 42 {
-			t.Fatalf("popped key = %d, want 42", got)
-		}
+		require.Equal(t, api.Key(42), got)
 	case <-time.After(time.Second):
 		t.Fatal("drainer did not pop within 1s")
 	}
@@ -141,15 +137,11 @@ func TestSchedulerUpdateExistingKey(t *testing.T) {
 
 	select {
 	case got := <-popped:
-		if got != 1 {
-			t.Fatalf("popped key = %d, want 1", got)
-		}
+		require.Equal(t, api.Key(1), got)
 	case <-time.After(time.Second):
 		t.Fatal("drainer did not pop within 1s")
 	}
-	if s.Len() != 0 {
-		t.Fatalf("heap len after pop = %d, want 0", s.Len())
-	}
+	require.Equal(t, 0, s.Len())
 }
 
 func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {
@@ -172,16 +164,15 @@ func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {
 	for i := range 10 {
 		s.Schedule(api.Key(i), time.Now().Add(2*time.Second))
 	}
-	if s.Len() != 10 {
-		t.Fatalf("heap len before compaction = %d, want 10", s.Len())
-	}
+	require.Equal(t, 10, s.Len())
 
 	s.compact()
 
 	// Even keys (0,2,4,6,8) are live and should remain.
 	// Odd keys (1,3,5,7,9) are dead and should be removed.
-	if got := s.Len(); got != 5 {
-		t.Fatalf("heap len after compaction = %d, want 5", got)
+	{
+		got := s.Len()
+		require.Equal(t, 5, got)
 	}
 }
 
@@ -220,9 +211,7 @@ func TestSchedulerScheduleAfterStopIsNoop(t *testing.T) {
 
 	// Schedule after Stop should not insert into the heap.
 	s.Schedule(api.Key(1), time.Now().Add(50*time.Millisecond))
-	if s.Len() != 0 {
-		t.Fatalf("heap len after post-Stop Schedule = %d, want 0", s.Len())
-	}
+	require.Equal(t, 0, s.Len())
 }
 
 // TestSchedulerIndexConsistency verifies that the index map stays
@@ -246,9 +235,7 @@ func TestSchedulerIndexConsistency(t *testing.T) {
 
 	// Update key 1 to fire later — should not create a duplicate.
 	s.Schedule(api.Key(1), time.Now().Add(80*time.Millisecond))
-	if s.Len() != 3 {
-		t.Fatalf("heap len after update = %d, want 3 (no duplicate)", s.Len())
-	}
+	require.Equal(t, 3, s.Len())
 
 	// Wait for all three to pop.
 	// Key 2 pops first (60ms), then key 3 (70ms), then key 1 (80ms).
@@ -256,7 +243,5 @@ func TestSchedulerIndexConsistency(t *testing.T) {
 	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
 		return popped.Load() == total
 	})
-	if s.Len() != 0 {
-		t.Fatalf("heap len after all pops = %d, want 0", s.Len())
-	}
+	require.Equal(t, 0, s.Len())
 }

@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -16,9 +19,7 @@ func TestSampledByKeyDeterminism(t *testing.T) {
 		key := api.Key(i * 7)
 		first := l.sampledByKey(key)
 		second := l.sampledByKey(key)
-		if first != second {
-			t.Fatalf("key %d: non-deterministic sampling", key)
-		}
+		require.Equal(t, second, first)
 	}
 }
 
@@ -31,18 +32,14 @@ func TestSampledByKeyRate(t *testing.T) {
 			sampled++
 		}
 	}
-	if sampled != 100 {
-		t.Fatalf("expected 100 sampled keys out of 10000, got %d", sampled)
-	}
+	require.Equal(t, 100, sampled)
 }
 
 func TestSampledByKeyZeroRateAlwaysLogs(t *testing.T) {
 	t.Parallel()
 	l := NewSampledLogger(nil, 0)
 	for i := range 100 {
-		if !l.sampledByKey(api.Key(i)) {
-			t.Fatalf("key %d: zero rate should always log", i)
-		}
+		require.True(t, l.sampledByKey(api.Key(i)))
 	}
 }
 
@@ -55,9 +52,7 @@ func TestSampledByKeyDistribution(t *testing.T) {
 			buckets[i/1000%10]++
 		}
 	}
-	if len(buckets) != 10 {
-		t.Fatalf("expected samples across all 10 buckets, got %d", len(buckets))
-	}
+	require.Len(t, buckets, 10)
 }
 
 func TestSampledByCounterRate(t *testing.T) {
@@ -69,18 +64,14 @@ func TestSampledByCounterRate(t *testing.T) {
 			sampled++
 		}
 	}
-	if sampled != 100 {
-		t.Fatalf("expected 100 sampled out of 10000, got %d", sampled)
-	}
+	require.Equal(t, 100, sampled)
 }
 
 func TestSampledByCounterZeroRateAlwaysLogs(t *testing.T) {
 	t.Parallel()
 	l := NewSampledLogger(nil, 0)
 	for range 100 {
-		if !l.sampledByCounter() {
-			t.Fatal("zero rate should always log")
-		}
+		require.True(t, l.sampledByCounter())
 	}
 }
 
@@ -99,16 +90,13 @@ func TestInfoZeroRateAlwaysLogs(t *testing.T) {
 	var buf bytes.Buffer
 	l := NewSampledLogger(slog.New(slog.NewJSONHandler(&buf, nil)), 0)
 	l.Info("test message", "key", api.Key(42))
-	if buf.Len() == 0 {
-		t.Fatal("zero rate should always log")
-	}
+	require.NotEqual(t, 0, buf.Len())
 	var rec map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(buf.Bytes(), &rec)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
-	if rec["msg"] != "test message" {
-		t.Errorf("msg = %v, want test message", rec["msg"])
-	}
+	assert.Equal(t, "test message", rec["msg"])
 }
 
 func TestInfoKeyFilteredBySampling(t *testing.T) {
@@ -116,13 +104,9 @@ func TestInfoKeyFilteredBySampling(t *testing.T) {
 	var buf bytes.Buffer
 	l := NewSampledLogger(slog.New(slog.NewJSONHandler(&buf, nil)), 100)
 	l.Info("filtered", "key", api.Key(1))
-	if buf.Len() != 0 {
-		t.Fatal("key 1 with rate 100 should be filtered")
-	}
+	require.Equal(t, 0, buf.Len())
 	l.Info("passes", "key", api.Key(100))
-	if buf.Len() == 0 {
-		t.Fatal("key 100 with rate 100 should pass")
-	}
+	require.NotEqual(t, 0, buf.Len())
 }
 
 func TestInfoNoKeyUsesCounterSampling(t *testing.T) {
@@ -132,11 +116,7 @@ func TestInfoNoKeyUsesCounterSampling(t *testing.T) {
 	for range 99 {
 		l.Info("no key here")
 	}
-	if buf.Len() != 0 {
-		t.Fatal("first 99 calls (counter 1-99 % 100 != 0) should be filtered")
-	}
+	require.Equal(t, 0, buf.Len())
 	l.Info("no key here")
-	if buf.Len() == 0 {
-		t.Fatal("100th call (counter 100 % 100 == 0) should pass")
-	}
+	require.NotEqual(t, 0, buf.Len())
 }

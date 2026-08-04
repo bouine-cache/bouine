@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestActiveHealth_AccumulatesDespitePassiveTraffic is the core bug
@@ -71,12 +73,8 @@ func TestActiveHealth_AccumulatesDespitePassiveTraffic(t *testing.T) {
 	// The bad target should be ejected by active health despite the
 	// passive traffic keeping the good target's counter at zero.
 	healthy := p.Healthy()
-	if len(healthy) != 1 {
-		t.Fatalf("expected exactly 1 healthy target (good), got %v", healthy)
-	}
-	if healthy[0] != good.Listener.Addr().String() {
-		t.Fatalf("expected good target to remain healthy, got %s", healthy[0])
-	}
+	require.Len(t, healthy, 1)
+	require.Equal(t, good.Listener.Addr().String(), healthy[0])
 }
 
 // TestPassiveHealth_ErrorHandlerEjects verifies that connection errors
@@ -99,14 +97,10 @@ func TestPassiveHealth_ErrorHandlerEjects(t *testing.T) {
 	for range 5 {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-		if rr.Code != http.StatusBadGateway {
-			t.Fatalf("expected 502, got %d", rr.Code)
-		}
+		require.Equal(t, http.StatusBadGateway, rr.Code)
 	}
 
-	if len(p.Healthy()) != 0 {
-		t.Fatalf("expected 0 healthy targets after connection errors, got %v", p.Healthy())
-	}
+	require.Len(t, p.Healthy(), 0)
 }
 
 // TestPassiveHealth_DisabledDoesNotZeroCounters verifies that when
@@ -137,8 +131,9 @@ func TestPassiveHealth_DisabledDoesNotZeroCounters(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 
-	if got := p.targets[0].passiveErrors.Load(); got != 42 {
-		t.Fatalf("passiveErrors = %d, want 42 (passive disabled must not zero)", got)
+	{
+		got := p.targets[0].passiveErrors.Load()
+		require.Equal(t, int64(42), got)
 	}
 }
 
@@ -155,9 +150,7 @@ func TestMarkHealthy_CAS(t *testing.T) {
 	// Eject the target.
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
-	if len(p.Healthy()) != 0 {
-		t.Fatal("should be ejected")
-	}
+	require.Len(t, p.Healthy(), 0)
 
 	// Manually set both counters to verify they're reset.
 	p.targets[0].passiveErrors.Store(5)
@@ -165,18 +158,19 @@ func TestMarkHealthy_CAS(t *testing.T) {
 	p.targets[0].successes.Store(2)
 
 	p.MarkHealthy(bad.Listener.Addr().String())
-	if len(p.Healthy()) != 1 {
-		t.Fatal("should be healthy after MarkHealthy")
-	}
+	require.Len(t, p.Healthy(), 1)
 
-	if got := p.targets[0].passiveErrors.Load(); got != 0 {
-		t.Fatalf("passiveErrors = %d, want 0", got)
+	{
+		got := p.targets[0].passiveErrors.Load()
+		require.Equal(t, int64(0), got)
 	}
-	if got := p.targets[0].probeErrors.Load(); got != 0 {
-		t.Fatalf("probeErrors = %d, want 0", got)
+	{
+		got := p.targets[0].probeErrors.Load()
+		require.Equal(t, int64(0), got)
 	}
-	if got := p.targets[0].successes.Load(); got != 0 {
-		t.Fatalf("successes = %d, want 0", got)
+	{
+		got := p.targets[0].successes.Load()
+		require.Equal(t, int64(0), got)
 	}
 }
 
@@ -228,9 +222,7 @@ func TestConcurrent_ActiveAndPassive(t *testing.T) {
 	wg.Wait()
 
 	// Target should be ejected (by whichever path hits threshold first).
-	if len(p.Healthy()) != 0 {
-		t.Fatalf("expected 0 healthy targets, got %v", p.Healthy())
-	}
+	require.Len(t, p.Healthy(), 0)
 }
 
 // TestTargetStatus_SplitCounters verifies that TargetStatus exposes
@@ -246,17 +238,9 @@ func TestTargetStatus_SplitCounters(t *testing.T) {
 	p.targets[0].probeErrors.Store(3)
 
 	statuses := p.Targets()
-	if len(statuses) != 1 {
-		t.Fatalf("expected 1 target, got %d", len(statuses))
-	}
+	require.Len(t, statuses, 1)
 	s := statuses[0]
-	if s.PassiveErrors != 7 {
-		t.Fatalf("PassiveErrors = %d, want 7", s.PassiveErrors)
-	}
-	if s.ProbeErrors != 3 {
-		t.Fatalf("ProbeErrors = %d, want 3", s.ProbeErrors)
-	}
-	if s.ConsecutiveErrors != 10 {
-		t.Fatalf("ConsecutiveErrors = %d, want 10", s.ConsecutiveErrors)
-	}
+	require.Equal(t, int64(7), s.PassiveErrors)
+	require.Equal(t, int64(3), s.ProbeErrors)
+	require.Equal(t, int64(10), s.ConsecutiveErrors)
 }

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMap_GetSetDel(t *testing.T) {
@@ -12,30 +15,34 @@ func TestMap_GetSetDel(t *testing.T) {
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("X-Custom", "value1")
 
-	if got := h.Get("Content-Type"); got != "text/html" {
-		t.Errorf("Get(Content-Type) = %q, want %q", got, "text/html")
+	{
+		got := h.Get("Content-Type")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := h.Get("content-type"); got != "text/html" {
-		t.Errorf("Get(content-type) = %q, want %q (case-insensitive)", got, "text/html")
+	{
+		got := h.Get("content-type")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := h.Get("CACHE-CONTROL"); got != "public, max-age=3600" {
-		t.Errorf("Get(CACHE-CONTROL) = %q, want %q (case-insensitive)", got, "public, max-age=3600")
+	{
+		got := h.Get("CACHE-CONTROL")
+		assert.Equal(t, "public, max-age=3600", got)
 	}
-	if got := h.Get("Missing"); got != "" {
-		t.Errorf("Get(Missing) = %q, want empty", got)
+	{
+		got := h.Get("Missing")
+		assert.Equal(t, "", got)
 	}
 
 	h.Set("Content-Type", "application/json")
-	if got := h.Get("Content-Type"); got != "application/json" {
-		t.Errorf("after Set overwrite, Get = %q, want %q", got, "application/json")
+	{
+		got := h.Get("Content-Type")
+		assert.Equal(t, "application/json", got)
 	}
 
 	h.Del("X-Custom")
-	if h.Has("X-Custom") {
-		t.Error("Has(X-Custom) = true after Del")
-	}
-	if got := h.Get("X-Custom"); got != "" {
-		t.Errorf("Get(X-Custom) = %q after Del, want empty", got)
+	assert.False(t, h.Has("X-Custom"))
+	{
+		got := h.Get("X-Custom")
+		assert.Equal(t, "", got)
 	}
 }
 
@@ -49,26 +56,22 @@ func TestMap_FromHTTP(t *testing.T) {
 
 	hm := FromHTTP(src)
 
-	if got := hm.Get("Content-Type"); got != "text/html" {
-		t.Errorf("Get(Content-Type) = %q, want %q", got, "text/html")
+	{
+		got := hm.Get("Content-Type")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := hm.Get("X-Multi"); got != "a, b, c" {
-		t.Errorf("Get(X-Multi) = %q, want %q (joined)", got, "a, b, c")
+	{
+		got := hm.Get("X-Multi")
+		assert.Equal(t, "a, b, c", got)
 	}
-	if hm.Len() != 3 {
-		t.Errorf("Len() = %d, want 3", hm.Len())
-	}
+	assert.Equal(t, 3, hm.Len())
 }
 
 func TestMap_FromHTTP_Nil(t *testing.T) {
 	hm := FromHTTP(nil)
-	if hm.Len() != 0 {
-		t.Errorf("FromHTTP(nil) Len = %d, want 0", hm.Len())
-	}
+	assert.Equal(t, 0, hm.Len())
 	hm2 := FromHTTP(http.Header{})
-	if hm2.Len() != 0 {
-		t.Errorf("FromHTTP(empty) Len = %d, want 0", hm2.Len())
-	}
+	assert.Equal(t, 0, hm2.Len())
 }
 
 func TestMap_Clone(t *testing.T) {
@@ -77,16 +80,19 @@ func TestMap_Clone(t *testing.T) {
 	h.Set("ETag", `"abc123"`)
 
 	c := h.Clone()
-	if got := c.Get("Content-Type"); got != "text/html" {
-		t.Errorf("clone Get(Content-Type) = %q, want %q", got, "text/html")
+	{
+		got := c.Get("Content-Type")
+		assert.Equal(t, "text/html", got)
 	}
 
 	c.Set("Content-Type", "application/json")
-	if got := h.Get("Content-Type"); got != "text/html" {
-		t.Errorf("original mutated after clone Set: Get = %q, want %q", got, "text/html")
+	{
+		got := h.Get("Content-Type")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := c.Get("Content-Type"); got != "application/json" {
-		t.Errorf("clone Get = %q, want %q", got, "application/json")
+	{
+		got := c.Get("Content-Type")
+		assert.Equal(t, "application/json", got)
 	}
 }
 
@@ -99,14 +105,17 @@ func TestMap_WriteTo(t *testing.T) {
 	dst := make(http.Header, 3)
 	h.WriteTo(dst)
 
-	if got := dst.Get("Content-Type"); got != "text/html" {
-		t.Errorf("dst.Get(Content-Type) = %q, want %q", got, "text/html")
+	{
+		got := dst.Get("Content-Type")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := dst.Get("Cache-Control"); got != "public, max-age=3600" {
-		t.Errorf("dst.Get(Cache-Control) = %q, want %q", got, "public, max-age=3600")
+	{
+		got := dst.Get("Cache-Control")
+		assert.Equal(t, "public, max-age=3600", got)
 	}
-	if got := dst.Get("X-Custom"); got != "value" {
-		t.Errorf("dst.Get(X-Custom) = %q, want %q", got, "value")
+	{
+		got := dst.Get("X-Custom")
+		assert.Equal(t, "value", got)
 	}
 }
 
@@ -121,12 +130,8 @@ func TestMap_Range(t *testing.T) {
 		return true
 	})
 
-	if len(seen) != 2 {
-		t.Errorf("Range visited %d entries, want 2", len(seen))
-	}
-	if seen["Content-Type"] != "text/html" {
-		t.Errorf("Range saw Content-Type = %q, want %q", seen["Content-Type"], "text/html")
-	}
+	assert.Len(t, seen, 2)
+	assert.Equal(t, "text/html", seen["Content-Type"])
 }
 
 func TestMap_Range_CanonicalKeyOrder(t *testing.T) {
@@ -149,13 +154,9 @@ func TestMap_Range_CanonicalKeyOrder(t *testing.T) {
 	})
 
 	want := []string{"Age", "Cache-Control", "Content-Type", "Vary"}
-	if len(keys) != len(want) {
-		t.Fatalf("Range visited %d keys, want %d: %v", len(keys), len(want), keys)
-	}
+	require.Len(t, keys, len(want))
 	for i, k := range keys {
-		if k != want[i] {
-			t.Errorf("Range order[%d] = %q, want %q (full: %v)", i, k, want[i], keys)
-		}
+		assert.Equal(t, want[i], k)
 	}
 }
 
@@ -171,27 +172,25 @@ func TestMap_Range_StopEarly(t *testing.T) {
 		return false // stop after first
 	})
 
-	if count != 1 {
-		t.Errorf("Range with early stop visited %d entries, want 1", count)
-	}
+	assert.Equal(t, 1, count)
 }
 
 func TestMap_SetValues(t *testing.T) {
 	h := Map{}
 	h.SetValues("X-Multi", []string{"a", "b", "c"})
-	if got := h.Get("X-Multi"); got != "a, b, c" {
-		t.Errorf("SetValues Get = %q, want %q", got, "a, b, c")
+	{
+		got := h.Get("X-Multi")
+		assert.Equal(t, "a, b, c", got)
 	}
 
 	h.SetValues("X-Single", []string{"only"})
-	if got := h.Get("X-Single"); got != "only" {
-		t.Errorf("SetValues single Get = %q, want %q", got, "only")
+	{
+		got := h.Get("X-Single")
+		assert.Equal(t, "only", got)
 	}
 
 	h.SetValues("X-Multi", []string{})
-	if h.Has("X-Multi") {
-		t.Error("SetValues with empty slice should delete header")
-	}
+	assert.False(t, h.Has("X-Multi"))
 }
 
 func TestMap_InternKey(t *testing.T) {
@@ -202,9 +201,7 @@ func TestMap_InternKey(t *testing.T) {
 	if k1 != k2 || k2 != k3 {
 		t.Errorf("InternKey should return same string for different cases: %q %q %q", k1, k2, k3)
 	}
-	if k1 != "Content-Type" {
-		t.Errorf("InternKey should return canonical form, got %q", k1)
-	}
+	assert.Equal(t, "Content-Type", k1)
 }
 
 func TestMap_MarshalJSON(t *testing.T) {
@@ -213,13 +210,12 @@ func TestMap_MarshalJSON(t *testing.T) {
 	h.Set("Cache-Control", "public, max-age=3600")
 
 	data, err := json.Marshal(h)
-	if err != nil {
-		t.Fatalf("MarshalJSON: %v", err)
-	}
+	require.NoErrorf(t, err, "MarshalJSON: %v", err)
 
 	var m map[string][]string
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
+	{
+		err := json.Unmarshal(data, &m)
+		require.NoErrorf(t, err, "unmarshal result: %v", err)
 	}
 
 	if vals, ok := m["Content-Type"]; !ok || len(vals) != 1 || vals[0] != "text/html" {
@@ -233,30 +229,30 @@ func TestMap_MarshalJSON(t *testing.T) {
 func TestMap_MarshalJSON_Empty(t *testing.T) {
 	h := Map{}
 	data, err := json.Marshal(h)
-	if err != nil {
-		t.Fatalf("MarshalJSON: %v", err)
-	}
-	if string(data) != "{}" {
-		t.Errorf("empty MarshalJSON = %s, want {}", string(data))
-	}
+	require.NoErrorf(t, err, "MarshalJSON: %v", err)
+	assert.Equal(t, "{}", string(data))
 }
 
 func TestMap_UnmarshalJSON(t *testing.T) {
 	input := `{"Content-Type": ["text/html"], "Cache-Control": ["public, max-age=3600"], "X-Multi": ["a", "b"]}`
 
 	var h Map
-	if err := json.Unmarshal([]byte(input), &h); err != nil {
-		t.Fatalf("UnmarshalJSON: %v", err)
+	{
+		err := json.Unmarshal([]byte(input), &h)
+		require.NoErrorf(t, err, "UnmarshalJSON: %v", err)
 	}
 
-	if got := h.Get("Content-Type"); got != "text/html" {
-		t.Errorf("Get(Content-Type) = %q, want %q", got, "text/html")
+	{
+		got := h.Get("Content-Type")
+		assert.Equal(t, "text/html", got)
 	}
-	if got := h.Get("Cache-Control"); got != "public, max-age=3600" {
-		t.Errorf("Get(Cache-Control) = %q, want %q", got, "public, max-age=3600")
+	{
+		got := h.Get("Cache-Control")
+		assert.Equal(t, "public, max-age=3600", got)
 	}
-	if got := h.Get("X-Multi"); got != "a, b" {
-		t.Errorf("Get(X-Multi) = %q, want %q (joined)", got, "a, b")
+	{
+		got := h.Get("X-Multi")
+		assert.Equal(t, "a, b", got)
 	}
 }
 
@@ -268,13 +264,12 @@ func TestMap_JSONRoundTrip(t *testing.T) {
 	original.Set("Vary", "Accept-Encoding")
 
 	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	require.NoErrorf(t, err, "marshal: %v", err)
 
 	var decoded Map
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	{
+		err := json.Unmarshal(data, &decoded)
+		require.NoErrorf(t, err, "unmarshal: %v", err)
 	}
 
 	original.Range(func(key, value string) bool {
@@ -294,16 +289,10 @@ func TestMap_Footprint_NoOrphans(t *testing.T) {
 	h.Set("X-Custom", "value1")
 
 	entries, valueSlots, valueBytes := h.Footprint()
-	if entries != 3 {
-		t.Errorf("entries = %d, want 3", entries)
-	}
-	if valueSlots != 3 {
-		t.Errorf("valueSlots = %d, want 3", valueSlots)
-	}
+	assert.Equal(t, 3, entries)
+	assert.Equal(t, 3, valueSlots)
 	wantBytes := len("text/html") + len("public") + len("value1")
-	if valueBytes != wantBytes {
-		t.Errorf("valueBytes = %d, want %d", valueBytes, wantBytes)
-	}
+	assert.Equal(t, wantBytes, valueBytes)
 }
 
 func TestMap_Footprint_WithOrphanedDel(t *testing.T) {
@@ -315,18 +304,12 @@ func TestMap_Footprint_WithOrphanedDel(t *testing.T) {
 	h.Del("Set-Cookie")
 
 	entries, valueSlots, valueBytes := h.Footprint()
-	if entries != 2 {
-		t.Errorf("entries = %d, want 2 (after Del)", entries)
-	}
+	assert.Equal(t, 2, entries)
 	// Del orphans the value slot — valueSlots should still be 3.
-	if valueSlots != 3 {
-		t.Errorf("valueSlots = %d, want 3 (Del orphans the slot)", valueSlots)
-	}
+	assert.Equal(t, 3, valueSlots)
 	// valueBytes should include the orphaned "session=abc" bytes.
 	wantBytes := len("text/html") + len("session=abc") + len("value1")
-	if valueBytes != wantBytes {
-		t.Errorf("valueBytes = %d, want %d (orphaned value data must be counted)", valueBytes, wantBytes)
-	}
+	assert.Equal(t, wantBytes, valueBytes)
 }
 
 func TestInternKey_Deduplicates(t *testing.T) {
@@ -344,12 +327,8 @@ func TestInternValue_Deduplicates(t *testing.T) {
 	a := InternValue("text/html")
 	b := InternValue("text/html")
 	c := InternValue("application/json")
-	if a != b {
-		t.Fatalf("InternValue should return identical strings for same value; got %q and %q", a, b)
-	}
-	if a == c {
-		t.Fatalf("InternValue should return different strings for different values; got %q == %q", a, c)
-	}
+	require.Equal(t, b, a)
+	require.NotEqual(t, c, a)
 }
 
 func TestFromHTTP_InternsValues(t *testing.T) {

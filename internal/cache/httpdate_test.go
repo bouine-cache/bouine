@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -21,8 +23,9 @@ func TestComputeAge_PrefersStoredOriginAge(t *testing.T) {
 		OriginAge: 30 * time.Second,
 		Header:    header.FromHTTP(http.Header{header.Age: {"5"}}),
 	}
-	if got := ComputeAge(obj, now); got != 30*time.Second {
-		t.Fatalf("ComputeAge = %v, want 30s (stored OriginAge must win over Age header)", got)
+	{
+		got := ComputeAge(obj, now)
+		require.Equal(t, 30*time.Second, got)
 	}
 }
 
@@ -36,7 +39,8 @@ func TestComputeAge_FallsBackToHeader(t *testing.T) {
 		StoredAt: now,
 		Header:   header.FromHTTP(http.Header{header.Age: {"42"}}),
 	}
-	if got := ComputeAge(obj, now); got != 42*time.Second {
-		t.Fatalf("ComputeAge = %v, want 42s (fallback to Age header when OriginAge==0)", got)
+	{
+		got := ComputeAge(obj, now)
+		require.Equal(t, 42*time.Second, got)
 	}
 }

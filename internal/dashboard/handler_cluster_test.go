@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -37,31 +39,15 @@ func TestHandler_ClusterWithStoreData(t *testing.T) {
 	h.cluster(w, r)
 
 	body := w.Body.String()
-	if !strings.Contains(body, "total cached") {
-		t.Error("expected 'total cached' in response body")
-	}
-	if !strings.Contains(body, "total objects") {
-		t.Error("expected 'total objects' in response body")
-	}
-	if !strings.Contains(body, "tier-bar-fill warm") {
-		t.Error("expected 'tier-bar-fill warm' class in response body")
-	}
+	assert.Contains(t, body, "total cached")
+	assert.Contains(t, body, "total objects")
+	assert.Contains(t, body, "tier-bar-fill warm")
 	// Legend should contain percentage for hot bytes share.
-	if !strings.Contains(body, "(61%)") {
-		t.Errorf("expected hot bytes percentage '(61%%)' in legend, body snippet: %s",
-			substringAround(body, "cache-legend", 200))
-	}
-	if !strings.Contains(body, "(39%)") {
-		t.Errorf("expected warm bytes percentage '(39%%)' in legend, body snippet: %s",
-			substringAround(body, "cache-legend", 200))
-	}
+	assert.Contains(t, body, "(61%)")
+	assert.Contains(t, body, "(39%)")
 	// Entries legend: 4303 / 4413 ≈ 98%, 110 / 4413 ≈ 2%.
-	if !strings.Contains(body, "(98%)") {
-		t.Errorf("expected hot entries percentage '(98%%)' in legend")
-	}
-	if !strings.Contains(body, "(2%)") {
-		t.Errorf("expected warm entries percentage '(2%%)' in legend")
-	}
+	assert.Contains(t, body, "(98%)")
+	assert.Contains(t, body, "(2%)")
 }
 
 func TestHandler_ClusterWithoutStoreData(t *testing.T) {
@@ -77,12 +63,8 @@ func TestHandler_ClusterWithoutStoreData(t *testing.T) {
 	h.cluster(w, r)
 
 	body := w.Body.String()
-	if strings.Contains(body, "c-cache-bytes") {
-		t.Error("cache storage section should be absent when StoreFn is nil")
-	}
-	if strings.Contains(body, "total cached") {
-		t.Error("'total cached' should be absent when StoreFn is nil")
-	}
+	assert.False(t, strings.Contains(body, "c-cache-bytes"))
+	assert.False(t, strings.Contains(body, "total cached"))
 }
 
 // substringAround returns a window of +/- n chars around the first

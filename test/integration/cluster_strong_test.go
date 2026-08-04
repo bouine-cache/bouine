@@ -3,6 +3,8 @@
 package integration_test
 
 import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
@@ -17,12 +19,14 @@ func TestStrong_MissThenHit(t *testing.T) {
 	// Fresh URL — first request must be a MISS, second must be a HIT.
 	// Both requests go to the same node; the owner caches the response.
 	resp := s.Get(t, 0, "/hit?x=strong-miss-then-hit-a")
-	if got := resp.Header.Get("X-Cache"); got != "MISS" {
-		t.Fatalf("first request: X-Cache = %q, want MISS", got)
+	{
+		got := resp.Header.Get("X-Cache")
+		require.Equal(t, "MISS", got)
 	}
 	resp = s.Get(t, 0, "/hit?x=strong-miss-then-hit-a")
-	if got := resp.Header.Get("X-Cache"); got != "HIT" {
-		t.Fatalf("second request: X-Cache = %q, want HIT", got)
+	{
+		got := resp.Header.Get("X-Cache")
+		require.Equal(t, "HIT", got)
 	}
 }
 
@@ -38,9 +42,7 @@ func TestStrong_PeerFetch(t *testing.T) {
 	// In strong mode, non-owner nodes peer-fetch from the owner.
 	for i := range s.Nodes {
 		resp := s.Get(t, i, "/hit?x=strong-peerfetch")
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d: status = %d, want 200", i, resp.StatusCode)
-		}
+		assert.Equal(t, 200, resp.StatusCode)
 	}
 
 	// Confirm that peer-fetch hit counter is non-zero somewhere in the cluster.
@@ -78,8 +80,9 @@ func TestStrong_PurgePropagation(t *testing.T) {
 
 	// Node 0 is immediately cleared (direct store.Delete).
 	resp := s.Get(t, 0, path)
-	if got := resp.Header.Get("X-Cache"); got != "MISS" {
-		t.Fatalf("node 0 after purge: X-Cache = %q, want MISS", got)
+	{
+		got := resp.Header.Get("X-Cache")
+		require.Equal(t, "MISS", got)
 	}
 
 	// The gossip-purge message carries a cache key derived from node 0's
@@ -94,17 +97,13 @@ func TestStrong_PurgePropagation(t *testing.T) {
 		// After purge, the old peer-fetched entry should be gone.
 		// The request falls through to origin (node i's HTTP address
 		// produces a different cache key than the original purge).
-		if resp.StatusCode != 200 {
-			t.Errorf("node %d after purge: status = %d", i, resp.StatusCode)
-		}
+		assert.Equal(t, 200, resp.StatusCode)
 		if resp.Header.Get("X-Cache") != "MISS" {
 			continue
 		}
 		// Second request should now HIT from the re-fetched object.
 		resp2 := s.Get(t, i, path)
-		if resp2.Header.Get("X-Cache") != "HIT" {
-			t.Errorf("node %d re-fetch: X-Cache = %q, want HIT", i, resp2.Header.Get("X-Cache"))
-		}
+		assert.Equal(t, "HIT", resp2.Header.Get("X-Cache"))
 	}
 }
 
@@ -129,8 +128,9 @@ func TestStrong_BanPropagation(t *testing.T) {
 	// immediately (no gossip wait needed).
 	for i := range s.Nodes {
 		resp := s.Get(t, i, path)
-		if got := resp.Header.Get("X-Cache"); got == "HIT" {
-			t.Errorf("node %d after ban: X-Cache = HIT (expected MISS/banned)", i)
+		{
+			got := resp.Header.Get("X-Cache")
+			assert.NotEqual(t, "HIT", got)
 		}
 	}
 }

@@ -5,6 +5,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -26,31 +29,17 @@ func TestOriginHeaderRing_SampleAndAudit(t *testing.T) {
 	}, 200)
 
 	audit := r.HeaderAudit()
-	if len(audit) != 2 {
-		t.Fatalf("expected 2 pools in audit, got %d", len(audit))
-	}
+	require.Len(t, audit, 2)
 
 	api := audit["api-pool"]
-	if api.SampleCount != 2 {
-		t.Errorf("api-pool sample count: want 2, got %d", api.SampleCount)
-	}
-	if api.HasCacheControlPct != 50 {
-		t.Errorf("api-pool CC%%: want 50, got %f", api.HasCacheControlPct)
-	}
-	if api.HasETagPct != 100 {
-		t.Errorf("api-pool ETag%%: want 100, got %f", api.HasETagPct)
-	}
-	if api.SampleCacheControl != "max-age=60" {
-		t.Errorf("api-pool sample CC: want 'max-age=60', got %q", api.SampleCacheControl)
-	}
+	assert.Equal(t, int64(2), api.SampleCount)
+	assert.Equal(t, float64(50), api.HasCacheControlPct)
+	assert.Equal(t, float64(100), api.HasETagPct)
+	assert.Equal(t, "max-age=60", api.SampleCacheControl)
 
 	st := audit["static-pool"]
-	if st.HasLastModifiedPct != 100 {
-		t.Errorf("static-pool LM%%: want 100, got %f", st.HasLastModifiedPct)
-	}
-	if st.HasSurrogateKeyPct != 100 {
-		t.Errorf("static-pool SK%%: want 100, got %f", st.HasSurrogateKeyPct)
-	}
+	assert.Equal(t, float64(100), st.HasLastModifiedPct)
+	assert.Equal(t, float64(100), st.HasSurrogateKeyPct)
 }
 
 func TestOriginHeaderRing_NilHeader(t *testing.T) {
@@ -58,9 +47,7 @@ func TestOriginHeaderRing_NilHeader(t *testing.T) {
 	r := NewOriginHeaderRing()
 	r.Sample("p", nil, 200)
 	audit := r.HeaderAudit()
-	if len(audit) != 0 {
-		t.Fatalf("expected empty audit for nil header, got %d pools", len(audit))
-	}
+	require.Len(t, audit, 0)
 }
 
 func TestOriginHeaderRing_Wraparound(t *testing.T) {
@@ -72,12 +59,8 @@ func TestOriginHeaderRing_Wraparound(t *testing.T) {
 	}
 	audit := r.HeaderAudit()
 	s := audit["p"]
-	if s.SampleCount != originHeaderRingCap {
-		t.Errorf("sample count after wraparound: want %d, got %d", originHeaderRingCap, s.SampleCount)
-	}
-	if s.HasCacheControlPct != 100 {
-		t.Errorf("CC%% after wraparound: want 100, got %f", s.HasCacheControlPct)
-	}
+	assert.Equal(t, int64(originHeaderRingCap), s.SampleCount)
+	assert.Equal(t, float64(100), s.HasCacheControlPct)
 }
 
 func TestOriginHeaderRing_Concurrent(t *testing.T) {
@@ -96,7 +79,5 @@ func TestOriginHeaderRing_Concurrent(t *testing.T) {
 	wg.Wait()
 	audit := r.HeaderAudit()
 	s := audit["p"]
-	if s.SampleCount != 1000 {
-		t.Errorf("concurrent sample count: want 1000, got %d", s.SampleCount)
-	}
+	assert.Equal(t, int64(1000), s.SampleCount)
 }

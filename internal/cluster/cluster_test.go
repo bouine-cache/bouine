@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -44,9 +47,7 @@ func TestRing_AddGet(t *testing.T) {
 		owners[r.get(key)]++
 	}
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		if owners[name] == 0 {
-			t.Errorf("node %s got no keys in 1000-key distribution (dist: %v)", name, owners)
-		}
+		assert.NotEqual(t, 0, owners[name])
 	}
 }
 
@@ -61,12 +62,8 @@ func TestRing_RemoveRedistributes(t *testing.T) {
 
 	r.remove(owner)
 	newOwner := r.get(key)
-	if newOwner == owner {
-		t.Fatalf("after removing owner %s, key still routes to same node", owner)
-	}
-	if newOwner == "" {
-		t.Fatal("after remove, key routes to empty node")
-	}
+	require.NotEqual(t, owner, newOwner)
+	require.NotEqual(t, "", newOwner)
 }
 
 func TestRing_Digest_Changes(t *testing.T) {
@@ -78,12 +75,8 @@ func TestRing_Digest_Changes(t *testing.T) {
 	r.add("node2", 16)
 	d2 := r.digest()
 
-	if d1.Hash == d2.Hash {
-		t.Fatal("digest should change when ring membership changes")
-	}
-	if d2.Size != 2 {
-		t.Fatalf("size = %d, want 2", d2.Size)
-	}
+	require.NotEqual(t, d2.Hash, d1.Hash)
+	require.Equal(t, 2, d2.Size)
 }
 
 func TestRing_SingleNode(t *testing.T) {
@@ -91,9 +84,7 @@ func TestRing_SingleNode(t *testing.T) {
 	r := newRing(64)
 	r.add("only", 64)
 	for i := range 10 {
-		if r.get(api.Key(i)) != "only" {
-			t.Fatalf("single node should own all keys")
-		}
+		require.Equal(t, "only", r.get(api.Key(i)))
 	}
 }
 
@@ -101,40 +92,29 @@ func TestCluster_LocalMode(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	members := c.Members()
-	if len(members) != 1 {
-		t.Fatalf("expected 1 member (self), got %d", len(members))
-	}
-	if members[0].Name != "local" {
-		t.Fatalf("member name = %q", members[0].Name)
-	}
+	require.Len(t, members, 1)
+	require.Equal(t, "local", members[0].Name)
 	key := api.Key(999)
-	if !c.IsLocal(key) {
-		t.Fatal("single-node cluster should own all keys")
-	}
+	require.True(t, c.IsLocal(key))
 }
 
 func TestCluster_TwoNodeJoin(t *testing.T) {
 	t.Parallel()
 	c1, err := New(defaultConfig(t, "node1", "127.0.0.1:17900"))
-	if err != nil {
-		t.Fatalf("c1: %v", err)
-	}
+	require.NoErrorf(t, err, "c1: %v", err)
 	defer func() { _ = c1.Leave(t.Context()) }()
 
 	c2, err := New(defaultConfig(t, "node2", "127.0.0.1:17901"))
-	if err != nil {
-		t.Fatalf("c2: %v", err)
-	}
+	require.NoErrorf(t, err, "c2: %v", err)
 	defer func() { _ = c2.Leave(t.Context()) }()
 
-	if _, err := c2.Join([]string{"127.0.0.1:17900"}); err != nil {
-		t.Fatalf("join: %v", err)
+	{
+		_, err := c2.Join([]string{"127.0.0.1:17900"})
+		require.NoErrorf(t, err, "join: %v", err)
 	}
 
 	// Wait for gossip to propagate.
@@ -151,9 +131,7 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var called atomic.Int32
@@ -168,8 +146,9 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
-	if got := called.Load(); got != 1 {
-		t.Fatalf("PurgeFn called %d times, want 1", got)
+	{
+		got := called.Load()
+		require.Equal(t, int32(1), got)
 	}
 }
 
@@ -177,9 +156,7 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var called atomic.Int32
@@ -194,8 +171,9 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 	msg, _ := EncodeBanGossip(evt)
 	c.NotifyMsg(msg)
 
-	if got := called.Load(); got != 1 {
-		t.Fatalf("BanFn called %d times, want 1", got)
+	{
+		got := called.Load()
+		require.Equal(t, int32(1), got)
 	}
 }
 
@@ -203,9 +181,7 @@ func TestNotifyMsg_MalformedPayload(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// Should not panic on invalid data.
@@ -219,9 +195,7 @@ func TestNotifyMsg_WhenNoCallbacks(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// Should not panic when no invalidator is set.
@@ -235,9 +209,7 @@ func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	cfg.GossipApplyTimeout = 50 * time.Millisecond
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var got atomic.Pointer[context.Context]
@@ -252,11 +224,10 @@ func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
 	c.NotifyMsg(msg)
 
 	ctx := *got.Load()
-	if ctx == nil {
-		t.Fatal("PurgeFn not called")
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		t.Fatal("context passed to PurgeFn has no deadline")
+	require.NotNil(t, ctx)
+	{
+		_, ok := ctx.Deadline()
+		require.True(t, ok)
 	}
 }
 
@@ -264,9 +235,7 @@ func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	var got atomic.Pointer[context.Context]
@@ -281,11 +250,10 @@ func TestNotifyMsg_BanCtxHasDeadline(t *testing.T) {
 	c.NotifyMsg(msg)
 
 	ctx := *got.Load()
-	if ctx == nil {
-		t.Fatal("BanFn not called")
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		t.Fatal("context passed to BanFn has no deadline")
+	require.NotNil(t, ctx)
+	{
+		_, ok := ctx.Deadline()
+		require.True(t, ok)
 	}
 }
 
@@ -293,14 +261,10 @@ func TestNotifyMsg_DefaultApplyTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
-	if c.cfg.GossipApplyTimeout != 100*time.Millisecond {
-		t.Fatalf("default GossipApplyTimeout = %v, want 100ms", c.cfg.GossipApplyTimeout)
-	}
+	require.Equal(t, 100*time.Millisecond, c.cfg.GossipApplyTimeout)
 }
 
 func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
@@ -308,9 +272,7 @@ func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	cfg.GossipApplyTimeout = 10 * time.Millisecond
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	c.SetInvalidator(Invalidator{
@@ -334,9 +296,7 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	cfg.GossipApplyTimeout = 10 * time.Millisecond
 	c, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoErrorf(t, err, "New: %v", err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	reg := prometheus.NewRegistry()
@@ -354,9 +314,7 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 	c.NotifyMsg(msg)
 
 	metrics, err := reg.Gather()
-	if err != nil {
-		t.Fatalf("gather: %v", err)
-	}
+	require.NoErrorf(t, err, "gather: %v", err)
 	for _, mf := range metrics {
 		if mf.GetName() != "bouine_cluster_invalidations_gossip_total" {
 			continue
@@ -364,9 +322,7 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 		for _, m := range mf.GetMetric() {
 			for _, l := range m.GetLabel() {
 				if l.GetValue() == "purge" {
-					if m.GetCounter().GetValue() != 0 {
-						t.Fatalf("invalidation counter = %v, want 0 on failed apply", m.GetCounter().GetValue())
-					}
+					require.Equal(t, 0, m.GetCounter().GetValue())
 				}
 			}
 		}

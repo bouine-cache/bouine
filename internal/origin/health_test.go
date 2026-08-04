@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestActiveHealth_RecoversTarget(t *testing.T) {
@@ -22,9 +24,7 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 	p.targets[0].healthy.Store(false)
 	p.targets[0].probeErrors.Store(10)
 
-	if len(p.Healthy()) != 0 {
-		t.Fatal("should be ejected")
-	}
+	require.Len(t, p.Healthy(), 0)
 
 	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
 		Path:               "/",
@@ -39,9 +39,7 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 
 	_ = hc.Run(ctx)
 
-	if len(p.Healthy()) != 1 {
-		t.Fatalf("target should be restored, got %v", p.Healthy())
-	}
+	require.Len(t, p.Healthy(), 1)
 }
 
 func TestActiveHealth_EjectsUnhealthy(t *testing.T) {
@@ -66,7 +64,5 @@ func TestActiveHealth_EjectsUnhealthy(t *testing.T) {
 
 	_ = hc.Run(ctx)
 
-	if len(p.Healthy()) != 0 {
-		t.Fatalf("target should be ejected, got %v", p.Healthy())
-	}
+	require.Len(t, p.Healthy(), 0)
 }

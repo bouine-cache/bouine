@@ -6,33 +6,28 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefaults_AdminListenerEnabled(t *testing.T) {
 	t.Parallel()
 	d := Defaults()
-	if d.Listen.Admin == "" {
-		t.Fatal("admin listener should be enabled by default")
-	}
+	require.NotEqual(t, "", d.Listen.Admin)
 }
 
 func TestParse_EmptyYieldsDefaults(t *testing.T) {
 	t.Parallel()
 	cfg, err := Parse(nil)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Listen.Admin == "" {
-		t.Fatal("expected admin default")
-	}
+	require.NoErrorf(t, err, "parse: %v", err)
+	require.NotEqual(t, "", cfg.Listen.Admin)
 }
 
 func TestParse_RejectsUnknownKeys(t *testing.T) {
 	t.Parallel()
 	_, err := Parse([]byte("nonsensical_field: 1\n"))
-	if err == nil {
-		t.Fatal("expected error on unknown key")
-	}
+	require.Error(t, err)
 }
 
 func TestParse_RejectsDuplicatePool(t *testing.T) {
@@ -93,34 +88,28 @@ routes:
       stale_while_revalidate: 30s
 `
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if got := cfg.Storage.HotMaxBytes.Bytes(); got != 2_000_000_000 {
-		t.Fatalf("HotMaxBytes = %d, want %d", got, 2_000_000_000)
+	require.NoErrorf(t, err, "parse: %v", err)
+	{
+		got := cfg.Storage.HotMaxBytes.Bytes()
+		require.Equal(t, int64(2_000_000_000), got)
 	}
 	if len(cfg.Routes) != 1 || cfg.Routes[0].Pool != "app" {
 		t.Fatalf("unexpected routes: %+v", cfg.Routes)
 	}
-	if cfg.UpstreamPools[0].Health.Active.Interval.Seconds() != 5 {
-		t.Fatalf("interval = %v", cfg.UpstreamPools[0].Health.Active.Interval)
-	}
+	require.Equal(t, float64(5), cfg.UpstreamPools[0].Health.Active.Interval.Seconds())
 }
 
 func TestLoad_FromDisk(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
-	if err := os.WriteFile(path, []byte("listen:\n  admin: ':9001'\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	{
+		err := os.WriteFile(path, []byte("listen:\n  admin: ':9001'\n"), 0o600)
+		require.NoErrorf(t, err, "write: %v", err)
 	}
 	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Listen.Admin != ":9001" {
-		t.Fatalf("admin = %q", cfg.Listen.Admin)
-	}
+	require.NoErrorf(t, err, "load: %v", err)
+	require.Equal(t, ":9001", cfg.Listen.Admin)
 }
 
 func TestByteSize_Forms(t *testing.T) {
@@ -153,41 +142,35 @@ func TestByteSize_Forms(t *testing.T) {
 			continue
 		}
 		b = s.HotMaxBytes
-		if b.Bytes() != tc.want {
-			t.Errorf("%q -> %d, want %d", tc.in, b.Bytes(), tc.want)
-		}
+		assert.Equal(t, tc.want, b.Bytes())
 	}
 }
 
 func TestClusterMode_DefaultIsStrong(t *testing.T) {
 	t.Parallel()
 	cfg := Defaults()
-	if cfg.Cluster.Mode != ClusterModeStrong {
-		t.Fatalf("default cluster mode = %q, want %q", cfg.Cluster.Mode, ClusterModeStrong)
-	}
+	require.Equal(t, ClusterModeStrong, cfg.Cluster.Mode)
 }
 
 func TestClusterMode_EmptyDefaultsToStrong(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
+	{
+		err := cfg.Validate()
+		require.NoErrorf(t, err, "validate: %v", err)
 	}
-	if cfg.Cluster.Mode != ClusterModeStrong {
-		t.Fatalf("empty mode = %q, want %q", cfg.Cluster.Mode, ClusterModeStrong)
-	}
+	require.Equal(t, ClusterModeStrong, cfg.Cluster.Mode)
 }
 
 func TestClusterMode_ValidModes(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{ClusterModeStrong, ClusterModeEventual} {
 		cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: mode}}
-		if err := cfg.Validate(); err != nil {
-			t.Errorf("mode %q: unexpected error: %v", mode, err)
+		{
+			err := cfg.Validate()
+			assert.Nil(t, err)
 		}
-		if cfg.Cluster.Mode != mode {
-			t.Errorf("mode %q: got %q", mode, cfg.Cluster.Mode)
-		}
+		assert.Equal(t, mode, cfg.Cluster.Mode)
 	}
 }
 
@@ -195,31 +178,24 @@ func TestClusterMode_InvalidValue(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "invalid"}}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for invalid cluster mode")
-	}
-	if !strings.Contains(err.Error(), "cluster.mode must be") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cluster.mode must be")
 }
 
 func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for eventual mode without cluster listener")
-	}
-	if !strings.Contains(err.Error(), "requires listen.cluster") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "requires listen.cluster")
 }
 
 func TestClusterMode_StrongWithoutListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeStrong}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("strong mode without listener should be valid: %v", err)
+	{
+		err := cfg.Validate()
+		require.NoErrorf(t, err, "strong mode without listener should be valid: %v", err)
 	}
 }
 
@@ -337,15 +313,9 @@ routes:
       ttl_default:  30s
 `
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(cfg.Routes) != 1 {
-		t.Fatalf("expected 1 route")
-	}
-	if cfg.Routes[0].Cache.TTLOverride != 1*60*60*1e9 {
-		t.Errorf("TTLOverride = %v, want 1h", cfg.Routes[0].Cache.TTLOverride)
-	}
+	require.NoErrorf(t, err, "unexpected error: %v", err)
+	require.Len(t, cfg.Routes, 1)
+	assert.Equal(t, time.Duration(int64(1)*60*60*1e9), cfg.Routes[0].Cache.TTLOverride)
 }
 
 func TestValidate_TTLOverride_NegativeRejected(t *testing.T) {
@@ -383,12 +353,8 @@ routes:
       strip_prefix: /api/v1
 `
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Routes[0].Request.StripPrefix != "/api/v1" {
-		t.Errorf("StripPrefix = %q, want /api/v1", cfg.Routes[0].Request.StripPrefix)
-	}
+	require.NoErrorf(t, err, "unexpected error: %v", err)
+	assert.Equal(t, "/api/v1", cfg.Routes[0].Request.StripPrefix)
 }
 
 func TestParse_MethodsNormalisedToUpper(t *testing.T) {
@@ -402,9 +368,7 @@ routes:
     pool: app
 `
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoErrorf(t, err, "unexpected error: %v", err)
 	if cfg.Routes[0].Match.Methods[0] != "GET" || cfg.Routes[0].Match.Methods[1] != "POST" {
 		t.Errorf("methods not normalised: %v", cfg.Routes[0].Match.Methods)
 	}
@@ -432,12 +396,8 @@ routes:
     pool: app
 `
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(cfg.Routes[0].Match.Methods) != 0 {
-		t.Errorf("empty methods should be nil/empty, got %v", cfg.Routes[0].Match.Methods)
-	}
+	require.NoErrorf(t, err, "unexpected error: %v", err)
+	assert.Len(t, cfg.Routes[0].Match.Methods, 0)
 }
 
 // --- HotMaxBytes GOMEMLIMIT derivation (issue #161) ---
@@ -468,8 +428,9 @@ func TestResolveHotMaxBytes_ExplicitOverrideKept(t *testing.T) {
 	t.Parallel()
 	s := Storage{HotMaxBytes: ByteSize(1 << 30)} // 1 GiB explicit
 	s.ResolveHotMaxBytes("24GiB")
-	if got := s.HotMaxBytes.Bytes(); got != 1<<30 {
-		t.Fatalf("explicit override clobbered: got %d, want %d", got, 1<<30)
+	{
+		got := s.HotMaxBytes.Bytes()
+		require.Equal(t, int64(1)<<30, got)
 	}
 }
 
@@ -477,18 +438,14 @@ func TestResolveHotMaxBytes_NoGomemLimitStaysZero(t *testing.T) {
 	t.Parallel()
 	s := Storage{}
 	s.ResolveHotMaxBytes("")
-	if s.HotMaxBytes.Bytes() != 0 {
-		t.Fatalf("expected 0 when GOMEMLIMIT unset, got %d", s.HotMaxBytes.Bytes())
-	}
+	require.Equal(t, int64(0), s.HotMaxBytes.Bytes())
 }
 
 func TestResolveHotMaxBytes_InvalidGomemLimitIgnored(t *testing.T) {
 	t.Parallel()
 	s := Storage{}
 	s.ResolveHotMaxBytes("garbage")
-	if s.HotMaxBytes.Bytes() != 0 {
-		t.Fatalf("expected 0 for invalid GOMEMLIMIT, got %d", s.HotMaxBytes.Bytes())
-	}
+	require.Equal(t, int64(0), s.HotMaxBytes.Bytes())
 }
 
 func TestParse_DerivesHotMaxBytesFromGomemLimitEnv(t *testing.T) {
@@ -499,24 +456,22 @@ listen:
 storage:
   warm_dir: /tmp`
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	require.NoErrorf(t, err, "parse: %v", err)
 	want := int64(24<<30) * 75 / 100
-	if got := cfg.Storage.HotMaxBytes.Bytes(); got != want {
-		t.Fatalf("HotMaxBytes = %d, want %d (24GiB*0.75)", got, want)
+	{
+		got := cfg.Storage.HotMaxBytes.Bytes()
+		require.Equal(t, want, got)
 	}
 }
 
 func TestParse_EmptyConfigDerivesHotMaxBytesFromGomemLimit(t *testing.T) {
 	t.Setenv("GOMEMLIMIT", "3GiB")
 	cfg, err := Parse(nil)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	require.NoErrorf(t, err, "parse: %v", err)
 	want := int64(3<<30) * 75 / 100
-	if got := cfg.Storage.HotMaxBytes.Bytes(); got != want {
-		t.Fatalf("HotMaxBytes = %d, want %d (3GiB*0.75)", got, want)
+	{
+		got := cfg.Storage.HotMaxBytes.Bytes()
+		require.Equal(t, want, got)
 	}
 }
 
@@ -527,8 +482,9 @@ func TestResolveHotMaxBytes_PlainIntegerBytes(t *testing.T) {
 	s := Storage{}
 	s.ResolveHotMaxBytes("3221225472") // 3 GiB
 	want := int64(3221225472) * 75 / 100
-	if got := s.HotMaxBytes.Bytes(); got != want {
-		t.Fatalf("HotMaxBytes = %d, want %d", got, want)
+	{
+		got := s.HotMaxBytes.Bytes()
+		require.Equal(t, want, got)
 	}
 }
 
@@ -541,11 +497,10 @@ storage:
   hot_max_bytes: 2GiB
 `
 	cfg, err := Parse([]byte(yamlSrc))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if got := cfg.Storage.HotMaxBytes.Bytes(); got != 2<<30 {
-		t.Fatalf("explicit hot_max_bytes overridden by GOMEMLIMIT: got %d, want %d", got, 2<<30)
+	require.NoErrorf(t, err, "parse: %v", err)
+	{
+		got := cfg.Storage.HotMaxBytes.Bytes()
+		require.Equal(t, int64(2<<30), got)
 	}
 }
 
@@ -553,12 +508,8 @@ func TestCluster_FullMode_Rejected(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000", Cluster: ":8443"}, Cluster: Cluster{Mode: "full"}}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for mode 'full' which has been removed")
-	}
-	if !strings.Contains(err.Error(), "cluster.mode must be") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cluster.mode must be")
 }
 
 func TestWALSyncInterval_NegativeRejected(t *testing.T) {
@@ -568,12 +519,8 @@ func TestWALSyncInterval_NegativeRejected(t *testing.T) {
 		Storage: Storage{WALSyncInterval: -2 * time.Second},
 	}
 	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for wal_sync_interval < -1")
-	}
-	if !strings.Contains(err.Error(), "wal_sync_interval") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wal_sync_interval")
 }
 
 func TestWALSyncInterval_NegativeOneAccepted(t *testing.T) {
@@ -582,8 +529,9 @@ func TestWALSyncInterval_NegativeOneAccepted(t *testing.T) {
 		Listen:  Listen{Admin: ":9000"},
 		Storage: Storage{WALSyncInterval: -1},
 	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("wal_sync_interval = -1 should be accepted, got: %v", err)
+	{
+		err := cfg.Validate()
+		require.NoErrorf(t, err, "wal_sync_interval = -1 should be accepted, got: %v", err)
 	}
 }
 
@@ -594,9 +542,7 @@ func TestResolveWarmMaxEntries_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
 	want := limit * 15 / (100 * 128)
 	s := Storage{}
 	s.ResolveWarmMaxEntries("14GiB")
-	if s.WarmMaxEntries != want {
-		t.Fatalf("WarmMaxEntries = %d, want %d", s.WarmMaxEntries, want)
-	}
+	require.Equal(t, want, s.WarmMaxEntries)
 }
 
 func TestResolveWarmMaxEntries_DefaultRatio(t *testing.T) {
@@ -605,36 +551,28 @@ func TestResolveWarmMaxEntries_DefaultRatio(t *testing.T) {
 	want := limit * 15 / (100 * 128)
 	s := Storage{}
 	s.ResolveWarmMaxEntries("14GiB")
-	if s.WarmMaxEntries != want {
-		t.Fatalf("WarmMaxEntries = %d, want %d", s.WarmMaxEntries, want)
-	}
+	require.Equal(t, want, s.WarmMaxEntries)
 }
 
 func TestResolveWarmMaxEntries_ExplicitOverrideKept(t *testing.T) {
 	t.Parallel()
 	s := Storage{WarmMaxEntries: 5_000_000}
 	s.ResolveWarmMaxEntries("14GiB")
-	if s.WarmMaxEntries != 5_000_000 {
-		t.Fatalf("explicit override clobbered: got %d, want 5000000", s.WarmMaxEntries)
-	}
+	require.Equal(t, int64(5_000_000), s.WarmMaxEntries)
 }
 
 func TestResolveWarmMaxEntries_NoGomemLimitStaysZero(t *testing.T) {
 	t.Parallel()
 	s := Storage{}
 	s.ResolveWarmMaxEntries("")
-	if s.WarmMaxEntries != 0 {
-		t.Fatalf("expected 0 when GOMEMLIMIT unset, got %d", s.WarmMaxEntries)
-	}
+	require.Equal(t, int64(0), s.WarmMaxEntries)
 }
 
 func TestResolveWarmMaxEntries_InvalidGomemLimitIgnored(t *testing.T) {
 	t.Parallel()
 	s := Storage{}
 	s.ResolveWarmMaxEntries("garbage")
-	if s.WarmMaxEntries != 0 {
-		t.Fatalf("expected 0 for invalid GOMEMLIMIT, got %d", s.WarmMaxEntries)
-	}
+	require.Equal(t, int64(0), s.WarmMaxEntries)
 }
 
 func TestParse_GOGC(t *testing.T) {

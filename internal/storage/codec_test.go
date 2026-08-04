@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -33,9 +36,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 
 	got, err := decodeObject(encodeObject(orig))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	require.NoErrorf(t, err, "decode: %v", err)
 
 	if got.Key != orig.Key || got.VaryKey != orig.VaryKey || got.StatusCode != orig.StatusCode {
 		t.Errorf("identity fields mismatch: %+v", got)
@@ -73,21 +74,13 @@ func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 		// round-trip (ADR-0015 risk).
 	}
 	got, err := decodeObject(encodeObject(orig))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !got.LastModified.IsZero() {
-		t.Errorf("LastModified should round-trip as zero, got %v", got.LastModified)
-	}
-	if !got.StoredAt.IsZero() {
-		t.Errorf("StoredAt should round-trip as zero, got %v", got.StoredAt)
-	}
+	require.NoErrorf(t, err, "decode: %v", err)
+	assert.True(t, got.LastModified.IsZero())
+	assert.True(t, got.StoredAt.IsZero())
 	if len(got.Body) != 0 || got.BodySize != 0 {
 		t.Errorf("empty body expected, got %q (size %d)", got.Body, got.BodySize)
 	}
-	if got.SurrogateKeys != nil {
-		t.Errorf("nil surrogate keys expected, got %v", got.SurrogateKeys)
-	}
+	assert.Nil(t, got.SurrogateKeys)
 }
 
 func TestEncodeIsDeterministicAcrossMapIteration(t *testing.T) {
@@ -113,9 +106,7 @@ func TestEncodeIsDeterministicAcrossMapIteration(t *testing.T) {
 			Header:     header.FromHTTP(base),
 			Body:       []byte("deterministic payload"),
 		})
-		if !bytes.Equal(blob, prev) {
-			t.Fatalf("encodeObject not deterministic\nprev=%x\ncurr=%x", prev, blob)
-		}
+		require.True(t, bytes.Equal(blob, prev))
 		prev = blob
 	}
 }
@@ -128,8 +119,9 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 		"truncated":   encodeObject(&api.Object{Header: header.FromHTTP(http.Header{"A": {"b"}}), Body: []byte("xx")})[:4],
 	}
 	for name, blob := range cases {
-		if _, err := decodeObject(blob); err == nil {
-			t.Errorf("%s: expected decode error, got nil", name)
+		{
+			_, err := decodeObject(blob)
+			assert.NotNilf(t, err, "case %s", name)
 		}
 	}
 }

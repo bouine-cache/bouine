@@ -13,6 +13,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -38,25 +41,16 @@ func TestHotStore_PutGet(t *testing.T) {
 	k := KeyHash([]byte("test-key"))
 	o := obj(k, 100)
 
-	if err := s.Put(context.Background(), k, o); err != nil {
-		t.Fatalf("put: %v", err)
+	{
+		err := s.Put(context.Background(), k, o)
+		require.NoErrorf(t, err, "put: %v", err)
 	}
 	got, src, err := s.Get(context.Background(), k)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected hit, got miss")
-	}
-	if got.StatusCode != 200 {
-		t.Fatalf("status = %d", got.StatusCode)
-	}
-	if got.Hits != 1 {
-		t.Fatalf("hits = %d, want 1", got.Hits)
-	}
-	if src != api.SourceHot {
-		t.Fatalf("source = %q, want %q", src, api.SourceHot)
-	}
+	require.NoErrorf(t, err, "get: %v", err)
+	require.NotNil(t, got)
+	require.Equal(t, 200, got.StatusCode)
+	require.Equal(t, uint64(1), got.Hits)
+	require.Equal(t, api.SourceHot, src)
 }
 
 func TestHotStore_Miss(t *testing.T) {
@@ -64,19 +58,11 @@ func TestHotStore_Miss(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
 	got, src, err := s.Get(context.Background(), 999)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got != nil {
-		t.Fatal("expected miss")
-	}
-	if src != "" {
-		t.Fatalf("source = %q, want empty", src)
-	}
+	require.NoErrorf(t, err, "get: %v", err)
+	require.Nil(t, got)
+	require.Equal(t, api.Source(""), src)
 	st := s.Stats()
-	if st.Misses != 1 {
-		t.Fatalf("misses = %d", st.Misses)
-	}
+	require.Equal(t, int64(1), st.Misses)
 }
 
 func TestHotStore_Get_DelegatesToGet(t *testing.T) {
@@ -85,17 +71,14 @@ func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	k := KeyHash([]byte("delegate"))
 	o := obj(k, 100)
 
-	if err := s.Put(context.Background(), k, o); err != nil {
-		t.Fatalf("put: %v", err)
+	{
+		err := s.Put(context.Background(), k, o)
+		require.NoErrorf(t, err, "put: %v", err)
 	}
 
 	got, _, err := s.Get(context.Background(), k)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected hit via Get")
-	}
+	require.NoErrorf(t, err, "Get: %v", err)
+	require.NotNil(t, got)
 }
 
 func TestHotStore_Delete(t *testing.T) {
@@ -106,9 +89,7 @@ func TestHotStore_Delete(t *testing.T) {
 	_ = s.Delete(context.Background(), k)
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got != nil {
-		t.Fatal("expected miss after delete")
-	}
+	require.Nil(t, got)
 }
 
 func TestHotStore_EvictsOnFull(t *testing.T) {
@@ -123,9 +104,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 	}
 
 	st := s.Stats()
-	if st.Evictions == 0 {
-		t.Fatal("expected evictions")
-	}
+	require.NotEqual(t, 0, st.Evictions)
 	if st.HotBytes > 4096 {
 		t.Fatalf("HotBytes = %d, exceeds budget", st.HotBytes)
 	}
@@ -162,24 +141,16 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 	_ = s.Put(ctx, expired.Key, expired)
 
 	before := s.Stats()
-	if before.HotEntries != 2 {
-		t.Fatalf("entries before reap = %d, want 2", before.HotEntries)
-	}
+	require.Equal(t, int64(2), before.HotEntries)
 
 	s.reapExpired(now)
 
 	after := s.Stats()
-	if after.HotEntries != 1 {
-		t.Fatalf("entries after reap = %d, want 1 (fresh only)", after.HotEntries)
-	}
+	require.Equal(t, int64(1), after.HotEntries)
 	got, _, _ := s.Get(ctx, expired.Key)
-	if got != nil {
-		t.Fatal("expired entry should have been reaped")
-	}
+	require.Nil(t, got)
 	got, _, _ = s.Get(ctx, fresh.Key)
-	if got == nil {
-		t.Fatal("fresh entry should still be present")
-	}
+	require.NotNil(t, got)
 }
 
 func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
@@ -215,9 +186,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 	s.reapExpired(now)
 
 	st := s.Stats()
-	if st.HotEntries != 2 {
-		t.Fatalf("entries after reap = %d, want 2 (SWR and SIE still valid)", st.HotEntries)
-	}
+	require.Equal(t, int64(2), st.HotEntries)
 }
 
 func TestObjSize_AccountsForHeaders(t *testing.T) {
@@ -247,17 +216,17 @@ func TestObjSize_AccountsForHeaders(t *testing.T) {
 
 func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 	t.Parallel()
-	if want := int64(unsafe.Sizeof(api.Object{})); objectStructSize != want {
-		t.Errorf("objectStructSize = %d, but unsafe.Sizeof(api.Object{}) = %d — update the constant",
-			objectStructSize, want)
+	{
+		want := int64(unsafe.Sizeof(api.Object{}))
+		assert.Equal(t, want, objectStructSize)
 	}
-	if want := int64(unsafe.Sizeof(hotEntry{})); hotEntrySize != want {
-		t.Errorf("hotEntrySize = %d, but unsafe.Sizeof(hotEntry{}) = %d — update the constant",
-			hotEntrySize, want)
+	{
+		want := int64(unsafe.Sizeof(hotEntry{}))
+		assert.Equal(t, want, hotEntrySize)
 	}
-	if want := int64(unsafe.Sizeof(sieve.Entry[api.Key]{})); sieveEntrySize != want {
-		t.Errorf("sieveEntrySize = %d, but unsafe.Sizeof(sieve.Entry[api.Key]{}) = %d — update the constant",
-			sieveEntrySize, want)
+	{
+		want := int64(unsafe.Sizeof(sieve.Entry[api.Key]{}))
+		assert.Equal(t, want, sieveEntrySize)
 	}
 }
 
@@ -265,9 +234,7 @@ func TestObjSize_MapOverheadConstant(t *testing.T) {
 	t.Parallel()
 	// 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry.
 	// The hmap struct header (~96 B) is negligible at 1M+ entries.
-	if mapPerEntryOverhead != 22 {
-		t.Errorf("mapPerEntryOverhead = %d, want 22 (Go runtime bucket overhead)", mapPerEntryOverhead)
-	}
+	assert.Equal(t, int64(22), mapPerEntryOverhead)
 }
 
 func TestObjSize_OrphanedValuesCounted(t *testing.T) {
@@ -305,9 +272,7 @@ func TestObjSize_OrphanedValuesCounted(t *testing.T) {
 	}
 	delta := size - sizeClean
 	// Expected delta: headerValueHeader(16) + len("session=abc")(11) = 27.
-	if delta != 27 {
-		t.Errorf("delta = %d, want 27 (16 B string header + 11 B orphaned value data)", delta)
-	}
+	assert.Equal(t, int64(27), delta)
 }
 
 func TestObjSize_ExactValue(t *testing.T) {
@@ -338,9 +303,7 @@ func TestObjSize_ExactValue(t *testing.T) {
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
-	if got != want {
-		t.Errorf("objSize = %d, want %d (exact value mismatch)", got, want)
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
@@ -368,9 +331,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	}
 
 	st := s.Stats()
-	if st.Evictions == 0 {
-		t.Fatal("expected evictions with large headers and small bodies")
-	}
+	require.NotEqual(t, 0, st.Evictions)
 	overshoot := int64(budget * 11 / 10) // 10% transient overshoot bound
 	if st.HotBytes > overshoot {
 		t.Fatalf("HotBytes = %d, exceeds overshoot bound %d", st.HotBytes, overshoot)
@@ -386,16 +347,10 @@ func TestHotStore_Replace(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 200))
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got == nil {
-		t.Fatal("expected hit")
-	}
-	if got.BodySize != 200 {
-		t.Fatalf("body_size = %d, want 200", got.BodySize)
-	}
+	require.NotNil(t, got)
+	require.Equal(t, int64(200), got.BodySize)
 	st := s.Stats()
-	if st.HotEntries != 1 {
-		t.Fatalf("entries = %d, want 1", st.HotEntries)
-	}
+	require.Equal(t, int64(1), st.HotEntries)
 }
 
 func TestHotStore_ConcurrentAccess(t *testing.T) {
@@ -417,9 +372,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	st := s.Stats()
-	if st.Hits == 0 {
-		t.Fatal("expected hits from concurrent access")
-	}
+	require.NotEqual(t, 0, st.Hits)
 }
 
 func TestHotStore_Stats(t *testing.T) {
@@ -431,28 +384,18 @@ func TestHotStore_Stats(t *testing.T) {
 	_, _, _ = s.Get(context.Background(), 12345) // miss
 
 	st := s.Stats()
-	if st.HotEntries != 1 {
-		t.Fatalf("entries = %d", st.HotEntries)
-	}
-	if st.Hits != 1 {
-		t.Fatalf("hits = %d", st.Hits)
-	}
-	if st.Misses != 1 {
-		t.Fatalf("misses = %d", st.Misses)
-	}
+	require.Equal(t, int64(1), st.HotEntries)
+	require.Equal(t, int64(1), st.Hits)
+	require.Equal(t, int64(1), st.Misses)
 }
 
 func TestKeyHash_Deterministic(t *testing.T) {
 	t.Parallel()
 	a := KeyHash([]byte("hello"))
 	b := KeyHash([]byte("hello"))
-	if a != b {
-		t.Fatalf("non-deterministic: %d != %d", a, b)
-	}
+	require.Equal(t, b, a)
 	c := KeyHash([]byte("world"))
-	if a == c {
-		t.Fatal("collision on different inputs")
-	}
+	require.NotEqual(t, c, a)
 }
 
 func TestHotStore_SetBacked(t *testing.T) {
@@ -461,8 +404,9 @@ func TestHotStore_SetBacked(t *testing.T) {
 
 	k := KeyHash([]byte("warm-key"))
 	o := obj(k, 512)
-	if err := s.Put(context.Background(), k, o); err != nil {
-		t.Fatal(err)
+	{
+		err := s.Put(context.Background(), k, o)
+		require.NoError(t, err)
 	}
 
 	s.SetBacked(k)
@@ -473,9 +417,7 @@ func TestHotStore_SetBacked(t *testing.T) {
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
 		t.Fatal("expected entry to be marked hasBackup after SetBacked")
 	}
-	if sh.backedCount != 1 {
-		t.Fatalf("backedCount = %d, want 1", sh.backedCount)
-	}
+	require.Equal(t, int64(1), sh.backedCount)
 }
 
 func TestHotStore_EvictPreferBacked(t *testing.T) {
@@ -496,11 +438,13 @@ func TestHotStore_EvictPreferBacked(t *testing.T) {
 	// k2 triggers eviction. k1 (backed) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
-	if got, _, _ := s.Get(ctx, k1); got != nil {
-		t.Error("k1 (backed) should have been evicted first")
+	{
+		got, _, _ := s.Get(ctx, k1)
+		assert.Nil(t, got)
 	}
-	if got, _, _ := s.Get(ctx, k2); got == nil {
-		t.Error("k2 (hot-only, newly inserted) should exist")
+	{
+		got, _, _ := s.Get(ctx, k2)
+		assert.NotNil(t, got)
 	}
 }
 
@@ -529,11 +473,13 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	k3 := KeyHash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	if got, _, _ := s.Get(ctx, k1); got == nil {
-		t.Error("k1 (hot-only, visited) should survive — visited bit preserved")
+	{
+		got, _, _ := s.Get(ctx, k1)
+		assert.NotNil(t, got)
 	}
-	if got, _, _ := s.Get(ctx, k2); got != nil {
-		t.Error("k2 (backed) should have been evicted")
+	{
+		got, _, _ := s.Get(ctx, k2)
+		assert.Nil(t, got)
 	}
 }
 
@@ -548,13 +494,15 @@ func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	_ = s.Put(ctx, k2, obj(k2, 1000))
 
 	k3 := KeyHash([]byte("z"))
-	if err := s.Put(ctx, k3, obj(k3, 1000)); err != nil {
-		t.Fatal(err)
+	{
+		err := s.Put(ctx, k3, obj(k3, 1000))
+		require.NoError(t, err)
 	}
 
 	// k3 must have been inserted (eviction loop allowed it).
-	if _, _, err := s.Get(ctx, k3); err != nil {
-		t.Fatal("k3 should exist:", err)
+	{
+		_, _, err := s.Get(ctx, k3)
+		require.Nil(t, err)
 	}
 }
 
@@ -577,9 +525,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
 		t.Fatal("entry should have hasBackup after re-marking")
 	}
-	if sh.backedCount != 1 {
-		t.Fatalf("backedCount = %d, want 1 after re-mark", sh.backedCount)
-	}
+	require.Equal(t, int64(1), sh.backedCount)
 }
 
 // TestHotOverflowLatency validates that under 1.5× working-set overflow,
@@ -713,17 +659,11 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "example\\.com"})
-	if err != nil {
-		t.Fatalf("ban: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("ban count = %d, want 1", count)
-	}
+	require.NoErrorf(t, err, "ban: %v", err)
+	require.Equal(t, 1, count)
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got != nil {
-		t.Fatal("expected miss after ban")
-	}
+	require.Nil(t, got)
 }
 
 func TestHotStore_BanByPathRegex(t *testing.T) {
@@ -738,17 +678,11 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me"})
-	if err != nil {
-		t.Fatalf("ban: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("ban count = %d, want 1", count)
-	}
+	require.NoErrorf(t, err, "ban: %v", err)
+	require.Equal(t, 1, count)
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got != nil {
-		t.Fatal("expected miss after ban")
-	}
+	require.Nil(t, got)
 }
 
 func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
@@ -761,12 +695,8 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 		HostRegex: "example\\.com",
 		CreatedAt: banTime,
 	})
-	if err != nil {
-		t.Fatalf("ban: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("ban count = %d, want 0 (store empty)", count)
-	}
+	require.NoErrorf(t, err, "ban: %v", err)
+	require.Equal(t, 0, count)
 
 	// Simulate peer replication: Put an object with StoredAt before the ban.
 	k := KeyHash([]byte("lazy-ban"))
@@ -777,9 +707,7 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got != nil {
-		t.Fatal("expected miss from lazy ban on slow path")
-	}
+	require.Nil(t, got)
 }
 
 func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
@@ -796,9 +724,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got == nil {
-		t.Fatal("expected hit before ban")
-	}
+	require.NotNil(t, got)
 
 	// Issue a ban that covers the object's StoredAt. The next Get
 	// takes the fast path (visited=true) and must enforce the lazy ban.
@@ -806,14 +732,10 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 		HostRegex: "example\\.com",
 		CreatedAt: time.Now(),
 	})
-	if err != nil {
-		t.Fatalf("ban: %v", err)
-	}
+	require.NoErrorf(t, err, "ban: %v", err)
 
 	got, _, _ = s.Get(context.Background(), k)
-	if got != nil {
-		t.Fatal("expected miss from lazy ban on fast path")
-	}
+	require.Nil(t, got)
 }
 
 func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
@@ -826,9 +748,7 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 		HostRegex: "example\\.com",
 		CreatedAt: banTime,
 	})
-	if err != nil {
-		t.Fatalf("ban: %v", err)
-	}
+	require.NoErrorf(t, err, "ban: %v", err)
 
 	// Object stored AFTER the ban — should be exempt from lazy eviction.
 	k := KeyHash([]byte("exempt"))
@@ -839,7 +759,5 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 	_ = s.Put(context.Background(), k, o)
 
 	got, _, _ := s.Get(context.Background(), k)
-	if got == nil {
-		t.Fatal("expected hit — object stored after ban should be exempt")
-	}
+	require.NotNil(t, got)
 }

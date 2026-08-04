@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -37,12 +40,8 @@ func TestMaxObjectSize_SmallResponseCached(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
 
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("small response should be cached, got X-Cache=%q", rr.Header().Get(header.XCache))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1", calls)
-	}
+	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	assert.Equal(t, 1, calls)
 }
 
 func TestMaxObjectSize_LargeResponseSkipped(t *testing.T) {
@@ -67,12 +66,8 @@ func TestMaxObjectSize_LargeResponseSkipped(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
 
-	if calls != 2 {
-		t.Errorf("origin called %d times, want 2 (large response must not be cached)", calls)
-	}
-	if rr2.Header().Get(header.XCache) == "HIT" {
-		t.Error("large response should NOT be a HIT")
-	}
+	assert.Equal(t, 2, calls)
+	assert.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 }
 
 func TestMaxObjectSize_ZeroDisabled(t *testing.T) {
@@ -92,12 +87,8 @@ func TestMaxObjectSize_ZeroDisabled(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
 
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("zero max_object_size should not limit caching, got X-Cache=%q", rr.Header().Get(header.XCache))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1", calls)
-	}
+	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	assert.Equal(t, 1, calls)
 }
 
 func TestMaxObjectSize_ExactBoundaryCached(t *testing.T) {
@@ -115,7 +106,5 @@ func TestMaxObjectSize_ExactBoundaryCached(t *testing.T) {
 
 	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)
-	if obj == nil {
-		t.Fatal("response at exact boundary should be cached")
-	}
+	require.NotNil(t, obj)
 }

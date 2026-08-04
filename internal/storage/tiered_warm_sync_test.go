@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -25,9 +27,7 @@ func tieredStoreWithSync(t *testing.T, batchSize int) *TieredStore {
 		WarmSyncInterval:  -1, // disabled — we call runWarmSyncCycle manually
 		WarmSyncBatchSize: batchSize,
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 	return ts
 }
@@ -42,15 +42,17 @@ func TestWarmSync_WritesHotOnlyEntriesToWarm(t *testing.T) {
 	}
 
 	// Verify warm is empty before sync.
-	if keys := ts.warm.Keys(); len(keys) != 0 {
-		t.Fatalf("warm should be empty before sync, got %d keys", len(keys))
+	{
+		keys := ts.warm.Keys()
+		require.Len(t, keys, 0)
 	}
 
 	ts.runWarmSyncCycle(context.Background())
 
 	// Verify warm now has the entries.
-	if keys := ts.warm.Keys(); len(keys) != 10 {
-		t.Fatalf("warm should have 10 keys after sync, got %d", len(keys))
+	{
+		keys := ts.warm.Keys()
+		require.Len(t, keys, 10)
 	}
 }
 
@@ -63,17 +65,12 @@ func TestWarmSync_SkipsWarmBackedEntries(t *testing.T) {
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
 	warmKeysBefore := len(ts.warm.Keys())
-	if warmKeysBefore != 1 {
-		t.Fatalf("expected 1 warm key from large Put, got %d", warmKeysBefore)
-	}
+	require.Equal(t, 1, warmKeysBefore)
 
 	ts.runWarmSyncCycle(context.Background())
 
 	warmKeysAfter := len(ts.warm.Keys())
-	if warmKeysAfter != warmKeysBefore {
-		t.Fatalf("warm key count changed: %d → %d (should skip backed)",
-			warmKeysBefore, warmKeysAfter)
-	}
+	require.Equal(t, warmKeysBefore, warmKeysAfter)
 }
 
 func TestWarmSync_RespectsBatchSize(t *testing.T) {
@@ -86,14 +83,16 @@ func TestWarmSync_RespectsBatchSize(t *testing.T) {
 	}
 
 	ts.runWarmSyncCycle(context.Background())
-	if keys := ts.warm.Keys(); len(keys) != 3 {
-		t.Fatalf("expected 3 warm keys (batch size), got %d", len(keys))
+	{
+		keys := ts.warm.Keys()
+		require.Len(t, keys, 3)
 	}
 
 	// Second cycle should sync more.
 	ts.runWarmSyncCycle(context.Background())
-	if keys := ts.warm.Keys(); len(keys) != 6 {
-		t.Fatalf("expected 6 warm keys after 2 cycles, got %d", len(keys))
+	{
+		keys := ts.warm.Keys()
+		require.Len(t, keys, 6)
 	}
 }
 
@@ -110,9 +109,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 		WarmSyncInterval:  -1, // disabled — manual cycle
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// Put a large object (goes to warm on Put, marks hasBackup).
@@ -120,9 +117,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
 	warmKeysBefore := len(ts.warm.Keys())
-	if warmKeysBefore != 1 {
-		t.Fatalf("expected 1 warm key, got %d", warmKeysBefore)
-	}
+	require.Equal(t, 1, warmKeysBefore)
 
 	// Fill with many large entries to force SIEVE eviction of k.
 	// evictPreferBacked targets backed entries first.
@@ -145,9 +140,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 			warmKeysBefore, warmKeysAfter)
 	}
 	for _, wk := range ts.warm.Keys() {
-		if wk == uint64(k) {
-			t.Fatalf("key %d should have been tombstoned but is still in warm", k)
-		}
+		require.NotEqual(t, uint64(k), wk)
 	}
 }
 
@@ -186,9 +179,7 @@ func TestWarmSync_SyncGoroutineStopsOnClose(t *testing.T) {
 		WarmSyncInterval:  100 * time.Millisecond,
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 
 	// Let the sync goroutine run for a fixed window, then close via a
 	// timer so the main goroutine waits on the done channel instead of
@@ -221,9 +212,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		WarmSyncInterval:  -1, // disabled — we call cycle manually
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 
 	for i := range 5 {
 		k := api.Key(700 + i)
@@ -241,13 +230,12 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	require.NoErrorf(t, err, "reopen: %v", err)
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
-	if keys := ts2.warm.Keys(); len(keys) != 5 {
-		t.Fatalf("expected 5 warm keys after restart, got %d", len(keys))
+	{
+		keys := ts2.warm.Keys()
+		require.Len(t, keys, 5)
 	}
 
 	// Verify warm hits work.
@@ -273,9 +261,7 @@ func TestWarmSync_WarmSyncIntervalNegativeOneDisablesSync(t *testing.T) {
 		BodyThreshold:    1024,
 		WarmSyncInterval: -1, // explicitly disabled
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// syncWg should be 0 — no goroutine started.
@@ -304,9 +290,7 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 
 	// Put large objects (go to warm on Put).
 	for i := range 3 {
@@ -327,13 +311,12 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	require.NoErrorf(t, err, "reopen: %v", err)
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
-	if keys := ts2.warm.Keys(); len(keys) != 3 {
-		t.Fatalf("expected 3 warm keys after segment scan rebuild, got %d", len(keys))
+	{
+		keys := ts2.warm.Keys()
+		require.Len(t, keys, 3)
 	}
 }
 
@@ -354,9 +337,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("NewTieredStore: %v", err)
-	}
+	require.NoErrorf(t, err, "NewTieredStore: %v", err)
 
 	// Put 3 large objects, then delete one so a tombstone exists in the
 	// segment alongside the live records.
@@ -364,8 +345,9 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		k := api.Key(900 + i)
 		_ = ts1.Put(context.Background(), k, bigObj(k, 2000))
 	}
-	if err := ts1.Delete(context.Background(), api.Key(901)); err != nil {
-		t.Fatalf("Delete: %v", err)
+	{
+		err := ts1.Delete(context.Background(), api.Key(901))
+		require.NoErrorf(t, err, "Delete: %v", err)
 	}
 	_ = ts1.Close(context.Background())
 
@@ -380,23 +362,18 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	require.NoErrorf(t, err, "reopen: %v", err)
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
 	// Keys 900 and 902 should be live; 901 should NOT have been
 	// resurrected by the segment scan.
-	if keys := ts2.warm.Keys(); len(keys) != 2 {
-		t.Fatalf("expected 2 warm keys after tombstone-honouring rebuild, got %d: %v", len(keys), keys)
+	{
+		keys := ts2.warm.Keys()
+		require.Len(t, keys, 2)
 	}
 	got, _, err := ts2.Get(context.Background(), api.Key(901))
-	if err != nil {
-		t.Fatalf("Get(901): %v", err)
-	}
-	if got != nil {
-		t.Fatal("Get(901) should return nil — key was tombstoned before WAL loss")
-	}
+	require.NoErrorf(t, err, "Get(901): %v", err)
+	require.Nil(t, got)
 }
 
 // TestPutReplace_TombstonesOldWarmCopy verifies that replacing a
@@ -412,8 +389,9 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	k := api.Key(1100)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
-	if keys := ts.warm.Keys(); len(keys) != 1 {
-		t.Fatalf("expected 1 warm key, got %d", len(keys))
+	{
+		keys := ts.warm.Keys()
+		require.Len(t, keys, 1)
 	}
 
 	// Replace with a small object — below bodyThreshold, does not
@@ -433,9 +411,7 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("Get(%d): got=%v err=%v", k, got, err)
 	}
-	if got.BodySize != 100 {
-		t.Fatalf("expected new body size 100, got %d (stale warm copy?)", got.BodySize)
-	}
+	require.Equal(t, int64(100), got.BodySize)
 }
 
 // TestOnEvictCallback verifies that the OnEvict callback fires when a
@@ -484,8 +460,5 @@ func TestOnEvictCallback(t *testing.T) {
 	found := slices.Contains(evictedKeys, k1)
 	mu.Unlock()
 
-	if !found {
-		t.Fatalf("OnEvict did not fire for backed key %d (evicted %d total)",
-			k1, len(evictedKeys))
-	}
+	require.True(t, found)
 }

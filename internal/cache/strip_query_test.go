@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -20,9 +22,7 @@ func TestBuildKey_StripQueryParams(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, nil)
 
-	if k1 != k2 {
-		t.Errorf("keys should match after stripping utm_source: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
@@ -35,9 +35,7 @@ func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, nil)
 
-	if k1 != k2 {
-		t.Errorf("keys should match when all params stripped: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
@@ -46,9 +44,7 @@ func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
 	k1 := BuildKey(r, nil)
 	k2 := BuildKey(r, nil)
 
-	if k1 != k2 {
-		t.Errorf("nil policy should not change key: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
@@ -61,9 +57,7 @@ func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
 	k1 := BuildKey(r1, policy)
 	k2 := BuildKey(r2, nil)
 
-	if k1 != k2 {
-		t.Errorf("keys should match after stripping utm_source: got %v vs %v", k1, k2)
-	}
+	assert.Equal(t, k2, k1)
 }
 
 func TestStripQueryParams_HandlerIntegration(t *testing.T) {
@@ -93,10 +87,6 @@ func TestStripQueryParams_HandlerIntegration(t *testing.T) {
 	h.ServeHTTP(rr,
 		httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=twitter", nil))
 
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("second request (different utm_source) should be HIT, got X-Cache=%q", rr.Header().Get(header.XCache))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1 (utm_source should be stripped from key)", calls)
-	}
+	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	assert.Equal(t, 1, calls)
 }

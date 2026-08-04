@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -41,9 +44,7 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/r", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != 200 {
-		t.Fatalf("status = %d", rr.Code)
-	}
+	require.Equal(t, 200, rr.Code)
 
 	// Retrieve the stored object and assert TTL = override (±jitter; jitter=0 here).
 	key := BuildKey(req, nil)
@@ -51,9 +52,7 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
 	}
-	if obj.TTL != routeOverride {
-		t.Errorf("obj.TTL = %v, want %v (origin max-age was %v)", obj.TTL, routeOverride, originMaxAge)
-	}
+	assert.Equal(t, routeOverride, obj.TTL)
 }
 
 // TestOverrideTTL_ForwardsOriginalCacheControlHeader ensures the response
@@ -75,16 +74,12 @@ func TestOverrideTTL_ForwardsOriginalCacheControlHeader(t *testing.T) {
 	h.ServeHTTP(rr, req)
 
 	got := rr.Header().Get(header.CacheControl)
-	if got != upstreamCC {
-		t.Errorf("downstream Cache-Control = %q, want %q", got, upstreamCC)
-	}
+	assert.Equal(t, upstreamCC, got)
 
 	// Second request hits cache — header is served from the stored object.
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/fwd", nil))
-	if rr2.Header().Get(header.CacheControl) != upstreamCC {
-		t.Errorf("cached Cache-Control = %q, want %q", rr2.Header().Get(header.CacheControl), upstreamCC)
-	}
+	assert.Equal(t, upstreamCC, rr2.Header().Get(header.CacheControl))
 }
 
 // TestOverrideTTL_ZeroDisabled confirms that zero OverrideTTL leaves the
@@ -109,9 +104,7 @@ func TestOverrideTTL_ZeroDisabled(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
 	}
-	if obj.TTL != originMaxAge {
-		t.Errorf("obj.TTL = %v, want %v", obj.TTL, originMaxAge)
-	}
+	assert.Equal(t, originMaxAge, obj.TTL)
 }
 
 // TestOverrideTTL_HitBeforeExpiry verifies the object is served as a cache HIT
@@ -136,12 +129,8 @@ func TestOverrideTTL_HitBeforeExpiry(t *testing.T) {
 	// upstream's max-age=1 has logically not elapsed yet (test runs < 1 s).
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
-	if rr.Header().Get(header.XCache) != "HIT" {
-		t.Errorf("X-Cache = %q, want HIT", rr.Header().Get(header.XCache))
-	}
-	if calls != 1 {
-		t.Errorf("origin called %d times, want 1", calls)
-	}
+	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	assert.Equal(t, 1, calls)
 }
 
 // TestOverrideTTL_NoStoreNotCached ensures no-store responses are never
@@ -161,9 +150,7 @@ func TestOverrideTTL_NoStoreNotCached(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 	}
-	if calls != 3 {
-		t.Errorf("origin called %d times, want 3 (no-store must bypass cache even with OverrideTTL)", calls)
-	}
+	assert.Equal(t, 3, calls)
 }
 
 // TestOverrideTTL_ShortensUpstreamTTL verifies the override can be shorter
@@ -182,16 +169,10 @@ func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 
 	key := BuildKey(req, nil)
 	obj, _, _ := h.store.Get(req.Context(), key)
-	if obj == nil {
-		t.Fatal("object not stored")
-	}
-	if obj.TTL != 5*time.Second {
-		t.Errorf("obj.TTL = %v, want 5s", obj.TTL)
-	}
+	require.NotNil(t, obj)
+	assert.Equal(t, 5*time.Second, obj.TTL)
 	// Downstream still sees the upstream's 1 h header.
-	if obj.Header.Get(header.CacheControl) != "max-age=3600" {
-		t.Errorf("stored Cache-Control = %q, want max-age=3600", obj.Header.Get(header.CacheControl))
-	}
+	assert.Equal(t, "max-age=3600", obj.Header.Get(header.CacheControl))
 }
 
 // TestOverrideTTL_WithJitter checks that jitter is applied to the override
@@ -216,9 +197,7 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 
 	key := BuildKey(req, nil)
 	obj, _, _ := h.store.Get(req.Context(), key)
-	if obj == nil {
-		t.Fatal("object not stored")
-	}
+	require.NotNil(t, obj)
 	// With 10 % jitter on 1 h, TTL must be in [54 min, 66 min].
 	const (
 		low  = 54 * time.Minute
@@ -269,9 +248,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 	// expired (past override TTL) and triggers revalidation.
 	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
-	if obj == nil {
-		t.Fatal("object not stored after phase 0")
-	}
+	require.NotNil(t, obj)
 	expired := obj.CloneForRefresh()
 	expired.StoredAt = time.Now().Add(-(override + time.Second))
 	_ = h.store.Put(context.Background(), key, expired)
@@ -282,14 +259,8 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 
 	// After the 304, the object must still carry the override TTL.
 	after, _, _ := h.store.Get(context.Background(), key)
-	if after == nil {
-		t.Fatal("object missing after 304 revalidation")
-	}
-	if after.TTL != override {
-		t.Errorf("TTL after 304 = %v, want %v (override must survive revalidation)", after.TTL, override)
-	}
+	require.NotNil(t, after)
+	assert.Equal(t, override, after.TTL)
 	// Upstream's original Cache-Control is still forwarded verbatim.
-	if after.Header.Get(header.CacheControl) != "max-age=1, must-revalidate" {
-		t.Errorf("stored Cache-Control = %q, want max-age=1, must-revalidate", after.Header.Get(header.CacheControl))
-	}
+	assert.Equal(t, "max-age=1, must-revalidate", after.Header.Get(header.CacheControl))
 }

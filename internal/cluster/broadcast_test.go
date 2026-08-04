@@ -189,7 +189,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 	b.BroadcastPurge(context.Background(), api.Key(1), "")
 
 	families, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	var got float64
 	for _, f := range families {
 		if f.GetName() != "bouine_cluster_broadcast_failures_total" {

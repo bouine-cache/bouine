@@ -568,7 +568,7 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 
 	ageStr := rr.Header().Get(header.Age)
 	ageSecs, err := strconv.Atoi(ageStr)
-	require.NoErrorf(t, err, "Age header = %q, not an integer: %v", ageStr, err)
+	require.NoErrorf(t, err, "Age header = %q, not an integer", ageStr)
 
 	expectedMin := int(reqStart.Sub(stale.StoredAt).Seconds())
 	expectedMax := int(reqStart.Add(50 * time.Millisecond).Sub(stale.StoredAt).Seconds())
@@ -810,7 +810,7 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 	count, err := store.Ban(context.Background(), api.BanExpr{
 		PathRegex: "^/ban-me",
 	})
-	require.NoErrorf(t, err, "ban failed: %v", err)
+	require.NoError(t, err, "ban failed")
 	require.Equal(t, 1, count)
 
 	// After ban — should be MISS (re-fetch from origin).
@@ -841,7 +841,7 @@ func TestHandler_BanByHostRegex(t *testing.T) {
 	count, err := store.Ban(context.Background(), api.BanExpr{
 		HostRegex: "example.com",
 	})
-	require.NoErrorf(t, err, "ban failed: %v", err)
+	require.NoError(t, err, "ban failed")
 	require.Equal(t, 1, count)
 
 	// After ban — should be MISS.
@@ -880,7 +880,7 @@ func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
 
 	rec := acquireRecorder(0)
 	_, err := rec.body.Write(make([]byte, maxRecorderCap+1))
-	require.NoErrorf(t, err, "write: %v", err)
+	require.NoError(t, err, "write")
 	releaseRecorder(rec)
 
 	fresh := acquireRecorder(0)

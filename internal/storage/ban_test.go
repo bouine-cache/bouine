@@ -33,7 +33,7 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "example\\.com"})
-	require.NoErrorf(t, err, "Ban: %v", err)
+	require.NoError(t, err, "Ban")
 	require.Equal(t, n, count)
 
 	for i := range n {
@@ -59,7 +59,7 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "^/never-matches$"})
-	require.NoErrorf(t, err, "Ban: %v", err)
+	require.NoError(t, err, "Ban")
 	require.Equal(t, 0, count)
 
 	for i := range n {
@@ -89,7 +89,7 @@ func TestBan_ParallelPartialMatch(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me$"})
-	require.NoErrorf(t, err, "Ban: %v", err)
+	require.NoError(t, err, "Ban")
 	require.Equal(t, n/2, count)
 
 	for i := range n {
@@ -120,7 +120,7 @@ func TestBan_ParallelEvictionCount(t *testing.T) {
 
 	before := s.stats.evictions.Load()
 	count, err := s.Ban(context.Background(), api.BanExpr{HostRegex: "evict\\.example\\.com"})
-	require.NoErrorf(t, err, "Ban: %v", err)
+	require.NoError(t, err, "Ban")
 	after := s.stats.evictions.Load()
 
 	require.Equal(t, n, count)
@@ -148,7 +148,7 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 	}
 
 	count, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "target"})
-	require.NoErrorf(t, err, "Ban: %v", err)
+	require.NoError(t, err, "Ban")
 	want := n / 3
 	require.Equal(t, want, count)
 

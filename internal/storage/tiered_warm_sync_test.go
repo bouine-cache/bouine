@@ -27,7 +27,7 @@ func tieredStoreWithSync(t *testing.T, batchSize int) *TieredStore {
 		WarmSyncInterval:  -1, // disabled — we call runWarmSyncCycle manually
 		WarmSyncBatchSize: batchSize,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 	return ts
 }
@@ -101,7 +101,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 		WarmSyncInterval:  -1, // disabled — manual cycle
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// Put a large object (goes to warm on Put, marks hasBackup).
@@ -171,7 +171,7 @@ func TestWarmSync_SyncGoroutineStopsOnClose(t *testing.T) {
 		WarmSyncInterval:  100 * time.Millisecond,
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 
 	// Let the sync goroutine run for a fixed window, then close via a
 	// timer so the main goroutine waits on the done channel instead of
@@ -204,7 +204,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		WarmSyncInterval:  -1, // disabled — we call cycle manually
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 
 	for i := range 5 {
 		k := api.Key(700 + i)
@@ -222,7 +222,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "reopen: %v", err)
+	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
 	keys := ts2.warm.Keys()
@@ -251,7 +251,7 @@ func TestWarmSync_WarmSyncIntervalNegativeOneDisablesSync(t *testing.T) {
 		BodyThreshold:    1024,
 		WarmSyncInterval: -1, // explicitly disabled
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// syncWg should be 0 — no goroutine started.
@@ -280,7 +280,7 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 
 	// Put large objects (go to warm on Put).
 	for i := range 3 {
@@ -301,7 +301,7 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "reopen: %v", err)
+	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
 	keys := ts2.warm.Keys()
@@ -325,7 +325,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "NewTieredStore: %v", err)
+	require.NoError(t, err, "NewTieredStore")
 
 	// Put 3 large objects, then delete one so a tombstone exists in the
 	// segment alongside the live records.
@@ -334,7 +334,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		_ = ts1.Put(context.Background(), k, bigObj(k, 2000))
 	}
 	err = ts1.Delete(context.Background(), api.Key(901))
-	require.NoErrorf(t, err, "Delete: %v", err)
+	require.NoError(t, err, "Delete")
 	_ = ts1.Close(context.Background())
 
 	// Delete the WAL to force the segment-scan fallback.
@@ -348,7 +348,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 		WarmSyncInterval:  -1,
 		WarmSyncBatchSize: 100,
 	})
-	require.NoErrorf(t, err, "reopen: %v", err)
+	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
 
 	// Keys 900 and 902 should be live; 901 should NOT have been
@@ -356,7 +356,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 	keys := ts2.warm.Keys()
 	require.Len(t, keys, 2)
 	got, _, err := ts2.Get(context.Background(), api.Key(901))
-	require.NoErrorf(t, err, "Get(901): %v", err)
+	require.NoError(t, err, "Get(901)")
 	require.Nil(t, got)
 }
 

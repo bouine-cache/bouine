@@ -28,7 +28,7 @@ func TestHedgedTransport_FastResponse(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/fast", nil)
 	resp, err := ht.RoundTrip(req)
-	require.NoErrorf(t, err, "RoundTrip: %v", err)
+	require.NoError(t, err, "RoundTrip")
 	require.Equal(t, 200, resp.StatusCode)
 	_ = resp.Body.Close()
 	// Fast response: hedge should not fire.
@@ -53,7 +53,7 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/slow", nil)
 	resp, err := ht.RoundTrip(req)
-	require.NoErrorf(t, err, "RoundTrip: %v", err)
+	require.NoError(t, err, "RoundTrip")
 	_ = resp.Body.Close()
 	require.Equal(t, 200, resp.StatusCode)
 	// Hedge should have fired.
@@ -80,7 +80,7 @@ func TestHedgedTransport_NoGoroutineLeak(t *testing.T) {
 	for range iterations {
 		req, _ := http.NewRequest("GET", srv.URL+"/slow", nil)
 		resp, err := ht.RoundTrip(req)
-		require.NoErrorf(t, err, "RoundTrip: %v", err)
+		require.NoError(t, err, "RoundTrip")
 		_ = resp.Body.Close()
 	}
 
@@ -106,7 +106,7 @@ func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
 	}
 	req, _ := http.NewRequest("POST", srv.URL+"/post", nil)
 	resp, err := ht.RoundTrip(req)
-	require.NoErrorf(t, err, "RoundTrip: %v", err)
+	require.NoError(t, err, "RoundTrip")
 	_ = resp.Body.Close()
 	// POST should never fire a hedge. Poll that calls stays at 1.
 	poll.Eventually(t, 100*time.Millisecond, 10*time.Millisecond, func() bool {

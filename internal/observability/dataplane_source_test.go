@@ -49,7 +49,7 @@ func TestMiddleware_SourceLabel(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
 
 	got, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	var foundRequests, foundBytes bool
 	for _, mf := range got {
 		switch mf.GetName() {
@@ -85,7 +85,7 @@ func TestMiddleware_SourceLabel_Empty(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
 
 	got, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	for _, mf := range got {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
@@ -115,7 +115,7 @@ func TestResponseBytesOut_HasCacheResultAndSource(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
 
 	got, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	for _, mf := range got {
 		if mf.GetName() != "bouine_response_bytes_total" {
 			continue

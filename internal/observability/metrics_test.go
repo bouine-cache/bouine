@@ -15,8 +15,8 @@ func TestNewMetrics_Defaults(t *testing.T) {
 	m := NewMetrics()
 	require.NotNil(t, m.Registry)
 	got, err := m.Registry.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
-	require.NotEqual(t, 0, len(got))
+	require.NoError(t, err, "gather")
+	require.NotEmpty(t, got)
 }
 
 func TestMetrics_Handler_ExposesRegisteredCollector(t *testing.T) {

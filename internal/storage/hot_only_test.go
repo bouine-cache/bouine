@@ -207,7 +207,7 @@ func TestHotOnly_KeysRotation(t *testing.T) {
 	if len(batch) > 3 {
 		t.Fatalf("batch len = %d, want <= 3", len(batch))
 	}
-	require.NotEqual(t, 0, len(batch))
+	require.NotEmpty(t, batch)
 
 	// All returned keys must be valid hot-only entries.
 	for _, k := range batch {

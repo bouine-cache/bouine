@@ -3,10 +3,11 @@
 package integration_test
 
 import (
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Strong mode: consistent hash ring, peer fetch on miss, HTTP+gossip invalidation.

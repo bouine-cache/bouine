@@ -200,7 +200,7 @@ func TestClient_SuccessBodyNotCapped(t *testing.T) {
 
 	c := New(srv.URL)
 	got, err := c.Peers(context.Background())
-	require.NoErrorf(t, err, "Peers failed on large success body: %v", err)
+	require.NoError(t, err, "Peers failed on large success body")
 	assert.Len(t, got, 50)
 }
 

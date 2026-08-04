@@ -45,7 +45,7 @@ func TestHealthz(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	var got map[string]string
 	err := json.Unmarshal(body, &got)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	require.Equal(t, "ok", got["status"])
 }
 
@@ -79,7 +79,7 @@ func TestReadyz_Detail_NotReady(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	require.Equal(t, "not-ready", resp["status"])
 	conds, ok := resp["conditions"].([]any)
 	require.True(t, ok)
@@ -102,7 +102,7 @@ func TestReadyz_Detail_Ready(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	require.Equal(t, "ready", resp["status"])
 	conds, ok := resp["conditions"].([]any)
 	require.True(t, ok)
@@ -116,7 +116,7 @@ func TestReadyz_Detail_NoConditionsFn(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	conds, ok := resp["conditions"].([]any)
 	require.True(t, ok)
 	require.Len(t, conds, 0)
@@ -220,7 +220,7 @@ func TestDrain_NoDrainFn(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	var got map[string]string
 	err := json.Unmarshal(body, &got)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	require.Equal(t, "drained", got["status"])
 }
 
@@ -260,21 +260,21 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	s.inner.WriteTimeout = 50 * time.Millisecond
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoErrorf(t, err, "listen: %v", err)
+	require.NoError(t, err, "listen")
 	defer ln.Close()
 
 	go s.inner.Serve(ln)
 	defer s.inner.Close()
 
 	resp, err := http.Get("http://" + ln.Addr().String() + "/drain")
-	require.NoErrorf(t, err, "drain request failed (write timeout killed connection): %v", err)
+	require.NoError(t, err, "drain request failed (write timeout killed connection)")
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
-	require.NoErrorf(t, err, "read body: %v", err)
+	require.NoError(t, err, "read body")
 	var got map[string]string
 	err = json.Unmarshal(body, &got)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	require.Equal(t, "drained", got["status"])
 
 	// DrainFn must have been called synchronously — the response is

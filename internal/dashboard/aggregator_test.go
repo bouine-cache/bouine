@@ -170,7 +170,7 @@ func TestPeerMetricsHandler(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	var sum observability.MetricsSummary
 	err := json.NewDecoder(w.Body).Decode(&sum)
-	require.NoErrorf(t, err, "decode: %v", err)
+	require.NoError(t, err, "decode")
 	assert.Equal(t, "node-x", sum.NodeName)
 	var total int64
 	for _, b := range sum.RequestSnap {

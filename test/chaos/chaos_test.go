@@ -27,7 +27,7 @@ func TestChaos_PeerKill(t *testing.T) {
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=pk-%d", s.Nodes[0].HTTPAddr, i)
 		resp, err := http.Get(url) //nolint:noctx
-		require.NoErrorf(t, err, "populate %d: %v", i, err)
+		require.NoErrorf(t, err, "populate %d", i)
 		resp.Body.Close()
 	}
 
@@ -63,7 +63,7 @@ func TestChaos_OriginFlap(t *testing.T) {
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=flap-%d", s.Nodes[0].HTTPAddr, i)
 		resp, err := http.Get(url) //nolint:noctx
-		require.NoErrorf(t, err, "populate %d: %v", i, err)
+		require.NoErrorf(t, err, "populate %d", i)
 		resp.Body.Close()
 	}
 
@@ -126,7 +126,7 @@ func TestChaos_PartialPartition(t *testing.T) {
 				time.Sleep(200 * time.Millisecond)
 			}
 		}
-		require.NoErrorf(t, err, "populate node %d: %v", i, err)
+		require.NoErrorf(t, err, "populate node %d", i)
 	}
 
 	// Purge from node 0.
@@ -183,7 +183,7 @@ func TestChaos_SlowOrigin(t *testing.T) {
 	const url = "/hit?x=slow-origin"
 	start := time.Now()
 	resp, err := http.Get(s.Nodes[0].HTTPAddr + url) //nolint:noctx
-	require.NoErrorf(t, err, "warm: %v", err)
+	require.NoError(t, err, "warm")
 	resp.Body.Close()
 	warmDur := time.Since(start)
 	t.Logf("warm request: %v (300ms origin delay expected)", warmDur)
@@ -196,7 +196,7 @@ func TestChaos_SlowOrigin(t *testing.T) {
 	for range 10 {
 		start = time.Now()
 		resp, err = http.Get(s.Nodes[0].HTTPAddr + url) //nolint:noctx
-		require.NoErrorf(t, err, "hit: %v", err)
+		require.NoError(t, err, "hit")
 		resp.Body.Close()
 		dur := time.Since(start)
 		if dur > time.Duration(hitBudgetMs)*time.Millisecond {
@@ -215,7 +215,7 @@ func TestChaos_RollingRestart(t *testing.T) {
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=roll-%d", s.Nodes[0].HTTPAddr, i)
 		resp, err := http.Get(url) //nolint:noctx
-		require.NoErrorf(t, err, "populate %d: %v", i, err)
+		require.NoErrorf(t, err, "populate %d", i)
 		resp.Body.Close()
 	}
 
@@ -285,7 +285,7 @@ func TestChaos_OriginDown(t *testing.T) {
 	// fallback path when origin returns 503.
 	const path = "/stale?x=origin-down"
 	resp, err := http.Get(s.Nodes[0].HTTPAddr + path) //nolint:noctx
-	require.NoErrorf(t, err, "warm: %v", err)
+	require.NoError(t, err, "warm")
 	resp.Body.Close()
 
 	// Wait for max-age=1 to expire so the object becomes stale.
@@ -297,7 +297,7 @@ func TestChaos_OriginDown(t *testing.T) {
 
 	// Request should serve stale (SWR window is 3600s).
 	resp2, err := http.Get(s.Nodes[0].HTTPAddr + path) //nolint:noctx
-	require.NoErrorf(t, err, "stale request: %v", err)
+	require.NoError(t, err, "stale request")
 	resp2.Body.Close()
 	if resp2.StatusCode >= 500 {
 		t.Errorf("origin down: got %d, expected stale 200", resp2.StatusCode)
@@ -315,7 +315,7 @@ func TestChaos_ConcurrentPurgeUnderLoad(t *testing.T) {
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=purge-load-%d", s.Nodes[0].HTTPAddr, i)
 		resp, err := http.Get(url) //nolint:noctx
-		require.NoErrorf(t, err, "populate %d: %v", i, err)
+		require.NoErrorf(t, err, "populate %d", i)
 		resp.Body.Close()
 	}
 
@@ -379,7 +379,7 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 	// Surviving nodes should still be reachable.
 	for _, n := range []int{0, 1} {
 		resp, err := http.Get(s.Nodes[n].HTTPAddr + "/hit?x=rejoin") //nolint:noctx
-		require.NoErrorf(t, err, "node %d during partition: %v", n, err)
+		require.NoErrorf(t, err, "node %d during partition", n)
 		resp.Body.Close()
 		assert.Equal(t, 200, resp.StatusCode)
 	}
@@ -390,7 +390,7 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 
 	// Node 2 must be reachable and serve requests.
 	resp, err := http.Get(s.Nodes[2].HTTPAddr + "/hit?x=rejoin-after") //nolint:noctx
-	require.NoErrorf(t, err, "node 2 after rejoin: %v", err)
+	require.NoError(t, err, "node 2 after rejoin")
 	resp.Body.Close()
 	assert.Equal(t, 200, resp.StatusCode)
 }

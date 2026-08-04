@@ -18,7 +18,7 @@ func TestSessionAuth_SignAndValidate(t *testing.T) {
 	sa := newSessionAuth("secret-token")
 
 	tok, err := sa.makeToken()
-	require.NoErrorf(t, err, "makeToken: %v", err)
+	require.NoError(t, err, "makeToken")
 	assert.True(t, sa.valid(tok))
 }
 
@@ -98,7 +98,7 @@ func TestSessionAuth_MiddlewarePassesValidCookie(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("tok")
 	tok, err := sa.makeToken()
-	require.NoErrorf(t, err, "makeToken: %v", err)
+	require.NoError(t, err, "makeToken")
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

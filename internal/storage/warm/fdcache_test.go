@@ -54,7 +54,7 @@ func TestFDCache_LRUTouchToFront(t *testing.T) {
 func TestFDCache_ReaderProtection(t *testing.T) {
 	t.Parallel()
 	f, err := os.CreateTemp(t.TempDir(), "seg")
-	require.NoErrorf(t, err, "CreateTemp: %v", err)
+	require.NoError(t, err, "CreateTemp")
 	seg := &Segment{ID: 0, Path: f.Name(), f: f}
 	seg.opened.Store(true)
 	seg.readers.Add(1)
@@ -73,7 +73,7 @@ func TestFDCache_EvictionSkipsReaders(t *testing.T) {
 	segs := make([]*Segment, 3)
 	for i := range segs {
 		f, err := os.CreateTemp(t.TempDir(), "seg")
-		require.NoErrorf(t, err, "CreateTemp: %v", err)
+		require.NoError(t, err, "CreateTemp")
 		segs[i] = &Segment{ID: i, Path: f.Name(), f: f}
 		segs[i].opened.Store(true)
 	}
@@ -118,7 +118,7 @@ func TestFDCache_EvictionAllReadersNoInfiniteLoop(t *testing.T) {
 	segs := make([]*Segment, 3)
 	for i := range segs {
 		f, err := os.CreateTemp(t.TempDir(), "seg")
-		require.NoErrorf(t, err, "CreateTemp: %v", err)
+		require.NoError(t, err, "CreateTemp")
 		segs[i] = &Segment{ID: i, Path: f.Name(), f: f}
 		segs[i].opened.Store(true)
 	}
@@ -171,12 +171,12 @@ func TestStore_SegmentCacheSizeEviction(t *testing.T) {
 		SegMax:           512,
 		SegmentCacheSize: 1,
 	})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 5; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 500))
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 
 	require.NotNil(t, s.fdCache)
@@ -194,7 +194,7 @@ func TestStore_SegmentCacheSizeUnlimited(t *testing.T) {
 		SegMax:           1 << 20,
 		SegmentCacheSize: -1,
 	})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	require.Nil(t, s.fdCache)
@@ -209,18 +209,18 @@ func TestStore_FDCacheClearedOnCompact(t *testing.T) {
 		SegMax:           1 << 20,
 		SegmentCacheSize: 256,
 	})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 3; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 100))
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 
 	require.NotEqual(t, 0, s.fdCache.Len())
 
 	err = s.Compact()
-	require.NoErrorf(t, err, "Compact: %v", err)
+	require.NoError(t, err, "Compact")
 
 	require.Equal(t, 0, s.fdCache.Len())
 }
@@ -234,12 +234,12 @@ func TestStore_FDCacheConcurrentReaders(t *testing.T) {
 		SegMax:           512,
 		SegmentCacheSize: 2,
 	})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 10; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 500))
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 
 	var wg sync.WaitGroup
@@ -262,17 +262,17 @@ func TestStore_FDCacheClearedOnClose(t *testing.T) {
 		SegMax:           512,
 		SegmentCacheSize: 256,
 	})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 
 	for i := 0; i < 3; i++ {
 		_, _, err := s.Put(uint64(i), make([]byte, 500))
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 
 	require.NotEqual(t, 0, s.fdCache.Len())
 
 	err = s.Close()
-	require.NoErrorf(t, err, "Close: %v", err)
+	require.NoError(t, err, "Close")
 
 	require.Equal(t, 0, s.fdCache.Len())
 }

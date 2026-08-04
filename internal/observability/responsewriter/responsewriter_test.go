@@ -3,7 +3,6 @@ package responsewriter
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -55,7 +54,7 @@ func TestWriteHeaderAndWrite(t *testing.T) {
 	require.Equal(t, 206, rec.Code)
 
 	n, err := rw.Write([]byte("hello"))
-	require.NoErrorf(t, err, "Write error: %v", err)
+	require.NoError(t, err, "Write error")
 	require.Equal(t, 5, n)
 	require.Equal(t, int64(5), rw.Bytes)
 	Release(rw)
@@ -118,7 +117,7 @@ func TestHijackDelegates(t *testing.T) {
 	frw := &fullResponseWriter{ResponseWriter: httptest.NewRecorder()}
 	rw := Acquire(frw)
 	_, _, err := rw.Hijack()
-	require.NoErrorf(t, err, "Hijack error: %v", err)
+	require.NoError(t, err, "Hijack error")
 	require.True(t, frw.hijacked)
 	Release(rw)
 }
@@ -126,7 +125,7 @@ func TestHijackDelegates(t *testing.T) {
 func TestHijackErrNotSupported(t *testing.T) {
 	rw := Acquire(plainResponseWriter{ResponseWriter: httptest.NewRecorder()})
 	_, _, err := rw.Hijack()
-	require.True(t, errors.Is(err, ErrNotSupported))
+	require.Equal(t, ErrNotSupported, err)
 	Release(rw)
 }
 
@@ -134,7 +133,7 @@ func TestReadFromDelegates(t *testing.T) {
 	frw := &fullResponseWriter{ResponseWriter: httptest.NewRecorder()}
 	rw := Acquire(frw)
 	n, err := rw.ReadFrom(bytes.NewReader([]byte("streamed")))
-	require.NoErrorf(t, err, "ReadFrom error: %v", err)
+	require.NoError(t, err, "ReadFrom error")
 	require.Equal(t, int64(8), n)
 	require.True(t, frw.readFrom)
 	require.Equal(t, int64(8), rw.Bytes)
@@ -144,7 +143,7 @@ func TestReadFromDelegates(t *testing.T) {
 func TestReadFromFallbackCopy(t *testing.T) {
 	rw := Acquire(plainResponseWriter{ResponseWriter: httptest.NewRecorder()})
 	n, err := rw.ReadFrom(bytes.NewReader([]byte("fallback")))
-	require.NoErrorf(t, err, "ReadFrom error: %v", err)
+	require.NoError(t, err, "ReadFrom error")
 	require.Equal(t, int64(8), n)
 	require.Equal(t, int64(8), rw.Bytes)
 	Release(rw)

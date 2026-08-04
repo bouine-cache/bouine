@@ -14,7 +14,7 @@ import (
 func metricValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	for _, mf := range mfs {
 		if mf.GetName() != name {
 			continue
@@ -38,7 +38,7 @@ func metricValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 func assertMetricExists(t *testing.T, reg *prometheus.Registry, name string) {
 	t.Helper()
 	mfs, err := reg.Gather()
-	require.NoErrorf(t, err, "gather: %v", err)
+	require.NoError(t, err, "gather")
 	for _, mf := range mfs {
 		if mf.GetName() == name {
 			return
@@ -82,14 +82,14 @@ func TestMetrics_OverBudgetIncrements(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20, Metrics: m})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	// Fill the budget with protected entries so eviction cannot free space.
 	smallBody := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 4; i++ {
 		_, _, err := s.Put(uint64(i), smallBody)
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 	for i := 0; i < 4; i++ {
 		s.Protect(uint64(i))
@@ -111,17 +111,17 @@ func TestMetrics_EvictionsIncrements(t *testing.T) {
 	dir := t.TempDir()
 	// Small budget so Put triggers eviction.
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 360, SegMax: 1 << 20, Metrics: m})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	smallBody := make([]byte, 100) // 120 bytes per record
 	// 3 records × 120 = 360 = budget. The 4th Put must evict to fit.
 	for i := 0; i < 3; i++ {
 		_, _, err := s.Put(uint64(i), smallBody)
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 	_, _, err = s.Put(99, smallBody)
-	require.NoErrorf(t, err, "Put 99 with eviction: %v", err)
+	require.NoError(t, err, "Put 99 with eviction")
 
 	got := metricValue(t, reg, "bouine_warm_evictions_total")
 	if got < 1 {
@@ -136,11 +136,11 @@ func TestMetrics_CompactionTriggeredIncrements(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20, Metrics: m})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	err = s.Compact()
-	require.NoErrorf(t, err, "Compact: %v", err)
+	require.NoError(t, err, "Compact")
 
 	got := metricValue(t, reg, "bouine_warm_compaction_triggered_total")
 	assert.Equal(t, float64(1), got)
@@ -153,13 +153,13 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20, Metrics: m})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 5; i++ {
 		_, _, err := s.Put(uint64(i), body)
-		require.NoErrorf(t, err, "Put %d: %v", i, err)
+		require.NoErrorf(t, err, "Put %d", i)
 	}
 
 	// DiskBytes should equal the sum of segment file sizes, which for 5
@@ -182,7 +182,7 @@ func TestMetrics_MaxBytesGauge(t *testing.T) {
 	dir := t.TempDir()
 	const maxBytes = 1 << 20 // 1 MiB
 	s, err := NewStore(Config{Dir: dir, MaxBytes: maxBytes, SegMax: 1 << 20, Metrics: m})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	got := s.MaxBytes()
@@ -199,7 +199,7 @@ func TestMetrics_MaxBytesZeroGauge(t *testing.T) {
 
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 0, SegMax: 1 << 20, Metrics: m})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	regVal := metricValue(t, reg, "bouine_warm_max_bytes")
@@ -212,7 +212,7 @@ func TestMetrics_NilMetricsSafe(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 512, SegMax: 1 << 20})
-	require.NoErrorf(t, err, "NewStore: %v", err)
+	require.NoError(t, err, "NewStore")
 	t.Cleanup(func() { _ = s.Close() })
 
 	body := make([]byte, 100)
@@ -220,5 +220,5 @@ func TestMetrics_NilMetricsSafe(t *testing.T) {
 		_, _, _ = s.Put(uint64(i), body) // some may be rejected, must not panic
 	}
 	err = s.Compact()
-	require.NoErrorf(t, err, "Compact with nil metrics: %v", err)
+	require.NoError(t, err, "Compact with nil metrics")
 }

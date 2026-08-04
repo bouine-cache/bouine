@@ -253,14 +253,14 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 	}
 
 	err := s.Put(context.Background(), k, o)
-	require.NoErrorf(t, err, "put: %v", err)
+	require.NoError(t, err, "put")
 	// Verify Put did not mutate the caller's obj.Body — the caller
 	// (TieredStore.Put) may still need to read it for warm-tier encoding.
 	for i := range o.Body {
 		require.Equal(t, byte(i%256), o.Body[i])
 	}
 	got, src, err := s.Get(context.Background(), k)
-	require.NoErrorf(t, err, "get: %v", err)
+	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, api.SourceHot, src)
 	require.Len(t, got.Body, 500)
@@ -286,7 +286,7 @@ func TestHotStore_SlabEviction(t *testing.T) {
 		k := KeyHash([]byte{byte(i)})
 		o := obj(k, 200)
 		err := s.Put(context.Background(), k, o)
-		require.NoErrorf(t, err, "put %d: %v", i, err)
+		require.NoErrorf(t, err, "put %d", i)
 	}
 	// Verify that slab frees actually happened during evictions.
 	// With 20 puts of 200B each into a 4096B store, at least some
@@ -325,7 +325,7 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 		o.Body[i] = byte(i % 256)
 	}
 	err := s.Put(context.Background(), key, o)
-	require.NoErrorf(t, err, "put: %v", err)
+	require.NoError(t, err, "put")
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

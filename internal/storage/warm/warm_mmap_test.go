@@ -52,7 +52,7 @@ func TestReadRecordAtMmapFallback(t *testing.T) {
 
 	// Full readRecordAt should succeed via the pread fallback.
 	rec2, err := readRecordAt(seg, off, totalSize)
-	require.NoErrorf(t, err, "readRecordAt: %v", err)
+	require.NoError(t, err, "readRecordAt")
 	if rec2.Key != 1 || string(rec2.Body) != string(body) {
 		t.Errorf("readRecordAt: key=%d body=%q, want key=1 body=%q", rec2.Key, rec2.Body, body)
 	}
@@ -81,14 +81,14 @@ func TestMmapGetAfterSegmentRotation(t *testing.T) {
 	for i := uint64(0); i < 10; i++ {
 		key := uint64(100 + i)
 		_, _, err := s.Put(key, body)
-		require.NoErrorf(t, err, "Put(%d): %v", key, err)
+		require.NoErrorf(t, err, "Put(%d)", key)
 		keys = append(keys, key)
 	}
 
 	// Verify all reads succeed, including from the sealed segment(s).
 	for _, key := range keys {
 		got, err := s.Get(key)
-		require.NoErrorf(t, err, "Get(%d): %v", key, err)
+		require.NoErrorf(t, err, "Get(%d)", key)
 		require.NotNil(t, got)
 		assert.Equal(t, string(body), string(got))
 	}
@@ -114,21 +114,21 @@ func TestMmapGetAfterCompact(t *testing.T) {
 	body := []byte("compact test body")
 	for i := uint64(0); i < 100; i++ {
 		_, _, err := s.Put(i, body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 	// Delete some to create tombstones for compaction.
 	for i := uint64(0); i < 50; i++ {
 		_, err := s.Delete(i)
-		require.NoErrorf(t, err, "Delete(%d): %v", i, err)
+		require.NoErrorf(t, err, "Delete(%d)", i)
 	}
 
 	err = s.Compact()
-	require.NoErrorf(t, err, "Compact: %v", err)
+	require.NoError(t, err, "Compact")
 
 	// Reads from live keys should succeed.
 	for i := uint64(50); i < 100; i++ {
 		got, err := s.Get(i)
-		require.NoErrorf(t, err, "Get(%d) after compact: %v", i, err)
+		require.NoErrorf(t, err, "Get(%d) after compact", i)
 		require.NotNil(t, got)
 		assert.Equal(t, string(body), string(got))
 	}
@@ -136,7 +136,7 @@ func TestMmapGetAfterCompact(t *testing.T) {
 	// Deleted keys should return nil (tombstone or missing).
 	for i := uint64(0); i < 50; i++ {
 		got, err := s.Get(i)
-		require.NoErrorf(t, err, "Get(%d) deleted: %v", i, err)
+		require.NoErrorf(t, err, "Get(%d) deleted", i)
 		assert.Nil(t, got)
 	}
 }
@@ -160,12 +160,12 @@ func TestMmapFdCacheEviction(t *testing.T) {
 	// Write enough to create 2 segments.
 	for i := uint64(0); i < 10; i++ {
 		_, _, err := s.Put(i, body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	// Read from the old segment to trigger lazy mmap init (on Linux).
 	_, err = s.Get(0)
-	require.NoErrorf(t, err, "Get(0) before eviction: %v", err)
+	require.NoError(t, err, "Get(0) before eviction")
 
 	// Close the old segment's fd to simulate fdCache eviction.
 	s.mu.RLock()
@@ -182,7 +182,7 @@ func TestMmapFdCacheEviction(t *testing.T) {
 
 	// Read from the old segment after fd close.
 	got, err := s.Get(0)
-	require.NoErrorf(t, err, "Get(0) after fd close: %v", err)
+	require.NoError(t, err, "Get(0) after fd close")
 	require.NotNil(t, got)
 	assert.Equal(t, string(body), string(got))
 }
@@ -201,12 +201,12 @@ func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 	body := []byte("concurrent compact test body")
 	for i := uint64(0); i < 500; i++ {
 		_, _, err := s.Put(i, body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 	// Delete half to create tombstones.
 	for i := uint64(0); i < 250; i++ {
 		_, err := s.Delete(i)
-		require.NoErrorf(t, err, "Delete(%d): %v", i, err)
+		require.NoErrorf(t, err, "Delete(%d)", i)
 	}
 
 	var wg sync.WaitGroup
@@ -246,7 +246,7 @@ func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 	// Verify reads still work after compaction.
 	for i := uint64(250); i < 500; i++ {
 		got, err := s.Get(i)
-		require.NoErrorf(t, err, "Get(%d) post-compact: %v", i, err)
+		require.NoErrorf(t, err, "Get(%d) post-compact", i)
 		require.NotNil(t, got)
 	}
 }
@@ -269,7 +269,7 @@ func TestMmapNonLinuxStubs(t *testing.T) {
 	}
 	for i := uint64(0); i < 10; i++ {
 		_, _, err := s.Put(i, body)
-		require.NoErrorf(t, err, "Put(%d): %v", i, err)
+		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	// tryMmap is a no-op → seg.mmap stays nil.
@@ -297,7 +297,7 @@ func TestMmapNonLinuxStubs(t *testing.T) {
 	// Reads should work via pread fallback.
 	for i := uint64(0); i < 10; i++ {
 		got, err := s.Get(i)
-		require.NoErrorf(t, err, "Get(%d): %v", i, err)
+		require.NoErrorf(t, err, "Get(%d)", i)
 		if got == nil || string(got) != string(body) {
 			t.Errorf("Get(%d) = %q, want %q", i, got, body)
 		}

@@ -118,7 +118,7 @@ func TestCloudflareStatus_Endpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	var got map[string]any
 	err := json.Unmarshal(body, &got)
-	require.NoErrorf(t, err, "unmarshal: %v", err)
+	require.NoError(t, err, "unmarshal")
 	require.Equal(t, true, got["enabled"])
 	require.Equal(t, "abc123", got["zone_id"])
 	require.Equal(t, true, got["async"])

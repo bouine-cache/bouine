@@ -300,7 +300,7 @@ func TestCFPropagator_AsyncContextCancellation(t *testing.T) {
 	closeCancel()
 
 	// Give the goroutine time to notice the cancellation.
-	<-time.After(200 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// Close should return quickly since the goroutine already exited.
 	done := make(chan error, 1)

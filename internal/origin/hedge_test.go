@@ -45,7 +45,7 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := calls.Add(1)
 		if n == 1 {
-			<-time.After(200 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 		}
 		w.WriteHeader(200)
 	}))
@@ -73,7 +73,7 @@ func TestHedgedTransport_SlowFiresHedge(t *testing.T) {
 func TestHedgedTransport_NoGoroutineLeak(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		<-time.After(200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
@@ -105,7 +105,7 @@ func TestHedgedTransport_NoHedgeForPost(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		<-time.After(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()

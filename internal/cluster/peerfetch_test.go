@@ -176,7 +176,7 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	t.Parallel()
 	const delay = 5 * time.Millisecond // > 1ms so it survives Milliseconds() truncation
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		<-time.After(delay)
+		time.Sleep(delay)
 		w.Header().Set(header.ContentType, "application/octet-stream")
 		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: 1, StatusCode: 200, Body: []byte("cached")}))
 	}))
@@ -339,7 +339,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 				break
 			}
 		}
-		<-time.After(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 		inFlight.Add(-1)
 		w.Header().Set(header.ContentType, "application/octet-stream")
 		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: 1, StatusCode: 200, Body: []byte("x")}))

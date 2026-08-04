@@ -250,12 +250,13 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 		}),
 	})
 
-	// GET without token should succeed (auth-exempt like other peer RPCs).
+	// GET without token should succeed because /v1/peer/metrics is in
+	// the auth-exempt map (same as peer fetch/purge/ban RPCs).
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/peer/metrics", nil)
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("no token: got %d, want 200 (peer metrics should be exempt)", rr.Code)
+		t.Fatalf("exempt path: got %d, want 200", rr.Code)
 	}
 	if body := rr.Body.String(); body != "{}" {
 		t.Fatalf("response body: want {}, got %q", body)

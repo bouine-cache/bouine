@@ -5,6 +5,10 @@
 <h1 align="center">bouine</h1>
 
 <p align="center">
+  <em>/bwin/</em>
+</p>
+
+<p align="center">
   <a href="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/bouine-cache/bouine/actions/workflows/release.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <a href="https://github.com/bouine-cache/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/bouine-cache/bouine" alt="Latest Release"></a>

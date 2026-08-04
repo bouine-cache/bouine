@@ -21,10 +21,10 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 > Status: **v1.0-rc** — core caching, clustering, negative caching,
 > jittered TTLs, soft-purge, and the Go SDK are shipped. Validated on k3s
 > with 3-node gossip cluster.
-> `make conformance` scores **340/365 (93.2%)** on
+> `make conformance` scores **342/365 (93.7%)** on
 > [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
-> See [`PLAN.md`](PLAN.md) for the roadmap (prefetching, HTTP/3, VCL shim,
-> and AI insights are deferred — not yet implemented).
+> See [`CHANGELOG.md`](CHANGELOG.md) for what's shipped and what's deferred
+> (prefetching, HTTP/3, VCL shim, and AI insights are not yet implemented).
 
 ---
 
@@ -36,12 +36,24 @@ It targets the same problem space as a classic HTTP cache but is designed from d
   external KV.
 - **Clustering**: gossip membership + consistent hash + peer fetch. K8s
   StatefulSet friendly.
-- **Compliance**: **93.2 % on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)**
-  (340/365). Covers RFC 9111 freshness, stale-while-revalidate, stale-if-error, CDN-Cache-Control,
+- **Compliance**: **93.7 % on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)**
+  (342/365). Covers RFC 9111 freshness, stale-while-revalidate, stale-if-error, CDN-Cache-Control,
   heuristic caching, Vary, conditional requests, and `must-understand`.
 - **Performance**: zero-alloc hit path, benchmark-gated CI.
 - **Observability**: Prometheus, OpenTelemetry, slog, pprof.
-- **Migration**: NGINX migration guide included.
+- **Migration**: NGINX and Varnish migration guides included.
+
+### Why bouine?
+
+| | bouine | Varnish | NGINX |
+|---|---|---|---|
+| Architecture | Reverse-proxy cache | Reverse-proxy cache | Reverse proxy + cache |
+| External deps | None (embedded storage) | None | None |
+| Clustering | Gossip + consistent hash (built-in) | Varnish Plus only | Upstream hash (no cluster state) |
+| Cache invalidation | Purge + ban (predicate) + soft-purge | Purge + ban | Purge only (no ban) |
+| Observability | Prometheus + OTel + slog (built-in) | Vmod-based | Third-party modules |
+| Config | YAML (declarative) | VCL (imperative) | NGINX.conf |
+| Kubernetes | StatefulSet + Helm chart, first-class | Sidecar / external | Ingress controller pattern |
 
 ---
 
@@ -94,6 +106,20 @@ curl -s http://localhost:9000/healthz
 # ok
 ```
 
+### Install
+
+```bash
+# Prebuilt binary (from releases)
+curl -L https://github.com/bouine-cache/bouine/releases/latest/download/bouine-v0.3.7-linux-amd64 -o bouine
+chmod +x bouine
+
+# or via Go
+go install github.com/bouine-cache/bouine/cmd/bouine@latest
+
+# or Docker
+docker pull bouinecache/bouine:latest
+```
+
 ### Building from source
 
 ```bash
@@ -110,13 +136,11 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 ## Kubernetes
 
 ```bash
-docker buildx build --platform linux/amd64 -t bouine:dev --load .
+helm repo add bouine https://charts.bouine.org
+helm repo update
 
-helm install bouine deploy/helm/bouine \
+helm install bouine bouine/bouine \
   --namespace bouine --create-namespace \
-  --set image.repository=bouine \
-  --set image.tag=dev \
-  --set image.pullPolicy=Never \
   --set "config.upstream_pools[0].name=app" \
   --set "config.upstream_pools[0].targets[0]=app.default.svc:8080" \
   --set "config.routes[0].pool=app" \
@@ -138,43 +162,14 @@ below are the canonical source the site is built from.
 
 | Topic                            | Where                                                 |
 |----------------------------------|--------------------------------------------------------|
-| Roadmap & phases                 | [`PLAN.md`](PLAN.md)                                  |
+| Getting started & install        | [bouine.org/docs/getting-started](https://bouine.org/docs/getting-started/) |
 | Architecture reference           | [`docs/architecture.md`](docs/architecture.md)        |
-| Working agreement (binding)      | [`AGENTS.md`](AGENTS.md)                              |
-| Threat model                     | [`docs/security/threat-model.md`](docs/security/threat-model.md) |
-| Contributing (humans)            | [`CONTRIBUTING.md`](CONTRIBUTING.md)                  |
-| Code of Conduct                  | [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)            |
-| Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
-| Changelog                        | [`CHANGELOG.md`](CHANGELOG.md)                        |
+| Configuration reference          | [bouine.org/docs/configuration](https://bouine.org/docs/configuration/) |
 | Migration from NGINX             | [`docs/migration/nginx.md`](docs/migration/nginx.md)   |
 | Migration from Varnish           | [`docs/migration/varnish.md`](docs/migration/varnish.md) |
-| Decision records (ADRs)          | [`docs/decisions/`](docs/decisions/)                  |
-| SLO / SLI reference              | [`docs/operations/slo.md`](docs/operations/slo.md)    |
-| Soak + chaos report (v1.0 gate)  | [`docs/operations/soak-chaos-report.md`](docs/operations/soak-chaos-report.md) |
-
----
-
-## Project layout
-
-The high-level Go module layout follows the layered architecture in
-[`PLAN.md §2.2`](PLAN.md). Lower numbers are closer to the wire.
-
-```
-/cmd/bouine                  Cobra entrypoint + subcommands
-/internal/server             L1 — HTTP/1.1, /2, TLS, route matching
-/internal/storage            L2 — sharded RAM hot tier, mmap warm tier, WAL, SIEVE
-/internal/cache              L3 — RFC 9111 state machine, Vary, conditionals, negative cache
-/internal/origin             L4 — upstream pool, health, hedge, circuit breaker
-/internal/cluster            L5 — gossip, consistent hash, peer fetch, broadcast
-/internal/admin              L6 — net/http admin: purge, ban, refresh, config viewer
-/internal/dashboard          L6 — embedded operator dashboard (templ + htmx)
-/internal/observability      L7 — Prometheus, OpenTelemetry, slog, pprof
-/internal/cloudflare         Cloudflare Cache API invalidation propagation
-/internal/config             config loader, schema, validation
-/internal/runtime            supervised goroutines, graceful shutdown sequencer
-/pkg/bouineapi               public Go SDK
-/pkg/api                     shared wire types (SDK, admin server, dashboard)
-```
+| Contributing                     | [`CONTRIBUTING.md`](CONTRIBUTING.md)                  |
+| Changelog                        | [`CHANGELOG.md`](CHANGELOG.md)                        |
+| Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
 
 ---
 

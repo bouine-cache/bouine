@@ -5,6 +5,10 @@
 <h1 align="center">bouine</h1>
 
 <p align="center">
+  <em>/bwin/</em> &mdash; the HTTP cache that swims fast
+</p>
+
+<p align="center">
   <a href="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/bouine-cache/bouine/actions/workflows/release.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <a href="https://github.com/bouine-cache/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/bouine-cache/bouine" alt="Latest Release"></a>
@@ -14,11 +18,19 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
 </p>
 
-bouine is a cloud-native HTTP cache in Go — RFC 9111
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#kubernetes">Kubernetes</a> &middot;
+  <a href="https://bouine.org">Docs</a> &middot;
+  <a href="#why-bouine">Why bouine?</a> &middot;
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+bouine is a cloud-native HTTP cache in Go &mdash; RFC 9111
 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
 It targets the same problem space as a classic HTTP cache but is designed from day one for Kubernetes, multi-instance clustering, and first-class observability.
 
-> Status: **v1.0-rc** — core caching, clustering, negative caching,
+> Status: **v1.0-rc** &mdash; core caching, clustering, negative caching,
 > jittered TTLs, soft-purge, and the Go SDK are shipped. Validated on k3s
 > with 3-node gossip cluster.
 > `make conformance` scores **342/365 (93.7%)** on
@@ -30,18 +42,40 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 
 ## Highlights
 
-- **Protocols**: HTTP/1.1 and HTTP/2 on the data plane.
-  `net/http` on a separate admin port for the operator surface.
-- **Embedded storage**: sharded in-RAM hot tier + mmap warm tier. No
-  external KV.
-- **Clustering**: gossip membership + consistent hash + peer fetch. K8s
-  StatefulSet friendly.
-- **Compliance**: **93.7 % on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)**
-  (342/365). Covers RFC 9111 freshness, stale-while-revalidate, stale-if-error, CDN-Cache-Control,
-  heuristic caching, Vary, conditional requests, and `must-understand`.
-- **Performance**: zero-alloc hit path, benchmark-gated CI.
-- **Observability**: Prometheus, OpenTelemetry, slog, pprof.
-- **Migration**: NGINX and Varnish migration guides included.
+<table>
+<tr>
+<td valign="top" width="50%">
+
+**Protocol & storage**
+
+- HTTP/1.1 + HTTP/2 data plane, `net/http` admin port
+- Sharded in-RAM hot tier + mmap warm tier
+- No external KV store
+
+**Clustering**
+
+- Gossip membership + consistent hash ring
+- Peer fetch (cluster-wide lookup before origin)
+- K8s StatefulSet friendly
+
+</td>
+<td valign="top" width="50%">
+
+**Compliance**
+
+- **93.7%** on [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests)
+- RFC 9111 freshness, SWR, SIE, `Vary`, conditionals
+- `CDN-Cache-Control`, `must-understand`, negative caching
+
+**Performance & ops**
+
+- Zero-alloc hit path, benchmark-gated CI
+- Prometheus + OpenTelemetry + slog + pprof
+- NGINX & Varnish migration guides
+
+</td>
+</tr>
+</table>
 
 ### Why bouine?
 
@@ -88,7 +122,7 @@ docker run -d --name bouine -p 8080:8080 -p 9000:9000 \
   bouinecache/bouine:latest serve --config /etc/bouine/config.yaml
 ```
 
-Test it — first request is a MISS, second is a HIT:
+Test it --- first request is a MISS, second is a HIT:
 
 ```bash
 curl -s -I http://localhost:8080/get | grep x-cache
@@ -182,3 +216,7 @@ All contributors are bound by [`AGENTS.md`](AGENTS.md). Humans should
 start at [`CONTRIBUTING.md`](CONTRIBUTING.md); AI agents start at
 [`AGENTS.md`](AGENTS.md). Security issues go through
 [`SECURITY.md`](SECURITY.md), never public issues.
+
+---
+
+Varnish and VCL are trademarks of Varnish Software. NGINX is a trademark of F5, Inc. bouine is not affiliated with or endorsed by either project. All product names are used for comparative purposes only.

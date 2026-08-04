@@ -83,7 +83,8 @@ type Config struct {
 	// network; protected by network policy / mTLS in production).
 	PeerFetchHandler http.Handler
 	// PeerMetricsHandler, if non-nil, is mounted at GET /v1/peer/metrics
-	// (behind bearer-token auth) so peers can fetch this node's ring summary.
+	// (auth-exempt; callers are trusted cluster peers on the internal
+	// network, same rationale as peer fetch/purge/ban).
 	PeerMetricsHandler http.Handler
 	// DashboardHandler, if non-nil, is mounted at /dashboard/ outside the
 	// bearer-token middleware; the dashboard manages its own session-cookie auth.
@@ -599,9 +600,9 @@ func (s *Server) rateLimitMiddleware(next http.Handler, perSecond int) http.Hand
 	})
 }
 
-// authMiddleware enforces bearer token authentication on all write
-// (non-GET) requests. Safe read-only endpoints used by K8s probes
-// and monitoring are always allowed without a token.
+// authMiddleware enforces bearer token authentication on all
+// requests except paths in the exempt map. Exempt paths include K8s
+// probes, Prometheus scrape, and cluster-internal peer RPCs.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	// Paths exempt from auth (K8s probes, Prometheus scrape, cluster RPCs).
 	exempt := map[string]bool{
@@ -620,6 +621,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Peers forward purge/ban events via HTTP fan-out in strong mode.
 		"/v1/peer/purge": true,
 		"/v1/peer/ban":   true,
+		// Peer-to-peer metrics RPC: same rationale as peer fetch. The
+		// aggregator fans out to cluster peers to collect ring summaries.
+		"/v1/peer/metrics": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Panic recovery: log and return 500 instead of crashing the connection.

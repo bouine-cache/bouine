@@ -85,7 +85,7 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 	h := &Handler{
 		cfg:           cfg,
 		auth:          newSessionAuth(cfg.Token),
-		agg:           NewAggregator(cfg.Rings, cfg.PeersFn, cfg.SelfAddr, cfg.Token, cfg.Logger),
+		agg:           NewAggregator(cfg.Rings, cfg.PeersFn, cfg.SelfAddr, cfg.Logger),
 		insightEngine: insights.New(),
 	}
 

@@ -26,7 +26,7 @@ func TestAggregator_CollectSingleNode(t *testing.T) {
 	rings.Request.RecordRequest("HIT", 200, 5)
 	rings.Request.Flush(time.Now())
 
-	agg := NewAggregator(rings, nil, "", "", nil)
+	agg := NewAggregator(rings, nil, "", nil)
 	merged, peers := agg.Collect(t.Context())
 
 	if len(peers) != 1 {
@@ -64,7 +64,7 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	peersFn := func() []api.PeerInfo {
 		return []api.PeerInfo{{Name: "peer-1", AdminAddr: peerAddr}}
 	}
-	agg := NewAggregator(rings, peersFn, "127.0.0.1:9999", "", nil)
+	agg := NewAggregator(rings, peersFn, "127.0.0.1:9999", nil)
 	merged, peers := agg.Collect(t.Context())
 
 	if len(peers) != 2 {
@@ -100,7 +100,7 @@ func TestAggregator_PeerTimeout(t *testing.T) {
 	peersFn := func() []api.PeerInfo {
 		return []api.PeerInfo{{Name: "slow", AdminAddr: slowSrv.Listener.Addr().String()}}
 	}
-	agg := NewAggregator(rings, peersFn, "self:9999", "", nil)
+	agg := NewAggregator(rings, peersFn, "self:9999", nil)
 
 	start := time.Now()
 	_, peers := agg.Collect(t.Context())
@@ -133,7 +133,7 @@ func TestAggregator_LastKnownOnStale(t *testing.T) {
 	peersFn := func() []api.PeerInfo {
 		return []api.PeerInfo{{Name: "flaky", AdminAddr: liveSrv.Listener.Addr().String()}}
 	}
-	agg := NewAggregator(rings, peersFn, "self:9999", "", nil)
+	agg := NewAggregator(rings, peersFn, "self:9999", nil)
 	_, peers := agg.Collect(t.Context())
 	// Verify live peer found.
 	var got99 bool
@@ -194,5 +194,37 @@ func TestPeerMetricsHandler(t *testing.T) {
 	}
 	if total != 1 {
 		t.Errorf("total requests: want 1, got %d", total)
+	}
+}
+
+func TestAggregator_CollectNoToken(t *testing.T) {
+	t.Parallel()
+	peerSnap := make([]observability.RequestBucket, 2160)
+	peerSnap[0] = observability.RequestBucket{Requests: 30}
+	peerSum := observability.MetricsSummary{
+		NodeName:    "peer-notoken",
+		CollectedAt: time.Now(),
+		RequestSnap: peerSnap,
+	}
+
+	srv := mockPeerServer(t, peerSum)
+	defer srv.Close()
+
+	rings := observability.NewRings("self")
+	peersFn := func() []api.PeerInfo {
+		return []api.PeerInfo{{Name: "peer-notoken", AdminAddr: srv.Listener.Addr().String()}}
+	}
+	agg := NewAggregator(rings, peersFn, "127.0.0.1:9999", nil)
+	merged, peers := agg.Collect(t.Context())
+
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 peer results, got %d", len(peers))
+	}
+	var totalReq int64
+	for _, b := range merged.RequestSnap {
+		totalReq += b.Requests
+	}
+	if totalReq != 30 {
+		t.Errorf("merged total requests: want 30, got %d", totalReq)
 	}
 }

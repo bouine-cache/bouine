@@ -22,7 +22,6 @@ type Aggregator struct {
 	rings    *observability.Rings
 	peersFn  func() []api.PeerInfo
 	selfAddr string
-	token    string
 	timeout  time.Duration
 	logger   observability.Logger
 
@@ -31,12 +30,11 @@ type Aggregator struct {
 }
 
 // NewAggregator creates an Aggregator.
-func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, selfAddr, token string, logger observability.Logger) *Aggregator {
+func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, selfAddr string, logger observability.Logger) *Aggregator {
 	return &Aggregator{
 		rings:     rings,
 		peersFn:   peersFn,
 		selfAddr:  selfAddr,
-		token:     token,
 		timeout:   200 * time.Millisecond,
 		logger:    logger,
 		lastKnown: make(map[string]observability.MetricsSummary),
@@ -166,10 +164,6 @@ func (a *Aggregator) fetchPeer(ctx context.Context, peer api.PeerInfo) (observab
 	if err != nil {
 		return observability.MetricsSummary{NodeName: peer.Name}, err
 	}
-	if a.token != "" {
-		req.Header.Set(header.Authorization, "Bearer "+a.token)
-	}
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return observability.MetricsSummary{NodeName: peer.Name}, err
@@ -189,7 +183,9 @@ func (a *Aggregator) fetchPeer(ctx context.Context, peer api.PeerInfo) (observab
 }
 
 // PeerMetricsHandler returns the local ring summary as JSON.
-// Mounted at GET /v1/peer/metrics on the admin server.
+// Mounted at GET /v1/peer/metrics on the admin server (auth-exempt;
+// callers are trusted cluster peers on the internal network, same
+// rationale as /v1/peer/fetch, /v1/peer/purge, /v1/peer/ban).
 func PeerMetricsHandler(rings *observability.Rings) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		sum := rings.Summary()

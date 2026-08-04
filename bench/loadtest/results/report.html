@@ -31,6 +31,13 @@
   k6 --summary-export JSON &nbsp;·&nbsp; 3k RPS hit/mixed, 1.5k RPS miss &nbsp;·&nbsp;
   30 s per run &nbsp;·&nbsp; Docker bridge network (macOS)
 </p>
+<p class="subtitle" style="margin-top:-1.5rem;font-size:.78rem;color:var(--muted)">
+  Benchmark methodology: nginx 1.27-alpine, varnish 7.6, envoy 1.31, bouine (HEAD).
+  All proxies run with equivalent caching configs in Docker containers on the same host
+  (Docker bridge network, macOS). Results are indicative of relative performance under
+  these specific conditions and are not representative of production performance.
+  Configure and tune each proxy for your workload before drawing conclusions.
+</p>
 
 <div class="legend">
   <div class="litem"><div class="lswatch" style="background:#4f8ef7"></div>bouine</div><div class="litem"><div class="lswatch" style="background:#f7a24f"></div>nginx</div><div class="litem"><div class="lswatch" style="background:#4ff77e"></div>varnish</div><div class="litem"><div class="lswatch" style="background:#f74f4f"></div>envoy</div>

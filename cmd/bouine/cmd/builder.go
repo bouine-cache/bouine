@@ -161,7 +161,7 @@ func (e *engine) buildHandler(rs *runState) http.Handler {
 // Each pool holds the target addresses and passive health state for a named
 // upstream. Pools are keyed by name and passed to buildRouter so each route can
 // reference its upstream by the name declared in config.
-func (e *engine) buildPools() (map[string]*origin.Pool, error) {
+func (e *engine) buildPools(metrics *origin.Metrics) (map[string]*origin.Pool, error) {
 	pools := make(map[string]*origin.Pool, len(e.cfg.UpstreamPools))
 	for _, pc := range e.cfg.UpstreamPools {
 		p, err := origin.NewPool(origin.PoolConfig{
@@ -169,6 +169,7 @@ func (e *engine) buildPools() (map[string]*origin.Pool, error) {
 			Targets:        pc.Targets,
 			Logger:         e.logger,
 			Consecutive5xx: pc.Health.Passive.Consecutive5xx,
+			Metrics:        metrics,
 		})
 		if err != nil {
 			return nil, err

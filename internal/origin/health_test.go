@@ -20,7 +20,7 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 	p := pool(t, healthy.Listener.Addr().String())
 	// Manually eject the target.
 	p.targets[0].healthy.Store(false)
-	p.targets[0].errors.Store(10)
+	p.targets[0].probeErrors.Store(10)
 
 	if len(p.Healthy()) != 0 {
 		t.Fatal("should be ejected")

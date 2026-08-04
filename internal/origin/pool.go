@@ -35,11 +35,82 @@ type Pool struct {
 
 // Target is a single upstream endpoint.
 type Target struct {
-	addr      string
-	url       *url.URL
-	healthy   atomic.Bool
-	errors    atomic.Int64
-	successes atomic.Int64
+	addr          string
+	url           *url.URL
+	healthy       atomic.Bool
+	passiveErrors atomic.Int64
+	probeErrors   atomic.Int64
+	successes     atomic.Int64
+	metrics       *Metrics
+}
+
+// recordPassiveError increments the passive error counter and ejects the
+// target via CompareAndSwap if the threshold is reached. Called from both
+// the ModifyResponse (5xx) and ErrorHandler (connection error) paths. The
+// source string is included in the ejection log for operator visibility.
+func (t *Target) recordPassiveError(threshold int, logger observability.Logger, poolName, source string) {
+	cnt := t.passiveErrors.Add(1)
+	if t.metrics != nil {
+		t.metrics.incPassiveError(poolName, t.addr)
+	}
+	if cnt >= int64(threshold) {
+		if t.healthy.CompareAndSwap(true, false) {
+			if t.metrics != nil {
+				t.metrics.incEjection(poolName, t.addr, "passive")
+			}
+			logger.Warn("target ejected (passive)",
+				"pool", poolName,
+				"target", t.addr,
+				"source", source,
+				"consecutive_errors", cnt)
+		}
+	}
+}
+
+// recordProbeError increments the probe error counter and ejects the
+// target via CompareAndSwap if the threshold is reached. Called from the
+// active health checker. Counter increments are lock-free; the CAS on
+// healthy ensures the log and flag always agree.
+func (t *Target) recordProbeError(threshold int, logger observability.Logger, poolName string) {
+	cnt := t.probeErrors.Add(1)
+	if t.metrics != nil {
+		t.metrics.incProbeError(poolName, t.addr)
+	}
+	if cnt >= int64(threshold) {
+		if t.healthy.CompareAndSwap(true, false) {
+			if t.metrics != nil {
+				t.metrics.incEjection(poolName, t.addr, "active")
+			}
+			logger.Warn("target ejected (active)",
+				"pool", poolName,
+				"target", t.addr,
+				"consecutive_failures", cnt)
+		}
+	}
+}
+
+// recordProbeSuccess increments the probe success counter and restores
+// the target via CompareAndSwap if the healthy threshold is reached.
+// Does NOT touch passiveErrors — passive and active counters are
+// independent.
+func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, poolName string) {
+	t.probeErrors.Store(0)
+	if t.healthy.Load() {
+		return
+	}
+	cnt := t.successes.Add(1)
+	if cnt >= int64(threshold) {
+		if t.healthy.CompareAndSwap(false, true) {
+			t.successes.Store(0)
+			if t.metrics != nil {
+				t.metrics.incRestore(poolName, t.addr, "active")
+			}
+			logger.Info("target restored (active)",
+				"pool", poolName,
+				"target", t.addr,
+				"consecutive_successes", cnt)
+		}
+	}
 }
 
 // DefaultResponseHeaderTimeout bounds the time waiting for the origin's
@@ -62,6 +133,10 @@ type PoolConfig struct {
 
 	// DialTimeout bounds the TCP dial.
 	DialTimeout time.Duration
+
+	// Metrics holds Prometheus collectors for origin health events.
+	// Nil is safe — all counter methods are no-ops on a nil Metrics.
+	Metrics *Metrics
 }
 
 // NewPool constructs a pool from config. Returns an error if no
@@ -82,6 +157,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("origin: pool %q: %w", cfg.Name, err)
 		}
+		t.metrics = cfg.Metrics
 		p.targets = append(p.targets, t)
 	}
 
@@ -176,6 +252,9 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 				"pool", p.Name,
 				"target", addr,
 				"error", err)
+			if t != nil && consecutive5xx > 0 {
+				t.recordPassiveError(consecutive5xx, p.logger, p.Name, "connection error")
+			}
 			http.Error(w, "upstream error", http.StatusBadGateway)
 		},
 
@@ -185,16 +264,9 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 				return nil
 			}
 			if consecutive5xx > 0 && resp.StatusCode >= 500 {
-				cnt := t.errors.Add(1)
-				if cnt >= int64(consecutive5xx) {
-					t.healthy.Store(false)
-					p.logger.Warn("target ejected",
-						"pool", p.Name,
-						"target", t.addr,
-						"consecutive_5xx", cnt)
-				}
-			} else {
-				t.errors.Store(0)
+				t.recordPassiveError(consecutive5xx, p.logger, p.Name, "passive 5xx")
+			} else if consecutive5xx > 0 {
+				t.passiveErrors.Store(0)
 			}
 			return nil
 		},
@@ -227,12 +299,15 @@ func (p *Pool) Healthy() []string {
 	return out
 }
 
-// TargetStatus reports the health and consecutive-error count for a
-// single upstream target.
+// TargetStatus reports the health and error counts for a single
+// upstream target. ConsecutiveErrors is the sum of passive and probe
+// errors for backward compatibility with dashboard consumers.
 type TargetStatus struct {
 	Addr              string
 	Healthy           bool
 	ConsecutiveErrors int64
+	PassiveErrors     int64
+	ProbeErrors       int64
 }
 
 // Targets returns the health status of all targets in the pool.
@@ -241,24 +316,36 @@ func (p *Pool) Targets() []TargetStatus {
 	defer p.mu.RUnlock()
 	out := make([]TargetStatus, len(p.targets))
 	for i, t := range p.targets {
+		pe := t.passiveErrors.Load()
+		pr := t.probeErrors.Load()
 		out[i] = TargetStatus{
 			Addr:              t.addr,
 			Healthy:           t.healthy.Load(),
-			ConsecutiveErrors: t.errors.Load(),
+			ConsecutiveErrors: pe + pr,
+			PassiveErrors:     pe,
+			ProbeErrors:       pr,
 		}
 	}
 	return out
 }
 
 // MarkHealthy resets a previously ejected target so it can receive
-// traffic again. Called by the active health checker.
+// traffic again. Called by the active health checker or manual admin
+// intervention. Uses CompareAndSwap so the log and the flag always
+// agree.
 func (p *Pool) MarkHealthy(addr string) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, t := range p.targets {
 		if t.addr == addr {
-			t.healthy.Store(true)
-			t.errors.Store(0)
+			t.passiveErrors.Store(0)
+			t.probeErrors.Store(0)
+			t.successes.Store(0)
+			if t.healthy.CompareAndSwap(false, true) {
+				p.logger.Info("target restored (manual)",
+					"pool", p.Name,
+					"target", t.addr)
+			}
 		}
 	}
 }

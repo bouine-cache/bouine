@@ -70,7 +70,6 @@ templ Cluster(d ClusterData) {
 				<div class="stat-row"><span class="stat-k" title="Cluster consistency model. strong: ring-sharded keys with peer fetch. eventual: local cache, gossip invalidation.">mode</span><span class="stat-v">{ modeLabel(d.Meta.Mode) }</span></div>
 				if d.Meta.Mode == "strong" {
 					<div class="stat-row"><span class="stat-k" title="Number of virtual nodes placed on the ring per real node. More virtual nodes → more uniform key-space distribution.">virtual nodes / real</span><span class="stat-v">{ strconv.Itoa(d.Meta.VirtualNodes) }</span></div>
-					<div class="stat-row"><span class="stat-k" title="Maximum allowed load imbalance between nodes relative to the average. 1.25 means a node can hold up to 25% more keys than perfect balance before the ring rebalances.">load factor</span><span class="stat-v">{ fmt.Sprintf("%.2f", d.Meta.LoadFactor) }</span></div>
 					<div class="stat-row"><span class="stat-k" title="Maximum number of peer-fetch hops a single request can make before bouine falls through to the origin. Prevents infinite loops in multi-node clusters.">hop limit</span><span class="stat-v">{ strconv.Itoa(d.Meta.HopLimit) }</span></div>
 					<div class="stat-row"><span class="stat-k" title="Maximum time to wait for a cache lookup response from a peer node before giving up and going to origin.">peer fetch timeout</span><span class="stat-v">{ d.Meta.PeerFetchTimeout }</span></div>
 				} else if d.Meta.Mode == "eventual" {

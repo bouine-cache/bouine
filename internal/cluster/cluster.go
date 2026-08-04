@@ -39,9 +39,6 @@ type Config struct {
 	// VirtualNodes is the number of virtual nodes per real node on
 	// the consistent hash ring. Default 256.
 	VirtualNodes int
-	// LoadFactor caps the maximum load per node relative to the
-	// average. Default 1.25.
-	LoadFactor float64
 	// Mode determines how cache keys are distributed across the cluster.
 	// "strong" uses a consistent hash ring with peer fetch on miss.
 	// "eventual" caches locally with no peer fetch; invalidation by gossip.
@@ -100,9 +97,6 @@ func New(cfg Config) (*Cluster, error) {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.VirtualNodes <= 0 {
 		cfg.VirtualNodes = 256
-	}
-	if cfg.LoadFactor <= 0 {
-		cfg.LoadFactor = 1.25
 	}
 	if cfg.GossipApplyTimeout <= 0 {
 		cfg.GossipApplyTimeout = 100 * time.Millisecond

@@ -29,16 +29,17 @@ the K8s StatefulSet deployment target.
 ## Decision
 
 **L6 (cluster) uses `hashicorp/memberlist` for gossip and a
-consistent hash ring with bounded loads for request routing.**
+consistent hash ring for request routing.**
 
 Specifically:
 
 - `hashicorp/memberlist` handles: node join/leave/failure detection,
   SWIM protocol health probing, user-data broadcasting. Proven by
   Consul, Serf, and Nomad in production at scale.
-- Consistent hash with bounded loads (Google 2017 paper) avoids hot
-  spots: each real node has 256 virtual nodes; the load factor cap
-  is configurable (default 1.25×).
+- Consistent hash ring avoids hot spots: each real node has 256
+  virtual nodes for uniform key-space distribution. Bounded-load
+  walking (Google 2017 paper) is a future enhancement, not yet
+  implemented.
 - Peer-fetch is HTTP/2 over mTLS on a dedicated port (`:8443`). The
   cluster CA is separate from the data-plane CA.
 - Protocol framing: every peer-fetch and gossip metadata message

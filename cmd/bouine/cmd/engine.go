@@ -689,7 +689,6 @@ func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
 	}
 	if rs.clusterNode != nil {
 		meta.VirtualNodes = rs.clusterNode.Config().VirtualNodes
-		meta.LoadFactor = rs.clusterNode.Config().LoadFactor
 		meta.Mode = rs.clusterNode.Mode()
 	} else {
 		meta.Mode = "single-node"

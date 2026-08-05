@@ -23,6 +23,12 @@ import (
 // (issue #201).
 const defaultHandoffQueueDepth = 4096
 
+// MaxHandoffQueueDepth is the upper bound for HandoffQueueDepth. Each
+// slot costs a pointer + message header in memberlist's per-peer linked
+// list; 1<<20 × 50 peers ≈ 50 M entries worst case. config.maxHandoffQueueDepth
+// mirrors this value for YAML validation.
+const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
+
 // Config controls the cluster membership layer.
 //
 // Stable.
@@ -120,6 +126,10 @@ func New(cfg Config) (*Cluster, error) {
 	}
 	if cfg.HandoffQueueDepth < 0 {
 		return nil, fmt.Errorf("cluster: HandoffQueueDepth must be >= 0, got %d", cfg.HandoffQueueDepth)
+	}
+	if cfg.HandoffQueueDepth > MaxHandoffQueueDepth {
+		return nil, fmt.Errorf("cluster: HandoffQueueDepth must be <= %d, got %d (each slot costs a pointer + message header per peer)",
+			MaxHandoffQueueDepth, cfg.HandoffQueueDepth)
 	}
 
 	c := &Cluster{

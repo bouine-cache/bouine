@@ -206,6 +206,7 @@ const (
 // maxHandoffQueueDepth is the upper bound for cluster.handoff_queue_depth.
 // Each slot costs a pointer + message header in memberlist's per-peer
 // linked list; 1<<20 × 50 peers ≈ 50 M entries worst case.
+// Keep in sync with cluster.MaxHandoffQueueDepth.
 const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 
 // Cluster controls peer membership and fan-out. The cluster is enabled

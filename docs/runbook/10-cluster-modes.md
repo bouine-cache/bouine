@@ -249,8 +249,8 @@ staleness, but sustained drops indicate a capacity problem.
    peers ≈ 40 K entries.
 3. **Check `GossipApplyTimeout`.** If the `NotifyMsg` handler is slow
    (e.g. store writes exceeding 100 ms), the handoff queue backs up.
-   Check `bouine_cluster_gossip_apply_duration_seconds` if available, or
-   profile the store write path.
+   Profile the store write path with `go tool pprof` against the
+   `/debug/pprof/*` endpoints on the admin port.
 4. **Check for slow consumers.** A node that is CPU-bound or disk-bound
    will drain its handoff queue slowly. Check `bouine_hot_store_bytes`
    and node CPU/disk metrics.

@@ -1588,9 +1588,7 @@ func TestHandler_SWR_Close_NoNewRevalidateAfterClose(t *testing.T) {
 	})
 	bs := newBlockingStore(innerStore)
 
-	var originCalls atomic.Int64
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		originCalls.Add(1)
 		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
 		w.Header().Set(header.ETag, `"v1"`)
 		w.WriteHeader(200)

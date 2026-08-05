@@ -81,17 +81,17 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	// fast-path's zero-allocation goal.
 	ctx := context.Background()
 
-	key := buildKeyFromRaw(req, f.policy)
-	obj, src, err := f.store.Get(ctx, key)
+	key, key2 := buildKeyFromRaw(req, f.policy)
+	obj, src, err := f.store.Get(ctx, key, key2)
 	if err != nil || obj == nil {
 		return nil, false
 	}
 
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
 	if vary := obj.Header.Get(header.Vary); vary != "" {
-		vk := variantKeyFromRaw(key, vary, req, f.policy)
+		vk, vk2 := variantKeyFromRaw(key, key2, vary, req, f.policy)
 		if vk != key {
-			vobj, vsrc, verr := f.store.Get(ctx, vk)
+			vobj, vsrc, verr := f.store.Get(ctx, vk, vk2)
 			if verr != nil || vobj == nil {
 				return nil, false
 			}
@@ -423,10 +423,11 @@ func parseNoCacheFieldNames(ccHeader string) map[string]bool {
 
 // buildKeyFromRaw computes the canonical cache key from a RawRequest.
 // It mirrors BuildKey but reads from RawRequest fields instead of
-// *http.Request, avoiding the allocation of *http.Request + *url.URL.
+// buildKeyFromRaw computes the canonical cache key from a RawRequest,
+// avoiding the allocation of *http.Request + *url.URL.
 //
 // Zero-alloc on the hot path: uses a 512-byte stack buffer.
-func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
+func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) (api.Key, uint64) {
 	var buf [512]byte
 	n := 0
 
@@ -458,7 +459,9 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n += copyOverflow(buf[:], n, method)
 
 	if n <= len(buf) {
-		return api.Key(xxhash.Sum64(buf[:n]))
+		h := xxhash.NewWithSeed(key2Seed)
+		_, _ = h.Write(buf[:n])
+		return api.Key(xxhash.Sum64(buf[:n])), h.Sum64()
 	}
 
 	// Overflow: redo with a heap buffer.
@@ -473,7 +476,9 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n = appendCanonicalQueryString(heap, n, req.Query, policy)
 	n = appendByte(heap, n, '|')
 	n += copyOverflow(heap, n, method)
-	return api.Key(xxhash.Sum64(heap[:n]))
+	h := xxhash.NewWithSeed(key2Seed)
+	_, _ = h.Write(heap[:n])
+	return api.Key(xxhash.Sum64(heap[:n])), h.Sum64()
 }
 
 // appendCanonicalPathString canonicalizes a path string (collapse
@@ -742,11 +747,14 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 }
 
 // variantKeyFromRaw computes the variant key from a RawRequest.
+// variantKeyFromRaw computes the variant key from a RawRequest.
 // It mirrors VariantKey but reads header values from RawRequest
-// instead of http.Header.
-func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
+// instead of http.Header. Returns (variantKey, variantKey2) where
+// variantKey2 is the secondary hash XORed with the same vary hash,
+// matching how VariantKey derives the variant primary.
+func variantKeyFromRaw(primary api.Key, primary2 uint64, vary string, req *api.RawRequest, policy *KeyPolicy) (api.Key, uint64) {
 	if vary == "" {
-		return primary
+		return primary, primary2
 	}
 	if varyContainsStar(vary) {
 		// Hash all request headers.
@@ -757,7 +765,8 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 			_, _ = h.WriteString(hdr.Key)
 			_, _ = h.WriteString(hdr.Value)
 		}
-		return api.Key(uint64(primary) ^ h.Sum64())
+		vHash := h.Sum64()
+		return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
 	}
 
 	// Parse and sort Vary field names.
@@ -765,13 +774,13 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 	n := 0
 	for f := range strings.SplitSeq(vary, ",") {
 		if n >= maxVaryFields {
-			return primary // pathological — fall back
+			return primary, primary2 // pathological — fall back
 		}
 		fields[n] = strings.ToLower(strings.TrimSpace(f))
 		n++
 	}
 	if n == 0 {
-		return primary
+		return primary, primary2
 	}
 	// Insertion sort.
 	for i := 1; i < n; i++ {
@@ -792,7 +801,7 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 		val := normalizeHeaderValue(req.Header(f))
 		needed := len(f) + 1 + len(val) + 1
 		if off+needed > len(buf) {
-			return primary // overflow — fall back
+			return primary, primary2 // overflow — fall back
 		}
 		off += copy(buf[off:], f)
 		buf[off] = '='
@@ -803,7 +812,8 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 		written = true
 	}
 	if !written {
-		return primary
+		return primary, primary2
 	}
-	return api.Key(uint64(primary) ^ xxhash.Sum64(buf[:off]))
+	vHash := xxhash.Sum64(buf[:off])
+	return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
 }

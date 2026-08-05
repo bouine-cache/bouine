@@ -259,7 +259,7 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 	for i := range o.Body {
 		require.Equal(t, byte(i%256), o.Body[i])
 	}
-	got, src, err := s.Get(context.Background(), k)
+	got, src, err := s.Get(context.Background(), k, 0)
 	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, api.SourceHot, src)
@@ -340,7 +340,7 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 				return
 			default:
 			}
-			got, _, err := s.Get(context.Background(), key)
+			got, _, err := s.Get(context.Background(), key, 0)
 			if err != nil || got == nil {
 				continue
 			}

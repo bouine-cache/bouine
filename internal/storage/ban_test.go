@@ -37,7 +37,7 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 	require.Equal(t, n, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), api.Key(i))
+		got, _, _ := s.Get(context.Background(), api.Key(i), 0)
 		assert.Nil(t, got)
 	}
 }
@@ -63,7 +63,7 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 	require.Equal(t, 0, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), api.Key(i))
+		got, _, _ := s.Get(context.Background(), api.Key(i), 0)
 		assert.NotNil(t, got)
 	}
 }
@@ -93,7 +93,7 @@ func TestBan_ParallelPartialMatch(t *testing.T) {
 	require.Equal(t, n/2, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), api.Key(i))
+		got, _, _ := s.Get(context.Background(), api.Key(i), 0)
 		if i%2 == 0 {
 			assert.Nil(t, got)
 		} else {
@@ -153,7 +153,7 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 	require.Equal(t, want, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), api.Key(i))
+		got, _, _ := s.Get(context.Background(), api.Key(i), 0)
 		if i%3 == 0 {
 			assert.Nil(t, got)
 		} else {
@@ -215,7 +215,7 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 	got := total.Load()
 	require.Equal(t, int64(n), got)
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), api.Key(i))
+		got, _, _ := s.Get(context.Background(), api.Key(i), 0)
 		assert.Nil(t, got)
 	}
 }

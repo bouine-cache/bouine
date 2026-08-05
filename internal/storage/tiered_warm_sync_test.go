@@ -248,7 +248,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 	// Verify warm hits work.
 	for i := range 5 {
 		k := api.Key(700 + i)
-		got, src, err := ts2.Get(context.Background(), k)
+		got, src, err := ts2.Get(context.Background(), k, 0)
 		if err != nil || got == nil {
 			t.Fatalf("Get(%d): got=%v src=%q err=%v", k, got, src, err)
 		}
@@ -377,7 +377,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 	// resurrected by the segment scan.
 	keys := ts2.warm.Keys()
 	require.Len(t, keys, 2)
-	got, _, err := ts2.Get(context.Background(), api.Key(901))
+	got, _, err := ts2.Get(context.Background(), api.Key(901), 0)
 	require.NoError(t, err, "Get(901)")
 	require.Nil(t, got)
 }
@@ -411,7 +411,7 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	// The key should still be in warm (the new object was synced),
 	// but with the new body, not the old one. Verify by checking that
 	// Get returns the small object's body size.
-	got, _, err := ts.Get(context.Background(), k)
+	got, _, err := ts.Get(context.Background(), k, 0)
 	if err != nil || got == nil {
 		t.Fatalf("Get(%d): got=%v err=%v", k, got, err)
 	}

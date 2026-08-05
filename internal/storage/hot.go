@@ -97,6 +97,10 @@ type shard struct {
 type hotEntry struct {
 	obj   *api.Object
 	sieve *sieve.Entry[api.Key]
+	// key2 is the secondary hash for collision detection (issue #51).
+	// Verified against the requesting key2 on Get to ensure the entry
+	// belongs to the requesting URL, not a primary-hash collision.
+	key2 uint64
 	// hasBackup is true when the object also exists in a slower tier.
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
@@ -255,11 +259,16 @@ func (h *HotStore) shard(key api.Key) *shard {
 // on a hit, or nil + empty source on a miss (a miss is not an error —
 // it is a normal control-flow outcome). Bans are checked lazily.
 //
+// Collision detection (issue #51): key2 is verified against the stored
+// entry's key2. A mismatch means two distinct URLs collided on the
+// primary 64-bit hash — the entry belongs to a different URL, so we
+// return a miss instead of serving wrong content.
+//
 // Fast path (visited bit already set): acquires only a read lock,
 // avoiding write-lock contention under concurrent read-heavy workloads.
 // Slow path (visited=false, i.e. first access after eviction hand sweep):
 // upgrades to a write lock to set the bit.
-func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
+func (h *HotStore) Get(_ context.Context, key api.Key, key2 uint64) (*api.Object, api.Source, error) {
 	s := h.shard(key)
 
 	// Fast path: read lock. If the entry exists and its visited bit is
@@ -267,6 +276,13 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	s.mu.RLock()
 	e := s.entries[key]
 	if e != nil && e.sieve.Visited() {
+		if e.key2 != key2 {
+			// Collision: primary hash matches but secondary hash
+			// differs. This entry belongs to a different URL.
+			s.mu.RUnlock()
+			h.stats.misses.Add(1)
+			return nil, "", nil
+		}
 		e.windowHits.Add(1)
 		stored := e.obj
 		ret := h.detachBody(stored)
@@ -292,6 +308,12 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	e = s.entries[key]
 	var stored *api.Object
 	if e != nil {
+		if e.key2 != key2 {
+			// Collision detected on slow path.
+			s.mu.Unlock()
+			h.stats.misses.Add(1)
+			return nil, "", nil
+		}
 		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			return e.sieve
 		})
@@ -375,6 +397,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 		cur.obj = nil
 		cur.sieve = nil
 		cur.hasBackup = false
+		cur.key2 = 0
 		cur.windowHits.Store(0)
 		hotEntryPool.Put(cur)
 	}
@@ -452,6 +475,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		old.obj = nil
 		old.sieve = nil
 		old.hasBackup = false
+		old.key2 = 0
 		old.windowHits.Store(0)
 		hotEntryPool.Put(old)
 	}
@@ -462,6 +486,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
 	e.sieve = se
+	e.key2 = obj.Key2
 	s.entries[key] = e
 	s.bytes += size
 	s.mu.Unlock()
@@ -498,6 +523,22 @@ func (h *HotStore) reaperLoop() {
 }
 
 // reapExpired scans all shards and removes entries whose TTL + SWR + SIE
+// GetForSync reads an object from the hot tier without key2 verification.
+// Used by TieredStore.writeHotOnlyToWarm to read objects it already owns
+// for warm-tier sync. The caller trusts the entry because it was stored
+// by this node's own Put path.
+func (h *HotStore) GetForSync(ctx context.Context, key api.Key) (*api.Object, error) {
+	s := h.shard(key)
+	s.mu.RLock()
+	e := s.entries[key]
+	var ret *api.Object
+	if e != nil {
+		ret = h.detachBody(e.obj)
+	}
+	s.mu.RUnlock()
+	return ret, nil
+}
+
 // has elapsed. Each shard is locked individually and for at most
 // reaperShardBudget to avoid blocking readers.
 func (h *HotStore) reapExpired(now time.Time) {
@@ -971,8 +1012,8 @@ func KeyHash(b []byte) api.Key {
 }
 
 const (
-	objectStructSize    int64 = 264 // unsafe.Sizeof(api.Object{}) — atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
-	hotEntrySize        int64 = 32
+	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — Key2 uint64 added 8B. atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
+	hotEntrySize        int64 = 40
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).

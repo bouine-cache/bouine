@@ -85,6 +85,9 @@ type BanEvent struct {
 type PeerFetchRequest struct {
 	// Key is the cache key being requested.
 	Key Key `json:"key"`
+	// Key2 is the secondary cache key for collision detection (issue #51).
+	// Zero means "no collision guard" (pre-upgrade peer or admin request).
+	Key2 uint64 `json:"key2"`
 	// VaryKey is the variant key (empty = any variant).
 	VaryKey string `json:"vary_key,omitempty"`
 	// Hops is the number of peers already traversed (T36 loop guard).

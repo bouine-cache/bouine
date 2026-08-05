@@ -15,13 +15,13 @@ import (
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
 // *http.Request is available.
-func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
+func BuildKeyFromURL(rawURL string, policy *KeyPolicy) (api.Key, uint64) {
 	if rawURL == "" {
-		return 0
+		return 0, 0
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	r := &http.Request{
 		Method: http.MethodGet,
@@ -31,13 +31,26 @@ func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	return BuildKey(r, policy)
 }
 
+// key2Seed is the seed for the second independent xxhash64 used to
+// detect collisions on the primary key. A different seed produces a
+// statistically independent hash, giving 128-bit collision resistance
+// (birthday bound ~2^64 objects) without the cost of SHA-256.
+const key2Seed = 0x626f75696e6532 // "bouine2" in ASCII
+
 // BuildKey constructs the canonical primary cache key from a request.
 // The key is deterministic and stable across nodes.
+//
+// Returns (primary, secondary): two independent xxhash64 digests of
+// the same canonical buffer. The primary is the map index; the
+// secondary is stored on the entry and verified on Get to detect
+// collisions (issue #51). Same design as Varnish/Nginx (wide hash,
+// no key string) but using two fast xxhash64 calls instead of one
+// slow SHA-256.
 //
 // Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
 // canonical key exceeds 512 bytes (rare — the project caps URLs at 8 KiB),
 // it falls back to a heap buffer via buildKeyHeap.
-func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
+func BuildKey(r *http.Request, policy *KeyPolicy) (api.Key, uint64) {
 	var buf [512]byte
 	n := 0
 
@@ -68,7 +81,10 @@ func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	}
 
 	if n <= len(buf) {
-		return api.Key(xxhash.Sum64(buf[:n]))
+		h := xxhash.NewWithSeed(key2Seed)
+		_, _ = h.Write(buf[:n])
+		secondary := h.Sum64()
+		return api.Key(xxhash.Sum64(buf[:n])), secondary
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
@@ -77,7 +93,7 @@ func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 
 // buildKeyHeap handles the rare case where the canonical key exceeds the
 // 512-byte stack buffer. It allocates a heap buffer and rebuilds the key.
-func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
+func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) (api.Key, uint64) {
 	heap := make([]byte, n)
 	n = 0
 
@@ -102,7 +118,11 @@ func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
 		n += copyOverflow(heap, n, r.Method)
 	}
 
-	return api.Key(xxhash.Sum64(heap[:n]))
+	primary := xxhash.Sum64(heap[:n])
+	h := xxhash.NewWithSeed(key2Seed)
+	_, _ = h.Write(heap[:n])
+	secondary := h.Sum64()
+	return api.Key(primary), secondary
 }
 
 // appendByte writes a single byte at offset n into dst. If n is past

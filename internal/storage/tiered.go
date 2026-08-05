@@ -432,8 +432,8 @@ func (t *TieredStore) initWAL(walDir string) error {
 // consulted and the object is promoted back into the hot tier so
 // the next hit is served from RAM. Returns api.SourceHot or
 // api.SourceWarm depending on which tier served the hit.
-func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error) {
-	obj, src, err := t.hot.Get(ctx, key)
+func (t *TieredStore) Get(ctx context.Context, key api.Key, key2 uint64) (*api.Object, api.Source, error) {
+	obj, src, err := t.hot.Get(ctx, key, key2)
 	if err != nil {
 		return nil, "", err
 	}
@@ -458,6 +458,16 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		// blob poisons lookups forever (issue #171).
 		t.logger.Warn("evicting undecodable warm blob",
 			"key", key, "error", decErr)
+		t.evictWarm(key)
+		return nil, "", nil
+	}
+	// Collision detection (issue #51): verify the decoded object's
+	// Key2 against the requesting key2. Old v2 codec blobs decode with
+	// Key2=0, which fails verification → miss → re-fetch → stored as
+	// v3. This is the accepted warm-cache invalidation on upgrade.
+	if loaded.Key2 != key2 {
+		t.logger.Debug("warm tier collision or stale codec, evicting",
+			"key", key, "stored_key2", loaded.Key2, "request_key2", key2)
 		t.evictWarm(key)
 		return nil, "", nil
 	}
@@ -491,6 +501,14 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		return nil, "", nil
 	}
 	return loaded, api.SourceWarm, nil
+}
+
+// GetForSync reads an object from the hot tier without key2 verification.
+// Used by internal paths (scheduler, variant slot probing) that don't
+// have the requesting key2. Does not consult the warm tier — callers
+// that need warm-tier fallback should use Get with the full key pair.
+func (t *TieredStore) GetForSync(ctx context.Context, key api.Key) (*api.Object, error) {
+	return t.hot.GetForSync(ctx, key)
 }
 
 // Put stores an object in the hot tier and, for large objects, also
@@ -1011,7 +1029,7 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 // see backpressure (#205).
 func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.Key, walEntries *[]wal.Entry) (synced, skipped, skippedOverBudget int) {
 	for _, key := range hotOnlyKeys {
-		obj, _, err := t.hot.Get(ctx, key)
+		obj, err := t.hot.GetForSync(ctx, key)
 		if err != nil || obj == nil {
 			skipped++
 			continue

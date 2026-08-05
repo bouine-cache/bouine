@@ -31,11 +31,12 @@ func TestFastPathHandler_TryHit(t *testing.T) {
 	}
 
 	// Compute key the same way TryHit does.
-	key := buildKeyFromRaw(req, nil)
+	key, key2 := buildKeyFromRaw(req, nil)
 
 	// Populate the store with a cached object.
 	obj := &api.Object{
 		Key:        key,
+		Key2:       key2,
 		StatusCode: 200,
 		Header: header.FromHTTP(http.Header{
 			"Content-Type":   []string{"text/html"},
@@ -138,13 +139,14 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 		TTL:      60 * time.Second,
 	}
 	// Build key matching "HEAD /" — HEAD is normalized to GET for key building.
-	key := buildKeyFromRaw(&api.RawRequest{
+	key, key2 := buildKeyFromRaw(&api.RawRequest{
 		Method: "HEAD",
 		Path:   "/",
 		Host:   "example.com",
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
+	obj.Key2 = key2
 	err := store.Put(context.Background(), key, obj)
 	require.NoError(t, err, "Put failed")
 
@@ -183,13 +185,14 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 		TTL:                  1 * time.Second,
 		StaleWhileRevalidate: 60 * time.Second,
 	}
-	key := buildKeyFromRaw(&api.RawRequest{
+	key, key2 := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
 		Path:   "/",
 		Host:   "example.com",
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
+	obj.Key2 = key2
 	err := store.Put(context.Background(), key, obj)
 	require.NoError(t, err, "Put failed")
 
@@ -222,13 +225,14 @@ func BenchmarkFastPath_Hit(b *testing.B) {
 		StoredAt: time.Now(),
 		TTL:      600 * time.Second,
 	}
-	key := buildKeyFromRaw(&api.RawRequest{
+	key, key2 := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
 		Path:   "/",
 		Host:   "example.com",
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
+	obj.Key2 = key2
 	if err := store.Put(context.Background(), key, obj); err != nil {
 		b.Fatalf("Put failed: %v", err)
 	}
@@ -289,7 +293,7 @@ func BenchmarkBuildKeyFromRaw(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		_ = buildKeyFromRaw(req, nil)
+		_, _ = buildKeyFromRaw(req, nil)
 	}
 }
 
@@ -312,13 +316,14 @@ func BenchmarkFastPath_ParseAndHit(b *testing.B) {
 		StoredAt: time.Now(),
 		TTL:      600 * time.Second,
 	}
-	key := buildKeyFromRaw(&api.RawRequest{
+	key, key2 := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
 		Path:   "/",
 		Host:   "example.com",
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
+	obj.Key2 = key2
 	if err := store.Put(context.Background(), key, obj); err != nil {
 		b.Fatalf("Put failed: %v", err)
 	}
@@ -363,13 +368,14 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 		StoredAt: time.Now(),
 		TTL:      600 * time.Second,
 	}
-	key := buildKeyFromRaw(&api.RawRequest{
+	key, key2 := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
 		Path:   "/",
 		Host:   "example.com",
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
+	obj.Key2 = key2
 	err := store.Put(context.Background(), key, obj)
 	require.NoError(t, err, "Put failed")
 
@@ -430,13 +436,14 @@ func BenchmarkFastPath_HitWithWrite(b *testing.B) {
 		StoredAt: time.Now(),
 		TTL:      600 * time.Second,
 	}
-	key := buildKeyFromRaw(&api.RawRequest{
+	key, key2 := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
 		Path:   "/",
 		Host:   "example.com",
 		Scheme: "http",
 	}, nil)
 	obj.Key = key
+	obj.Key2 = key2
 	if err := store.Put(context.Background(), key, obj); err != nil {
 		b.Fatalf("Put failed: %v", err)
 	}

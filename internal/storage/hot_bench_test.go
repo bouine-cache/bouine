@@ -21,7 +21,7 @@ func BenchmarkHotStore_Get_Hit(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k, 0)
 	}
 }
 
@@ -31,7 +31,7 @@ func BenchmarkHotStore_Get_Miss(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, _, _ = s.Get(context.Background(), 0xDEADBEEF)
+		_, _, _ = s.Get(context.Background(), 0xDEADBEEF, 0)
 	}
 }
 
@@ -81,7 +81,7 @@ func BenchmarkSIEVE_Access(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k, 0)
 	}
 }
 
@@ -99,8 +99,8 @@ func BenchmarkHotGet_NoBans_Parallel(b *testing.B) {
 	}
 	// Warm the visited bits so every Get takes the RLock fast path.
 	for _, k := range ks {
-		_, _, _ = s.Get(context.Background(), k)
-		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k, 0)
+		_, _, _ = s.Get(context.Background(), k, 0)
 	}
 
 	b.ResetTimer()
@@ -111,7 +111,7 @@ func BenchmarkHotGet_NoBans_Parallel(b *testing.B) {
 		for pb.Next() {
 			k := ks[i%keys]
 			i++
-			_, _, _ = s.Get(ctx, k)
+			_, _, _ = s.Get(ctx, k, 0)
 		}
 	})
 }
@@ -129,8 +129,8 @@ func BenchmarkHotGet_WithBan_Parallel(b *testing.B) {
 		_ = s.Put(context.Background(), ks[i], obj(ks[i], 1024))
 	}
 	for _, k := range ks {
-		_, _, _ = s.Get(context.Background(), k)
-		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k, 0)
+		_, _, _ = s.Get(context.Background(), k, 0)
 	}
 	// Register a ban that matches nothing currently cached (objects were
 	// stored before this ban's CreatedAt is in the future), so every Get
@@ -148,7 +148,7 @@ func BenchmarkHotGet_WithBan_Parallel(b *testing.B) {
 		for pb.Next() {
 			k := ks[i%keys]
 			i++
-			_, _, _ = s.Get(ctx, k)
+			_, _, _ = s.Get(ctx, k, 0)
 		}
 	})
 }
@@ -217,7 +217,7 @@ func BenchmarkHotMixed_80_20(b *testing.B) {
 			}
 			// 80% reads, timed for the p99 distribution.
 			start := time.Now()
-			_, _, _ = s.Get(ctx, k)
+			_, _, _ = s.Get(ctx, k, 0)
 			local = append(local, time.Since(start))
 		}
 		mu.append(&getLatencies, local)
@@ -266,8 +266,8 @@ func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 		_ = s.Put(context.Background(), ks[i], obj(ks[i], 1024))
 	}
 	for _, k := range ks {
-		_, _, _ = s.Get(context.Background(), k)
-		_, _, _ = s.Get(context.Background(), k)
+		_, _, _ = s.Get(context.Background(), k, 0)
+		_, _, _ = s.Get(context.Background(), k, 0)
 	}
 
 	b.ResetTimer()
@@ -278,7 +278,7 @@ func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 		for pb.Next() {
 			k := ks[i%shards]
 			i++
-			_, _, _ = s.Get(ctx, k)
+			_, _, _ = s.Get(ctx, k, 0)
 		}
 	})
 }

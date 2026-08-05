@@ -249,7 +249,7 @@ type Handler struct {
 	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
-	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, key2 uint64) (*api.Object, error)
 }
 
 // HandlerConfig configures a cache Handler.
@@ -325,7 +325,7 @@ type HandlerConfig struct {
 	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
 	// the key is owned by a remote peer. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
-	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, key2 uint64) (*api.Object, error)
 
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin.
@@ -484,7 +484,7 @@ func (h *Handler) Close(ctx context.Context) error {
 func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
 	defer cancel()
-	obj, _, err := h.store.Get(ctx, key)
+	obj, err := h.store.GetForSync(ctx, key)
 	if err != nil || obj == nil {
 		return nil
 	}
@@ -505,7 +505,7 @@ func (h *Handler) triggerBgRefresh(key api.Key) {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
-	obj, _, err := h.store.Get(ctx, key)
+	obj, err := h.store.GetForSync(ctx, key)
 	cancel()
 	if err != nil || obj == nil {
 		if h.refreshRegistry != nil {
@@ -594,7 +594,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	req = req.WithContext(ctx)
 	ConditionalHeaders(req, stale)
 
-	res := h.collapsedFetch(req, key)
+	res := h.collapsedFetch(req, key, stale.Key2)
 	if res.Err != nil {
 		h.refreshMetrics.IncTotal("error")
 		h.refreshMetrics.IncErrors(errorType(res.Err))
@@ -632,7 +632,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+		obj := buildObject(key, stale.Key2, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, req, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -680,7 +680,7 @@ func (h *Handler) RouteName() string {
 // buildKey constructs the cache key, applying the route's KeyPolicy
 // when configured. Inlined to avoid overhead on the hit path when no
 // policy is configured (zero added allocs).
-func (h *Handler) buildKey(r *http.Request) api.Key {
+func (h *Handler) buildKey(r *http.Request) (api.Key, uint64) {
 	return BuildKey(r, h.policy)
 }
 
@@ -705,7 +705,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// can produce now < StoredAt when both are in the same millisecond,
 	// causing a stale object to appear fresh.
 	now := time.Now()
-	primaryKey, key, obj, src := h.lookup(r)
+	primaryKey, primary2, key, key2, obj, src := h.lookup(r)
 	if rw, ok := w.(*responsewriter.ResponseWriter); ok {
 		rw.SetCacheKey(key)
 	}
@@ -721,12 +721,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.serveObject(w, r, disp.Object, now, cacheHit, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
-			h.triggerBgRevalidate(r, key, disp.Object)
+			h.triggerBgRevalidate(r, key, key2, disp.Object)
 		}
 	case Miss:
-		h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
+		h.handleCacheMiss(w, r, primaryKey, primary2, key, key2, obj, now, src)
 	case Revalidate:
-		h.revalidate(w, r, primaryKey, key, disp.Object, now, src)
+		h.revalidate(w, r, primaryKey, primary2, key, key2, disp.Object, now, src)
 	case Bypass:
 		h.handleBypass(w, r)
 	}
@@ -740,17 +740,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // stored locally for future requests on this node (L0 promotion).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
-func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source) {
+func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primaryKey api.Key, primary2 uint64, lookupKey api.Key, lookupKey2 uint64, obj *api.Object, now time.Time, src api.Source) {
 	if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(r.Context(), owner, lookupKey); err == nil && peerObj != nil {
+			if peerObj, err := h.peerFetch(r.Context(), owner, lookupKey, lookupKey2); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					h.serveObject(w, r, peerObj, now, cacheHit, api.SourcePeer)
 					// Promote to local hot tier (best-effort; ignore error).
 					_ = h.store.Put(r.Context(), lookupKey, peerObj)
 					if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
-						h.triggerBgRevalidate(r, lookupKey, peerObj)
+						h.triggerBgRevalidate(r, lookupKey, lookupKey2, peerObj)
 					}
 					return
 				}
@@ -770,33 +770,33 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 	// (handler.go:1041) is stricter and bounds stale to the SIE window.
 	// Tightening the miss path to match is tracked as a follow-up.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, lookupKey, primaryKey, obj, now, src)
+		h.fetchAndStoreStayinAlive(w, r, lookupKey, lookupKey2, primaryKey, primary2, obj, now, src)
 	} else {
-		h.fetchAndStore(w, r, lookupKey, primaryKey)
+		h.fetchAndStore(w, r, lookupKey, lookupKey2, primaryKey, primary2)
 	}
 }
 
 // lookup resolves the cache key and stored object for r, accounting
 // for Vary-based secondary keys. Returns the source (hot/warm) from
 // the storage tier that served the object.
-func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, lookupKey api.Key, obj *api.Object, src api.Source) {
-	primaryKey = h.buildKey(r)
-	obj, src, err := h.store.Get(r.Context(), primaryKey)
+func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, primary2 uint64, lookupKey api.Key, lookupKey2 uint64, obj *api.Object, src api.Source) {
+	primaryKey, primary2 = h.buildKey(r)
+	obj, src, err := h.store.Get(r.Context(), primaryKey, primary2)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "key", primaryKey, "error", err)
 	}
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
-		return primaryKey, primaryKey, obj, src
+		return primaryKey, primary2, primaryKey, primary2, obj, src
 	}
-	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), r.Header, h.policy)
+	vk, vk2 := VariantKey(primaryKey, primary2, obj.Header.Get(header.Vary), r.Header, h.policy)
 	if vk == primaryKey {
-		return primaryKey, primaryKey, obj, src
+		return primaryKey, primary2, primaryKey, primary2, obj, src
 	}
-	vobj, vsrc, verr := h.store.Get(r.Context(), vk)
+	vobj, vsrc, verr := h.store.Get(r.Context(), vk, vk2)
 	if verr == nil && vobj != nil {
-		return primaryKey, vk, vobj, vsrc
+		return primaryKey, primary2, vk, vk2, vobj, vsrc
 	}
-	return primaryKey, vk, nil, ""
+	return primaryKey, primary2, vk, vk2, nil, ""
 }
 
 // tryConditional304 returns true and writes a 304 if the client's
@@ -955,8 +955,9 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 }
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
-func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
-	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(key), 36), func() (any, error) {
+func (h *Handler) collapsedFetch(r *http.Request, key api.Key, key2 uint64) fetchResult {
+	sfKey := strconv.FormatUint(uint64(key), 36) + ":" + strconv.FormatUint(key2, 36)
+	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
 	})
@@ -968,8 +969,8 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
-func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult {
-	sfKey := strconv.FormatUint(uint64(key)^revalKeySuffix, 36)
+func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key, key2 uint64) fetchResult {
+	sfKey := strconv.FormatUint(uint64(key)^revalKeySuffix, 36) + ":" + strconv.FormatUint(key2, 36)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
@@ -977,15 +978,15 @@ func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult 
 	return v.(fetchResult)
 }
 
-func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key) {
-	res := h.collapsedFetch(r, lookupKey)
+func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKey api.Key, lookupKey2 uint64, primaryKey api.Key, primary2 uint64) {
+	res := h.collapsedFetch(r, lookupKey, lookupKey2)
 	if res.Err != nil {
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res, primaryKey)
+	h.writeAndMaybeStore(w, r, res, primaryKey, primary2)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -997,8 +998,8 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKe
 // Vary variants do not collapse into a single fetch.
 // primaryKey is the canonical key used for Vary variant storage in
 // writeAndMaybeStore.
-func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source) {
-	res := h.collapsedFetch(r, lookupKey)
+func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, lookupKey api.Key, lookupKey2 uint64, primaryKey api.Key, primary2 uint64, stale *api.Object, now time.Time, src api.Source) {
+	res := h.collapsedFetch(r, lookupKey, lookupKey2)
 	if res.Err != nil {
 		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", lookupKey)
@@ -1011,7 +1012,7 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res, primaryKey)
+	h.writeAndMaybeStore(w, r, res, primaryKey, primary2)
 }
 
 // revalidate sends a conditional request to the origin and refreshes the
@@ -1019,7 +1020,7 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 // (may be a Vary variant key); it is used for singleflight dedup and for
 // storing the 304-refreshed object. primaryKey is the canonical key used for
 // Vary variant storage in writeAndMaybeStore.
-func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source) {
+func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey api.Key, primary2 uint64, lookupKey api.Key, lookupKey2 uint64, stale *api.Object, now time.Time, src api.Source) {
 	revalReq := r.Clone(r.Context())
 	ConditionalHeaders(revalReq, stale)
 
@@ -1028,7 +1029,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	res := h.collapsedRevalidate(revalReq, lookupKey)
+	res := h.collapsedRevalidate(revalReq, lookupKey, lookupKey2)
 	if res.Err != nil {
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
@@ -1065,7 +1066,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 		return
 	}
 
-	h.writeAndMaybeStore(w, r, res, primaryKey)
+	h.writeAndMaybeStore(w, r, res, primaryKey, primary2)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1108,7 +1109,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 // stale-while-revalidate response. revalSem prevents goroutine explosion.
 // The goroutine is tracked by revalWg so Close can drain it before
 // store.Close, preventing use-after-close panics.
-func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, key2 uint64, stale *api.Object) {
 	// Bail out early if the handler is already shutting down.
 	select {
 	case <-h.done:
@@ -1142,20 +1143,20 @@ func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.O
 			case <-bgCtx.Done():
 			}
 		}()
-		h.doBackgroundRevalidate(bgCtx, bgReq, key, stale)
+		h.doBackgroundRevalidate(bgCtx, bgReq, key, key2, stale)
 	}()
 }
 
 // doBackgroundRevalidate fetches a fresh copy of stale and stores it.
 // Uses the collapse group to deduplicate concurrent SWR triggers for
 // the same key.
-func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, key api.Key, key2 uint64, stale *api.Object) {
 	revalReq := r.Clone(ctx)
 	ConditionalHeaders(revalReq, stale)
 
 	staleHits := h.store.WindowHits(key)
 
-	res := h.collapsedFetch(revalReq, key)
+	res := h.collapsedFetch(revalReq, key, key2)
 	if res.Err != nil {
 		return
 	}
@@ -1178,7 +1179,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+		obj := buildObject(key, key2, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		h.storeObject(ctx, key, obj, r, true, staleHits)
 	}
 }
@@ -1188,6 +1189,7 @@ func (h *Handler) writeAndMaybeStore(
 	r *http.Request,
 	res fetchResult,
 	primaryKey api.Key,
+	primary2 uint64,
 ) {
 	dst := w.Header()
 	for k, vals := range res.Header {
@@ -1220,8 +1222,9 @@ func (h *Handler) writeAndMaybeStore(
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey
+		storeKey2 := primary2
 		if vary := res.Header.Get(header.Vary); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, r.Header, h.policy)
+			storeKey, storeKey2 = VariantKey(primaryKey, primary2, vary, r.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
@@ -1231,7 +1234,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+		obj := buildObject(storeKey, storeKey2, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
 		if storeKey != primaryKey {
 			// Shallow-copy the object and change only the Key. This avoids
@@ -1248,6 +1251,7 @@ func (h *Handler) writeAndMaybeStore(
 			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
+			primaryObj.Key2 = primary2
 			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)
 		}
 	}
@@ -1276,7 +1280,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	if len(set) > 0 {
 		h.variantMu.Unlock()
 		probeCtx := context.WithoutCancel(reqCtx)
-		pkObj, _, _ := h.store.Get(probeCtx, primaryKey)
+		pkObj, _ := h.store.GetForSync(probeCtx, primaryKey)
 		h.variantMu.Lock()
 		set = h.variantSets[primaryKey]
 		if set == nil {
@@ -1303,7 +1307,7 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	probeCtx := context.WithoutCancel(reqCtx)
 	dead := make([]api.Key, 0, len(keys))
 	for _, k := range keys {
-		obj, _, _ := h.store.Get(probeCtx, k)
+		obj, _ := h.store.GetForSync(probeCtx, k)
 		if obj == nil {
 			dead = append(dead, k)
 		}
@@ -1340,8 +1344,15 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	h.upstream.ServeHTTP(rec, r)
 
 	if rec.truncated {
+		// Compute the GET-equivalent key for logging. buildKey
+		// normalizes HEAD→GET but not POST→GET, so we synthesize a
+		// GET request to get the same key the invalidation below
+		// would use.
+		getReq := r.Clone(r.Context())
+		getReq.Method = http.MethodGet
+		logKey, _ := h.buildKey(getReq)
 		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
-			"key", h.buildKey(r), "limit", h.maxResponseBytes)
+			"key", logKey, "limit", h.maxResponseBytes)
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
 		http.Error(w, "upstream response too large", http.StatusBadGateway)
@@ -1364,7 +1375,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
 		getReq := r.Clone(r.Context())
 		getReq.Method = http.MethodGet
-		key := h.buildKey(getReq)
+		key, key2 := h.buildKey(getReq)
 		_ = h.store.Delete(r.Context(), key)
 		h.variantMu.Lock()
 		delete(h.variantSets, key)
@@ -1388,13 +1399,13 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		// RFC 9111 §4.3.1: if the POST response has explicit freshness
 		// and a Content-Location matching the request URI, store the
 		// response under the GET key so subsequent GETs can reuse it.
-		h.maybeStorePostResponse(r, getReq, key, rec)
+		h.maybeStorePostResponse(r, getReq, key, key2, rec)
 	}
 }
 
 // maybeStorePostResponse stores a successful POST response under the GET
 // key when it is cacheable, per RFC 9111 §4.3.1.
-func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, key api.Key, rec *responseRecorder) {
+func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, key api.Key, key2 uint64, rec *responseRecorder) {
 	if r.Method != http.MethodPost || rec.statusCode < 200 || rec.statusCode >= 300 {
 		return
 	}
@@ -1414,7 +1425,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Header:     rec.header.Clone(),
 		Body:       bodyCopy,
 	}
-	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+	obj := buildObject(key, key2, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 	h.storeObject(r.Context(), key, obj, getReq, false, 0)
 }
 
@@ -1446,7 +1457,8 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 		Host:   host,
 		TLS:    tlsState,
 	}
-	return h.buildKey(locReq)
+	key, _ := h.buildKey(locReq)
+	return key
 }
 
 // storeObject stores obj under key. When refresh-before-expiry
@@ -1620,7 +1632,7 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy) *api.Object {
+func buildObject(key api.Key, key2 uint64, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL time.Duration, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy) *api.Object {
 	now := time.Now()
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
@@ -1657,6 +1669,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 
 	obj := &api.Object{
 		Key:          key,
+		Key2:         key2,
 		StatusCode:   res.StatusCode,
 		Header:       header.FromHTTP(res.Header),
 		Body:         res.Body,

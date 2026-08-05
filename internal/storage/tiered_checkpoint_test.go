@@ -60,7 +60,7 @@ func TestCheckpointAndSnapshotRestart(t *testing.T) {
 
 	for i := range 20 {
 		k := api.Key(i + 1)
-		obj, src, err := ts2.Get(context.Background(), k)
+		obj, src, err := ts2.Get(context.Background(), k, 0)
 		require.NoErrorf(t, err, "get %d after restart", i)
 		require.NotNil(t, obj)
 		require.Equal(t, api.SourceWarm, src)
@@ -90,7 +90,7 @@ func TestSnapshotFallbackOnMissingSnapshot(t *testing.T) {
 
 	for i := range 10 {
 		k := api.Key(i + 1)
-		obj, _, err := ts2.Get(context.Background(), k)
+		obj, _, err := ts2.Get(context.Background(), k, 0)
 		require.NoErrorf(t, err, "get %d", i)
 		require.NotNil(t, obj)
 	}
@@ -127,13 +127,13 @@ func TestSnapshotWithWALDelta(t *testing.T) {
 	ts2 := newTieredStoreWithDir(t, dir)
 	defer func() { _ = ts2.Close(context.Background()) }()
 
-	obj, _, err := ts2.Get(context.Background(), api.Key(1))
+	obj, _, err := ts2.Get(context.Background(), api.Key(1), 0)
 	require.NoError(t, err, "get deleted key")
 	require.Nil(t, obj)
 
 	for i := 1; i < 20; i++ {
 		k := api.Key(i + 1)
-		obj, _, err := ts2.Get(context.Background(), k)
+		obj, _, err := ts2.Get(context.Background(), k, 0)
 		require.NoErrorf(t, err, "get %d", i)
 		require.NotNil(t, obj)
 	}

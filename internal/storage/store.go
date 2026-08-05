@@ -22,10 +22,16 @@ import (
 // engine.
 //
 // Unstable. The Get signature changed in #174 to return api.Source
-// alongside the object; the interface may change again as the storage
+// alongside the object; it changed again in #51 to accept key2 for
+// collision detection. The interface may change again as the storage
 // tier gains capabilities. Callers depend on this at their own risk.
 type Store interface {
-	Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
+	Get(ctx context.Context, key api.Key, key2 uint64) (*api.Object, api.Source, error)
+	// GetForSync reads an object without key2 verification. Used by
+	// internal paths (scheduler, variant slot probing) that don't
+	// have the requesting key2. The caller trusts the entry because it
+	// was stored by this node's own Put path.
+	GetForSync(ctx context.Context, key api.Key) (*api.Object, error)
 	Put(ctx context.Context, key api.Key, obj *api.Object) error
 	Delete(ctx context.Context, key api.Key) error
 	Ban(ctx context.Context, predicate api.BanExpr) (int, error)

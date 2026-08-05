@@ -551,8 +551,8 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
-	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
-	obj, _, _ := h.store.Get(context.Background(), key)
+	key, key2 := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	obj, _, _ := h.store.Get(context.Background(), key, key2)
 	require.NotNil(t, obj)
 	stale := obj.CloneForRefresh()
 	stale.StoredAt = time.Now().Add(-staleAge)
@@ -702,8 +702,8 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	req1.Header.Set("X-Test-Variant", "a")
 	h.ServeHTTP(httptest.NewRecorder(), req1)
 
-	primaryKey := h.buildKey(req1)
-	storeKey := VariantKey(primaryKey, "X-Test-Variant", req1.Header, nil)
+	primaryKey, primary2 := h.buildKey(req1)
+	storeKey, _ := VariantKey(primaryKey, primary2, "X-Test-Variant", req1.Header, nil)
 
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
@@ -723,7 +723,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	_ = store.Delete(context.Background(), primaryKey)
 	_ = store.Delete(context.Background(), storeKey)
 
-	pkObj, _, _ := store.Get(context.Background(), primaryKey)
+	pkObj, _, _ := store.Get(context.Background(), primaryKey, 0)
 	require.Nil(t, pkObj)
 
 	// Request a new variant. The handler should detect the evicted
@@ -732,7 +732,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	req2.Header.Set("X-Test-Variant", "b")
 	h.ServeHTTP(httptest.NewRecorder(), req2)
 
-	newStoreKey := VariantKey(primaryKey, "X-Test-Variant", req2.Header, nil)
+	newStoreKey, _ := VariantKey(primaryKey, primary2, "X-Test-Variant", req2.Header, nil)
 
 	h.variantMu.Lock()
 	set = h.variantSets[primaryKey]
@@ -992,8 +992,8 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 	h.scheduler.Start()
 
 	ctx := context.Background()
-	key := h.buildKey(httptest.NewRequest("GET", "http://example.com/page", nil))
-	obj, _, err := h.store.Get(ctx, key)
+	key, key2 := h.buildKey(httptest.NewRequest("GET", "http://example.com/page", nil))
+	obj, _, err := h.store.Get(ctx, key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
@@ -1025,8 +1025,8 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(httptest.NewRequest("GET", url, nil))
-	obj, _, err := h.store.Get(context.Background(), key)
+	key, key2 := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
@@ -1090,8 +1090,8 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
-	key := h.buildKey(httptest.NewRequest("GET", url, nil))
-	obj, _, err := h.store.Get(context.Background(), key)
+	key, key2 := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
@@ -1106,7 +1106,7 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 
 	// Verify the stored object has Hits reset (may be 1 from SIEVE slow path
 	// on the test's store.Get, but should not carry over the previous window's count).
-	refreshed, _, err := h.store.Get(context.Background(), key)
+	refreshed, _, err := h.store.Get(context.Background(), key, key2)
 	if err != nil || refreshed == nil {
 		t.Fatalf("store.Get after refresh: obj=%v err=%v", refreshed, err)
 	}
@@ -1128,8 +1128,8 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(httptest.NewRequest("GET", url, nil))
-	obj, _, err := h.store.Get(context.Background(), key)
+	key, key2 := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
@@ -1188,8 +1188,8 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(httptest.NewRequest("GET", url, nil))
-	obj, _, err := h.store.Get(context.Background(), key)
+	key, key2 := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
@@ -1211,7 +1211,7 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// Re-read obj to get updated Hits.
-	obj, _, err = h.store.Get(context.Background(), key)
+	obj, _, err = h.store.Get(context.Background(), key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get after HIT: obj=%v err=%v", obj, err)
 	}
@@ -1248,8 +1248,8 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(httptest.NewRequest("GET", url, nil))
-	obj, _, err := h.store.Get(context.Background(), key)
+	key, key2 := h.buildKey(httptest.NewRequest("GET", url, nil))
+	obj, _, err := h.store.Get(context.Background(), key, key2)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
@@ -1334,7 +1334,7 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	}))
 	req := httptest.NewRequest("GET", "/", nil)
-	res := h.collapsedFetch(req, 0)
+	res := h.collapsedFetch(req, 0, 0)
 	require.NotNil(t, res.Err)
 	require.True(t, errors.Is(res.Err, http.ErrAbortHandler))
 }
@@ -1418,7 +1418,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	stale := &api.Object{
-		Key:        BuildKeyFromURL("http://example.com/test", nil),
+		Key:        func() api.Key { k, _ := BuildKeyFromURL("http://example.com/test", nil); return k }(),
 		StatusCode: 200,
 		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}, "X-Sensitive": {"secret"}}),
 		Body:       []byte("body"),

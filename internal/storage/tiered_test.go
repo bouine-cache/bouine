@@ -67,7 +67,7 @@ func TestTiered_HotOnly(t *testing.T) {
 
 	err := ts.Put(context.Background(), k, o)
 	require.NoError(t, err, "put")
-	got, src, err := ts.Get(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k, 0)
 	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, api.SourceHot, src)
@@ -83,7 +83,7 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	require.NoError(t, err, "put")
 
 	// Should be in hot tier.
-	got, src, err := ts.Get(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k, 0)
 	if err != nil || got == nil {
 		t.Fatalf("get: err=%v got=%v", err, got)
 	}
@@ -113,14 +113,14 @@ func TestTiered_LargeObjectReadPath(t *testing.T) {
 	err = ts.hot.Delete(context.Background(), k)
 	require.NoError(t, err, "delete from hot")
 
-	got, src, err := ts.Get(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k, 0)
 	require.NoError(t, err, "Get")
 	require.NotNil(t, got)
 	require.Equal(t, api.SourceWarm, src)
 
 	// After warm hit, object is promoted to hot — second Get should
 	// report SourceHot.
-	got2, src2, err := ts.Get(context.Background(), k)
+	got2, src2, err := ts.Get(context.Background(), k, 0)
 	require.NoError(t, err, "second Get")
 	require.NotNil(t, got2)
 	require.Equal(t, api.SourceHot, src2)
@@ -131,7 +131,7 @@ func TestTieredStore_Get_Miss(t *testing.T) {
 	ts := tieredStore(t, false)
 	k := KeyHash([]byte("tiered-miss"))
 
-	got, src, err := ts.Get(context.Background(), k)
+	got, src, err := ts.Get(context.Background(), k, 0)
 	require.NoError(t, err, "Get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -177,7 +177,7 @@ func TestTiered_DeleteBothTiers(t *testing.T) {
 	_ = ts.Put(context.Background(), k, o)
 	_ = ts.Delete(context.Background(), k)
 
-	got, _, _ := ts.Get(context.Background(), k)
+	got, _, _ := ts.Get(context.Background(), k, 0)
 	require.Nil(t, got)
 }
 
@@ -257,7 +257,7 @@ func TestTiered_WarmGet(t *testing.T) {
 	// Delete from hot tier so next Get must fall through to warm.
 	err = ts1.hot.Delete(ctx, k)
 	require.NoError(t, err, "hot delete")
-	got, _, err := ts1.Get(ctx, k)
+	got, _, err := ts1.Get(ctx, k, 0)
 	require.NoError(t, err, "Get after hot eviction")
 	if got == nil || got.StatusCode != 200 {
 		t.Fatalf("expected object from warm tier, got %v", got)
@@ -268,7 +268,7 @@ func TestTiered_WarmGet(t *testing.T) {
 	ts2 := newStore()
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 	// Hot tier is empty after reopen.
-	got2, _, err := ts2.Get(ctx, k)
+	got2, _, err := ts2.Get(ctx, k, 0)
 	require.NoError(t, err, "Get after reopen")
 	if got2 == nil || got2.StatusCode != 200 {
 		t.Fatalf("expected object from warm tier after reopen, got %v", got2)
@@ -492,7 +492,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	require.NoError(t, err, "wal.Append")
 
 	// Get must treat the undecodable blob as a miss, not an error.
-	got, _, err := ts1.Get(ctx, k)
+	got, _, err := ts1.Get(ctx, k, 0)
 	require.NoError(t, err, "Get: expected nil error for legacy blob,")
 	require.Nil(t, got)
 
@@ -508,7 +508,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	require.NoError(t, err, "Put fresh")
 	err = ts1.hot.Delete(ctx, k)
 	require.NoError(t, err, "hot.Delete")
-	gotFresh, _, err := ts1.Get(ctx, k)
+	gotFresh, _, err := ts1.Get(ctx, k, 0)
 	require.NoError(t, err, "Get fresh from warm")
 	if gotFresh == nil || gotFresh.StatusCode != 200 {
 		t.Fatalf("expected fresh object from warm tier, got %v", gotFresh)
@@ -523,7 +523,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 	// Evict from hot so Get falls through to warm.
 	_ = ts2.hot.Delete(ctx, k)
-	got2, _, err := ts2.Get(ctx, k)
+	got2, _, err := ts2.Get(ctx, k, 0)
 	require.NoError(t, err, "Get after reopen: expected nil error,")
 	if got2 == nil || got2.StatusCode != 200 {
 		t.Fatalf("expected fresh object from warm tier after reopen, got %v", got2)
@@ -549,7 +549,7 @@ func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
 	_, _, err := ts.warm.Put(uint64(k), corruptBlob)
 	require.NoError(t, err, "warm.Put")
 
-	got, _, err := ts.Get(ctx, k)
+	got, _, err := ts.Get(ctx, k, 0)
 	require.NoError(t, err, "Get: expected nil error for corrupt blob,")
 	require.Nil(t, got)
 	body, _ := ts.warm.Get(uint64(k))
@@ -604,11 +604,11 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 	_ = ts2.hot.Delete(ctx, goodKey)
 	_ = ts2.hot.Delete(ctx, legacyKey)
 
-	gotLegacy, _, err := ts2.Get(ctx, legacyKey)
+	gotLegacy, _, err := ts2.Get(ctx, legacyKey, 0)
 	require.NoError(t, err, "Get legacy after reopen: expected nil error,")
 	require.Nil(t, gotLegacy)
 
-	gotGood, _, err := ts2.Get(ctx, goodKey)
+	gotGood, _, err := ts2.Get(ctx, goodKey, 0)
 	require.NoError(t, err, "Get good after reopen")
 	if gotGood == nil || gotGood.StatusCode != 200 {
 		t.Fatalf("expected good object to survive legacy eviction, got %v", gotGood)
@@ -652,7 +652,7 @@ func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
 	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 
-	got, _, err := ts2.Get(ctx, k)
+	got, _, err := ts2.Get(ctx, k, 0)
 	require.NoError(t, err, "Get after torn write replay: expected nil error,")
 	require.Nil(t, got)
 }
@@ -693,7 +693,7 @@ func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
 
 	_ = ts2.hot.Delete(ctx, k)
-	got, _, err := ts2.Get(ctx, k)
+	got, _, err := ts2.Get(ctx, k, 0)
 	require.NoError(t, err, "Get after reopen")
 	require.NotNil(t, got)
 }
@@ -789,7 +789,7 @@ func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 
 	// Verify every entry is servable from warm tier (hot tier is empty on reopen).
 	for i, k := range keys {
-		obj, src, err := ts2.Get(ctx, k)
+		obj, src, err := ts2.Get(ctx, k, 0)
 		require.NoErrorf(t, err, "Get %d", i)
 		require.NotNil(t, obj)
 		require.Equal(t, api.SourceWarm, src)
@@ -1011,7 +1011,7 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	assert.False(t, ok, "key should not be promoted to warm on ErrOverBudget")
 
 	// The object must still be servable from the hot tier.
-	got, src, err := ts.Get(ctx, key)
+	got, src, err := ts.Get(ctx, key, 0)
 	require.NoError(t, err, "Get after over-budget Put")
 	require.NotNil(t, got)
 	require.Equal(t, api.SourceHot, src)

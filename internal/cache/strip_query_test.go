@@ -19,8 +19,8 @@ func TestBuildKey_StripQueryParams(t *testing.T) {
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=email&b=2", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
 
-	k1 := BuildKey(r1, policy)
-	k2 := BuildKey(r2, nil)
+	k1, _ := BuildKey(r1, policy)
+	k2, _ := BuildKey(r2, nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -32,8 +32,8 @@ func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page", nil)
 
-	k1 := BuildKey(r1, policy)
-	k2 := BuildKey(r2, nil)
+	k1, _ := BuildKey(r1, policy)
+	k2, _ := BuildKey(r2, nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -41,8 +41,8 @@ func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
-	k1 := BuildKey(r, nil)
-	k2 := BuildKey(r, nil)
+	k1, _ := BuildKey(r, nil)
+	k2, _ := BuildKey(r, nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -54,8 +54,8 @@ func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=x", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1", nil)
 
-	k1 := BuildKey(r1, policy)
-	k2 := BuildKey(r2, nil)
+	k1, _ := BuildKey(r1, policy)
+	k2, _ := BuildKey(r2, nil)
 
 	assert.Equal(t, k2, k1)
 }

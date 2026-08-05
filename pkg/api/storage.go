@@ -36,6 +36,11 @@ func (k Key) String() string { return k.Hex() }
 type Object struct {
 	// Key is the primary cache key.
 	Key Key `json:"key"`
+	// Key2 is the secondary cache key (independent xxhash64 with a
+	// different seed) used for collision detection on Get. Zero for
+	// objects decoded from v2 codec blobs; verification fails → miss
+	// → re-fetch → stored as v3. See issue #51.
+	Key2 uint64 `json:"key2"`
 	// VaryKey is the secondary key derived from Vary headers. Empty
 	// string if the response does not Vary.
 	VaryKey string `json:"vary_key,omitempty"`
@@ -129,6 +134,7 @@ func (o *Object) StoreSerializedHead(head []byte) {
 func (o *Object) CloneForReturn(body []byte) *Object {
 	clone := &Object{
 		Key:                  o.Key,
+		Key2:                 o.Key2,
 		VaryKey:              o.VaryKey,
 		StatusCode:           o.StatusCode,
 		Header:               o.Header,
@@ -165,6 +171,7 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 func (o *Object) CloneForRefresh() *Object {
 	return &Object{
 		Key:                  o.Key,
+		Key2:                 o.Key2,
 		VaryKey:              o.VaryKey,
 		StatusCode:           o.StatusCode,
 		Header:               o.Header,

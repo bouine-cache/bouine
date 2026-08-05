@@ -511,7 +511,7 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalidationOps {
 	return invalidationOps{
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
-			key := cache.BuildKeyFromURL(urlStr, nil)
+			key, _ := cache.BuildKeyFromURL(urlStr, nil)
 			if err := rs.store.Delete(dCtx, key); err != nil {
 				return err
 			}
@@ -534,7 +534,8 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 			return n, nil
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			if err := rs.store.Delete(dCtx, cache.BuildKeyFromURL(urlStr, nil)); err != nil {
+			key, _ := cache.BuildKeyFromURL(urlStr, nil)
+			if err := rs.store.Delete(dCtx, key); err != nil {
 				return err
 			}
 			rs.cfProp.PropagateForRefresh(dCtx, urlStr)

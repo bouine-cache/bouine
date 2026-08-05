@@ -43,7 +43,7 @@ func TestHotStore_PutGet(t *testing.T) {
 
 	err := s.Put(context.Background(), k, o)
 	require.NoError(t, err, "put")
-	got, src, err := s.Get(context.Background(), k)
+	got, src, err := s.Get(context.Background(), k, 0)
 	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, 200, got.StatusCode)
@@ -55,7 +55,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, src, err := s.Get(context.Background(), 999)
+	got, src, err := s.Get(context.Background(), 999, 0)
 	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -72,7 +72,7 @@ func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	err := s.Put(context.Background(), k, o)
 	require.NoError(t, err, "put")
 
-	got, _, err := s.Get(context.Background(), k)
+	got, _, err := s.Get(context.Background(), k, 0)
 	require.NoError(t, err, "Get")
 	require.NotNil(t, got)
 }
@@ -84,7 +84,7 @@ func TestHotStore_Delete(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_ = s.Delete(context.Background(), k)
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.Nil(t, got)
 }
 
@@ -143,9 +143,9 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 
 	after := s.Stats()
 	require.Equal(t, int64(1), after.HotEntries)
-	got, _, _ := s.Get(ctx, expired.Key)
+	got, _, _ := s.Get(ctx, expired.Key, 0)
 	require.Nil(t, got)
-	got, _, _ = s.Get(ctx, fresh.Key)
+	got, _, _ = s.Get(ctx, fresh.Key, 0)
 	require.NotNil(t, got)
 }
 
@@ -282,14 +282,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 264, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// objectStructSize: 272, hotEntrySize: 40, sieveEntrySize: 32, mapPerEntryOverhead: 22
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 264 + 32 + 32 + 22 +
+	want := int64(5) + 272 + 40 + 32 + 22 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
@@ -336,7 +336,7 @@ func TestHotStore_Replace(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 100))
 	_ = s.Put(context.Background(), k, obj(k, 200))
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.NotNil(t, got)
 	require.Equal(t, int64(200), got.BodySize)
 	st := s.Stats()
@@ -355,7 +355,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 			for i := range 1000 {
 				k := api.Key(base*1000 + i)
 				_ = s.Put(context.Background(), k, obj(k, 64))
-				_, _, _ = s.Get(context.Background(), k)
+				_, _, _ = s.Get(context.Background(), k, 0)
 			}
 		}(g)
 	}
@@ -370,8 +370,8 @@ func TestHotStore_Stats(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
-	_, _, _ = s.Get(context.Background(), k)
-	_, _, _ = s.Get(context.Background(), 12345) // miss
+	_, _, _ = s.Get(context.Background(), k, 0)
+	_, _, _ = s.Get(context.Background(), 12345, 0) // miss
 
 	st := s.Stats()
 	require.Equal(t, int64(1), st.HotEntries)
@@ -426,9 +426,9 @@ func TestHotStore_EvictPreferBacked(t *testing.T) {
 	// k2 triggers eviction. k1 (backed) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
-	got, _, _ := s.Get(ctx, k1)
+	got, _, _ := s.Get(ctx, k1, 0)
 	assert.Nil(t, got)
-	got, _, _ = s.Get(ctx, k2)
+	got, _, _ = s.Get(ctx, k2, 0)
 	assert.NotNil(t, got)
 }
 
@@ -447,7 +447,7 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
 	// Access k1 to set visited=true.
-	_, _, _ = s.Get(ctx, k1)
+	_, _, _ = s.Get(ctx, k1, 0)
 
 	// Mark k2 as backed.
 	s.SetBacked(k2)
@@ -457,9 +457,9 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	k3 := KeyHash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	got, _, _ := s.Get(ctx, k1)
+	got, _, _ := s.Get(ctx, k1, 0)
 	assert.NotNil(t, got)
-	got, _, _ = s.Get(ctx, k2)
+	got, _, _ = s.Get(ctx, k2, 0)
 	assert.Nil(t, got)
 }
 
@@ -478,7 +478,7 @@ func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	require.NoError(t, err)
 
 	// k3 must have been inserted (eviction loop allowed it).
-	_, _, err = s.Get(ctx, k3)
+	_, _, err = s.Get(ctx, k3, 0)
 	require.Nil(t, err)
 }
 
@@ -557,7 +557,7 @@ func TestHotOverflowLatency(t *testing.T) {
 					continue
 				}
 				start := time.Now()
-				_, _, _ = s.Get(ctx, k)
+				_, _, _ = s.Get(ctx, k, 0)
 				local = append(local, time.Since(start))
 			}
 			mu.Lock()
@@ -638,7 +638,7 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 	require.NoError(t, err, "ban")
 	require.Equal(t, 1, count)
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.Nil(t, got)
 }
 
@@ -657,7 +657,7 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 	require.NoError(t, err, "ban")
 	require.Equal(t, 1, count)
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.Nil(t, got)
 }
 
@@ -682,7 +682,7 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 	o.StoredAt = banTime.Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.Nil(t, got)
 }
 
@@ -699,7 +699,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	o.StoredAt = time.Now().Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.NotNil(t, got)
 
 	// Issue a ban that covers the object's StoredAt. The next Get
@@ -710,7 +710,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	})
 	require.NoError(t, err, "ban")
 
-	got, _, _ = s.Get(context.Background(), k)
+	got, _, _ = s.Get(context.Background(), k, 0)
 	require.Nil(t, got)
 }
 
@@ -734,6 +734,6 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 	o.StoredAt = banTime.Add(1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _, _ := s.Get(context.Background(), k)
+	got, _, _ := s.Get(context.Background(), k, 0)
 	require.NotNil(t, got)
 }

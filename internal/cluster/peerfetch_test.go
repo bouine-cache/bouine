@@ -24,7 +24,7 @@ type stubStore struct {
 	objects map[api.Key]*api.Object
 }
 
-func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
+func (s *stubStore) Get(_ context.Context, key api.Key, _ uint64) (*api.Object, api.Source, error) {
 	return s.objects[key], "", nil
 }
 

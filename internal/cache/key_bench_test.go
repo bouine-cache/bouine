@@ -10,7 +10,7 @@ func BenchmarkBuildKey_NoPolicy(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, nil)
+		_, _ = BuildKey(r, nil)
 	}
 }
 
@@ -20,7 +20,7 @@ func BenchmarkBuildKey_KeepParams(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_, _ = BuildKey(r, policy)
 	}
 }
 
@@ -30,7 +30,7 @@ func BenchmarkBuildKey_StripPrefix(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_, _ = BuildKey(r, policy)
 	}
 }
 
@@ -40,7 +40,7 @@ func BenchmarkBuildKey_StripEmpty(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_, _ = BuildKey(r, policy)
 	}
 }
 
@@ -50,7 +50,7 @@ func BenchmarkBuildKey_Dedup(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_, _ = BuildKey(r, policy)
 	}
 }
 
@@ -66,6 +66,6 @@ func BenchmarkBuildKey_AllPolicies(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_, _ = BuildKey(r, policy)
 	}
 }

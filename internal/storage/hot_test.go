@@ -43,7 +43,7 @@ func TestHotStore_PutGet(t *testing.T) {
 
 	err := s.Put(context.Background(), k, o)
 	require.NoError(t, err, "put")
-	got, src, err := s.Get(context.Background(), k, 0)
+	got, src, err := s.Get(context.Background(), k)
 	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, 200, got.StatusCode)
@@ -55,7 +55,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, src, err := s.Get(context.Background(), 999, 0)
+	got, src, err := s.Get(context.Background(), api.Key{Hash: 999})
 	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -72,7 +72,7 @@ func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	err := s.Put(context.Background(), k, o)
 	require.NoError(t, err, "put")
 
-	got, _, err := s.Get(context.Background(), k, 0)
+	got, _, err := s.Get(context.Background(), k)
 	require.NoError(t, err, "Get")
 	require.NotNil(t, got)
 }
@@ -84,7 +84,7 @@ func TestHotStore_Delete(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_ = s.Delete(context.Background(), k)
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.Nil(t, got)
 }
 
@@ -95,7 +95,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 
 	// Insert objects until eviction must have happened.
 	for i := range 100 {
-		k := api.Key(i)
+		k := api.Key{Hash: uint64(i)}
 		_ = s.Put(context.Background(), k, obj(k, 500))
 	}
 
@@ -143,9 +143,9 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 
 	after := s.Stats()
 	require.Equal(t, int64(1), after.HotEntries)
-	got, _, _ := s.Get(ctx, expired.Key, 0)
+	got, _, _ := s.Get(ctx, expired.Key)
 	require.Nil(t, got)
-	got, _, _ = s.Get(ctx, fresh.Key, 0)
+	got, _, _ = s.Get(ctx, fresh.Key)
 	require.NotNil(t, got)
 }
 
@@ -216,7 +216,7 @@ func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 	assert.Equal(t, want, objectStructSize)
 	want = int64(unsafe.Sizeof(hotEntry{}))
 	assert.Equal(t, want, hotEntrySize)
-	want = int64(unsafe.Sizeof(sieve.Entry[api.Key]{}))
+	want = int64(unsafe.Sizeof(sieve.Entry[uint64]{}))
 	assert.Equal(t, want, sieveEntrySize)
 }
 
@@ -308,7 +308,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	}
 
 	for i := range 500 {
-		k := api.Key(i)
+		k := api.Key{Hash: uint64(i)}
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
@@ -336,7 +336,7 @@ func TestHotStore_Replace(t *testing.T) {
 	_ = s.Put(context.Background(), k, obj(k, 100))
 	_ = s.Put(context.Background(), k, obj(k, 200))
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.NotNil(t, got)
 	require.Equal(t, int64(200), got.BodySize)
 	st := s.Stats()
@@ -353,9 +353,9 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := range 1000 {
-				k := api.Key(base*1000 + i)
+				k := api.Key{Hash: uint64(base*1000 + i)}
 				_ = s.Put(context.Background(), k, obj(k, 64))
-				_, _, _ = s.Get(context.Background(), k, 0)
+				_, _, _ = s.Get(context.Background(), k)
 			}
 		}(g)
 	}
@@ -370,8 +370,8 @@ func TestHotStore_Stats(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
-	_, _, _ = s.Get(context.Background(), k, 0)
-	_, _, _ = s.Get(context.Background(), 12345, 0) // miss
+	_, _, _ = s.Get(context.Background(), k)
+	_, _, _ = s.Get(context.Background(), api.Key{Hash: 12345}) // miss
 
 	st := s.Stats()
 	require.Equal(t, int64(1), st.HotEntries)
@@ -399,10 +399,10 @@ func TestHotStore_SetBacked(t *testing.T) {
 
 	s.SetBacked(k)
 
-	sh := &s.shards[uint64(k)&s.mask]
+	sh := &s.shards[k.Hash&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+	if e, ok := sh.entries[k.Hash]; !ok || !e.hasBackup {
 		t.Fatal("expected entry to be marked hasBackup after SetBacked")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -426,9 +426,9 @@ func TestHotStore_EvictPreferBacked(t *testing.T) {
 	// k2 triggers eviction. k1 (backed) should be evicted, not k2.
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
-	got, _, _ := s.Get(ctx, k1, 0)
+	got, _, _ := s.Get(ctx, k1)
 	assert.Nil(t, got)
-	got, _, _ = s.Get(ctx, k2, 0)
+	got, _, _ = s.Get(ctx, k2)
 	assert.NotNil(t, got)
 }
 
@@ -447,7 +447,7 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
 	// Access k1 to set visited=true.
-	_, _, _ = s.Get(ctx, k1, 0)
+	_, _, _ = s.Get(ctx, k1)
 
 	// Mark k2 as backed.
 	s.SetBacked(k2)
@@ -457,9 +457,9 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	k3 := KeyHash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	got, _, _ := s.Get(ctx, k1, 0)
+	got, _, _ := s.Get(ctx, k1)
 	assert.NotNil(t, got)
-	got, _, _ = s.Get(ctx, k2, 0)
+	got, _, _ = s.Get(ctx, k2)
 	assert.Nil(t, got)
 }
 
@@ -478,7 +478,7 @@ func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	require.NoError(t, err)
 
 	// k3 must have been inserted (eviction loop allowed it).
-	_, _, err = s.Get(ctx, k3, 0)
+	_, _, err = s.Get(ctx, k3)
 	require.Nil(t, err)
 }
 
@@ -495,10 +495,10 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	_ = s.Put(ctx, k, obj(k, 200))
 	s.SetBacked(k)
 
-	sh := &s.shards[uint64(k)&s.mask]
+	sh := &s.shards[k.Hash&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+	if e, ok := sh.entries[k.Hash]; !ok || !e.hasBackup {
 		t.Fatal("entry should have hasBackup after re-marking")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -530,7 +530,7 @@ func TestHotOverflowLatency(t *testing.T) {
 
 	// Pre-fill to capacity.
 	for i := range approxCap * runtime.NumCPU() {
-		k := api.Key(i)
+		k := api.Key{Hash: uint64(i)}
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -551,13 +551,13 @@ func TestHotOverflowLatency(t *testing.T) {
 			local := make([]time.Duration, 0, 1024)
 			for !stop.Load() {
 				n := ctr.Add(1)
-				k := api.Key(n % uint64(working))
+				k := api.Key{Hash: n % uint64(working)}
 				if n%5 == 0 {
 					_ = s.Put(ctx, k, obj(k, bodySize))
 					continue
 				}
 				start := time.Now()
-				_, _, _ = s.Get(ctx, k, 0)
+				_, _, _ = s.Get(ctx, k)
 				local = append(local, time.Since(start))
 			}
 			mu.Lock()
@@ -638,7 +638,7 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 	require.NoError(t, err, "ban")
 	require.Equal(t, 1, count)
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.Nil(t, got)
 }
 
@@ -657,7 +657,7 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 	require.NoError(t, err, "ban")
 	require.Equal(t, 1, count)
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.Nil(t, got)
 }
 
@@ -682,7 +682,7 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 	o.StoredAt = banTime.Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.Nil(t, got)
 }
 
@@ -699,7 +699,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	o.StoredAt = time.Now().Add(-1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.NotNil(t, got)
 
 	// Issue a ban that covers the object's StoredAt. The next Get
@@ -710,7 +710,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	})
 	require.NoError(t, err, "ban")
 
-	got, _, _ = s.Get(context.Background(), k, 0)
+	got, _, _ = s.Get(context.Background(), k)
 	require.Nil(t, got)
 }
 
@@ -734,6 +734,6 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 	o.StoredAt = banTime.Add(1 * time.Hour)
 	_ = s.Put(context.Background(), k, o)
 
-	got, _, _ := s.Get(context.Background(), k, 0)
+	got, _, _ := s.Get(context.Background(), k)
 	require.NotNil(t, got)
 }

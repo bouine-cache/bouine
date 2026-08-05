@@ -47,8 +47,8 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 	require.Equal(t, 200, rr.Code)
 
 	// Retrieve the stored object and assert TTL = override (±jitter; jitter=0 here).
-	key, key2 := BuildKey(req, nil)
-	obj, _, err := h.store.Get(req.Context(), key, key2)
+	key := BuildKey(req, nil)
+	obj, _, err := h.store.Get(req.Context(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
 	}
@@ -99,8 +99,8 @@ func TestOverrideTTL_ZeroDisabled(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	key, key2 := BuildKey(req, nil)
-	obj, _, err := h.store.Get(req.Context(), key, key2)
+	key := BuildKey(req, nil)
+	obj, _, err := h.store.Get(req.Context(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
 	}
@@ -167,8 +167,8 @@ func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/short", nil)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	key, key2 := BuildKey(req, nil)
-	obj, _, _ := h.store.Get(req.Context(), key, key2)
+	key := BuildKey(req, nil)
+	obj, _, _ := h.store.Get(req.Context(), key)
 	require.NotNil(t, obj)
 	assert.Equal(t, 5*time.Second, obj.TTL)
 	// Downstream still sees the upstream's 1 h header.
@@ -195,8 +195,8 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/jitter", nil)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	key, key2 := BuildKey(req, nil)
-	obj, _, _ := h.store.Get(req.Context(), key, key2)
+	key := BuildKey(req, nil)
+	obj, _, _ := h.store.Get(req.Context(), key)
 	require.NotNil(t, obj)
 	// With 10 % jitter on 1 h, TTL must be in [54 min, 66 min].
 	const (
@@ -246,8 +246,8 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 
 	// Manually set StoredAt far in the past so Evaluate sees the object as
 	// expired (past override TTL) and triggers revalidation.
-	key, key2 := BuildKey(httptest.NewRequest("GET", url, nil), nil)
-	obj, _, _ := h.store.Get(context.Background(), key, key2)
+	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	obj, _, _ := h.store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 	expired := obj.CloneForRefresh()
 	expired.StoredAt = time.Now().Add(-(override + time.Second))
@@ -258,7 +258,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// After the 304, the object must still carry the override TTL.
-	after, _, _ := h.store.Get(context.Background(), key, key2)
+	after, _, _ := h.store.Get(context.Background(), key)
 	require.NotNil(t, after)
 	assert.Equal(t, override, after.TTL)
 	// Upstream's original Cache-Control is still forwarded verbatim.

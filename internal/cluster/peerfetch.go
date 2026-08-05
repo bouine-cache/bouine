@@ -205,8 +205,8 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 	// allocation on the server side.
 	body := make([]byte, 0, 10+len(req.VaryKey))
 	body = append(body, peerFetchBinaryVersion)
-	body = binary.LittleEndian.AppendUint64(body, uint64(req.Key))
-	body = binary.LittleEndian.AppendUint64(body, req.Key2)
+	body = binary.LittleEndian.AppendUint64(body, req.Key.Hash)
+	body = binary.LittleEndian.AppendUint64(body, req.Key.Hash2)
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
 	body = append(body, req.VaryKey...)
 
@@ -320,7 +320,7 @@ type PeerFetchHandler struct {
 // PeerStore is the minimal storage interface needed by peer fetch.
 // It is satisfied by storage.Store.
 type PeerStore interface {
-	Get(ctx context.Context, key api.Key, key2 uint64) (*api.Object, api.Source, error)
+	Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
 }
 
 // NewPeerFetchHandler creates a peer-fetch handler backed by store.
@@ -370,8 +370,8 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Key = api.Key(binary.LittleEndian.Uint64(body[1:9]))
-		req.Key2 = binary.LittleEndian.Uint64(body[9:17])
+		req.Key = api.Key{Hash: binary.LittleEndian.Uint64(body[1:9])}
+		req.Key.Hash2 = binary.LittleEndian.Uint64(body[9:17])
 		varyLen := int(body[17])
 		if len(body) < 18+varyLen {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -386,7 +386,7 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Key = api.Key(binary.LittleEndian.Uint64(body[1:9]))
+		req.Key = api.Key{Hash: binary.LittleEndian.Uint64(body[1:9])}
 		varyLen := int(body[9])
 		if len(body) < 10+varyLen {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -405,7 +405,7 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, _, err := h.store.Get(r.Context(), req.Key, req.Key2)
+	obj, _, err := h.store.Get(r.Context(), req.Key)
 	if err != nil || obj == nil {
 		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
 		w.WriteHeader(http.StatusNotFound)

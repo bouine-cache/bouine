@@ -80,7 +80,7 @@ func NewSampledLogger(base *slog.Logger, sampleRate uint64) *SampledLogger {
 func (l *SampledLogger) Info(msg string, args ...any) {
 	if l.sampleRate != 0 {
 		if key, ok := extractKey(args); ok {
-			if uint64(key)%l.sampleRate != 0 {
+			if key.Hash%l.sampleRate != 0 {
 				return
 			}
 		} else if l.counter.Add(1)%l.sampleRate != 0 {
@@ -109,5 +109,5 @@ func extractKey(args []any) (api.Key, bool) {
 			}
 		}
 	}
-	return 0, false
+	return api.Key{}, false
 }

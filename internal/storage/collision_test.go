@@ -21,11 +21,10 @@ func TestCollisionDetection_HotStoreRejectsKey2Mismatch(t *testing.T) {
 	store := NewHotStore(HotConfig{MaxBytes: 1 << 20})
 	ctx := context.Background()
 
-	// Simulate a collision: same primary key, different key2.
-	primary := api.Key(42)
+	// Simulate a collision: same primary hash, different Hash2.
+	primary := api.Key{Hash: 42}
 	obj1 := &api.Object{
-		Key:        primary,
-		Key2:       111,
+		Key:        api.Key{Hash: 42, Hash2: 111},
 		StatusCode: 200,
 		Header:     header.FromHTTP(nil),
 		Body:       []byte("body-A"),
@@ -35,30 +34,29 @@ func TestCollisionDetection_HotStoreRejectsKey2Mismatch(t *testing.T) {
 	}
 	require.NoError(t, store.Put(ctx, primary, obj1))
 
-	// Lookup with a different key2 must return a miss, not body-A.
-	got, _, err := store.Get(ctx, primary, 222)
+	// Lookup with a different Hash2 must return a miss, not body-A.
+	got, _, err := store.Get(ctx, api.Key{Hash: 42, Hash2: 222})
 	require.NoError(t, err)
 	assert.Nil(t, got, "collision must return miss, not wrong body")
 
-	// Lookup with the correct key2 returns body-A.
-	got, _, err = store.Get(ctx, primary, 111)
+	// Lookup with the correct Hash2 returns body-A.
+	got, _, err = store.Get(ctx, api.Key{Hash: 42, Hash2: 111})
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "body-A", string(got.Body))
 }
 
 // TestCollisionDetection_HotStoreOverwritesCollidingEntry verifies
-// that storing a second entry with the same primary key but different
-// key2 overwrites the first (ping-pong degradation, not wrong content).
+// that storing a second entry with the same primary hash but different
+// Hash2 overwrites the first (ping-pong degradation, not wrong content).
 func TestCollisionDetection_HotStoreOverwritesCollidingEntry(t *testing.T) {
 	t.Parallel()
 	store := NewHotStore(HotConfig{MaxBytes: 1 << 20})
 	ctx := context.Background()
 
-	primary := api.Key(99)
+	primary := api.Key{Hash: 99}
 	obj1 := &api.Object{
-		Key:        primary,
-		Key2:       111,
+		Key:        api.Key{Hash: 99, Hash2: 111},
 		StatusCode: 200,
 		Header:     header.FromHTTP(nil),
 		Body:       []byte("body-A"),
@@ -67,8 +65,7 @@ func TestCollisionDetection_HotStoreOverwritesCollidingEntry(t *testing.T) {
 		TTL:        60 * time.Second,
 	}
 	obj2 := &api.Object{
-		Key:        primary,
-		Key2:       222,
+		Key:        api.Key{Hash: 99, Hash2: 222},
 		StatusCode: 200,
 		Header:     header.FromHTTP(nil),
 		Body:       []byte("body-B"),
@@ -80,14 +77,14 @@ func TestCollisionDetection_HotStoreOverwritesCollidingEntry(t *testing.T) {
 	require.NoError(t, store.Put(ctx, primary, obj1))
 	require.NoError(t, store.Put(ctx, primary, obj2))
 
-	// obj2 overwrote obj1; only key2=222 can find it.
-	got, _, err := store.Get(ctx, primary, 222)
+	// obj2 overwrote obj1; only Hash2=222 can find it.
+	got, _, err := store.Get(ctx, api.Key{Hash: 99, Hash2: 222})
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "body-B", string(got.Body))
 
-	// key2=111 now misses (entry was replaced).
-	got, _, err = store.Get(ctx, primary, 111)
+	// Hash2=111 now misses (entry was replaced).
+	got, _, err = store.Get(ctx, api.Key{Hash: 99, Hash2: 111})
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }

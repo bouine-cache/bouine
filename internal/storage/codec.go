@@ -81,8 +81,8 @@ func encodeObject(obj *api.Object) []byte {
 
 func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = append(buf, objCodecVersion)
-	buf = binary.AppendUvarint(buf, uint64(obj.Key))
-	buf = binary.AppendUvarint(buf, obj.Key2)
+	buf = binary.AppendUvarint(buf, obj.Key.Hash)
+	buf = binary.AppendUvarint(buf, obj.Key.Hash2)
 	buf = appendString(buf, obj.VaryKey)
 	buf = binary.AppendUvarint(buf, uint64(obj.StatusCode)) //nolint:gosec // HTTP status is small and non-negative
 	buf = binary.AppendVarint(buf, int64(obj.TTL))
@@ -130,12 +130,12 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	}
 
 	obj := &api.Object{}
-	obj.Key = api.Key(r.uvarint())
+	obj.Key = api.Key{Hash: r.uvarint()}
 	// Key2 is present in v3+ blobs. v2 blobs have no Key2 field; the
 	// decoder leaves it as 0, which fails collision verification in
 	// TieredStore.Get → miss → re-fetch → stored as v3.
 	if ver >= objCodecVersion {
-		obj.Key2 = r.uvarint()
+		obj.Key.Hash2 = r.uvarint()
 	}
 	obj.VaryKey = r.str()
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder

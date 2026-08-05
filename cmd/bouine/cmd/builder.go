@@ -250,8 +250,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 				owner := rs.clusterNode.Owner(key)
 				return owner, rs.clusterNode.IsLocal(key)
 			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, key2 uint64) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, Key2: key2})
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
 		}
 		cached := cache.NewHandler(cfg)
@@ -318,8 +318,8 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 				owner := rs.clusterNode.Owner(key)
 				return owner, rs.clusterNode.IsLocal(key)
 			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, key2 uint64) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, Key2: key2})
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
 		}
 		cached := cache.NewHandler(cfg)

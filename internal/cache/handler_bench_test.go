@@ -207,7 +207,7 @@ func BenchmarkBuildKey(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, _ = BuildKey(req, nil)
+		_ = BuildKey(req, nil)
 	}
 }
 
@@ -220,7 +220,7 @@ func BenchmarkBuildKey_LongURL(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, _ = BuildKey(req, nil)
+		_ = BuildKey(req, nil)
 	}
 }
 

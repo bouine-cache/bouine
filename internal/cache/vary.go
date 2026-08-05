@@ -53,9 +53,9 @@ func varyContainsStar(vary string) bool {
 //
 //nolint:gocyclo // 17: Vary header parsing is inherently branchy
 //nolint:gocyclo // 17: Vary header parsing is inherently branchy
-func VariantKey(primary api.Key, primary2 uint64, vary string, reqHeader http.Header, policy *KeyPolicy) (api.Key, uint64) {
+func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
 	if vary == "" {
-		return primary, primary2
+		return primary
 	}
 	if varyContainsStar(vary) {
 		h := xxhash.New()
@@ -67,7 +67,7 @@ func VariantKey(primary api.Key, primary2 uint64, vary string, reqHeader http.He
 			}
 		}
 		vHash := h.Sum64()
-		return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
+		return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
 	}
 
 	// Parse and sort Vary field names using a stack-allocated array.
@@ -77,13 +77,13 @@ func VariantKey(primary api.Key, primary2 uint64, vary string, reqHeader http.He
 	for f := range strings.SplitSeq(vary, ",") {
 		if n >= maxVaryFields {
 			// Pathological Vary — fall back to alloc path.
-			return variantKeySlow(primary, primary2, vary, reqHeader, policy)
+			return variantKeySlow(primary, vary, reqHeader, policy)
 		}
 		fields[n] = strings.ToLower(strings.TrimSpace(f))
 		n++
 	}
 	if n == 0 {
-		return primary, primary2
+		return primary
 	}
 	// Inline insertion sort (n is typically 1-3, max 16).
 	for i := 1; i < n; i++ {
@@ -106,7 +106,7 @@ func VariantKey(primary api.Key, primary2 uint64, vary string, reqHeader http.He
 		needed := len(f) + 1 + len(val) + 1 // f=val;
 		if off+needed > len(buf) {
 			// Buffer overflow — fall back to alloc path.
-			return variantKeySlow(primary, primary2, vary, reqHeader, policy)
+			return variantKeySlow(primary, vary, reqHeader, policy)
 		}
 		off += copy(buf[off:], f)
 		buf[off] = '='
@@ -117,15 +117,15 @@ func VariantKey(primary api.Key, primary2 uint64, vary string, reqHeader http.He
 		written = true
 	}
 	if !written {
-		return primary, primary2
+		return primary
 	}
 	vHash := xxhash.Sum64(buf[:off])
-	return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
+	return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
 }
 
 // variantKeySlow is the fallback allocation path for Vary headers that
 // exceed the stack buffer limits (too many fields or too much data).
-func variantKeySlow(primary api.Key, primary2 uint64, vary string, reqHeader http.Header, policy *KeyPolicy) (api.Key, uint64) {
+func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
 	fields := strings.Split(strings.ToLower(vary), ",")
 	for i, f := range fields {
 		fields[i] = strings.TrimSpace(f)
@@ -145,10 +145,10 @@ func variantKeySlow(primary api.Key, primary2 uint64, vary string, reqHeader htt
 		written = true
 	}
 	if !written {
-		return primary, primary2
+		return primary
 	}
 	vHash := h.Sum64()
-	return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
+	return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
 }
 
 // normalizeHeaderValue lowercases and sorts comma-separated tokens in

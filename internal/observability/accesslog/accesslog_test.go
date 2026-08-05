@@ -62,7 +62,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 		w.Header().Set(header.XCache, "HIT")
 		w.WriteHeader(200)
 		if rw, ok := w.(*responsewriter.ResponseWriter); ok {
-			rw.SetCacheKey(api.Key(42))
+			rw.SetCacheKey(api.Key{Hash: 42})
 		}
 	})
 

@@ -15,13 +15,13 @@ import (
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
 // *http.Request is available.
-func BuildKeyFromURL(rawURL string, policy *KeyPolicy) (api.Key, uint64) {
+func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if rawURL == "" {
-		return 0, 0
+		return api.Key{}
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return 0, 0
+		return api.Key{}
 	}
 	r := &http.Request{
 		Method: http.MethodGet,
@@ -50,7 +50,7 @@ const key2Seed = 0x626f75696e6532 // "bouine2" in ASCII
 // Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
 // canonical key exceeds 512 bytes (rare — the project caps URLs at 8 KiB),
 // it falls back to a heap buffer via buildKeyHeap.
-func BuildKey(r *http.Request, policy *KeyPolicy) (api.Key, uint64) {
+func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	var buf [512]byte
 	n := 0
 
@@ -84,7 +84,7 @@ func BuildKey(r *http.Request, policy *KeyPolicy) (api.Key, uint64) {
 		h := xxhash.NewWithSeed(key2Seed)
 		_, _ = h.Write(buf[:n])
 		secondary := h.Sum64()
-		return api.Key(xxhash.Sum64(buf[:n])), secondary
+		return api.Key{Hash: xxhash.Sum64(buf[:n]), Hash2: secondary}
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
@@ -93,7 +93,7 @@ func BuildKey(r *http.Request, policy *KeyPolicy) (api.Key, uint64) {
 
 // buildKeyHeap handles the rare case where the canonical key exceeds the
 // 512-byte stack buffer. It allocates a heap buffer and rebuilds the key.
-func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) (api.Key, uint64) {
+func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
 	heap := make([]byte, n)
 	n = 0
 
@@ -117,15 +117,12 @@ func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) (api.Key, uint64) {
 	} else {
 		n += copyOverflow(heap, n, r.Method)
 	}
-
-	primary := xxhash.Sum64(heap[:n])
 	h := xxhash.NewWithSeed(key2Seed)
 	_, _ = h.Write(heap[:n])
 	secondary := h.Sum64()
-	return api.Key(primary), secondary
+	return api.Key{Hash: xxhash.Sum64(heap[:n]), Hash2: secondary}
 }
 
-// appendByte writes a single byte at offset n into dst. If n is past
 // the end of dst the write is skipped but n is still incremented so the
 // caller can detect overflow by comparing n > len(dst).
 func appendByte(dst []byte, n int, b byte) int {

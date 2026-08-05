@@ -133,7 +133,7 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "peer:1"}, false // always remote
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key, _ uint64) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key) (*api.Object, error) {
 			return &api.Object{
 				Key:        key,
 				StatusCode: 200,

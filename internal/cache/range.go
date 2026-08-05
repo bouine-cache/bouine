@@ -77,7 +77,7 @@ func ServeRange(w http.ResponseWriter, r *http.Request, obj *api.Object, stale b
 	}
 
 	// Multi-range: multipart/byteranges (RFC 7233 §4.1).
-	boundary := "bouine-range-" + strconv.FormatUint(uint64(obj.Key), 16)
+	boundary := "bouine-range-" + strconv.FormatUint(obj.Key.Hash, 16)
 	contentType := "multipart/byteranges; boundary=" + boundary
 	w.Header().Set(header.ContentType, contentType)
 	w.WriteHeader(http.StatusPartialContent)

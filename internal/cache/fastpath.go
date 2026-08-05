@@ -81,17 +81,17 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	// fast-path's zero-allocation goal.
 	ctx := context.Background()
 
-	key, key2 := buildKeyFromRaw(req, f.policy)
-	obj, src, err := f.store.Get(ctx, key, key2)
+	key := buildKeyFromRaw(req, f.policy)
+	obj, src, err := f.store.Get(ctx, key)
 	if err != nil || obj == nil {
 		return nil, false
 	}
 
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
 	if vary := obj.Header.Get(header.Vary); vary != "" {
-		vk, vk2 := variantKeyFromRaw(key, key2, vary, req, f.policy)
+		vk := variantKeyFromRaw(key, vary, req, f.policy)
 		if vk != key {
-			vobj, vsrc, verr := f.store.Get(ctx, vk, vk2)
+			vobj, vsrc, verr := f.store.Get(ctx, vk)
 			if verr != nil || vobj == nil {
 				return nil, false
 			}
@@ -427,7 +427,7 @@ func parseNoCacheFieldNames(ccHeader string) map[string]bool {
 // avoiding the allocation of *http.Request + *url.URL.
 //
 // Zero-alloc on the hot path: uses a 512-byte stack buffer.
-func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) (api.Key, uint64) {
+func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	var buf [512]byte
 	n := 0
 
@@ -461,7 +461,7 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) (api.Key, uint64) {
 	if n <= len(buf) {
 		h := xxhash.NewWithSeed(key2Seed)
 		_, _ = h.Write(buf[:n])
-		return api.Key(xxhash.Sum64(buf[:n])), h.Sum64()
+		return api.Key{Hash: xxhash.Sum64(buf[:n]), Hash2: h.Sum64()}
 	}
 
 	// Overflow: redo with a heap buffer.
@@ -478,7 +478,7 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) (api.Key, uint64) {
 	n += copyOverflow(heap, n, method)
 	h := xxhash.NewWithSeed(key2Seed)
 	_, _ = h.Write(heap[:n])
-	return api.Key(xxhash.Sum64(heap[:n])), h.Sum64()
+	return api.Key{Hash: xxhash.Sum64(heap[:n]), Hash2: h.Sum64()}
 }
 
 // appendCanonicalPathString canonicalizes a path string (collapse
@@ -752,9 +752,9 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 // instead of http.Header. Returns (variantKey, variantKey2) where
 // variantKey2 is the secondary hash XORed with the same vary hash,
 // matching how VariantKey derives the variant primary.
-func variantKeyFromRaw(primary api.Key, primary2 uint64, vary string, req *api.RawRequest, policy *KeyPolicy) (api.Key, uint64) {
+func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
 	if vary == "" {
-		return primary, primary2
+		return primary
 	}
 	if varyContainsStar(vary) {
 		// Hash all request headers.
@@ -766,7 +766,7 @@ func variantKeyFromRaw(primary api.Key, primary2 uint64, vary string, req *api.R
 			_, _ = h.WriteString(hdr.Value)
 		}
 		vHash := h.Sum64()
-		return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
+		return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
 	}
 
 	// Parse and sort Vary field names.
@@ -774,13 +774,13 @@ func variantKeyFromRaw(primary api.Key, primary2 uint64, vary string, req *api.R
 	n := 0
 	for f := range strings.SplitSeq(vary, ",") {
 		if n >= maxVaryFields {
-			return primary, primary2 // pathological — fall back
+			return primary // pathological — fall back
 		}
 		fields[n] = strings.ToLower(strings.TrimSpace(f))
 		n++
 	}
 	if n == 0 {
-		return primary, primary2
+		return primary
 	}
 	// Insertion sort.
 	for i := 1; i < n; i++ {
@@ -801,7 +801,7 @@ func variantKeyFromRaw(primary api.Key, primary2 uint64, vary string, req *api.R
 		val := normalizeHeaderValue(req.Header(f))
 		needed := len(f) + 1 + len(val) + 1
 		if off+needed > len(buf) {
-			return primary, primary2 // overflow — fall back
+			return primary // overflow — fall back
 		}
 		off += copy(buf[off:], f)
 		buf[off] = '='
@@ -812,8 +812,8 @@ func variantKeyFromRaw(primary api.Key, primary2 uint64, vary string, req *api.R
 		written = true
 	}
 	if !written {
-		return primary, primary2
+		return primary
 	}
 	vHash := xxhash.Sum64(buf[:off])
-	return api.Key(uint64(primary) ^ vHash), primary2 ^ vHash
+	return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
 }

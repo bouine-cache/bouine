@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bouine-cache/bouine/pkg/api"
-
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -18,42 +16,42 @@ func TestBuildKey_Deterministic(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/foo?b=2&a=1", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/foo?a=1&b=2", nil)
-	require.Equal(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.Equal(t, BuildKey(r2, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_HeadSharesGet(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/x", nil)
 	r2 := httptest.NewRequest("HEAD", "http://example.com/x", nil)
-	require.Equal(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.Equal(t, BuildKey(r2, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_DifferentPaths(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/a", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/b", nil)
-	require.NotEqual(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.NotEqual(t, BuildKey(r2, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_SchemeMatters(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	r2 := httptest.NewRequest("GET", "https://example.com/", nil)
-	require.NotEqual(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.NotEqual(t, BuildKey(r2, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_DefaultPortStripped(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com:80/", nil)
-	require.Equal(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.Equal(t, BuildKey(r2, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_DuplicateSlashes(t *testing.T) {
 	t.Parallel()
 	r1 := httptest.NewRequest("GET", "http://example.com/a/b", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/a//b", nil)
-	require.Equal(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.Equal(t, BuildKey(r2, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_HostNormalization(t *testing.T) {
@@ -61,11 +59,11 @@ func TestBuildKey_HostNormalization(t *testing.T) {
 	// Same host, different casing → same key.
 	r1 := httptest.NewRequest("GET", "http://Example.COM/a", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/a", nil)
-	require.Equal(t, func() api.Key { k, _ := BuildKey(r2, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.Equal(t, BuildKey(r2, nil), BuildKey(r1, nil))
 
 	// Non-default port produces different key.
 	r3 := httptest.NewRequest("GET", "http://example.com:8080/a", nil)
-	require.NotEqual(t, func() api.Key { k, _ := BuildKey(r3, nil); return k }(), func() api.Key { k, _ := BuildKey(r1, nil); return k }())
+	require.NotEqual(t, BuildKey(r3, nil), BuildKey(r1, nil))
 }
 
 func TestBuildKey_LongURLNoPanic(t *testing.T) {
@@ -76,8 +74,8 @@ func TestBuildKey_LongURLNoPanic(t *testing.T) {
 	longPath := strings.Repeat("a", 600)
 	r := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1", nil)
 	// Must not panic.
-	k, _ := BuildKey(r, nil)
-	require.NotEqual(t, 0, k)
+	k := BuildKey(r, nil)
+	require.False(t, k.IsZero())
 }
 
 func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {

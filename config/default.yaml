@@ -13,6 +13,15 @@ storage:
   # synchronous mode (per-entry fsync, same as pre-ADR-0024 behavior).
   # See ADR-0024.
   wal_sync_interval: 100ms
+  # tombstone_queue_size controls the buffer size of the hot→warm
+  # tombstone channel. Default 65536. Increasing this reduces drops
+  # under bursty eviction pressure.
+  # tombstone_queue_size: 65536
+  # tombstone_drain_interval controls how often the dedicated drain
+  # goroutine flushes the tombstone and warm-evict queues to the warm
+  # tier + WAL. Default 1s. Set to -1 to disable the dedicated drain
+  # goroutine (drains only on the warm sync cycle). See ADR-0029.
+  # tombstone_drain_interval: 1s
 
 admin:
   # SECURITY: set a strong, unique token before exposing port 9000.

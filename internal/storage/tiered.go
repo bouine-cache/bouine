@@ -92,8 +92,15 @@ type TieredStore struct {
 	checkpointWg sync.WaitGroup
 	// syncWg tracks the warm sync goroutine for join-on-close.
 	syncWg sync.WaitGroup
+	// drainWg tracks the tombstone drain goroutine for join-on-close.
+	drainWg sync.WaitGroup
 	// compactInterval is the configured compaction check interval.
 	compactInterval time.Duration
+	// tombstoneDrainInterval controls how often the dedicated drain
+	// goroutine flushes the tombstone and warm-evict queues. <= 0
+	// means the dedicated drain goroutine is disabled and draining
+	// happens only on the warm sync cycle.
+	tombstoneDrainInterval time.Duration
 }
 
 // TieredConfig configures a TieredStore.
@@ -143,6 +150,16 @@ type TieredConfig struct {
 	// CompactInterval controls how often the warm-tier compaction check
 	// runs. Default 30m. Set to -1 to disable periodic compaction.
 	CompactInterval time.Duration
+
+	// TombstoneQueueSize controls the buffer size of the hot→warm
+	// tombstone channel and the warm-evict queue. Default 65536.
+	TombstoneQueueSize int
+
+	// TombstoneDrainInterval controls how often the dedicated drain
+	// goroutine flushes tombstone and warm-evict queues to the warm
+	// tier + WAL. Default 1s. Set to -1 to disable the dedicated drain
+	// goroutine (drains only on the warm sync cycle).
+	TombstoneDrainInterval time.Duration
 }
 
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
@@ -183,12 +200,26 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		checkpointWALThreshold = 100_000
 	}
 
+	tombstoneQueueSize := cfg.TombstoneQueueSize
+	if tombstoneQueueSize <= 0 {
+		tombstoneQueueSize = 65536
+	}
+	// tombstoneDrainInterval: 0 (unset) and -1 both mean "disabled".
+	// The production default (1s) is set by the config layer
+	// (internal/config.Storage.TombstoneDrainInterval). This keeps
+	// tests that don't set it backward-compatible — no drain goroutine
+	// starts unless explicitly requested.
+	tombstoneDrainInterval := cfg.TombstoneDrainInterval
+	if tombstoneDrainInterval == 0 {
+		tombstoneDrainInterval = -1
+	}
+
 	ts := &TieredStore{
 		bodyThreshold:          cfg.BodyThreshold,
 		warmSyncInterval:       warmSyncInterval,
 		warmSyncBatchSize:      cfg.WarmSyncBatchSize,
-		tombstoneQueue:         make(chan api.Key, 4096),
-		warmEvictQueue:         make(chan api.Key, 4096),
+		tombstoneQueue:         make(chan api.Key, tombstoneQueueSize),
+		warmEvictQueue:         make(chan api.Key, tombstoneQueueSize),
 		done:                   make(chan struct{}),
 		logger:                 cfg.Logger,
 		walSyncInterval:        walSyncInterval,
@@ -196,6 +227,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		compactInterval:        cfg.CompactInterval,
 		checkpointInterval:     checkpointInterval,
 		checkpointWALThreshold: checkpointWALThreshold,
+		tombstoneDrainInterval: tombstoneDrainInterval,
 	}
 
 	// Wire the eviction callback so backed evictions enqueue
@@ -232,6 +264,15 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	if ts.warm != nil && warmSyncInterval > 0 {
 		ts.syncWg.Add(1)
 		go ts.warmSyncLoop()
+	}
+
+	// Start the dedicated tombstone drain goroutine if warm tier is
+	// enabled and the drain interval is positive. This decouples
+	// tombstone draining from the warm sync cycle, preventing queue
+	// overflow under sustained eviction pressure (#221).
+	if ts.warm != nil && tombstoneDrainInterval > 0 {
+		ts.drainWg.Add(1)
+		go ts.tombstoneDrainLoop()
 	}
 
 	// Start the checkpoint loop if warm tier and WAL are both enabled.
@@ -708,6 +749,59 @@ func (t *TieredStore) runCompaction(reason string, force bool) {
 	t.walEntryCount.Store(0)
 }
 
+// tombstoneDrainLoop runs a dedicated goroutine that drains the tombstone
+// and warm-evict queues at a faster cadence than the warm sync cycle. This
+// prevents queue overflow under sustained eviction pressure (#221).
+// The drain writes tombstones/deletes to the warm tier and appends WAL
+// delete entries in a single batch. The warm sync cycle still drains the
+// queues as a fallback, so disabling this goroutine (interval <= 0) does
+// not lose functionality — it just reverts to the pre-fix behavior.
+func (t *TieredStore) tombstoneDrainLoop() {
+	defer t.drainWg.Done()
+	ticker := time.NewTicker(t.tombstoneDrainInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-t.done:
+			// Final drain to flush any tombstones enqueued after the
+			// last tick but before Close closes the warm store.
+			t.drainQueues()
+			return
+		case <-ticker.C:
+			t.drainQueues()
+		}
+	}
+}
+
+// drainQueues drains the tombstone and warm-evict queues, writes tombstones
+// to the warm tier, and appends WAL delete entries in a single batch. This
+// is called by the dedicated drain goroutine and does not run the hot→warm
+// promotion logic (that stays on the warm sync cycle).
+func (t *TieredStore) drainQueues() {
+	if t.warm == nil {
+		return
+	}
+	var walEntries []wal.Entry
+	tombstoned := t.drainTombstones(&walEntries)
+	warmEvicted := t.drainWarmEvicts(&walEntries)
+
+	if len(walEntries) > 0 {
+		if err := t.warm.Sync(); err != nil {
+			t.logger.Warn("tombstone drain: warm sync failed", "error", err)
+		}
+		if t.wal != nil {
+			t.walEnqueueBatch(walEntries)
+		}
+	}
+
+	if tombstoned > 0 || warmEvicted > 0 {
+		t.logger.Info("tombstone drain cycle complete",
+			"tombstoned", tombstoned,
+			"warm_evicted", warmEvicted,
+		)
+	}
+}
+
 // warmSyncLoop periodically batches hot-only entries into the warm tier
 // so they survive restarts. It also drains the tombstone queue to remove
 // warm copies of evicted (unpopular) entries. Terminates when done is closed.
@@ -1166,12 +1260,14 @@ func (t *TieredStore) WindowHits(key api.Key) int64 {
 }
 
 // Close shuts down the WAL, warm tier, and hot tier in order.
-// The compaction and warm-sync goroutines are stopped and joined
-// before the warm store is closed, preventing use-after-close on file handles.
+// The compaction, warm-sync, and tombstone-drain goroutines are stopped
+// and joined before the warm store is closed, preventing use-after-close
+// on file handles. A final drain flushes pending tombstones before close.
 func (t *TieredStore) Close(ctx context.Context) error {
 	close(t.done)
 	t.compactWg.Wait()
 	t.syncWg.Wait()
+	t.drainWg.Wait()
 	t.checkpointWg.Wait()
 
 	t.walMu.Lock()

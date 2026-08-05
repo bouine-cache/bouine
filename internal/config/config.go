@@ -190,6 +190,18 @@ type Storage struct {
 	// When the cache is full and a new segment is opened, the least-
 	// recently-accessed segment with zero in-flight readers is closed.
 	SegmentCacheSize int `yaml:"segment_cache_size,omitempty" json:"segment_cache_size,omitempty"`
+	// TombstoneQueueSize controls the buffer size of the hot→warm
+	// tombstone channel. When the buffer fills, tombstones are dropped
+	// (the on-disk tombstone still guarantees durability via segment scan;
+	// the WAL delete is a fast-replay optimization). Default 65536.
+	// Increasing this reduces drops under bursty eviction pressure.
+	TombstoneQueueSize int `yaml:"tombstone_queue_size,omitempty" json:"tombstone_queue_size,omitempty"`
+	// TombstoneDrainInterval controls how often the dedicated drain
+	// goroutine flushes the tombstone and warm-evict queues to the warm
+	// tier + WAL. Default 1s. 0 means use the default. Set to -1 to
+	// disable the dedicated drain goroutine (drains only on the warm
+	// sync cycle, which may cause drops under sustained eviction).
+	TombstoneDrainInterval time.Duration `yaml:"tombstone_drain_interval,omitempty" json:"tombstone_drain_interval,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

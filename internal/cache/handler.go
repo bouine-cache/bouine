@@ -45,9 +45,9 @@ import (
 )
 
 // defaultRefreshConcurrency bounds concurrent background refresh fetches
-// per route. Distinct from bgRevalSem (256, shared) and fetchSem (32,
-// per-handler foreground). Refresh fetches are typically 304s (no body),
-// so memory pressure is minimal.
+// per route. Distinct from revalSem (256, per-handler SWR) and fetchSem
+// (32, per-handler foreground). Refresh fetches are typically 304s (no
+// body), so memory pressure is minimal.
 const defaultRefreshConcurrency = 8
 
 // defaultRefreshTimeout bounds a single background refresh fetch. Since
@@ -86,10 +86,11 @@ const defaultFetchConcurrency = 32
 // hits.
 const defaultFetchTimeout = 60 * time.Second
 
-// bgRevalSem bounds concurrent background stale-while-revalidate
-// goroutines. When full, excess revalidation attempts are silently
-// dropped — the next client will re-trigger if still stale.
-var bgRevalSem = make(chan struct{}, 256)
+// defaultRevalConcurrency bounds concurrent background
+// stale-while-revalidate goroutines per Handler. When full, excess
+// revalidation attempts are silently dropped — the next client will
+// re-trigger if still stale.
+const defaultRevalConcurrency = 256
 
 // Pre-allocated header values to avoid per-request slice literals.
 var (
@@ -231,6 +232,8 @@ type Handler struct {
 	done                 chan struct{}
 	closeOnce            sync.Once
 	refreshWg            sync.WaitGroup
+	revalSem             chan struct{}  // bounds concurrent SWR background goroutines
+	revalWg              sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
 	// variantSets tracks the live variant store keys per primary key to
 	// enforce MaxVariants cap. Entries are removed when the handler observes
 	// their eviction via store probes on the cap path, on explicit Delete,
@@ -442,12 +445,15 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		}
 	}
 
+	h.revalSem = make(chan struct{}, defaultRevalConcurrency)
+
 	return h
 }
 
-// Close drains in-flight refresh goroutines and stops the scheduler.
-// Called during engine shutdown before store.Close() to prevent
-// use-after-close panics. Safe to call multiple times.
+// Close drains in-flight background goroutines (both refresh-before-expiry
+// and SWR revalidation) and stops the scheduler. Called during engine
+// shutdown before store.Close() to prevent use-after-close panics. Safe to
+// call multiple times.
 func (h *Handler) Close(ctx context.Context) error {
 	h.closeOnce.Do(func() {
 		close(h.done)
@@ -456,20 +462,21 @@ func (h *Handler) Close(ctx context.Context) error {
 		h.scheduler.Stop()
 	}
 
-	if h.refreshSem != nil {
-		done := make(chan struct{})
-		go func() {
-			h.refreshWg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	// Drain both refresh-before-expiry and SWR goroutines. A zero-value
+	// WaitGroup (when refresh-before-expiry is disabled) returns immediately
+	// from Wait(), so this is safe in all configurations.
+	done := make(chan struct{})
+	go func() {
+		h.refreshWg.Wait()
+		h.revalWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // lookupForRefresh returns the live object for key, or nil if the
@@ -1098,19 +1105,43 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object
 
 // triggerBgRevalidate fires a background goroutine that fetches a fresh
 // copy of the stale object and updates the store. Called after serving a
-// stale-while-revalidate response. bgRevalSem prevents goroutine explosion.
+// stale-while-revalidate response. revalSem prevents goroutine explosion.
+// The goroutine is tracked by revalWg so Close can drain it before
+// store.Close, preventing use-after-close panics.
 func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.Object) {
+	// Bail out early if the handler is already shutting down.
 	select {
-	case bgRevalSem <- struct{}{}:
+	case <-h.done:
+		return
+	default:
+	}
+
+	select {
+	case h.revalSem <- struct{}{}:
 	default:
 		return // semaphore full — next client will retry
 	}
 	// Detach from the client's context so the background fetch is not
-	// cancelled when the response is sent.
-	bgCtx := context.WithoutCancel(r.Context())
+	// cancelled when the response is sent, but wrap it in a cancellable
+	// context so Close can signal shutdown.
+	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(r.Context()))
 	bgReq := r.Clone(bgCtx)
+	h.revalWg.Add(1)
 	go func() {
-		defer func() { <-bgRevalSem }()
+		defer func() {
+			h.revalWg.Done()
+			<-h.revalSem
+		}()
+		defer bgCancel()
+		// Cancel the background fetch if the handler is shutting down so
+		// we don't call store.Put on a closed store.
+		go func() {
+			select {
+			case <-h.done:
+				bgCancel()
+			case <-bgCtx.Done():
+			}
+		}()
 		h.doBackgroundRevalidate(bgCtx, bgReq, key, stale)
 	}()
 }

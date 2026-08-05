@@ -439,6 +439,12 @@ func (c *Config) validateCluster() error {
 	if c.Storage.WALSyncInterval < -1 {
 		return fmt.Errorf("config: storage.wal_sync_interval must be >= -1 (-1 = synchronous mode), got %v", c.Storage.WALSyncInterval)
 	}
+	if c.Storage.TombstoneQueueSize < 0 {
+		return fmt.Errorf("config: storage.tombstone_queue_size must be >= 0 (0 = default 65536), got %v", c.Storage.TombstoneQueueSize)
+	}
+	if c.Storage.TombstoneDrainInterval < -1 {
+		return fmt.Errorf("config: storage.tombstone_drain_interval must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
+	}
 	return nil
 }
 

@@ -20,12 +20,13 @@ func tieredStoreWithSync(t *testing.T, batchSize int) *TieredStore {
 	t.Helper()
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1, // disabled — we call runWarmSyncCycle manually
-		WarmSyncBatchSize: batchSize,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1, // disabled — we call runWarmSyncCycle manually
+		WarmSyncBatchSize:      batchSize,
+		TombstoneDrainInterval: -1, // disabled — we call drainTombstones manually via runWarmSyncCycle
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
@@ -94,12 +95,13 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	// by SIEVE when we fill with competing entries.
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 14, NumShards: 1}, // 16 KiB, single shard
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1, // disabled — manual cycle
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 14, NumShards: 1}, // 16 KiB, single shard
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1, // disabled — manual cycle
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1, // disabled — manual drain
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
@@ -138,11 +140,24 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 
 func TestWarmSync_TombstoneQueueOverflowNonBlocking(t *testing.T) {
 	t.Parallel()
-	ts := tieredStoreWithSync(t, 100)
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneQueueSize:     16, // small queue for deterministic overflow test
+		TombstoneDrainInterval: -1, // disabled — manual drain
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
-	// Fill tombstone queue to capacity (4096). The channel is buffered
+	// Fill tombstone queue to capacity. The channel is buffered
 	// so all sends should succeed without blocking.
-	for i := range 4096 {
+	qcap := cap(ts.tombstoneQueue)
+	for i := range qcap {
 		ts.tombstoneQueue <- api.Key(600 + i)
 	}
 
@@ -197,12 +212,13 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 
 	// Create store, fill with small objects, sync, close.
 	ts1, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1, // disabled — we call cycle manually
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1, // disabled — we call cycle manually
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "NewTieredStore")
 
@@ -215,12 +231,13 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 
 	// Reopen — warm should have the entries from the previous run.
 	ts2, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
@@ -245,11 +262,12 @@ func TestWarmSync_WarmSyncIntervalNegativeOneDisablesSync(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:              HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:             &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:           filepath.Join(dir, "index.wal"),
-		BodyThreshold:    1024,
-		WarmSyncInterval: -1, // explicitly disabled
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1, // explicitly disabled
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
@@ -273,12 +291,13 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 
 	// Create store, fill warm, close.
 	ts1, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "NewTieredStore")
 
@@ -294,12 +313,13 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 
 	// Reopen — should rebuild index from segment scan.
 	ts2, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
@@ -318,12 +338,13 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 	walPath := filepath.Join(dir, "index.wal")
 
 	ts1, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "NewTieredStore")
 
@@ -341,12 +362,13 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 	_ = os.Remove(walPath)
 
 	ts2, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(context.Background()) })
@@ -443,4 +465,88 @@ func TestOnEvictCallback(t *testing.T) {
 	mu.Unlock()
 
 	require.True(t, found)
+}
+
+// TestTombstoneDrain_DedicatedGoroutineDrainsQueues verifies that the
+// dedicated drain goroutine flushes tombstones from the queue to the
+// warm tier without a manual runWarmSyncCycle call.
+func TestTombstoneDrain_DedicatedGoroutineDrainsQueues(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1, // warm sync disabled
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: 50 * time.Millisecond, // fast drain
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	// Put a large object (goes to warm on Put, marks hasBackup).
+	k := api.Key(1200)
+	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
+	require.Len(t, ts.warm.Keys(), 1, "warm should have the large object")
+
+	// Enqueue a tombstone directly — simulates hot-tier eviction.
+	ts.tombstoneQueue <- k
+
+	// The dedicated drain goroutine should process it within a few
+	// drain cycles. The tombstone removes the key from the warm tier.
+	poll.Eventually(t, 5*time.Second, 20*time.Millisecond, func() bool {
+		return !slices.Contains(ts.warm.Keys(), uint64(k))
+	})
+}
+
+// TestTombstoneDrain_GoroutineStopsOnClose verifies that the dedicated
+// drain goroutine is joined during Close without blocking.
+func TestTombstoneDrain_GoroutineStopsOnClose(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: 100 * time.Millisecond,
+	})
+	require.NoError(t, err, "NewTieredStore")
+
+	done := make(chan struct{})
+	time.AfterFunc(300*time.Millisecond, func() {
+		_ = ts.Close(context.Background())
+		close(done)
+	})
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked waiting for drainWg")
+	}
+}
+
+// TestTombstoneDrain_ConfigurableQueueSize verifies that the queue size
+// is configurable and respects the configured capacity.
+func TestTombstoneDrain_ConfigurableQueueSize(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneQueueSize:     32,
+		TombstoneDrainInterval: -1, // disabled
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	require.Equal(t, 32, cap(ts.tombstoneQueue))
+	require.Equal(t, 32, cap(ts.warmEvictQueue))
 }

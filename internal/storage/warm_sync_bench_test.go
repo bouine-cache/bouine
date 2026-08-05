@@ -36,12 +36,13 @@ func BenchmarkWarmSync_CacheSurvivalRate(b *testing.B) {
 			walPath := filepath.Join(dir, "index.wal")
 
 			ts1, err := NewTieredStore(TieredConfig{
-				Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-				Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-				WALDir:            walPath,
-				BodyThreshold:     int64(bodyThreshold),
-				WarmSyncInterval:  -1, // always 0 — we call runWarmSyncCycle manually
-				WarmSyncBatchSize: 5000,
+				Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+				Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+				WALDir:                 walPath,
+				BodyThreshold:          int64(bodyThreshold),
+				WarmSyncInterval:       -1, // always 0 — we call runWarmSyncCycle manually
+				WarmSyncBatchSize:      5000,
+				TombstoneDrainInterval: -1,
 			})
 			if err != nil {
 				b.Fatalf("NewTieredStore: %v", err)
@@ -68,12 +69,13 @@ func BenchmarkWarmSync_CacheSurvivalRate(b *testing.B) {
 
 			// Reopen and measure how many entries survived in warm.
 			ts2, err := NewTieredStore(TieredConfig{
-				Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-				Warm:              &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-				WALDir:            walPath,
-				BodyThreshold:     int64(bodyThreshold),
-				WarmSyncInterval:  -1,
-				WarmSyncBatchSize: 5000,
+				Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+				Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+				WALDir:                 walPath,
+				BodyThreshold:          int64(bodyThreshold),
+				WarmSyncInterval:       -1,
+				WarmSyncBatchSize:      5000,
+				TombstoneDrainInterval: -1,
 			})
 			if err != nil {
 				b.Fatalf("reopen: %v", err)
@@ -111,12 +113,13 @@ func BenchmarkWarmSync_CacheSurvivalRate(b *testing.B) {
 func BenchmarkWarmSync_Overhead(b *testing.B) {
 	dir := b.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 5000,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      5000,
+		TombstoneDrainInterval: -1,
 	})
 	if err != nil {
 		b.Fatalf("NewTieredStore: %v", err)
@@ -146,12 +149,13 @@ func BenchmarkWarmSync_Overhead(b *testing.B) {
 func BenchmarkWarmSync_StaleEntryCleanup(b *testing.B) {
 	dir := b.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 5000,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      5000,
+		TombstoneDrainInterval: -1,
 	})
 	if err != nil {
 		b.Fatalf("NewTieredStore: %v", err)

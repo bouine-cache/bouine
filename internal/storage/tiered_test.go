@@ -921,3 +921,65 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	warmEntries := ts.Stats().WarmEntries
 	assert.Equal(t, int64(fillCount), warmEntries)
 }
+
+// TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget verifies that
+// TieredStore.Put absorbs warm.ErrOverBudget: the object is kept hot-only,
+// Put returns nil, no WAL entry is written, and the object stays servable
+// from hot via Get. Without this, a cache miss that fetched successfully
+// from origin would fail the response when the warm tier is at its byte
+// budget (#206).
+func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Fill the warm tier to exactly its byte budget with protected
+	// entries so any subsequent warm.Put cannot evict to make room and
+	// must return ErrOverBudget.
+	const warmBodySize = 200
+	recSize := warmRecordSize(warmBodySize)
+	const numFill = 3
+	warmMaxBytes := int64(numFill * recSize)
+
+	// BodyThreshold sits below warmBodySize so the Put path attempts a
+	// warm write (and hits ErrOverBudget) rather than staying hot-only.
+	const bodyThreshold = 100
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
+		WALDir:            filepath.Join(dir, "index.wal"),
+		BodyThreshold:     bodyThreshold,
+		WarmSyncInterval:  -1, // disabled — not relevant to the Put path
+		WarmSyncBatchSize: 100,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(ctx) })
+
+	for i := range numFill {
+		_, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize))
+		require.NoErrorf(t, err, "warm.Put fill %d", i)
+		ts.warm.Protect(uint64(i))
+	}
+	require.True(t, ts.warm.OverBudget(), "warm should be over budget after fill")
+
+	// Put a large object whose body exceeds BodyThreshold, forcing the
+	// warm write path. warm.Put returns ErrOverBudget; Put must absorb
+	// it and keep the object hot-only instead of failing the response.
+	// The skipped warm write exits before walEnqueue, so no WAL entry is
+	// appended (structurally guaranteed by the early return nil).
+	key := KeyHash([]byte("large-over-budget"))
+	o := bigObj(key, warmBodySize)
+	err = ts.Put(ctx, key, o)
+	require.NoError(t, err, "Put should return nil when warm is over budget")
+
+	// The key must not be present in warm — it was rejected, not stored.
+	_, _, ok := ts.warm.Lookup(uint64(key))
+	assert.False(t, ok, "key should not be promoted to warm on ErrOverBudget")
+
+	// The object must still be servable from the hot tier.
+	got, src, err := ts.Get(ctx, key)
+	require.NoError(t, err, "Get after over-budget Put")
+	require.NotNil(t, got)
+	require.Equal(t, api.SourceHot, src)
+	require.Equal(t, int64(warmBodySize), got.BodySize)
+}

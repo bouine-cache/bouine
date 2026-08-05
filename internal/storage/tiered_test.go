@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -932,6 +934,15 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ctx := context.Background()
+	walPath := filepath.Join(dir, "index.wal")
+
+	// Wire warm metrics so the OverBudget counter proves the
+	// warm.Put rejection branch was actually taken — without this, the
+	// test would stay green even if BodyThreshold regressed and the warm
+	// path was skipped entirely (Put returns nil from the hot-only path
+	// with the same observable symptoms).
+	reg := prometheus.NewRegistry()
+	warmMetrics := warm.RegisterMetrics(reg)
 
 	// Fill the warm tier to exactly its byte budget with protected
 	// entries so any subsequent warm.Put cannot evict to make room and
@@ -945,15 +956,14 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	// warm write (and hits ErrOverBudget) rather than staying hot-only.
 	const bodyThreshold = 100
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     bodyThreshold,
-		WarmSyncInterval:  -1, // disabled — not relevant to the Put path
-		WarmSyncBatchSize: 100,
+		Hot:              HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:             &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
+		WarmMetrics:      warmMetrics,
+		WALDir:           walPath,
+		BodyThreshold:    bodyThreshold,
+		WarmSyncInterval: -1, // disabled — not relevant to the Put path
 	})
 	require.NoError(t, err, "NewTieredStore")
-	t.Cleanup(func() { _ = ts.Close(ctx) })
 
 	for i := range numFill {
 		_, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize))
@@ -962,15 +972,24 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	}
 	require.True(t, ts.warm.OverBudget(), "warm should be over budget after fill")
 
+	// Snapshot the OverBudget counter before the Put. The fill calls
+	// were under budget, so it must still be 0 here.
+	before := counterValue(t, warmMetrics.OverBudget)
+	require.Equal(t, float64(0), before, "no over-budget rejections expected before Put")
+
 	// Put a large object whose body exceeds BodyThreshold, forcing the
 	// warm write path. warm.Put returns ErrOverBudget; Put must absorb
 	// it and keep the object hot-only instead of failing the response.
-	// The skipped warm write exits before walEnqueue, so no WAL entry is
-	// appended (structurally guaranteed by the early return nil).
 	key := KeyHash([]byte("large-over-budget"))
 	o := bigObj(key, warmBodySize)
 	err = ts.Put(ctx, key, o)
 	require.NoError(t, err, "Put should return nil when warm is over budget")
+
+	// The OverBudget counter must have incremented exactly once — this
+	// proves the warm.Put rejection branch fired, not just the hot-only
+	// path.
+	after := counterValue(t, warmMetrics.OverBudget)
+	assert.Equal(t, before+1, after, "OverBudget counter must increment by 1")
 
 	// The key must not be present in warm — it was rejected, not stored.
 	_, _, ok := ts.warm.Lookup(uint64(key))
@@ -982,4 +1001,29 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, api.SourceHot, src)
 	require.Equal(t, int64(warmBodySize), got.BodySize)
+
+	// Close the store so the WAL is flushed, then replay it to prove no
+	// entry was appended for the skipped warm write. The fill calls went
+	// directly through ts.warm.Put (bypassing TieredStore.Put), so the
+	// WAL must be empty.
+	require.NoError(t, ts.Close(ctx), "Close to flush WAL")
+	var walEntries int
+	err = wal.Replay(walPath, func(wal.Entry) error {
+		walEntries++
+		return nil
+	})
+	require.NoError(t, err, "wal.Replay")
+	assert.Equal(t, 0, walEntries, "no WAL entry should be appended when warm write is skipped")
+}
+
+// counterValue reads the current value of a prometheus.Counter. Used by
+// the over-budget Put test to prove the ErrOverBudget branch fired.
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, c.(prometheus.Metric).Write(&m), "read counter")
+	if cm := m.GetCounter(); cm != nil {
+		return cm.GetValue()
+	}
+	return 0
 }

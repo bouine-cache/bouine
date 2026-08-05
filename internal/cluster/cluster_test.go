@@ -350,13 +350,16 @@ func TestIncGossipDrop_IncrementsCounter(t *testing.T) {
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather")
+	found := false
 	for _, f := range families {
 		if f.GetName() != "bouine_cluster_gossip_drops_total" {
 			continue
 		}
+		found = true
 		require.Len(t, f.GetMetric(), 1)
 		require.Equal(t, 2.0, f.GetMetric()[0].GetCounter().GetValue())
 	}
+	require.True(t, found, "bouine_cluster_gossip_drops_total not registered")
 }
 
 func TestIncGossipDrop_NilMetricsSafe(t *testing.T) {

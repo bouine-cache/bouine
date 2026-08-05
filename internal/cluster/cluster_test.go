@@ -340,6 +340,15 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 	}
 }
 
+func TestNew_NegativeHandoffQueueDepthRejected(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.HandoffQueueDepth = -1
+	_, err := New(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "HandoffQueueDepth")
+}
+
 func TestIncGossipDrop_IncrementsCounter(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
@@ -368,13 +377,11 @@ func TestIncGossipDrop_NilMetricsSafe(t *testing.T) {
 	m.IncGossipDrop()
 }
 
-// TestIncGossipDrop_ClusterWiring exercises the full chain from the
-// cluster's incGossipDrop callback (the method the slogAdapter calls)
-// through to the registered Prometheus counter. This proves the wiring
-// that the unit test above (which calls m.IncGossipDrop directly) does
-// not: that a real *Cluster with metrics set increments the counter
-// when its callback fires.
-func TestIncGossipDrop_ClusterWiring(t *testing.T) {
+// TestGossipDrop_EndToEndWiring exercises the full chain: a real
+// *Cluster's slogAdapter receives a "handler queue full" log line via
+// Write, parses it, and increments the Prometheus counter through the
+// atomic metrics pointer wired by SetMetrics.
+func TestGossipDrop_EndToEndWiring(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := RegisterMetrics(reg)
@@ -385,13 +392,17 @@ func TestIncGossipDrop_ClusterWiring(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// SetMetrics is called after New but before Join (production wiring
-	// in engine.go:386-388). incGossipDrop must see the metrics pointer.
+	// in engine.go:386-388). The adapter stores the pointer atomically.
 	c.SetMetrics(m)
 
-	// Simulate two "handler queue full" log lines arriving from
-	// memberlist's log output.
-	c.incGossipDrop()
-	c.incGossipDrop()
+	// Write two "handler queue full" log lines to the adapter — this is
+	// what memberlist's logging goroutine does in production.
+	_, err = c.adapter.Write([]byte(
+		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
+	require.NoError(t, err, "Write 1")
+	_, err = c.adapter.Write([]byte(
+		"2026/07/03 23:15:01 [WARN] memberlist: handler queue full, dropping message 8\n"))
+	require.NoError(t, err, "Write 2")
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -406,17 +417,20 @@ func TestIncGossipDrop_ClusterWiring(t *testing.T) {
 	t.Fatal("bouine_cluster_gossip_drops_total not registered")
 }
 
-// TestIncGossipDrop_BeforeSetMetricsNoPanic verifies that the nil-safety
-// of IncGossipDrop holds when the callback fires before SetMetrics has
-// been called (e.g. memberlist logs a warning during Create, before
-// engine.go wires metrics).
-func TestIncGossipDrop_BeforeSetMetricsNoPanic(t *testing.T) {
+// TestGossipDrop_BeforeSetMetricsNoPanic verifies that writing a
+// "handler queue full" log line to the adapter before SetMetrics has
+// been called does not panic (the metrics pointer is nil and handled
+// gracefully). This mirrors the production window where memberlist
+// starts logging inside Create before the engine calls SetMetrics.
+func TestGossipDrop_BeforeSetMetricsNoPanic(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
 	c, err := New(cfg)
 	require.NoError(t, err, "New")
 	defer func() { _ = c.Leave(t.Context()) }()
 
-	// c.metrics is nil at this point — must not panic.
-	c.incGossipDrop()
+	// adapter.metrics is nil at this point — must not panic.
+	_, err = c.adapter.Write([]byte(
+		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
+	require.NoError(t, err, "Write")
 }

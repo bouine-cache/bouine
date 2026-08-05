@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bouine-cache/bouine/internal/observability"
 )
@@ -24,9 +25,10 @@ const handlerQueueFullMsg = "handler queue full"
 type slogAdapter struct {
 	logger    observability.Logger
 	component string
-	// onDrop is called when a handlerQueueFullMsg warning is parsed,
-	// so the cluster can increment its gossip-drop counter. May be nil.
-	onDrop func()
+	// metrics is read atomically so that SetMetrics can update it
+	// concurrently with memberlist's logging goroutine, which starts
+	// inside memberlist.Create (before the caller can call SetMetrics).
+	metrics atomic.Pointer[Metrics]
 
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -34,10 +36,16 @@ type slogAdapter struct {
 
 // newSlogAdapter returns an io.Writer that forwards memberlist log lines
 // to logger as structured slog records tagged with component=memberlist.
-// onDrop is called for each "handler queue full" warning; pass nil to
-// disable.
-func newSlogAdapter(logger observability.Logger, onDrop func()) *slogAdapter {
-	return &slogAdapter{logger: logger, component: "memberlist", onDrop: onDrop}
+// The returned adapter holds an atomic metrics pointer; call setMetrics
+// before memberlist starts logging to ensure drops are counted.
+func newSlogAdapter(logger observability.Logger) *slogAdapter {
+	return &slogAdapter{logger: logger, component: "memberlist"}
+}
+
+// setMetrics atomically sets the metrics pointer. Safe to call
+// concurrently with Write — the pointer is read atomically in emit.
+func (a *slogAdapter) setMetrics(m *Metrics) {
+	a.metrics.Store(m)
 }
 
 // Write implements io.Writer, buffering partial lines until a newline arrives.
@@ -81,8 +89,10 @@ func (a *slogAdapter) emit(line string) {
 	default: // INFO and anything unrecognised
 		a.logger.Info(msg, "component", a.component)
 	}
-	if a.onDrop != nil && strings.Contains(msg, handlerQueueFullMsg) {
-		a.onDrop()
+	if level == "WARN" && strings.Contains(msg, handlerQueueFullMsg) {
+		if m := a.metrics.Load(); m != nil {
+			m.IncGossipDrop()
+		}
 	}
 }
 

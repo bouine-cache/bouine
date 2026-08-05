@@ -1447,3 +1447,183 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	require.False(t, bytes.Contains(expected, []byte("max-age=60")))
 	require.False(t, bytes.Contains(expected, []byte("X-Sensitive: secret")))
 }
+
+// blockingStore wraps a real HotStore but blocks Put after blockCh is
+// signalled. This lets tests hold an SWR goroutine inside store.Put while
+// Handler.Close is called, proving Close drains the goroutine before
+// returning.
+type blockingStore struct {
+	storage.Store
+	blockCh     chan struct{} // when closed, Put starts blocking
+	putReached  chan struct{} // closed when a Put blocks on release
+	releaseCh   chan struct{} // when closed, blocked Put proceeds
+	putDone     atomic.Bool
+	reachedOnce sync.Once
+}
+
+func newBlockingStore(inner storage.Store) *blockingStore {
+	return &blockingStore{
+		Store:      inner,
+		blockCh:    make(chan struct{}),
+		putReached: make(chan struct{}),
+		releaseCh:  make(chan struct{}),
+	}
+}
+
+func (b *blockingStore) startBlocking() {
+	close(b.blockCh)
+}
+
+func (b *blockingStore) Put(ctx context.Context, key api.Key, obj *api.Object) error {
+	// Only block if blocking has been enabled. Before startBlocking(),
+	// Put passes through to the inner store immediately.
+	select {
+	case <-b.blockCh:
+		b.reachedOnce.Do(func() { close(b.putReached) })
+		// Intentionally ignore ctx so the goroutine stays blocked even
+		// when Close cancels the background context. This simulates a
+		// slow store.Put that does not honour context cancellation, which
+		// is exactly the scenario where Close must wait on revalWg.
+		<-b.releaseCh
+	default:
+		// Not yet in blocking mode — fall through.
+	}
+	err := b.Store.Put(ctx, key, obj)
+	b.putDone.Store(true)
+	return err
+}
+
+// TestHandler_SWR_Close_DrainsInFlightRevalidate verifies that Handler.Close
+// waits for in-flight SWR background revalidation goroutines to complete
+// before returning. This is the regression test for the use-after-close
+// panic described in issue #283.
+func TestHandler_SWR_Close_DrainsInFlightRevalidate(t *testing.T) {
+	t.Parallel()
+
+	innerStore := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+	})
+	bs := newBlockingStore(innerStore)
+
+	// Origin returns a cacheable response with SWR.
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+
+	h := NewHandler(HandlerConfig{
+		Upstream: upstream,
+		Store:    bs,
+	})
+
+	// First request: populates the cache.
+	r1 := httptest.NewRequest("GET", "http://example.com/swr", nil)
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, r1)
+	require.Equal(t, 200, w1.Code)
+
+	// Wait for TTL to expire so the next request is a StaleHit + SWR trigger.
+	time.Sleep(2 * time.Second)
+
+	// Enable blocking so the SWR goroutine's Put will block.
+	bs.startBlocking()
+
+	// Second request: StaleHit → serves stale, triggers background revalidation.
+	// The blocking store will hold the SWR goroutine inside Put.
+	r2 := httptest.NewRequest("GET", "http://example.com/swr", nil)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	require.Equal(t, 200, w2.Code)
+
+	// Wait for the SWR goroutine to reach store.Put.
+	select {
+	case <-bs.putReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SWR goroutine never reached store.Put")
+	}
+
+	// Close the handler while the SWR goroutine is blocked in Put.
+	// Close must NOT return until the goroutine completes (or ctx times out).
+	closeDone := make(chan error)
+	go func() {
+		closeDone <- h.Close(context.Background())
+	}()
+
+	// Give Close a moment to prove it's blocked.
+	select {
+	case <-closeDone:
+		t.Fatal("Close returned before SWR goroutine completed — use-after-close risk")
+	case <-time.After(100 * time.Millisecond):
+		// Good: Close is still waiting.
+	}
+
+	// Release the SWR goroutine so it can complete.
+	close(bs.releaseCh)
+
+	// Now Close should return.
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after SWR goroutine completed")
+	}
+
+	// Verify the SWR goroutine actually finished Put (no use-after-close).
+	require.True(t, bs.putDone.Load(), "SWR goroutine should have completed store.Put")
+
+	_ = innerStore.Close(context.Background())
+}
+
+// TestHandler_SWR_Close_NoGoroutineLeakAfterShutdown verifies that after
+// Close, no new SWR goroutines are spawned (the h.done check prevents it).
+func TestHandler_SWR_Close_NoNewRevalidateAfterClose(t *testing.T) {
+	t.Parallel()
+
+	innerStore := storage.NewHotStore(storage.HotConfig{
+		MaxBytes:  1 << 20,
+		NumShards: 2,
+	})
+	bs := newBlockingStore(innerStore)
+
+	var originCalls atomic.Int64
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originCalls.Add(1)
+		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	})
+
+	h := NewHandler(HandlerConfig{
+		Upstream: upstream,
+		Store:    bs,
+	})
+
+	// Populate cache.
+	r1 := httptest.NewRequest("GET", "http://example.com/swr2", nil)
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, r1)
+
+	time.Sleep(2 * time.Second)
+
+	// Close handler — h.done is now closed.
+	require.NoError(t, h.Close(context.Background()))
+
+	// Request after close: should not spawn a new SWR goroutine.
+	r2 := httptest.NewRequest("GET", "http://example.com/swr2", nil)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+
+	// The SWR goroutine should not have been spawned, so Put should not be reached.
+	select {
+	case <-bs.putReached:
+		t.Fatal("SWR goroutine was spawned after Close — h.done check failed")
+	case <-time.After(200 * time.Millisecond):
+		// Good: no new goroutine.
+	}
+
+	_ = innerStore.Close(context.Background())
+}

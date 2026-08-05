@@ -367,3 +367,56 @@ func TestIncGossipDrop_NilMetricsSafe(t *testing.T) {
 	var m *Metrics
 	m.IncGossipDrop()
 }
+
+// TestIncGossipDrop_ClusterWiring exercises the full chain from the
+// cluster's incGossipDrop callback (the method the slogAdapter calls)
+// through to the registered Prometheus counter. This proves the wiring
+// that the unit test above (which calls m.IncGossipDrop directly) does
+// not: that a real *Cluster with metrics set increments the counter
+// when its callback fires.
+func TestIncGossipDrop_ClusterWiring(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	// SetMetrics is called after New but before Join (production wiring
+	// in engine.go:386-388). incGossipDrop must see the metrics pointer.
+	c.SetMetrics(m)
+
+	// Simulate two "handler queue full" log lines arriving from
+	// memberlist's log output.
+	c.incGossipDrop()
+	c.incGossipDrop()
+
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_drops_total" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1)
+		require.Equal(t, 2.0, f.GetMetric()[0].GetCounter().GetValue())
+		return
+	}
+	t.Fatal("bouine_cluster_gossip_drops_total not registered")
+}
+
+// TestIncGossipDrop_BeforeSetMetricsNoPanic verifies that the nil-safety
+// of IncGossipDrop holds when the callback fires before SetMetrics has
+// been called (e.g. memberlist logs a warning during Create, before
+// engine.go wires metrics).
+func TestIncGossipDrop_BeforeSetMetricsNoPanic(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	// c.metrics is nil at this point — must not panic.
+	c.incGossipDrop()
+}

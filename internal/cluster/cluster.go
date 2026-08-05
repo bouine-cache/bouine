@@ -17,6 +17,18 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
+// defaultHandoffQueueDepth is the memberlist per-peer message buffer
+// depth. memberlist@v0.6.0's upstream default is 1024 (config.go:335);
+// bouine uses 4096 to absorb production bursts of cache invalidations
+// (issue #201).
+const defaultHandoffQueueDepth = 4096
+
+// MaxHandoffQueueDepth bounds the configurable upper limit. Each slot
+// costs a pointer + message header in a per-peer linked list; 1<<20
+// slots × 50 peers ≈ 50 M entries worst case. The config layer mirrors
+// this bound (see config.maxHandoffQueueDepth) — keep them in sync.
+const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
+
 // Config controls the cluster membership layer.
 //
 // Stable.
@@ -57,8 +69,9 @@ type Config struct {
 	// HandoffQueueDepth sets memberlist's per-peer message handoff
 	// queue depth. When the receiving node's handler is busy, messages
 	// are buffered up to this depth before being dropped. The default
-	// (0 = use 4096) is 4× the memberlist upstream default of 1024 to
-	// absorb production bursts of cache invalidations. See issue #201.
+	// (0 = use defaultHandoffQueueDepth = 4096) is 4× the memberlist
+	// upstream default of 1024 to absorb production bursts of cache
+	// invalidations. See issue #201.
 	HandoffQueueDepth int
 }
 
@@ -94,11 +107,6 @@ type Cluster struct {
 	inv         Invalidator
 	metrics     *Metrics
 }
-
-// defaultHandoffQueueDepth is the memberlist per-peer message buffer
-// depth. memberlist's upstream default is 1024; bouine uses 4096 to
-// absorb production bursts of cache invalidations (issue #201).
-const defaultHandoffQueueDepth = 4096
 
 // New creates a Cluster and starts the gossip listener. Call Join
 // afterwards to connect to existing peers.
@@ -570,9 +578,11 @@ func (c *Cluster) Mode() string { return c.cfg.Mode }
 func (c *Cluster) SetMetrics(m *Metrics) { c.metrics = m }
 
 // incGossipDrop is the callback for slogAdapter to increment the
-// gossip-drops counter when memberlist logs a "handler queue full"
+// gossip-drops counter when memberlist logs a handlerQueueFullMsg
 // warning. Safe to call before SetMetrics — the metrics pointer is
-// nil until then, and IncGossipDrop handles nil receivers.
+// nil until then, and IncGossipDrop handles nil receivers. Not safe
+// to call concurrently with SetMetrics; SetMetrics must be called
+// before Join (see its doc).
 func (c *Cluster) incGossipDrop() {
 	c.metrics.IncGossipDrop()
 }

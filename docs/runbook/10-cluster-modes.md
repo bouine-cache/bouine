@@ -220,3 +220,51 @@ No data migration needed — each node starts with an empty cache.
 | Stale reads | `eventual` | Gossip convergence window | Wait 5 s, re-check. If persistent, check gossip. |
 | Low hit rate | `eventual` | Uneven node fill | Check per-node hit rates, consider `strong` |
 | Node join fails | all | DNS not resolving | `kubectl get endpoints`, verify `publishNotReadyAddresses` |
+| Gossip drops increasing | all | Handoff queue overflow | `bouine_cluster_gossip_drops_total`, see [Gossip drops](#gossip-drops) |
+
+---
+
+## Gossip drops
+
+`bouine_cluster_gossip_drops_total` counts memberlist "handler queue full"
+warnings — messages dropped because the receiving node's per-peer handoff
+queue overflowed. The counter is node-local: to get cluster-wide drops,
+use `sum(bouine_cluster_gossip_drops_total)`.
+
+### When to expect zero
+
+On a healthy cluster with tuned `handoff_queue_depth`, this counter should
+stay at zero. Non-zero values mean invalidation messages are being dropped;
+gossip provides redundant delivery, so a few drops may not cause visible
+staleness, but sustained drops indicate a capacity problem.
+
+### What to do when non-zero
+
+1. **Check the rate.** `rate(bouine_cluster_gossip_drops_total[5m])` — if
+   it's a brief spike during an invalidation burst, no action needed.
+   Sustained non-zero rate requires intervention.
+2. **Increase `handoff_queue_depth`.** Default is 4096 (4× memberlist's
+   upstream 1024). Increase in powers of 2 (8192, 16384) and re-check the
+   metric. Each slot costs a pointer + message header per peer; 4096 × 10
+   peers ≈ 40 K entries.
+3. **Check `GossipApplyTimeout`.** If the `NotifyMsg` handler is slow
+   (e.g. store writes exceeding 100 ms), the handoff queue backs up.
+   Check `bouine_cluster_gossip_apply_duration_seconds` if available, or
+   profile the store write path.
+4. **Check for slow consumers.** A node that is CPU-bound or disk-bound
+   will drain its handoff queue slowly. Check `bouine_hot_store_bytes`
+   and node CPU/disk metrics.
+
+### Sample alert
+
+```yaml
+# Alert if gossip drops are sustained over 5 minutes.
+- alert: GossipDropsSustained
+  expr: rate(bouine_cluster_gossip_drops_total[5m]) > 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Memberlist handoff queue overflow — invalidation messages being dropped"
+    description: "Increase cluster.handoff_queue_depth or investigate slow NotifyMsg handler."
+```

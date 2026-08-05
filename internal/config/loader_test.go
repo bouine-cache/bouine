@@ -195,6 +195,28 @@ func TestClusterHandoffQueueDepth_ZeroAccepted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestClusterHandoffQueueDepth_ExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{HandoffQueueDepth: maxHandoffQueueDepth + 1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "handoff_queue_depth")
+	require.Contains(t, err.Error(), "must be <=")
+}
+
+func TestClusterHandoffQueueDepth_AtUpperBoundAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{HandoffQueueDepth: maxHandoffQueueDepth},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
 func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}

@@ -10,10 +10,21 @@ import (
 
 // slogAdapter bridges memberlist's stdlib *log.Logger output into slog,
 // parsing [LEVEL] tokens and re-emitting with component=memberlist.
+// handlerQueueFullMsg is the exact substring memberlist logs when a
+// per-peer handoff queue overflows. Anchored to memberlist@v0.6.0
+// net.go:472:
+//
+//	m.logger.Printf("[WARN] memberlist: handler queue full, dropping message (%d) %s", ...)
+//
+// If a memberlist upgrade changes this wording, the gossip-drops
+// metric silently stops counting. Update this constant and the
+// corresponding test corpus when bumping memberlist.
+const handlerQueueFullMsg = "handler queue full"
+
 type slogAdapter struct {
 	logger    observability.Logger
 	component string
-	// onDrop is called when a "handler queue full" warning is parsed,
+	// onDrop is called when a handlerQueueFullMsg warning is parsed,
 	// so the cluster can increment its gossip-drop counter. May be nil.
 	onDrop func()
 
@@ -70,7 +81,7 @@ func (a *slogAdapter) emit(line string) {
 	default: // INFO and anything unrecognised
 		a.logger.Info(msg, "component", a.component)
 	}
-	if a.onDrop != nil && strings.Contains(msg, "handler queue full") {
+	if a.onDrop != nil && strings.Contains(msg, handlerQueueFullMsg) {
 		a.onDrop()
 	}
 }

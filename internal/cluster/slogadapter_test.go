@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -157,7 +157,7 @@ func TestParseMemberlistLine(t *testing.T) {
 func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger, nil)
+	a := newSlogAdapter(logger)
 
 	lines := []string{
 		"2026/07/05 09:37:34 [WARN] memberlist: Was able to connect to bouine-3 over TCP but UDP probes failed, network may be misconfigured\n",
@@ -190,7 +190,7 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 func TestSlogAdapter_BuffersPartialLines(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger, nil)
+	a := newSlogAdapter(logger)
 
 	// Write a line in two chunks; no record should be emitted until the
 	// newline arrives.
@@ -209,7 +209,7 @@ func TestSlogAdapter_BuffersPartialLines(t *testing.T) {
 func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger, nil)
+	a := newSlogAdapter(logger)
 
 	blob := strings.Join([]string{
 		"2026/07/05 09:37:34 [WARN] memberlist: first\n",
@@ -227,7 +227,7 @@ func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
 func TestSlogAdapter_EmptyLinesDropped(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger, nil)
+	a := newSlogAdapter(logger)
 
 	_, err := a.Write([]byte("\n\n"))
 	require.NoError(t, err, "Write")
@@ -235,38 +235,90 @@ func TestSlogAdapter_EmptyLinesDropped(t *testing.T) {
 	require.Len(t, got, 0)
 }
 
-func TestSlogAdapter_HandlerQueueFullCallsOnDrop(t *testing.T) {
+func TestSlogAdapter_HandlerQueueFullIncrementsCounter(t *testing.T) {
 	t.Parallel()
 	logger, _, _ := captureLogger(t)
-	drops := atomic.Int32{}
-	a := newSlogAdapter(logger, func() { drops.Add(1) })
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	a := newSlogAdapter(logger)
+	a.setMetrics(m)
 
 	_, err := a.Write([]byte(
 		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
 	require.NoError(t, err, "Write")
 
-	require.Equal(t, int32(1), drops.Load())
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_drops_total" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1)
+		require.Equal(t, 1.0, f.GetMetric()[0].GetCounter().GetValue())
+		return
+	}
+	t.Fatal("bouine_cluster_gossip_drops_total not registered")
 }
 
-func TestSlogAdapter_NonDropWarningDoesNotCallOnDrop(t *testing.T) {
+func TestSlogAdapter_NonDropWarningDoesNotIncrement(t *testing.T) {
 	t.Parallel()
 	logger, _, _ := captureLogger(t)
-	drops := atomic.Int32{}
-	a := newSlogAdapter(logger, func() { drops.Add(1) })
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	a := newSlogAdapter(logger)
+	a.setMetrics(m)
 
 	_, err := a.Write([]byte(
 		"2026/07/03 23:15:00 [WARN] memberlist: Refuting a suspect message (from: node-3)\n"))
 	require.NoError(t, err, "Write")
 
-	require.Equal(t, int32(0), drops.Load())
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_drops_total" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1)
+		require.Equal(t, 0.0, f.GetMetric()[0].GetCounter().GetValue())
+		return
+	}
+	t.Fatal("bouine_cluster_gossip_drops_total not registered")
 }
 
-func TestSlogAdapter_NilOnDropIsSafe(t *testing.T) {
+func TestSlogAdapter_NoMetricsNoPanic(t *testing.T) {
 	t.Parallel()
 	logger, _, _ := captureLogger(t)
-	a := newSlogAdapter(logger, nil)
+	a := newSlogAdapter(logger)
 
+	// No setMetrics call — metrics pointer is nil. Must not panic.
 	_, err := a.Write([]byte(
 		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
 	require.NoError(t, err, "Write")
+}
+
+func TestSlogAdapter_InfoLevelDropDoesNotIncrement(t *testing.T) {
+	t.Parallel()
+	logger, _, _ := captureLogger(t)
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	a := newSlogAdapter(logger)
+	a.setMetrics(m)
+
+	// A hypothetical INFO-level log containing the substring should not
+	// increment the counter — only WARN counts.
+	_, err := a.Write([]byte(
+		"2026/07/03 23:15:00 [INFO] memberlist: handler queue full (debug info)\n"))
+	require.NoError(t, err, "Write")
+
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_drops_total" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1)
+		require.Equal(t, 0.0, f.GetMetric()[0].GetCounter().GetValue())
+		return
+	}
+	t.Fatal("bouine_cluster_gossip_drops_total not registered")
 }

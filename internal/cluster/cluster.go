@@ -23,12 +23,6 @@ import (
 // (issue #201).
 const defaultHandoffQueueDepth = 4096
 
-// MaxHandoffQueueDepth bounds the configurable upper limit. Each slot
-// costs a pointer + message header in a per-peer linked list; 1<<20
-// slots × 50 peers ≈ 50 M entries worst case. The config layer mirrors
-// this bound (see config.maxHandoffQueueDepth) — keep them in sync.
-const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
-
 // Config controls the cluster membership layer.
 //
 // Stable.
@@ -106,6 +100,7 @@ type Cluster struct {
 	gossipQueue []gossipBroadcast
 	inv         Invalidator
 	metrics     *Metrics
+	adapter     *slogAdapter
 }
 
 // New creates a Cluster and starts the gossip listener. Call Join
@@ -123,6 +118,9 @@ func New(cfg Config) (*Cluster, error) {
 	if cfg.HandoffQueueDepth == 0 {
 		cfg.HandoffQueueDepth = defaultHandoffQueueDepth
 	}
+	if cfg.HandoffQueueDepth < 0 {
+		return nil, fmt.Errorf("cluster: HandoffQueueDepth must be >= 0, got %d", cfg.HandoffQueueDepth)
+	}
 
 	c := &Cluster{
 		cfg:    cfg,
@@ -136,8 +134,12 @@ func New(cfg Config) (*Cluster, error) {
 	mlCfg.Name = cfg.NodeName
 	mlCfg.HandoffQueueDepth = cfg.HandoffQueueDepth
 	// Bridge memberlist's stdlib log output into slog so gossip diagnostics are structured.
-	// The onDrop callback lets us count "handler queue full" warnings as Prometheus metrics.
-	mlCfg.LogOutput = newSlogAdapter(c.logger, c.incGossipDrop)
+	// The adapter holds an atomic.Pointer[Metrics] so SetMetrics can be called
+	// concurrently with memberlist's logging goroutine (which starts inside
+	// memberlist.Create, before the caller can call SetMetrics).
+	adapter := newSlogAdapter(c.logger)
+	mlCfg.LogOutput = adapter
+	c.adapter = adapter
 	mlCfg.Delegate = c
 	mlCfg.Events = c
 	// Use the configured PushPullInterval if set (integration tests use
@@ -574,17 +576,13 @@ func (c *Cluster) Config() Config {
 func (c *Cluster) Mode() string { return c.cfg.Mode }
 
 // SetMetrics registers cluster-level Prometheus counters. Must be called
-// before Join. Nil receiver is a no-op.
-func (c *Cluster) SetMetrics(m *Metrics) { c.metrics = m }
-
-// incGossipDrop is the callback for slogAdapter to increment the
-// gossip-drops counter when memberlist logs a handlerQueueFullMsg
-// warning. Safe to call before SetMetrics — the metrics pointer is
-// nil until then, and IncGossipDrop handles nil receivers. Not safe
-// to call concurrently with SetMetrics; SetMetrics must be called
-// before Join (see its doc).
-func (c *Cluster) incGossipDrop() {
-	c.metrics.IncGossipDrop()
+// before Join. Nil receiver is a no-op. Safe to call concurrently with
+// memberlist's logging goroutine — the adapter stores the pointer atomically.
+func (c *Cluster) SetMetrics(m *Metrics) {
+	c.metrics = m
+	if c.adapter != nil {
+		c.adapter.setMetrics(m)
+	}
 }
 
 // SetInvalidator registers callbacks for applying purge and ban events

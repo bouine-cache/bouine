@@ -349,6 +349,27 @@ func TestNew_NegativeHandoffQueueDepthRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "HandoffQueueDepth")
 }
 
+func TestNew_HandoffQueueDepthExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.HandoffQueueDepth = MaxHandoffQueueDepth + 1
+	_, err := New(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "HandoffQueueDepth")
+	require.Contains(t, err.Error(), "must be <=")
+}
+
+func TestNew_HandoffQueueDepthAtUpperBoundAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.HandoffQueueDepth = MaxHandoffQueueDepth
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	require.Equal(t, MaxHandoffQueueDepth, c.cfg.HandoffQueueDepth)
+}
+
 func TestIncGossipDrop_IncrementsCounter(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()

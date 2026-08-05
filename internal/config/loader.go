@@ -422,6 +422,10 @@ func (c *Config) validateCluster() error {
 	if c.Cluster.Mode == "" {
 		c.Cluster.Mode = ClusterModeStrong
 	}
+	if c.Cluster.HandoffQueueDepth < 0 {
+		return fmt.Errorf("config: cluster.handoff_queue_depth must be >= 0 (0 = default), got %d",
+			c.Cluster.HandoffQueueDepth)
+	}
 	if c.Storage.WarmSyncInterval < -1 {
 		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
 	}

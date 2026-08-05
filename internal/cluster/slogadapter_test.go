@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,7 +157,7 @@ func TestParseMemberlistLine(t *testing.T) {
 func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger)
+	a := newSlogAdapter(logger, nil)
 
 	lines := []string{
 		"2026/07/05 09:37:34 [WARN] memberlist: Was able to connect to bouine-3 over TCP but UDP probes failed, network may be misconfigured\n",
@@ -189,7 +190,7 @@ func TestSlogAdapter_EmitsStructuredRecords(t *testing.T) {
 func TestSlogAdapter_BuffersPartialLines(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger)
+	a := newSlogAdapter(logger, nil)
 
 	// Write a line in two chunks; no record should be emitted until the
 	// newline arrives.
@@ -208,7 +209,7 @@ func TestSlogAdapter_BuffersPartialLines(t *testing.T) {
 func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger)
+	a := newSlogAdapter(logger, nil)
 
 	blob := strings.Join([]string{
 		"2026/07/05 09:37:34 [WARN] memberlist: first\n",
@@ -226,10 +227,46 @@ func TestSlogAdapter_MultipleLinesInOneWrite(t *testing.T) {
 func TestSlogAdapter_EmptyLinesDropped(t *testing.T) {
 	t.Parallel()
 	logger, mu, buf := captureLogger(t)
-	a := newSlogAdapter(logger)
+	a := newSlogAdapter(logger, nil)
 
 	_, err := a.Write([]byte("\n\n"))
 	require.NoError(t, err, "Write")
 	got := parseAdapterRecords(t, mu, buf)
 	require.Len(t, got, 0)
+}
+
+func TestSlogAdapter_HandlerQueueFullCallsOnDrop(t *testing.T) {
+	t.Parallel()
+	logger, _, _ := captureLogger(t)
+	drops := atomic.Int32{}
+	a := newSlogAdapter(logger, func() { drops.Add(1) })
+
+	_, err := a.Write([]byte(
+		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
+	require.NoError(t, err, "Write")
+
+	require.Equal(t, int32(1), drops.Load())
+}
+
+func TestSlogAdapter_NonDropWarningDoesNotCallOnDrop(t *testing.T) {
+	t.Parallel()
+	logger, _, _ := captureLogger(t)
+	drops := atomic.Int32{}
+	a := newSlogAdapter(logger, func() { drops.Add(1) })
+
+	_, err := a.Write([]byte(
+		"2026/07/03 23:15:00 [WARN] memberlist: Refuting a suspect message (from: node-3)\n"))
+	require.NoError(t, err, "Write")
+
+	require.Equal(t, int32(0), drops.Load())
+}
+
+func TestSlogAdapter_NilOnDropIsSafe(t *testing.T) {
+	t.Parallel()
+	logger, _, _ := captureLogger(t)
+	a := newSlogAdapter(logger, nil)
+
+	_, err := a.Write([]byte(
+		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
+	require.NoError(t, err, "Write")
 }

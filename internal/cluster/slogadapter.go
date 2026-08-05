@@ -13,6 +13,9 @@ import (
 type slogAdapter struct {
 	logger    observability.Logger
 	component string
+	// onDrop is called when a "handler queue full" warning is parsed,
+	// so the cluster can increment its gossip-drop counter. May be nil.
+	onDrop func()
 
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -20,8 +23,10 @@ type slogAdapter struct {
 
 // newSlogAdapter returns an io.Writer that forwards memberlist log lines
 // to logger as structured slog records tagged with component=memberlist.
-func newSlogAdapter(logger observability.Logger) *slogAdapter {
-	return &slogAdapter{logger: logger, component: "memberlist"}
+// onDrop is called for each "handler queue full" warning; pass nil to
+// disable.
+func newSlogAdapter(logger observability.Logger, onDrop func()) *slogAdapter {
+	return &slogAdapter{logger: logger, component: "memberlist", onDrop: onDrop}
 }
 
 // Write implements io.Writer, buffering partial lines until a newline arrives.
@@ -64,6 +69,9 @@ func (a *slogAdapter) emit(line string) {
 		a.logger.Debug(msg, "component", a.component)
 	default: // INFO and anything unrecognised
 		a.logger.Info(msg, "component", a.component)
+	}
+	if a.onDrop != nil && strings.Contains(msg, "handler queue full") {
+		a.onDrop()
 	}
 }
 

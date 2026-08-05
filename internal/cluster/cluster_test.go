@@ -257,6 +257,27 @@ func TestNotifyMsg_DefaultApplyTimeout(t *testing.T) {
 	require.Equal(t, 100*time.Millisecond, c.cfg.GossipApplyTimeout)
 }
 
+func TestNew_DefaultHandoffQueueDepth(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	require.Equal(t, defaultHandoffQueueDepth, c.cfg.HandoffQueueDepth)
+}
+
+func TestNew_CustomHandoffQueueDepth(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.HandoffQueueDepth = 8192
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	require.Equal(t, 8192, c.cfg.HandoffQueueDepth)
+}
+
 func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "local", "127.0.0.1:0")
@@ -317,4 +338,29 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestIncGossipDrop_IncrementsCounter(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+
+	m.IncGossipDrop()
+	m.IncGossipDrop()
+
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_drops_total" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1)
+		require.Equal(t, 2.0, f.GetMetric()[0].GetCounter().GetValue())
+	}
+}
+
+func TestIncGossipDrop_NilMetricsSafe(t *testing.T) {
+	t.Parallel()
+	var m *Metrics
+	m.IncGossipDrop()
 }

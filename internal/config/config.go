@@ -223,6 +223,14 @@ type Cluster struct {
 	// continues retrying in the background. Default 120s. 0 means use
 	// the default.
 	JoinTimeout time.Duration `yaml:"join_timeout,omitempty" json:"join_timeout,omitempty"`
+	// HandoffQueueDepth sets memberlist's HandoffQueueDepth — the
+	// number of messages buffered per peer when the handler is busy.
+	// The default (0) uses bouine's default of 4096, which is 4× the
+	// memberlist upstream default of 1024. A burst of cache
+	// invalidations can exceed the upstream default and cause message
+	// drops; 4096 absorbs typical production bursts. Negative values
+	// are rejected.
+	HandoffQueueDepth int `yaml:"handoff_queue_depth,omitempty" json:"handoff_queue_depth,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

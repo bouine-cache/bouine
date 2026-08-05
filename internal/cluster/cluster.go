@@ -54,6 +54,12 @@ type Config struct {
 	// bound protects memberlist's dispatch goroutine from stalling on a
 	// slow store and causing false failure detection. Default 100ms.
 	GossipApplyTimeout time.Duration
+	// HandoffQueueDepth sets memberlist's per-peer message handoff
+	// queue depth. When the receiving node's handler is busy, messages
+	// are buffered up to this depth before being dropped. The default
+	// (0 = use 4096) is 4× the memberlist upstream default of 1024 to
+	// absorb production bursts of cache invalidations. See issue #201.
+	HandoffQueueDepth int
 }
 
 // Invalidator holds callbacks for applying purge and ban events received
@@ -89,6 +95,11 @@ type Cluster struct {
 	metrics     *Metrics
 }
 
+// defaultHandoffQueueDepth is the memberlist per-peer message buffer
+// depth. memberlist's upstream default is 1024; bouine uses 4096 to
+// absorb production bursts of cache invalidations (issue #201).
+const defaultHandoffQueueDepth = 4096
+
 // New creates a Cluster and starts the gossip listener. Call Join
 // afterwards to connect to existing peers.
 //
@@ -101,6 +112,9 @@ func New(cfg Config) (*Cluster, error) {
 	if cfg.GossipApplyTimeout <= 0 {
 		cfg.GossipApplyTimeout = 100 * time.Millisecond
 	}
+	if cfg.HandoffQueueDepth == 0 {
+		cfg.HandoffQueueDepth = defaultHandoffQueueDepth
+	}
 
 	c := &Cluster{
 		cfg:    cfg,
@@ -112,8 +126,10 @@ func New(cfg Config) (*Cluster, error) {
 
 	mlCfg := memberlist.DefaultLANConfig()
 	mlCfg.Name = cfg.NodeName
+	mlCfg.HandoffQueueDepth = cfg.HandoffQueueDepth
 	// Bridge memberlist's stdlib log output into slog so gossip diagnostics are structured.
-	mlCfg.LogOutput = newSlogAdapter(c.logger)
+	// The onDrop callback lets us count "handler queue full" warnings as Prometheus metrics.
+	mlCfg.LogOutput = newSlogAdapter(c.logger, c.incGossipDrop)
 	mlCfg.Delegate = c
 	mlCfg.Events = c
 	// Use the configured PushPullInterval if set (integration tests use
@@ -552,6 +568,14 @@ func (c *Cluster) Mode() string { return c.cfg.Mode }
 // SetMetrics registers cluster-level Prometheus counters. Must be called
 // before Join. Nil receiver is a no-op.
 func (c *Cluster) SetMetrics(m *Metrics) { c.metrics = m }
+
+// incGossipDrop is the callback for slogAdapter to increment the
+// gossip-drops counter when memberlist logs a "handler queue full"
+// warning. Safe to call before SetMetrics — the metrics pointer is
+// nil until then, and IncGossipDrop handles nil receivers.
+func (c *Cluster) incGossipDrop() {
+	c.metrics.IncGossipDrop()
+}
 
 // SetInvalidator registers callbacks for applying purge and ban events
 // received via gossip. Must be called before Join.

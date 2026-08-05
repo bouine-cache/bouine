@@ -174,6 +174,27 @@ func TestClusterMode_InvalidValue(t *testing.T) {
 	require.Contains(t, err.Error(), "cluster.mode must be")
 }
 
+func TestClusterHandoffQueueDepth_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{HandoffQueueDepth: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "handoff_queue_depth")
+}
+
+func TestClusterHandoffQueueDepth_ZeroAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{HandoffQueueDepth: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
 func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}

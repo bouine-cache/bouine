@@ -26,6 +26,11 @@ type Metrics struct {
 	// labelled by reason (dial, timeout, 5xx). Non-zero indicates peers
 	// may have missed an invalidation; gossip provides redundant delivery.
 	BroadcastFailures *prometheus.CounterVec
+	// GossipDrops counts memberlist "handler queue full" warnings —
+	// messages dropped because the receiving node's handoff queue
+	// overflowed. Non-zero indicates the HandoffQueueDepth may need
+	// tuning or invalidation bursts need throttling. See issue #201.
+	GossipDrops prometheus.Counter
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -60,12 +65,18 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_broadcast_failures_total",
 			Help:      "HTTP fan-out failures by invalidation type and reason. Gossip provides redundant delivery.",
 		}, []string{"type", "reason"}),
+		GossipDrops: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_gossip_drops_total",
+			Help:      "Memberlist handler queue full warnings — messages dropped because the receiving node's handoff queue overflowed.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
 		m.InvalidationsGossip,
 		m.InvalidationsHTTP,
 		m.BroadcastFailures,
+		m.GossipDrops,
 	)
 	return m
 }
@@ -112,6 +123,15 @@ func (m *Metrics) IncBroadcastFailure(typ, reason string) {
 	}
 	m.BroadcastFailures.WithLabelValues(typ, reason).Inc()
 	m.broadcastFailuresTotal.Add(1)
+}
+
+// IncGossipDrop increments the gossip-drops counter. Called when
+// memberlist logs a "handler queue full" warning.
+func (m *Metrics) IncGossipDrop() {
+	if m == nil || m.GossipDrops == nil {
+		return
+	}
+	m.GossipDrops.Inc()
 }
 
 // BroadcastFailuresCount returns the total number of broadcast failures

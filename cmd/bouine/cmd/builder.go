@@ -110,13 +110,14 @@ func (e *engine) buildCluster(ctx context.Context) (*cluster.Cluster, error) {
 	}
 
 	return cluster.New(cluster.Config{
-		NodeName:      hostname,
-		BindAddr:      e.cfg.Listen.Cluster,
-		AdvertiseAddr: advertiseAddr,
-		Join:          e.cfg.Cluster.Join,
-		PeerInfo:      peerInfo,
-		Logger:        e.logger,
-		Mode:          e.cfg.Cluster.Mode,
+		NodeName:          hostname,
+		BindAddr:          e.cfg.Listen.Cluster,
+		AdvertiseAddr:     advertiseAddr,
+		Join:              e.cfg.Cluster.Join,
+		PeerInfo:          peerInfo,
+		Logger:            e.logger,
+		Mode:              e.cfg.Cluster.Mode,
+		HandoffQueueDepth: e.cfg.Cluster.HandoffQueueDepth,
 	})
 }
 

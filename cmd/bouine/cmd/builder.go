@@ -27,6 +27,15 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
+// tombstoneDrainDefault returns the production default for the tombstone
+// drain interval. 0 (unset) maps to 1s; -1 passes through as disabled.
+func tombstoneDrainDefault(v time.Duration) time.Duration {
+	if v == 0 {
+		return 1 * time.Second
+	}
+	return v
+}
+
 // buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is
 // configured, or a plain HotStore for ephemeral/dev deployments.
 // warmMetrics, when non-nil, is injected into the warm store so it can
@@ -48,6 +57,8 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
 		CompactInterval:        e.cfg.Storage.CompactInterval,
 		CheckpointInterval:     e.cfg.Storage.CheckpointInterval,
 		CheckpointWALThreshold: e.cfg.Storage.CheckpointWALThreshold,
+		TombstoneQueueSize:     e.cfg.Storage.TombstoneQueueSize,
+		TombstoneDrainInterval: tombstoneDrainDefault(e.cfg.Storage.TombstoneDrainInterval),
 		Logger:                 e.logger,
 		WarmMetrics:            warmMetrics,
 	})

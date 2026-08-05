@@ -806,12 +806,13 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	warmMaxBytes := int64(numFill * recSize)
 
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     1 << 20, // everything stays hot-only (never written to warm on Put)
-		WarmSyncInterval:  -1,      // disabled — we call runWarmSyncCycle manually
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1 << 20, // everything stays hot-only (never written to warm on Put)
+		WarmSyncInterval:       -1,      // disabled — we call runWarmSyncCycle manually
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(ctx) })
@@ -880,12 +881,13 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	warmMaxBytes := int64(fillCount * recSize)
 
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:              &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
-		WALDir:            filepath.Join(dir, "index.wal"),
-		BodyThreshold:     1 << 20, // everything stays hot-only
-		WarmSyncInterval:  -1,      // disabled — we call runWarmSyncCycle manually
-		WarmSyncBatchSize: 100,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: warmMaxBytes, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1 << 20, // everything stays hot-only
+		WarmSyncInterval:       -1,      // disabled — we call runWarmSyncCycle manually
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(ctx) })

@@ -45,7 +45,7 @@ func TestNormaliseCacheResult(t *testing.T) {
 		{"REVALIDATED", "REVALIDATED"},
 		{"BYPASS", "BYPASS"},
 		{"", "MISS"},
-		{"EVIL-ROUTE-12345", "UNKNOWN"},
+		{"WEIRD-CACHE-VALUE", "UNKNOWN"},
 		{"hit", "UNKNOWN"},
 	}
 	for _, c := range cases {
@@ -75,6 +75,7 @@ func TestMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
+	foundDefault := false
 	for _, mf := range got {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
@@ -83,8 +84,12 @@ func TestMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
 			route := labelValue(metric, "route")
 			assert.NotEqual(t, "evil-route-12345", route,
 				"spoofed X-Bouine-Route header must not appear as route label")
+			if route == "_default" {
+				foundDefault = true
+			}
 		}
 	}
+	assert.True(t, foundDefault, "route label must be _default on no-match, not empty or spoofed")
 }
 
 // TestMiddleware_SpoofedRouteHeader_StrippedBeforeHandler verifies that
@@ -134,17 +139,23 @@ func TestMiddleware_RouterSetsRouteLabel(t *testing.T) {
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
 	found := false
+	spoofedFound := false
 	for _, mf := range got {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
 		}
 		for _, metric := range mf.GetMetric() {
-			if labelValue(metric, "route") == "my-route" {
+			route := labelValue(metric, "route")
+			if route == "my-route" {
 				found = true
+			}
+			if route == "spoofed" {
+				spoofedFound = true
 			}
 		}
 	}
 	assert.True(t, found, "route label must be 'my-route' (set by router, not spoofed)")
+	assert.False(t, spoofedFound, "spoofed route label must not appear in metrics")
 }
 
 // TestMiddleware_UnknownCacheResultMapsToUnknown verifies that an
@@ -156,7 +167,7 @@ func TestMiddleware_UnknownCacheResultMapsToUnknown(t *testing.T) {
 	m := NewDataPlaneMetrics(reg)
 
 	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCache, "EVIL-CACHE-VALUE")
+		w.Header().Set(header.XCache, "WEIRD-CACHE-VALUE")
 		w.WriteHeader(200)
 	}))
 
@@ -165,16 +176,21 @@ func TestMiddleware_UnknownCacheResultMapsToUnknown(t *testing.T) {
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
+	found := false
 	for _, mf := range got {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
 		}
 		for _, metric := range mf.GetMetric() {
 			cr := labelValue(metric, "cache_result")
-			assert.NotEqual(t, "EVIL-CACHE-VALUE", cr,
+			if cr == "UNKNOWN" {
+				found = true
+			}
+			assert.NotEqual(t, "WEIRD-CACHE-VALUE", cr,
 				"unknown X-Cache value must not appear as cache_result label")
 		}
 	}
+	assert.True(t, found, "cache_result must be UNKNOWN for unrecognized X-Cache value")
 }
 
 func TestMiddleware_SourceLabel(t *testing.T) {

@@ -34,10 +34,11 @@ func tieredStore(t *testing.T, withWarm bool) *TieredStore {
 		walDir = filepath.Join(dir, "index.wal")
 	}
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          warmCfg,
-		WALDir:        walDir,
-		BodyThreshold: 1024,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   warmCfg,
+		WALDir:                 walDir,
+		BodyThreshold:          1024,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
@@ -139,10 +140,11 @@ func TestTiered_Stats_WarmDiskAndMaxBytes(t *testing.T) {
 	const maxBytes = 100 << 20
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: maxBytes, SegMax: 1 << 20},
-		WALDir:        filepath.Join(dir, "index.wal"),
-		BodyThreshold: 1024,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: maxBytes, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
@@ -229,10 +231,11 @@ func TestTiered_WarmGet(t *testing.T) {
 
 	newStore := func() *TieredStore {
 		ts, err := NewTieredStore(TieredConfig{
-			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-			WALDir:        walPath,
-			BodyThreshold: 512, // large objects (>512 B) go to warm tier
+			Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:                 walPath,
+			BodyThreshold:          512, // large objects (>512 B) go to warm tier
+			TombstoneDrainInterval: -1,  // disabled — tests drain manually
 		})
 		if err != nil {
 			t.Fatalf("NewTieredStore: %v", err)
@@ -282,10 +285,11 @@ func TestTiered_WarmStatsRestoredAfterReopen(t *testing.T) {
 
 	newStore := func() *TieredStore {
 		ts, err := NewTieredStore(TieredConfig{
-			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-			WALDir:        walPath,
-			BodyThreshold: 512,
+			Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:                 walPath,
+			BodyThreshold:          512,
+			TombstoneDrainInterval: -1, // disabled — tests drain manually
 		})
 		if err != nil {
 			t.Fatalf("NewTieredStore: %v", err)
@@ -319,8 +323,9 @@ func TestTiered_WarmStatsRestoredAfterReopen(t *testing.T) {
 func TestTieredStore_CloseStopsCompaction(t *testing.T) {
 	dir := t.TempDir()
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:  HotConfig{MaxBytes: 1 << 20, NumShards: 2},
-		Warm: &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 64 << 20, SegMax: 1 << 20},
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 64 << 20, SegMax: 1 << 20},
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err)
 
@@ -350,10 +355,11 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 	dir := t.TempDir()
 	// Tiny hot tier so a single large object triggers eviction.
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 2048, NumShards: 2},
-		Warm:          &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:        filepath.Join(dir, "index.wal"),
-		BodyThreshold: 512,
+		Hot:                    HotConfig{MaxBytes: 2048, NumShards: 2},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          512,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 	t.Cleanup(func() { _ = ts.Close(ctx) })
@@ -388,8 +394,9 @@ func TestTieredStore_OverBudget(t *testing.T) {
 	ctx := context.Background()
 	const maxBytes = 1024
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: maxBytes, NumShards: 1},
-		BodyThreshold: 64 << 10, // objects stay hot-only
+		Hot:                    HotConfig{MaxBytes: maxBytes, NumShards: 1},
+		BodyThreshold:          64 << 10, // objects stay hot-only
+		TombstoneDrainInterval: -1,       // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 
@@ -458,10 +465,11 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 
 	newStore := func() *TieredStore {
 		ts, err := NewTieredStore(TieredConfig{
-			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-			WALDir:        walPath,
-			BodyThreshold: 512,
+			Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:                 walPath,
+			BodyThreshold:          512,
+			TombstoneDrainInterval: -1, // disabled — tests drain manually
 		})
 		if err != nil {
 			t.Fatalf("NewTieredStore: %v", err)
@@ -617,10 +625,11 @@ func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
 	ctx := context.Background()
 
 	ts1, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:        walPath,
-		BodyThreshold: 512,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          512,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 	k := KeyHash([]byte("torn-write-key"))
@@ -632,10 +641,11 @@ func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
 	truncateLastSegmentRecord(t, warmDir)
 
 	ts2, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:        walPath,
-		BodyThreshold: 512,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          512,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
@@ -657,10 +667,11 @@ func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	ts1, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:        walPath,
-		BodyThreshold: 512,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          512,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 	k := KeyHash([]byte("durable-key"))
@@ -670,10 +681,11 @@ func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
 	require.NoError(t, err, "Close")
 
 	ts2, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-		WALDir:        walPath,
-		BodyThreshold: 512,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          512,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "reopen")
 	t.Cleanup(func() { _ = ts2.Close(ctx) })
@@ -742,10 +754,11 @@ func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 
 	newStore := func() *TieredStore {
 		ts, err := NewTieredStore(TieredConfig{
-			Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-			Warm:          &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
-			WALDir:        walPath,
-			BodyThreshold: 512,
+			Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+			Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+			WALDir:                 walPath,
+			BodyThreshold:          512,
+			TombstoneDrainInterval: -1, // disabled — tests drain manually
 		})
 		if err != nil {
 			t.Fatalf("NewTieredStore: %v", err)

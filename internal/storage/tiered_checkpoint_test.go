@@ -20,10 +20,11 @@ func newTieredStoreWithDir(t *testing.T, dir string) *TieredStore {
 		SegMax:   1 << 20,
 	}
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:           HotConfig{MaxBytes: 1 << 20, NumShards: 4},
-		Warm:          warmCfg,
-		WALDir:        filepath.Join(dir, "index.wal"),
-		BodyThreshold: 1024,
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+		Warm:                   warmCfg,
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          1024,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
 	return ts

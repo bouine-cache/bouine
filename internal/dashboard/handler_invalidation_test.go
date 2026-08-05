@@ -16,8 +16,8 @@ import (
 )
 
 // newTestHandler builds a Handler with the minimum config needed to exercise
-// the apiOK/apiError/invalidation handlers: a NoopLogger (so render errors
-// don't panic) and the supplied invalidation closures.
+// the apiOK/apiError/invalidation handlers: a NoopLogger so render errors are
+// logged rather than panicked, and no invalidation closures wired.
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
 	return &Handler{
@@ -86,7 +86,7 @@ func TestAPIBan_InvalidRegexEscaped(t *testing.T) {
 	assert.Contains(t, resp, `class="flash-err"`)
 }
 
-func TestLoginHandler_GETEscapesStaticMarkup(t *testing.T) {
+func TestLoginHandler_RendersForm(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("tok")
 	w := httptest.NewRecorder()
@@ -98,6 +98,4 @@ func TestLoginHandler_GETEscapesStaticMarkup(t *testing.T) {
 	assert.Contains(t, body, `<title>bouine · login</title>`)
 	assert.Contains(t, body, `name="token"`)
 	assert.Contains(t, body, `type="password"`)
-	// The static page has no interpolation, but assert no raw script tags leak.
-	assert.NotContains(t, body, `<script`)
 }

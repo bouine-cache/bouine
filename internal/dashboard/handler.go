@@ -626,7 +626,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.PurgeFn == nil {
-		h.apiError(w, "purge not configured")
+		h.apiError(w, r, "purge not configured")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
@@ -640,21 +640,21 @@ func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
 		rawURL = req.URL
 	}
 	if msg := validateCacheURL(rawURL); msg != "" {
-		h.apiError(w, msg)
+		h.apiError(w, r, msg)
 		return
 	}
 	if err := h.cfg.PurgeFn(r.Context(), rawURL); err != nil {
 		h.cfg.Rings.OpsLog.Record("purge", rawURL, err.Error())
-		h.apiError(w, err.Error())
+		h.apiError(w, r, err.Error())
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("purge", rawURL, "ok")
-	h.apiOK(w, "purged")
+	h.apiOK(w, r, "purged")
 }
 
 func (h *Handler) apiBan(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.BanFn == nil {
-		h.apiError(w, "ban not configured")
+		h.apiError(w, r, "ban not configured")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
@@ -670,31 +670,31 @@ func (h *Handler) apiBan(w http.ResponseWriter, r *http.Request) {
 		hostRegex, pathRegex = req.HostRegex, req.PathRegex
 	}
 	if hostRegex == "" && pathRegex == "" {
-		h.apiError(w, "provide at least one of host regex or path regex")
+		h.apiError(w, r, "provide at least one of host regex or path regex")
 		return
 	}
 	if msg := validateRegex("host regex", hostRegex); msg != "" {
-		h.apiError(w, msg)
+		h.apiError(w, r, msg)
 		return
 	}
 	if msg := validateRegex("path regex", pathRegex); msg != "" {
-		h.apiError(w, msg)
+		h.apiError(w, r, msg)
 		return
 	}
 	n, err := h.cfg.BanFn(r.Context(), hostRegex, pathRegex)
 	arg := hostRegex + " " + pathRegex
 	if err != nil {
 		h.cfg.Rings.OpsLog.Record("ban", arg, err.Error())
-		h.apiError(w, err.Error())
+		h.apiError(w, r, err.Error())
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("ban", arg, fmt.Sprintf("ok, %d evicted", n))
-	h.apiOK(w, fmt.Sprintf("banned, %d entries evicted", n))
+	h.apiOK(w, r, fmt.Sprintf("banned, %d entries evicted", n))
 }
 
 func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.RefreshFn == nil {
-		h.apiError(w, "refresh not configured")
+		h.apiError(w, r, "refresh not configured")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
@@ -708,27 +708,25 @@ func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
 		rawURL = req.URL
 	}
 	if msg := validateCacheURL(rawURL); msg != "" {
-		h.apiError(w, msg)
+		h.apiError(w, r, msg)
 		return
 	}
 	if err := h.cfg.RefreshFn(r.Context(), rawURL); err != nil {
 		h.cfg.Rings.OpsLog.Record("refresh", rawURL, err.Error())
-		h.apiError(w, err.Error())
+		h.apiError(w, r, err.Error())
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("refresh", rawURL, "ok")
-	h.apiOK(w, "refreshed")
+	h.apiOK(w, r, "refreshed")
 }
 
-func (h *Handler) apiOK(w http.ResponseWriter, msg string) {
-	w.Header().Set(header.ContentType, "text/html")
+func (h *Handler) apiOK(w http.ResponseWriter, r *http.Request, msg string) {
 	w.Header().Set(header.HXTrigger, "refreshOpsLog")
-	_, _ = fmt.Fprintf(w, `<span class="flash-ok">✓ %s</span>`, msg)
+	h.render(w, r, templates.Flash(templates.FlashOK, msg))
 }
 
-func (h *Handler) apiError(w http.ResponseWriter, msg string) {
-	w.Header().Set(header.ContentType, "text/html")
-	_, _ = fmt.Fprintf(w, `<span class="flash-err">✗ %s</span>`, msg)
+func (h *Handler) apiError(w http.ResponseWriter, r *http.Request, msg string) {
+	h.render(w, r, templates.Flash(templates.FlashError, msg))
 }
 
 // ── Input validation ──────────────────────────────────────────────────

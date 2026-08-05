@@ -1,0 +1,21 @@
+package templates
+
+// FlashKind selects the visual variant of a Flash partial.
+type FlashKind string
+
+const (
+	FlashOK    FlashKind = "ok"
+	FlashError FlashKind = "err"
+)
+
+// Flash renders a single inline status pill returned to htmx swaps on the
+// invalidation forms. templ auto-escapes Message, so callers may pass
+// attacker-influenced error strings (regex compile errors, URL parse errors,
+// origin/peer error text) without a separate escaping step.
+templ Flash(kind FlashKind, message string) {
+	if kind == FlashOK {
+		<span class="flash-ok">✓ { message }</span>
+	} else {
+		<span class="flash-err">✗ { message }</span>
+	}
+}

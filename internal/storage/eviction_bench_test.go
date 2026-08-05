@@ -31,12 +31,13 @@ func BenchmarkWarmSyncCycle_1M(b *testing.B) {
 	walPath := filepath.Join(dir, "index.wal")
 
 	ts, err := NewTieredStore(TieredConfig{
-		Hot:               HotConfig{MaxBytes: 1 << 30, NumShards: 64},
-		Warm:              &warm.Config{Dir: warmDir, MaxBytes: 10 << 30, SegMax: 64 << 20},
-		WALDir:            walPath,
-		BodyThreshold:     1024,
-		WarmSyncInterval:  -1,
-		WarmSyncBatchSize: 5000,
+		Hot:                    HotConfig{MaxBytes: 1 << 30, NumShards: 64},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 10 << 30, SegMax: 64 << 20},
+		WALDir:                 walPath,
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      5000,
+		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	if err != nil {
 		b.Fatalf("NewTieredStore: %v", err)

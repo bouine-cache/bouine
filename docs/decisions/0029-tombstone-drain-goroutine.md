@@ -49,6 +49,7 @@ is disabled.
   drain interval is positive. Negligible CPU overhead (one ticker + one
   drain per interval).
 - **Negative**: Dropped-tombstone counter swaps are now split between
-  the drain goroutine and the sync cycle. Both report independently;
-  the sync cycle logs the remaining drops after the drain goroutine has
-  already processed them.
+  the drain goroutine and the sync cycle. Both drain paths atomically
+  swap and log dropped counters; whichever fires first reports the
+  drops accumulated since its last swap. The counters are never lost —
+  only the log attribution may differ between the two goroutines.

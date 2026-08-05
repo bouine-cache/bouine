@@ -204,14 +204,12 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	if tombstoneQueueSize <= 0 {
 		tombstoneQueueSize = 65536
 	}
-	// tombstoneDrainInterval: 0 (unset) and -1 both mean "disabled".
-	// The production default (1s) is set by the config layer
-	// (internal/config.Storage.TombstoneDrainInterval). This keeps
-	// tests that don't set it backward-compatible — no drain goroutine
-	// starts unless explicitly requested.
+	// tombstoneDrainInterval: 0 (unset) defaults to 1s, matching the
+	// convention of every other interval in this struct. -1 explicitly
+	// disables the dedicated drain goroutine (reverts to pre-fix behavior).
 	tombstoneDrainInterval := cfg.TombstoneDrainInterval
 	if tombstoneDrainInterval == 0 {
-		tombstoneDrainInterval = -1
+		tombstoneDrainInterval = 1 * time.Second
 	}
 
 	ts := &TieredStore{
@@ -798,6 +796,15 @@ func (t *TieredStore) drainQueues() {
 		t.logger.Info("tombstone drain cycle complete",
 			"tombstoned", tombstoned,
 			"warm_evicted", warmEvicted,
+		)
+	}
+
+	droppedTomb := t.droppedTombstones.Swap(0)
+	droppedEvict := t.droppedWarmEvicts.Swap(0)
+	if droppedTomb > 0 || droppedEvict > 0 {
+		t.logger.Warn("tombstone drain: queue overflow — entries dropped",
+			"dropped_tombstones", droppedTomb,
+			"dropped_warm_evicts", droppedEvict,
 		)
 	}
 }

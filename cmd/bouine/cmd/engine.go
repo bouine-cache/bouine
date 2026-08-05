@@ -280,7 +280,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	rings, snapshotPath := e.initRings()
 	dpMetrics.Rings = rings
 
-	clusterNode, peerFetcher, broadcaster, peersFn, clusterMetrics := e.initCluster(ctx, store)
+	clusterNode, peerFetcher, broadcaster, peersFn, clusterMetrics := e.initCluster(ctx, store, token)
 
 	cfCtx, cfCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cfCancel is stored in runState and called during shutdown
 	cfProp := e.initCloudflare(dpMetrics, cfCtx)                //nolint:contextcheck // detached lifecycle for CF async goroutines
@@ -362,6 +362,7 @@ func (e *engine) initRings() (*observability.Rings, string) {
 func (e *engine) initCluster(
 	ctx context.Context,
 	store storage.Store,
+	token string,
 ) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.Metrics) {
 	if e.cfg.Listen.Cluster == "" {
 		return nil, nil, nil, nil, nil
@@ -387,7 +388,7 @@ func (e *engine) initCluster(
 	clusterNode.SetMetrics(clusterMetrics)
 
 	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry, e.cfg.Cluster.HopLimit)
-	broadcaster := cluster.NewBroadcaster(clusterNode, nil, "")
+	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
 
 	clusterNode.SetInvalidator(cluster.Invalidator{
 		PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
@@ -505,6 +506,8 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 }
 
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
+// The broadcaster internally detaches from the engine's root context so
+// peer fan-out survives shutdown; local store operations use dCtx.
 func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalidationOps {
 	return invalidationOps{
 		PurgeFn: func(dCtx context.Context, urlStr string) error {

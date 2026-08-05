@@ -82,6 +82,12 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 // via gossip for redundant delivery. In eventual mode it sends via
 // gossip only (no HTTP fan-out).
 func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey string) {
+	// Detach from the caller's context so peer fan-out is bounded only
+	// by broadcastTimeout, not by the engine lifecycle or per-request
+	// cancellation. This ensures final purges during shutdown reach all
+	// peers. The caller's ctx still governs local store operations.
+	fanoutCtx := context.WithoutCancel(ctx)
+
 	evt := api.PurgeEvent{
 		Key:      key,
 		VaryKey:  varyKey,
@@ -107,7 +113,7 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 							"panic", v)
 					}
 				}()
-				if err := b.sendPurge(ctx, peer, evt); err != nil {
+				if err := b.sendPurge(fanoutCtx, peer, evt); err != nil {
 					b.logger.Warn("purge broadcast failed",
 						"peer", peer.Name,
 						"key", evt.Key,
@@ -140,6 +146,11 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 // In strong mode it posts to each peer's admin API. In eventual
 // mode it sends via gossip only.
 func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
+	// Detach from the caller's context so peer fan-out is bounded only
+	// by broadcastTimeout, not by the engine lifecycle or per-request
+	// cancellation. Same rationale as BroadcastPurge.
+	fanoutCtx := context.WithoutCancel(ctx)
+
 	evt := api.BanEvent{
 		Predicate: expr,
 		Issuer:    b.cluster.cfg.NodeName,
@@ -164,7 +175,7 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 							"panic", v)
 					}
 				}()
-				if err := b.sendBan(ctx, peer, evt); err != nil {
+				if err := b.sendBan(fanoutCtx, peer, evt); err != nil {
 					b.logger.Warn("ban broadcast failed",
 						"peer", peer.Name,
 						"error", err)
@@ -222,7 +233,11 @@ func (b *Broadcaster) postBinary(ctx context.Context, addr, path string, body []
 	ctx, cancel := context.WithTimeout(ctx, broadcastTimeout)
 	defer cancel()
 
-	url := "http://" + addr + path
+	scheme := "http"
+	if b.fetcher != nil && b.fetcher.useTLS {
+		scheme = "https"
+	}
+	url := scheme + "://" + addr + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url,
 		bytes.NewReader(body))
 	if err != nil {

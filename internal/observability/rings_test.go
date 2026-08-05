@@ -2,6 +2,7 @@ package observability
 
 import (
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -234,6 +235,34 @@ func TestRouteRing_RecordRouteZeroAllocs(t *testing.T) {
 		r.RecordRoute("/api/v1", "HIT", 200, 10)
 	})
 	assert.Equal(t, float64(0), allocs)
+}
+
+// TestRouteRing_CapEnforced verifies that RecordRoute stops creating new
+// route entries after routeRingCap is reached. This is a defense-in-depth
+// bound; the primary fix for route-label cardinality is stripping the
+// inbound X-Bouine-Route header in the metrics middleware.
+func TestRouteRing_CapEnforced(t *testing.T) {
+	t.Parallel()
+	r := &RouteRing{}
+	// Fill up to the cap.
+	for i := range routeRingCap {
+		r.RecordRoute("route-"+strconv.Itoa(i), "HIT", 200, 10)
+	}
+	assert.Equal(t, int64(routeRingCap), r.size.Load(),
+		"size should equal routeRingCap after filling")
+
+	// These should be silently dropped.
+	r.RecordRoute("overflow-1", "HIT", 200, 10)
+	r.RecordRoute("overflow-2", "HIT", 200, 10)
+
+	// size must not have grown beyond the cap (best-effort, single-goroutine
+	// so no TOCTOU concern here).
+	assert.Equal(t, int64(routeRingCap), r.size.Load(),
+		"size must not exceed routeRingCap")
+
+	// Overflow routes must not have been tracked.
+	_, ok := r.liveRoutes.Load("overflow-1")
+	assert.False(t, ok, "overflow route must not be tracked after cap reached")
 }
 
 // BenchmarkRequestRing_RecordRequest measures hot-path throughput and

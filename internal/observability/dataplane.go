@@ -547,6 +547,15 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 		nowFunc = time.Now
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Strip any inbound X-Bouine-Route header before dispatching to
+		// the router. This header is server-internal: the router sets it
+		// on match. An attacker-supplied value would otherwise flow
+		// directly into Prometheus labels as the `route` dimension,
+		// creating an unbounded cardinality bomb on 404s (no-match path
+		// where the router never overwrites it). delete() by canonical
+		// key is zero-allocation.
+		delete(r.Header, header.XBouineRoute)
+
 		start := nowFunc()
 		sw := responsewriter.Acquire(w)
 		defer responsewriter.Release(sw)
@@ -739,7 +748,9 @@ func (m *DataPlaneMetrics) shouldLogAccess(key api.Key) bool {
 }
 
 // normaliseCacheResult maps X-Cache header values to a stable Prometheus
-// label. Unknown values are kept as-is (forward-compatible).
+// label. Unknown values are mapped to UNKNOWN to keep the Prometheus label
+// set closed and prevent cardinality bombs from attacker-controlled or
+// misconfigured X-Cache response headers.
 func normaliseCacheResult(xCache string) string {
 	switch xCache {
 	case "HIT", "MISS", "STALE", "REVALIDATED", "BYPASS":
@@ -747,7 +758,7 @@ func normaliseCacheResult(xCache string) string {
 	case "":
 		return "MISS"
 	default:
-		return xCache
+		return "UNKNOWN"
 	}
 }
 

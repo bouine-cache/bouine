@@ -28,6 +28,13 @@ const (
 	// latencyHistBuckets is the number of fixed log-scale latency buckets
 	// recorded per request window (10 finite bands + 1 overflow).
 	latencyHistBuckets = 11
+	// routeRingCap is the max number of distinct routes tracked by the
+	// RouteRing. Best-effort: a few extra entries may appear under
+	// concurrent inserts before the cap is observed (same TOCTOU as
+	// URLRing). This is a defense-in-depth bound — the primary fix for
+	// route-label cardinality is stripping the inbound X-Bouine-Route
+	// header in the metrics middleware.
+	routeRingCap = 256
 )
 
 // LatencyBoundsMs are the inclusive upper bounds (ms) for the first 10
@@ -221,6 +228,10 @@ type RouteRing struct {
 	buckets []RouteBucket // grows as routes are discovered
 	// live per-route accumulators
 	liveRoutes sync.Map // string → *routeCounters
+	// size tracks the number of entries in liveRoutes for best-effort
+	// cap enforcement. A few extra entries may appear under concurrent
+	// inserts before the cap is observed (TOCTOU, same as URLRing).
+	size atomic.Int64
 }
 
 type routeCounters struct {
@@ -235,10 +246,19 @@ type routeCounters struct {
 // xCache is the X-Cache header value; "HIT" increments hits, "MISS" misses.
 // statusCode is used to track 5xx errors per route.
 // durMs is the request duration in milliseconds, used for per-route latency.
+// New routes are silently dropped once routeRingCap distinct routes are
+// tracked (best-effort, same TOCTOU as URLRing).
 func (r *RouteRing) RecordRoute(route, xCache string, statusCode int, durMs int64) {
 	v, ok := r.liveRoutes.Load(route)
 	if !ok {
-		v, _ = r.liveRoutes.LoadOrStore(route, &routeCounters{})
+		if r.size.Load() >= routeRingCap {
+			return // cap reached, silently drop
+		}
+		nc := &routeCounters{}
+		v, ok = r.liveRoutes.LoadOrStore(route, nc)
+		if !ok {
+			r.size.Add(1)
+		}
 	}
 	c := v.(*routeCounters)
 	c.requests.Add(1)

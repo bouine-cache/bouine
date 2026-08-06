@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"encoding/binary"
 	"net/http"
 	"net/url"
 	"sort"
@@ -11,6 +12,56 @@ import (
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
+
+// key2Seed is the seed for the second independent xxhash64 used as the
+// collision guard. A different seed produces a statistically independent
+// hash, giving 128-bit collision resistance (birthday bound ~2^64
+// objects) without the cost of a cryptographic hash. "bouine2" in ASCII.
+const key2Seed uint64 = 0x626f75696e6532
+
+// NewKey computes the 128-bit cache key from a canonical key buffer
+// (the normalized scheme|host|path|query|method bytes). The primary
+// hash is xxhash64(canonical); the guard hash is xxhash64 with an
+// independent seed over the same bytes.
+//
+// This is the default constructor used by BuildKey. It allocates one
+// *xxhash.Digest for the seeded guard hash, but escape analysis
+// stack-allocates it (the digest does not escape NewKey), so the
+// constructor is zero-allocation in practice — see BenchmarkNewKey.
+func NewKey(canonical []byte) api.Key {
+	g := xxhash.NewWithSeed(key2Seed)
+	_, _ = g.Write(canonical)
+	return api.NewKeyFromHashes(xxhash.Sum64(canonical), g.Sum64())
+}
+
+// NewKeyZeroAlloc is an alternative constructor that avoids the
+// *xxhash.Digest by appending the seed bytes to a stack copy of the
+// canonical buffer and calling the zero-allocation xxhash.Sum64 on the
+// extended input. The guard hash is statistically independent from the
+// primary because the hash inputs differ (canonical vs canonical||seed).
+//
+// For canonical buffers ≤ 512 bytes this is fully zero-allocation; the
+// rare overflow path (canonical > 512 bytes) falls back to a single heap
+// allocation, mirroring BuildKey's existing heap fallback.
+//
+// Note: NewKeyZeroAlloc produces DIFFERENT guard hash values than NewKey
+// (seeded-digest vs seed-append are different functions), so the two
+// constructors are not interchangeable. A deployment must pick one and
+// stick with it; switching requires a codec bump and cache flush. Use
+// the NewKey / NewKeyZeroAlloc benchmarks to compare before switching.
+func NewKeyZeroAlloc(canonical []byte) api.Key {
+	primary := xxhash.Sum64(canonical)
+	if len(canonical) <= 512 {
+		var buf [520]byte
+		n := copy(buf[:], canonical)
+		binary.LittleEndian.PutUint64(buf[n:], key2Seed)
+		return api.NewKeyFromHashes(primary, xxhash.Sum64(buf[:n+8]))
+	}
+	buf := make([]byte, len(canonical)+8)
+	copy(buf, canonical)
+	binary.LittleEndian.PutUint64(buf[len(canonical):], key2Seed)
+	return api.NewKeyFromHashes(primary, xxhash.Sum64(buf))
+}
 
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
@@ -31,21 +82,14 @@ func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	return BuildKey(r, policy)
 }
 
-// key2Seed is the seed for the second independent xxhash64 used to
-// detect collisions on the primary key. A different seed produces a
-// statistically independent hash, giving 128-bit collision resistance
-// (birthday bound ~2^64 objects) without the cost of SHA-256.
-const key2Seed = 0x626f75696e6532 // "bouine2" in ASCII
-
-// BuildKey constructs the canonical primary cache key from a request.
+// BuildKey constructs the canonical cache key from a request.
 // The key is deterministic and stable across nodes.
 //
-// Returns (primary, secondary): two independent xxhash64 digests of
-// the same canonical buffer. The primary is the map index; the
-// secondary is stored on the entry and verified on Get to detect
-// collisions (issue #51). Same design as Varnish/Nginx (wide hash,
-// no key string) but using two fast xxhash64 calls instead of one
-// slow SHA-256.
+// Returns a 128-bit Key: two independent xxhash64 digests of the same
+// canonical buffer (see NewKey). The primary is the map index; the
+// guard is stored on the entry and verified on Get to detect collisions
+// (issue #51). Same design as Varnish/Nginx (wide hash, no key string)
+// but using two fast xxhash64 calls instead of one slow SHA-256.
 //
 // Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
 // canonical key exceeds 512 bytes (rare — the project caps URLs at 8 KiB),
@@ -81,10 +125,7 @@ func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	}
 
 	if n <= len(buf) {
-		h := xxhash.NewWithSeed(key2Seed)
-		_, _ = h.Write(buf[:n])
-		secondary := h.Sum64()
-		return api.Key{Hash: xxhash.Sum64(buf[:n]), Hash2: secondary}
+		return NewKey(buf[:n])
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
@@ -117,10 +158,7 @@ func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
 	} else {
 		n += copyOverflow(heap, n, r.Method)
 	}
-	h := xxhash.NewWithSeed(key2Seed)
-	_, _ = h.Write(heap[:n])
-	secondary := h.Sum64()
-	return api.Key{Hash: xxhash.Sum64(heap[:n]), Hash2: secondary}
+	return NewKey(heap[:n])
 }
 
 // the end of dst the write is skipped but n is still incremented so the

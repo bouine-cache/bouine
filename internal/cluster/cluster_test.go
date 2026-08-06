@@ -43,7 +43,7 @@ func TestRing_AddGet(t *testing.T) {
 	// Use sequential keys spread across the full uint64 range.
 	step := uint64(^uint64(0) / 1000)
 	for i := range 1000 {
-		key := api.Key{Hash: uint64(i) * step}
+		key := api.KeyFromPrimary(uint64(i) * step)
 		owners[r.get(key)]++
 	}
 	for _, name := range []string{"alpha", "beta", "gamma"} {
@@ -57,7 +57,7 @@ func TestRing_RemoveRedistributes(t *testing.T) {
 	r.add("a", 64)
 	r.add("b", 64)
 
-	key := api.Key{Hash: 12345678}
+	key := api.KeyFromPrimary(12345678)
 	owner := r.get(key)
 
 	r.remove(owner)
@@ -84,7 +84,7 @@ func TestRing_SingleNode(t *testing.T) {
 	r := newRing(64)
 	r.add("only", 64)
 	for i := range 10 {
-		require.Equal(t, "only", r.get(api.Key{Hash: uint64(i)}))
+		require.Equal(t, "only", r.get(api.KeyFromPrimary(uint64(i))))
 	}
 }
 
@@ -98,7 +98,7 @@ func TestCluster_LocalMode(t *testing.T) {
 	members := c.Members()
 	require.Len(t, members, 1)
 	require.Equal(t, "local", members[0].Name)
-	key := api.Key{Hash: 999}
+	key := api.KeyFromPrimary(999)
 	require.True(t, c.IsLocal(key))
 }
 
@@ -140,7 +140,7 @@ func TestNotifyMsg_PurgeEvent(t *testing.T) {
 		},
 	})
 
-	evt := api.PurgeEvent{Key: api.Key{Hash: 42}, VaryKey: "v1", Issuer: "local"}
+	evt := api.PurgeEvent{Key: api.KeyFromPrimary(42), VaryKey: "v1", Issuer: "local"}
 	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
@@ -193,7 +193,7 @@ func TestNotifyMsg_WhenNoCallbacks(t *testing.T) {
 	defer func() { _ = c.Leave(t.Context()) }()
 
 	// Should not panic when no invalidator is set.
-	evt := api.PurgeEvent{Key: api.Key{Hash: 42}}
+	evt := api.PurgeEvent{Key: api.KeyFromPrimary(42)}
 	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 }
@@ -213,7 +213,7 @@ func TestNotifyMsg_PurgeCtxHasDeadline(t *testing.T) {
 			return nil
 		},
 	})
-	evt := api.PurgeEvent{Key: api.Key{Hash: 7}, Issuer: "local"}
+	evt := api.PurgeEvent{Key: api.KeyFromPrimary(7), Issuer: "local"}
 	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 
@@ -292,7 +292,7 @@ func TestNotifyMsg_PurgeTimeoutAbortsApply(t *testing.T) {
 			return ctx.Err()
 		},
 	})
-	evt := api.PurgeEvent{Key: api.Key{Hash: 1}, Issuer: "local"}
+	evt := api.PurgeEvent{Key: api.KeyFromPrimary(1), Issuer: "local"}
 	msg, _ := EncodePurgeGossip(evt)
 	start := time.Now()
 	c.NotifyMsg(msg)
@@ -320,7 +320,7 @@ func TestNotifyMsg_FailedApplySkipsMetric(t *testing.T) {
 			return ctx.Err()
 		},
 	})
-	evt := api.PurgeEvent{Key: api.Key{Hash: 1}, Issuer: "local"}
+	evt := api.PurgeEvent{Key: api.KeyFromPrimary(1), Issuer: "local"}
 	msg, _ := EncodePurgeGossip(evt)
 	c.NotifyMsg(msg)
 

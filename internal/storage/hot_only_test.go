@@ -15,10 +15,10 @@ import (
 
 // hotOnlyContains checks whether key is hot-only (present and not backed).
 func hotOnlyContains(s *HotStore, key api.Key) bool {
-	sh := &s.shards[key.Hash&s.mask]
+	sh := &s.shards[key.Primary()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	e, ok := sh.entries[key.Hash]
+	e, ok := sh.entries[key.Primary()]
 	return ok && !e.hasBackup
 }
 
@@ -165,7 +165,7 @@ func TestHotOnly_SweeperEvictionRemovesKey(t *testing.T) {
 	for _, k := range keys {
 		inEntries := false
 		sh.mu.RLock()
-		_, inEntries = sh.entries[k.Hash]
+		_, inEntries = sh.entries[k.Primary()]
 		sh.mu.RUnlock()
 		if inEntries {
 			assert.True(t, hotOnlyContains(s, k))
@@ -196,7 +196,7 @@ func TestHotOnly_KeysRotation(t *testing.T) {
 
 	// Insert 10 keys.
 	for i := range 10 {
-		k := api.Key{Hash: uint64(i + 1)}
+		k := api.KeyFromPrimary(uint64(i + 1))
 		_ = s.Put(ctx, k, obj(k, 10))
 	}
 

@@ -40,11 +40,11 @@ var peerFetchEncodePool = sync.Pool{
 // peerFetchBinaryVersion is the version byte for the binary peer-fetch
 // request format. Must not collide with JSON's '{' (0x7B).
 // v1: 1 byte version + 8 bytes key + 1 byte vary-key length + vary-key.
-// v2: adds 8 bytes key2 after key (issue #51 collision guard).
+// v2: adds 8 bytes guard after key (issue #51 collision guard).
 const peerFetchBinaryVersion = 2
 
 // maxPeerFetchBinaryBody is the maximum binary request body size.
-// 1 (version) + 8 (key) + 8 (key2) + 1 (vary-key len) + 255 (vary-key) = 273.
+// 1 (version) + 8 (key) + 8 (guard) + 1 (vary-key len) + 255 (vary-key) = 273.
 const maxPeerFetchBinaryBody = 512
 
 const (
@@ -199,14 +199,14 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 	}
 	url := scheme + "://" + fetchAddr + PeerFetchPath
 
-	// Binary request: 1 byte version + 8 bytes key + 8 bytes key2 +
+	// Binary request: 1 byte version + 8 bytes key + 8 bytes guard +
 	// 1 byte vary-key length + vary-key string. ~10x faster than
 	// json.Marshal for a 3-field struct and eliminates the io.ReadAll
 	// allocation on the server side.
 	body := make([]byte, 0, 10+len(req.VaryKey))
 	body = append(body, peerFetchBinaryVersion)
-	body = binary.LittleEndian.AppendUint64(body, req.Key.Hash)
-	body = binary.LittleEndian.AppendUint64(body, req.Key.Hash2)
+	body = binary.LittleEndian.AppendUint64(body, req.Key.Primary())
+	body = binary.LittleEndian.AppendUint64(body, req.Key.Guard())
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
 	body = append(body, req.VaryKey...)
 
@@ -364,14 +364,14 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req api.PeerFetchRequest
 	switch body[0] {
 	case peerFetchBinaryVersion:
-		// Binary format v2: 1 byte version + 8 bytes key + 8 bytes key2 +
+		// Binary format v2: 1 byte version + 8 bytes key + 8 bytes guard +
 		// 1 byte vary-key length + vary-key string.
 		if len(body) < 18 {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Key = api.Key{Hash: binary.LittleEndian.Uint64(body[1:9])}
-		req.Key.Hash2 = binary.LittleEndian.Uint64(body[9:17])
+		req.Key = api.KeyFromPrimary(binary.LittleEndian.Uint64(body[1:9]))
+		req.Key = req.Key.WithGuard(binary.LittleEndian.Uint64(body[9:17]))
 		varyLen := int(body[17])
 		if len(body) < 18+varyLen {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -381,12 +381,12 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case 1:
 		// Binary format v1 (backward compat during rolling upgrade):
 		// 1 byte version + 8 bytes key + 1 byte vary-key length +
-		// vary-key string. No Key2 field; key2 defaults to 0.
+		// vary-key string. No guard field; guard defaults to 0.
 		if len(body) < 10 {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Key = api.Key{Hash: binary.LittleEndian.Uint64(body[1:9])}
+		req.Key = api.KeyFromPrimary(binary.LittleEndian.Uint64(body[1:9]))
 		varyLen := int(body[9])
 		if len(body) < 10+varyLen {
 			http.Error(w, "bad request", http.StatusBadRequest)

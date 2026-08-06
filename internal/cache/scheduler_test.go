@@ -19,13 +19,13 @@ func TestRefreshHeapOrdering(t *testing.T) {
 	heapPush := func(key api.Key, at int64) {
 		heap.Push(&h, &heapEntry{key: key, refreshAt: at})
 	}
-	heapPush(api.Key{Hash: 3}, 300)
-	heapPush(api.Key{Hash: 1}, 100)
-	heapPush(api.Key{Hash: 2}, 200)
+	heapPush(api.KeyFromPrimary(3), 300)
+	heapPush(api.KeyFromPrimary(1), 100)
+	heapPush(api.KeyFromPrimary(2), 200)
 
 	require.Equal(t, 3, h.Len())
 	// Pop in order.
-	want := []api.Key{{Hash: 1}, {Hash: 2}, {Hash: 3}}
+	want := []api.Key{api.KeyFromPrimary(1), api.KeyFromPrimary(2), api.KeyFromPrimary(3)}
 	for _, w := range want {
 		got := heap.Pop(&h).(*heapEntry).key
 		require.Equal(t, w, got)
@@ -47,11 +47,11 @@ func TestSchedulerScheduleAndStop(t *testing.T) {
 	s.Start()
 	defer s.Stop()
 
-	s.Schedule(api.Key{Hash: 42}, time.Now().Add(50*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(42), time.Now().Add(50*time.Millisecond))
 
 	select {
 	case got := <-popped:
-		require.Equal(t, api.Key{Hash: 42}, got)
+		require.Equal(t, api.KeyFromPrimary(42), got)
 	case <-time.After(time.Second):
 		t.Fatal("drainer did not pop within 1s")
 	}
@@ -100,9 +100,9 @@ func TestSchedulerWakesOnEarlierTop(t *testing.T) {
 	defer s.Stop()
 
 	// Schedule far in the future.
-	s.Schedule(api.Key{Hash: 1}, time.Now().Add(10*time.Second))
+	s.Schedule(api.KeyFromPrimary(1), time.Now().Add(10*time.Second))
 	// Schedule a nearer entry — should wake the drainer.
-	s.Schedule(api.Key{Hash: 2}, time.Now().Add(50*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(2), time.Now().Add(50*time.Millisecond))
 
 	select {
 	case <-done:
@@ -112,7 +112,7 @@ func TestSchedulerWakesOnEarlierTop(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(popped) != 1 || popped[0].Hash != 2 {
+	if len(popped) != 1 || popped[0].Primary() != 2 {
 		t.Fatalf("popped = %v, want [2]", popped)
 	}
 }
@@ -131,13 +131,13 @@ func TestSchedulerUpdateExistingKey(t *testing.T) {
 	defer s.Stop()
 
 	// Schedule key 1 far in the future.
-	s.Schedule(api.Key{Hash: 1}, time.Now().Add(10*time.Second))
+	s.Schedule(api.KeyFromPrimary(1), time.Now().Add(10*time.Second))
 	// Update key 1 to fire soon.
-	s.Schedule(api.Key{Hash: 1}, time.Now().Add(50*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(1), time.Now().Add(50*time.Millisecond))
 
 	select {
 	case got := <-popped:
-		require.Equal(t, api.Key{Hash: 1}, got)
+		require.Equal(t, api.KeyFromPrimary(1), got)
 	case <-time.After(time.Second):
 		t.Fatal("drainer did not pop within 1s")
 	}
@@ -150,7 +150,7 @@ func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {
 	onPop := func(key api.Key) {}
 	// alive returns nil for odd keys (dead), non-nil for even (live).
 	alive := func(key api.Key) *api.Object {
-		if int64(key.Hash)%2 == 0 {
+		if int64(key.Primary())%2 == 0 {
 			return &api.Object{Key: key, TTL: 10 * time.Second, StoredAt: time.Now()}
 		}
 		return nil
@@ -162,7 +162,7 @@ func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {
 
 	// Schedule entries in the near-future window.
 	for i := range 10 {
-		s.Schedule(api.Key{Hash: uint64(i)}, time.Now().Add(2*time.Second))
+		s.Schedule(api.KeyFromPrimary(uint64(i)), time.Now().Add(2*time.Second))
 	}
 	require.Equal(t, 10, s.Len())
 
@@ -208,7 +208,7 @@ func TestSchedulerScheduleAfterStopIsNoop(t *testing.T) {
 	s.Stop()
 
 	// Schedule after Stop should not insert into the heap.
-	s.Schedule(api.Key{Hash: 1}, time.Now().Add(50*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(1), time.Now().Add(50*time.Millisecond))
 	require.Equal(t, 0, s.Len())
 }
 
@@ -219,7 +219,7 @@ func TestSchedulerIndexConsistency(t *testing.T) {
 
 	var popped atomic.Int64
 	onPop := func(key api.Key) {
-		popped.Add(int64(key.Hash))
+		popped.Add(int64(key.Primary()))
 	}
 	alive := func(key api.Key) *api.Object { return nil }
 
@@ -227,12 +227,12 @@ func TestSchedulerIndexConsistency(t *testing.T) {
 	s.Start()
 	defer s.Stop()
 
-	s.Schedule(api.Key{Hash: 1}, time.Now().Add(50*time.Millisecond))
-	s.Schedule(api.Key{Hash: 2}, time.Now().Add(60*time.Millisecond))
-	s.Schedule(api.Key{Hash: 3}, time.Now().Add(70*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(1), time.Now().Add(50*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(2), time.Now().Add(60*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(3), time.Now().Add(70*time.Millisecond))
 
 	// Update key 1 to fire later — should not create a duplicate.
-	s.Schedule(api.Key{Hash: 1}, time.Now().Add(80*time.Millisecond))
+	s.Schedule(api.KeyFromPrimary(1), time.Now().Add(80*time.Millisecond))
 	require.Equal(t, 3, s.Len())
 
 	// Wait for all three to pop.

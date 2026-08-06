@@ -45,7 +45,7 @@ func BenchmarkWarmSyncCycle_1M(b *testing.B) {
 	defer func() { _ = ts.Close(context.Background()) }()
 
 	for i := range n {
-		k := api.Key{Hash: uint64(i)}
+		k := api.KeyFromPrimary(uint64(i))
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 
@@ -84,7 +84,7 @@ func BenchmarkBan_1M(b *testing.B) {
 	defer func() { _ = s.Close(context.Background()) }()
 
 	for i := range n {
-		k := api.Key{Hash: uint64(i)}
+		k := api.KeyFromPrimary(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, 1024))
 	}
 

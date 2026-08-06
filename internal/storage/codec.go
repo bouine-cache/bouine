@@ -15,12 +15,12 @@ import (
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
 //
-// v2: original binary format (Key only, no Key2).
-// v3: adds Key2 after Key for collision detection (issue #51).
+// v2: original binary format (Key only, no guard).
+// v3: adds the guard hash after the primary for collision detection (issue #51).
 const objCodecVersion byte = 3
 
 // objCodecV2 is the prior codec version. Blobs encoded with v2 are
-// still decoded (Key2 defaults to 0, which fails collision verification
+// still decoded (guard defaults to 0, which fails collision verification
 // in TieredStore.Get → miss → re-fetch → stored as v3).
 const objCodecV2 byte = 2
 
@@ -81,8 +81,8 @@ func encodeObject(obj *api.Object) []byte {
 
 func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = append(buf, objCodecVersion)
-	buf = binary.AppendUvarint(buf, obj.Key.Hash)
-	buf = binary.AppendUvarint(buf, obj.Key.Hash2)
+	buf = binary.AppendUvarint(buf, obj.Key.Primary())
+	buf = binary.AppendUvarint(buf, obj.Key.Guard())
 	buf = appendString(buf, obj.VaryKey)
 	buf = binary.AppendUvarint(buf, uint64(obj.StatusCode)) //nolint:gosec // HTTP status is small and non-negative
 	buf = binary.AppendVarint(buf, int64(obj.TTL))
@@ -130,12 +130,12 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	}
 
 	obj := &api.Object{}
-	obj.Key = api.Key{Hash: r.uvarint()}
-	// Key2 is present in v3+ blobs. v2 blobs have no Key2 field; the
+	obj.Key = api.KeyFromPrimary(r.uvarint())
+	// Guard is present in v3+ blobs. v2 blobs have no guard field; the
 	// decoder leaves it as 0, which fails collision verification in
 	// TieredStore.Get → miss → re-fetch → stored as v3.
 	if ver >= objCodecVersion {
-		obj.Key.Hash2 = r.uvarint()
+		obj.Key = obj.Key.WithGuard(r.uvarint())
 	}
 	obj.VaryKey = r.str()
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder

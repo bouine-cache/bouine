@@ -20,7 +20,7 @@ func TestPeerPurgeHandler_DecodesAndCalls(t *testing.T) {
 		return nil
 	})
 
-	evt := api.PurgeEvent{Key: api.Key{Hash: 42}, Issuer: "node-0"}
+	evt := api.PurgeEvent{Key: api.KeyFromPrimary(42), Issuer: "node-0"}
 	body, _ := EncodePurgeHTTP(evt)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/peer/purge", bytesReader(body))
@@ -28,7 +28,7 @@ func TestPeerPurgeHandler_DecodesAndCalls(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, api.Key{Hash: 42}, received.Key)
+	assert.Equal(t, api.KeyFromPrimary(42), received.Key)
 }
 
 func TestPeerPurgeHandler_BadBody(t *testing.T) {

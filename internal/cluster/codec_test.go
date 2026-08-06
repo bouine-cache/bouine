@@ -12,7 +12,7 @@ import (
 func TestEncodeDecodePurge_RoundTrip(t *testing.T) {
 	t.Parallel()
 	evt := api.PurgeEvent{
-		Key:      api.Key{Hash: 0xDEADBEEF},
+		Key:      api.KeyFromPrimary(0xDEADBEEF),
 		VaryKey:  "variant-1",
 		Issuer:   "node-0",
 		IssuedAt: time.Unix(0, 1234567890),
@@ -39,7 +39,7 @@ func TestEncodeDecodePurge_RoundTrip(t *testing.T) {
 func TestEncodeDecodePurge_EmptyStrings(t *testing.T) {
 	t.Parallel()
 	evt := api.PurgeEvent{
-		Key:      api.Key{Hash: 1},
+		Key:      api.KeyFromPrimary(1),
 		VaryKey:  "",
 		Issuer:   "",
 		IssuedAt: time.Unix(0, 1),
@@ -125,7 +125,7 @@ func TestIsBinaryFrame(t *testing.T) {
 	t.Parallel()
 	require.False(t, IsBinaryFrame([]byte("{}")))
 	require.False(t, IsBinaryFrame(nil))
-	buf, _ := EncodePurgeGossip(api.PurgeEvent{Key: api.Key{Hash: 1}})
+	buf, _ := EncodePurgeGossip(api.PurgeEvent{Key: api.KeyFromPrimary(1)})
 	require.True(t, IsBinaryFrame(buf))
 	require.Equal(t, msgTypePurge, GossipMsgType(buf))
 }

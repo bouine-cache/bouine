@@ -46,12 +46,10 @@ func varyContainsStar(vary string) bool {
 // *xxhash.Digest on the heap. Falls back to the allocation path for
 // pathological inputs.
 //
-// VariantKey derives a variant key from the primary cache key and Vary
-// header. Returns (variantKey, variantKey2) where variantKey2 is the
-// secondary hash XORed with the same vary hash, so the variant's
-// collision guard is independent from the primary's.
+// The variant's collision guard is derived by XORing the vary hash into
+// both of the primary's hashes (see api.Key.WithVary), so the variant's
+// guard is independent from the primary's.
 //
-//nolint:gocyclo // 17: Vary header parsing is inherently branchy
 //nolint:gocyclo // 17: Vary header parsing is inherently branchy
 func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
 	if vary == "" {
@@ -67,7 +65,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *Key
 			}
 		}
 		vHash := h.Sum64()
-		return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
+		return primary.WithVary(vHash)
 	}
 
 	// Parse and sort Vary field names using a stack-allocated array.
@@ -120,7 +118,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *Key
 		return primary
 	}
 	vHash := xxhash.Sum64(buf[:off])
-	return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
+	return primary.WithVary(vHash)
 }
 
 // variantKeySlow is the fallback allocation path for Vary headers that
@@ -148,7 +146,7 @@ func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, policy 
 		return primary
 	}
 	vHash := h.Sum64()
-	return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
+	return primary.WithVary(vHash)
 }
 
 // normalizeHeaderValue lowercases and sorts comma-separated tokens in

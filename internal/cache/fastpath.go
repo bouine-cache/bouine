@@ -459,9 +459,7 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n += copyOverflow(buf[:], n, method)
 
 	if n <= len(buf) {
-		h := xxhash.NewWithSeed(key2Seed)
-		_, _ = h.Write(buf[:n])
-		return api.Key{Hash: xxhash.Sum64(buf[:n]), Hash2: h.Sum64()}
+		return NewKey(buf[:n])
 	}
 
 	// Overflow: redo with a heap buffer.
@@ -476,9 +474,7 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n = appendCanonicalQueryString(heap, n, req.Query, policy)
 	n = appendByte(heap, n, '|')
 	n += copyOverflow(heap, n, method)
-	h := xxhash.NewWithSeed(key2Seed)
-	_, _ = h.Write(heap[:n])
-	return api.Key{Hash: xxhash.Sum64(heap[:n]), Hash2: h.Sum64()}
+	return NewKey(heap[:n])
 }
 
 // appendCanonicalPathString canonicalizes a path string (collapse
@@ -749,9 +745,8 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 // variantKeyFromRaw computes the variant key from a RawRequest.
 // variantKeyFromRaw computes the variant key from a RawRequest.
 // It mirrors VariantKey but reads header values from RawRequest
-// instead of http.Header. Returns (variantKey, variantKey2) where
-// variantKey2 is the secondary hash XORed with the same vary hash,
-// matching how VariantKey derives the variant primary.
+// instead of http.Header. The variant's guard is derived via
+// api.Key.WithVary, matching VariantKey.
 func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
 	if vary == "" {
 		return primary
@@ -766,7 +761,7 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 			_, _ = h.WriteString(hdr.Value)
 		}
 		vHash := h.Sum64()
-		return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
+		return primary.WithVary(vHash)
 	}
 
 	// Parse and sort Vary field names.
@@ -815,5 +810,5 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 		return primary
 	}
 	vHash := xxhash.Sum64(buf[:off])
-	return api.Key{Hash: primary.Hash ^ vHash, Hash2: primary.Hash2 ^ vHash}
+	return primary.WithVary(vHash)
 }

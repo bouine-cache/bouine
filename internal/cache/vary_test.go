@@ -16,14 +16,14 @@ import (
 
 func TestVariantKey_NoVary(t *testing.T) {
 	t.Parallel()
-	primary := api.Key{Hash: 100}
+	primary := api.KeyFromPrimary(100)
 	got := VariantKey(primary, "", nil, nil)
 	require.Equal(t, primary, got)
 }
 
 func TestVariantKey_DifferentHeaders(t *testing.T) {
 	t.Parallel()
-	primary := api.Key{Hash: 100}
+	primary := api.KeyFromPrimary(100)
 	h1 := http.Header{header.AcceptEncoding: {"gzip"}}
 	h2 := http.Header{header.AcceptEncoding: {"br"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h1, nil)
@@ -36,7 +36,7 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 
 func TestVariantKey_SameHeaders(t *testing.T) {
 	t.Parallel()
-	primary := api.Key{Hash: 100}
+	primary := api.KeyFromPrimary(100)
 	h := http.Header{header.AcceptEncoding: {"gzip"}}
 	k1 := VariantKey(primary, "Accept-Encoding", h, nil)
 	k2 := VariantKey(primary, "Accept-Encoding", h, nil)
@@ -45,7 +45,7 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 
 func TestVariantKey_VaryStar(t *testing.T) {
 	t.Parallel()
-	primary := api.Key{Hash: 100}
+	primary := api.KeyFromPrimary(100)
 	h1 := http.Header{header.Accept: {"text/html"}}
 	h2 := http.Header{header.Accept: {"application/json"}}
 	k1 := VariantKey(primary, "*", h1, nil)
@@ -55,7 +55,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 
 func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	t.Parallel()
-	primary := api.Key{Hash: 100}
+	primary := api.KeyFromPrimary(100)
 	// Exclude map uses lowercase; Vary header uses mixed case.
 	// VariantKey lowercases Vary fields before lookup, so this should
 	// match.

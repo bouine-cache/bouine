@@ -70,7 +70,7 @@ func purgePayloadLen(evt api.PurgeEvent) int {
 }
 
 func putPurgePayload(buf []byte, off int, evt api.PurgeEvent) (int, error) {
-	binary.LittleEndian.PutUint64(buf[off:], evt.Key.Hash)
+	binary.LittleEndian.PutUint64(buf[off:], evt.Key.Primary())
 	off += 8
 	var err error
 	off, err = putString(buf, off, evt.VaryKey)
@@ -92,7 +92,7 @@ func decodePurgePayload(buf []byte, off int) (api.PurgeEvent, error) {
 	if off+8 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.Key = api.Key{Hash: binary.LittleEndian.Uint64(buf[off:])}
+	evt.Key = api.KeyFromPrimary(binary.LittleEndian.Uint64(buf[off:]))
 	off += 8
 	var err error
 	evt.VaryKey, off, err = readString(buf, off)

@@ -742,7 +742,7 @@ func (m *DataPlaneMetrics) shouldLogAccess(key api.Key) bool {
 		return true
 	}
 	if !key.IsZero() {
-		return key.Hash%m.accessSampleRate == 0
+		return key.Primary()%m.accessSampleRate == 0
 	}
 	return m.accessCounter.Add(1)%m.accessSampleRate == 0
 }

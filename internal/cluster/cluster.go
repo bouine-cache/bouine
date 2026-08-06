@@ -508,7 +508,7 @@ func (r *ring) get(key api.Key) string {
 	if len(r.nodes) == 0 {
 		return ""
 	}
-	h := key.Hash
+	h := key.Primary()
 	idx := sort.Search(len(r.nodes), func(i int) bool {
 		return r.nodes[i] >= h
 	})

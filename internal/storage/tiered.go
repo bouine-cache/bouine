@@ -232,7 +232,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	// tombstones for async processing by warmSyncLoop.
 	cfg.Hot.OnEvict = func(key uint64) {
 		select {
-		case ts.tombstoneQueue <- api.Key{Hash: key}:
+		case ts.tombstoneQueue <- api.KeyFromPrimary(key):
 		default:
 			ts.droppedTombstones.Add(1)
 		}
@@ -300,9 +300,9 @@ func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
 	// the WAL delete is a fast-replay optimization, not the sole
 	// durability guarantee.
 	w.OnEvict = func(key uint64) {
-		t.hot.ClearBacked(api.Key{Hash: key})
+		t.hot.ClearBacked(api.KeyFromPrimary(key))
 		select {
-		case t.warmEvictQueue <- api.Key{Hash: key}:
+		case t.warmEvictQueue <- api.KeyFromPrimary(key):
 		default:
 			t.droppedWarmEvicts.Add(1)
 		}
@@ -443,7 +443,7 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 	if t.warm == nil {
 		return nil, "", nil
 	}
-	body, wErr := t.warm.Get(key.Hash)
+	body, wErr := t.warm.Get(key.Primary())
 	if wErr != nil {
 		return nil, "", wErr
 	}
@@ -462,12 +462,13 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 		return nil, "", nil
 	}
 	// Collision detection (issue #51): verify the decoded object's
-	// Key2 against the requesting key2. Old v2 codec blobs decode with
-	// Key2=0, which fails verification → miss → re-fetch → stored as
-	// v3. This is the accepted warm-cache invalidation on upgrade.
-	if loaded.Key.Hash2 != key.Hash2 {
+	// guard against the requesting key's guard. Old v2 codec blobs
+	// decode with guard=0, which fails verification → miss → re-fetch →
+	// stored as v3. This is the accepted warm-cache invalidation on
+	// upgrade.
+	if !loaded.Key.SameGuard(key) {
 		t.logger.Debug("warm tier collision or stale codec, evicting",
-			"key", key, "stored_key2", loaded.Key.Hash2, "request_key2", key.Hash2)
+			"key", key, "stored_guard", loaded.Key.Guard(), "request_guard", key.Guard())
 		t.evictWarm(key)
 		return nil, "", nil
 	}
@@ -503,10 +504,10 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 	return loaded, api.SourceWarm, nil
 }
 
-// GetForSync reads an object from the hot tier without key2 verification.
+// GetForSync reads an object from the hot tier without guard verification.
 // Used by internal paths (scheduler, variant slot probing) that don't
-// have the requesting key2. Does not consult the warm tier — callers
-// that need warm-tier fallback should use Get with the full key pair.
+// have the requesting guard. Does not consult the warm tier — callers
+// that need warm-tier fallback should use Get with the full key.
 
 // Put stores an object in the hot tier and, for large objects, also
 // in the warm tier (with a WAL record).
@@ -517,7 +518,7 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 
 	if t.warm != nil && obj.BodySize > t.bodyThreshold {
 		body := encodeObject(obj)
-		segID, offset, err := t.warm.Put(key.Hash, body) //nolint:gosec // segID fits int32
+		segID, offset, err := t.warm.Put(key.Primary(), body) //nolint:gosec // segID fits int32
 		if err != nil {
 			if errors.Is(err, warm.ErrOverBudget) {
 				// Hot tier already holds the object; warm-tier
@@ -534,13 +535,13 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		t.hot.SetBacked(key)
 		// Mark the warm entry as protected so warm-tier eviction
 		// skips it (the hot tier will re-sync it if evicted from warm).
-		t.warm.Protect(key.Hash)
+		t.warm.Protect(key.Primary())
 		if t.wal != nil {
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
 			}
 			recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
-			t.walEnqueue(wal.PutEntryWithSize(key.Hash, int32(segID), offset, recSize)) //nolint:gosec // segID bounded
+			t.walEnqueue(wal.PutEntryWithSize(key.Primary(), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 			return nil
 		}
 	}
@@ -574,7 +575,7 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 	if t.warm == nil {
 		return nil
 	}
-	segID, err := t.warm.Delete(key.Hash)
+	segID, err := t.warm.Delete(key.Primary())
 	if err != nil {
 		return err
 	}
@@ -582,7 +583,7 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 		if err := t.warm.SyncSegment(segID); err != nil {
 			return fmt.Errorf("warm: sync before wal append: %w", err)
 		}
-		t.walEnqueue(wal.DeleteEntry(key.Hash))
+		t.walEnqueue(wal.DeleteEntry(key.Primary()))
 		return nil
 	}
 	return nil
@@ -620,7 +621,7 @@ func (t *TieredStore) Keys() []api.Key {
 		out = append(out, k)
 	}
 	for _, wk := range warmKeys {
-		k := api.Key{Hash: wk}
+		k := api.KeyFromPrimary(wk)
 		if _, ok := seen[k]; ok {
 			continue
 		}
@@ -946,7 +947,7 @@ func (t *TieredStore) collectHotOnlyKeysFallback() []api.Key {
 			skipped++
 			continue
 		}
-		if _, _, ok := t.warm.Lookup(k.Hash); !ok {
+		if _, _, ok := t.warm.Lookup(k.Primary()); !ok {
 			keys = append(keys, k)
 			needed--
 		}
@@ -959,7 +960,7 @@ func (t *TieredStore) collectHotOnlyKeysFallback() []api.Key {
 	// by the first pass and have not been added yet.
 	if needed > 0 {
 		for i := range offset {
-			if _, _, ok := t.warm.Lookup(hotKeys[i].Hash); !ok {
+			if _, _, ok := t.warm.Lookup(hotKeys[i].Primary()); !ok {
 				keys = append(keys, hotKeys[i])
 				needed--
 			}
@@ -988,12 +989,12 @@ func (t *TieredStore) drainTombstones(walEntries *[]wal.Entry) int {
 	for {
 		select {
 		case key := <-t.tombstoneQueue:
-			if _, err := t.warm.Delete(key.Hash); err != nil {
+			if _, err := t.warm.Delete(key.Primary()); err != nil {
 				t.logger.Debug("warm sync: tombstone delete failed",
 					"key", key, "error", err)
 				continue
 			}
-			*walEntries = append(*walEntries, wal.DeleteEntry(key.Hash))
+			*walEntries = append(*walEntries, wal.DeleteEntry(key.Primary()))
 			tombstoned++
 		default:
 			return tombstoned
@@ -1010,7 +1011,7 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 	for {
 		select {
 		case key := <-t.warmEvictQueue:
-			*walEntries = append(*walEntries, wal.DeleteEntry(key.Hash))
+			*walEntries = append(*walEntries, wal.DeleteEntry(key.Primary()))
 			evicted++
 		default:
 			return evicted
@@ -1032,7 +1033,7 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 			continue
 		}
 		body := encodeObject(obj)
-		segID, offset, err := t.warm.Put(key.Hash, body)
+		segID, offset, err := t.warm.Put(key.Primary(), body)
 		if err != nil {
 			if errors.Is(err, warm.ErrOverBudget) {
 				// Remaining keys including this one — not yet
@@ -1050,9 +1051,9 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 			continue
 		}
 		recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
-		*walEntries = append(*walEntries, wal.PutEntryWithSize(key.Hash, int32(segID), offset, recSize)) //nolint:gosec // segID bounded
+		*walEntries = append(*walEntries, wal.PutEntryWithSize(key.Primary(), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 		t.hot.SetBacked(key)
-		t.warm.Protect(key.Hash)
+		t.warm.Protect(key.Primary())
 		synced++
 	}
 	return synced, skipped, skippedOverBudget

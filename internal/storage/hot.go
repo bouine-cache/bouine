@@ -97,10 +97,10 @@ type shard struct {
 type hotEntry struct {
 	obj   *api.Object
 	sieve *sieve.Entry[uint64]
-	// key2 is the secondary hash for collision detection (issue #51).
-	// Verified against the requesting key2 on Get to ensure the entry
-	// belongs to the requesting URL, not a primary-hash collision.
-	key2 uint64
+	// guard is the collision-guard hash for issue #51. Verified against
+	// the requesting key's guard on Get to ensure the entry belongs to
+	// the requesting URL, not a primary-hash collision.
+	guard uint64
 	// hasBackup is true when the object also exists in a slower tier.
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
@@ -252,17 +252,17 @@ func NewHotStore(cfg HotConfig) *HotStore {
 }
 
 func (h *HotStore) shard(key api.Key) *shard {
-	return &h.shards[key.Hash&h.mask]
+	return &h.shards[key.Primary()&h.mask]
 }
 
 // Get looks up key in the hot tier. Returns the object and api.SourceHot
 // on a hit, or nil + empty source on a miss (a miss is not an error —
 // it is a normal control-flow outcome). Bans are checked lazily.
 //
-// Collision detection (issue #51): key2 is verified against the stored
-// entry's key2. A mismatch means two distinct URLs collided on the
-// primary 64-bit hash — the entry belongs to a different URL, so we
-// return a miss instead of serving wrong content.
+// Collision detection (issue #51): the guard hash is verified against
+// the stored entry's guard. A mismatch means two distinct URLs collided
+// on the primary 64-bit hash — the entry belongs to a different URL, so
+// we return a miss instead of serving wrong content.
 //
 // Fast path (visited bit already set): acquires only a read lock,
 // avoiding write-lock contention under concurrent read-heavy workloads.
@@ -274,9 +274,9 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	// Fast path: read lock. If the entry exists and its visited bit is
 	// already set, no write is needed — just return the object.
 	s.mu.RLock()
-	e := s.entries[key.Hash]
+	e := s.entries[key.Primary()]
 	if e != nil && e.sieve.Visited() {
-		if e.key2 != key.Hash2 {
+		if e.guard != key.Guard() {
 			// Collision: primary hash matches but secondary hash
 			// differs. This entry belongs to a different URL.
 			s.mu.RUnlock()
@@ -305,16 +305,16 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	// Slow path: visited bit is false. Upgrade to write lock, re-check
 	// (entry may have been evicted between RUnlock and Lock), then set it.
 	s.mu.Lock()
-	e = s.entries[key.Hash]
+	e = s.entries[key.Primary()]
 	var stored *api.Object
 	if e != nil {
-		if e.key2 != key.Hash2 {
+		if e.guard != key.Guard() {
 			// Collision detected on slow path.
 			s.mu.Unlock()
 			h.stats.misses.Add(1)
 			return nil, "", nil
 		}
-		s.evict.Access(key.Hash, func(k uint64) *sieve.Entry[uint64] {
+		s.evict.Access(key.Primary(), func(k uint64) *sieve.Entry[uint64] {
 			return e.sieve
 		})
 		e.obj.Hits++
@@ -388,16 +388,16 @@ func (h *HotStore) flushSlabFrees(bodies [][]byte) {
 func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 	var slabFrees [][]byte
 	s.mu.Lock()
-	if cur, ok := s.entries[key.Hash]; ok && cur.obj == obj {
-		h.notifyEvict(key.Hash, cur, &slabFrees)
+	if cur, ok := s.entries[key.Primary()]; ok && cur.obj == obj {
+		h.notifyEvict(key.Primary(), cur, &slabFrees)
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.sieve)
-		delete(s.entries, key.Hash)
+		delete(s.entries, key.Primary())
 		h.stats.evictions.Add(1)
 		cur.obj = nil
 		cur.sieve = nil
 		cur.hasBackup = false
-		cur.key2 = 0
+		cur.guard = 0
 		cur.windowHits.Store(0)
 		hotEntryPool.Put(cur)
 	}
@@ -414,7 +414,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
-	shardIdx := int(key.Hash & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
+	shardIdx := int(key.Primary() & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	// Move the body off the Go heap before acquiring the shard lock so
@@ -465,8 +465,8 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	}
 
 	// Remove old entry if replacing, return to pool.
-	if old, exists := s.entries[key.Hash]; exists {
-		h.notifyEvict(key.Hash, old, &slabFrees)
+	if old, exists := s.entries[key.Primary()]; exists {
+		h.notifyEvict(key.Primary(), old, &slabFrees)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.sieve)
 		if old.hasBackup {
@@ -475,19 +475,19 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		old.obj = nil
 		old.sieve = nil
 		old.hasBackup = false
-		old.key2 = 0
+		old.guard = 0
 		old.windowHits.Store(0)
 		hotEntryPool.Put(old)
 	}
 
-	se, _ := s.evict.Access(key.Hash, func(k uint64) *sieve.Entry[uint64] {
+	se, _ := s.evict.Access(key.Primary(), func(k uint64) *sieve.Entry[uint64] {
 		return nil // force insert
 	})
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
 	e.sieve = se
-	e.key2 = obj.Key.Hash2
-	s.entries[key.Hash] = e
+	e.guard = obj.Key.Guard()
+	s.entries[key.Primary()] = e
 	s.bytes += size
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
@@ -523,14 +523,14 @@ func (h *HotStore) reaperLoop() {
 }
 
 // reapExpired scans all shards and removes entries whose TTL + SWR + SIE
-// GetForSync reads an object from the hot tier without key2 verification.
+// GetForSync reads an object from the hot tier without guard verification.
 // Used by TieredStore.writeHotOnlyToWarm to read objects it already owns
 // for warm-tier sync. The caller trusts the entry because it was stored
 // by this node's own Put path.
 func (h *HotStore) GetForSync(ctx context.Context, key api.Key) (*api.Object, error) {
 	s := h.shard(key)
 	s.mu.RLock()
-	e := s.entries[key.Hash]
+	e := s.entries[key.Primary()]
 	var ret *api.Object
 	if e != nil {
 		ret = h.detachBody(e.obj)
@@ -622,11 +622,11 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	s := h.shard(key)
 	var slabFrees [][]byte
 	s.mu.Lock()
-	if e, ok := s.entries[key.Hash]; ok {
+	if e, ok := s.entries[key.Primary()]; ok {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.sieve)
-		h.notifyEvict(key.Hash, e, &slabFrees)
-		delete(s.entries, key.Hash)
+		h.notifyEvict(key.Primary(), e, &slabFrees)
+		delete(s.entries, key.Primary())
 		e.obj = nil
 		e.sieve = nil
 		e.hasBackup = false
@@ -830,7 +830,7 @@ func (h *HotStore) Stats() api.Stats {
 func (h *HotStore) WindowHits(key api.Key) int64 {
 	s := h.shard(key)
 	s.mu.RLock()
-	e := s.entries[key.Hash]
+	e := s.entries[key.Primary()]
 	var n int64
 	if e != nil {
 		n = e.windowHits.Load()
@@ -863,7 +863,7 @@ func (h *HotStore) SetBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key.Hash]; ok && !e.hasBackup {
+	if e, ok := s.entries[key.Primary()]; ok && !e.hasBackup {
 		e.hasBackup = true
 		s.backedCount++
 	}
@@ -876,7 +876,7 @@ func (h *HotStore) ClearBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key.Hash]; ok && e.hasBackup {
+	if e, ok := s.entries[key.Primary()]; ok && e.hasBackup {
 		e.hasBackup = false
 		s.backedCount--
 	}
@@ -934,7 +934,7 @@ func (h *HotStore) Keys() []api.Key {
 		s := &h.shards[i]
 		s.mu.RLock()
 		for k := range s.entries {
-			keys = append(keys, api.Key{Hash: k})
+			keys = append(keys, api.KeyFromPrimary(k))
 		}
 		s.mu.RUnlock()
 	}
@@ -994,7 +994,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 				skipped++
 				continue
 			}
-			keys = append(keys, api.Key{Hash: k})
+			keys = append(keys, api.KeyFromPrimary(k))
 			needed--
 			if needed <= 0 {
 				break
@@ -1008,11 +1008,11 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 
 // KeyHash computes the canonical cache key from a byte slice.
 func KeyHash(b []byte) api.Key {
-	return api.Key{Hash: xxhash.Sum64(b)}
+	return api.KeyFromPrimary(xxhash.Sum64(b))
 }
 
 const (
-	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — Key2 uint64 added 8B. atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
+	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — guard uint64 added 8B. atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
 	hotEntrySize        int64 = 40
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.

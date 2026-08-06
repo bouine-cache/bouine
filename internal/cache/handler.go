@@ -956,7 +956,7 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
 func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
-	sfKey := strconv.FormatUint(key.Hash, 36) + ":" + strconv.FormatUint(key.Hash2, 36)
+	sfKey := key.SingleFlightKey(0)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
@@ -970,7 +970,7 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
 func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult {
-	sfKey := strconv.FormatUint(key.Hash^revalKeySuffix, 36) + ":" + strconv.FormatUint(key.Hash2, 36)
+	sfKey := key.SingleFlightKey(revalKeySuffix)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil

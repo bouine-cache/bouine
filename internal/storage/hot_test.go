@@ -55,7 +55,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, src, err := s.Get(context.Background(), api.Key{Hash: 999})
+	got, src, err := s.Get(context.Background(), api.KeyFromPrimary(999))
 	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -95,7 +95,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 
 	// Insert objects until eviction must have happened.
 	for i := range 100 {
-		k := api.Key{Hash: uint64(i)}
+		k := api.KeyFromPrimary(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, 500))
 	}
 
@@ -308,7 +308,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	}
 
 	for i := range 500 {
-		k := api.Key{Hash: uint64(i)}
+		k := api.KeyFromPrimary(uint64(i))
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
@@ -353,7 +353,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := range 1000 {
-				k := api.Key{Hash: uint64(base*1000 + i)}
+				k := api.KeyFromPrimary(uint64(base*1000 + i))
 				_ = s.Put(context.Background(), k, obj(k, 64))
 				_, _, _ = s.Get(context.Background(), k)
 			}
@@ -371,7 +371,7 @@ func TestHotStore_Stats(t *testing.T) {
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_, _, _ = s.Get(context.Background(), k)
-	_, _, _ = s.Get(context.Background(), api.Key{Hash: 12345}) // miss
+	_, _, _ = s.Get(context.Background(), api.KeyFromPrimary(12345)) // miss
 
 	st := s.Stats()
 	require.Equal(t, int64(1), st.HotEntries)
@@ -399,10 +399,10 @@ func TestHotStore_SetBacked(t *testing.T) {
 
 	s.SetBacked(k)
 
-	sh := &s.shards[k.Hash&s.mask]
+	sh := &s.shards[k.Primary()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k.Hash]; !ok || !e.hasBackup {
+	if e, ok := sh.entries[k.Primary()]; !ok || !e.hasBackup {
 		t.Fatal("expected entry to be marked hasBackup after SetBacked")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -495,10 +495,10 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	_ = s.Put(ctx, k, obj(k, 200))
 	s.SetBacked(k)
 
-	sh := &s.shards[k.Hash&s.mask]
+	sh := &s.shards[k.Primary()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k.Hash]; !ok || !e.hasBackup {
+	if e, ok := sh.entries[k.Primary()]; !ok || !e.hasBackup {
 		t.Fatal("entry should have hasBackup after re-marking")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -530,7 +530,7 @@ func TestHotOverflowLatency(t *testing.T) {
 
 	// Pre-fill to capacity.
 	for i := range approxCap * runtime.NumCPU() {
-		k := api.Key{Hash: uint64(i)}
+		k := api.KeyFromPrimary(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -551,7 +551,7 @@ func TestHotOverflowLatency(t *testing.T) {
 			local := make([]time.Duration, 0, 1024)
 			for !stop.Load() {
 				n := ctr.Add(1)
-				k := api.Key{Hash: n % uint64(working)}
+				k := api.KeyFromPrimary(n % uint64(working))
 				if n%5 == 0 {
 					_ = s.Put(ctx, k, obj(k, bodySize))
 					continue

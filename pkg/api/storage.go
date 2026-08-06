@@ -1,78 +1,11 @@
 package api
 
 import (
-	"encoding/json"
-	"log/slog"
-	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/header"
 )
-
-// Key is the canonical cache key. It carries two independent xxhash64
-// digests of the normalized request attributes (scheme + host + path +
-// query + method): Hash is the primary map index, Hash2 is the
-// collision guard verified on every Get (issue #51). Together they
-// provide 128-bit collision resistance (birthday bound ~2^64 objects).
-//
-// The zero-value Key (both hashes 0) represents an unset/invalid key.
-type Key struct {
-	Hash  uint64
-	Hash2 uint64
-}
-
-// IsZero reports whether the key is the zero value (both hashes 0).
-func (k Key) IsZero() bool { return k.Hash == 0 && k.Hash2 == 0 }
-
-// LogValue renders the key as a lowercase hex string in slog output so
-// it matches the xxhash64 hex form used in admin API responses, storage
-// paths, and runbook examples. This allocates one string per log record,
-// which is acceptable: the hit-path access log is sampled (1:100) and
-// miss/error paths are not hot.
-func (k Key) LogValue() slog.Value { return slog.StringValue(k.Hex()) }
-
-// Hex returns the lowercase hex representation of the primary hash.
-// Intended for admin API responses, log output, and runbook examples.
-func (k Key) Hex() string { return strconv.FormatUint(k.Hash, 16) }
-
-// String returns the lowercase hex representation of the primary hash,
-// satisfying fmt.Stringer.
-func (k Key) String() string { return k.Hex() }
-
-// MarshalJSON serialises the key as a two-element JSON array
-// [hash, hash2] to preserve backward compatibility with admin API
-// consumers that parse the key as a JSON number: the first element is
-// the primary hash (same value as before), the second is the
-// collision guard.
-func (k Key) MarshalJSON() ([]byte, error) {
-	return []byte("[" + strconv.FormatUint(k.Hash, 10) + "," + strconv.FormatUint(k.Hash2, 10) + "]"), nil
-}
-
-// UnmarshalJSON deserialises the key from a JSON array [hash, hash2].
-// For backward compatibility, a bare JSON number is interpreted as the
-// primary hash with Hash2=0.
-func (k *Key) UnmarshalJSON(data []byte) error {
-	s := string(data)
-	if len(s) > 0 && s[0] == '[' {
-		// Array form: [hash, hash2].
-		var arr [2]uint64
-		if err := json.Unmarshal(data, &arr); err != nil {
-			return err
-		}
-		k.Hash = arr[0]
-		k.Hash2 = arr[1]
-		return nil
-	}
-	// Legacy: bare number → primary hash only, Hash2=0.
-	var v uint64
-	if err := json.Unmarshal(data, &v); err != nil {
-		return err
-	}
-	k.Hash = v
-	k.Hash2 = 0
-	return nil
-}
 
 // Object is the cached response stored by the storage layer. It holds
 // both the HTTP metadata and the body bytes (or a reference to the

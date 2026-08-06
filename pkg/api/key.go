@@ -16,7 +16,8 @@ import (
 // construct them directly. Use cache.NewKey / cache.BuildKey to build a
 // key from a canonical request; NewKeyFromHashes is the low-level
 // constructor for the hashing layer, and KeyFromPrimary reconstructs a
-// key from a stored primary hash. The With* methods derive related keys.
+// primary-only key (guard 0) for the cases where the guard is genuinely
+// unavailable (see its doc). The With* methods derive related keys.
 //
 // The zero-value Key (both hashes 0) represents an unset/invalid key.
 type Key struct {
@@ -34,9 +35,13 @@ func NewKeyFromHashes(primary, guard uint64) Key {
 }
 
 // KeyFromPrimary reconstructs a Key from a stored primary hash with a
-// zero guard. Used by decoders (codec, peer-fetch, WAL) that read the
-// primary from bytes and then set the guard separately via WithGuard,
-// and by the warm tier / WAL which index by primary hash only.
+// zero guard. The resulting key will MISS on any Get that verifies the
+// guard (guard 0 ≠ stored guard). Use only when the guard is genuinely
+// unavailable: warm-tier key unions (warm stores uint64 primaries, not
+// full keys), v1 backward-compat decoders (no guard field on the wire),
+// purge events (which carry only the primary), and eviction callbacks
+// (which receive a uint64 from the warm tier). For decoders that have
+// both hashes, use NewKeyFromHashes instead.
 func KeyFromPrimary(h uint64) Key { return Key{hash: h} }
 
 // Primary returns the primary map-index hash. This is the only accessor

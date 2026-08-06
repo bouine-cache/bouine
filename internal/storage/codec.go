@@ -130,13 +130,15 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	}
 
 	obj := &api.Object{}
-	obj.Key = api.KeyFromPrimary(r.uvarint())
+	primary := r.uvarint()
 	// Guard is present in v3+ blobs. v2 blobs have no guard field; the
-	// decoder leaves it as 0, which fails collision verification in
+	// guard defaults to 0, which fails collision verification in
 	// TieredStore.Get → miss → re-fetch → stored as v3.
+	var guard uint64
 	if ver >= objCodecVersion {
-		obj.Key = obj.Key.WithGuard(r.uvarint())
+		guard = r.uvarint()
 	}
+	obj.Key = api.NewKeyFromHashes(primary, guard)
 	obj.VaryKey = r.str()
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder
 	obj.TTL = time.Duration(r.varint())

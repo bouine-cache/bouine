@@ -370,8 +370,10 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Key = api.KeyFromPrimary(binary.LittleEndian.Uint64(body[1:9]))
-		req.Key = req.Key.WithGuard(binary.LittleEndian.Uint64(body[9:17]))
+		req.Key = api.NewKeyFromHashes(
+			binary.LittleEndian.Uint64(body[1:9]),
+			binary.LittleEndian.Uint64(body[9:17]),
+		)
 		varyLen := int(body[17])
 		if len(body) < 18+varyLen {
 			http.Error(w, "bad request", http.StatusBadRequest)

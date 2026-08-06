@@ -933,8 +933,8 @@ func (h *HotStore) Keys() []api.Key {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		for k := range s.entries {
-			keys = append(keys, api.KeyFromPrimary(k))
+		for k, e := range s.entries {
+			keys = append(keys, api.NewKeyFromHashes(k, e.guard))
 		}
 		s.mu.RUnlock()
 	}
@@ -994,7 +994,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 				skipped++
 				continue
 			}
-			keys = append(keys, api.KeyFromPrimary(k))
+			keys = append(keys, api.NewKeyFromHashes(k, e.guard))
 			needed--
 			if needed <= 0 {
 				break

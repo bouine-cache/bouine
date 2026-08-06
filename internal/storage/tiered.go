@@ -466,7 +466,7 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 	// decode with guard=0, which fails verification → miss → re-fetch →
 	// stored as v3. This is the accepted warm-cache invalidation on
 	// upgrade.
-	if !loaded.Key.SameGuard(key) {
+	if loaded.Key.Guard() != key.Guard() {
 		t.logger.Debug("warm tier collision or stale codec, evicting",
 			"key", key, "stored_guard", loaded.Key.Guard(), "request_guard", key.Guard())
 		t.evictWarm(key)

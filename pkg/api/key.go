@@ -74,11 +74,6 @@ func (k Key) SingleFlightKey(suffix uint64) string {
 	return strconv.FormatUint(k.hash^suffix, 36) + ":" + strconv.FormatUint(k.hash2, 36)
 }
 
-// SameGuard reports whether k and other share the same guard hash.
-// Used by the warm-tier load path to detect a collision without
-// comparing the primary (the primary already matched the map index).
-func (k Key) SameGuard(other Key) bool { return k.hash2 == other.hash2 }
-
 // IsZero reports whether the key is the zero value (both hashes 0).
 func (k Key) IsZero() bool { return k.hash == 0 && k.hash2 == 0 }
 

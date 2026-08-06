@@ -57,17 +57,3 @@ func TestWithVary(t *testing.T) {
 		t.Fatalf("WithVary: primary=%d guard=%d", v.Primary(), v.Guard())
 	}
 }
-
-// TestSameGuard confirms the warm-tier collision check helper.
-func TestSameGuard(t *testing.T) {
-	t.Parallel()
-	a := api.KeyFromPrimary(1).WithGuard(7)
-	b := api.KeyFromPrimary(2).WithGuard(7)
-	c := api.KeyFromPrimary(1).WithGuard(8)
-	if !a.SameGuard(b) {
-		t.Fatal("a and b share guard 7")
-	}
-	if a.SameGuard(c) {
-		t.Fatal("a and c have different guards")
-	}
-}

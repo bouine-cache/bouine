@@ -245,7 +245,7 @@ func TestHotStore_SlabPutGet(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
-	k := KeyHash([]byte("slab-test-key"))
+	k := keyHash([]byte("slab-test-key"))
 	o := obj(k, 500)
 	o.Body = make([]byte, 500)
 	for i := range o.Body {
@@ -283,7 +283,7 @@ func TestHotStore_SlabEviction(t *testing.T) {
 
 	// Fill beyond capacity to trigger evictions.
 	for i := range 20 {
-		k := KeyHash([]byte{byte(i)})
+		k := keyHash([]byte{byte(i)})
 		o := obj(k, 200)
 		err := s.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put %d", i)
@@ -317,7 +317,7 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 
 	// Insert a known object, then hammer it with concurrent Gets
 	// while simultaneously filling the store to force evictions.
-	key := KeyHash([]byte("concurrent-key"))
+	key := keyHash([]byte("concurrent-key"))
 	bodySize := 200
 	o := obj(key, bodySize)
 	o.Body = make([]byte, bodySize)
@@ -368,7 +368,7 @@ func TestHotStore_SlabConcurrentGetEviction(t *testing.T) {
 				return
 			default:
 			}
-			k := KeyHash([]byte(fmt.Sprintf("evict-%d", i)))
+			k := keyHash([]byte(fmt.Sprintf("evict-%d", i)))
 			if err := s.Put(context.Background(), k, obj(k, 200)); err != nil {
 				return
 			}

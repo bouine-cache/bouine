@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -74,7 +73,7 @@ type HotStore struct {
 	wg sync.WaitGroup
 	// onEvict is called when a backed entry is evicted. Set via
 	// HotConfig.OnEvict. See HotConfig.OnEvict for the constraint.
-	onEvict func(key uint64)
+	onEvict func(key api.Key)
 	// slab allocates body bytes from mmap'd regions to reduce GC
 	// pressure. nil means use Go heap (default, backward compatible).
 	slab *SlabAllocator
@@ -196,7 +195,7 @@ type HotConfig struct {
 	// HotStore. It may only enqueue the key for async processing.
 	// Violating this constraint stalls all readers and writers on the
 	// shard.
-	OnEvict func(key uint64)
+	OnEvict func(key api.Key)
 }
 
 // NewHotStore creates a sharded in-memory store and starts the
@@ -371,7 +370,7 @@ func (h *HotStore) notifyEvict(key uint64, entry *hotEntry, slabFrees *[][]byte)
 		*slabFrees = append(*slabFrees, entry.obj.Body)
 	}
 	if h.onEvict != nil && entry.hasBackup {
-		h.onEvict(key)
+		h.onEvict(api.NewKeyFromHashes(key, entry.guard))
 	}
 }
 
@@ -486,7 +485,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
 	e.sieve = se
-	e.guard = obj.Key.Guard()
+	e.guard = key.Guard()
 	s.entries[key.Primary()] = e
 	s.bytes += size
 	s.mu.Unlock()
@@ -1006,13 +1005,11 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	return keys, total
 }
 
-// KeyHash computes the canonical cache key from a byte slice.
-func KeyHash(b []byte) api.Key {
-	return api.KeyFromPrimary(xxhash.Sum64(b))
-}
-
 const (
-	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — guard uint64 added 8B. atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
+	// objectStructSize is the unsafe.Sizeof of api.Object. The guard is
+	// inside api.Key (which is inside Object.Key), not a separate field.
+	// Update when fields are added.
+	objectStructSize    int64 = 272
 	hotEntrySize        int64 = 40
 	sieveEntrySize      int64 = 32
 	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.

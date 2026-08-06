@@ -77,20 +77,24 @@ func (k Key) SingleFlightKey(suffix uint64) string {
 // IsZero reports whether the key is the zero value (both hashes 0).
 func (k Key) IsZero() bool { return k.hash == 0 && k.hash2 == 0 }
 
-// LogValue renders the key as a lowercase hex string in slog output so
-// it matches the xxhash64 hex form used in admin API responses, storage
-// paths, and runbook examples. This allocates one string per log record,
-// which is acceptable: the hit-path access log is sampled (1:100) and
-// miss/error paths are not hot.
-func (k Key) LogValue() slog.Value { return slog.StringValue(k.Hex()) }
+// LogValue renders the key as "primary.guard" in slog output so both
+// hashes are visible when debugging collisions (issue #51). This allocates
+// one string per log record, which is acceptable: the hit-path access log
+// is sampled (1:100) and miss/error paths are not hot.
+func (k Key) LogValue() slog.Value { return slog.StringValue(k.String()) }
 
 // Hex returns the lowercase hex representation of the primary hash.
-// Intended for admin API responses, log output, and runbook examples.
+// Intended for admin API responses, storage paths, and runbook examples.
+// Shows only the primary; use String or LogValue to see both hashes when
+// debugging collisions.
 func (k Key) Hex() string { return strconv.FormatUint(k.hash, 16) }
 
-// String returns the lowercase hex representation of the primary hash,
-// satisfying fmt.Stringer.
-func (k Key) String() string { return k.Hex() }
+// String returns "primary.guard" in lowercase hex, satisfying fmt.Stringer.
+// Both hashes are included so collision debugging can distinguish entries
+// that share a primary but differ on the guard.
+func (k Key) String() string {
+	return strconv.FormatUint(k.hash, 16) + "." + strconv.FormatUint(k.hash2, 16)
+}
 
 // MarshalJSON serialises the key as a two-element JSON array
 // [hash, hash2] to preserve backward compatibility with admin API

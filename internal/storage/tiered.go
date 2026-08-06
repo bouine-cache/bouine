@@ -230,9 +230,9 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 
 	// Wire the eviction callback so backed evictions enqueue
 	// tombstones for async processing by warmSyncLoop.
-	cfg.Hot.OnEvict = func(key uint64) {
+	cfg.Hot.OnEvict = func(key api.Key) {
 		select {
-		case ts.tombstoneQueue <- api.KeyFromPrimary(key):
+		case ts.tombstoneQueue <- key:
 		default:
 			ts.droppedTombstones.Add(1)
 		}
@@ -507,6 +507,12 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 // Put stores an object in the hot tier and, for large objects, also
 // in the warm tier (with a WAL record).
 func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) error {
+	// Normalize the object's key so both hot and warm tiers store the
+	// same key. Without this, a caller passing key ≠ obj.Key would store
+	// key.Guard() in the hot entry (Put uses the key parameter) but
+	// obj.Key.Guard() in the warm blob (encodeObject serializes obj.Key),
+	// and subsequent warm-tier Get would silently miss on guard mismatch.
+	obj.Key = key
 	if err := t.hot.Put(ctx, key, obj); err != nil {
 		return err
 	}
@@ -596,6 +602,12 @@ func (t *TieredStore) Ban(ctx context.Context, expr api.BanExpr) (int, error) {
 // backed keys were seen as "missing" and backfilled via Put,
 // re-overfilling the hot tier. The union reports keys the node *owns*,
 // not just those currently in RAM (#175).
+//
+// Hot-tier keys carry the full guard (issue #51). Warm-only keys are
+// reconstructed with KeyFromPrimary (guard 0) because the warm tier
+// indexes by primary hash only; the guard lives in the blob. These
+// primary-only keys will miss on guard-verifying Get — use Primary()
+// to compare if you need to check membership.
 func (t *TieredStore) Keys() []api.Key {
 	hotKeys := t.hot.Keys()
 	if t.warm == nil {

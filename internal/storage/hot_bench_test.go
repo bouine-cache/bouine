@@ -15,7 +15,7 @@ import (
 
 func BenchmarkHotStore_Get_Hit(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
-	k := KeyHash([]byte("bench-hit"))
+	k := keyHash([]byte("bench-hit"))
 	_ = s.Put(context.Background(), k, obj(k, 1024))
 
 	b.ResetTimer()
@@ -75,7 +75,7 @@ func BenchmarkHotStore_Put_Eviction(b *testing.B) {
 func BenchmarkSIEVE_Access(b *testing.B) {
 	// Benchmark the SIEVE access path in isolation.
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 1})
-	k := KeyHash([]byte("sieve-bench"))
+	k := keyHash([]byte("sieve-bench"))
 	_ = s.Put(context.Background(), k, obj(k, 64))
 
 	b.ResetTimer()

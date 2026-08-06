@@ -431,9 +431,9 @@ func TestOnEvictCallback(t *testing.T) {
 	s := NewHotStore(HotConfig{
 		MaxBytes:  1 << 14, // 16 KiB — very small to force eviction
 		NumShards: 1,       // single shard for deterministic eviction
-		OnEvict: func(key uint64) {
+		OnEvict: func(key api.Key) {
 			mu.Lock()
-			evictedKeys = append(evictedKeys, api.KeyFromPrimary(key))
+			evictedKeys = append(evictedKeys, key)
 			mu.Unlock()
 		},
 	})

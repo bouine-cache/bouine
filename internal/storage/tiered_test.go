@@ -62,7 +62,7 @@ func bigObj(key api.Key, bodySize int) *api.Object {
 func TestTiered_HotOnly(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, false)
-	k := KeyHash([]byte("hot-only"))
+	k := keyHash([]byte("hot-only"))
 	o := bigObj(k, 100) // below threshold, hot only
 
 	err := ts.Put(context.Background(), k, o)
@@ -76,7 +76,7 @@ func TestTiered_HotOnly(t *testing.T) {
 func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)
-	k := KeyHash([]byte("big-object"))
+	k := keyHash([]byte("big-object"))
 	o := bigObj(k, 8192) // above 1024 threshold
 
 	err := ts.Put(context.Background(), k, o)
@@ -103,7 +103,7 @@ func TestTiered_LargeObjectWritesToWarm(t *testing.T) {
 func TestTiered_LargeObjectReadPath(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)
-	k := KeyHash([]byte("big-read"))
+	k := keyHash([]byte("big-read"))
 	o := bigObj(k, 8192) // above 1024 threshold
 
 	err := ts.Put(context.Background(), k, o)
@@ -129,7 +129,7 @@ func TestTiered_LargeObjectReadPath(t *testing.T) {
 func TestTieredStore_Get_Miss(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, false)
-	k := KeyHash([]byte("tiered-miss"))
+	k := keyHash([]byte("tiered-miss"))
 
 	got, src, err := ts.Get(context.Background(), k)
 	require.NoError(t, err, "Get")
@@ -152,7 +152,7 @@ func TestTiered_Stats_WarmDiskAndMaxBytes(t *testing.T) {
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// Put a large object so the warm tier has on-disk bytes.
-	k := KeyHash([]byte("disk-bytes"))
+	k := keyHash([]byte("disk-bytes"))
 	err = ts.Put(context.Background(), k, bigObj(k, 2048))
 	require.NoError(t, err, "put")
 
@@ -171,7 +171,7 @@ func TestTiered_Stats_WarmDiskAndMaxBytes(t *testing.T) {
 func TestTiered_DeleteBothTiers(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)
-	k := KeyHash([]byte("del-both"))
+	k := keyHash([]byte("del-both"))
 	o := bigObj(k, 2048) // above threshold
 
 	_ = ts.Put(context.Background(), k, o)
@@ -213,7 +213,7 @@ func TestTiered_WALReplay(t *testing.T) {
 func TestTiered_EphemeralMode(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, false)
-	k := KeyHash([]byte("ephemeral"))
+	k := keyHash([]byte("ephemeral"))
 	_ = ts.Put(context.Background(), k, bigObj(k, 2048))
 
 	st := ts.Stats()
@@ -247,7 +247,7 @@ func TestTiered_WarmGet(t *testing.T) {
 
 	// Write a large object that crosses the threshold.
 	ts1 := newStore()
-	k := KeyHash([]byte("warm-get-key"))
+	k := keyHash([]byte("warm-get-key"))
 	obj := bigObj(k, 1024)
 	err := ts1.Put(ctx, k, obj)
 	require.NoError(t, err, "Put")
@@ -301,7 +301,7 @@ func TestTiered_WarmStatsRestoredAfterReopen(t *testing.T) {
 
 	ts1 := newStore()
 	for i := range 5 {
-		k := KeyHash([]byte(fmt.Sprintf("stats-key-%d", i)))
+		k := keyHash([]byte(fmt.Sprintf("stats-key-%d", i)))
 		err := ts1.Put(ctx, k, bigObj(k, 1024))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
@@ -367,8 +367,8 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 	t.Cleanup(func() { _ = ts.Close(ctx) })
 
 	// Two large objects that exceed the hot budget; both go to warm.
-	k1 := KeyHash([]byte("union-key-1"))
-	k2 := KeyHash([]byte("union-key-2"))
+	k1 := keyHash([]byte("union-key-1"))
+	k2 := keyHash([]byte("union-key-2"))
 	err = ts.Put(ctx, k1, bigObj(k1, 1024))
 	require.NoError(t, err, "Put k1")
 	err = ts.Put(ctx, k2, bigObj(k2, 1024))
@@ -379,12 +379,12 @@ func TestTieredStore_KeysReturnsHotWarmUnion(t *testing.T) {
 	require.NoError(t, err, "hot delete k1")
 
 	got := ts.Keys()
-	gotSet := make(map[api.Key]bool, len(got))
+	gotPrimaries := make(map[uint64]bool, len(got))
 	for _, k := range got {
-		gotSet[k] = true
+		gotPrimaries[k.Primary()] = true
 	}
-	assert.True(t, gotSet[k1])
-	assert.True(t, gotSet[k2])
+	assert.True(t, gotPrimaries[k1.Primary()], "k1 (warm-only) primary should be in union")
+	assert.True(t, gotPrimaries[k2.Primary()], "k2 (hot+warm) primary should be in union")
 }
 
 // TestTieredStore_OverBudget verifies the OverBudget contract: it must
@@ -406,7 +406,7 @@ func TestTieredStore_OverBudget(t *testing.T) {
 	require.False(t, ts.OverBudget())
 
 	// Under-budget store is not over budget.
-	k := KeyHash([]byte("small"))
+	k := keyHash([]byte("small"))
 	err = ts.Put(ctx, k, bigObj(k, 256))
 	require.NoError(t, err, "Put small")
 	require.False(t, ts.OverBudget())
@@ -418,7 +418,7 @@ func TestTieredStore_OverBudget(t *testing.T) {
 	// avoid a double-close on done.
 	close(ts.hot.done)
 
-	overK := KeyHash([]byte("oversized"))
+	overK := keyHash([]byte("oversized"))
 	err = ts.Put(ctx, overK, bigObj(overK, maxBytes*2))
 	require.NoError(t, err, "Put oversized")
 	require.True(t, ts.OverBudget())
@@ -430,9 +430,9 @@ func TestTieredStore_ImplementsKeyLister(t *testing.T) {
 
 	ts := tieredStore(t, true)
 	keys := []api.Key{
-		KeyHash([]byte("k1")),
-		KeyHash([]byte("k2")),
-		KeyHash([]byte("k3")),
+		keyHash([]byte("k1")),
+		keyHash([]byte("k2")),
+		keyHash([]byte("k3")),
 	}
 	for _, k := range keys {
 		err := ts.Put(ctx, k, bigObj(k, 100))
@@ -480,7 +480,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	}
 
 	ts1 := newStore()
-	k := KeyHash([]byte("legacy-codec-key"))
+	k := keyHash([]byte("legacy-codec-key"))
 	// Inject a blob whose version byte is 1 (legacy). warm.Put writes
 	// the record and sets the in-memory index; we also append a WAL
 	// PutEntry so the durability of the eviction can be tested after
@@ -537,7 +537,7 @@ func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
 	t.Parallel()
 	ts := tieredStore(t, true)
 	ctx := context.Background()
-	k := KeyHash([]byte("corrupt-codec-key"))
+	k := keyHash([]byte("corrupt-codec-key"))
 
 	// A blob that starts with the current version byte but is truncated
 	// mid-metadata: decodeObject will set errCorrupt.
@@ -580,10 +580,10 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 	// blob. Close.
 	ts1, err := NewTieredStore(cfg)
 	require.NoError(t, err, "ts1")
-	goodKey := KeyHash([]byte("good-object"))
+	goodKey := keyHash([]byte("good-object"))
 	err = ts1.Put(ctx, goodKey, bigObj(goodKey, 1024))
 	require.NoError(t, err, "Put good")
-	legacyKey := KeyHash([]byte("legacy-after-reopen"))
+	legacyKey := keyHash([]byte("legacy-after-reopen"))
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
 	segID, offset, err := ts1.warm.Put(legacyKey.Primary(), legacyBlob)
 	require.NoError(t, err, "warm.Put legacy")
@@ -634,7 +634,7 @@ func TestTiered_TornWriteReplayReturnsMiss(t *testing.T) {
 		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
-	k := KeyHash([]byte("torn-write-key"))
+	k := keyHash([]byte("torn-write-key"))
 	err = ts1.Put(ctx, k, bigObj(k, 1024))
 	require.NoError(t, err, "Put")
 	err = ts1.Close(ctx)
@@ -676,7 +676,7 @@ func TestTiered_PutCloseReopenRoundTrip(t *testing.T) {
 		TombstoneDrainInterval: -1, // disabled — tests drain manually
 	})
 	require.NoError(t, err, "NewTieredStore")
-	k := KeyHash([]byte("durable-key"))
+	k := keyHash([]byte("durable-key"))
 	err = ts1.Put(ctx, k, bigObj(k, 1024))
 	require.NoError(t, err, "Put")
 	err = ts1.Close(ctx)
@@ -772,7 +772,7 @@ func TestTiered_WALReplayRestoresIndex(t *testing.T) {
 	ts1 := newStore()
 	keys := make([]api.Key, 10)
 	for i := range 10 {
-		k := KeyHash([]byte(fmt.Sprintf("replay-key-%d", i)))
+		k := keyHash([]byte(fmt.Sprintf("replay-key-%d", i)))
 		keys[i] = k
 		err := ts1.Put(ctx, k, bigObj(k, 1024))
 		require.NoErrorf(t, err, "Put %d", i)
@@ -995,7 +995,7 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	// Put a large object whose body exceeds BodyThreshold, forcing the
 	// warm write path. warm.Put returns ErrOverBudget; Put must absorb
 	// it and keep the object hot-only instead of failing the response.
-	key := KeyHash([]byte("large-over-budget"))
+	key := keyHash([]byte("large-over-budget"))
 	o := bigObj(key, warmBodySize)
 	err = ts.Put(ctx, key, o)
 	require.NoError(t, err, "Put should return nil when warm is over budget")

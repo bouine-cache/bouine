@@ -2,7 +2,6 @@ package observability
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"log/slog"
 	"testing"
@@ -78,7 +77,7 @@ func TestSampledByCounterZeroRateAlwaysLogs(t *testing.T) {
 
 // sampledByKey is a test helper that exposes the key-based sampling decision.
 func (l *SampledLogger) sampledByKey(key api.Key) bool {
-	return l.sampleRate == 0 || binary.LittleEndian.Uint64(key[:8])%l.sampleRate == 0
+	return l.sampleRate == 0 || key.Hash64()%l.sampleRate == 0
 }
 
 // sampledByCounter is a test helper that exposes the counter-based sampling decision.

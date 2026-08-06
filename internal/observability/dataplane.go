@@ -2,7 +2,6 @@ package observability
 
 import (
 	"context"
-	"encoding/binary"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -743,7 +742,7 @@ func (m *DataPlaneMetrics) shouldLogAccess(key api.Key) bool {
 		return true
 	}
 	if !key.IsZero() {
-		return binary.LittleEndian.Uint64(key[:8])%m.accessSampleRate == 0
+		return key.Hash64()%m.accessSampleRate == 0
 	}
 	return m.accessCounter.Add(1)%m.accessSampleRate == 0
 }

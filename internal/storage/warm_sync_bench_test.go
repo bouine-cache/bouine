@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/binary"
 	"path/filepath"
 	"testing"
 
@@ -91,7 +90,7 @@ func BenchmarkWarmSync_CacheSurvivalRate(b *testing.B) {
 			smallSurvived := 0
 			largeSurvived := 0
 			for _, k := range warmKeys {
-				if int(binary.LittleEndian.Uint64(k[:8])) < smallObjCount {
+				if int(k.Hash64()) < smallObjCount {
 					smallSurvived++
 				} else {
 					largeSurvived++

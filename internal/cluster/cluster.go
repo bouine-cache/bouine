@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -509,7 +508,7 @@ func (r *ring) get(key api.Key) string {
 	if len(r.nodes) == 0 {
 		return ""
 	}
-	h := binary.LittleEndian.Uint64(key[:8])
+	h := key.Hash64()
 	idx := sort.Search(len(r.nodes), func(i int) bool {
 		return r.nodes[i] >= h
 	})

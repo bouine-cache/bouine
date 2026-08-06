@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/binary"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 
 // hotOnlyContains checks whether key is hot-only (present and not backed).
 func hotOnlyContains(s *HotStore, key api.Key) bool {
-	sh := &s.shards[binary.LittleEndian.Uint64(key[:8])&s.mask]
+	sh := &s.shards[key.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	e, ok := sh.entries[key]

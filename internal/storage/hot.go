@@ -249,7 +249,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 }
 
 func (h *HotStore) shard(key api.Key) *shard {
-	return &h.shards[binary.LittleEndian.Uint64(key[:8])&h.mask]
+	return &h.shards[key.Hash64()&h.mask]
 }
 
 // Get looks up key in the hot tier. Returns the object and api.SourceHot
@@ -392,7 +392,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
-	shardIdx := int(binary.LittleEndian.Uint64(key[:8]) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
+	shardIdx := int(key.Hash64() & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	// Move the body off the Go heap before acquiring the shard lock so

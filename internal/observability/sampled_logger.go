@@ -1,7 +1,6 @@
 package observability
 
 import (
-	"encoding/binary"
 	"log/slog"
 	"sync/atomic"
 
@@ -81,7 +80,7 @@ func NewSampledLogger(base *slog.Logger, sampleRate uint64) *SampledLogger {
 func (l *SampledLogger) Info(msg string, args ...any) {
 	if l.sampleRate != 0 {
 		if key, ok := extractKey(args); ok {
-			if binary.LittleEndian.Uint64(key[:8])%l.sampleRate != 0 {
+			if key.Hash64()%l.sampleRate != 0 {
 				return
 			}
 		} else if l.counter.Add(1)%l.sampleRate != 0 {

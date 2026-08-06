@@ -16,7 +16,7 @@ func TestNewKeyFromBytes(t *testing.T) {
 
 func TestNewKeyFromUint64(t *testing.T) {
 	k := NewKeyFromUint64(0xDEADBEEF)
-	require.Equal(t, uint64(0xDEADBEEF), binary.LittleEndian.Uint64(k[:8]))
+	require.Equal(t, uint64(0xDEADBEEF), k.Hash64())
 	// High half must be zero for the test/diagnostic constructor.
 	require.Equal(t, uint64(0), binary.LittleEndian.Uint64(k[8:]))
 }
@@ -28,7 +28,7 @@ func TestWithVaryXorsBothHalves(t *testing.T) {
 	})
 	v := uint64(0xFFFFFFFFFFFFFFFF)
 	got := k.WithVary(v)
-	require.Equal(t, binary.LittleEndian.Uint64(k[:8])^v, binary.LittleEndian.Uint64(got[:8]))
+	require.Equal(t, k.Hash64()^v, got.Hash64())
 	require.Equal(t, binary.LittleEndian.Uint64(k[8:])^v, binary.LittleEndian.Uint64(got[8:]))
 }
 

@@ -2,7 +2,6 @@ package cache
 
 import (
 	"container/heap"
-	"encoding/binary"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -151,7 +150,7 @@ func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {
 	onPop := func(key api.Key) {}
 	// alive returns nil for odd keys (dead), non-nil for even (live).
 	alive := func(key api.Key) *api.Object {
-		if binary.LittleEndian.Uint64(key[:8])%2 == 0 {
+		if key.Hash64()%2 == 0 {
 			return &api.Object{Key: key, TTL: 10 * time.Second, StoredAt: time.Now()}
 		}
 		return nil
@@ -220,7 +219,7 @@ func TestSchedulerIndexConsistency(t *testing.T) {
 
 	var popped atomic.Int64
 	onPop := func(key api.Key) {
-		popped.Add(int64(binary.LittleEndian.Uint64(key[:8])))
+		popped.Add(int64(key.Hash64()))
 	}
 	alive := func(key api.Key) *api.Object { return nil }
 

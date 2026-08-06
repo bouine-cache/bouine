@@ -49,7 +49,7 @@ func NewKeyFromUint64(v uint64) Key {
 // xxhash64 of the Vary header set), unchanged from the prior uint64
 // key design.
 func (k Key) WithVary(varyHash uint64) Key {
-	p := binary.LittleEndian.Uint64(k[:8]) ^ varyHash
+	p := k.Hash64() ^ varyHash
 	g := binary.LittleEndian.Uint64(k[8:]) ^ varyHash
 	var result Key
 	binary.LittleEndian.PutUint64(result[:8], p)
@@ -64,7 +64,7 @@ func (k Key) WithVary(varyHash uint64) Key {
 // (possibly suffix-mixed) key.
 func (k Key) SingleFlightKey(suffix uint64) string {
 	var x Key
-	binary.LittleEndian.PutUint64(x[:8], binary.LittleEndian.Uint64(k[:8])^suffix)
+	binary.LittleEndian.PutUint64(x[:8], k.Hash64()^suffix)
 	copy(x[8:], k[8:])
 	return hex.EncodeToString(x[:])
 }
@@ -80,6 +80,13 @@ func (k Key) IsZero() bool {
 	}
 	return true
 }
+
+// Hash64 returns the first 8 bytes as a little-endian uint64 — the
+// primary xxhash64 half. It is a uniform hash suitable for shard
+// selection, consistent-hash ring ownership, and log sampling without
+// re-hashing the full 16 bytes. Callers that need the full 128-bit
+// collision check MUST use the Key directly as a map key, not Hash64.
+func (k Key) Hash64() uint64 { return binary.LittleEndian.Uint64(k[:8]) }
 
 // Hex returns the 32-char lowercase hex of all 16 key bytes.
 func (k Key) Hex() string { return hex.EncodeToString(k[:]) }
@@ -99,7 +106,7 @@ func (k Key) LogValue() slog.Value { return slog.StringValue(k.String()) }
 // array form (rather than a bare number) makes the 128-bit width
 // explicit and unambiguous in admin API output.
 func (k Key) MarshalJSON() ([]byte, error) {
-	lo := binary.LittleEndian.Uint64(k[:8])
+	lo := k.Hash64()
 	hi := binary.LittleEndian.Uint64(k[8:])
 	return json.Marshal([2]uint64{lo, hi})
 }

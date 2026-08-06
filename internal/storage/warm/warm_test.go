@@ -1470,7 +1470,7 @@ func TestEvict_CallbackNotifiesHotTier(t *testing.T) {
 
 	var evicted atomic.Int64
 	s.OnEvict = func(key api.Key) {
-		evicted.Store(int64(binary.LittleEndian.Uint64(key[:8])))
+		evicted.Store(int64(key.Hash64()))
 	}
 
 	_, _, err = s.Put(api.NewKeyFromUint64(42), []byte("data"))

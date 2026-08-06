@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -400,7 +399,7 @@ func TestHotStore_SetBacked(t *testing.T) {
 
 	s.SetBacked(k)
 
-	sh := &s.shards[binary.LittleEndian.Uint64(k[:8])&s.mask]
+	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
@@ -496,7 +495,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	_ = s.Put(ctx, k, obj(k, 200))
 	s.SetBacked(k)
 
-	sh := &s.shards[binary.LittleEndian.Uint64(k[:8])&s.mask]
+	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {

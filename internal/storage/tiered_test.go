@@ -189,9 +189,9 @@ func TestTiered_WALReplay(t *testing.T) {
 	// Write WAL entries manually.
 	l, err := wal.Open(walPath)
 	require.NoError(t, err, "wal open")
-	_ = l.Append(wal.PutEntry(42, 0, 0))
-	_ = l.Append(wal.PutEntry(43, 0, 100))
-	_ = l.Append(wal.DeleteEntry(42))
+	_ = l.Append(wal.PutEntry(api.NewKeyFromUint64(42), 0, 0))
+	_ = l.Append(wal.PutEntry(api.NewKeyFromUint64(43), 0, 100))
+	_ = l.Append(wal.DeleteEntry(api.NewKeyFromUint64(42)))
 	_ = l.Close()
 
 	// Replay and verify.
@@ -202,10 +202,10 @@ func TestTiered_WALReplay(t *testing.T) {
 	})
 	require.NoError(t, err, "replay")
 	require.Len(t, entries, 3)
-	if !entries[0].IsPut() || entries[0].Key != 42 {
+	if !entries[0].IsPut() || entries[0].Key != api.NewKeyFromUint64(42) {
 		t.Fatalf("entry 0: %+v", entries[0])
 	}
-	if !entries[2].IsDelete() || entries[2].Key != 42 {
+	if !entries[2].IsDelete() || entries[2].Key != api.NewKeyFromUint64(42) {
 		t.Fatalf("entry 2: %+v", entries[2])
 	}
 }
@@ -486,9 +486,9 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	// PutEntry so the durability of the eviction can be tested after
 	// reopen.
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
-	segID, offset, err := ts1.warm.Put(uint64(k), legacyBlob)
+	segID, offset, err := ts1.warm.Put(k, legacyBlob)
 	require.NoError(t, err, "warm.Put")
-	err = ts1.wal.Append(wal.PutEntry(uint64(k), int32(segID), offset))
+	err = ts1.wal.Append(wal.PutEntry(k, int32(segID), offset))
 	require.NoError(t, err, "wal.Append")
 
 	// Get must treat the undecodable blob as a miss, not an error.
@@ -498,7 +498,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 
 	// The warm-tier index must no longer contain the key: warm.Get
 	// returns nil after the tombstone + index removal.
-	body, _ := ts1.warm.Get(uint64(k))
+	body, _ := ts1.warm.Get(k)
 	require.Nil(t, body)
 
 	// A fresh Put of a v2 object for the same key must be readable
@@ -546,13 +546,13 @@ func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
 		Header:     header.FromHTTP(http.Header{"A": {"b"}}),
 		Body:       []byte("xx"),
 	})[:4]
-	_, _, err := ts.warm.Put(uint64(k), corruptBlob)
+	_, _, err := ts.warm.Put(k, corruptBlob)
 	require.NoError(t, err, "warm.Put")
 
 	got, _, err := ts.Get(ctx, k)
 	require.NoError(t, err, "Get: expected nil error for corrupt blob,")
 	require.Nil(t, got)
-	body, _ := ts.warm.Get(uint64(k))
+	body, _ := ts.warm.Get(k)
 	require.Nil(t, body)
 }
 
@@ -585,9 +585,9 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 	require.NoError(t, err, "Put good")
 	legacyKey := KeyHash([]byte("legacy-after-reopen"))
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
-	segID, offset, err := ts1.warm.Put(uint64(legacyKey), legacyBlob)
+	segID, offset, err := ts1.warm.Put(legacyKey, legacyBlob)
 	require.NoError(t, err, "warm.Put legacy")
-	err = ts1.wal.Append(wal.PutEntry(uint64(legacyKey), int32(segID), offset))
+	err = ts1.wal.Append(wal.PutEntry(legacyKey, int32(segID), offset))
 	require.NoError(t, err, "wal.Append")
 	err = ts1.Close(ctx)
 	require.NoError(t, err, "ts1.Close")
@@ -835,11 +835,11 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Fill the warm tier to exactly the budget. Protect all entries so
 	// the eviction policy can't free space.
 	for i := range numFill {
-		_, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize))
+		_, _, err := ts.warm.Put(api.NewKeyFromUint64(uint64(i)), make([]byte, warmBodySize))
 		require.NoErrorf(t, err, "warm.Put %d under budget", i)
 	}
 	for i := range numFill {
-		ts.warm.Protect(uint64(i))
+		ts.warm.Protect(api.NewKeyFromUint64(uint64(i)))
 	}
 
 	// Verify warm is over budget.
@@ -848,7 +848,7 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Put some objects in the hot tier (below body_threshold so they're
 	// hot-only and candidates for warm sync promotion).
 	for i := range 10 {
-		k := api.Key(1000 + i)
+		k := api.NewKeyFromUint64(uint64(1000 + i))
 		err := ts.Put(ctx, k, obj(k, 100))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
@@ -859,7 +859,7 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Verify none of the hot-only keys were promoted to warm.
 	for i := range 10 {
 		k := uint64(1000 + i)
-		_, _, ok := ts.warm.Lookup(k)
+		_, _, ok := ts.warm.Lookup(api.NewKeyFromUint64(k))
 		assert.False(t, ok)
 	}
 
@@ -885,7 +885,7 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	// range as the actual hot-only objects below — the Key field is
 	// uvarint-encoded so key magnitude affects the encoded length.
 	// The warm record size is warmRecordSize(len(encodedBody)).
-	probeKey := api.Key(1000)
+	probeKey := api.NewKeyFromUint64(uint64(1000))
 	encodedBody := encodeObject(obj(probeKey, 100))
 	recSize := warmRecordSize(len(encodedBody))
 
@@ -912,7 +912,7 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	// is hit mid-cycle.
 	const numHotOnly = 5
 	for i := range numHotOnly {
-		k := api.Key(1000 + i)
+		k := api.NewKeyFromUint64(uint64(1000 + i))
 		err := ts.Put(ctx, k, obj(k, 100))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
@@ -925,10 +925,10 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	promoted := 0
 	for i := range numHotOnly {
 		k := uint64(1000 + i)
-		if _, _, ok := ts.warm.Lookup(k); ok {
+		if _, _, ok := ts.warm.Lookup(api.NewKeyFromUint64(k)); ok {
 			// Protect promoted entries so eviction doesn't remove
 			// them before we count.
-			ts.warm.Protect(k)
+			ts.warm.Protect(api.NewKeyFromUint64(k))
 			promoted++
 		}
 	}
@@ -981,9 +981,9 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	require.NoError(t, err, "NewTieredStore")
 
 	for i := range numFill {
-		_, _, err := ts.warm.Put(uint64(i), make([]byte, warmBodySize))
+		_, _, err := ts.warm.Put(api.NewKeyFromUint64(uint64(i)), make([]byte, warmBodySize))
 		require.NoErrorf(t, err, "warm.Put fill %d", i)
-		ts.warm.Protect(uint64(i))
+		ts.warm.Protect(api.NewKeyFromUint64(uint64(i)))
 	}
 	require.True(t, ts.warm.OverBudget(), "warm should be over budget after fill")
 
@@ -1007,7 +1007,7 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	assert.Equal(t, before+1, after, "OverBudget counter must increment by 1")
 
 	// The key must not be present in warm — it was rejected, not stored.
-	_, _, ok := ts.warm.Lookup(uint64(key))
+	_, _, ok := ts.warm.Lookup(key)
 	assert.False(t, ok, "key should not be promoted to warm on ErrOverBudget")
 
 	// The object must still be servable from the hot tier.

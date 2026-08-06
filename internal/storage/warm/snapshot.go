@@ -1,7 +1,7 @@
 package warm
 
 import (
-	"cmp"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,15 +11,16 @@ import (
 	"slices"
 
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 const (
 	snapMagic       uint32 = 0x49445853 // "SXDI"
-	snapVersion     uint32 = 1
+	snapVersion     uint32 = 2
 	snapEndMagic    uint32 = 0x464E4524 // "$END"
 	snapHdrLen             = 32
 	snapSegEntryLen        = 12 // seg_id (4) + seg_size (8)
-	snapEntryLen           = 28 // key + seg_id + offset + size
+	snapEntryLen           = 36 // key (16) + seg_id (4) + offset (8) + size (8)
 	snapFooterLen          = 8  // footer_crc + end_magic
 	snapFile               = "index.snap"
 )
@@ -27,7 +28,7 @@ const (
 var snapCRCTable = crc32.MakeTable(crc32.Castagnoli)
 
 type snapEntry struct {
-	key    uint64
+	key    api.Key
 	segID  int32
 	offset int64
 	size   int64
@@ -49,7 +50,7 @@ func (s *Store) SnapshotPath() string {
 // validation on load.
 func (s *Store) WriteSnapshot() error {
 	s.idxMu.RLock()
-	idxSnap := make(map[uint64]warmLoc, len(s.index))
+	idxSnap := make(map[api.Key]warmLoc, len(s.index))
 	for k, v := range s.index {
 		idxSnap[k] = v
 	}
@@ -63,7 +64,7 @@ func (s *Store) WriteSnapshot() error {
 // sequence. The caller must ensure idxSnap is not mutated during this
 // call. The segByID map is copied internally under s.mu.RLock, so the
 // caller does not need to synchronize access to it.
-func (s *Store) WriteSnapshotFromCopy(idxSnap map[uint64]warmLoc) error {
+func (s *Store) WriteSnapshotFromCopy(idxSnap map[api.Key]warmLoc) error {
 	// Copy segByID under s.mu.RLock. The segByID map is modified by
 	// rebuildSegByID during compaction (under s.mu.Lock). Reading the
 	// map reference without the lock and then iterating it after release
@@ -103,7 +104,7 @@ func (s *Store) WriteSnapshotFromCopy(idxSnap map[uint64]warmLoc) error {
 		totalBytes += loc.size
 	}
 	slices.SortFunc(entries, func(a, b snapEntry) int {
-		return cmp.Compare(a.key, b.key)
+		return bytes.Compare(a.key[:], b.key[:])
 	})
 
 	hdr, bodyData := encodeSnapshot(segIDs, segSizes, entries, totalBytes)
@@ -180,10 +181,10 @@ func encodeSnapshot(segIDs []int, segSizes map[int]int64, entries []snapEntry, t
 	entryData := make([]byte, snapEntryLen*len(entries))
 	for i, e := range entries {
 		off := i * snapEntryLen
-		binary.LittleEndian.PutUint64(entryData[off:], e.key)
-		binary.LittleEndian.PutUint32(entryData[off+8:], uint32(e.segID))   //nolint:gosec // segID fits uint32
-		binary.LittleEndian.PutUint64(entryData[off+12:], uint64(e.offset)) //nolint:gosec // offset fits uint64
-		binary.LittleEndian.PutUint64(entryData[off+20:], uint64(e.size))   //nolint:gosec // size fits uint64
+		copy(entryData[off:off+16], e.key[:])
+		binary.LittleEndian.PutUint32(entryData[off+16:], uint32(e.segID))  //nolint:gosec // segID fits uint32
+		binary.LittleEndian.PutUint64(entryData[off+20:], uint64(e.offset)) //nolint:gosec // offset fits uint64
+		binary.LittleEndian.PutUint64(entryData[off+28:], uint64(e.size))   //nolint:gosec // size fits uint64
 	}
 
 	body = make([]byte, 0, len(segTbl)+len(entryData))
@@ -283,16 +284,17 @@ func (s *Store) LoadSnapshot(path string) error {
 		delete(s.index, k)
 	}
 	if len(s.index) < int(entryCount) { //nolint:gosec // entryCount fits int
-		s.index = make(map[uint64]warmLoc, entryCount)
+		s.index = make(map[api.Key]warmLoc, entryCount)
 	}
 	for i := range entryCount {
 		ee := entryData[i*snapEntryLen : (i+1)*snapEntryLen]
-		key := binary.LittleEndian.Uint64(ee[0:8])
-		segID := int(int32(binary.LittleEndian.Uint32(ee[8:12]))) //nolint:gosec // segID fits int32
-		offset := int64(binary.LittleEndian.Uint64(ee[12:20]))    //nolint:gosec // offset fits int64
-		size := int64(binary.LittleEndian.Uint64(ee[20:28]))      //nolint:gosec // size fits int64
+		var key api.Key
+		copy(key[:], ee[0:16])
+		segID := int(int32(binary.LittleEndian.Uint32(ee[16:20]))) //nolint:gosec // segID fits int32
+		offset := int64(binary.LittleEndian.Uint64(ee[20:28]))     //nolint:gosec // offset fits int64
+		size := int64(binary.LittleEndian.Uint64(ee[28:36]))       //nolint:gosec // size fits int64
 
-		e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
+		e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			if loc, ok := s.index[k]; ok {
 				return loc.sieve
 			}

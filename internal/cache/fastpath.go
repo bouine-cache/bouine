@@ -458,7 +458,7 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n += copyOverflow(buf[:], n, method)
 
 	if n <= len(buf) {
-		return api.Key(xxhash.Sum64(buf[:n]))
+		return NewKey(buf[:n])
 	}
 
 	// Overflow: redo with a heap buffer.
@@ -473,7 +473,7 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 	n = appendCanonicalQueryString(heap, n, req.Query, policy)
 	n = appendByte(heap, n, '|')
 	n += copyOverflow(heap, n, method)
-	return api.Key(xxhash.Sum64(heap[:n]))
+	return NewKey(heap[:n])
 }
 
 // appendCanonicalPathString canonicalizes a path string (collapse
@@ -757,7 +757,7 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 			_, _ = h.WriteString(hdr.Key)
 			_, _ = h.WriteString(hdr.Value)
 		}
-		return api.Key(uint64(primary) ^ h.Sum64())
+		return primary.WithVary(h.Sum64())
 	}
 
 	// Parse and sort Vary field names.
@@ -805,5 +805,5 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 	if !written {
 		return primary
 	}
-	return api.Key(uint64(primary) ^ xxhash.Sum64(buf[:off]))
+	return primary.WithVary(xxhash.Sum64(buf[:off]))
 }

@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"encoding/binary"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -727,7 +728,7 @@ func (m *DataPlaneMetrics) buildAccessLogAttrs(r *http.Request, sw *responsewrit
 		"remote", r.RemoteAddr,
 		"cache_status", cacheResult,
 	}
-	if sw.Key != 0 {
+	if !sw.Key.IsZero() {
 		attrs = append(attrs, "key", sw.Key)
 	}
 	return attrs
@@ -741,8 +742,8 @@ func (m *DataPlaneMetrics) shouldLogAccess(key api.Key) bool {
 	if m.accessSampleRate == 0 {
 		return true
 	}
-	if key != 0 {
-		return uint64(key)%m.accessSampleRate == 0
+	if !key.IsZero() {
+		return binary.LittleEndian.Uint64(key[:8])%m.accessSampleRate == 0
 	}
 	return m.accessCounter.Add(1)%m.accessSampleRate == 0
 }

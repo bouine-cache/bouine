@@ -11,7 +11,7 @@ import (
 
 const (
 	binaryMagic   byte = 0x42
-	binaryVersion byte = 2
+	binaryVersion byte = 3
 	binaryHdrLen       = 2 // magic + version
 	gossipHdrLen       = 3 // magic + version + msgType
 	maxStringLen       = 65535
@@ -66,12 +66,12 @@ func readString(buf []byte, offset int) (string, int, error) {
 }
 
 func purgePayloadLen(evt api.PurgeEvent) int {
-	return 8 + 2 + len(evt.VaryKey) + 2 + len(evt.Issuer) + 8 + 8
+	return 16 + 2 + len(evt.VaryKey) + 2 + len(evt.Issuer) + 8 + 8
 }
 
 func putPurgePayload(buf []byte, off int, evt api.PurgeEvent) (int, error) {
-	binary.LittleEndian.PutUint64(buf[off:], uint64(evt.Key))
-	off += 8
+	copy(buf[off:off+16], evt.Key[:])
+	off += 16
 	var err error
 	off, err = putString(buf, off, evt.VaryKey)
 	if err != nil {
@@ -89,11 +89,11 @@ func putPurgePayload(buf []byte, off int, evt api.PurgeEvent) (int, error) {
 
 func decodePurgePayload(buf []byte, off int) (api.PurgeEvent, error) {
 	var evt api.PurgeEvent
-	if off+8 > len(buf) {
+	if off+16 > len(buf) {
 		return evt, errShortFrame
 	}
-	evt.Key = api.Key(binary.LittleEndian.Uint64(buf[off:]))
-	off += 8
+	copy(evt.Key[:], buf[off:off+16])
+	off += 16
 	var err error
 	evt.VaryKey, off, err = readString(buf, off)
 	if err != nil {

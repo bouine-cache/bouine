@@ -60,7 +60,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *Key
 				_, _ = h.WriteString(v)
 			}
 		}
-		return api.Key(uint64(primary) ^ h.Sum64())
+		return primary.WithVary(h.Sum64())
 	}
 
 	// Parse and sort Vary field names using a stack-allocated array.
@@ -112,7 +112,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *Key
 	if !written {
 		return primary
 	}
-	return api.Key(uint64(primary) ^ xxhash.Sum64(buf[:off]))
+	return primary.WithVary(xxhash.Sum64(buf[:off]))
 }
 
 // variantKeySlow is the fallback allocation path for Vary headers that
@@ -139,7 +139,7 @@ func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, policy 
 	if !written {
 		return primary
 	}
-	return api.Key(uint64(primary) ^ h.Sum64())
+	return primary.WithVary(h.Sum64())
 }
 
 // normalizeHeaderValue lowercases and sorts comma-separated tokens in

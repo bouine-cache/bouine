@@ -1,27 +1,58 @@
 package cache
 
 import (
+	"encoding/binary"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
+// key2Seed is the seed for the second xxhash64 half of the 128-bit
+// cache key. "bouine2" in ASCII. Distinct from the implicit zero seed
+// of the primary xxhash.Sum64 call so the two halves are independent.
+const key2Seed uint64 = 0x626f75696e6532 // "bouine2"
+
+// key2Pool pools seeded xxhash digests for the second key half.
+// xxhash.Digest is a fixed struct (no internal slice), so pooling it
+// amortizes to zero allocations after warm-up, satisfying AGENTS.md §7
+// (allocs/op = 0 on the hit path, which runs NewKey before the map
+// lookup). A per-process pool is fine: all callers share the same seed.
+var key2Pool = sync.Pool{
+	New: func() any { return xxhash.NewWithSeed(key2Seed) },
+}
+
+// NewKey computes the 128-bit cache key from canonical bytes: the
+// primary xxhash64 in the low half and a seeded xxhash64 in the high
+// half. Both halves are independent, so the full [16]byte is a 128-bit
+// collision check when used as a map key. Zero amortized allocations.
+func NewKey(canonical []byte) api.Key {
+	var k api.Key
+	binary.LittleEndian.PutUint64(k[:8], xxhash.Sum64(canonical))
+	d := key2Pool.Get().(*xxhash.Digest)
+	d.Reset()
+	_, _ = d.Write(canonical)
+	binary.LittleEndian.PutUint64(k[8:], d.Sum64())
+	key2Pool.Put(d)
+	return k
+}
+
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
 // *http.Request is available.
 func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if rawURL == "" {
-		return 0
+		return api.Key{}
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return 0
+		return api.Key{}
 	}
 	r := &http.Request{
 		Method: http.MethodGet,
@@ -68,7 +99,7 @@ func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	}
 
 	if n <= len(buf) {
-		return api.Key(xxhash.Sum64(buf[:n]))
+		return NewKey(buf[:n])
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
@@ -102,7 +133,7 @@ func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
 		n += copyOverflow(heap, n, r.Method)
 	}
 
-	return api.Key(xxhash.Sum64(heap[:n]))
+	return NewKey(heap[:n])
 }
 
 // appendByte writes a single byte at offset n into dst. If n is past

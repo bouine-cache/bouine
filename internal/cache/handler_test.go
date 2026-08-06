@@ -1264,7 +1264,7 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	t.Parallel()
 	r := newRefreshRegistry()
-	key := api.Key(42)
+	key := api.NewKeyFromUint64(uint64(42))
 
 	// Key not registered → DecrementPersist returns false.
 	require.False(t, r.DecrementPersist(key))
@@ -1334,7 +1334,7 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	}))
 	req := httptest.NewRequest("GET", "/", nil)
-	res := h.collapsedFetch(req, 0)
+	res := h.collapsedFetch(req, api.Key{})
 	require.NotNil(t, res.Err)
 	require.True(t, errors.Is(res.Err, http.ErrAbortHandler))
 }

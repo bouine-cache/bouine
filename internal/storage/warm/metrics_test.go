@@ -2,11 +2,13 @@ package warm
 
 import (
 	"errors"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // metricValue returns the value of a single unlabeled counter or gauge
@@ -88,15 +90,15 @@ func TestMetrics_OverBudgetIncrements(t *testing.T) {
 	// Fill the budget with protected entries so eviction cannot free space.
 	smallBody := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 4; i++ {
-		_, _, err := s.Put(uint64(i), smallBody)
+		_, _, err := s.Put(api.NewKeyFromUint64(uint64(i)), smallBody)
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 	for i := 0; i < 4; i++ {
-		s.Protect(uint64(i))
+		s.Protect(api.NewKeyFromUint64(uint64(i)))
 	}
 
 	// This Put must be rejected with ErrOverBudget.
-	_, _, err = s.Put(99, smallBody)
+	_, _, err = s.Put(api.NewKeyFromUint64(99), smallBody)
 	require.True(t, errors.Is(err, ErrOverBudget))
 
 	got := metricValue(t, reg, "bouine_warm_over_budget_total")
@@ -117,10 +119,10 @@ func TestMetrics_EvictionsIncrements(t *testing.T) {
 	smallBody := make([]byte, 100) // 120 bytes per record
 	// 3 records × 120 = 360 = budget. The 4th Put must evict to fit.
 	for i := 0; i < 3; i++ {
-		_, _, err := s.Put(uint64(i), smallBody)
+		_, _, err := s.Put(api.NewKeyFromUint64(uint64(i)), smallBody)
 		require.NoErrorf(t, err, "Put %d", i)
 	}
-	_, _, err = s.Put(99, smallBody)
+	_, _, err = s.Put(api.NewKeyFromUint64(99), smallBody)
 	require.NoError(t, err, "Put 99 with eviction")
 
 	got := metricValue(t, reg, "bouine_warm_evictions_total")
@@ -158,7 +160,7 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 
 	body := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 5; i++ {
-		_, _, err := s.Put(uint64(i), body)
+		_, _, err := s.Put(api.NewKeyFromUint64(uint64(i)), body)
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 
@@ -217,7 +219,7 @@ func TestMetrics_NilMetricsSafe(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := 0; i < 5; i++ {
-		_, _, _ = s.Put(uint64(i), body) // some may be rejected, must not panic
+		_, _, _ = s.Put(api.NewKeyFromUint64(uint64(i)), body) // some may be rejected, must not panic
 	}
 	err = s.Compact()
 	require.NoError(t, err, "Compact with nil metrics")

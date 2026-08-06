@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -55,7 +56,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, src, err := s.Get(context.Background(), 999)
+	got, src, err := s.Get(context.Background(), api.NewKeyFromUint64(999))
 	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -95,7 +96,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 
 	// Insert objects until eviction must have happened.
 	for i := range 100 {
-		k := api.Key(i)
+		k := api.NewKeyFromUint64(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, 500))
 	}
 
@@ -222,9 +223,9 @@ func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 
 func TestObjSize_MapOverheadConstant(t *testing.T) {
 	t.Parallel()
-	// 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry.
+	// 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry.
 	// The hmap struct header (~96 B) is negligible at 1M+ entries.
-	assert.Equal(t, int64(22), mapPerEntryOverhead)
+	assert.Equal(t, int64(32), mapPerEntryOverhead)
 }
 
 func TestObjSize_OrphanedValuesCounted(t *testing.T) {
@@ -282,14 +283,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 264, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// objectStructSize: 272, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 264 + 32 + 32 + 22 +
+	want := int64(5) + 272 + 32 + 40 + 32 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
@@ -308,7 +309,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	}
 
 	for i := range 500 {
-		k := api.Key(i)
+		k := api.NewKeyFromUint64(uint64(i))
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
@@ -353,7 +354,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := range 1000 {
-				k := api.Key(base*1000 + i)
+				k := api.NewKeyFromUint64(uint64(base*1000 + i))
 				_ = s.Put(context.Background(), k, obj(k, 64))
 				_, _, _ = s.Get(context.Background(), k)
 			}
@@ -371,7 +372,7 @@ func TestHotStore_Stats(t *testing.T) {
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_, _, _ = s.Get(context.Background(), k)
-	_, _, _ = s.Get(context.Background(), 12345) // miss
+	_, _, _ = s.Get(context.Background(), api.NewKeyFromUint64(12345)) // miss
 
 	st := s.Stats()
 	require.Equal(t, int64(1), st.HotEntries)
@@ -399,7 +400,7 @@ func TestHotStore_SetBacked(t *testing.T) {
 
 	s.SetBacked(k)
 
-	sh := &s.shards[uint64(k)&s.mask]
+	sh := &s.shards[binary.LittleEndian.Uint64(k[:8])&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
@@ -495,7 +496,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	_ = s.Put(ctx, k, obj(k, 200))
 	s.SetBacked(k)
 
-	sh := &s.shards[uint64(k)&s.mask]
+	sh := &s.shards[binary.LittleEndian.Uint64(k[:8])&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
@@ -530,7 +531,7 @@ func TestHotOverflowLatency(t *testing.T) {
 
 	// Pre-fill to capacity.
 	for i := range approxCap * runtime.NumCPU() {
-		k := api.Key(i)
+		k := api.NewKeyFromUint64(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -551,7 +552,7 @@ func TestHotOverflowLatency(t *testing.T) {
 			local := make([]time.Duration, 0, 1024)
 			for !stop.Load() {
 				n := ctr.Add(1)
-				k := api.Key(n % uint64(working))
+				k := api.NewKeyFromUint64(uint64(n % uint64(working)))
 				if n%5 == 0 {
 					_ = s.Put(ctx, k, obj(k, bodySize))
 					continue

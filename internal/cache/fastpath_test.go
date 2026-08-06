@@ -126,7 +126,7 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 	fp := NewFastPathHandlerFromStore(store)
 
 	obj := &api.Object{
-		Key:        1,
+		Key:        api.NewKeyFromUint64(1),
 		StatusCode: 200,
 		Header: header.FromHTTP(http.Header{
 			"Content-Type":   []string{"text/html"},
@@ -171,7 +171,7 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 
 	// Object that is stale but within SWR window.
 	obj := &api.Object{
-		Key:        1,
+		Key:        api.NewKeyFromUint64(1),
 		StatusCode: 200,
 		Header: header.FromHTTP(http.Header{
 			"Content-Type":   []string{"text/html"},
@@ -211,7 +211,7 @@ func BenchmarkFastPath_Hit(b *testing.B) {
 	fp := NewFastPathHandlerFromStore(store)
 
 	obj := &api.Object{
-		Key:        1,
+		Key:        api.NewKeyFromUint64(1),
 		StatusCode: 200,
 		Header: header.FromHTTP(http.Header{
 			"Content-Type":   []string{"text/html"},

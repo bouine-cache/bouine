@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -248,7 +249,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 }
 
 func (h *HotStore) shard(key api.Key) *shard {
-	return &h.shards[uint64(key)&h.mask]
+	return &h.shards[binary.LittleEndian.Uint64(key[:8])&h.mask]
 }
 
 // Get looks up key in the hot tier. Returns the object and api.SourceHot
@@ -391,7 +392,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
-	shardIdx := int(uint64(key) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
+	shardIdx := int(binary.LittleEndian.Uint64(key[:8]) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	// Move the body off the Go heap before acquiring the shard lock so
@@ -965,16 +966,29 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	return keys, total
 }
 
-// KeyHash computes the canonical cache key from a byte slice.
+// KeyHash computes a 128-bit cache key from a byte slice using the
+// same dual-xxhash64 scheme as cache.NewKey. Exported for callers that
+// construct keys outside the cache layer (admin tools, tests). Storage
+// cannot import cache, so the seed constant is duplicated here.
 func KeyHash(b []byte) api.Key {
-	return api.Key(xxhash.Sum64(b))
+	var k api.Key
+	binary.LittleEndian.PutUint64(k[:8], xxhash.Sum64(b))
+	g := xxhash.NewWithSeed(key2Seed)
+	_, _ = g.Write(b)
+	binary.LittleEndian.PutUint64(k[8:], g.Sum64())
+	return k
 }
 
+// key2Seed is the seed for the second xxhash64 half of the 128-bit
+// cache key. Duplicated from internal/cache.key2Seed because storage
+// cannot import cache (layer rule). Keep in sync.
+const key2Seed uint64 = 0x626f75696e6532 // "bouine2"
+
 const (
-	objectStructSize    int64 = 264 // unsafe.Sizeof(api.Object{}) — atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
+	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — Key grew 8→16 B inline. Update when fields are added.
 	hotEntrySize        int64 = 32
-	sieveEntrySize      int64 = 32
-	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.
+	sieveEntrySize      int64 = 40 // unsafe.Sizeof(sieve.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
+	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
 	headerEntriesSlice int64 = 24 // []headerEntry slice header
 	headerValuesSlice  int64 = 24 // []string slice header

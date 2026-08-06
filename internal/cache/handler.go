@@ -1454,8 +1454,7 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 		Host:   host,
 		TLS:    tlsState,
 	}
-	key := h.buildKey(locReq)
-	return key
+	return h.buildKey(locReq)
 }
 
 // storeObject stores obj under key. When refresh-before-expiry

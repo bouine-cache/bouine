@@ -760,8 +760,7 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 			_, _ = h.WriteString(hdr.Key)
 			_, _ = h.WriteString(hdr.Value)
 		}
-		vHash := h.Sum64()
-		return primary.WithVary(vHash)
+		return primary.WithVary(h.Sum64())
 	}
 
 	// Parse and sort Vary field names.
@@ -809,6 +808,5 @@ func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy
 	if !written {
 		return primary
 	}
-	vHash := xxhash.Sum64(buf[:off])
-	return primary.WithVary(vHash)
+	return primary.WithVary(xxhash.Sum64(buf[:off]))
 }

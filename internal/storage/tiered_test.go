@@ -18,6 +18,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/storage/wal"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -189,9 +190,9 @@ func TestTiered_WALReplay(t *testing.T) {
 	// Write WAL entries manually.
 	l, err := wal.Open(walPath)
 	require.NoError(t, err, "wal open")
-	_ = l.Append(wal.PutEntry(api.NewKeyFromUint64(42), 0, 0))
-	_ = l.Append(wal.PutEntry(api.NewKeyFromUint64(43), 0, 100))
-	_ = l.Append(wal.DeleteEntry(api.NewKeyFromUint64(42)))
+	_ = l.Append(wal.PutEntry(testkey.From(42), 0, 0))
+	_ = l.Append(wal.PutEntry(testkey.From(43), 0, 100))
+	_ = l.Append(wal.DeleteEntry(testkey.From(42)))
 	_ = l.Close()
 
 	// Replay and verify.
@@ -202,10 +203,10 @@ func TestTiered_WALReplay(t *testing.T) {
 	})
 	require.NoError(t, err, "replay")
 	require.Len(t, entries, 3)
-	if !entries[0].IsPut() || entries[0].Key != api.NewKeyFromUint64(42) {
+	if !entries[0].IsPut() || entries[0].Key != testkey.From(42) {
 		t.Fatalf("entry 0: %+v", entries[0])
 	}
-	if !entries[2].IsDelete() || entries[2].Key != api.NewKeyFromUint64(42) {
+	if !entries[2].IsDelete() || entries[2].Key != testkey.From(42) {
 		t.Fatalf("entry 2: %+v", entries[2])
 	}
 }
@@ -835,11 +836,11 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Fill the warm tier to exactly the budget. Protect all entries so
 	// the eviction policy can't free space.
 	for i := range numFill {
-		_, _, err := ts.warm.Put(api.NewKeyFromUint64(uint64(i)), make([]byte, warmBodySize))
+		_, _, err := ts.warm.Put(testkey.From(uint64(i)), make([]byte, warmBodySize))
 		require.NoErrorf(t, err, "warm.Put %d under budget", i)
 	}
 	for i := range numFill {
-		ts.warm.Protect(api.NewKeyFromUint64(uint64(i)))
+		ts.warm.Protect(testkey.From(uint64(i)))
 	}
 
 	// Verify warm is over budget.
@@ -848,7 +849,7 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Put some objects in the hot tier (below body_threshold so they're
 	// hot-only and candidates for warm sync promotion).
 	for i := range 10 {
-		k := api.NewKeyFromUint64(uint64(1000 + i))
+		k := testkey.From(uint64(1000 + i))
 		err := ts.Put(ctx, k, obj(k, 100))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
@@ -859,7 +860,7 @@ func TestWarmSync_SkipsPromotionWhenOverBudget(t *testing.T) {
 	// Verify none of the hot-only keys were promoted to warm.
 	for i := range 10 {
 		k := uint64(1000 + i)
-		_, _, ok := ts.warm.Lookup(api.NewKeyFromUint64(k))
+		_, _, ok := ts.warm.Lookup(testkey.From(k))
 		assert.False(t, ok)
 	}
 
@@ -885,7 +886,7 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	// range as the actual hot-only objects below — the Key field is
 	// uvarint-encoded so key magnitude affects the encoded length.
 	// The warm record size is warmRecordSize(len(encodedBody)).
-	probeKey := api.NewKeyFromUint64(uint64(1000))
+	probeKey := testkey.From(1000)
 	encodedBody := encodeObject(obj(probeKey, 100))
 	recSize := warmRecordSize(len(encodedBody))
 
@@ -912,7 +913,7 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	// is hit mid-cycle.
 	const numHotOnly = 5
 	for i := range numHotOnly {
-		k := api.NewKeyFromUint64(uint64(1000 + i))
+		k := testkey.From(uint64(1000 + i))
 		err := ts.Put(ctx, k, obj(k, 100))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
@@ -925,10 +926,10 @@ func TestWarmSync_StopsPromotionMidCycleOnOverBudget(t *testing.T) {
 	promoted := 0
 	for i := range numHotOnly {
 		k := uint64(1000 + i)
-		if _, _, ok := ts.warm.Lookup(api.NewKeyFromUint64(k)); ok {
+		if _, _, ok := ts.warm.Lookup(testkey.From(k)); ok {
 			// Protect promoted entries so eviction doesn't remove
 			// them before we count.
-			ts.warm.Protect(api.NewKeyFromUint64(k))
+			ts.warm.Protect(testkey.From(k))
 			promoted++
 		}
 	}
@@ -981,9 +982,9 @@ func TestTieredPut_LargeObjectSucceedsWhenWarmOverBudget(t *testing.T) {
 	require.NoError(t, err, "NewTieredStore")
 
 	for i := range numFill {
-		_, _, err := ts.warm.Put(api.NewKeyFromUint64(uint64(i)), make([]byte, warmBodySize))
+		_, _, err := ts.warm.Put(testkey.From(uint64(i)), make([]byte, warmBodySize))
 		require.NoErrorf(t, err, "warm.Put fill %d", i)
-		ts.warm.Protect(api.NewKeyFromUint64(uint64(i)))
+		ts.warm.Protect(testkey.From(uint64(i)))
 	}
 	require.True(t, ts.warm.OverBudget(), "warm should be over budget after fill")
 

@@ -14,7 +14,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
-	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -62,7 +62,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 		w.Header().Set(header.XCache, "HIT")
 		w.WriteHeader(200)
 		if rw, ok := w.(*responsewriter.ResponseWriter); ok {
-			rw.SetCacheKey(api.NewKeyFromUint64(uint64(42)))
+			rw.SetCacheKey(testkey.From(42))
 		}
 	})
 

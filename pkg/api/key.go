@@ -32,16 +32,6 @@ type Key [16]byte
 // which computes both xxhash64 halves.
 func NewKeyFromBytes(b [16]byte) Key { return Key(b) }
 
-// NewKeyFromUint64 builds a Key with v in the low half and a zeroed
-// high half. Intended for tests and diagnostics where distinctness
-// matters but 128-bit collision resistance does not. Production key
-// construction MUST go through cache.NewKey.
-func NewKeyFromUint64(v uint64) Key {
-	var k Key
-	binary.LittleEndian.PutUint64(k[:8], v)
-	return k
-}
-
 // WithVary returns a variant key derived by XORing varyHash into both
 // 8-byte halves. Because both halves are independent xxhash64 values,
 // mixing both by the 64-bit vary hash preserves the 128-bit collision

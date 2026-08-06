@@ -18,6 +18,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -55,7 +56,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, src, err := s.Get(context.Background(), api.NewKeyFromUint64(999))
+	got, src, err := s.Get(context.Background(), testkey.From(999))
 	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -95,7 +96,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 
 	// Insert objects until eviction must have happened.
 	for i := range 100 {
-		k := api.NewKeyFromUint64(uint64(i))
+		k := testkey.From(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, 500))
 	}
 
@@ -308,7 +309,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	}
 
 	for i := range 500 {
-		k := api.NewKeyFromUint64(uint64(i))
+		k := testkey.From(uint64(i))
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
@@ -353,7 +354,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := range 1000 {
-				k := api.NewKeyFromUint64(uint64(base*1000 + i))
+				k := testkey.From(uint64(base*1000 + i))
 				_ = s.Put(context.Background(), k, obj(k, 64))
 				_, _, _ = s.Get(context.Background(), k)
 			}
@@ -371,7 +372,7 @@ func TestHotStore_Stats(t *testing.T) {
 	k := KeyHash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_, _, _ = s.Get(context.Background(), k)
-	_, _, _ = s.Get(context.Background(), api.NewKeyFromUint64(12345)) // miss
+	_, _, _ = s.Get(context.Background(), testkey.From(12345)) // miss
 
 	st := s.Stats()
 	require.Equal(t, int64(1), st.HotEntries)
@@ -530,7 +531,7 @@ func TestHotOverflowLatency(t *testing.T) {
 
 	// Pre-fill to capacity.
 	for i := range approxCap * runtime.NumCPU() {
-		k := api.NewKeyFromUint64(uint64(i))
+		k := testkey.From(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -551,7 +552,7 @@ func TestHotOverflowLatency(t *testing.T) {
 			local := make([]time.Duration, 0, 1024)
 			for !stop.Load() {
 				n := ctr.Add(1)
-				k := api.NewKeyFromUint64(uint64(n % uint64(working)))
+				k := testkey.From(n % uint64(working))
 				if n%5 == 0 {
 					_ = s.Put(ctx, k, obj(k, bodySize))
 					continue

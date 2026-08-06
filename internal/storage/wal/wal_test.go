@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 )
 
 func tmpWAL(t *testing.T) (*Log, string) {
@@ -25,10 +25,10 @@ func TestAppendAndReplay(t *testing.T) {
 	l, path := tmpWAL(t)
 
 	entries := []Entry{
-		PutEntry(api.NewKeyFromUint64(100), 0, 0),
-		PutEntry(api.NewKeyFromUint64(200), 0, 1024),
-		DeleteEntry(api.NewKeyFromUint64(100)),
-		PutEntry(api.NewKeyFromUint64(300), 1, 0),
+		PutEntry(testkey.From(100), 0, 0),
+		PutEntry(testkey.From(200), 0, 1024),
+		DeleteEntry(testkey.From(100)),
+		PutEntry(testkey.From(300), 1, 0),
 	}
 	for _, e := range entries {
 		err := l.Append(e)
@@ -73,7 +73,7 @@ func TestReplay_MissingFile(t *testing.T) {
 func TestReplay_TruncatedRecord(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
-	err := l.Append(PutEntry(api.NewKeyFromUint64(1), 0, 0))
+	err := l.Append(PutEntry(testkey.From(1), 0, 0))
 	require.NoError(t, err, "append")
 	_ = l.Close()
 
@@ -94,7 +94,7 @@ func TestTruncate(t *testing.T) {
 	t.Parallel()
 	l, path := tmpWAL(t)
 	for range 5 {
-		err := l.Append(PutEntry(api.NewKeyFromUint64(1), 0, 0))
+		err := l.Append(PutEntry(testkey.From(1), 0, 0))
 		require.NoError(t, err, "append")
 	}
 	err := l.Truncate()
@@ -108,11 +108,11 @@ func TestTruncate(t *testing.T) {
 
 func TestEntryHelpers(t *testing.T) {
 	t.Parallel()
-	p := PutEntry(api.NewKeyFromUint64(42), 3, 1024)
+	p := PutEntry(testkey.From(42), 3, 1024)
 	if !p.IsPut() || p.IsDelete() {
 		t.Fatal("PutEntry flags wrong")
 	}
-	d := DeleteEntry(api.NewKeyFromUint64(42))
+	d := DeleteEntry(testkey.From(42))
 	if !d.IsDelete() || d.IsPut() {
 		t.Fatal("DeleteEntry flags wrong")
 	}
@@ -132,10 +132,10 @@ func TestAsyncEnqueueSyncReplay(t *testing.T) {
 	l, path := tmpAsyncWAL(t, 50*time.Millisecond)
 
 	entries := []Entry{
-		PutEntry(api.NewKeyFromUint64(100), 0, 0),
-		PutEntry(api.NewKeyFromUint64(200), 0, 1024),
-		DeleteEntry(api.NewKeyFromUint64(100)),
-		PutEntry(api.NewKeyFromUint64(300), 1, 0),
+		PutEntry(testkey.From(100), 0, 0),
+		PutEntry(testkey.From(200), 0, 1024),
+		DeleteEntry(testkey.From(100)),
+		PutEntry(testkey.From(300), 1, 0),
 	}
 	for _, e := range entries {
 		err := l.Enqueue(e)
@@ -165,10 +165,10 @@ func TestAsyncEnqueueBatchSyncReplay(t *testing.T) {
 	l, path := tmpAsyncWAL(t, 50*time.Millisecond)
 
 	entries := []Entry{
-		PutEntry(api.NewKeyFromUint64(1), 0, 0),
-		PutEntry(api.NewKeyFromUint64(2), 0, 100),
-		PutEntry(api.NewKeyFromUint64(3), 1, 200),
-		DeleteEntry(api.NewKeyFromUint64(2)),
+		PutEntry(testkey.From(1), 0, 0),
+		PutEntry(testkey.From(2), 0, 100),
+		PutEntry(testkey.From(3), 1, 200),
+		DeleteEntry(testkey.From(2)),
 	}
 	l.EnqueueBatch(entries)
 
@@ -188,7 +188,7 @@ func TestAsyncCloseFlushesPending(t *testing.T) {
 	require.NoError(t, err, "open")
 
 	for i := range 10 {
-		err := l.Enqueue(PutEntry(api.NewKeyFromUint64(uint64(i+1)), 0, int64(i*100)))
+		err := l.Enqueue(PutEntry(testkey.From(uint64(i+1)), 0, int64(i*100)))
 		require.NoError(t, err, "enqueue")
 	}
 
@@ -212,7 +212,7 @@ func TestAsyncDropOnFull(t *testing.T) {
 
 	sent := syncChSize + 100
 	for i := range sent {
-		_ = l.Enqueue(PutEntry(api.NewKeyFromUint64(uint64(i+1)), 0, 0))
+		_ = l.Enqueue(PutEntry(testkey.From(uint64(i+1)), 0, 0))
 	}
 
 	dropped := l.DroppedEntries()
@@ -226,7 +226,7 @@ func TestOpenSyncVsAsync(t *testing.T) {
 	require.Nil(t, syncLog.syncCh)
 	// Enqueue on sync log falls back to Append — data is immediately
 	// durable without calling Sync.
-	err := syncLog.Enqueue(PutEntry(api.NewKeyFromUint64(42), 0, 0))
+	err := syncLog.Enqueue(PutEntry(testkey.From(42), 0, 0))
 	require.NoError(t, err, "enqueue on sync log")
 	var count int
 	_ = Replay(syncPath, func(_ Entry) error { count++; return nil })
@@ -247,7 +247,7 @@ func TestOpenAsyncSyncIntervalNeg1Fallback(t *testing.T) {
 	require.Nil(t, l.syncCh)
 
 	// Enqueue falls back to Append (synchronous).
-	err = l.Enqueue(PutEntry(api.NewKeyFromUint64(42), 0, 0))
+	err = l.Enqueue(PutEntry(testkey.From(42), 0, 0))
 	require.NoError(t, err, "enqueue")
 
 	// Data should be immediately durable (no async delay).
@@ -264,7 +264,7 @@ func TestAsyncTornRecord(t *testing.T) {
 	require.NoError(t, err, "open")
 
 	// Enqueue one valid entry and Sync to flush it.
-	err = l.Enqueue(PutEntry(api.NewKeyFromUint64(1), 0, 0))
+	err = l.Enqueue(PutEntry(testkey.From(1), 0, 0))
 	require.NoError(t, err, "enqueue")
 	err = l.Sync()
 	require.NoError(t, err, "sync")
@@ -293,7 +293,7 @@ func TestLastSyncTime(t *testing.T) {
 	// Initially zero (never synced).
 	require.True(t, l.LastSyncTime().IsZero())
 
-	err := l.Enqueue(PutEntry(api.NewKeyFromUint64(1), 0, 0))
+	err := l.Enqueue(PutEntry(testkey.From(1), 0, 0))
 	require.NoError(t, err, "enqueue")
 	err = l.Sync()
 	require.NoError(t, err, "sync")
@@ -315,7 +315,7 @@ func TestDroppedEntriesResets(t *testing.T) {
 
 	// Fill the channel beyond capacity to generate drops.
 	for i := range syncChSize + 50 {
-		_ = l.Enqueue(PutEntry(api.NewKeyFromUint64(uint64(i+1)), 0, 0))
+		_ = l.Enqueue(PutEntry(testkey.From(uint64(i+1)), 0, 0))
 	}
 
 	first := l.DroppedEntries()

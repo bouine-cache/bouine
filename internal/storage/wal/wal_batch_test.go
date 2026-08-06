@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 )
 
 func TestAppendBatch(t *testing.T) {
@@ -18,10 +18,10 @@ func TestAppendBatch(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 
 	entries := []Entry{
-		PutEntry(api.NewKeyFromUint64(10), 0, 0),
-		PutEntry(api.NewKeyFromUint64(20), 1, 512),
-		DeleteEntry(api.NewKeyFromUint64(10)),
-		PutEntry(api.NewKeyFromUint64(30), 2, 1024),
+		PutEntry(testkey.From(10), 0, 0),
+		PutEntry(testkey.From(20), 1, 512),
+		DeleteEntry(testkey.From(10)),
+		PutEntry(testkey.From(30), 2, 1024),
 	}
 	err = l.AppendBatch(entries)
 	require.NoError(t, err, "AppendBatch")
@@ -60,8 +60,8 @@ func TestAppendBatch_Atomicity(t *testing.T) {
 	require.NoError(t, err, "open")
 
 	entries := []Entry{
-		PutEntry(api.NewKeyFromUint64(100), 0, 0),
-		PutEntry(api.NewKeyFromUint64(200), 0, 256),
+		PutEntry(testkey.From(100), 0, 0),
+		PutEntry(testkey.From(200), 0, 256),
 	}
 	err = l.AppendBatch(entries)
 	require.NoError(t, err, "AppendBatch")

@@ -6,13 +6,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestEncodeDecodePurge_RoundTrip(t *testing.T) {
 	t.Parallel()
 	evt := api.PurgeEvent{
-		Key:      api.NewKeyFromUint64(uint64(0xDEADBEEF)),
+		Key:      testkey.From(0xDEADBEEF),
 		VaryKey:  "variant-1",
 		Issuer:   "node-0",
 		IssuedAt: time.Unix(0, 1234567890),
@@ -39,7 +40,7 @@ func TestEncodeDecodePurge_RoundTrip(t *testing.T) {
 func TestEncodeDecodePurge_EmptyStrings(t *testing.T) {
 	t.Parallel()
 	evt := api.PurgeEvent{
-		Key:      api.NewKeyFromUint64(1),
+		Key:      testkey.From(1),
 		VaryKey:  "",
 		Issuer:   "",
 		IssuedAt: time.Unix(0, 1),
@@ -125,7 +126,7 @@ func TestIsBinaryFrame(t *testing.T) {
 	t.Parallel()
 	require.False(t, IsBinaryFrame([]byte("{}")))
 	require.False(t, IsBinaryFrame(nil))
-	buf, _ := EncodePurgeGossip(api.PurgeEvent{Key: api.NewKeyFromUint64(1)})
+	buf, _ := EncodePurgeGossip(api.PurgeEvent{Key: testkey.From(1)})
 	require.True(t, IsBinaryFrame(buf))
 	require.Equal(t, msgTypePurge, GossipMsgType(buf))
 }

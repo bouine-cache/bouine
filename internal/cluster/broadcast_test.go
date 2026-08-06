@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -43,10 +44,10 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(42)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(42), "")
 
 	require.Len(t, received, 1)
-	assert.Equal(t, api.NewKeyFromUint64(uint64(42)), received[0].Key)
+	assert.Equal(t, testkey.From(42), received[0].Key)
 }
 
 func TestBroadcaster_BroadcastBan(t *testing.T) {
@@ -102,7 +103,7 @@ func TestBroadcaster_SkipsSelf(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(1)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(1), "")
 
 	assert.Equal(t, 1, called)
 }
@@ -123,7 +124,7 @@ func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(99)), "/v")
+	b.BroadcastPurge(context.Background(), testkey.From(99), "/v")
 
 	require.Equal(t, 0, httpCalled)
 }
@@ -144,7 +145,7 @@ func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(7)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(7), "")
 
 	require.Equal(t, 1, httpCalled)
 }
@@ -188,7 +189,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(1)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(1), "")
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -216,7 +217,7 @@ func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(77)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(77), "")
 
 	families, _ := reg.Gather()
 	var reason string
@@ -267,7 +268,7 @@ func TestBroadcastPurge_NotCancelledByParentContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	b.BroadcastPurge(ctx, api.NewKeyFromUint64(uint64(42)), "")
+	b.BroadcastPurge(ctx, testkey.From(42), "")
 
 	if got := received.Load(); got != 1 {
 		t.Fatalf("expected 1 peer to receive purge despite cancelled parent ctx, got %d", got)
@@ -316,7 +317,7 @@ func TestBroadcaster_UsesHTTPWhenNoTLS(t *testing.T) {
 	}}
 
 	b := NewBroadcaster(c, nil)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(1)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(1), "")
 
 	if gotTLS {
 		t.Fatal("expected plaintext HTTP with nil fetcher, got TLS")
@@ -346,7 +347,7 @@ func TestBroadcaster_UsesHTTPSWhenFetcherHasTLS(t *testing.T) {
 	}
 
 	b := NewBroadcaster(c, fetcher)
-	b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(1)), "")
+	b.BroadcastPurge(context.Background(), testkey.From(1), "")
 
 	if !gotTLS {
 		t.Fatal("expected HTTPS with TLS fetcher, got plaintext")
@@ -365,7 +366,7 @@ func TestBroadcaster_SendsAuthToken(t *testing.T) {
 		name string
 		op   func(b *Broadcaster)
 	}{
-		{"purge", func(b *Broadcaster) { b.BroadcastPurge(context.Background(), api.NewKeyFromUint64(uint64(1)), "") }},
+		{"purge", func(b *Broadcaster) { b.BroadcastPurge(context.Background(), testkey.From(1), "") }},
 		{"ban", func(b *Broadcaster) { b.BroadcastBan(context.Background(), api.BanExpr{HostRegex: "test\\.com"}) }},
 	}
 	for _, tc := range cases {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -68,17 +69,17 @@ func TestEvictionLogging_BackedSkipped(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(1)), &api.Object{
-		Key: api.NewKeyFromUint64(1), Body: make([]byte, 100),
+	_ = h.Put(ctx, testkey.From(1), &api.Object{
+		Key: testkey.From(1), Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(2)), &api.Object{
-		Key: api.NewKeyFromUint64(2), Body: make([]byte, 100),
+	_ = h.Put(ctx, testkey.From(2), &api.Object{
+		Key: testkey.From(2), Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
-	h.SetBacked(api.NewKeyFromUint64(uint64(1)))
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(3)), &api.Object{
-		Key: api.NewKeyFromUint64(3), Body: make([]byte, 100),
+	h.SetBacked(testkey.From(1))
+	_ = h.Put(ctx, testkey.From(3), &api.Object{
+		Key: testkey.From(3), Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
 	h.Close(ctx)
@@ -104,16 +105,16 @@ func TestEvictionLogging_NoBackup(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(1)), &api.Object{
-		Key: api.NewKeyFromUint64(1), Body: make([]byte, 100),
+	_ = h.Put(ctx, testkey.From(1), &api.Object{
+		Key: testkey.From(1), Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(2)), &api.Object{
-		Key: api.NewKeyFromUint64(2), Body: make([]byte, 100),
+	_ = h.Put(ctx, testkey.From(2), &api.Object{
+		Key: testkey.From(2), Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(3)), &api.Object{
-		Key: api.NewKeyFromUint64(3), Body: make([]byte, 100),
+	_ = h.Put(ctx, testkey.From(3), &api.Object{
+		Key: testkey.From(3), Body: make([]byte, 100),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
 	h.Close(ctx)
@@ -140,8 +141,8 @@ func TestEvictionLogging_Expired(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(1)), &api.Object{
-		Key: api.NewKeyFromUint64(1), Body: make([]byte, 10),
+	_ = h.Put(ctx, testkey.From(1), &api.Object{
+		Key: testkey.From(1), Body: make([]byte, 10),
 		StoredAt: time.Now().Add(-2 * time.Hour),
 		TTL:      time.Second,
 	})
@@ -190,15 +191,15 @@ func TestEvictionLogging_SweeperOvershoot(t *testing.T) {
 	ctx := context.Background()
 	// First object: fits (shard empty, 870 > 500 but no entries to
 	// evict → stillOver=true, sweeper signaled but has nothing to do).
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(0)), &api.Object{
-		Key: api.NewKeyFromUint64(0), Body: make([]byte, 400),
+	_ = h.Put(ctx, testkey.From(0), &api.Object{
+		Key: testkey.From(0), Body: make([]byte, 400),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
 	// Second object: shard already over (870 > 500). Inline evicts
 	// up to 4 (only 1 entry), inserts new (870+870=1740 >> 500).
 	// stillOver=true → sweeper signal. Sweeper evicts to get under 500.
-	_ = h.Put(ctx, api.NewKeyFromUint64(uint64(1)), &api.Object{
-		Key: api.NewKeyFromUint64(1), Body: make([]byte, 400),
+	_ = h.Put(ctx, testkey.From(1), &api.Object{
+		Key: testkey.From(1), Body: make([]byte, 400),
 		StoredAt: time.Now(), TTL: time.Hour,
 	})
 	// Poll for the sweeper to process the overshoot and emit the log.
@@ -238,8 +239,8 @@ func TestEvictionLogging_ConcurrentSafe(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_ = h.Put(ctx, api.NewKeyFromUint64(uint64(idx)), &api.Object{
-				Key: api.NewKeyFromUint64(uint64(idx)), Body: make([]byte, 50),
+			_ = h.Put(ctx, testkey.From(uint64(idx)), &api.Object{
+				Key: testkey.From(uint64(idx)), Body: make([]byte, 50),
 				StoredAt: time.Now(), TTL: time.Hour,
 			})
 		}(i)

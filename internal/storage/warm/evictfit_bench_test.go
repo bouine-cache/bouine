@@ -3,7 +3,7 @@ package warm
 import (
 	"testing"
 
-	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 )
 
 // BenchmarkWarmEvictToFit_MultiEvict measures evictToFit when a single Put
@@ -37,7 +37,7 @@ func BenchmarkWarmEvictToFit_MultiEvict(b *testing.B) {
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
-		if _, _, err := s.Put(api.NewKeyFromUint64(uint64(i)), body); err != nil {
+		if _, _, err := s.Put(testkey.From(uint64(i)), body); err != nil {
 			b.Fatalf("Put(%d): %v", i, err)
 		}
 	}
@@ -53,10 +53,10 @@ func BenchmarkWarmEvictToFit_MultiEvict(b *testing.B) {
 		b.StopTimer()
 		for i := range seedEntries {
 			s.idxMu.RLock()
-			_, exists := s.index[api.NewKeyFromUint64(uint64(i))]
+			_, exists := s.index[testkey.From(uint64(i))]
 			s.idxMu.RUnlock()
 			if !exists {
-				_, _, _ = s.Put(api.NewKeyFromUint64(uint64(i)), body)
+				_, _, _ = s.Put(testkey.From(uint64(i)), body)
 			}
 		}
 		b.StartTimer()

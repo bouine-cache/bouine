@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -1264,7 +1265,7 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	t.Parallel()
 	r := newRefreshRegistry()
-	key := api.NewKeyFromUint64(uint64(42))
+	key := testkey.From(42)
 
 	// Key not registered → DecrementPersist returns false.
 	require.False(t, r.DecrementPersist(key))

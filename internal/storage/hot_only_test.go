@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -196,7 +197,7 @@ func TestHotOnly_KeysRotation(t *testing.T) {
 
 	// Insert 10 keys.
 	for i := range 10 {
-		k := api.NewKeyFromUint64(uint64(i + 1))
+		k := testkey.From(uint64(i + 1))
 		_ = s.Put(ctx, k, obj(k, 10))
 	}
 

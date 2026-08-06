@@ -8,20 +8,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fromUint64 builds a Key with v in the low half and a zeroed high
+// half. Local test helper — production tests use testkey.From.
+func fromUint64(v uint64) Key {
+	var k Key
+	binary.LittleEndian.PutUint64(k[:8], v)
+	return k
+}
+
 func TestNewKeyFromBytes(t *testing.T) {
+	t.Parallel()
 	b := [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 	k := NewKeyFromBytes(b)
 	require.Equal(t, Key(b), k)
 }
 
-func TestNewKeyFromUint64(t *testing.T) {
-	k := NewKeyFromUint64(0xDEADBEEF)
+func TestHash64ReturnsLowHalf(t *testing.T) {
+	t.Parallel()
+	k := fromUint64(0xDEADBEEF)
 	require.Equal(t, uint64(0xDEADBEEF), k.Hash64())
-	// High half must be zero for the test/diagnostic constructor.
 	require.Equal(t, uint64(0), binary.LittleEndian.Uint64(k[8:]))
 }
 
 func TestWithVaryXorsBothHalves(t *testing.T) {
+	t.Parallel()
 	k := NewKeyFromBytes([16]byte{
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
@@ -33,24 +43,28 @@ func TestWithVaryXorsBothHalves(t *testing.T) {
 }
 
 func TestWithVaryZeroIsIdentity(t *testing.T) {
-	k := NewKeyFromUint64(42)
+	t.Parallel()
+	k := fromUint64(42)
 	require.Equal(t, k, k.WithVary(0))
 }
 
 func TestIsZero(t *testing.T) {
+	t.Parallel()
 	require.True(t, Key{}.IsZero())
-	require.False(t, NewKeyFromUint64(1).IsZero())
+	require.False(t, fromUint64(1).IsZero())
 }
 
 func TestHexIs32Chars(t *testing.T) {
-	k := NewKeyFromUint64(0x42)
+	t.Parallel()
+	k := fromUint64(0x42)
 	s := k.Hex()
 	require.Len(t, s, 32)
 	require.Equal(t, k.Hex(), k.String())
 }
 
 func TestSingleFlightKeyDistinguishesSuffix(t *testing.T) {
-	k := NewKeyFromUint64(0xCAFEBABE)
+	t.Parallel()
+	k := fromUint64(0xCAFEBABE)
 	base := k.SingleFlightKey(0)
 	reval := k.SingleFlightKey(1)
 	require.NotEqual(t, base, reval)
@@ -58,13 +72,13 @@ func TestSingleFlightKeyDistinguishesSuffix(t *testing.T) {
 }
 
 func TestKeyJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	k := NewKeyFromBytes([16]byte{
 		0xEF, 0xBE, 0xAD, 0xDE, 0x00, 0x00, 0x00, 0x00,
 		0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00,
 	})
 	out, err := json.Marshal(k)
 	require.NoError(t, err)
-	// [lo, hi] decimal array.
 	require.Equal(t, `[3735928559,305419896]`, string(out))
 
 	var got Key
@@ -73,6 +87,7 @@ func TestKeyJSONRoundTrip(t *testing.T) {
 }
 
 func TestKeyUnmarshalJSONRejectsBadInput(t *testing.T) {
+	t.Parallel()
 	var k Key
 	err := json.Unmarshal([]byte(`"deadbeef"`), &k)
 	require.Error(t, err)

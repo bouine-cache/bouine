@@ -11,10 +11,10 @@ import (
 // for a short URL.
 var canonicalKey = []byte("https|example.com|/path|q=1|GET")
 
-// BenchmarkNewKey measures the default constructor (option A): one
-// xxhash.Sum64 for the primary plus one xxhash.NewWithSeed Digest for
-// the guard. Escape analysis stack-allocates the Digest, so this is
-// zero-allocation. This is the path wired into BuildKey.
+// BenchmarkNewKey measures the constructor: one xxhash.Sum64 for the
+// primary plus one xxhash.NewWithSeed Digest for the guard. Escape
+// analysis stack-allocates the Digest, so this is zero-allocation.
+// This is the path wired into BuildKey.
 func BenchmarkNewKey(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
@@ -22,33 +22,16 @@ func BenchmarkNewKey(b *testing.B) {
 	}
 }
 
-// BenchmarkNewKeyZeroAlloc measures the alternative constructor
-// (option B): two xxhash.Sum64 calls over a stack buffer (the guard
-// input is canonical||seed). Zero allocations on the common path
-// (canonical ≤ 512 bytes). Not wired into BuildKey; see NewKeyZeroAlloc
-// godoc for the migration caveat (different guard hash values).
-func BenchmarkNewKeyZeroAlloc(b *testing.B) {
-	b.ReportAllocs()
-	for range b.N {
-		_ = NewKeyZeroAlloc(canonicalKey)
-	}
-}
-
-// TestNewKeyDistinctHashes confirms the two constructors produce
-// distinct guard values (they are different functions and must not be
-// mixed within a deployment) but the same primary.
-func TestNewKeyDistinctHashes(t *testing.T) {
+// TestNewKeyNonZero confirms NewKey produces a non-zero key with a
+// guard distinct from the primary (the two hashes are independent).
+func TestNewKeyNonZero(t *testing.T) {
 	t.Parallel()
-	a := NewKey(canonicalKey)
-	z := NewKeyZeroAlloc(canonicalKey)
-	if a.Primary() != z.Primary() {
-		t.Fatalf("primary mismatch: %d vs %d", a.Primary(), z.Primary())
-	}
-	if a.Guard() == z.Guard() {
-		t.Fatalf("guards must differ between constructors: both %d", a.Guard())
-	}
-	if a.IsZero() {
+	k := NewKey(canonicalKey)
+	if k.IsZero() {
 		t.Fatal("NewKey produced a zero key")
+	}
+	if k.Primary() == k.Guard() {
+		t.Fatalf("primary and guard must differ: both %d", k.Primary())
 	}
 }
 

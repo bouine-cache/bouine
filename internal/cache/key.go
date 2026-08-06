@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"encoding/binary"
 	"net/http"
 	"net/url"
 	"sort"
@@ -24,43 +23,14 @@ const key2Seed uint64 = 0x626f75696e6532
 // hash is xxhash64(canonical); the guard hash is xxhash64 with an
 // independent seed over the same bytes.
 //
-// This is the default constructor used by BuildKey. It allocates one
-// *xxhash.Digest for the seeded guard hash, but escape analysis
-// stack-allocates it (the digest does not escape NewKey), so the
-// constructor is zero-allocation in practice — see BenchmarkNewKey.
+// This is the single constructor used by BuildKey. The seeded
+// *xxhash.Digest does not escape NewKey, so escape analysis
+// stack-allocates it and the constructor is zero-allocation — see
+// BenchmarkNewKey.
 func NewKey(canonical []byte) api.Key {
 	g := xxhash.NewWithSeed(key2Seed)
 	_, _ = g.Write(canonical)
 	return api.NewKeyFromHashes(xxhash.Sum64(canonical), g.Sum64())
-}
-
-// NewKeyZeroAlloc is an alternative constructor that avoids the
-// *xxhash.Digest by appending the seed bytes to a stack copy of the
-// canonical buffer and calling the zero-allocation xxhash.Sum64 on the
-// extended input. The guard hash is statistically independent from the
-// primary because the hash inputs differ (canonical vs canonical||seed).
-//
-// For canonical buffers ≤ 512 bytes this is fully zero-allocation; the
-// rare overflow path (canonical > 512 bytes) falls back to a single heap
-// allocation, mirroring BuildKey's existing heap fallback.
-//
-// Note: NewKeyZeroAlloc produces DIFFERENT guard hash values than NewKey
-// (seeded-digest vs seed-append are different functions), so the two
-// constructors are not interchangeable. A deployment must pick one and
-// stick with it; switching requires a codec bump and cache flush. Use
-// the NewKey / NewKeyZeroAlloc benchmarks to compare before switching.
-func NewKeyZeroAlloc(canonical []byte) api.Key {
-	primary := xxhash.Sum64(canonical)
-	if len(canonical) <= 512 {
-		var buf [520]byte
-		n := copy(buf[:], canonical)
-		binary.LittleEndian.PutUint64(buf[n:], key2Seed)
-		return api.NewKeyFromHashes(primary, xxhash.Sum64(buf[:n+8]))
-	}
-	buf := make([]byte, len(canonical)+8)
-	copy(buf, canonical)
-	binary.LittleEndian.PutUint64(buf[len(canonical):], key2Seed)
-	return api.NewKeyFromHashes(primary, xxhash.Sum64(buf))
 }
 
 // BuildKeyFromURL computes the canonical cache key from a raw URL

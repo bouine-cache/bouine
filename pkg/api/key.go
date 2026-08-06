@@ -13,10 +13,10 @@ import (
 // provide 128-bit collision resistance (birthday bound ~2^64 objects).
 //
 // The two hashes are encapsulated: callers must not reach in and read or
-// construct them directly. Use NewKeyFromHashes (in the cache layer,
-// which owns the xxhash seeding) to build a key from precomputed hashes,
-// KeyFromPrimary to reconstruct a key from a stored primary hash, and
-// the With* methods to derive related keys.
+// construct them directly. Use cache.NewKey / cache.BuildKey to build a
+// key from a canonical request; NewKeyFromHashes is the low-level
+// constructor for the hashing layer, and KeyFromPrimary reconstructs a
+// key from a stored primary hash. The With* methods derive related keys.
 //
 // The zero-value Key (both hashes 0) represents an unset/invalid key.
 type Key struct {
@@ -67,11 +67,6 @@ func (k Key) WithVary(varyHash uint64) Key {
 // share the same cache key without colliding. Pass 0 for a plain fetch.
 func (k Key) SingleFlightKey(suffix uint64) string {
 	return strconv.FormatUint(k.hash^suffix, 36) + ":" + strconv.FormatUint(k.hash2, 36)
-}
-
-// Equals reports whether two keys are identical (both hashes match).
-func (k Key) Equals(other Key) bool {
-	return k.hash == other.hash && k.hash2 == other.hash2
 }
 
 // SameGuard reports whether k and other share the same guard hash.

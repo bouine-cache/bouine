@@ -504,11 +504,6 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 	return loaded, api.SourceWarm, nil
 }
 
-// GetForSync reads an object from the hot tier without guard verification.
-// Used by internal paths (scheduler, variant slot probing) that don't
-// have the requesting guard. Does not consult the warm tier — callers
-// that need warm-tier fallback should use Get with the full key.
-
 // Put stores an object in the hot tier and, for large objects, also
 // in the warm tier (with a WAL record).
 func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) error {

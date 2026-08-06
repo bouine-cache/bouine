@@ -28,7 +28,6 @@ import (
 // risk.
 type Store interface {
 	Get(ctx context.Context, key api.Key) (*api.Object, api.Source, error)
-	// have the requesting guard. The caller trusts the entry because it
 	Put(ctx context.Context, key api.Key, obj *api.Object) error
 	Delete(ctx context.Context, key api.Key) error
 	Ban(ctx context.Context, predicate api.BanExpr) (int, error)

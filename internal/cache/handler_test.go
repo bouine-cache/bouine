@@ -1265,7 +1265,7 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	t.Parallel()
 	r := newRefreshRegistry()
-	key := testkey.From(42)
+	key := testkey.Key(42)
 
 	// Key not registered → DecrementPersist returns false.
 	require.False(t, r.DecrementPersist(key))

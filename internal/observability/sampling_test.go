@@ -17,7 +17,7 @@ func TestSampledByKeyDeterminism(t *testing.T) {
 	t.Parallel()
 	l := NewSampledLogger(nil, 100)
 	for i := range 1000 {
-		key := testkey.From(uint64(i * 7))
+		key := testkey.Key(uint64(i * 7))
 		first := l.sampledByKey(key)
 		second := l.sampledByKey(key)
 		require.Equal(t, second, first)
@@ -29,7 +29,7 @@ func TestSampledByKeyRate(t *testing.T) {
 	l := NewSampledLogger(nil, 100)
 	sampled := 0
 	for i := range 10000 {
-		if l.sampledByKey(testkey.From(uint64(i))) {
+		if l.sampledByKey(testkey.Key(uint64(i))) {
 			sampled++
 		}
 	}
@@ -40,7 +40,7 @@ func TestSampledByKeyZeroRateAlwaysLogs(t *testing.T) {
 	t.Parallel()
 	l := NewSampledLogger(nil, 0)
 	for i := range 100 {
-		require.True(t, l.sampledByKey(testkey.From(uint64(i))))
+		require.True(t, l.sampledByKey(testkey.Key(uint64(i))))
 	}
 }
 
@@ -49,7 +49,7 @@ func TestSampledByKeyDistribution(t *testing.T) {
 	l := NewSampledLogger(nil, 100)
 	buckets := make(map[int]int)
 	for i := range 100000 {
-		if l.sampledByKey(testkey.From(uint64(i))) {
+		if l.sampledByKey(testkey.Key(uint64(i))) {
 			buckets[i/1000%10]++
 		}
 	}
@@ -90,7 +90,7 @@ func TestInfoZeroRateAlwaysLogs(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	l := NewSampledLogger(slog.New(slog.NewJSONHandler(&buf, nil)), 0)
-	l.Info("test message", "key", testkey.From(42))
+	l.Info("test message", "key", testkey.Key(42))
 	require.NotEqual(t, 0, buf.Len())
 	var rec map[string]any
 	err := json.Unmarshal(buf.Bytes(), &rec)
@@ -102,9 +102,9 @@ func TestInfoKeyFilteredBySampling(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	l := NewSampledLogger(slog.New(slog.NewJSONHandler(&buf, nil)), 100)
-	l.Info("filtered", "key", testkey.From(1))
+	l.Info("filtered", "key", testkey.Key(1))
 	require.Equal(t, 0, buf.Len())
-	l.Info("passes", "key", testkey.From(100))
+	l.Info("passes", "key", testkey.Key(100))
 	require.NotEqual(t, 0, buf.Len())
 }
 

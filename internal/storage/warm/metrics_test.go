@@ -90,15 +90,15 @@ func TestMetrics_OverBudgetIncrements(t *testing.T) {
 	// Fill the budget with protected entries so eviction cannot free space.
 	smallBody := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 4; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), smallBody)
+		_, _, err := s.Put(testkey.Key(uint64(i)), smallBody)
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 	for i := 0; i < 4; i++ {
-		s.Protect(testkey.From(uint64(i)))
+		s.Protect(testkey.Key(uint64(i)))
 	}
 
 	// This Put must be rejected with ErrOverBudget.
-	_, _, err = s.Put(testkey.From(99), smallBody)
+	_, _, err = s.Put(testkey.Key(99), smallBody)
 	require.True(t, errors.Is(err, ErrOverBudget))
 
 	got := metricValue(t, reg, "bouine_warm_over_budget_total")
@@ -119,10 +119,10 @@ func TestMetrics_EvictionsIncrements(t *testing.T) {
 	smallBody := make([]byte, 100) // 120 bytes per record
 	// 3 records × 120 = 360 = budget. The 4th Put must evict to fit.
 	for i := 0; i < 3; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), smallBody)
+		_, _, err := s.Put(testkey.Key(uint64(i)), smallBody)
 		require.NoErrorf(t, err, "Put %d", i)
 	}
-	_, _, err = s.Put(testkey.From(99), smallBody)
+	_, _, err = s.Put(testkey.Key(99), smallBody)
 	require.NoError(t, err, "Put 99 with eviction")
 
 	got := metricValue(t, reg, "bouine_warm_evictions_total")
@@ -160,7 +160,7 @@ func TestMetrics_DiskBytesMatchesSegmentSizes(t *testing.T) {
 
 	body := make([]byte, 100) // 120 bytes per record
 	for i := 0; i < 5; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), body)
+		_, _, err := s.Put(testkey.Key(uint64(i)), body)
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 
@@ -219,7 +219,7 @@ func TestMetrics_NilMetricsSafe(t *testing.T) {
 
 	body := make([]byte, 100)
 	for i := 0; i < 5; i++ {
-		_, _, _ = s.Put(testkey.From(uint64(i)), body) // some may be rejected, must not panic
+		_, _, _ = s.Put(testkey.Key(uint64(i)), body) // some may be rejected, must not panic
 	}
 	err = s.Compact()
 	require.NoError(t, err, "Compact with nil metrics")

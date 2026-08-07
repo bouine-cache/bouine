@@ -32,7 +32,7 @@ func BenchmarkHotStore_Get_Miss(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_, _, _ = s.Get(context.Background(), testkey.From(0xDEADBEEF))
+		_, _, _ = s.Get(context.Background(), testkey.Key(0xDEADBEEF))
 	}
 }
 
@@ -43,7 +43,7 @@ func BenchmarkHotStore_Put(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := range b.N {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
@@ -61,14 +61,14 @@ func BenchmarkHotStore_Put_Eviction(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 8192, NumShards: 4})
 	// Fill up.
 	for i := range 100 {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, 512))
 	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := range b.N {
-		k := testkey.From(uint64(i + 10000))
+		k := testkey.Key(uint64(i + 10000))
 		_ = s.Put(context.Background(), k, obj(k, 512))
 	}
 }
@@ -95,7 +95,7 @@ func BenchmarkHotGet_NoBans_Parallel(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	ks := make([]api.Key, keys)
 	for i := range ks {
-		ks[i] = testkey.From(uint64(i + 1))
+		ks[i] = testkey.Key(uint64(i + 1))
 		_ = s.Put(context.Background(), ks[i], obj(ks[i], 1024))
 	}
 	// Warm the visited bits so every Get takes the RLock fast path.
@@ -126,7 +126,7 @@ func BenchmarkHotGet_WithBan_Parallel(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	ks := make([]api.Key, keys)
 	for i := range ks {
-		ks[i] = testkey.From(uint64(i + 1))
+		ks[i] = testkey.Key(uint64(i + 1))
 		_ = s.Put(context.Background(), ks[i], obj(ks[i], 1024))
 	}
 	for _, k := range ks {
@@ -167,7 +167,7 @@ func BenchmarkHotPut_Overflow(b *testing.B) {
 	// Pre-fill to the budget so we start in steady-state eviction.
 	prefill := (budgetBytes / (bodySize + 256))
 	for i := range prefill {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -176,7 +176,7 @@ func BenchmarkHotPut_Overflow(b *testing.B) {
 	ctx := context.Background()
 	for i := range b.N {
 		// 1.5x working set: keep churning fresh keys past the budget.
-		k := testkey.From(uint64(i + prefill))
+		k := testkey.Key(uint64(i + prefill))
 		_ = s.Put(ctx, k, obj(k, bodySize))
 	}
 }
@@ -193,7 +193,7 @@ func BenchmarkHotMixed_80_20(b *testing.B) {
 	)
 	s := NewHotStore(HotConfig{MaxBytes: budgetBytes, NumShards: 16})
 	for i := range working {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -210,7 +210,7 @@ func BenchmarkHotMixed_80_20(b *testing.B) {
 		local := make([]time.Duration, 0, 4096)
 		for pb.Next() {
 			n := ctr.Add(1)
-			k := testkey.From(uint64(n % working))
+			k := testkey.Key(uint64(n % working))
 			if n%5 == 0 {
 				// 20% writes.
 				_ = s.Put(ctx, k, obj(k, bodySize))
@@ -263,7 +263,7 @@ func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: shards})
 	ks := make([]api.Key, shards)
 	for i := range ks {
-		ks[i] = testkey.From(uint64(i + 1))
+		ks[i] = testkey.Key(uint64(i + 1))
 		_ = s.Put(context.Background(), ks[i], obj(ks[i], 1024))
 	}
 	for _, k := range ks {

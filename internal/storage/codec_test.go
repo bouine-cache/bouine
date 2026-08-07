@@ -16,7 +16,7 @@ import (
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	orig := &api.Object{
-		Key:        testkey.From(0xDEADBEEFCAFE),
+		Key:        testkey.Key(0xDEADBEEFCAFE),
 		VaryKey:    "accept-encoding=gzip",
 		StatusCode: http.StatusOK,
 		Header: header.FromHTTP(http.Header{

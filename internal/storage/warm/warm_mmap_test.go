@@ -18,7 +18,7 @@ func TestMmapFieldNilByDefault(t *testing.T) {
 	t.Parallel()
 	s := tmpStore(t)
 	body := []byte("test body")
-	segID, _, err := s.Put(testkey.From(1), body)
+	segID, _, err := s.Put(testkey.Key(1), body)
 	require.NoError(t, err)
 	s.mu.RLock()
 	seg := s.segs[segID]
@@ -38,7 +38,7 @@ func TestReadRecordAtMmapFallback(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	body := []byte("fallback test body")
-	segID, off, err := s.Put(testkey.From(1), body)
+	segID, off, err := s.Put(testkey.Key(1), body)
 	require.NoError(t, err)
 	totalSize := int64(HeaderLen + len(body) + FooterLen)
 
@@ -55,7 +55,7 @@ func TestReadRecordAtMmapFallback(t *testing.T) {
 	// Full readRecordAt should succeed via the pread fallback.
 	rec2, err := readRecordAt(seg, off, totalSize)
 	require.NoError(t, err, "readRecordAt")
-	if rec2.Key != testkey.From(1) || string(rec2.Body) != string(body) {
+	if rec2.Key != testkey.Key(1) || string(rec2.Body) != string(body) {
 		t.Errorf("readRecordAt: key=%d body=%q, want key=1 body=%q", rec2.Key, rec2.Body, body)
 	}
 }
@@ -82,14 +82,14 @@ func TestMmapGetAfterSegmentRotation(t *testing.T) {
 	var keys []uint64
 	for i := uint64(0); i < 10; i++ {
 		key := uint64(100 + i)
-		_, _, err := s.Put(testkey.From(key), body)
+		_, _, err := s.Put(testkey.Key(key), body)
 		require.NoErrorf(t, err, "Put(%d)", key)
 		keys = append(keys, key)
 	}
 
 	// Verify all reads succeed, including from the sealed segment(s).
 	for _, key := range keys {
-		got, err := s.Get(testkey.From(key))
+		got, err := s.Get(testkey.Key(key))
 		require.NoErrorf(t, err, "Get(%d)", key)
 		require.NotNil(t, got)
 		assert.Equal(t, string(body), string(got))
@@ -115,12 +115,12 @@ func TestMmapGetAfterCompact(t *testing.T) {
 
 	body := []byte("compact test body")
 	for i := uint64(0); i < 100; i++ {
-		_, _, err := s.Put(testkey.From(i), body)
+		_, _, err := s.Put(testkey.Key(i), body)
 		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 	// Delete some to create tombstones for compaction.
 	for i := uint64(0); i < 50; i++ {
-		_, err := s.Delete(testkey.From(i))
+		_, err := s.Delete(testkey.Key(i))
 		require.NoErrorf(t, err, "Delete(%d)", i)
 	}
 
@@ -129,7 +129,7 @@ func TestMmapGetAfterCompact(t *testing.T) {
 
 	// Reads from live keys should succeed.
 	for i := uint64(50); i < 100; i++ {
-		got, err := s.Get(testkey.From(i))
+		got, err := s.Get(testkey.Key(i))
 		require.NoErrorf(t, err, "Get(%d) after compact", i)
 		require.NotNil(t, got)
 		assert.Equal(t, string(body), string(got))
@@ -137,7 +137,7 @@ func TestMmapGetAfterCompact(t *testing.T) {
 
 	// Deleted keys should return nil (tombstone or missing).
 	for i := uint64(0); i < 50; i++ {
-		got, err := s.Get(testkey.From(i))
+		got, err := s.Get(testkey.Key(i))
 		require.NoErrorf(t, err, "Get(%d) deleted", i)
 		assert.Nil(t, got)
 	}
@@ -161,12 +161,12 @@ func TestMmapFdCacheEviction(t *testing.T) {
 	}
 	// Write enough to create 2 segments.
 	for i := uint64(0); i < 10; i++ {
-		_, _, err := s.Put(testkey.From(i), body)
+		_, _, err := s.Put(testkey.Key(i), body)
 		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
 	// Read from the old segment to trigger lazy mmap init (on Linux).
-	_, err = s.Get(testkey.From(0))
+	_, err = s.Get(testkey.Key(0))
 	require.NoError(t, err, "Get(0) before eviction")
 
 	// Close the old segment's fd to simulate fdCache eviction.
@@ -183,7 +183,7 @@ func TestMmapFdCacheEviction(t *testing.T) {
 	require.True(t, oldSeg.closeIfIdle())
 
 	// Read from the old segment after fd close.
-	got, err := s.Get(testkey.From(0))
+	got, err := s.Get(testkey.Key(0))
 	require.NoError(t, err, "Get(0) after fd close")
 	require.NotNil(t, got)
 	assert.Equal(t, string(body), string(got))
@@ -202,12 +202,12 @@ func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 
 	body := []byte("concurrent compact test body")
 	for i := uint64(0); i < 500; i++ {
-		_, _, err := s.Put(testkey.From(i), body)
+		_, _, err := s.Put(testkey.Key(i), body)
 		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 	// Delete half to create tombstones.
 	for i := uint64(0); i < 250; i++ {
-		_, err := s.Delete(testkey.From(i))
+		_, err := s.Delete(testkey.Key(i))
 		require.NoErrorf(t, err, "Delete(%d)", i)
 	}
 
@@ -219,7 +219,7 @@ func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 			defer wg.Done()
 			for j := range 200 {
 				key := uint64(250 + (j % 250))
-				got, err := s.Get(testkey.From(key))
+				got, err := s.Get(testkey.Key(key))
 				if err != nil {
 					t.Errorf("goroutine %d: Get(%d): %v", g, key, err)
 					return
@@ -247,7 +247,7 @@ func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 
 	// Verify reads still work after compaction.
 	for i := uint64(250); i < 500; i++ {
-		got, err := s.Get(testkey.From(i))
+		got, err := s.Get(testkey.Key(i))
 		require.NoErrorf(t, err, "Get(%d) post-compact", i)
 		require.NotNil(t, got)
 	}
@@ -270,7 +270,7 @@ func TestMmapNonLinuxStubs(t *testing.T) {
 		body[i] = byte(i)
 	}
 	for i := uint64(0); i < 10; i++ {
-		_, _, err := s.Put(testkey.From(i), body)
+		_, _, err := s.Put(testkey.Key(i), body)
 		require.NoErrorf(t, err, "Put(%d)", i)
 	}
 
@@ -298,7 +298,7 @@ func TestMmapNonLinuxStubs(t *testing.T) {
 
 	// Reads should work via pread fallback.
 	for i := uint64(0); i < 10; i++ {
-		got, err := s.Get(testkey.From(i))
+		got, err := s.Get(testkey.Key(i))
 		require.NoErrorf(t, err, "Get(%d)", i)
 		if got == nil || string(got) != string(body) {
 			t.Errorf("Get(%d) = %q, want %q", i, got, body)
@@ -325,7 +325,7 @@ func BenchmarkReadRecordAtMmap(b *testing.B) {
 		"----------------------------------------------"))
 	// Write enough records to trigger rollover so key 0 is in a sealed segment.
 	for i := uint64(0); i < 5; i++ {
-		if _, _, err := s.Put(testkey.From(i), body); err != nil {
+		if _, _, err := s.Put(testkey.Key(i), body); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -346,14 +346,14 @@ func BenchmarkReadRecordAtMmap(b *testing.B) {
 
 	// Get the index entry for key 0 to find offset and size.
 	s.idxMu.RLock()
-	loc, ok := s.index[testkey.From(0)]
+	loc, ok := s.index[testkey.Key(0)]
 	s.idxMu.RUnlock()
 	if !ok {
 		b.Fatal("key 0 not in index")
 	}
 
 	// Trigger lazy mmap init (on Linux) by doing one Get.
-	if _, err := s.Get(testkey.From(0)); err != nil {
+	if _, err := s.Get(testkey.Key(0)); err != nil {
 		b.Fatal(err)
 	}
 
@@ -364,7 +364,7 @@ func BenchmarkReadRecordAtMmap(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if rec.Key != testkey.From(0) {
+		if rec.Key != testkey.Key(0) {
 			b.Fatalf("key=%d, want 0", rec.Key)
 		}
 	}

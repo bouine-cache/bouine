@@ -178,7 +178,7 @@ func TestStore_SegmentCacheSizeEviction(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 5; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), make([]byte, 500))
+		_, _, err := s.Put(testkey.Key(uint64(i)), make([]byte, 500))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 
@@ -216,7 +216,7 @@ func TestStore_FDCacheClearedOnCompact(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 3; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), make([]byte, 100))
+		_, _, err := s.Put(testkey.Key(uint64(i)), make([]byte, 100))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 
@@ -241,7 +241,7 @@ func TestStore_FDCacheConcurrentReaders(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 
 	for i := 0; i < 10; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), make([]byte, 500))
+		_, _, err := s.Put(testkey.Key(uint64(i)), make([]byte, 500))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 
@@ -251,7 +251,7 @@ func TestStore_FDCacheConcurrentReaders(t *testing.T) {
 		go func(key api.Key) {
 			defer wg.Done()
 			_, _ = s.Get(key)
-		}(testkey.From(uint64(i)))
+		}(testkey.Key(uint64(i)))
 	}
 	wg.Wait()
 }
@@ -268,7 +268,7 @@ func TestStore_FDCacheClearedOnClose(t *testing.T) {
 	require.NoError(t, err, "NewStore")
 
 	for i := 0; i < 3; i++ {
-		_, _, err := s.Put(testkey.From(uint64(i)), make([]byte, 500))
+		_, _, err := s.Put(testkey.Key(uint64(i)), make([]byte, 500))
 		require.NoErrorf(t, err, "Put %d", i)
 	}
 

@@ -26,7 +26,7 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 
 	const n = 1000
 	for i := range n {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		o := obj(k, 64)
 		o.Header.Set(header.XBouineHost, "example.com")
 		o.Header.Set(header.XBouinePath, fmt.Sprintf("/ban-%d", i))
@@ -38,7 +38,7 @@ func TestBan_ParallelEvictsAllMatching(t *testing.T) {
 	require.Equal(t, n, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), testkey.From(uint64(i)))
+		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
 		assert.Nil(t, got)
 	}
 }
@@ -53,7 +53,7 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 
 	const n = 500
 	for i := range n {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		o := obj(k, 64)
 		o.Header.Set(header.XBouineHost, "keep.example.com")
 		_ = s.Put(context.Background(), k, o)
@@ -64,7 +64,7 @@ func TestBan_ParallelNonMatchingRegexReturnsZero(t *testing.T) {
 	require.Equal(t, 0, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), testkey.From(uint64(i)))
+		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
 		assert.NotNil(t, got)
 	}
 }
@@ -79,7 +79,7 @@ func TestBan_ParallelPartialMatch(t *testing.T) {
 
 	const n = 400
 	for i := range n {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		o := obj(k, 64)
 		if i%2 == 0 {
 			o.Header.Set(header.XBouinePath, "/ban-me")
@@ -94,7 +94,7 @@ func TestBan_ParallelPartialMatch(t *testing.T) {
 	require.Equal(t, n/2, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), testkey.From(uint64(i)))
+		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
 		if i%2 == 0 {
 			assert.Nil(t, got)
 		} else {
@@ -113,7 +113,7 @@ func TestBan_ParallelEvictionCount(t *testing.T) {
 
 	const n = 800
 	for i := range n {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		o := obj(k, 64)
 		o.Header.Set(header.XBouineHost, "evict.example.com")
 		_ = s.Put(context.Background(), k, o)
@@ -138,7 +138,7 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 
 	const n = 600
 	for i := range n {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		o := obj(k, 64)
 		if i%3 == 0 {
 			o.SurrogateKeys = []string{"target"}
@@ -154,7 +154,7 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 	require.Equal(t, want, count)
 
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), testkey.From(uint64(i)))
+		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
 		if i%3 == 0 {
 			assert.Nil(t, got)
 		} else {
@@ -173,7 +173,7 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 
 	const n = 1000
 	for i := range n {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		o := obj(k, 64)
 		if i%2 == 0 {
 			o.Header.Set(header.XBouineHost, "a.example.com")
@@ -216,7 +216,7 @@ func TestBan_ParallelConcurrentBans(t *testing.T) {
 	got := total.Load()
 	require.Equal(t, int64(n), got)
 	for i := range n {
-		got, _, _ := s.Get(context.Background(), testkey.From(uint64(i)))
+		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))
 		assert.Nil(t, got)
 	}
 }

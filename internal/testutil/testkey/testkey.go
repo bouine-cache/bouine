@@ -10,11 +10,11 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// From builds an [api.Key] with n in the low half and a zeroed high half.
+// Key builds an [api.Key] with n in the low half and a zeroed high half.
 // Accepts uint64 so callers can pass loop counters and hash values
 // without a cast; untyped int constants are converted automatically.
-func From(n uint64) api.Key {
+func Key(n uint64) api.Key {
 	var k api.Key
-	binary.LittleEndian.PutUint64(k[:8], uint64(n))
+	binary.LittleEndian.PutUint64(k[:8], n)
 	return k
 }

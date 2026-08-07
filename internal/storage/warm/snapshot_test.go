@@ -21,7 +21,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	keys := []uint64{1, 42, 100, 999, 12345}
 	for _, k := range keys {
 		body := []byte("value-for-key")
-		_, _, err := s.Put(testkey.From(k), body)
+		_, _, err := s.Put(testkey.Key(k), body)
 		require.NoErrorf(t, err, "put %d", k)
 	}
 
@@ -47,7 +47,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	require.Len(t, keys, got)
 
 	for _, k := range keys {
-		body, gErr := s2.Get(testkey.From(k))
+		body, gErr := s2.Get(testkey.Key(k))
 		require.Nil(t, gErr)
 		require.NotNil(t, body)
 		require.Equal(t, "value-for-key", string(body))
@@ -65,7 +65,7 @@ func TestSnapshotCorruptHeaderMagic(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err, "new")
-	_, _, err = s.Put(testkey.From(1), []byte("data"))
+	_, _, err = s.Put(testkey.Key(1), []byte("data"))
 	require.NoError(t, err, "put")
 	err = s.WriteSnapshot()
 	require.NoError(t, err, "writeSnapshot")
@@ -91,7 +91,7 @@ func TestSnapshotCorruptFooterCRC(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err, "new")
-	_, _, err = s.Put(testkey.From(1), []byte("data"))
+	_, _, err = s.Put(testkey.Key(1), []byte("data"))
 	require.NoError(t, err, "put")
 	err = s.WriteSnapshot()
 	require.NoError(t, err, "writeSnapshot")
@@ -118,7 +118,7 @@ func TestSnapshotMissingSegment(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err, "new")
-	_, _, err = s.Put(testkey.From(1), []byte("data"))
+	_, _, err = s.Put(testkey.Key(1), []byte("data"))
 	require.NoError(t, err, "put")
 	err = s.WriteSnapshot()
 	require.NoError(t, err, "writeSnapshot")
@@ -147,7 +147,7 @@ func TestSnapshotSegmentSizeMismatch(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err, "new")
-	_, _, err = s.Put(testkey.From(1), []byte("data"))
+	_, _, err = s.Put(testkey.Key(1), []byte("data"))
 	require.NoError(t, err, "put")
 	err = s.WriteSnapshot()
 	require.NoError(t, err, "writeSnapshot")
@@ -178,7 +178,7 @@ func TestSnapshotSegmentGrewAfterCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err, "new")
-	_, _, err = s.Put(testkey.From(1), []byte("initial"))
+	_, _, err = s.Put(testkey.Key(1), []byte("initial"))
 	require.NoError(t, err, "put")
 	err = s.WriteSnapshot()
 	require.NoError(t, err, "writeSnapshot")
@@ -187,7 +187,7 @@ func TestSnapshotSegmentGrewAfterCheckpoint(t *testing.T) {
 	// Simulate writes that happen after the checkpoint: append more
 	// data to the same segment so its on-disk size grows beyond the
 	// snapshot size. The WAL would normally capture these writes.
-	_, _, err = s.Put(testkey.From(2), []byte("appended-data"))
+	_, _, err = s.Put(testkey.Key(2), []byte("appended-data"))
 	require.NoError(t, err, "put after snapshot")
 
 	// Simulate a hard kill (SIGKILL) — close the file handles without
@@ -219,7 +219,7 @@ func TestSnapshotCloseWritesSnapshot(t *testing.T) {
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err, "new")
 	for i := range 10 {
-		_, _, err := s.Put(testkey.From(uint64(i+1)), []byte("val"))
+		_, _, err := s.Put(testkey.Key(uint64(i+1)), []byte("val"))
 		require.NoErrorf(t, err, "put %d", i+1)
 	}
 	err = s.Close()
@@ -284,7 +284,7 @@ func TestSnapshotConcurrentWithCompact(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	for i := range 200 {
-		_, _, err := s.Put(testkey.From(uint64(i)), make([]byte, 1024))
+		_, _, err := s.Put(testkey.Key(uint64(i)), make([]byte, 1024))
 		require.NoErrorf(t, err, "put %d", i)
 	}
 

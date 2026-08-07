@@ -50,12 +50,12 @@ func BenchmarkWarmSync_CacheSurvivalRate(b *testing.B) {
 
 			// Fill with small objects (below threshold — hot-only).
 			for i := range smallObjCount {
-				k := testkey.From(uint64(i))
+				k := testkey.Key(uint64(i))
 				_ = ts1.Put(context.Background(), k, obj(k, 100))
 			}
 			// Fill with large objects (above threshold — written to warm on Put).
 			for i := range largeObjCount {
-				k := testkey.From(uint64(smallObjCount + i))
+				k := testkey.Key(uint64(smallObjCount + i))
 				_ = ts1.Put(context.Background(), k, bigObj(k, 2000))
 			}
 
@@ -128,7 +128,7 @@ func BenchmarkWarmSync_Overhead(b *testing.B) {
 
 	// Fill with 1000 small objects (hot-only).
 	for i := range 1000 {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 
@@ -166,11 +166,11 @@ func BenchmarkWarmSync_StaleEntryCleanup(b *testing.B) {
 	// objects (hot-only). Without notifyEvict, the stale warm copies
 	// would linger forever.
 	for i := range 500 {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 	}
 	for i := range 500 {
-		k := testkey.From(uint64(i))
+		k := testkey.Key(uint64(i))
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 

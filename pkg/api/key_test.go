@@ -9,7 +9,7 @@ import (
 )
 
 // fromUint64 builds a Key with v in the low half and a zeroed high
-// half. Local test helper — production tests use testkey.From.
+// half. Local test helper — production tests use testkey.Key.
 func fromUint64(v uint64) Key {
 	var k Key
 	binary.LittleEndian.PutUint64(k[:8], v)

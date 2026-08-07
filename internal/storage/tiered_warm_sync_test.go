@@ -39,7 +39,7 @@ func TestWarmSync_WritesHotOnlyEntriesToWarm(t *testing.T) {
 	ts := tieredStoreWithSync(t, 100) // sync disabled, we call cycle manually
 	// Put small objects (below bodyThreshold=1024) so they stay hot-only.
 	for i := range 10 {
-		k := testkey.From(uint64(100 + i))
+		k := testkey.Key(uint64(100 + i))
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 
@@ -59,7 +59,7 @@ func TestWarmSync_SkipsWarmBackedEntries(t *testing.T) {
 	ts := tieredStoreWithSync(t, 100)
 
 	// Put a large object (> bodyThreshold) so it goes to warm on Put.
-	k := testkey.From(200)
+	k := testkey.Key(200)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
 	warmKeysBefore := len(ts.warm.Keys())
@@ -76,7 +76,7 @@ func TestWarmSync_RespectsBatchSize(t *testing.T) {
 	ts := tieredStoreWithSync(t, 3) // batch size 3
 
 	for i := range 10 {
-		k := testkey.From(uint64(300 + i))
+		k := testkey.Key(uint64(300 + i))
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 
@@ -108,7 +108,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// Put a large object (goes to warm on Put, marks hasBackup).
-	k := testkey.From(400)
+	k := testkey.Key(400)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
 	warmKeysBefore := len(ts.warm.Keys())
@@ -117,7 +117,7 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 	// Fill with many large entries to force SIEVE eviction of k.
 	// evictPreferBacked targets backed entries first.
 	for i := range 50 {
-		k2 := testkey.From(uint64(500 + i))
+		k2 := testkey.Key(uint64(500 + i))
 		_ = ts.Put(context.Background(), k2, bigObj(k2, 2000))
 	}
 
@@ -159,7 +159,7 @@ func TestWarmSync_TombstoneQueueOverflowNonBlocking(t *testing.T) {
 	// so all sends should succeed without blocking.
 	qcap := cap(ts.tombstoneQueue)
 	for i := range qcap {
-		ts.tombstoneQueue <- testkey.From(uint64(600 + i))
+		ts.tombstoneQueue <- testkey.Key(uint64(600 + i))
 	}
 
 	// runWarmSyncCycle should drain the queue without blocking.
@@ -224,7 +224,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 	require.NoError(t, err, "NewTieredStore")
 
 	for i := range 5 {
-		k := testkey.From(uint64(700 + i))
+		k := testkey.Key(uint64(700 + i))
 		_ = ts1.Put(context.Background(), k, obj(k, 100))
 	}
 	ts1.runWarmSyncCycle(context.Background())
@@ -248,7 +248,7 @@ func TestWarmSync_RestartRecovery(t *testing.T) {
 
 	// Verify warm hits work.
 	for i := range 5 {
-		k := testkey.From(uint64(700 + i))
+		k := testkey.Key(uint64(700 + i))
 		got, src, err := ts2.Get(context.Background(), k)
 		if err != nil || got == nil {
 			t.Fatalf("Get(%d): got=%v src=%q err=%v", k, got, src, err)
@@ -276,7 +276,7 @@ func TestWarmSync_WarmSyncIntervalNegativeOneDisablesSync(t *testing.T) {
 	// syncWg should be 0 — no goroutine started.
 	// Put small objects and poll — warm should stay empty since sync is disabled.
 	for i := range 5 {
-		k := testkey.From(uint64(800 + i))
+		k := testkey.Key(uint64(800 + i))
 		_ = ts.Put(context.Background(), k, obj(k, 100))
 	}
 	poll.Eventually(t, 200*time.Millisecond, 20*time.Millisecond, func() bool {
@@ -304,7 +304,7 @@ func TestWarmSync_RebuildIndexFromScan(t *testing.T) {
 
 	// Put large objects (go to warm on Put).
 	for i := range 3 {
-		k := testkey.From(uint64(900 + i))
+		k := testkey.Key(uint64(900 + i))
 		_ = ts1.Put(context.Background(), k, bigObj(k, 2000))
 	}
 	_ = ts1.Close(context.Background())
@@ -352,10 +352,10 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 	// Put 3 large objects, then delete one so a tombstone exists in the
 	// segment alongside the live records.
 	for i := range 3 {
-		k := testkey.From(uint64(900 + i))
+		k := testkey.Key(uint64(900 + i))
 		_ = ts1.Put(context.Background(), k, bigObj(k, 2000))
 	}
-	err = ts1.Delete(context.Background(), testkey.From(901))
+	err = ts1.Delete(context.Background(), testkey.Key(901))
 	require.NoError(t, err, "Delete")
 	_ = ts1.Close(context.Background())
 
@@ -378,7 +378,7 @@ func TestWarmSync_RebuildIndexFromScanHonoursTombstones(t *testing.T) {
 	// resurrected by the segment scan.
 	keys := ts2.warm.Keys()
 	require.Len(t, keys, 2)
-	got, _, err := ts2.Get(context.Background(), testkey.From(901))
+	got, _, err := ts2.Get(context.Background(), testkey.Key(901))
 	require.NoError(t, err, "Get(901)")
 	require.Nil(t, got)
 }
@@ -393,7 +393,7 @@ func TestPutReplace_TombstonesOldWarmCopy(t *testing.T) {
 	ts := tieredStoreWithSync(t, 100)
 
 	// Put a large object — goes to warm, marks hasBackup.
-	k := testkey.From(1100)
+	k := testkey.Key(1100)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 
 	keys := ts.warm.Keys()
@@ -441,7 +441,7 @@ func TestOnEvictCallback(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 
 	// Put entry and mark as backed.
-	k1 := testkey.From(1000)
+	k1 := testkey.Key(1000)
 	_ = s.Put(context.Background(), k1, obj(k1, 100))
 	s.SetBacked(k1)
 
@@ -450,7 +450,7 @@ func TestOnEvictCallback(t *testing.T) {
 	// so with backedCount > 0, k1 is guaranteed to be among the first
 	// evicted.
 	for i := range 200 {
-		k2 := testkey.From(uint64(2000 + i))
+		k2 := testkey.Key(uint64(2000 + i))
 		_ = s.Put(context.Background(), k2, obj(k2, 100))
 	}
 
@@ -487,7 +487,7 @@ func TestTombstoneDrain_DedicatedGoroutineDrainsQueues(t *testing.T) {
 	t.Cleanup(func() { _ = ts.Close(context.Background()) })
 
 	// Put a large object (goes to warm on Put, marks hasBackup).
-	k := testkey.From(1200)
+	k := testkey.Key(1200)
 	_ = ts.Put(context.Background(), k, bigObj(k, 2000))
 	require.Len(t, ts.warm.Keys(), 1, "warm should have the large object")
 

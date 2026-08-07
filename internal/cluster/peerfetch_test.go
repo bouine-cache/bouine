@@ -45,7 +45,7 @@ func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop 
 
 func TestPeerFetchHandler_Hit(t *testing.T) {
 	t.Parallel()
-	key := testkey.From(42)
+	key := testkey.Key(42)
 	store := &stubStore{objects: map[api.Key]*api.Object{
 		key: {Key: key, StatusCode: 200, Body: []byte("cached")},
 	}}
@@ -66,7 +66,7 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 // map[string][]string per header on every peer fetch.
 func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	t.Parallel()
-	key := testkey.From(42)
+	key := testkey.Key(42)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -97,7 +97,7 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 // round-trip uses the binary codec with zero JSON on the response path.
 func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	t.Parallel()
-	key := testkey.From(7)
+	key := testkey.Key(7)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -126,14 +126,14 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 func TestPeerFetchHandler_Miss(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 0)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.From(999)}, 0)
+	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(999)}, 0)
 	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.From(1)}, MaxHops)
+	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, MaxHops)
 	require.Equal(t, http.StatusLoopDetected, rr.Code)
 }
 
@@ -141,11 +141,11 @@ func TestPeerFetchHandler_CustomHopLimit(t *testing.T) {
 	t.Parallel()
 	// hopLimit=1: a request at hop 1 should be rejected.
 	h := NewPeerFetchHandler(&stubStore{}, 1)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.From(1)}, 1)
+	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, 1)
 	require.Equal(t, http.StatusLoopDetected, rr.Code)
 	// hopLimit=3: a request at hop 2 should pass through (not rejected).
 	h3 := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 3)
-	rr3 := postFetch(t, h3, api.PeerFetchRequest{Key: testkey.From(1)}, 2)
+	rr3 := postFetch(t, h3, api.PeerFetchRequest{Key: testkey.Key(1)}, 2)
 	require.NotEqual(t, http.StatusLoopDetected, rr3.Code)
 }
 
@@ -164,14 +164,14 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(delay)
 		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.From(1), StatusCode: 200, Body: []byte("cached")}))
+		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("cached")}))
 	}))
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-		api.PeerFetchRequest{Key: testkey.From(1)})
+		api.PeerFetchRequest{Key: testkey.Key(1)})
 	require.NoError(t, err, "fetch")
 	require.NotNil(t, obj)
 
@@ -191,7 +191,7 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 // contract that peer-fetch depends on.
 func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	t.Parallel()
-	key := testkey.From(9)
+	key := testkey.Key(9)
 	storedAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	lastMod := time.Date(2026, 7, 5, 8, 30, 0, 0, time.UTC)
 	obj := &api.Object{
@@ -238,7 +238,7 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-		api.PeerFetchRequest{Key: testkey.From(1)})
+		api.PeerFetchRequest{Key: testkey.Key(1)})
 	require.NoError(t, err, "fetch")
 	require.Nil(t, obj)
 	hits, misses, _, _, _ := f.PeerFetchStats()
@@ -250,7 +250,7 @@ func TestPeerFetcher_HopLimitReached(t *testing.T) {
 	t.Parallel()
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
-		api.PeerFetchRequest{Key: testkey.From(1), Hops: MaxHops})
+		api.PeerFetchRequest{Key: testkey.Key(1), Hops: MaxHops})
 	require.NoError(t, err, "hop limit should return nil,nil")
 	require.Nil(t, obj)
 }
@@ -258,7 +258,7 @@ func TestPeerFetcher_HopLimitReached(t *testing.T) {
 func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	t.Parallel()
 	validResp := storage.EncodeObject(&api.Object{
-		Key:        testkey.From(1),
+		Key:        testkey.Key(1),
 		StatusCode: 200,
 		Body:       bytes.Repeat([]byte("A"), 4096),
 	})
@@ -274,7 +274,7 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-		api.PeerFetchRequest{Key: testkey.From(1)})
+		api.PeerFetchRequest{Key: testkey.Key(1)})
 	require.Error(t, err)
 	require.Nil(t, obj)
 }
@@ -294,7 +294,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		inFlight.Add(-1)
 		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.From(1), StatusCode: 200, Body: []byte("x")}))
+		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
 	}))
 	defer srv.Close()
 
@@ -307,7 +307,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 			defer wg.Done()
 			_, _ = f.Fetch(context.Background(),
 				api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-				api.PeerFetchRequest{Key: testkey.From(1)})
+				api.PeerFetchRequest{Key: testkey.Key(1)})
 		}()
 	}
 	wg.Wait()
@@ -323,7 +323,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-block
 		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.From(1)}))
+		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1)}))
 	}))
 	defer srv.Close()
 	defer close(block)
@@ -337,7 +337,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 			defer wg.Done()
 			_, _ = f.Fetch(context.Background(),
 				api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-				api.PeerFetchRequest{Key: testkey.From(1)})
+				api.PeerFetchRequest{Key: testkey.Key(1)})
 		}()
 	}
 
@@ -345,7 +345,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	defer cancel()
 	_, err := f.Fetch(ctx,
 		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
-		api.PeerFetchRequest{Key: testkey.From(2)})
+		api.PeerFetchRequest{Key: testkey.Key(2)})
 	require.Error(t, err)
 
 	wg.Wait()
@@ -356,7 +356,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 // hot path that issue #187 targeted. The body is 4 KiB with 10 headers,
 // matching the PR's throwaway benchmark setup so results are comparable.
 func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
-	key := testkey.From(1)
+	key := testkey.Key(1)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -393,7 +393,7 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 // storage.DecodeObject. This is the end-to-end path that the binary
 // codec replaces the JSON tower on.
 func BenchmarkPeerFetcher_Fetch(b *testing.B) {
-	key := testkey.From(1)
+	key := testkey.Key(1)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,

@@ -37,7 +37,7 @@ func BenchmarkWarmEvictToFit_MultiEvict(b *testing.B) {
 
 	body := make([]byte, seedBody)
 	for i := range seedEntries {
-		if _, _, err := s.Put(testkey.From(uint64(i)), body); err != nil {
+		if _, _, err := s.Put(testkey.Key(uint64(i)), body); err != nil {
 			b.Fatalf("Put(%d): %v", i, err)
 		}
 	}
@@ -53,10 +53,10 @@ func BenchmarkWarmEvictToFit_MultiEvict(b *testing.B) {
 		b.StopTimer()
 		for i := range seedEntries {
 			s.idxMu.RLock()
-			_, exists := s.index[testkey.From(uint64(i))]
+			_, exists := s.index[testkey.Key(uint64(i))]
 			s.idxMu.RUnlock()
 			if !exists {
-				_, _, _ = s.Put(testkey.From(uint64(i)), body)
+				_, _, _ = s.Put(testkey.Key(uint64(i)), body)
 			}
 		}
 		b.StartTimer()

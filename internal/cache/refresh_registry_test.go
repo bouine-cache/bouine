@@ -23,7 +23,7 @@ func TestRefreshRegistryRegisterLookup(t *testing.T) {
 		},
 	}
 
-	key := testkey.From(42)
+	key := testkey.Key(42)
 	r.Register(key, req, "", 0)
 
 	entry := r.Lookup(key)
@@ -52,7 +52,7 @@ func TestRefreshRegistryVaryHeaders(t *testing.T) {
 		},
 	}
 
-	key := testkey.From(99)
+	key := testkey.Key(99)
 	r.Register(key, req, "Accept, Accept-Language", 0)
 
 	entry := r.Lookup(key)
@@ -77,7 +77,7 @@ func TestRefreshRegistryUnregister(t *testing.T) {
 		Header: http.Header{},
 	}
 
-	key := testkey.From(1)
+	key := testkey.Key(1)
 	r.Register(key, req, "", 0)
 	require.Equal(t, 1, r.Len())
 
@@ -100,7 +100,7 @@ func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
 		},
 	}
 
-	key := testkey.From(77)
+	key := testkey.Key(77)
 	r.Register(key, req, "", 0)
 
 	// Mutate the original request header after registration.
@@ -124,7 +124,7 @@ func TestRefreshRegistryLen(t *testing.T) {
 	}
 
 	for i := range 5 {
-		r.Register(testkey.From(uint64(i)), req, "", 0)
+		r.Register(testkey.Key(uint64(i)), req, "", 0)
 	}
 	require.Equal(t, 5, r.Len())
 }

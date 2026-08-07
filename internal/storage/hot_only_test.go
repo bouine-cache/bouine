@@ -197,7 +197,7 @@ func TestHotOnly_KeysRotation(t *testing.T) {
 
 	// Insert 10 keys.
 	for i := range 10 {
-		k := testkey.From(uint64(i + 1))
+		k := testkey.Key(uint64(i + 1))
 		_ = s.Put(ctx, k, obj(k, 10))
 	}
 

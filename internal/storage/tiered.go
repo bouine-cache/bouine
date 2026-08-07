@@ -299,10 +299,10 @@ func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
 	// rebuildIndexFromScan honoring tombstones in segment order —
 	// the WAL delete is a fast-replay optimization, not the sole
 	// durability guarantee.
-	w.OnEvict = func(key uint64) {
-		t.hot.ClearBacked(api.Key(key))
+	w.OnEvict = func(key api.Key) {
+		t.hot.ClearBacked(key)
 		select {
-		case t.warmEvictQueue <- api.Key(key):
+		case t.warmEvictQueue <- key:
 		default:
 			t.droppedWarmEvicts.Add(1)
 		}
@@ -443,7 +443,7 @@ func (t *TieredStore) Get(ctx context.Context, key api.Key) (*api.Object, api.So
 	if t.warm == nil {
 		return nil, "", nil
 	}
-	body, wErr := t.warm.Get(uint64(key))
+	body, wErr := t.warm.Get(key)
 	if wErr != nil {
 		return nil, "", wErr
 	}
@@ -502,7 +502,7 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 
 	if t.warm != nil && obj.BodySize > t.bodyThreshold {
 		body := encodeObject(obj)
-		segID, offset, err := t.warm.Put(uint64(key), body) //nolint:gosec // segID fits int32
+		segID, offset, err := t.warm.Put(key, body) //nolint:gosec // segID fits int32
 		if err != nil {
 			if errors.Is(err, warm.ErrOverBudget) {
 				// Hot tier already holds the object; warm-tier
@@ -519,13 +519,13 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 		t.hot.SetBacked(key)
 		// Mark the warm entry as protected so warm-tier eviction
 		// skips it (the hot tier will re-sync it if evicted from warm).
-		t.warm.Protect(uint64(key))
+		t.warm.Protect(key)
 		if t.wal != nil {
 			if err := t.warm.SyncSegment(segID); err != nil {
 				return fmt.Errorf("warm: sync before wal append: %w", err)
 			}
 			recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
-			t.walEnqueue(wal.PutEntryWithSize(uint64(key), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
+			t.walEnqueue(wal.PutEntryWithSize(key, int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 			return nil
 		}
 	}
@@ -559,7 +559,7 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 	if t.warm == nil {
 		return nil
 	}
-	segID, err := t.warm.Delete(uint64(key))
+	segID, err := t.warm.Delete(key)
 	if err != nil {
 		return err
 	}
@@ -567,7 +567,7 @@ func (t *TieredStore) evictWarmErr(key api.Key) error {
 		if err := t.warm.SyncSegment(segID); err != nil {
 			return fmt.Errorf("warm: sync before wal append: %w", err)
 		}
-		t.walEnqueue(wal.DeleteEntry(uint64(key)))
+		t.walEnqueue(wal.DeleteEntry(key))
 		return nil
 	}
 	return nil
@@ -605,7 +605,7 @@ func (t *TieredStore) Keys() []api.Key {
 		out = append(out, k)
 	}
 	for _, wk := range warmKeys {
-		k := api.Key(wk)
+		k := wk
 		if _, ok := seen[k]; ok {
 			continue
 		}
@@ -931,7 +931,7 @@ func (t *TieredStore) collectHotOnlyKeysFallback() []api.Key {
 			skipped++
 			continue
 		}
-		if _, _, ok := t.warm.Lookup(uint64(k)); !ok {
+		if _, _, ok := t.warm.Lookup(k); !ok {
 			keys = append(keys, k)
 			needed--
 		}
@@ -944,7 +944,7 @@ func (t *TieredStore) collectHotOnlyKeysFallback() []api.Key {
 	// by the first pass and have not been added yet.
 	if needed > 0 {
 		for i := range offset {
-			if _, _, ok := t.warm.Lookup(uint64(hotKeys[i])); !ok {
+			if _, _, ok := t.warm.Lookup(hotKeys[i]); !ok {
 				keys = append(keys, hotKeys[i])
 				needed--
 			}
@@ -973,12 +973,12 @@ func (t *TieredStore) drainTombstones(walEntries *[]wal.Entry) int {
 	for {
 		select {
 		case key := <-t.tombstoneQueue:
-			if _, err := t.warm.Delete(uint64(key)); err != nil {
+			if _, err := t.warm.Delete(key); err != nil {
 				t.logger.Debug("warm sync: tombstone delete failed",
 					"key", key, "error", err)
 				continue
 			}
-			*walEntries = append(*walEntries, wal.DeleteEntry(uint64(key)))
+			*walEntries = append(*walEntries, wal.DeleteEntry(key))
 			tombstoned++
 		default:
 			return tombstoned
@@ -995,7 +995,7 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 	for {
 		select {
 		case key := <-t.warmEvictQueue:
-			*walEntries = append(*walEntries, wal.DeleteEntry(uint64(key)))
+			*walEntries = append(*walEntries, wal.DeleteEntry(key))
 			evicted++
 		default:
 			return evicted
@@ -1017,7 +1017,7 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 			continue
 		}
 		body := encodeObject(obj)
-		segID, offset, err := t.warm.Put(uint64(key), body)
+		segID, offset, err := t.warm.Put(key, body)
 		if err != nil {
 			if errors.Is(err, warm.ErrOverBudget) {
 				// Remaining keys including this one — not yet
@@ -1035,9 +1035,9 @@ func (t *TieredStore) writeHotOnlyToWarm(ctx context.Context, hotOnlyKeys []api.
 			continue
 		}
 		recSize := int64(warm.HeaderLen + len(body) + warm.FooterLen)
-		*walEntries = append(*walEntries, wal.PutEntryWithSize(uint64(key), int32(segID), offset, recSize)) //nolint:gosec // segID bounded
+		*walEntries = append(*walEntries, wal.PutEntryWithSize(key, int32(segID), offset, recSize)) //nolint:gosec // segID bounded
 		t.hot.SetBacked(key)
-		t.warm.Protect(uint64(key))
+		t.warm.Protect(key)
 		synced++
 	}
 	return synced, skipped, skippedOverBudget

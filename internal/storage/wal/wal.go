@@ -3,29 +3,32 @@
 // segment at which offset, so the index can be rebuilt after a crash
 // without scanning all segments.
 //
-// Record layout (little-endian):
+// Record layout (little-endian). v3: all records use 128-bit (16-byte)
+// keys. There is no v1/v2 decode path — a clean break with no backward
+// compat (nothing runs in production). Existing WAL files are deleted
+// on upgrade.
 //
-// v1 (25 bytes, op=1 PUT / op=2 DELETE):
+// v3 base (33 bytes, op=1 PUT / op=2 DELETE):
 //
 //	[1]  op        PUT=1, DELETE=2
-//	[8]  key       uint64
+//	[16] key       api.Key (128-bit)
 //	[4]  seg_id    int32 (PUT only; 0 for DELETE)
 //	[8]  offset    int64 (PUT only; 0 for DELETE)
-//	[4]  crc32c    checksum of the preceding 21 bytes
+//	[4]  crc32c    checksum of the preceding 29 bytes
 //
-// v2 (33 bytes, op=3 PUT only):
+// v3 +size (41 bytes, op=3 PUT only):
 //
 //	[1]  op        PUT_V2=3
-//	[8]  key       uint64
+//	[16] key       api.Key (128-bit)
 //	[4]  seg_id    int32
 //	[8]  offset    int64
 //	[8]  size      int64 (on-disk record size: HeaderLen + body + FooterLen)
-//	[4]  crc32c    checksum of the preceding 29 bytes
+//	[4]  crc32c    checksum of the preceding 37 bytes
 //
-// The v2 format eliminates the need for RecomputeStats after WAL replay
-// because the record size is persisted. Replay auto-detects v1 vs v2 by
-// reading the op byte: opPutV2 (3) records are 33 bytes, all others are
-// 25 bytes. This avoids a format header or magic number.
+// The +size record eliminates the need for RecomputeStats after WAL
+// replay because the record size is persisted. Replay auto-detects the
+// two widths by checking the op byte: opPutV2 (3) records are 41 bytes,
+// all others are 33 bytes. This avoids a format header or magic number.
 //
 // The WAL is truncated after a successful checkpoint (when the warm
 // tier and hot tier indices are known-good).
@@ -56,16 +59,18 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 const (
 	opPut    byte = 1
 	opDelete byte = 2
-	opPutV2  byte = 3                     // PUT with record size (v2 format)
-	recLen        = 1 + 8 + 4 + 8 + 4     // 25 bytes (v1)
-	recLenV2      = 1 + 8 + 4 + 8 + 8 + 4 // 33 bytes (v2: adds 8-byte size)
-	crcLen        = 21                    // bytes covered by CRC in v1
-	crcLenV2      = 29                    // bytes covered by CRC in v2
+	opPutV2  byte = 3                      // PUT with record size (+size variant)
+	recLen        = 1 + 16 + 4 + 8 + 4     // 33 bytes (v3 base: 128-bit key)
+	recLenV2      = 1 + 16 + 4 + 8 + 8 + 4 // 41 bytes (v3 +size: adds 8-byte size)
+	crcLen        = 29                     // bytes covered by CRC in v3 base
+	crcLenV2      = 37                     // bytes covered by CRC in v3 +size
 
 	// syncChSize is the bounded channel for async WAL entries.
 	// Matches existing tombstoneQueue / warmEvictQueue patterns.
@@ -80,8 +85,8 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// entryBufPool pools 33-byte encode buffers (v2 max size) to avoid
-// allocation on the Enqueue path. v1 entries use the first 25 bytes and
+// entryBufPool pools 41-byte encode buffers (v3 +size max) to avoid
+// allocation on the Enqueue path. Base entries use the first 33 bytes and
 // return a sub-slice. Stores *[recLenV2]byte (pointer to fixed-size array),
 // matching the recordHdrPool / recordFootPool pattern in warm.go.
 var entryBufPool = sync.Pool{
@@ -94,10 +99,10 @@ var entryBufPool = sync.Pool{
 // Entry is a single WAL record.
 type Entry struct {
 	Op     byte
-	Key    uint64
+	Key    api.Key
 	SegID  int32
 	Offset int64
-	Size   int64 // v2 only: on-disk record size (0 for v1 entries)
+	Size   int64 // +size variant only: on-disk record size (0 for base entries)
 }
 
 // Log is an append-only WAL file opened with O_DSYNC (Linux) or O_SYNC
@@ -162,25 +167,26 @@ func OpenAsync(path string, syncInterval time.Duration) (*Log, error) {
 	return l, nil
 }
 
-// encodeEntry encodes an Entry into a pooled buffer. v2 entries (opPutV2)
-// produce a 33-byte buffer; v1 entries produce a 25-byte sub-slice.
-// The pool stores 33-byte buffers; reslicing to full capacity on Get
-// ensures v2 writes never panic even after a v1 sub-slice was returned.
+// encodeEntry encodes an Entry into a pooled buffer. +size entries
+// (opPutV2) produce a 41-byte buffer; base entries produce a 33-byte
+// sub-slice. The pool stores 41-byte buffers; reslicing to full capacity
+// on Get ensures +size writes never panic even after a base sub-slice
+// was returned.
 func encodeEntry(e Entry) []byte {
 	bufp := entryBufPool.Get().(*[]byte)
 	buf := (*bufp)[:cap(*bufp)] // reslice to full capacity (always recLenV2)
 	buf[0] = e.Op
-	binary.LittleEndian.PutUint64(buf[1:9], e.Key)
-	binary.LittleEndian.PutUint32(buf[9:13], uint32(e.SegID))   //nolint:gosec // seg IDs are small
-	binary.LittleEndian.PutUint64(buf[13:21], uint64(e.Offset)) //nolint:gosec // offsets are positive
+	copy(buf[1:17], e.Key[:])
+	binary.LittleEndian.PutUint32(buf[17:21], uint32(e.SegID))  //nolint:gosec // seg IDs are small
+	binary.LittleEndian.PutUint64(buf[21:29], uint64(e.Offset)) //nolint:gosec // offsets are positive
 	if e.Op == opPutV2 {
-		binary.LittleEndian.PutUint64(buf[21:29], uint64(e.Size)) //nolint:gosec // size is positive
+		binary.LittleEndian.PutUint64(buf[29:37], uint64(e.Size)) //nolint:gosec // size is positive
 		crc := crc32.Checksum(buf[:crcLenV2], crcTable)
-		binary.LittleEndian.PutUint32(buf[29:33], crc)
+		binary.LittleEndian.PutUint32(buf[37:41], crc)
 		return buf[:recLenV2]
 	}
 	crc := crc32.Checksum(buf[:crcLen], crcTable)
-	binary.LittleEndian.PutUint32(buf[21:25], crc)
+	binary.LittleEndian.PutUint32(buf[29:33], crc)
 	return buf[:recLen]
 }
 
@@ -378,9 +384,8 @@ func (l *Log) LastSyncTime() time.Time {
 // Replay reads all valid entries from the WAL and calls fn for each.
 // Corrupt trailing records (partial writes) are silently skipped —
 // the WAL is append-only and a partial last record means a crash
-// interrupted the write. Auto-detects v1 (25-byte) and v2 (33-byte)
-// records by checking the op byte: opPutV2 (3) records are 33 bytes,
-// all others are 25 bytes.
+// interrupted the write. Auto-detects the two v3 widths by checking the
+// op byte: opPutV2 (3) records are 41 bytes, all others are 33 bytes.
 func Replay(path string, fn func(Entry) error) error {
 	f, err := os.Open(path) //nolint:gosec // operator-configured path
 	if err != nil {
@@ -401,7 +406,7 @@ func Replay(path string, fn func(Entry) error) error {
 		}
 
 		if buf[0] == opPutV2 {
-			// v2 record: read 8 more bytes for size field
+			// +size record: read 8 more bytes for size field
 			if _, err := io.ReadFull(f, buf[recLen:]); err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 					return nil
@@ -409,32 +414,36 @@ func Replay(path string, fn func(Entry) error) error {
 				return fmt.Errorf("wal: read v2: %w", err)
 			}
 			crc := crc32.Checksum(buf[:crcLenV2], crcTable)
-			stored := binary.LittleEndian.Uint32(buf[29:33])
+			stored := binary.LittleEndian.Uint32(buf[37:41])
 			if crc != stored {
 				return nil
 			}
+			var key api.Key
+			copy(key[:], buf[1:17])
 			e := Entry{
 				Op:     opPutV2,
-				Key:    binary.LittleEndian.Uint64(buf[1:9]),
-				SegID:  int32(binary.LittleEndian.Uint32(buf[9:13])),  //nolint:gosec // bounded by segment count
-				Offset: int64(binary.LittleEndian.Uint64(buf[13:21])), //nolint:gosec // file offsets
-				Size:   int64(binary.LittleEndian.Uint64(buf[21:29])), //nolint:gosec // record sizes
+				Key:    key,
+				SegID:  int32(binary.LittleEndian.Uint32(buf[17:21])), //nolint:gosec // bounded by segment count
+				Offset: int64(binary.LittleEndian.Uint64(buf[21:29])), //nolint:gosec // file offsets
+				Size:   int64(binary.LittleEndian.Uint64(buf[29:37])), //nolint:gosec // record sizes
 			}
 			if err := fn(e); err != nil {
 				return err
 			}
 		} else {
-			// v1 record: 25 bytes already read
+			// base record: 33 bytes already read
 			crc := crc32.Checksum(buf[:crcLen], crcTable)
-			stored := binary.LittleEndian.Uint32(buf[21:25])
+			stored := binary.LittleEndian.Uint32(buf[29:33])
 			if crc != stored {
 				return nil
 			}
+			var key api.Key
+			copy(key[:], buf[1:17])
 			e := Entry{
 				Op:     buf[0],
-				Key:    binary.LittleEndian.Uint64(buf[1:9]),
-				SegID:  int32(binary.LittleEndian.Uint32(buf[9:13])),  //nolint:gosec // bounded by segment count
-				Offset: int64(binary.LittleEndian.Uint64(buf[13:21])), //nolint:gosec // file offsets
+				Key:    key,
+				SegID:  int32(binary.LittleEndian.Uint32(buf[17:21])), //nolint:gosec // bounded by segment count
+				Offset: int64(binary.LittleEndian.Uint64(buf[21:29])), //nolint:gosec // file offsets
 			}
 			if err := fn(e); err != nil {
 				return err
@@ -506,20 +515,20 @@ func (e Entry) IsDelete() bool { return e.Op == opDelete }
 // backfill after replay.
 func (e Entry) HasSize() bool { return e.Op == opPutV2 }
 
-// PutEntry creates a v1 PUT WAL entry (no record size). Maintained for
-// backward compatibility with callers that don't have the size.
-func PutEntry(key uint64, segID int32, offset int64) Entry {
+// PutEntry creates a base PUT WAL entry (no record size). Maintained for
+// callers that don't have the size; replay backfills size via RecomputeStats.
+func PutEntry(key api.Key, segID int32, offset int64) Entry {
 	return Entry{Op: opPut, Key: key, SegID: segID, Offset: offset}
 }
 
-// PutEntryWithSize creates a v2 PUT WAL entry that includes the on-disk
+// PutEntryWithSize creates a +size PUT WAL entry that includes the on-disk
 // record size. Replay can set the index size directly, avoiding a full
 // segment scan (RecomputeStats) on startup.
-func PutEntryWithSize(key uint64, segID int32, offset, size int64) Entry {
+func PutEntryWithSize(key api.Key, segID int32, offset, size int64) Entry {
 	return Entry{Op: opPutV2, Key: key, SegID: segID, Offset: offset, Size: size}
 }
 
 // DeleteEntry creates a DELETE WAL entry.
-func DeleteEntry(key uint64) Entry {
+func DeleteEntry(key api.Key) Entry {
 	return Entry{Op: opDelete, Key: key}
 }

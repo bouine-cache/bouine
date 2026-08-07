@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/a-h/templ v0.3.1020
-	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/bouine-cache/xxhash/v3 v3.0.0
 	github.com/cloudflare/cloudflare-go/v4 v4.6.0
 	github.com/hashicorp/memberlist v0.6.0
 	github.com/prometheus/client_golang v1.24.1
@@ -24,6 +24,7 @@ require (
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

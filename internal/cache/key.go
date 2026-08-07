@@ -7,21 +7,31 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/bouine-cache/xxhash/v3"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
+
+// NewKey computes the 128-bit cache key from canonical bytes via a single
+// XXH128 hash. The result is stored in the canonical big-endian layout
+// from xxhash.Uint128.Bytes() (high 64 bits first, then low 64 bits).
+// The full [16]byte is a 128-bit collision check when used as a map key.
+// Zero allocations: Sum128 is a one-shot function with no heap state.
+func NewKey(canonical []byte) api.Key {
+	h := xxhash.Sum128(canonical)
+	return api.NewKeyFromBytes(h.Bytes())
+}
 
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
 // *http.Request is available.
 func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if rawURL == "" {
-		return 0
+		return api.Key{}
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return 0
+		return api.Key{}
 	}
 	r := &http.Request{
 		Method: http.MethodGet,
@@ -68,7 +78,7 @@ func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	}
 
 	if n <= len(buf) {
-		return api.Key(xxhash.Sum64(buf[:n]))
+		return NewKey(buf[:n])
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
@@ -102,7 +112,7 @@ func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
 		n += copyOverflow(heap, n, r.Method)
 	}
 
-	return api.Key(xxhash.Sum64(heap[:n]))
+	return NewKey(heap[:n])
 }
 
 // appendByte writes a single byte at offset n into dst. If n is past

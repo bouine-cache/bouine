@@ -956,7 +956,7 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
 func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
-	v, _, _ := h.flight.Do(strconv.FormatUint(uint64(key), 36), func() (any, error) {
+	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
 	})
@@ -969,7 +969,7 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
 func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult {
-	sfKey := strconv.FormatUint(uint64(key)^revalKeySuffix, 36)
+	sfKey := key.SingleFlightKey(revalKeySuffix)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
 		res := h.doFetch(r)
 		return res, nil
@@ -1379,7 +1379,7 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		for _, hdr := range []string{header.ContentLocation, header.Location} {
 			if loc := rec.header.Get(hdr); loc != "" {
 				locKey := h.buildLocationKey(r, loc)
-				if locKey != 0 {
+				if !locKey.IsZero() {
 					_ = h.store.Delete(r.Context(), locKey)
 				}
 			}
@@ -1421,7 +1421,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 	ref, err := url.Parse(loc)
 	if err != nil {
-		return 0
+		return api.Key{}
 	}
 	resolved := r.URL.ResolveReference(ref)
 	scheme := resolved.Scheme

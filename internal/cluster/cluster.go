@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/bouine-cache/xxhash/v3"
 	"github.com/hashicorp/memberlist"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -508,7 +508,7 @@ func (r *ring) get(key api.Key) string {
 	if len(r.nodes) == 0 {
 		return ""
 	}
-	h := uint64(key)
+	h := key.Hash64()
 	idx := sort.Search(len(r.nodes), func(i int) bool {
 		return r.nodes[i] >= h
 	})

@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/bouine-cache/bouine/internal/platform"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 // tryMmap mmaps the segment file read-only for zero-syscall point reads.
@@ -77,11 +78,15 @@ func readRecordAtMmap(seg *Segment, offset int64, size int64) (*Record, error) {
 	if offset+size > int64(len(mmapData)) {
 		return nil, ErrTornRecord
 	}
+	if size < int64(HeaderLen+FooterLen) {
+		return nil, ErrTornRecord
+	}
 	data := mmapData[offset : offset+size]
 
 	magic := binary.LittleEndian.Uint32(data[0:4])
-	key := binary.LittleEndian.Uint64(data[4:12])
-	bodyLen := binary.LittleEndian.Uint32(data[12:16])
+	var key api.Key
+	copy(key[:], data[4:20])
+	bodyLen := binary.LittleEndian.Uint32(data[20:24])
 
 	if uint64(bodyLen) > uint64(len(data))-uint64(HeaderLen+FooterLen) {
 		return nil, ErrTornRecord

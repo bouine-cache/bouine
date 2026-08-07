@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/bouine-cache/xxhash/v3"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/internal/observability"

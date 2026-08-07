@@ -3,6 +3,8 @@ package warm
 import (
 	"testing"
 	"time"
+
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 )
 
 // BenchmarkWarmEvict_AllVisited_1M measures a single evictOne() call on a
@@ -32,14 +34,14 @@ func BenchmarkWarmEvict_AllVisited_1M(b *testing.B) {
 
 	body := make([]byte, 100)
 	for i := range n {
-		if _, _, err := s.Put(uint64(i), body); err != nil {
+		if _, _, err := s.Put(testkey.Key(uint64(i)), body); err != nil {
 			b.Fatalf("Put(%d): %v", i, err)
 		}
 	}
 
 	// Access all entries via Get to set visited=true on every SIEVE entry.
 	for i := range n {
-		if _, err := s.Get(uint64(i)); err != nil {
+		if _, err := s.Get(testkey.Key(uint64(i))); err != nil {
 			b.Fatalf("Get(%d): %v", i, err)
 		}
 	}

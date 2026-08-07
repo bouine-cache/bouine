@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,11 +37,12 @@ var peerFetchEncodePool = sync.Pool{
 }
 
 // peerFetchBinaryVersion is the version byte for the binary peer-fetch
-// request format. Must not collide with JSON's '{' (0x7B).
-const peerFetchBinaryVersion = 1
+// request format. v2 uses 16-byte (128-bit) keys. Must not collide with
+// JSON's '{' (0x7B).
+const peerFetchBinaryVersion = 2
 
 // maxPeerFetchBinaryBody is the maximum binary request body size.
-// 1 (version) + 8 (key) + 1 (vary-key len) + 255 (vary-key) = 265.
+// 1 (version) + 16 (key) + 1 (vary-key len) + 255 (vary-key) = 273.
 const maxPeerFetchBinaryBody = 512
 
 const (
@@ -197,13 +197,13 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 	}
 	url := scheme + "://" + fetchAddr + PeerFetchPath
 
-	// Binary request: 1 byte version + 8 bytes key + 1 byte vary-key
+	// Binary request: 1 byte version + 16 bytes key + 1 byte vary-key
 	// length + vary-key string. ~10x faster than json.Marshal for a
 	// 2-field struct and eliminates the io.ReadAll allocation on the
 	// server side.
-	body := make([]byte, 0, 10+len(req.VaryKey))
+	body := make([]byte, 0, 18+len(req.VaryKey))
 	body = append(body, peerFetchBinaryVersion)
-	body = binary.LittleEndian.AppendUint64(body, uint64(req.Key))
+	body = append(body, req.Key[:]...)
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
 	body = append(body, req.VaryKey...)
 
@@ -363,13 +363,13 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case peerFetchBinaryVersion:
 		// Binary format: 1 byte version + 8 bytes key + 1 byte
 		// vary-key length + vary-key string.
-		if len(body) < 10 {
+		if len(body) < 18 {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Key = api.Key(binary.LittleEndian.Uint64(body[1:9]))
-		varyLen := int(body[9])
-		if len(body) < 10+varyLen {
+		copy(req.Key[:], body[1:17])
+		varyLen := int(body[17])
+		if len(body) < 18+varyLen {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}

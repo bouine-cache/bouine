@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -10,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -965,24 +963,6 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 
 	return keys, total
 }
-
-// KeyHash computes a 128-bit cache key from a byte slice using the
-// same dual-xxhash64 scheme as cache.NewKey. Exported for callers that
-// construct keys outside the cache layer (admin tools, tests). Storage
-// cannot import cache, so the seed constant is duplicated here.
-func KeyHash(b []byte) api.Key {
-	var k api.Key
-	binary.LittleEndian.PutUint64(k[:8], xxhash.Sum64(b))
-	g := xxhash.NewWithSeed(key2Seed)
-	_, _ = g.Write(b)
-	binary.LittleEndian.PutUint64(k[8:], g.Sum64())
-	return k
-}
-
-// key2Seed is the seed for the second xxhash64 half of the 128-bit
-// cache key. Duplicated from internal/cache.key2Seed because storage
-// cannot import cache (layer rule). Keep in sync.
-const key2Seed uint64 = 0x626f75696e6532 // "bouine2"
 
 const (
 	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — Key grew 8→16 B inline. Update when fields are added.

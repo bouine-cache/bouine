@@ -44,7 +44,7 @@ func TestHotOnly_PutAddsKey(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
-	k := KeyHash([]byte("hot-put"))
+	k := testkey.Hash([]byte("hot-put"))
 	err := s.Put(ctx, k, obj(k, 100))
 	require.NoError(t, err)
 	require.True(t, hotOnlyContains(s, k))
@@ -56,7 +56,7 @@ func TestHotOnly_SetBackedRemovesKey(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
-	k := KeyHash([]byte("backed-key"))
+	k := testkey.Hash([]byte("backed-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	require.True(t, hotOnlyContains(s, k))
 	s.SetBacked(k)
@@ -69,7 +69,7 @@ func TestHotOnly_ClearBackedReaddsKey(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
-	k := KeyHash([]byte("clear-backed-key"))
+	k := testkey.Hash([]byte("clear-backed-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	s.SetBacked(k)
 	require.False(t, hotOnlyContains(s, k))
@@ -83,7 +83,7 @@ func TestHotOnly_DeleteRemovesKey(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
-	k := KeyHash([]byte("delete-key"))
+	k := testkey.Hash([]byte("delete-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	require.True(t, hotOnlyContains(s, k))
 	err := s.Delete(ctx, k)
@@ -98,7 +98,7 @@ func TestHotOnly_BanRemovesKey(t *testing.T) {
 	defer func() { _ = s.Close(context.Background()) }()
 	ctx := context.Background()
 
-	k := KeyHash([]byte("ban-key"))
+	k := testkey.Hash([]byte("ban-key"))
 	o := obj(k, 50)
 	o.Header.Set(header.XBouineHost, "example.com")
 	o.Header.Set(header.XBouinePath, "/ban-me")
@@ -119,8 +119,8 @@ func TestHotOnly_EvictionRemovesKey(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 2 << 10, NumShards: 1})
 	ctx := context.Background()
 
-	k1 := KeyHash([]byte("evict-1"))
-	k2 := KeyHash([]byte("evict-2"))
+	k1 := testkey.Hash([]byte("evict-1"))
+	k2 := testkey.Hash([]byte("evict-2"))
 	_ = s.Put(ctx, k1, obj(k1, 1024))
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
@@ -145,7 +145,7 @@ func TestHotOnly_SweeperEvictionRemovesKey(t *testing.T) {
 
 	var keys []api.Key
 	for i := range 8 {
-		k := KeyHash([]byte("sweep-" + string(rune('a'+i))))
+		k := testkey.Hash([]byte("sweep-" + string(rune('a'+i))))
 		keys = append(keys, k)
 		_ = s.Put(ctx, k, obj(k, 1024))
 	}
@@ -181,7 +181,7 @@ func TestHotOnly_ReplaceBackedWithNonBacked(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
-	k := KeyHash([]byte("replace-key"))
+	k := testkey.Hash([]byte("replace-key"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	s.SetBacked(k)
 	require.False(t, hotOnlyContains(s, k))
@@ -239,7 +239,7 @@ func TestHotOnly_KeysLimitZero(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
-	_ = s.Put(ctx, KeyHash([]byte("k")), obj(KeyHash([]byte("k")), 10))
+	_ = s.Put(ctx, testkey.Hash([]byte("k")), obj(testkey.Hash([]byte("k")), 10))
 	keys, _ := s.HotOnlyKeys(0, 0)
 	require.Nil(t, keys)
 }

@@ -2,8 +2,6 @@
   <img src="docs/assets/logo_font.png" alt="bouine" width="280">
 </p>
 
-<h1 align="center">bouine</h1>
-
 <p align="center">
   <em>pronounce: /bwin/</em>
 </p>

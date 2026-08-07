@@ -457,9 +457,10 @@ func TestHandler_Revalidate_5xx_StaleFallbackGateConsistency(t *testing.T) {
 }
 
 // TestHandler_Revalidate_5xx_NoSIEWindow verifies that an expired object
-// without a stale-if-error window is NOT served stale on a 5xx response.
-// RFC 5861 §4 bounds stale-on-error to the stale-if-error window.
-// Regression test for #291.
+// without a stale-if-error window is still served stale on a 5xx response.
+// The cache-tests conformance suite (stale-warning-stored, stale-close)
+// expects stale serving on origin errors regardless of an explicit SIE
+// window, matching the behaviour of Varnish and squid.
 func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 	t.Parallel()
 	calls := 0
@@ -485,11 +486,12 @@ func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	// Second request triggers revalidation; upstream returns 5xx.
-	// Without a stale-if-error window, the 5xx must be forwarded.
+	// Without a stale-if-error window, stale is still served because
+	// staleFallbackAllowed returns true (no must-revalidate etc.).
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
-	require.Equal(t, 503, rr.Code)
-	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	require.Equal(t, 200, rr.Code)
+	require.Equal(t, "STALE", rr.Header().Get(header.XCache))
 }
 
 // TestHandler_Revalidate_5xx_MustRevalidateWithSIE verifies that an object
@@ -522,6 +524,74 @@ func TestHandler_Revalidate_5xx_MustRevalidateWithSIE(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
 	require.Equal(t, 503, rr.Code)
+}
+
+// TestHandler_Revalidate_ConnError_MustRevalidate verifies that a
+// must-revalidate object is NOT served stale when the origin connection
+// drops (res.Err path). The res.Err path uses the same staleFallbackAllowed
+// gate as the 5xx path, so must-revalidate requires the error to be
+// forwarded (RFC 9111 §5.2.2.1).
+func TestHandler_Revalidate_ConnError_MustRevalidate(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=1, must-revalidate")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "fresh-body")
+			return
+		}
+		// Simulate a connection drop: ErrAbortHandler is caught by doFetch
+		// and converted to fetchResult{Err: ...}.
+		panic(http.ErrAbortHandler)
+	})
+
+	h := testHandler(t, upstream)
+
+	seed := httptest.NewRecorder()
+	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/must-revalidate-err", nil))
+	require.Equal(t, 200, seed.Code)
+
+	time.Sleep(1500 * time.Millisecond)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate-err", nil))
+	require.Equal(t, 502, rr.Code)
+	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+}
+
+// TestHandler_Revalidate_ConnError_NoDirective verifies that an object
+// without blocking directives IS served stale when the origin connection
+// drops (res.Err path), matching the 5xx path behaviour.
+func TestHandler_Revalidate_ConnError_NoDirective(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=1")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "fresh-body")
+			return
+		}
+		panic(http.ErrAbortHandler)
+	})
+
+	h := testHandler(t, upstream)
+
+	seed := httptest.NewRecorder()
+	h.ServeHTTP(seed, httptest.NewRequest("GET", "http://example.com/no-dir-err", nil))
+	require.Equal(t, 200, seed.Code)
+
+	time.Sleep(1500 * time.Millisecond)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/no-dir-err", nil))
+	require.Equal(t, 200, rr.Code)
+	require.Equal(t, "STALE", rr.Header().Get(header.XCache))
 }
 
 // TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency verifies that when

@@ -1,0 +1,447 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "bouine Helm chart values",
+  "description": "Default values for the bouine cloud-native HTTP cache Helm chart.",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "description": "Number of bouine replicas in the StatefulSet.",
+      "type": "integer",
+      "minimum": 1,
+      "default": 3
+    },
+    "image": {
+      "description": "Container image configuration.",
+      "type": "object",
+      "properties": {
+        "repository": {
+          "description": "Container image repository.",
+          "type": "string",
+          "default": "bouinecache/bouine"
+        },
+        "tag": {
+          "description": "Container image tag. Defaults to the chart appVersion when empty.",
+          "type": "string",
+          "default": ""
+        },
+        "pullPolicy": {
+          "description": "Kubernetes image pull policy.",
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "default": "IfNotPresent"
+        }
+      },
+      "required": ["repository", "pullPolicy"]
+    },
+    "nameOverride": {
+      "description": "Override the chart name used in resource names.",
+      "type": "string",
+      "default": ""
+    },
+    "fullnameOverride": {
+      "description": "Override the fully qualified resource name.",
+      "type": "string",
+      "default": ""
+    },
+    "config": {
+      "description": "bouine configuration rendered into a ConfigMap mounted at /etc/bouine/.",
+      "type": "object",
+      "properties": {
+        "listen": {
+          "description": "Listen addresses for the data, admin, and cluster ports.",
+          "type": "object",
+          "properties": {
+            "http": {
+              "type": "string",
+              "default": ":80"
+            },
+            "https": {
+              "type": "string",
+              "default": ":443"
+            },
+            "admin": {
+              "type": "string",
+              "default": ":9000"
+            },
+            "cluster": {
+              "type": "string",
+              "default": ":8443"
+            }
+          }
+        },
+        "tls": {
+          "description": "TLS certificate configuration. Provide via a Secret mounted at /etc/bouine/tls/.",
+          "type": "object",
+          "properties": {
+            "certs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "cert_file": {
+                    "type": "string"
+                  },
+                  "key_file": {
+                    "type": "string"
+                  }
+                }
+              },
+              "default": []
+            }
+          }
+        },
+        "storage": {
+          "description": "Hot (RAM) and warm (disk) tier storage configuration.",
+          "type": "object",
+          "properties": {
+            "hot_max_bytes": {
+              "description": "Maximum size of the hot (RAM) tier. Accepts binary suffixes (GiB, MiB, KiB) or a plain byte count.",
+              "type": "string",
+              "default": "2GiB"
+            },
+            "warm_dir": {
+              "description": "Directory path for warm-tier mmap-backed storage.",
+              "type": "string",
+              "default": "/var/lib/bouine"
+            },
+            "warm_max_bytes": {
+              "description": "Maximum size of the warm (disk) tier.",
+              "type": "string",
+              "default": "20GiB"
+            },
+            "warm_sync_interval": {
+              "description": "Hot-to-warm background sync interval. Set to -1 to disable.",
+              "type": "string",
+              "default": "60s"
+            },
+            "warm_sync_batch_size": {
+              "type": "integer"
+            },
+            "body_threshold": {
+              "type": "string"
+            }
+          }
+        },
+        "cluster": {
+          "description": "Cluster gossip configuration. The join list is auto-populated from the headless service DNS.",
+          "type": "object",
+          "properties": {
+            "join": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          }
+        },
+        "admin": {
+          "description": "Admin server configuration.",
+          "type": "object",
+          "properties": {
+            "drain_duration": {
+              "description": "Block duration for the /drain endpoint used by the preStop hook.",
+              "type": "string"
+            }
+          }
+        },
+        "upstream_pools": {
+          "description": "Upstream origin pools. See the bouine configuration documentation for the full schema.",
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
+        },
+        "routes": {
+          "description": "Routing rules. See the bouine configuration documentation for the full schema.",
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
+        },
+        "cloudflare": {
+          "description": "Cloudflare Cache API invalidation propagation. The API token is injected via cloudflare.apiTokenSecretName, not placed here.",
+          "type": "object",
+          "properties": {
+            "zone_id": {
+              "type": "string"
+            },
+            "propagate": {
+              "type": "object",
+              "properties": {
+                "purge": {
+                  "type": "boolean"
+                },
+                "ban": {
+                  "type": "boolean"
+                },
+                "refresh": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "async": {
+              "type": "boolean"
+            },
+            "timeout": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "service": {
+      "description": "ClusterIP Service exposing the data and admin ports.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+          "default": "ClusterIP"
+        },
+        "httpPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 80
+        },
+        "httpsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 443
+        },
+        "adminPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9000
+        }
+      }
+    },
+    "headlessService": {
+      "description": "Headless Service for gossip peer discovery.",
+      "type": "object",
+      "properties": {
+        "clusterPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8443
+        }
+      }
+    },
+    "resources": {
+      "description": "Container resource requests and limits.",
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": ["string", "number"]
+            },
+            "memory": {
+              "type": "string"
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": ["string", "number"]
+            },
+            "memory": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "podSecurityContext": {
+      "description": "Pod-level security context.",
+      "type": "object"
+    },
+    "containerSecurityContext": {
+      "description": "Container-level security context.",
+      "type": "object"
+    },
+    "podDisruptionBudget": {
+      "description": "PodDisruptionBudget to ensure quorum during disruptions.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "minAvailable": {
+          "type": "integer"
+        }
+      }
+    },
+    "topologySpreadConstraints": {
+      "description": "Topology spread constraints to distribute pods across zones.",
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "terminationGracePeriodSeconds": {
+      "description": "Grace period before the pod is force-killed.",
+      "type": "integer",
+      "default": 40
+    },
+    "updateStrategy": {
+      "description": "StatefulSet rolling update strategy.",
+      "type": "object",
+      "properties": {
+        "maxUnavailable": {
+          "type": "integer",
+          "default": 1
+        }
+      }
+    },
+    "minReadySeconds": {
+      "description": "Seconds after a pod becomes Ready before it enters Service endpoints.",
+      "type": "integer",
+      "default": 30
+    },
+    "goMemLimit": {
+      "description": "Go runtime GOMEMLIMIT. Leave empty to auto-compute as 75% of resources.limits.memory.",
+      "type": "string",
+      "default": ""
+    },
+    "goGC": {
+      "description": "Go runtime GOGC value.",
+      "type": "string",
+      "default": "100"
+    },
+    "cloudflare": {
+      "description": "Cloudflare API token secret injection for CDN invalidation propagation.",
+      "type": ["object", "null"],
+      "properties": {
+        "apiTokenSecretName": {
+          "type": "string"
+        },
+        "apiTokenSecretKey": {
+          "type": "string",
+          "default": "CF_API_TOKEN"
+        }
+      }
+    },
+    "extraEnv": {
+      "description": "Extra environment variables injected into the bouine container.",
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
+    "startupProbe": {
+      "description": "Startup probe configuration.",
+      "type": "object"
+    },
+    "readinessProbe": {
+      "description": "Readiness probe configuration.",
+      "type": "object"
+    },
+    "livenessProbe": {
+      "description": "Liveness probe configuration.",
+      "type": "object"
+    },
+    "autoscaling": {
+      "description": "Horizontal Pod Autoscaler (CPU-only). Disabled by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "minReplicas": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 6
+        },
+        "cpuTrigger": {
+          "type": "object",
+          "properties": {
+            "targetType": {
+              "type": "string",
+              "enum": ["Utilization", "AverageValue"],
+              "default": "Utilization"
+            },
+            "averageUtilization": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 70
+            }
+          }
+        },
+        "scaleDownStabilizationSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 300
+        }
+      }
+    },
+    "warmVolume": {
+      "description": "PVC for the warm-tier disk storage.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "size": {
+          "type": "string",
+          "default": "50Gi"
+        },
+        "storageClass": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "networkPolicy": {
+      "description": "NetworkPolicy to restrict traffic. Disabled by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "serviceMonitor": {
+      "description": "Prometheus ServiceMonitor for scraping metrics. Disabled by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "labels": {
+          "type": "object",
+          "default": {}
+        },
+        "interval": {
+          "type": "string",
+          "default": "15s"
+        },
+        "scrapeTimeout": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    }
+  }
+}

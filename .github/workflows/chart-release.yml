@@ -35,10 +35,31 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v5
 
+      - name: Import GPG signing key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.HELM_CHART_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.HELM_CHART_GPG_PASSPHRASE }}
+
+      - name: Package and sign chart
+        run: |
+          set -euo pipefail
+          mkdir -p .cr-release-packages
+          helm package deploy/helm/bouine \
+            --destination .cr-release-packages \
+            --sign \
+            --key "${{ vars.HELM_CHART_GPG_KEY_ID }}" \
+            --keyring ~/.gnupg/pubring.kbx
+          # Verify the .prov provenance file was created alongside the .tgz
+          ls -la .cr-release-packages/*.tgz .cr-release-packages/*.tgz.prov
+
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.7.0
         with:
           charts_dir: deploy/helm
+          # Use the pre-packaged .tgz from the previous step instead of
+          # re-packaging, so the GPG-signed package is preserved.
+          skip_packaging: true
           # Re-runs (and tags whose chart version is already published) must
           # not fail when the GitHub release already exists; cr still
           # refreshes index.yaml from the packaged charts.
@@ -57,6 +78,25 @@ jobs:
         env:
           CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Publish provenance files to gh-pages
+        run: |
+          set -euo pipefail
+          # chart-releaser with --packages-with-index pushes .tgz files to
+          # gh-pages, but does not reliably include .prov provenance files.
+          # Copy them alongside the .tgz so Artifact Hub detects the chart
+          # as signed (it looks for a .prov sidecar next to each .tgz).
+          git fetch origin gh-pages
+          tmp="$(mktemp -d)"
+          git worktree add "$tmp" origin/gh-pages
+          cp .cr-release-packages/*.tgz.prov "$tmp/" 2>/dev/null || true
+          git -C "$tmp" add '*.tgz.prov'
+          if ! git -C "$tmp" diff --cached --quiet; then
+            git -C "$tmp" commit -m "ci: publish signed chart provenance files"
+            git -C "$tmp" pull --rebase origin gh-pages || true
+            git -C "$tmp" push origin HEAD:gh-pages
+          fi
+          git worktree remove "$tmp"
+
       - name: Publish Artifact Hub repository metadata
         run: |
           set -euo pipefail
@@ -67,6 +107,7 @@ jobs:
           git -C "$tmp" add artifacthub-repo.yml
           if ! git -C "$tmp" diff --cached --quiet; then
             git -C "$tmp" commit -m "ci: sync Artifact Hub repository metadata"
+            git -C "$tmp" pull --rebase origin gh-pages || true
             git -C "$tmp" push origin HEAD:gh-pages
           fi
           git worktree remove "$tmp"

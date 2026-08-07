@@ -765,10 +765,9 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 	// must-revalidate / proxy-revalidate / no-cache / s-maxage, which require
 	// the error to be forwarded to the client.
 	//
-	// The miss path uses staleFallbackAllowed as a third OR term (unbounded
-	// stale-on-error) for backward compatibility; the revalidate path
-	// (handler.go:1041) is stricter and bounds stale to the SIE window.
-	// Tightening the miss path to match is tracked as a follow-up.
+	// The miss path uses staleFallbackAllowed as a third OR term so that
+	// objects without an explicit SIE window still get stale-on-error
+	// fallback, matching the revalidate path's behaviour.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
 		h.fetchAndStoreStayinAlive(w, r, lookupKey, primaryKey, obj, now, src)
 	} else {
@@ -1029,30 +1028,40 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
 	res := h.collapsedRevalidate(revalReq, lookupKey)
-	if res.Err != nil {
+
+	// stale-on-error gate: both the connection-error path (res.Err) and
+	// the 5xx path use the same staleFallbackAllowed check so the policy
+	// cannot drift between the two error sites. stayinAlive bypasses the
+	// gate — it is an explicit operator override for emergency mode.
+	// staleFallbackAllowed returns false for must-revalidate,
+	// proxy-revalidate, no-cache, and s-maxage, all of which require a
+	// successful revalidation before serving stale (RFC 9111 §5.2.2).
+	// The cache-tests conformance suite expects stale serving on origin
+	// errors regardless of an explicit SIE window (stale-close,
+	// stale-warning-stored), matching Trafficserver and squid.
+	if h.stayinAlive && (res.Err != nil || res.StatusCode >= 500) {
+		if res.Err != nil {
+			h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
+				"error", res.Err, "key", stale.Key)
+		} else {
+			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
+				"status", res.StatusCode, "key", stale.Key)
+		}
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
-
-	// stale-if-error (RFC 5861 §4) and general stale-on-error: if origin
-	// returns 5xx, serve stale unless must-revalidate/proxy-revalidate
-	// explicitly forbids it (RFC 9111 §5.2.2.2).
-	if res.StatusCode >= 500 {
-		if h.stayinAlive {
-			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
-				"status", res.StatusCode, "key", stale.Key)
+	if res.Err != nil {
+		if staleFallbackAllowed(stale) {
 			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}
-		// Serve stale only within the stale-if-error window (RFC 5861 §4)
-		// and only when the stored response does not require revalidation.
-		// An object that expired long ago with no stale-if-error must not
-		// be served on a 5xx — the error is forwarded to the client.
-		// Directives like must-revalidate / proxy-revalidate / no-cache /
-		// s-maxage require a successful revalidation (staleFallbackAllowed
-		// returns false for them), so the 5xx is forwarded even if a SIE
-		// window is configured.
-		if stale.StaleForSIE(now) && staleFallbackAllowed(stale) {
+		w.Header()[header.XCache] = headerMISS
+		w.Header()[header.XCacheSource] = sourceOrigin
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	if res.StatusCode >= 500 {
+		if staleFallbackAllowed(stale) {
 			h.serveObject(w, r, stale, now, cacheStale, src)
 			return
 		}

@@ -78,6 +78,9 @@ func readRecordAtMmap(seg *Segment, offset int64, size int64) (*Record, error) {
 	if offset+size > int64(len(mmapData)) {
 		return nil, ErrTornRecord
 	}
+	if size < int64(HeaderLen+FooterLen) {
+		return nil, ErrTornRecord
+	}
 	data := mmapData[offset : offset+size]
 
 	magic := binary.LittleEndian.Uint32(data[0:4])

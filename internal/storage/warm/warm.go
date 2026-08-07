@@ -1680,7 +1680,7 @@ func readRecordAt(seg *Segment, offset int64, size int64) (*Record, error) {
 // readRecordAtSingle reads an entire record in one pread syscall using the
 // total on-disk record size from the index. The body aliases the read buffer
 // (no separate body allocation). The full buffer stays alive until the body
-// is consumed by decode+promote; the overhead is HeaderLen+FooterLen = 20 bytes
+// is consumed by decode+promote; the overhead is HeaderLen+FooterLen = 28 bytes
 // per record, temporary. Do NOT copy the body out — that adds an allocation
 // and defeats the purpose.
 func readRecordAtSingle(f *os.File, segID int, offset int64, size int64) (*Record, error) {
@@ -1721,8 +1721,8 @@ func readRecordAtSingle(f *os.File, segID int, offset int64, size int64) (*Recor
 	}, nil
 }
 
-// readRecordAtLegacy is the 3-pread fallback for v1 WAL entries where the
-// total record size is unknown. Reads header (16B), body (N bytes), and
+// readRecordAtLegacy is the 3-pread fallback for base WAL entries where the
+// total record size is unknown. Reads header (24B), body (N bytes), and
 // footer (4B) in separate pread syscalls.
 func readRecordAtLegacy(f *os.File, segID int, offset int64) (*Record, error) {
 	hdrPtr := recordHdrPool.Get().(*[]byte)

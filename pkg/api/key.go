@@ -8,11 +8,21 @@ import (
 	"log/slog"
 )
 
+// Key2Seed is the seed for the second xxhash64 half of the 128-bit
+// cache key. "bouine2" in ASCII. Distinct from the implicit zero seed
+// of the primary xxhash.Sum64 call so the two halves are independent.
+// Exported here (in the leaf pkg/api) so that internal/cache.NewKey and
+// internal/testutil/testkey.Hash share a single source of truth —
+// duplicating the constant across packages would let a bump in one
+// silently diverge from the other and break key equivalence between
+// production and tests.
+const Key2Seed uint64 = 0x626f75696e6532 // "bouine2"
+
 // Key is the canonical 128-bit cache key: two independent xxhash64
 // digests of the canonical request bytes (scheme + host + path + query
 // + method + Vary headers), packed little-endian into 16 bytes. The
 // first 8 bytes (k[:8]) are the primary xxhash64; the second 8 bytes
-// (k[8:]) are an xxhash64 computed with a fixed seed. The full 16-byte
+// (k[8:]) are an xxhash64 computed with Key2Seed. The full 16-byte
 // array is the map key, so a single map lookup is a 128-bit collision
 // check — no separate guard field, no guard verification, no
 // Primary/Guard accessor split. Birthday bound is ~2^64 objects.

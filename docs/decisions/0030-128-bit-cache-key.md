@@ -16,8 +16,12 @@ wrong response body — a correctness and security bug (issue #51).
 
 The fix is to widen the key to 128 bits so that the map lookup itself is
 a full collision check, not just a hash-bucket probe. This eliminates
-the wrong-body class of bug entirely: two distinct canonical requests
-cannot occupy the same map entry.
+the wrong-body class of bug on the primary-key axis: two distinct
+canonical requests cannot occupy the same map entry. The Vary
+dimension remains a single 64-bit xxhash64 (`WithVary` XORs one
+`uint64` varyHash into both halves), unchanged from the prior design —
+a Vary-hash collision can still produce a wrong body. The 128-bit key
+removes the weakest link (the primary key), not every link.
 
 ## Decision
 
@@ -88,8 +92,10 @@ letter. The waiver is justified because:
 
 ## Consequences
 
-- **Positive**: Eliminates the wrong-response-body class of bug. Map
-  lookup is a full 128-bit collision check.
+- **Positive**: Eliminates the wrong-response-body class of bug on the
+  primary-key axis. Map lookup is a full 128-bit collision check. The
+  Vary dimension remains 64-bit (a future widening would need to mix
+  both halves independently, not XOR the same varyHash into both).
 - **Positive**: No new dependencies. xxhash is already approved.
 - **Positive**: 0 allocations on the hit path maintained via `sync.Pool`.
 - **Negative**: `map[[16]byte]` lookup is ~2-4 ns slower than

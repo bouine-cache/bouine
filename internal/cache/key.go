@@ -15,9 +15,12 @@ import (
 )
 
 // key2Seed is the seed for the second xxhash64 half of the 128-bit
-// cache key. "bouine2" in ASCII. Distinct from the implicit zero seed
-// of the primary xxhash.Sum64 call so the two halves are independent.
-const key2Seed uint64 = 0x626f75696e6532 // "bouine2"
+// cache key. Re-exported from pkg/api (api.Key2Seed) so that
+// internal/testutil/testkey.Hash shares the same source of truth —
+// duplicating the constant would let a bump here silently diverge from
+// the test helper and break key equivalence between production and
+// tests.
+const key2Seed uint64 = api.Key2Seed
 
 // key2Pool pools seeded xxhash digests for the second key half.
 // xxhash.Digest is a fixed struct (no internal slice), so pooling it

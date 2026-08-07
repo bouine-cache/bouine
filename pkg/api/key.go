@@ -8,29 +8,19 @@ import (
 	"log/slog"
 )
 
-// Key2Seed is the seed for the second xxhash64 half of the 128-bit
-// cache key. "bouine2" in ASCII. Distinct from the implicit zero seed
-// of the primary xxhash.Sum64 call so the two halves are independent.
-// Exported here (in the leaf pkg/api) so that internal/cache.NewKey and
-// internal/testutil/testkey.Hash share a single source of truth —
-// duplicating the constant across packages would let a bump in one
-// silently diverge from the other and break key equivalence between
-// production and tests.
-const Key2Seed uint64 = 0x626f75696e6532 // "bouine2"
-
-// Key is the canonical 128-bit cache key: two independent xxhash64
-// digests of the canonical request bytes (scheme + host + path + query
-// + method + Vary headers), packed little-endian into 16 bytes. The
-// first 8 bytes (k[:8]) are the primary xxhash64; the second 8 bytes
-// (k[8:]) are an xxhash64 computed with Key2Seed. The full 16-byte
-// array is the map key, so a single map lookup is a 128-bit collision
-// check — no separate guard field, no guard verification, no
-// Primary/Guard accessor split. Birthday bound is ~2^64 objects.
+// Key is the canonical 128-bit cache key: a single XXH128 hash of the
+// canonical request bytes (scheme + host + path + query + method + Vary
+// headers), stored in the canonical big-endian representation from
+// xxhash.Uint128.Bytes() — high 64 bits first, then low 64 bits, each
+// in big-endian byte order. The full 16-byte array is the map key, so a
+// single map lookup is a full 128-bit collision check — no separate
+// guard field, no guard verification, no Primary/Guard accessor split.
+// Birthday bound is ~2^64 objects.
 //
-// The first 8 bytes are a uniform hash; ring ownership, shard
-// selection, and log sampling derive from k[:8] rather than hashing
-// all 16 bytes (a second hash call on the hot path would buy nothing
-// in distribution).
+// The first 8 bytes (k[:8]) are the high 64 bits of the XXH128 hash;
+// ring ownership, shard selection, and log sampling derive from k[:8]
+// via Hash64() rather than re-hashing all 16 bytes (both halves are
+// uniform, so the high half alone suffices for routing).
 //
 // Unstable until the 128-bit key migration lands across the cluster
 // wire formats (codec v3, WAL v3, peer fetch v2, snapshot v2, purge v2).
@@ -39,32 +29,32 @@ type Key [16]byte
 // NewKeyFromBytes constructs a Key from a raw 16-byte array. Intended
 // for decoders that read the key off the wire or off disk. Callers that
 // need a key from canonical request bytes should use cache.NewKey,
-// which computes both xxhash64 halves.
+// which computes the XXH128 hash.
 func NewKeyFromBytes(b [16]byte) Key { return Key(b) }
 
 // WithVary returns a variant key derived by XORing varyHash into both
-// 8-byte halves. Because both halves are independent xxhash64 values,
-// mixing both by the 64-bit vary hash preserves the 128-bit collision
-// resistance. The vary dimension itself remains 64-bit (a single
-// xxhash64 of the Vary header set), unchanged from the prior uint64
-// key design.
+// 8-byte halves. Because XXH128 produces two independent 64-bit halves
+// (high and low), mixing both by the 64-bit vary hash preserves the
+// 128-bit collision resistance. The vary dimension itself remains 64-bit
+// (a single xxhash64 of the Vary header set), unchanged from the prior
+// uint64 key design.
 func (k Key) WithVary(varyHash uint64) Key {
-	p := k.Hash64() ^ varyHash
-	g := binary.LittleEndian.Uint64(k[8:]) ^ varyHash
+	hi := binary.BigEndian.Uint64(k[:8]) ^ varyHash
+	lo := binary.BigEndian.Uint64(k[8:]) ^ varyHash
 	var result Key
-	binary.LittleEndian.PutUint64(result[:8], p)
-	binary.LittleEndian.PutUint64(result[8:], g)
+	binary.BigEndian.PutUint64(result[:8], hi)
+	binary.BigEndian.PutUint64(result[8:], lo)
 	return result
 }
 
 // SingleFlightKey returns a string key for request collapsing. The
-// suffix is XORed into the first 8 bytes so revalidation singleflight
-// (suffix != 0) is distinguished from fetch singleflight (suffix == 0)
-// without hashing the full key. The result is the 32-char hex of the
-// (possibly suffix-mixed) key.
+// suffix is XORed into the first 8 bytes (the high half) so
+// revalidation singleflight (suffix != 0) is distinguished from fetch
+// singleflight (suffix == 0) without hashing the full key. The result
+// is the 32-char hex of the (possibly suffix-mixed) key.
 func (k Key) SingleFlightKey(suffix uint64) string {
 	var x Key
-	binary.LittleEndian.PutUint64(x[:8], k.Hash64()^suffix)
+	binary.BigEndian.PutUint64(x[:8], binary.BigEndian.Uint64(k[:8])^suffix)
 	copy(x[8:], k[8:])
 	return hex.EncodeToString(x[:])
 }
@@ -81,12 +71,13 @@ func (k Key) IsZero() bool {
 	return true
 }
 
-// Hash64 returns the first 8 bytes as a little-endian uint64 — the
-// primary xxhash64 half. It is a uniform hash suitable for shard
-// selection, consistent-hash ring ownership, and log sampling without
-// re-hashing the full 16 bytes. Callers that need the full 128-bit
-// collision check MUST use the Key directly as a map key, not Hash64.
-func (k Key) Hash64() uint64 { return binary.LittleEndian.Uint64(k[:8]) }
+// Hash64 returns the first 8 bytes as a big-endian uint64 — the high
+// 64-bit half of the XXH128 hash. It is a uniform hash suitable for
+// shard selection, consistent-hash ring ownership, and log sampling
+// without re-hashing the full 16 bytes. Callers that need the full
+// 128-bit collision check MUST use the Key directly as a map key, not
+// Hash64.
+func (k Key) Hash64() uint64 { return binary.BigEndian.Uint64(k[:8]) }
 
 // Hex returns the 32-char lowercase hex of all 16 key bytes.
 func (k Key) Hex() string { return hex.EncodeToString(k[:]) }
@@ -102,13 +93,14 @@ func (k Key) String() string { return k.Hex() }
 func (k Key) LogValue() slog.Value { return slog.StringValue(k.String()) }
 
 // MarshalJSON emits the key as a 2-element decimal JSON array
-// [lo, hi] where lo and hi are the little-endian uint64 halves. The
+// [hi, lo] where hi and lo are the high and low 64-bit halves of the
+// XXH128 hash, read in big-endian from the canonical byte layout. The
 // array form (rather than a bare number) makes the 128-bit width
 // explicit and unambiguous in admin API output.
 func (k Key) MarshalJSON() ([]byte, error) {
-	lo := k.Hash64()
-	hi := binary.LittleEndian.Uint64(k[8:])
-	return json.Marshal([2]uint64{lo, hi})
+	hi := binary.BigEndian.Uint64(k[:8])
+	lo := binary.BigEndian.Uint64(k[8:])
+	return json.Marshal([2]uint64{hi, lo})
 }
 
 // UnmarshalJSON accepts only the 2-element decimal array form produced
@@ -119,7 +111,7 @@ func (k *Key) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &pair); err != nil {
 		return fmt.Errorf("api.Key: invalid key array: %w", err)
 	}
-	binary.LittleEndian.PutUint64(k[:8], pair[0])
-	binary.LittleEndian.PutUint64(k[8:], pair[1])
+	binary.BigEndian.PutUint64(k[:8], pair[0])
+	binary.BigEndian.PutUint64(k[8:], pair[1])
 	return nil
 }

@@ -1608,7 +1608,7 @@ func TestScanSegment_MmapCorrectness(t *testing.T) {
 			return nil
 		}
 		count++
-		lastKey = binary.LittleEndian.Uint64(r.Key[:8])
+		lastKey = binary.BigEndian.Uint64(r.Key[:8])
 		return nil
 	})
 	require.NoError(t, err, "Scan")

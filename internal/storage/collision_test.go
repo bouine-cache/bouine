@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,14 +56,13 @@ func TestHotStore_KeysWithSameFirstHalfAreDistinct(t *testing.T) {
 	require.Equal(t, key1, got.Key)
 }
 
-// TestNewKey_SecondHalfIndependentOfFirst verifies that testkey.Hash
-// (which mirrors cache.NewKey) produces a second half that is an
-// independent function of the input, not a copy of the first half. If
-// the seed constant were ever set to 0 (or dropped), both halves would
-// be identical and the 128-bit key would collapse to 64 bits of real
-// collision resistance — silently reintroducing issue #51. This test
-// catches that regression.
-func TestNewKey_SecondHalfIndependentOfFirst(t *testing.T) {
+// TestNewKey_HighAndLowHalvesDiffer verifies that testkey.Hash (which
+// mirrors cache.NewKey) produces a low half that differs from the high
+// half for non-trivial inputs. XXH128 computes two independent 64-bit
+// halves (high and low); if a bug caused them to be identical, the
+// 128-bit key would collapse to 64 bits of real collision resistance —
+// silently reintroducing issue #51. This test catches that regression.
+func TestNewKey_HighAndLowHalvesDiffer(t *testing.T) {
 	t.Parallel()
 	inputs := [][]byte{
 		[]byte("https://example.com/|/|a=1|GET"),
@@ -72,20 +72,11 @@ func TestNewKey_SecondHalfIndependentOfFirst(t *testing.T) {
 	}
 	for _, in := range inputs {
 		k := testkey.Hash(in)
-		require.NotEqual(t, k.Hash64(), 0, "first half must be non-zero for non-empty input: %q", in)
-		// The second half must differ from the first for a non-trivial
-		// input — otherwise the seed did nothing and the two halves
-		// are the same hash, giving 64-bit (not 128-bit) collision
-		// resistance.
-		require.NotEqualf(t, k.Hash64(), uint64le(k[8:]),
-			"both halves identical for %q — seed %d did not produce an independent second hash",
-			in, api.Key2Seed)
+		hi := k.Hash64()
+		lo := binary.BigEndian.Uint64(k[8:])
+		require.NotEqual(t, hi, 0, "high half must be non-zero for non-empty input: %q", in)
+		require.NotEqualf(t, hi, lo,
+			"high and low halves identical for %q — XXH128 produced a degenerate hash",
+			in)
 	}
-}
-
-// uint64le reads 8 bytes as a little-endian uint64.
-func uint64le(b []byte) uint64 {
-	_ = b[7]
-	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
-		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }

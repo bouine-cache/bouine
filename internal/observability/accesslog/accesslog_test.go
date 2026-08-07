@@ -76,7 +76,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 	err := json.Unmarshal(buf.Bytes(), &rec)
 	require.NoError(t, err, "unmarshal")
 	assert.Equal(t, "served cache hit", rec["msg"])
-	assert.Equal(t, "2a000000000000000000000000000000", rec["key"])
+	assert.Equal(t, "000000000000002a0000000000000000", rec["key"])
 }
 
 func TestMiddleware_200WithoutKeyLogsInfo(t *testing.T) {

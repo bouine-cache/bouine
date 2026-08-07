@@ -123,7 +123,7 @@ linters:
             - github.com/bouine-cache/bouine/internal/platform
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
-            - github.com/cespare/xxhash/v2
+            - github.com/bouine-cache/xxhash/v3
             - github.com/prometheus/client_golang
             - golang.org/x/sync
             - golang.org/x/sys
@@ -139,7 +139,7 @@ linters:
             - github.com/bouine-cache/bouine/internal/platform
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
-            - github.com/cespare/xxhash/v2
+            - github.com/bouine-cache/xxhash/v3
             - golang.org/x/sync
         origin-L4:
           list-mode: strict
@@ -160,7 +160,7 @@ linters:
             - github.com/bouine-cache/bouine/internal/staticfile
             - github.com/bouine-cache/bouine/internal/observability
             - github.com/bouine-cache/bouine/pkg/header
-            - github.com/cespare/xxhash/v2
+            - github.com/bouine-cache/xxhash/v3
             - github.com/prometheus/client_golang
         cluster-L5:
           list-mode: strict
@@ -175,7 +175,7 @@ linters:
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/hashicorp/memberlist
-            - github.com/cespare/xxhash/v2
+            - github.com/bouine-cache/xxhash/v3
             - github.com/prometheus/client_golang
             - golang.org/x/sync
         admin-L6:

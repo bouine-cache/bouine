@@ -1,4 +1,4 @@
-# ADR-0030: 128-bit cache key via 2×xxhash64
+# ADR-0030: 128-bit cache key via XXH128
 
 - **Status**: Accepted
 - **Date**: 2026-08-06
@@ -25,17 +25,18 @@ removes the weakest link (the primary key), not every link.
 
 ## Decision
 
-Replace `type Key uint64` with `type Key [16]byte` — two xxhash64
-halves packed little-endian.
+Replace `type Key uint64` with `type Key [16]byte` — a single XXH128
+hash stored in the canonical big-endian representation from
+`xxhash.Uint128.Bytes()` (high 64 bits first, then low 64 bits, each
+in big-endian byte order).
 
-- **First 8 bytes**: `xxhash64(canonical, seed=0)` — the original hash,
-  unchanged. Used for shard selection, ring hashing, and access
-  sampling. This avoids a hot-path hash call on the full 16 bytes for
+- **First 8 bytes (k[:8])**: the high 64-bit half of the XXH128 hash.
+  Used for shard selection, ring hashing, and access sampling via
+  `Hash64()`. This avoids a hot-path hash call on the full 16 bytes for
   routing decisions that only need 64 bits of uniformity.
-- **Second 8 bytes**: `xxhash64(canonical, seed="bouine2")` — an
-  independent hash with a different seed. Computed via a `sync.Pool` of
-  `*xxhash.Digest` to maintain 0 allocations on the hit path after
-  warm-up (AGENTS.md §7).
+- **Second 8 bytes (k[8:])**: the low 64-bit half of the XXH128 hash.
+  Both halves are computed in a single `xxhash.Sum128` call — no
+  `sync.Pool`, no second hash, no seeded digest.
 
 ### Why `[16]byte` over a two-field struct
 
@@ -46,15 +47,24 @@ the same properties but adds field naming that implies a
 primary/guard split (as seen in the abandoned PR #345). The array form
 makes it clear that both halves are equally part of the key identity.
 
-### Why 2×xxhash64 instead of a single 128-bit hash
+### Why XXH128 instead of 2×xxhash64
 
+The initial implementation (PR #346) used two independent xxhash64
+calls with different seeds, packed little-endian. This branch replaces
+that with a single XXH128 call via the `bouine-cache/xxhash` fork
+(which adds XXH3-128 to the upstream `cespare/xxhash/v2` API).
+
+- XXH128 is a single hash function that produces two independent 64-bit
+  halves (high and low) in one pass over the data. No `sync.Pool`, no
+  second hash call, no seed constant to duplicate across packages.
+- `xxhash.Sum128` is a one-shot function with no heap state — zero
+  allocations by construction, not by pooling.
 - `cespare/xxhash/v2` is already on the pre-approved dependency
-  allow-list (AGENTS.md §5). No new crypto or hash dependency.
-- xxhash64 is fast (~2 GB/s) and has no internal slice allocations,
-  making it pool-safe.
-- Two independent 64-bit hashes with different seeds provide the same
-  collision resistance as a 128-bit hash for the adversary model we
-  face (natural collisions, not adversarial preimage attacks).
+  allow-list (AGENTS.md §5). The fork keeps the same module path with a
+  `replace` directive; no new dependency.
+- The canonical big-endian byte layout from `Uint128.Bytes()` matches
+  the official XXH128 canonical representation, making cross-language
+  debugging and external tooling straightforward.
 
 ### Wire and on-disk format changes (no backward compatibility)
 
@@ -69,7 +79,7 @@ are bumped:
 | Warm snapshot | v1 | v2 | 8→16 B per entry |
 | Cluster purge/ban frame | v2 | v3 | 8→16 B per payload |
 | Peer-fetch request | v1 | v2 | 8→16 B per request |
-| Key JSON (`pkg/api`) | decimal uint64 | `[lo, hi]` decimal array | 128-bit explicit |
+| Key JSON (`pkg/api`) | decimal uint64 | `[hi, lo]` decimal array | 128-bit explicit |
 
 ### Memory impact
 
@@ -96,8 +106,10 @@ letter. The waiver is justified because:
   primary-key axis. Map lookup is a full 128-bit collision check. The
   Vary dimension remains 64-bit (a future widening would need to mix
   both halves independently, not XOR the same varyHash into both).
-- **Positive**: No new dependencies. xxhash is already approved.
-- **Positive**: 0 allocations on the hit path maintained via `sync.Pool`.
+- **Positive**: No new dependencies. xxhash is already approved; the
+  fork adds XXH128 to the same package.
+- **Positive**: 0 allocations on the hit path — `Sum128` is a one-shot
+  function with no heap state, no `sync.Pool` needed.
 - **Negative**: `map[[16]byte]` lookup is ~2-4 ns slower than
   `map[uint64]` due to the larger hash input. Acceptable per the
   performance budget.
@@ -105,3 +117,6 @@ letter. The waiver is justified because:
   previous versions. Acceptable pre-1.0.
 - **Negative**: ~8-10 B per cache entry additional memory overhead.
   Accounted for in the admission-control constants.
+- **Negative**: The `replace` directive in `go.mod` points to a local
+  fork until the XXH128 addition is upstreamed or the fork is published
+  with a stable tag.

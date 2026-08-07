@@ -1,49 +1,25 @@
 package cache
 
 import (
-	"encoding/binary"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/bouine-cache/xxhash/v3"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// key2Seed is the seed for the second xxhash64 half of the 128-bit
-// cache key. Re-exported from pkg/api (api.Key2Seed) so that
-// internal/testutil/testkey.Hash shares the same source of truth —
-// duplicating the constant would let a bump here silently diverge from
-// the test helper and break key equivalence between production and
-// tests.
-const key2Seed uint64 = api.Key2Seed
-
-// key2Pool pools seeded xxhash digests for the second key half.
-// xxhash.Digest is a fixed struct (no internal slice), so pooling it
-// amortizes to zero allocations after warm-up, satisfying AGENTS.md §7
-// (allocs/op = 0 on the hit path, which runs NewKey before the map
-// lookup). A per-process pool is fine: all callers share the same seed.
-var key2Pool = sync.Pool{
-	New: func() any { return xxhash.NewWithSeed(key2Seed) },
-}
-
-// NewKey computes the 128-bit cache key from canonical bytes: the
-// primary xxhash64 in the low half and a seeded xxhash64 in the high
-// half. Both halves are independent, so the full [16]byte is a 128-bit
-// collision check when used as a map key. Zero amortized allocations.
+// NewKey computes the 128-bit cache key from canonical bytes via a single
+// XXH128 hash. The result is stored in the canonical big-endian layout
+// from xxhash.Uint128.Bytes() (high 64 bits first, then low 64 bits).
+// The full [16]byte is a 128-bit collision check when used as a map key.
+// Zero allocations: Sum128 is a one-shot function with no heap state.
 func NewKey(canonical []byte) api.Key {
-	var k api.Key
-	binary.LittleEndian.PutUint64(k[:8], xxhash.Sum64(canonical))
-	d := key2Pool.Get().(*xxhash.Digest)
-	d.Reset()
-	_, _ = d.Write(canonical)
-	binary.LittleEndian.PutUint64(k[8:], d.Sum64())
-	key2Pool.Put(d)
-	return k
+	h := xxhash.Sum128(canonical)
+	return api.NewKeyFromBytes(h.Bytes())
 }
 
 // BuildKeyFromURL computes the canonical cache key from a raw URL

@@ -558,9 +558,9 @@ func TestWALSyncInterval_NegativeOneAccepted(t *testing.T) {
 
 func TestResolveWarmMaxEntries_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
 	t.Parallel()
-	// 14 GiB * 15% / (100 * 128) = 14*1024^3 * 15 / 12800 = ~16,777,216 entries
+	// 14 GiB * 15% / (100 * 160) = 14*1024^3 * 15 / 16000 = ~14,092,861 entries
 	limit := int64(14 << 30)
-	want := limit * 15 / (100 * 128)
+	want := limit * 15 / (100 * 160)
 	s := Storage{}
 	s.ResolveWarmMaxEntries("14GiB")
 	require.Equal(t, want, s.WarmMaxEntries)
@@ -569,7 +569,7 @@ func TestResolveWarmMaxEntries_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
 func TestResolveWarmMaxEntries_DefaultRatio(t *testing.T) {
 	t.Parallel()
 	limit := int64(14 << 30)
-	want := limit * 15 / (100 * 128)
+	want := limit * 15 / (100 * 160)
 	s := Storage{}
 	s.ResolveWarmMaxEntries("14GiB")
 	require.Equal(t, want, s.WarmMaxEntries)

@@ -65,9 +65,9 @@ curl http://<admin-addr>/debug/pprof/goroutine?debug=1
 1. **Orphaned `header.Map.values` slots from `Del`** — `Set-Cookie` is always
    deleted from cached objects, orphaning one value string per affected object.
    `objSize` counts active entries (`Len()`) not total slots (`len(values)`).
-2. **`mapPerEntryOverhead` is 2.3× too high** (50 vs Go runtime bucket overhead
-   of ~22 B/entry at load factor 6.5) — partially offsetting the underestimate
-   above.
+2. **`mapPerEntryOverhead` was recalibrated for 128-bit keys** (32 B/entry
+   for 8-slot buckets with 16 B keys at load factor 6.5, up from 22 B
+   with 8 B keys) — partially offsetting the underestimate above.
 
 Back-of-envelope net effect at 1.07M entries: ~43 MB underestimate from
 orphaned values (16 B string header + ~24 B average value per Set-Cookie

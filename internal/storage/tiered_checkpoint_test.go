@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage/warm"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -36,7 +37,7 @@ func TestCheckpointAndSnapshotRestart(t *testing.T) {
 	ts := newTieredStoreWithDir(t, dir)
 
 	for i := range 20 {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put %d", i)
@@ -59,7 +60,7 @@ func TestCheckpointAndSnapshotRestart(t *testing.T) {
 	defer func() { _ = ts2.Close(context.Background()) }()
 
 	for i := range 20 {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		obj, src, err := ts2.Get(context.Background(), k)
 		require.NoErrorf(t, err, "get %d after restart", i)
 		require.NotNil(t, obj)
@@ -73,7 +74,7 @@ func TestSnapshotFallbackOnMissingSnapshot(t *testing.T) {
 	ts := newTieredStoreWithDir(t, dir)
 
 	for i := range 10 {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put %d", i)
@@ -89,7 +90,7 @@ func TestSnapshotFallbackOnMissingSnapshot(t *testing.T) {
 	defer func() { _ = ts2.Close(context.Background()) }()
 
 	for i := range 10 {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		obj, _, err := ts2.Get(context.Background(), k)
 		require.NoErrorf(t, err, "get %d", i)
 		require.NotNil(t, obj)
@@ -102,7 +103,7 @@ func TestSnapshotWithWALDelta(t *testing.T) {
 	ts := newTieredStoreWithDir(t, dir)
 
 	for i := range 10 {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put %d", i)
@@ -112,13 +113,13 @@ func TestSnapshotWithWALDelta(t *testing.T) {
 	require.NoError(t, err, "checkpoint")
 
 	for i := 10; i < 20; i++ {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put delta %d", i)
 	}
 
-	err = ts.Delete(context.Background(), api.Key(1))
+	err = ts.Delete(context.Background(), testkey.Key(1))
 	require.NoError(t, err, "delete")
 
 	err = ts.Close(context.Background())
@@ -127,12 +128,12 @@ func TestSnapshotWithWALDelta(t *testing.T) {
 	ts2 := newTieredStoreWithDir(t, dir)
 	defer func() { _ = ts2.Close(context.Background()) }()
 
-	obj, _, err := ts2.Get(context.Background(), api.Key(1))
+	obj, _, err := ts2.Get(context.Background(), testkey.Key(1))
 	require.NoError(t, err, "get deleted key")
 	require.Nil(t, obj)
 
 	for i := 1; i < 20; i++ {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		obj, _, err := ts2.Get(context.Background(), k)
 		require.NoErrorf(t, err, "get %d", i)
 		require.NotNil(t, obj)
@@ -146,7 +147,7 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 	defer func() { _ = ts.Close(context.Background()) }()
 
 	for i := range 5 {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put %d", i)
@@ -160,7 +161,7 @@ func TestCheckpointTruncatesWAL(t *testing.T) {
 	require.Equal(t, int64(0), ts.walEntryCount.Load())
 
 	for i := 5; i < 10; i++ {
-		k := api.Key(i + 1)
+		k := testkey.Key(uint64(i + 1))
 		o := bigObj(k, 2048)
 		err := ts.Put(context.Background(), k, o)
 		require.NoErrorf(t, err, "put %d", i)

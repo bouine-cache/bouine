@@ -60,7 +60,7 @@ func Acquire(w http.ResponseWriter) *ResponseWriter {
 	rw.ResponseWriter = w
 	rw.Status = 200
 	rw.Bytes = 0
-	rw.Key = 0
+	rw.Key = api.Key{}
 	rw.headerWritten = false
 	return rw
 }

@@ -44,7 +44,7 @@ curl -X POST http://127.0.0.1:9000/v1/purge \
 
 ### How it works
 
-1. The URL is hashed (xxhash64) to produce the cache key.
+1. The URL is hashed (XXH128, producing a 128-bit `[16]byte` key) to produce the cache key.
 2. The key is deleted from the hot tier (in-RAM sharded map).
 3. In a clustered setup, the purge is forwarded to the key's owner
    node via the consistent-hash ring.

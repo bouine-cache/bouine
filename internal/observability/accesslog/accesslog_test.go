@@ -14,7 +14,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
-	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -62,7 +62,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 		w.Header().Set(header.XCache, "HIT")
 		w.WriteHeader(200)
 		if rw, ok := w.(*responsewriter.ResponseWriter); ok {
-			rw.SetCacheKey(api.Key(42))
+			rw.SetCacheKey(testkey.Key(42))
 		}
 	})
 
@@ -76,7 +76,7 @@ func TestMiddleware_200WithKeyLogsInfo(t *testing.T) {
 	err := json.Unmarshal(buf.Bytes(), &rec)
 	require.NoError(t, err, "unmarshal")
 	assert.Equal(t, "served cache hit", rec["msg"])
-	assert.Equal(t, "2a", rec["key"])
+	assert.Equal(t, "000000000000002a0000000000000000", rec["key"])
 }
 
 func TestMiddleware_200WithoutKeyLogsInfo(t *testing.T) {

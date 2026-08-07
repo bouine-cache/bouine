@@ -18,6 +18,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -38,7 +39,7 @@ func TestHotStore_PutGet(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	k := KeyHash([]byte("test-key"))
+	k := testkey.Hash([]byte("test-key"))
 	o := obj(k, 100)
 
 	err := s.Put(context.Background(), k, o)
@@ -55,7 +56,7 @@ func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	got, src, err := s.Get(context.Background(), 999)
+	got, src, err := s.Get(context.Background(), testkey.Key(999))
 	require.NoError(t, err, "get")
 	require.Nil(t, got)
 	require.Equal(t, api.Source(""), src)
@@ -66,7 +67,7 @@ func TestHotStore_Miss(t *testing.T) {
 func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
-	k := KeyHash([]byte("delegate"))
+	k := testkey.Hash([]byte("delegate"))
 	o := obj(k, 100)
 
 	err := s.Put(context.Background(), k, o)
@@ -80,7 +81,7 @@ func TestHotStore_Get_DelegatesToGet(t *testing.T) {
 func TestHotStore_Delete(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
-	k := KeyHash([]byte("del"))
+	k := testkey.Hash([]byte("del"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_ = s.Delete(context.Background(), k)
 
@@ -95,7 +96,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 
 	// Insert objects until eviction must have happened.
 	for i := range 100 {
-		k := api.Key(i)
+		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, 500))
 	}
 
@@ -113,7 +114,7 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 
 	now := time.Now()
 	fresh := &api.Object{
-		Key:        KeyHash([]byte("fresh")),
+		Key:        testkey.Hash([]byte("fresh")),
 		StatusCode: 200,
 		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:       make([]byte, 100),
@@ -122,7 +123,7 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 		TTL:        time.Minute,
 	}
 	expired := &api.Object{
-		Key:                  KeyHash([]byte("expired")),
+		Key:                  testkey.Hash([]byte("expired")),
 		StatusCode:           200,
 		Header:               header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:                 make([]byte, 100),
@@ -156,7 +157,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 
 	now := time.Now()
 	withinSWR := &api.Object{
-		Key:                  KeyHash([]byte("swr")),
+		Key:                  testkey.Hash([]byte("swr")),
 		StatusCode:           200,
 		Header:               header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:                 make([]byte, 100),
@@ -166,7 +167,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 		StaleWhileRevalidate: 30 * time.Second,
 	}
 	withinSIE := &api.Object{
-		Key:          KeyHash([]byte("sie")),
+		Key:          testkey.Hash([]byte("sie")),
 		StatusCode:   200,
 		Header:       header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
 		Body:         make([]byte, 100),
@@ -222,9 +223,9 @@ func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 
 func TestObjSize_MapOverheadConstant(t *testing.T) {
 	t.Parallel()
-	// 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry.
+	// 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry.
 	// The hmap struct header (~96 B) is negligible at 1M+ entries.
-	assert.Equal(t, int64(22), mapPerEntryOverhead)
+	assert.Equal(t, int64(32), mapPerEntryOverhead)
 }
 
 func TestObjSize_OrphanedValuesCounted(t *testing.T) {
@@ -282,14 +283,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 264, hotEntrySize: 32, sieveEntrySize: 32, mapPerEntryOverhead: 22
+	// objectStructSize: 272, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 264 + 32 + 32 + 22 +
+	want := int64(5) + 272 + 32 + 40 + 32 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
@@ -308,7 +309,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	}
 
 	for i := range 500 {
-		k := api.Key(i)
+		k := testkey.Key(uint64(i))
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
@@ -331,7 +332,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 func TestHotStore_Replace(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
-	k := KeyHash([]byte("replace"))
+	k := testkey.Hash([]byte("replace"))
 
 	_ = s.Put(context.Background(), k, obj(k, 100))
 	_ = s.Put(context.Background(), k, obj(k, 200))
@@ -353,7 +354,7 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 		go func(base int) {
 			defer wg.Done()
 			for i := range 1000 {
-				k := api.Key(base*1000 + i)
+				k := testkey.Key(uint64(base*1000 + i))
 				_ = s.Put(context.Background(), k, obj(k, 64))
 				_, _, _ = s.Get(context.Background(), k)
 			}
@@ -368,10 +369,10 @@ func TestHotStore_ConcurrentAccess(t *testing.T) {
 func TestHotStore_Stats(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 2})
-	k := KeyHash([]byte("stats"))
+	k := testkey.Hash([]byte("stats"))
 	_ = s.Put(context.Background(), k, obj(k, 50))
 	_, _, _ = s.Get(context.Background(), k)
-	_, _, _ = s.Get(context.Background(), 12345) // miss
+	_, _, _ = s.Get(context.Background(), testkey.Key(12345)) // miss
 
 	st := s.Stats()
 	require.Equal(t, int64(1), st.HotEntries)
@@ -381,10 +382,10 @@ func TestHotStore_Stats(t *testing.T) {
 
 func TestKeyHash_Deterministic(t *testing.T) {
 	t.Parallel()
-	a := KeyHash([]byte("hello"))
-	b := KeyHash([]byte("hello"))
+	a := testkey.Hash([]byte("hello"))
+	b := testkey.Hash([]byte("hello"))
 	require.Equal(t, b, a)
-	c := KeyHash([]byte("world"))
+	c := testkey.Hash([]byte("world"))
 	require.NotEqual(t, c, a)
 }
 
@@ -392,14 +393,14 @@ func TestHotStore_SetBacked(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 
-	k := KeyHash([]byte("warm-key"))
+	k := testkey.Hash([]byte("warm-key"))
 	o := obj(k, 512)
 	err := s.Put(context.Background(), k, o)
 	require.NoError(t, err)
 
 	s.SetBacked(k)
 
-	sh := &s.shards[uint64(k)&s.mask]
+	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
@@ -416,8 +417,8 @@ func TestHotStore_EvictPreferBacked(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 2 << 10, NumShards: 1})
 	ctx := context.Background()
 
-	k1 := KeyHash([]byte("a"))
-	k2 := KeyHash([]byte("b"))
+	k1 := testkey.Hash([]byte("a"))
+	k2 := testkey.Hash([]byte("b"))
 	_ = s.Put(ctx, k1, obj(k1, 1024))
 
 	// Mark k1 as backed before k2 arrives.
@@ -441,8 +442,8 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
 	ctx := context.Background()
 
-	k1 := KeyHash([]byte("hot"))
-	k2 := KeyHash([]byte("warm"))
+	k1 := testkey.Hash([]byte("hot"))
+	k2 := testkey.Hash([]byte("warm"))
 	_ = s.Put(ctx, k1, obj(k1, 1024))
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 
@@ -454,7 +455,7 @@ func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
 
 	// k3 triggers eviction. k2 (backed) should be evicted, k1 (hot, visited)
 	// should survive with its visited bit intact.
-	k3 := KeyHash([]byte("new"))
+	k3 := testkey.Hash([]byte("new"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
 	got, _, _ := s.Get(ctx, k1)
@@ -468,12 +469,12 @@ func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
 	ctx := context.Background()
 
-	k1 := KeyHash([]byte("x"))
-	k2 := KeyHash([]byte("y"))
+	k1 := testkey.Hash([]byte("x"))
+	k2 := testkey.Hash([]byte("y"))
 	_ = s.Put(ctx, k1, obj(k1, 1000))
 	_ = s.Put(ctx, k2, obj(k2, 1000))
 
-	k3 := KeyHash([]byte("z"))
+	k3 := testkey.Hash([]byte("z"))
 	err := s.Put(ctx, k3, obj(k3, 1000))
 	require.NoError(t, err)
 
@@ -487,7 +488,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	ctx := context.Background()
 
-	k := KeyHash([]byte("consistency"))
+	k := testkey.Hash([]byte("consistency"))
 	_ = s.Put(ctx, k, obj(k, 100))
 	s.SetBacked(k)
 
@@ -495,7 +496,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	_ = s.Put(ctx, k, obj(k, 200))
 	s.SetBacked(k)
 
-	sh := &s.shards[uint64(k)&s.mask]
+	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
@@ -530,7 +531,7 @@ func TestHotOverflowLatency(t *testing.T) {
 
 	// Pre-fill to capacity.
 	for i := range approxCap * runtime.NumCPU() {
-		k := api.Key(i)
+		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
 	}
 
@@ -551,7 +552,7 @@ func TestHotOverflowLatency(t *testing.T) {
 			local := make([]time.Duration, 0, 1024)
 			for !stop.Load() {
 				n := ctr.Add(1)
-				k := api.Key(n % uint64(working))
+				k := testkey.Key(n % uint64(working))
 				if n%5 == 0 {
 					_ = s.Put(ctx, k, obj(k, bodySize))
 					continue
@@ -628,7 +629,7 @@ func TestHotStore_BanByHostRegex(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	defer func() { _ = s.Close(context.Background()) }()
 
-	k := KeyHash([]byte("host-ban"))
+	k := testkey.Hash([]byte("host-ban"))
 	o := obj(k, 50)
 	o.Header.Set(header.XBouineHost, "example.com")
 	o.Header.Set(header.XBouinePath, "/keep")
@@ -647,7 +648,7 @@ func TestHotStore_BanByPathRegex(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
 	defer func() { _ = s.Close(context.Background()) }()
 
-	k := KeyHash([]byte("path-ban"))
+	k := testkey.Hash([]byte("path-ban"))
 	o := obj(k, 50)
 	o.Header.Set(header.XBouineHost, "example.com")
 	o.Header.Set(header.XBouinePath, "/ban-me")
@@ -675,7 +676,7 @@ func TestHotStore_BanLazyEvictionSlowPath(t *testing.T) {
 	require.Equal(t, 0, count)
 
 	// Simulate peer replication: Put an object with StoredAt before the ban.
-	k := KeyHash([]byte("lazy-ban"))
+	k := testkey.Hash([]byte("lazy-ban"))
 	o := obj(k, 50)
 	o.Header.Set(header.XBouineHost, "example.com")
 	o.Header.Set(header.XBouinePath, "/ban-me")
@@ -692,7 +693,7 @@ func TestHotStore_BanLazyEvictionFastPath(t *testing.T) {
 	defer func() { _ = s.Close(context.Background()) }()
 
 	// Put a matching object with old StoredAt and access it to set visited=true.
-	k := KeyHash([]byte("lazy-fast"))
+	k := testkey.Hash([]byte("lazy-fast"))
 	o := obj(k, 50)
 	o.Header.Set(header.XBouineHost, "example.com")
 	o.Header.Set(header.XBouinePath, "/ban-me")
@@ -727,7 +728,7 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 	require.NoError(t, err, "ban")
 
 	// Object stored AFTER the ban — should be exempt from lazy eviction.
-	k := KeyHash([]byte("exempt"))
+	k := testkey.Hash([]byte("exempt"))
 	o := obj(k, 50)
 	o.Header.Set(header.XBouineHost, "example.com")
 	o.Header.Set(header.XBouinePath, "/ban-me")

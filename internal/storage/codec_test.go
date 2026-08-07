@@ -9,13 +9,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	orig := &api.Object{
-		Key:        api.Key(0xDEADBEEFCAFE),
+		Key:        testkey.Key(0xDEADBEEFCAFE),
 		VaryKey:    "accept-encoding=gzip",
 		StatusCode: http.StatusOK,
 		Header: header.FromHTTP(http.Header{

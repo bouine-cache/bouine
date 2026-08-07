@@ -9,7 +9,7 @@
 // Record layout (little-endian):
 //
 //	[4]  magic      0x424F5549 ("BOUI")
-//	[8]  key        uint64
+//	[16] key        api.Key (128-bit)
 //	[4]  body_len   uint32
 //	[N]  body       []byte
 //	[4]  crc32c     checksum of (magic + key + body_len + body)
@@ -42,16 +42,17 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 const (
 	magicLive uint32 = 0x424F5549 // "BOUI"
 	magicDead uint32 = 0x44454144 // "DEAD"
 	// HeaderLen is the on-disk warm record header size in bytes
-	// (magic 4 + key 8 + body_len 4). It is part of the wire format
+	// (magic 4 + key 16 + body_len 4). It is part of the wire format
 	// and exported so tests and tooling can compute record sizes
 	// without duplicating the layout.
-	HeaderLen = 4 + 8 + 4
+	HeaderLen = 4 + 16 + 4
 	// FooterLen is the on-disk warm record footer size in bytes
 	// (crc32c). Exported alongside HeaderLen for the same reason.
 	FooterLen = 4
@@ -72,17 +73,19 @@ const (
 
 // EstimatedWarmLocHeapBytes is the approximate Go heap cost per warm
 // index entry: warmLoc struct (segID int + offset int64 + size int64 +
-// sieve pointer 8B + protected bool padded to 8B = ~40B) + map overhead
-// (~50B at load factor 6.5) + sieve.Entry (32B pooled, but pointer 8B
-// in warmLoc) = ~98B. Rounded to 128 for alignment and safety margin.
+// sieve pointer 8B + protected bool padded to 8B = ~40B, unchanged — the
+// Key lives in the map, not warmLoc) + map overhead (~58B at load factor
+// 6.5 with 16-byte keys) + sieve.Entry[api.Key] (40B: 16B key + 4B
+// atomic.Bool + 4B pad + 8B prev + 8B next) = ~138B. Rounded to 160 for
+// alignment and safety margin.
 // Update if warmLoc or sieve.Entry struct layout changes.
 // The same value is inlined in config/loader.go ResolveWarmMaxEntries
 // to avoid a circular import.
-const EstimatedWarmLocHeapBytes = 128
+const EstimatedWarmLocHeapBytes = 160
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// recordHdrPool pools the fixed-size 16-byte header buffer used by
+// recordHdrPool pools the fixed-size 24-byte header buffer used by
 // readRecordAt. The header is read, parsed, and discarded on every
 // warm-tier read; without pooling this is a per-call heap allocation
 // on the peer-fetch hot path (issue #187, fix #4).
@@ -128,7 +131,7 @@ var errSegFull = errors.New("warm: active segment full")
 
 // Record is a single warm-tier entry read from a segment.
 type Record struct {
-	Key    uint64
+	Key    api.Key
 	Body   []byte
 	IsTomb bool
 	Offset int64
@@ -343,7 +346,7 @@ type warmLoc struct {
 	segID     int
 	offset    int64
 	size      int64
-	sieve     *sieve.Entry[uint64]
+	sieve     *sieve.Entry[api.Key]
 	protected bool
 }
 
@@ -362,17 +365,17 @@ type Store struct {
 	nextID       atomic.Int32
 	stats        warmStats
 	idxMu        sync.RWMutex
-	index        map[uint64]warmLoc
+	index        map[api.Key]warmLoc
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
-	evictList *sieve.List[uint64]
+	evictList *sieve.List[api.Key]
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
 	// (compactLoop), so no synchronization is needed. The buffer grows
 	// to fit the steady-state key count and is reused across compaction
-	// cycles, avoiding a per-compaction allocation of ~16 MB at 2M keys.
-	compactKeysBuf []uint64
+	// cycles, avoiding a per-compaction allocation of ~32 MB at 2M keys.
+	compactKeysBuf []api.Key
 	// OnEvict is called with the evicted key after evictOne removes the
 	// entry from the warm index and writes the tombstone. The acceleration
 	// tier uses this to clear hasBackup on the corresponding hot entry so
@@ -385,7 +388,7 @@ type Store struct {
 	// back to false and permanently strand the warm entry as protected.
 	// ClearBacked (the only current callback) is O(1) and lock-only, so
 	// holding idxMu across it adds no I/O latency.
-	OnEvict func(key uint64)
+	OnEvict func(key api.Key)
 	// metrics receives warm-tier Prometheus collectors. Nil when the
 	// store is constructed without a registry (tests, single-node).
 	metrics *Metrics
@@ -473,8 +476,8 @@ func NewStore(cfg Config) (*Store, error) {
 		minFreeDisk:  cfg.MinFreeDisk,
 		preallocate:  cfg.Preallocate,
 		segMax:       cfg.SegMax,
-		index:        make(map[uint64]warmLoc),
-		evictList:    sieve.NewList[uint64](),
+		index:        make(map[api.Key]warmLoc),
+		evictList:    sieve.NewList[api.Key](),
 		metrics:      cfg.Metrics,
 	}
 	if cfg.SegmentCacheSize != -1 {
@@ -606,10 +609,30 @@ func (s *Store) preallocateSegments() error {
 // so N goroutines that hit errSegFull simultaneously create exactly one
 // new segment, not N.
 //
-// Lock ordering: s.mu.RLock → seg.mu.Lock → idxMu.Lock. Compact holds
-// s.mu.Lock → seg.mu.Lock → idxMu.Lock. No deadlock: Put's s.mu.RLock blocks
-// Compact's s.mu.Lock, and Put releases s.mu.RLock before calling newSegment.
-func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error) {
+// ensureBudgetLocked checks whether recSize fits within the configured
+// budgets, attempting eviction if not. Returns nil if the record fits
+// (either directly or after eviction), errSegFull if the active segment
+// is full and the caller should create a new one, or ErrOverBudget if
+// the record cannot fit even after eviction.
+func (s *Store) ensureBudgetLocked(recSize int64) error {
+	if s.maxBytes <= 0 && s.maxEntries <= 0 {
+		return nil
+	}
+	if s.fitsBudgets(recSize) {
+		return nil
+	}
+	evictErr := s.evictToFitBatchLocked(recSize)
+	if evictErr != nil && !errors.Is(evictErr, errSegFull) {
+		s.metrics.IncOverBudget()
+		return fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
+	}
+	return evictErr
+}
+
+// Put appends a live record for key to the active segment and updates the
+// in-memory index. See the comment above ensureBudgetLocked for budget and
+// lock-ordering details.
+func (s *Store) Put(key api.Key, body []byte) (segID int, offset int64, err error) {
 	recSize := int64(HeaderLen + len(body) + FooterLen)
 
 	s.mu.RLock()
@@ -619,24 +642,18 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 		// Enforce both budgets before appending. A zero budget means
 		// no limit (backward compatible with the default). When over
 		// either budget, attempt eviction to free space before rejecting.
-		if s.maxBytes > 0 || s.maxEntries > 0 {
-			if !s.fitsBudgets(recSize) {
-				evictErr := s.evictToFitBatchLocked(recSize)
-				if evictErr != nil && !errors.Is(evictErr, errSegFull) {
-					s.metrics.IncOverBudget()
-					return 0, 0, fmt.Errorf("warm: put %d bytes: %w", recSize, ErrOverBudget)
-				}
-				if errors.Is(evictErr, errSegFull) {
-					// Active segment is full; create a new one and retry.
-					s.mu.RUnlock()
-					if _, nErr := s.newSegment(); nErr != nil {
-						s.mu.RLock()
-						return 0, 0, nErr
-					}
+		if budgetErr := s.ensureBudgetLocked(recSize); budgetErr != nil {
+			if errors.Is(budgetErr, errSegFull) {
+				// Active segment is full; create a new one and retry.
+				s.mu.RUnlock()
+				if _, nErr := s.newSegment(); nErr != nil {
 					s.mu.RLock()
-					continue
+					return 0, 0, nErr
 				}
+				s.mu.RLock()
+				continue
 			}
+			return 0, 0, budgetErr
 		}
 
 		seg, segErr := s.activeSegRLocked()
@@ -687,7 +704,7 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 		// reuse the existing entry and mark it visited. Otherwise, insert a
 		// new entry at head with visited=false. The bool return (newly
 		// inserted) is discarded — the entry pointer is sufficient.
-		e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
+		e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 			if loc, ok := s.index[k]; ok {
 				return loc.sieve
 			}
@@ -706,7 +723,7 @@ func (s *Store) Put(key uint64, body []byte) (segID int, offset int64, err error
 //
 // Like Put, Delete holds s.mu.RLock for its entire duration to prevent
 // Compact from swapping segments mid-operation (issue #280).
-func (s *Store) Delete(key uint64) (segID int, err error) {
+func (s *Store) Delete(key api.Key) (segID int, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for {
@@ -770,7 +787,7 @@ func (s *Store) Delete(key uint64) (segID int, err error) {
 // The visited bit is an atomic.Bool, so it is set under RLock without
 // a lock upgrade. The re-check of segID + offset prevents marking a
 // stale entry that was evicted and reused during the TOCTOU window.
-func (s *Store) Get(key uint64) ([]byte, error) {
+func (s *Store) Get(key api.Key) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -853,10 +870,10 @@ func (s *Store) Get(key uint64) ([]byte, error) {
 //
 // The SIEVE Access call mirrors Put: the bool return (newly inserted) is
 // discarded — the entry pointer is sufficient for the index.
-func (s *Store) SetIndex(key uint64, segID int, offset int64) {
+func (s *Store) SetIndex(key api.Key, segID int, offset int64) {
 	s.idxMu.Lock()
 	defer s.idxMu.Unlock()
-	e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
+	e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 		if loc, ok := s.index[k]; ok {
 			return loc.sieve
 		}
@@ -869,10 +886,10 @@ func (s *Store) SetIndex(key uint64, segID int, offset int64) {
 // size. Used during WAL v2 replay to populate the index with size
 // information directly, avoiding the need for RecomputeStats to scan
 // all segments on startup.
-func (s *Store) SetIndexWithSize(key uint64, segID int, offset, size int64) {
+func (s *Store) SetIndexWithSize(key api.Key, segID int, offset, size int64) {
 	s.idxMu.Lock()
 	defer s.idxMu.Unlock()
-	e, _ := s.evictList.Access(key, func(k uint64) *sieve.Entry[uint64] {
+	e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
 		if loc, ok := s.index[k]; ok {
 			return loc.sieve
 		}
@@ -895,7 +912,7 @@ func (s *Store) IndexLen() int {
 // Lookup returns the segment ID and offset for a key in the warm-tier
 // index, or ok=false if the key is absent. Used by TieredStore to
 // rewrite the WAL after warm-tier compaction without scanning segments.
-func (s *Store) Lookup(key uint64) (segID int, offset int64, ok bool) {
+func (s *Store) Lookup(key api.Key) (segID int, offset int64, ok bool) {
 	s.idxMu.RLock()
 	loc, exists := s.index[key]
 	s.idxMu.RUnlock()
@@ -908,7 +925,7 @@ func (s *Store) Lookup(key uint64) (segID int, offset int64, ok bool) {
 // LookupWithSize is like Lookup but also returns the on-disk record
 // size. Used by rewriteWAL to write v2 WAL entries that include the
 // size, so the next startup can skip RecomputeStats.
-func (s *Store) LookupWithSize(key uint64) (segID int, offset, size int64, ok bool) {
+func (s *Store) LookupWithSize(key api.Key) (segID int, offset, size int64, ok bool) {
 	s.idxMu.RLock()
 	loc, exists := s.index[key]
 	s.idxMu.RUnlock()
@@ -923,7 +940,7 @@ func (s *Store) LookupWithSize(key uint64) (segID int, offset, size int64, ok bo
 // served from the warm tier. Does not update stats counters; callers
 // must run RecomputeStats after replay to restore accurate entries and
 // bytes. Using DelIndex outside of replay will cause stats drift.
-func (s *Store) DelIndex(key uint64) {
+func (s *Store) DelIndex(key api.Key) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
 		if loc.sieve != nil {
@@ -949,7 +966,7 @@ func (s *Store) DelIndex(key uint64) {
 // is only called on startup (before serving) or after compaction, so
 // concurrent index modifications are not a concern.
 func (s *Store) RecomputeStats() error {
-	sizeUpdates := make(map[uint64]int64)
+	sizeUpdates := make(map[api.Key]int64)
 	var entries, bytes int64
 	if err := s.Scan(func(r Record) error {
 		if r.IsTomb {
@@ -1100,7 +1117,7 @@ func (s *Store) SelfHeals() int64 {
 // a concurrent Protect updates protected). Those changes are
 // benign: the entry is stale because the segment is gone, and identity
 // is fully determined by (segID, offset).
-func (s *Store) dropStaleIndex(key uint64, stale warmLoc) {
+func (s *Store) dropStaleIndex(key api.Key, stale warmLoc) {
 	s.idxMu.Lock()
 	if cur, ok := s.index[key]; ok && cur.segID == stale.segID && cur.offset == stale.offset {
 		if cur.sieve != nil {
@@ -1120,10 +1137,10 @@ func (s *Store) dropStaleIndex(key uint64, stale warmLoc) {
 // slice is unsorted; callers that need determinism must sort it. Used by
 // TieredStore.Keys() to report the union of hot + warm keys so that
 // TieredStore.Keys() reports the complete set of keys the node owns.
-func (s *Store) Keys() []uint64 {
+func (s *Store) Keys() []api.Key {
 	s.idxMu.RLock()
 	defer s.idxMu.RUnlock()
-	keys := make([]uint64, 0, len(s.index))
+	keys := make([]api.Key, 0, len(s.index))
 	for k := range s.index {
 		keys = append(keys, k)
 	}
@@ -1147,7 +1164,7 @@ func (s *Store) Keys() []uint64 {
 // every hot-tier removal path to match this lifecycle; the paired
 // Protect+SetBacked + Delete-on-hot-eviction lifecycle is simpler
 // and already correct.
-func (s *Store) Protect(key uint64) {
+func (s *Store) Protect(key api.Key) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
 		loc.protected = true
@@ -1160,7 +1177,7 @@ func (s *Store) Protect(key uint64) {
 // segment. Both seg.mu and idxMu must be held by the caller. On failure,
 // the SIEVE entry and index entry for the victim are restored so the
 // victim is not lost.
-func (s *Store) writeTombstoneLocked(seg *Segment, key uint64, loc warmLoc) error {
+func (s *Store) writeTombstoneLocked(seg *Segment, key api.Key, loc warmLoc) error {
 	off := seg.size
 	if err := writeRecordAt(seg.f, off, magicDead, key, nil); err != nil {
 		s.restoreSIEVEEntry(key, loc)
@@ -1173,14 +1190,14 @@ func (s *Store) writeTombstoneLocked(seg *Segment, key uint64, loc warmLoc) erro
 // evictOneLocked performs a single eviction assuming seg.mu and idxMu
 // are already held. Returns the evicted key and true on success, or
 // (0, false) if no victim is available or the tombstone write fails.
-func (s *Store) evictOneLocked(seg *Segment) (uint64, bool) {
+func (s *Store) evictOneLocked(seg *Segment) (api.Key, bool) {
 	if s.evictList.Len() == 0 {
-		return 0, false
+		return api.Key{}, false
 	}
 
 	victimKey, victimLoc, found := s.pickEvictVictim()
 	if !found {
-		return 0, false
+		return api.Key{}, false
 	}
 
 	// Write the tombstone to the active segment. Both seg.mu and idxMu
@@ -1191,7 +1208,7 @@ func (s *Store) evictOneLocked(seg *Segment) (uint64, bool) {
 	// later live record wins). On failure, restore the SIEVE entry and
 	// index entry so the victim is not lost.
 	if err := s.writeTombstoneLocked(seg, victimKey, victimLoc); err != nil {
-		return 0, false
+		return api.Key{}, false
 	}
 
 	// Remove from index and decrement stats. The SIEVE entry was
@@ -1236,12 +1253,12 @@ func (s *Store) evictOneLocked(seg *Segment) (uint64, bool) {
 //
 // evictOne holds s.mu.RLock for its entire duration to prevent Compact
 // from swapping segments during eviction (issue #280).
-func (s *Store) evictOne() (uint64, bool) {
+func (s *Store) evictOne() (api.Key, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	seg, err := s.activeSegRLocked()
 	if err != nil {
-		return 0, false
+		return api.Key{}, false
 	}
 
 	seg.mu.Lock()
@@ -1307,11 +1324,11 @@ func (s *Store) evictToFitBatchLocked(recSize int64) error {
 // pickEvictVictim sweeps the SIEVE list (bounded by maxWarmEvictSkips)
 // for a non-protected victim. Protected entries are re-inserted at the
 // head with visited=true (second chance). idxMu must be held.
-func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
+func (s *Store) pickEvictVictim() (key api.Key, loc warmLoc, found bool) {
 	for range maxWarmEvictSkips {
 		cand, ok := s.evictList.EvictBounded(maxSweepProbes)
 		if !ok {
-			return 0, warmLoc{}, false
+			return api.Key{}, warmLoc{}, false
 		}
 		candLoc, exists := s.index[cand]
 		if !exists {
@@ -1326,7 +1343,7 @@ func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 			// Give the protected entry a second chance: re-insert
 			// at head with visited=true. The hand will clear visited
 			// on a future sweep and reconsider it.
-			e, _ := s.evictList.Access(cand, func(uint64) *sieve.Entry[uint64] { return nil })
+			e, _ := s.evictList.Access(cand, func(api.Key) *sieve.Entry[api.Key] { return nil })
 			e.MarkVisited()
 			candLoc.sieve = e
 			s.index[cand] = candLoc
@@ -1334,15 +1351,15 @@ func (s *Store) pickEvictVictim() (key uint64, loc warmLoc, found bool) {
 		}
 		return cand, candLoc, true
 	}
-	return 0, warmLoc{}, false
+	return api.Key{}, warmLoc{}, false
 }
 
 // restoreSIEVEEntry re-inserts a victim into the SIEVE list and restores
 // its index entry after a failed tombstone write. idxMu must be held.
 // The SIEVE entry was removed by EvictBounded, so a fresh entry is inserted
 // at the head with visited=false; the next Get will re-mark it.
-func (s *Store) restoreSIEVEEntry(key uint64, loc warmLoc) {
-	e, _ := s.evictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
+func (s *Store) restoreSIEVEEntry(key api.Key, loc warmLoc) {
+	e, _ := s.evictList.Access(key, func(api.Key) *sieve.Entry[api.Key] { return nil })
 	loc.sieve = e
 	s.index[key] = loc
 }
@@ -1593,13 +1610,13 @@ func segName(id int) string {
 	return fmt.Sprintf("%06d%s", id, segExt)
 }
 
-func writeRecordAt(f *os.File, offset int64, magic uint32, key uint64, body []byte) error {
+func writeRecordAt(f *os.File, offset int64, magic uint32, key api.Key, body []byte) error {
 	hdrPtr := recordHdrPool.Get().(*[]byte)
 	hdr := *hdrPtr
 	defer recordHdrPool.Put(hdrPtr)
 	binary.LittleEndian.PutUint32(hdr[0:4], magic)
-	binary.LittleEndian.PutUint64(hdr[4:12], key)
-	binary.LittleEndian.PutUint32(hdr[12:16], uint32(len(body))) //nolint:gosec // body capped by segment size
+	copy(hdr[4:20], key[:])
+	binary.LittleEndian.PutUint32(hdr[20:24], uint32(len(body))) //nolint:gosec // body capped by segment size
 
 	crc := crc32.Update(0, crcTable, hdr)
 	if len(body) > 0 {
@@ -1663,7 +1680,7 @@ func readRecordAt(seg *Segment, offset int64, size int64) (*Record, error) {
 // readRecordAtSingle reads an entire record in one pread syscall using the
 // total on-disk record size from the index. The body aliases the read buffer
 // (no separate body allocation). The full buffer stays alive until the body
-// is consumed by decode+promote; the overhead is HeaderLen+FooterLen = 20 bytes
+// is consumed by decode+promote; the overhead is HeaderLen+FooterLen = 28 bytes
 // per record, temporary. Do NOT copy the body out — that adds an allocation
 // and defeats the purpose.
 func readRecordAtSingle(f *os.File, segID int, offset int64, size int64) (*Record, error) {
@@ -1679,8 +1696,9 @@ func readRecordAtSingle(f *os.File, segID int, offset int64, size int64) (*Recor
 	}
 
 	magic := binary.LittleEndian.Uint32(buf[0:4])
-	key := binary.LittleEndian.Uint64(buf[4:12])
-	bodyLen := binary.LittleEndian.Uint32(buf[12:16])
+	var key api.Key
+	copy(key[:], buf[4:20])
+	bodyLen := binary.LittleEndian.Uint32(buf[20:24])
 
 	// Validate bodyLen against the buffer to prevent slice out of range
 	// on corrupted or stale index entries.
@@ -1703,8 +1721,8 @@ func readRecordAtSingle(f *os.File, segID int, offset int64, size int64) (*Recor
 	}, nil
 }
 
-// readRecordAtLegacy is the 3-pread fallback for v1 WAL entries where the
-// total record size is unknown. Reads header (16B), body (N bytes), and
+// readRecordAtLegacy is the 3-pread fallback for base WAL entries where the
+// total record size is unknown. Reads header (24B), body (N bytes), and
 // footer (4B) in separate pread syscalls.
 func readRecordAtLegacy(f *os.File, segID int, offset int64) (*Record, error) {
 	hdrPtr := recordHdrPool.Get().(*[]byte)
@@ -1718,8 +1736,9 @@ func readRecordAtLegacy(f *os.File, segID int, offset int64) (*Record, error) {
 	}
 
 	magic := binary.LittleEndian.Uint32(hdr[0:4])
-	key := binary.LittleEndian.Uint64(hdr[4:12])
-	bodyLen := binary.LittleEndian.Uint32(hdr[12:16])
+	var key api.Key
+	copy(key[:], hdr[4:20])
+	bodyLen := binary.LittleEndian.Uint32(hdr[20:24])
 
 	var body []byte
 	if bodyLen > 0 {
@@ -1791,8 +1810,9 @@ func scanSegment(f *os.File, segID int, fn func(Record) error) error {
 			return nil // torn trailing header
 		}
 		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
-		key := binary.LittleEndian.Uint64(data[offset+4 : offset+12])
-		bodyLen := int(binary.LittleEndian.Uint32(data[offset+12 : offset+16]))
+		var key api.Key
+		copy(key[:], data[offset+4:offset+20])
+		bodyLen := int(binary.LittleEndian.Uint32(data[offset+20 : offset+24]))
 
 		recEnd := offset + HeaderLen + bodyLen + FooterLen
 		if recEnd > len(data) {
@@ -1907,7 +1927,7 @@ func (s *Store) Compact() error {
 	defer s.mu.Unlock()
 
 	s.idxMu.RLock()
-	idxSnap := make(map[uint64]warmLoc, len(s.index))
+	idxSnap := make(map[api.Key]warmLoc, len(s.index))
 	for k, v := range s.index {
 		idxSnap[k] = v
 	}
@@ -1935,9 +1955,9 @@ func (s *Store) Compact() error {
 
 	// Build the SIEVE list and compute live bytes. This is O(N) but
 	// runs under s.mu.Lock so the index cannot change concurrently.
-	newEvictList := sieve.NewList[uint64]()
+	newEvictList := sieve.NewList[api.Key]()
 	for _, key := range orderedKeys {
-		e, _ := newEvictList.Access(key, func(uint64) *sieve.Entry[uint64] { return nil })
+		e, _ := newEvictList.Access(key, func(api.Key) *sieve.Entry[api.Key] { return nil })
 		loc := newIndex[key]
 		loc.sieve = e
 		newIndex[key] = loc
@@ -2021,7 +2041,7 @@ func swapSegmentFiles(dir, compactDir string) error {
 }
 
 type pendingRec struct {
-	key  uint64
+	key  api.Key
 	body []byte
 }
 
@@ -2035,9 +2055,9 @@ type pendingRec struct {
 //
 // The caller MUST hold s.mu.Lock: segs is passed in to avoid a re-entrant
 // s.mu.RLock (sync.RWMutex is not re-entrant).
-func (s *Store) compactSegments(tmp *Store, segs []*Segment, idxSnap map[uint64]warmLoc, compactDir string, keysBuf []uint64) (map[uint64]warmLoc, []uint64, int, error) {
+func (s *Store) compactSegments(tmp *Store, segs []*Segment, idxSnap map[api.Key]warmLoc, compactDir string, keysBuf []api.Key) (map[api.Key]warmLoc, []api.Key, int, error) {
 	orderedKeys := keysBuf[:0]
-	newIndex := make(map[uint64]warmLoc, len(idxSnap))
+	newIndex := make(map[api.Key]warmLoc, len(idxSnap))
 	written := 0
 	for _, seg := range segs {
 		seg.mu.Lock()

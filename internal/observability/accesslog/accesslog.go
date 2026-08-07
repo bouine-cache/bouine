@@ -40,7 +40,7 @@ func Middleware(logger observability.Logger, next http.Handler) http.Handler {
 			"remote", r.RemoteAddr,
 			"cache_status", cacheResult,
 		}
-		if sw.Key != 0 {
+		if !sw.Key.IsZero() {
 			attrs = append(attrs, "key", sw.Key)
 		}
 

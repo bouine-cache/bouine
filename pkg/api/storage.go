@@ -1,32 +1,11 @@
 package api
 
 import (
-	"log/slog"
-	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/header"
 )
-
-// Key is the canonical cache key. It is a plain uint64 xxhash digest
-// of the normalized request attributes (scheme + host + path + query +
-// method + Vary headers).
-type Key uint64
-
-// LogValue renders the key as a lowercase hex string in slog output so
-// it matches the xxhash64 hex form used in admin API responses, storage
-// paths, and runbook examples. This allocates one string per log record,
-// which is acceptable: the hit-path access log is sampled (1:100) and
-// miss/error paths are not hot.
-func (k Key) LogValue() slog.Value { return slog.StringValue(k.Hex()) }
-
-// Hex returns the lowercase hex representation of the key. Intended for
-// admin API responses, log output, and runbook examples.
-func (k Key) Hex() string { return strconv.FormatUint(uint64(k), 16) }
-
-// String returns the lowercase hex representation, satisfying fmt.Stringer.
-func (k Key) String() string { return k.Hex() }
 
 // Object is the cached response stored by the storage layer. It holds
 // both the HTTP metadata and the body bytes (or a reference to the

@@ -14,7 +14,7 @@ import (
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-const objCodecVersion byte = 2
+const objCodecVersion byte = 3
 
 // errCorrupt is returned when an encoded object blob is truncated or
 // otherwise malformed. TieredStore.Get treats it as a durable eviction:
@@ -73,7 +73,7 @@ func encodeObject(obj *api.Object) []byte {
 
 func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = append(buf, objCodecVersion)
-	buf = binary.AppendUvarint(buf, uint64(obj.Key))
+	buf = append(buf, obj.Key[:]...)
 	buf = appendString(buf, obj.VaryKey)
 	buf = binary.AppendUvarint(buf, uint64(obj.StatusCode)) //nolint:gosec // HTTP status is small and non-negative
 	buf = binary.AppendVarint(buf, int64(obj.TTL))
@@ -121,7 +121,7 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	}
 
 	obj := &api.Object{}
-	obj.Key = api.Key(r.uvarint())
+	copy(obj.Key[:], r.bytes(16))
 	obj.VaryKey = r.str()
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder
 	obj.TTL = time.Duration(r.varint())

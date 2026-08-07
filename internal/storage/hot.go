@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -248,7 +247,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 }
 
 func (h *HotStore) shard(key api.Key) *shard {
-	return &h.shards[uint64(key)&h.mask]
+	return &h.shards[key.Hash64()&h.mask]
 }
 
 // Get looks up key in the hot tier. Returns the object and api.SourceHot
@@ -391,7 +390,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	size := objSize(obj)
 	s := h.shard(key)
-	shardIdx := int(uint64(key) & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
+	shardIdx := int(key.Hash64() & h.mask) //nolint:gosec // mask < len(shards) ≤ 64, never overflows int
 	perShardMax := h.maxBytes / int64(len(h.shards))
 
 	// Move the body off the Go heap before acquiring the shard lock so
@@ -965,16 +964,11 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	return keys, total
 }
 
-// KeyHash computes the canonical cache key from a byte slice.
-func KeyHash(b []byte) api.Key {
-	return api.Key(xxhash.Sum64(b))
-}
-
 const (
-	objectStructSize    int64 = 264 // unsafe.Sizeof(api.Object{}) — atomic.Pointer[[]byte] replaces []byte (24→8 B). Update when fields are added.
+	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — Key grew 8→16 B inline. Update when fields are added.
 	hotEntrySize        int64 = 32
-	sieveEntrySize      int64 = 32
-	mapPerEntryOverhead int64 = 22 // 8-slot bucket = 144 B at load factor 6.5 → ~22 B/entry. hmap header (~96 B) negligible at 1M+ entries.
+	sieveEntrySize      int64 = 40 // unsafe.Sizeof(sieve.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
+	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
 	headerEntriesSlice int64 = 24 // []headerEntry slice header
 	headerValuesSlice  int64 = 24 // []string slice header

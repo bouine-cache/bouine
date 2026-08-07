@@ -189,7 +189,7 @@ func (s *Storage) ResolveHotMaxBytes(goMemLimit string) {
 //
 // When warm_max_entries is set explicitly it is kept as-is (operator
 // override). When GOMEMLIMIT is empty or unparseable, WarmMaxEntries is
-// left unchanged (zero = unlimited). The 128 constant is inlined from
+// left unchanged (zero = unlimited). The 160 constant is inlined from
 // warm.EstimatedWarmLocHeapBytes to avoid a circular import.
 func (s *Storage) ResolveWarmMaxEntries(goMemLimit string) {
 	if s.WarmMaxEntries > 0 {
@@ -203,9 +203,9 @@ func (s *Storage) ResolveWarmMaxEntries(goMemLimit string) {
 	if err != nil || n <= 0 {
 		return
 	}
-	// 128 = warm.EstimatedWarmLocHeapBytes. Inlined to avoid circular
+	// 160 = warm.EstimatedWarmLocHeapBytes. Inlined to avoid circular
 	// import (config -> warm -> storage). Update both if warmLoc changes.
-	s.WarmMaxEntries = n * int64(defaultWarmMaxEntriesRatio) / (100 * 128)
+	s.WarmMaxEntries = n * int64(defaultWarmMaxEntriesRatio) / (100 * 160)
 }
 
 // validateRoute checks a single route entry and normalises its fields.

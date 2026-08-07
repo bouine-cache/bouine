@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/bouine_anglerfish.png" alt="bouine" width="200">
+  <img src="docs/assets/logo_font.png" alt="bouine" width="280">
 </p>
 
 <h1 align="center">bouine</h1>

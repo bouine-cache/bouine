@@ -23,11 +23,8 @@ templ Layout(props LayoutProps) {
 			<canvas id="bouine-noise" aria-hidden="true"></canvas>
 			<aside aria-label="Sidebar">
 				<div class="logo" aria-label="bouine dashboard">
-					<img src="/logo.png" alt="bouine" class="logo-img" id="bouine-logo"/>
-					<div>
-						<div class="logo-name">bouine</div>
-						<div class="logo-v">{ fmtVersion(props.Version) }</div>
-					</div>
+					<img src="/logo-white.png" alt="bouine" class="logo-img" id="bouine-logo"/>
+					<div class="logo-v">{ fmtVersion(props.Version) }</div>
 				</div>
 				<nav role="navigation" aria-label="Main navigation">
 					<div class="ng" aria-hidden="true">Monitor</div>
@@ -108,7 +105,7 @@ templ Layout(props LayoutProps) {
 			<button
 				class="tog"
 				aria-label="Toggle colour theme"
-				onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙 dark':'☀ light';var lg=document.getElementById('bouine-logo');if(lg)lg.src=next==='light'?'/logo-white.png':'/logo.png';})(this)"
+				onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙 dark':'☀ light';var lg=document.getElementById('bouine-logo');if(lg)lg.src=next==='light'?'/logo.png':'/logo-white.png';})(this)"
 			>☀ light</button>
 			@noiseScript()
 			@tableHelperScript()

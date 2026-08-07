@@ -4,7 +4,7 @@ description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit p
 type: application
 version: 0.3.7
 appVersion: "0.3.7"
-icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/web/dashboard/logo.png
+icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/docs/assets/logo_font.png
 keywords:
   - cache
   - reverse-proxy

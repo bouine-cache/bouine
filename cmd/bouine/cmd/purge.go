@@ -56,6 +56,8 @@ func newBanCmd() *cobra.Command {
 					expr.HostRegex = v
 				case "path_regex":
 					expr.PathRegex = v
+				case "surrogate_key":
+					expr.SurrogateKey = v
 				default:
 					return fmt.Errorf("unknown predicate key %q", k)
 				}

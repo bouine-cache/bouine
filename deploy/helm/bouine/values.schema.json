@@ -566,6 +566,51 @@
           "default": []
         }
       }
+    },
+    "prometheusRule": {
+      "description": "PrometheusRule CRD with alerting rules for bouine SLOs. Requires the Prometheus Operator. Disabled by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "labels": {
+          "type": "object",
+          "default": {}
+        },
+        "rules": {
+          "description": "Alert threshold overrides. Adjust to match your traffic patterns and origin characteristics.",
+          "type": "object",
+          "properties": {
+            "hitLatencyThreshold": {
+              "description": "Hit-path p99 latency threshold in seconds (SLO DP-1).",
+              "type": ["number", "string"],
+              "default": 0.002
+            },
+            "errorRateThreshold": {
+              "description": "5xx error rate threshold as a fraction (SLO DP-4).",
+              "type": ["number", "string"],
+              "default": 0.01
+            },
+            "hitRateThreshold": {
+              "description": "Cache hit rate threshold as a fraction (SLO DP-3).",
+              "type": ["number", "string"],
+              "default": 0.60
+            },
+            "peerFetchHitRateThreshold": {
+              "description": "Peer-fetch hit rate threshold as a fraction (SLO CL-2).",
+              "type": ["number", "string"],
+              "default": 0.50
+            },
+            "warmTierUsageThreshold": {
+              "description": "Warm tier disk usage threshold as a fraction.",
+              "type": ["number", "string"],
+              "default": 0.90
+            }
+          }
+        }
+      }
     }
   }
 }

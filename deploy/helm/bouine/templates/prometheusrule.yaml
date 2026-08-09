@@ -1,0 +1,76 @@
+{{- if and .Values.prometheusRule .Values.prometheusRule.enabled }}
+{{- $rules := .Values.prometheusRule.rules | default dict }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "bouine.fullname" . }}
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: bouine-slo
+      rules:
+        - alert: BouineHitLatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result="HIT"}[5m]))
+            ) > {{ $rules.hitLatencyThreshold | default 0.002 }}
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bouine hit-path p99 > {{ $rules.hitLatencyThreshold | default 0.002 }}s (SLO DP-1)"
+
+        - alert: BouineErrorRateHigh
+          expr: |
+            sum(rate(bouine_requests_total{status=~"5.."}[5m]))
+            / sum(rate(bouine_requests_total[5m])) > {{ $rules.errorRateThreshold | default 0.01 }}
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "bouine 5xx rate > {{ $rules.errorRateThreshold | default 0.01 }} (SLO DP-4)"
+
+        - alert: BouineHitRateLow
+          expr: |
+            sum(rate(bouine_requests_total{cache_result="HIT"}[5m]))
+            / sum(rate(bouine_requests_total[5m])) < {{ $rules.hitRateThreshold | default 0.60 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bouine cache hit rate < {{ $rules.hitRateThreshold | default 0.60 }} (SLO DP-3)"
+
+        - alert: BouinePeerFetchHitRateLow
+          expr: |
+            sum(rate(bouine_peer_fetch_hits_total[5m]))
+            / (sum(rate(bouine_peer_fetch_hits_total[5m])) + sum(rate(bouine_peer_fetch_misses_total[5m])))
+            < {{ $rules.peerFetchHitRateThreshold | default 0.50 }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bouine peer-fetch hit rate < {{ $rules.peerFetchHitRateThreshold | default 0.50 }} (SLO CL-2)"
+            description: "Low peer-fetch hit rate may indicate cluster partition, network misconfiguration, or inconsistent hashing ring state — not a cache-quality metric."
+
+        - alert: BouineWarmTierNearFull
+          expr: |
+            bouine_warm_disk_bytes / clamp_min(bouine_warm_max_bytes, 1) > {{ $rules.warmTierUsageThreshold | default 0.90 }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bouine warm tier > {{ $rules.warmTierUsageThreshold | default 0.90 }} capacity"
+
+        - alert: BouineGossipBroadcastFailures
+          expr: |
+            sum(rate(bouine_cluster_broadcast_failures_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bouine cluster broadcast failures detected"
+{{- end }}

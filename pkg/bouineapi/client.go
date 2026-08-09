@@ -110,6 +110,15 @@ func (c *Client) Peers(ctx context.Context) ([]api.PeerInfo, error) {
 	return out, nil
 }
 
+// Stats returns storage stats (hot/warm entries, bytes, hits, misses, evictions).
+func (c *Client) Stats(ctx context.Context) (*api.Stats, error) {
+	var out api.Stats
+	if err := c.get(ctx, "/v1/stats", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // PurgeResult is the response from a purge operation.
 type PurgeResult struct {
 	Status string `json:"status"`

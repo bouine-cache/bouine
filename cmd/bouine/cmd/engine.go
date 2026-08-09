@@ -505,6 +505,17 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 	})
 }
 
+// sanitizedConfig returns a deep copy of the config with secret fields
+// zeroed out so GET /v1/config never exposes credentials.
+func sanitizedConfig(cfg config.Config) config.Config {
+	out := cfg
+	out.Admin.Token = ""
+	out.Cloudflare.APIToken = ""
+	out.TLS = config.TLS{} // zero out cert/key file paths
+	out.Cluster.TLS = config.ClusterTLS{}
+	return out
+}
+
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
 // The broadcaster internally detaches from the engine's root context so
 // peer fan-out survives shutdown; local store operations use dCtx.
@@ -563,6 +574,8 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		Metrics:            e.metrics,
 		PeersFn:            rs.peersFn,
 		CFStatusFn:         rs.cfProp.Status,
+		StatsFn:            func() api.Stats { return rs.store.Stats() },
+		ConfigFn:           func() any { return sanitizedConfig(*e.cfg) },
 		ReadyFn:            rs.seq.IsReady,
 		ConditionsFn:       conditionsFn,
 		DrainFn:            drainFn,

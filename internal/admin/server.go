@@ -104,6 +104,10 @@ type Config struct {
 	// block for the desired drain duration so kube-proxy can deregister
 	// the pod before SIGTERM arrives. If nil, /drain returns 200 immediately.
 	DrainFn func()
+	// StatsFn, if non-nil, returns storage stats for GET /v1/stats.
+	StatsFn func() api.Stats
+	// ConfigFn, if non-nil, returns the effective config for GET /v1/config.
+	ConfigFn func() any
 }
 
 // Condition is a readiness condition status entry for the
@@ -291,6 +295,12 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.CFStatusFn != nil {
 		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
+	}
+	if cfg.StatsFn != nil {
+		mux.HandleFunc("GET /v1/stats", s.stats)
+	}
+	if cfg.ConfigFn != nil {
+		mux.HandleFunc("GET /v1/config", s.configHandler)
 	}
 	if cfg.PeerFetchHandler != nil {
 		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
@@ -704,4 +714,12 @@ type CloudflareStatus struct {
 func (s *Server) cloudflareStatus(w http.ResponseWriter, _ *http.Request) {
 	status := s.cfg.CFStatusFn()
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) stats(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.cfg.StatsFn())
+}
+
+func (s *Server) configHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.cfg.ConfigFn())
 }

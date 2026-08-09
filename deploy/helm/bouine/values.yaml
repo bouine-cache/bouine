@@ -264,3 +264,17 @@ podMonitor:
   labels: {}
   interval: 15s
   scrapeTimeout: ""  # uses default
+
+# PrometheusRule CRD with alerting rules for bouine SLOs.
+# Requires the Prometheus Operator. Disabled by default.
+# Thresholds are overridable — adjust to match your traffic patterns and
+# origin characteristics. See docs/operations/slo.md for the reference SLOs.
+prometheusRule:
+  enabled: false
+  labels: {}
+  rules:
+    hitLatencyThreshold: 0.002      # seconds (SLO DP-1: hit p99 > 2ms)
+    errorRateThreshold: 0.01         # fraction (SLO DP-4: 5xx > 1%)
+    hitRateThreshold: 0.60           # fraction (SLO DP-3: hit rate < 60%)
+    peerFetchHitRateThreshold: 0.50  # fraction (SLO CL-2: peer-fetch hit rate < 50%)
+    warmTierUsageThreshold: 0.90    # fraction (warm disk/max > 90%)

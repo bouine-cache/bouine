@@ -13,6 +13,7 @@ on a 3-node StatefulSet with 4 vCPU / 4 GiB per pod.
 |--------|-----------|-----|--------------------|-----------------|
 | DP-1 | p99 hit-path latency ≤ 1 ms at 50 kRPS | `histogram_quantile(0.99, rate(bouine_request_duration_seconds_bucket{cache_result="HIT"}[5m]))` | 30-day rolling | > 2 ms for 5 min |
 | DP-2 | p99 miss-path latency ≤ 50 ms at 10 kRPS | `histogram_quantile(0.99, rate(bouine_request_duration_seconds_bucket{cache_result="MISS"}[5m]))` | 30-day rolling | > 100 ms for 5 min |
+|      | *Note: DP-2 is not shipped as a Helm alert rule because miss-path latency is dominated by origin response time, which operators cannot control. A `bouine_miss_overhead_seconds` metric (bouine processing time minus origin TTFB) would be actionable; until it exists, DP-2 remains a benchmark-only SLO.* | | | |
 | DP-3 | Cache hit rate ≥ 80 % on mixed workload | `rate(bouine_requests_total{cache_result="HIT"}[5m]) / rate(bouine_requests_total[5m])` | 24-hour rolling | < 60 % for 10 min |
 | DP-4 | Error rate (5xx) ≤ 0.1 % | `rate(bouine_requests_total{status=~"5.."}[5m]) / rate(bouine_requests_total[5m])` | 30-day rolling | > 1 % for 2 min |
 | DP-5 | Zero 5xx during rolling restart | Same as DP-4 measured during `kubectl rollout` window | Per-release | Any 5xx in window |

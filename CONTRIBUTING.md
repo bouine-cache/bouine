@@ -187,6 +187,23 @@ the document in the same PR. CI fails otherwise.
 
 ---
 
+## New contributors
+
+Welcome! If you're looking for a place to start:
+
+1. Browse issues labeled [`good first issue`](https://github.com/bouine-cache/bouine/labels/good%20first%20issue)
+   — these are self-contained tasks that don't require deep cache or cluster
+   knowledge.
+2. Read the [architecture reference](docs/architecture.md) for a high-level
+   overview of the layer model.
+3. Check the [codebase guide](https://bouine.org/docs/contributing/codebase/)
+   for a map of packages and their responsibilities.
+
+Good first issues are tagged by maintainers. If you find an untagged issue
+that looks approachable, ask in the issue or open a GitHub Discussion.
+
+---
+
 ## Reporting issues
 
 Use the issue templates under `.github/ISSUE_TEMPLATE/`. Include:

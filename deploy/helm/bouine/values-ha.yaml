@@ -1,0 +1,78 @@
+# High-availability values for bouine — 5 replicas, anti-affinity, large warm tier.
+# Use with: helm install bouine bouine/bouine -f values-ha.yaml
+
+replicaCount: 5
+
+config:
+  listen:
+    http: ":80"
+    https: ":443"
+    admin: ":9000"
+    cluster: ":8443"
+  storage:
+    hot_max_bytes: 8GiB
+    warm_max_bytes: 200GiB
+    warm_sync_interval: 30s
+  cluster:
+    join: []  # auto-populated from headless service
+  admin:
+    drain_duration: 15s
+
+resources:
+  requests:
+    cpu: 4000m
+    memory: 8Gi
+  limits:
+    cpu: 16
+    memory: 32Gi
+
+warmVolume:
+  enabled: true
+  size: 500Gi
+  storageClass: "fast-ssd"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 4
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: cache.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: bouine-tls
+      hosts:
+        - cache.example.com
+
+extraEnv:
+  - name: BOUINE_ADMIN_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: bouine-admin-token
+        key: token
+
+terminationGracePeriodSeconds: 60
+minReadySeconds: 60
+goGC: "100"

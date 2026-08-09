@@ -1,0 +1,57 @@
+Thank you for installing {{ include "bouine.name" . }}!
+
+Your bouine cache cluster is being deployed as a StatefulSet with {{ .Values.replicaCount }} replica(s).
+
+== Data-plane ports ==
+  HTTP:  {{ .Values.service.httpPort }}
+  HTTPS: {{ .Values.service.httpsPort }}
+
+== Admin port ==
+  {{ .Values.service.adminPort }}
+
+  Health check:
+    kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bouine.fullname" . }} 9000:{{ .Values.service.adminPort }}
+    curl -sf http://localhost:9000/healthz
+
+== Admin token ==
+
+If you did not set an admin token explicitly, bouine auto-generated one at
+startup. Check the pod logs:
+    kubectl logs --namespace {{ .Release.Namespace }} {{ include "bouine.fullname" . }}-0 | grep -i "token"
+
+To set a token, inject it via an environment variable:
+    extraEnv:
+      - name: BOUINE_ADMIN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: bouine-admin-token
+            key: token
+
+== Cluster mode ==
+
+{{- if gt (int .Values.replicaCount) 1 }}
+Gossip clustering is enabled with {{ .Values.replicaCount }} replicas.
+Peers are discovered via the headless service:
+    {{ include "bouine.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local
+{{- else }}
+Only 1 replica is configured. To enable clustering, set replicaCount >= 2.
+{{- end }}
+
+== Next steps ==
+
+1. Configure upstream pools and routes in your values:
+    config:
+      upstream_pools:
+        - name: app
+          targets: ["app.default.svc:8080"]
+      routes:
+        - match: {}
+          pool: app
+          cache:
+            ttl_default: 60s
+
+2. Verify the cache:
+    kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bouine.fullname" . }} 8080:{{ .Values.service.httpPort }}
+    curl -sI http://localhost:8080/ | grep x-cache
+
+3. Read the docs: https://bouine.org/docs/getting-started/

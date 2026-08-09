@@ -144,3 +144,11 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           vuln-type: os,library
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Sign Docker image
+        run: |
+          cosign sign --yes \
+            "${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}"

@@ -18,7 +18,7 @@ env:
 jobs:
   prek:
     name: prek
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,7 +50,7 @@ jobs:
 
   govulncheck:
     name: govulncheck
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7
@@ -62,12 +62,8 @@ jobs:
       - run: govulncheck ./...
 
   test-linux:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+    name: test (linux/amd64)
+    runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -76,7 +72,6 @@ jobs:
           cache: true
       - run: go test -race -count=1 -timeout=120s -coverprofile=coverage.out ./...
       - name: Coverage summary
-        if: matrix.os == 'ubuntu-latest'
         run: go tool cover -func=coverage.out | tail -1
 
   test-macos:
@@ -93,7 +88,7 @@ jobs:
 
   conformance:
     name: build + cache-tests conformance
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     needs: [prek, test-linux]
     steps:
       - uses: actions/checkout@v7

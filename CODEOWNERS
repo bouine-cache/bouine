@@ -1,28 +1,63 @@
 # bouine — Code owners
 #
 # These owners are auto-requested for review on PRs that touch their
-# files. Until the project has a stable maintainer roster, all paths
-# default to the repo owner.
+# files. Area-specific owners get first review; the @bouine-cache/maintainers
+# team is the fallback for anything not explicitly listed.
 
-* @thylong
+# Cache engine and storage — the core hot path.
+/internal/cache/           @bouine-cache/maintainers
+/internal/storage/         @bouine-cache/maintainers
+
+# Cluster and peer-to-peer protocol.
+/internal/cluster/         @bouine-cache/maintainers
+
+# Server, listeners, and HTTP parsing.
+/internal/server/           @bouine-cache/maintainers
+
+# Origin and upstream pool.
+/internal/origin/            @bouine-cache/maintainers
+
+# Admin API and dashboard.
+/internal/admin/             @bouine-cache/maintainers
+/internal/dashboard/         @bouine-cache/maintainers
+
+# Observability.
+/internal/observability/    @bouine-cache/maintainers
+
+# Config and CLI.
+/internal/config/            @bouine-cache/maintainers
+/cmd/                        @bouine-cache/maintainers
+
+# SDK and public types.
+/pkg/                        @bouine-cache/maintainers
 
 # Security-sensitive surface — additional review required.
-/docs/security/             @thylong
-/SECURITY.md                @thylong
-/internal/listener/         @thylong
-/internal/pipeline/         @thylong
-/internal/cluster/          @thylong
-/internal/admin/auth/       @thylong
+/docs/security/             @bouine-cache/maintainers
+/SECURITY.md                @bouine-cache/maintainers
 
 # Governance documents — changes require explicit sign-off.
-/PLAN.md                    @thylong
-/AGENTS.md                  @thylong
-/CONTRIBUTING.md            @thylong
-/LICENSE                    @thylong
+/PLAN.md                    @bouine-cache/maintainers
+/AGENTS.md                  @bouine-cache/maintainers
+/CONTRIBUTING.md            @bouine-cache/maintainers
+/LICENSE                    @bouine-cache/maintainers
 
 # CI and toolchain — affects every PR; review carefully.
-/.github/                   @thylong
-/Makefile                   @thylong
-/.golangci.yaml             @thylong
-/.pre-commit-config.yaml    @thylong
-/lint/                      @thylong
+/.github/                   @bouine-cache/maintainers
+/Makefile                   @bouine-cache/maintainers
+/.golangci.yaml             @bouine-cache/maintainers
+/.pre-commit-config.yaml    @bouine-cache/maintainers
+/lint/                      @bouine-cache/maintainers
+
+# Helm chart and deployment.
+/deploy/                     @bouine-cache/maintainers
+/Dockerfile                 @bouine-cache/maintainers
+
+# Documentation.
+/docs/                      @bouine-cache/maintainers
+
+# Tests and benchmarks.
+/test/                       @bouine-cache/maintainers
+/bench/                      @bouine-cache/maintainers
+
+# Default — everything not explicitly listed above.
+*                           @bouine-cache/maintainers

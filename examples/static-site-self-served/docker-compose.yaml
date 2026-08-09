@@ -1,0 +1,11 @@
+services:
+  bouine:
+    image: bouinecache/bouine:latest
+    ports:
+      - "8080:80"
+      - "9000:9000"
+    volumes:
+      - ./config.yaml:/etc/bouine/config.yaml
+      - ./html:/var/www/html
+      - ./assets:/var/www/assets
+    command: ["serve", "--config", "/etc/bouine/config.yaml", "--log-level", "debug"]

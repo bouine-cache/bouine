@@ -1,0 +1,29 @@
+services:
+  bouine:
+    image: bouinecache/bouine:latest
+    ports:
+      - "8080:80"
+      - "9000:9000"
+    volumes:
+      - ./config.yaml:/etc/bouine/config.yaml
+    command: ["serve", "--config", "/etc/bouine/config.yaml", "--log-level", "debug"]
+
+  origin:
+    image: nginx:alpine
+    ports:
+      - "8000:80"
+    configs:
+      - source: index
+        target: /usr/share/nginx/html/index.html
+      - source: asset
+        target: /usr/share/nginx/html/assets/style.css
+
+configs:
+  index:
+    content: |
+      <!DOCTYPE html>
+      <html><head><link rel="stylesheet" href="/assets/style.css"></head>
+      <body><h1>Static Site</h1><p>Served by nginx, cached by bouine.</p></body></html>
+  asset:
+    content: |
+      body { font-family: sans-serif; margin: 2rem; }

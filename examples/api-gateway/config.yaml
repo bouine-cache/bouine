@@ -9,7 +9,7 @@ listen:
   cluster: ":8443"
 
 storage:
-  hot_max_bytes: 512Mo
+  hot_max_bytes: 512MiB
 
 upstream_pools:
   - name: api

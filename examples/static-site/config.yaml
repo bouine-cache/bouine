@@ -8,7 +8,7 @@ listen:
   admin: ":9000"
 
 storage:
-  hot_max_bytes: 1Go
+  hot_max_bytes: 1GiB
 
 upstream_pools:
   - name: origin

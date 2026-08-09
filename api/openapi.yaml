@@ -1,0 +1,386 @@
+openapi: 3.0.3
+info:
+  title: bouine Admin API
+  description: Admin API for the bouine cloud-native HTTP cache.
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    url: https://github.com/bouine-cache/bouine
+servers:
+  - url: http://localhost:9000
+    description: Local admin server
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+    description: Liveness, readiness, and version endpoints
+  - name: Cache Invalidation
+    description: Purge, ban, and refresh operations
+  - name: Cluster
+    description: Cluster peer information
+  - name: Cloudflare
+    description: Cloudflare CDN integration status
+  - name: Auth
+    description: Authentication verification
+  - name: Peer RPC
+    description: Internal cluster peer-to-peer RPCs
+  - name: Debug
+    description: Profiling and debug endpoints
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: Returns 200 if the process is alive.
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: Returns 200 if the daemon is ready to serve traffic.
+      security: []
+      parameters:
+        - name: detail
+          in: query
+          schema:
+            type: boolean
+          description: Include per-condition readiness details
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyzDetail'
+  /version:
+    get:
+      tags: [Health]
+      summary: Build version
+      security: []
+      responses:
+        '200':
+          description: Version info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionInfo'
+  /drain:
+    get:
+      tags: [Health]
+      summary: Drain in-flight requests
+      description: Blocks for admin.drain_duration then returns. Used by K8s preStop hook.
+      security: []
+      responses:
+        '200':
+          description: Drained
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: drained
+  /metrics:
+    get:
+      tags: [Debug]
+      summary: Prometheus metrics
+      description: Returns Prometheus text exposition format.
+      security: []
+      responses:
+        '200':
+          description: Metrics in OpenMetrics text format
+          content:
+            text/plain:
+              schema:
+                type: string
+  /v1/cluster/peers:
+    get:
+      tags: [Cluster]
+      summary: List cluster peers
+      security: []
+      responses:
+        '200':
+          description: List of peers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PeerInfo'
+  /v1/purge:
+    post:
+      tags: [Cache Invalidation]
+      summary: Purge a URL from the cache
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  example: https://example.com/page
+      responses:
+        '200':
+          description: Purged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: purged
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/purge/batch:
+    post:
+      tags: [Cache Invalidation]
+      summary: Batch purge URLs from the cache
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [urls]
+              properties:
+                urls:
+                  type: array
+                  items:
+                    type: string
+                  maxItems: 1000
+      responses:
+        '200':
+          description: Batch purged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: purged
+                  count:
+                    type: integer
+                  failed:
+                    type: integer
+        '413':
+          description: Batch size exceeds maximum (default 1000)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/ban:
+    post:
+      tags: [Cache Invalidation]
+      summary: Ban cache entries matching a predicate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BanExpr'
+      responses:
+        '200':
+          description: Ban applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: banned
+                  count:
+                    type: integer
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/refresh:
+    post:
+      tags: [Cache Invalidation]
+      summary: Soft-purge a URL (mark stale, revalidate on next request)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  example: https://example.com/page
+      responses:
+        '200':
+          description: Refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: refreshed
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/auth/check:
+    get:
+      tags: [Auth]
+      summary: Verify the bearer token is valid
+      responses:
+        '200':
+          description: Token is valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '401':
+          description: Invalid or missing token
+  /v1/cloudflare/status:
+    get:
+      tags: [Cloudflare]
+      summary: Cloudflare CDN propagation status
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudflareStatus'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Admin bearer token. Set via config or BOUINE_ADMIN_TOKEN env var.
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+    ReadyzDetail:
+      type: object
+      properties:
+        status:
+          type: string
+          example: not-ready
+        conditions:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              ready:
+                type: boolean
+    VersionInfo:
+      type: object
+      properties:
+        version:
+          type: string
+        commit:
+          type: string
+        date:
+          type: string
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        max_batch_size:
+          type: integer
+          description: Present only on batch size exceeded errors
+        provided:
+          type: integer
+          description: Present only on batch size exceeded errors
+    BanExpr:
+      type: object
+      properties:
+        host_regex:
+          type: string
+          description: Regex to match the request host. At least one of host_regex, path_regex, or surrogate_key is required.
+        path_regex:
+          type: string
+          description: Regex to match the request path.
+        surrogate_key:
+          type: string
+          description: Surrogate key to match for invalidation.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+    PeerInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        addr:
+          type: string
+          description: mTLS HTTP/2 address for peer fetch
+        admin_addr:
+          type: string
+        data_addr:
+          type: string
+        weight:
+          type: number
+          format: float
+        version:
+          type: string
+        joined_at:
+          type: string
+          format: date-time
+    CloudflareStatus:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        zone_id:
+          type: string
+        async:
+          type: boolean
+        last_error:
+          type: string
+          nullable: true
+        last_success_at:
+          type: string
+          nullable: true
+        last_lag_ms:
+          type: integer
+          format: int64

@@ -662,3 +662,46 @@ func TestValidate_GOGC(t *testing.T) {
 }
 
 func ptrInt(v int) *int { return &v }
+
+func TestExpandEnvVars_Simple(t *testing.T) {
+	t.Setenv("BOUINE_TEST_HOST", "api.example.com")
+	got := expandEnvVars([]byte("listen:\n  http: \":80\"\nupstream_pools:\n  - name: app\n    targets: [\"${BOUINE_TEST_HOST}:8080\"]\n"))
+	require.Contains(t, string(got), "api.example.com:8080")
+}
+
+func TestExpandEnvVars_DefaultValue(t *testing.T) {
+	t.Setenv("BOUINE_MISSING", "")
+	got := expandEnvVars([]byte("host: ${BOUINE_MISSING:-fallback.example.com}"))
+	require.Contains(t, string(got), "fallback.example.com")
+}
+
+func TestExpandEnvVars_EscapeDollar(t *testing.T) {
+	got := expandEnvVars([]byte("cost: $$5.00"))
+	require.Equal(t, "cost: $5.00", string(got))
+}
+
+func TestExpandEnvVars_NoMatch(t *testing.T) {
+	got := expandEnvVars([]byte("no vars here"))
+	require.Equal(t, "no vars here", string(got))
+}
+
+func TestExpandEnvVars_UnclosedBrace(t *testing.T) {
+	got := expandEnvVars([]byte("val: ${UNCLOSED"))
+	require.Equal(t, "val: ${UNCLOSED", string(got))
+}
+
+func TestParse_EnvVarInterpolation(t *testing.T) {
+	t.Setenv("BOUINE_ORIGIN", "origin.example.com")
+	yamlSrc := `
+upstream_pools:
+  - name: app
+    targets: ["${BOUINE_ORIGIN}:8080"]
+routes:
+  - match: {}
+    pool: app
+    cache:
+      ttl_default: 60s`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.Equal(t, "origin.example.com:8080", cfg.UpstreamPools[0].Targets[0])
+}

@@ -21,12 +21,16 @@ func Root() *cobra.Command {
 
 	root.SetVersionTemplate(versionTemplate())
 
+	root.CompletionOptions.DisableDefaultCmd = true
+
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newServeCmd())
 	root.AddCommand(newClusterCmd())
 	root.AddCommand(newPurgeCmd())
 	root.AddCommand(newBanCmd())
 	root.AddCommand(newRefreshCmd())
+	root.AddCommand(newConfigCmd())
+	root.AddCommand(newCompletionCmd())
 	return root
 }
 

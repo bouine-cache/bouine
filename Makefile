@@ -112,6 +112,15 @@ testcerts: ## Generate ephemeral TLS certificates for integration tests.
 templ: ## Regenerate dashboard _templ.go files from *.templ sources.
 	go generate ./internal/dashboard/templates/
 
+.PHONY: schema-sync
+schema-sync: ## Sync embedded schema from the Helm chart.
+	cp deploy/helm/bouine/values.schema.json cmd/bouine/cmd/embedded/values.schema.json
+
+.PHONY: schema-check
+schema-check: ## Verify embedded schema is in sync with the Helm chart.
+	@diff -q deploy/helm/bouine/values.schema.json cmd/bouine/cmd/embedded/values.schema.json || \
+		{ echo "ERROR: embedded schema out of sync. Run: make schema-sync"; exit 1; }
+
 .PHONY: hooks
 hooks: ## Install prek hooks (commit + commit-msg + pre-push).
 	@command -v prek >/dev/null || { \

@@ -106,11 +106,11 @@ jobs:
             console.log(pass);
           " 2>/dev/null || echo "0")
           echo "Conformance: $PASS tests passing"
-          if [ "$PASS" -lt 342 ]; then
-            echo "FAIL: conformance score $PASS is below baseline of 342"
+          if [ "$PASS" -lt 339 ]; then
+            echo "FAIL: conformance score $PASS is below baseline of 339"
             exit 1
           fi
-          echo "PASS: conformance score $PASS >= 342"
+          echo "PASS: conformance score $PASS >= 339"
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7

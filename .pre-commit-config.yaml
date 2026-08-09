@@ -105,6 +105,14 @@ repos:
         pass_filenames: false
         stages: [pre-commit, pre-push]
 
+      - id: schema-sync-check
+        name: embedded schema sync check
+        entry: make schema-check
+        language: system
+        files: ^(deploy/helm/bouine/values\.schema\.json|cmd/bouine/cmd/embedded/values\.schema\.json)$
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
+
   # ---------------------------------------------------------------------
   # Secret scan.
   # ---------------------------------------------------------------------

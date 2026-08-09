@@ -19,7 +19,7 @@ env:
 jobs:
   prek:
     name: prek
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, ci]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,7 +51,7 @@ jobs:
 
   govulncheck:
     name: govulncheck
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, ci]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7
@@ -64,7 +64,7 @@ jobs:
 
   test-linux:
     name: test (linux/amd64)
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, ci]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -89,7 +89,7 @@ jobs:
 
   conformance:
     name: build + cache-tests conformance
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, ci]
     needs: [prek, test-linux]
     steps:
       - uses: actions/checkout@v7

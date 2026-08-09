@@ -171,6 +171,7 @@ below are the canonical source the site is built from.
 | Contributing                     | [`CONTRIBUTING.md`](CONTRIBUTING.md)                  |
 | Changelog                        | [`CHANGELOG.md`](CHANGELOG.md)                        |
 | Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
+| Discussions & community          | [GitHub Discussions](https://github.com/bouine-cache/bouine/discussions) |
 
 ---
 
@@ -184,3 +185,12 @@ All contributors are bound by [`AGENTS.md`](AGENTS.md). Humans should
 start at [`CONTRIBUTING.md`](CONTRIBUTING.md); AI agents start at
 [`AGENTS.md`](AGENTS.md). Security issues go through
 [`SECURITY.md`](SECURITY.md), never public issues.
+
+## Community
+
+- **[GitHub Discussions](https://github.com/bouine-cache/bouine/discussions)** —
+  ask questions, share configs, and discuss design decisions.
+- **[GitHub Issues](https://github.com/bouine-cache/bouine/issues)** —
+  bug reports and feature requests (use the issue templates).
+- **[Security advisories](https://github.com/bouine-cache/bouine/security/advisories/new)** —
+  private vulnerability reporting.

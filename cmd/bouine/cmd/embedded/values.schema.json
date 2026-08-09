@@ -29,9 +29,44 @@
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"],
           "default": "IfNotPresent"
+        },
+        "pullSecrets": {
+          "description": "List of Kubernetes Secret names for pulling from private registries.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "default": []
         }
       },
       "required": ["repository", "pullPolicy"]
+    },
+    "serviceAccount": {
+      "description": "Service account for the bouine pods.",
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": true
+        },
+        "automount": {
+          "type": "boolean",
+          "default": false
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        }
+      }
     },
     "nameOverride": {
       "description": "Override the chart name used in resource names.",
@@ -340,6 +375,22 @@
       },
       "default": []
     },
+    "extraVolumes": {
+      "description": "Extra volumes to add to the bouine pod (e.g. for TLS secrets, custom CA bundles, or static files).",
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
+    "extraVolumeMounts": {
+      "description": "Extra volume mounts to add to the bouine container.",
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
     "startupProbe": {
       "description": "Startup probe configuration.",
       "type": "object"
@@ -440,6 +491,79 @@
         "scrapeTimeout": {
           "type": "string",
           "default": ""
+        }
+      }
+    },
+    "podMonitor": {
+      "description": "Prometheus PodMonitor for scraping metrics (alternative to ServiceMonitor). Disabled by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "labels": {
+          "type": "object",
+          "default": {}
+        },
+        "interval": {
+          "type": "string",
+          "default": "15s"
+        },
+        "scrapeTimeout": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "ingress": {
+      "description": "Ingress for the data-plane HTTP/HTTPS ports. Disabled by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "className": {
+          "type": "string",
+          "default": ""
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "pathType": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": []
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
         }
       }
     }

@@ -1,0 +1,41 @@
+# Development values for bouine — single replica, minimal resources.
+# Use with: helm install bouine bouine/bouine -f values-dev.yaml
+
+replicaCount: 1
+
+config:
+  listen:
+    http: ":80"
+    https: ""
+    admin: ":9000"
+    cluster: ""
+  storage:
+    hot_max_bytes: 512MiB
+    warm_max_bytes: 2GiB
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 1Gi
+
+warmVolume:
+  enabled: true
+  size: 5Gi
+
+networkPolicy:
+  enabled: false
+
+serviceMonitor:
+  enabled: false
+
+podMonitor:
+  enabled: false
+
+ingress:
+  enabled: false
+
+terminationGracePeriodSeconds: 10
+goGC: "200"

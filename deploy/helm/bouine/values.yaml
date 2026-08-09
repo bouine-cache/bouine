@@ -6,6 +6,21 @@ image:
   repository: bouinecache/bouine
   tag: ""  # defaults to appVersion
   pullPolicy: IfNotPresent
+  # Optional: list of Kubernetes Secret names for pulling from private registries.
+  pullSecrets: []
+
+# Service account for the bouine pods.
+serviceAccount:
+  # Specifies whether a service account should be created.
+  create: true
+  # Automatically mount the service account token. Enable for IRSA /
+  # workload identity (e.g. AWS EKS, GCP workload identity).
+  automount: false
+  # Annotations to add to the service account (e.g. for IRSA / workload identity).
+  #  eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/bouine
+  annotations: {}
+  # Name of an existing service account to use when create is false.
+  name: ""
 
 nameOverride: ""
 fullnameOverride: ""
@@ -150,6 +165,27 @@ cloudflare:
 #           key: token
 extraEnv: []
 
+# Extra volumes to add to the bouine pod (e.g. for TLS secrets, custom CA
+# bundles, or static files for self-served mode).
+#   extraVolumes:
+#     - name: tls-certs
+#       secret:
+#         secretName: bouine-tls
+#     - name: static-files
+#       configMap:
+#         name: bouine-static
+extraVolumes: []
+
+# Extra volume mounts to add to the bouine container.
+#   extraVolumeMounts:
+#     - name: tls-certs
+#       mountPath: /etc/bouine/tls
+#       readOnly: true
+#     - name: static-files
+#       mountPath: /var/www/html
+#       readOnly: true
+extraVolumeMounts: []
+
 startupProbe:
   httpGet:
     path: /readyz
@@ -193,10 +229,37 @@ warmVolume:
   size: 50Gi
   storageClass: ""
 
+# Ingress for the data-plane HTTP/HTTPS ports.
+# Disabled by default — create one if you need external traffic.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Hostnames to route to the data-plane HTTP port.
+  hosts: []
+    # - host: cache.example.com
+    #   paths:
+    #     - path: /
+    #       pathType: Prefix
+  # TLS configuration for the ingress.
+  tls: []
+    # - secretName: cache-tls
+    #   hosts:
+    #     - cache.example.com
+
 networkPolicy:
   enabled: false
 
 serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 15s
+  scrapeTimeout: ""  # uses default
+
+# PodMonitor for Prometheus scraping (alternative to ServiceMonitor).
+# Some Prometheus Operator setups prefer PodMonitor when there is no dedicated
+# Service or when using pod-level scraping.
+podMonitor:
   enabled: false
   labels: {}
   interval: 15s

@@ -1,0 +1,68 @@
+# Production values for bouine.
+# Use with: helm install bouine bouine/bouine -f values-production.yaml
+
+replicaCount: 3
+
+config:
+  listen:
+    http: ":80"
+    https: ":443"
+    admin: ":9000"
+    cluster: ":8443"
+  storage:
+    hot_max_bytes: 4GiB
+    warm_max_bytes: 100GiB
+    warm_sync_interval: 60s
+  cluster:
+    join: []  # auto-populated from headless service
+  admin:
+    drain_duration: 15s
+
+resources:
+  requests:
+    cpu: 2000m
+    memory: 4Gi
+  limits:
+    cpu: 8
+    memory: 16Gi
+
+warmVolume:
+  enabled: true
+  size: 200Gi
+  storageClass: ""
+
+networkPolicy:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus
+
+podMonitor:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: cache.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: bouine-tls
+      hosts:
+        - cache.example.com
+
+extraEnv:
+  - name: BOUINE_ADMIN_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: bouine-admin-token
+        key: token
+
+terminationGracePeriodSeconds: 60
+goGC: "100"

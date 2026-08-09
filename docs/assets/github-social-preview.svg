@@ -1,0 +1,48 @@
+<svg width="1310" height="544" viewBox="0 0 1310 544" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1310" y2="544" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0D1117"/>
+      <stop offset="0.5" stop-color="#161B22"/>
+      <stop offset="1" stop-color="#0D1117"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="544" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#5B21B6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1310" height="544" fill="url(#bg)"/>
+  <rect x="0" y="0" width="8" height="544" fill="url(#accent)"/>
+  
+  <!-- Title -->
+  <text x="80" y="180" font-family="system-ui, -apple-system, sans-serif" font-size="72" font-weight="700" fill="#F3F4F6">bouine</text>
+  
+  <!-- Tagline -->
+  <text x="82" y="230" font-family="system-ui, -apple-system, sans-serif" font-size="28" font-weight="400" fill="#9CA3AF">Cloud-Native HTTP Cache in Go</text>
+  
+  <!-- Key stats -->
+  <g transform="translate(82, 290)">
+    <!-- Stat 1 -->
+    <rect x="0" y="0" width="280" height="80" rx="8" fill="#21262D" stroke="#30363D"/>
+    <text x="20" y="32" font-family="system-ui, -apple-system, sans-serif" font-size="32" font-weight="700" fill="#7C3AED">93.7%</text>
+    <text x="20" y="60" font-family="system-ui, -apple-system, sans-serif" font-size="16" fill="#9CA3AF">RFC 9111 compliance</text>
+    
+    <!-- Stat 2 -->
+    <rect x="310" y="0" width="280" height="80" rx="8" fill="#21262D" stroke="#30363D"/>
+    <text x="330" y="32" font-family="system-ui, -apple-system, sans-serif" font-size="32" font-weight="700" fill="#10B981">0</text>
+    <text x="370" y="32" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#10B981">allocs/op</text>
+    <text x="330" y="60" font-family="system-ui, -apple-system, sans-serif" font-size="16" fill="#9CA3AF">hit path</text>
+    
+    <!-- Stat 3 -->
+    <rect x="620" y="0" width="280" height="80" rx="8" fill="#21262D" stroke="#30363D"/>
+    <text x="640" y="32" font-family="system-ui, -apple-system, sans-serif" font-size="32" font-weight="700" fill="#F59E0B">gossip</text>
+    <text x="640" y="60" font-family="system-ui, -apple-system, sans-serif" font-size="16" fill="#9CA3AF">clustering built-in</text>
+  </g>
+  
+  <!-- Bottom features -->
+  <text x="82" y="420" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#6B7280">
+    Prometheus · OpenTelemetry · Helm chart · Go SDK · no external K/V store
+  </text>
+  
+  <!-- License -->
+  <text x="82" y="460" font-family="system-ui, -apple-system, sans-serif" font-size="18" fill="#4B5563">Apache 2.0 · github.com/bouine-cache/bouine</text>
+</svg>

@@ -73,10 +73,16 @@ func Load(path string) (*Config, error) {
 // Parse decodes YAML bytes into a Config, applying Defaults underneath
 // and rejecting unknown keys. An empty input is valid and yields a
 // config equal to Defaults().
+//
+// Environment variable interpolation is applied before YAML decoding:
+// ${VAR} is replaced with the value of VAR from the process environment.
+// ${VAR:-default} provides a fallback when VAR is unset or empty.
+// Literal dollar signs can be escaped as $$.
 func Parse(b []byte) (*Config, error) {
+	expanded := expandEnvVars(b)
 	cfg := Defaults()
-	if len(strings.TrimSpace(string(b))) > 0 {
-		dec := yaml.NewDecoder(strings.NewReader(string(b)))
+	if len(strings.TrimSpace(string(expanded))) > 0 {
+		dec := yaml.NewDecoder(strings.NewReader(string(expanded)))
 		dec.KnownFields(true)
 		if err := dec.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("yaml decode: %w", err)
@@ -152,6 +158,48 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// expandEnvVars replaces ${VAR} and ${VAR:-default} patterns in the
+// raw config bytes with values from the process environment. $$ is
+// expanded to a literal $ to allow escaping.
+func expandEnvVars(b []byte) []byte {
+	s := string(b)
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if i+1 < len(s) && s[i] == '$' && s[i+1] == '$' {
+			sb.WriteByte('$')
+			i += 2
+			continue
+		}
+		if i+1 < len(s) && s[i] == '$' && s[i+1] == '{' {
+			end := strings.IndexByte(s[i+2:], '}')
+			if end < 0 {
+				sb.WriteByte(s[i])
+				i++
+				continue
+			}
+			expr := s[i+2 : i+2+end]
+			name := expr
+			defVal := ""
+			if idx := strings.Index(expr, ":-"); idx >= 0 {
+				name = expr[:idx]
+				defVal = expr[idx+2:]
+			}
+			val := os.Getenv(name)
+			if val == "" {
+				val = defVal
+			}
+			sb.WriteString(val)
+			i += 2 + end + 1
+			continue
+		}
+		sb.WriteByte(s[i])
+		i++
+	}
+	return []byte(sb.String())
 }
 
 // ResolveHotMaxBytes derives the hot store memory budget from the

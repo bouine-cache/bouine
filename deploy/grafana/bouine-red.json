@@ -20,7 +20,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -68,7 +68,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -124,7 +124,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -181,7 +181,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -237,7 +237,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -285,7 +285,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -337,7 +337,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -386,7 +386,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -448,7 +448,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -527,7 +527,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -576,8 +576,8 @@
     },
     {
       "datasource": {
-        "type": "loki",
-        "uid": "ffof63va6oi68c"
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
         "h": 6,
@@ -596,9 +596,10 @@
       },
       "targets": [
         {
-          "expr": "{namespace=\"thylong-innerspace\", app=\"bouine\"} | json | status >= 500",
+          "expr": "{namespace=\"${namespace}\", app=\"bouine\"} | json | status >= 500",
           "type": "loki",
-          "uid": "ffof63va6oi68c"
+          "uid": "ffof63va6oi68c",
+          "query": "{namespace=\"${namespace}\", app=\"bouine\"} | json | status >= 500"
         }
       ],
       "title": "Error logs (5xx from bouine access log)",
@@ -620,7 +621,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -698,7 +699,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -759,7 +760,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -821,7 +822,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -870,7 +871,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -919,7 +920,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -980,7 +981,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1042,7 +1043,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1114,7 +1115,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1169,7 +1170,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1218,7 +1219,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1267,7 +1268,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1316,7 +1317,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1362,7 +1363,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1408,7 +1409,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "ffof63uiushz4c"
+        "uid": "${DS_PROMETHEUS}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1470,7 +1471,7 @@
     }
   ],
   "refresh": "15s",
-  "schemaVersion": 38,
+  "schemaVersion": 39,
   "tags": [
     "bouine",
     "red",
@@ -1478,6 +1479,30 @@
   ],
   "templating": {
     "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "includeAll": false,
+        "hide": 0
+      },
+      {
+        "name": "DS_LOKI",
+        "label": "Loki",
+        "type": "datasource",
+        "query": "loki",
+        "current": {
+          "text": "Loki",
+          "value": "Loki"
+        },
+        "includeAll": false,
+        "hide": 0
+      },
       {
         "current": {},
         "datasource": {
@@ -1494,6 +1519,23 @@
         },
         "refresh": 2,
         "type": "query"
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(bouine_requests_total, namespace)",
+        "current": {
+          "text": "All",
+          "value": ".*"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0
       }
     ]
   },
@@ -1502,6 +1544,6 @@
     "to": "now"
   },
   "timepicker": {},
-  "title": "bouine \u2014 RED dashboard",
+  "title": "bouine — RED dashboard",
   "uid": "bouine-red"
 }

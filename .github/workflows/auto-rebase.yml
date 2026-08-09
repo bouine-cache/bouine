@@ -22,7 +22,7 @@ permissions:
 jobs:
   rebase:
     name: Rebase open PRs onto main
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     if: github.repository == 'bouine-cache/bouine'
     steps:
       - name: Update PR branches

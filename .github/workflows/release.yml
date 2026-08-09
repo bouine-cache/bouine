@@ -18,7 +18,7 @@ env:
 jobs:
   binaries:
     name: Build binaries
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -90,7 +90,7 @@ jobs:
 
   docker:
     name: Docker Hub (multi-arch)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v7
 

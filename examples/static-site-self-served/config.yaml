@@ -10,14 +10,14 @@ listen:
   admin: ":9000"
 
 storage:
-  hot_max_bytes: 512Mo
+  hot_max_bytes: 512MiB
 
 routes:
   - name: assets
     match: { path_prefix: /assets/ }
     static:
       root: /var/www/assets
-      max_file_size: 50Mo
+      max_file_size: 50MiB
     request:
       strip_prefix: /assets/
     response:

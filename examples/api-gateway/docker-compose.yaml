@@ -1,0 +1,28 @@
+services:
+  bouine:
+    image: bouinecache/bouine:latest
+    ports:
+      - "8080:80"
+      - "9000:9000"
+    volumes:
+      - ./config.yaml:/etc/bouine/config.yaml
+    command: ["serve", "--config", "/etc/bouine/config.yaml", "--log-level", "debug"]
+
+  origin:
+    image: nginx:alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    configs:
+      - source: index
+        target: /usr/share/nginx/html/index.html
+
+configs:
+  index:
+    content: |
+      <!DOCTYPE html>
+      <html><body><h1>API Gateway Origin</h1>
+      <p>Time: <span id="t"></span></p>
+      <script>document.getElementById('t').textContent = new Date().toISOString()</script>
+      </body></html>

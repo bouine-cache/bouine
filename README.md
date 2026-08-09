@@ -56,6 +56,28 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 | Config | YAML (declarative) | VCL (imperative) | NGINX.conf |
 | Kubernetes | StatefulSet + Helm chart, first-class | Sidecar / external | Ingress controller pattern |
 
+### Architecture
+
+```
+                    ┌─────────────────────────────────────────┐
+  Client ──HTTP──►  │                 bouine                  │  ──►  Origin
+                    │  ┌───────────┐   ┌───────────┐          │
+                    │  │ Hot tier  │   │ Warm tier  │          │
+                    │  │ (RAM)     │   │ (mmap disk)│          │
+                    │  └───────────┘   └───────────┘          │
+                    │  ┌────────────────────────────┐         │
+                    │  │ Cache engine (RFC 9111)    │         │
+                    │  │ Vary · SWR · SIE · purge   │         │
+                    │  └────────────────────────────┘         │
+                    └──────────┬──────────┬──────────┬────────┘
+                          gossip   peer fetch   metrics / traces
+                              │         │          │
+                     ┌────────▼───┐     │     ┌────▼─────┐
+                     │  peers     │◄────┘     │  Prom    │
+                     │ (cluster)  │          │  OTel    │
+                     └────────────┘          └──────────┘
+```
+
 ---
 
 ## Quick Start
@@ -106,6 +128,25 @@ Check the admin endpoint:
 curl -s http://localhost:9000/healthz
 # ok
 ```
+
+<details>
+<summary>Demo: first request is a MISS, second is a HIT</summary>
+
+```
+$ curl -sI http://localhost:8080/get
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Cache: MISS
+Age: 0
+
+$ curl -sI http://localhost:8080/get
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Cache: HIT
+Age: 1
+```
+
+</details>
 
 ### Install
 

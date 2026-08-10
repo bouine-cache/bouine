@@ -108,6 +108,9 @@ type Config struct {
 	StatsFn func() api.Stats
 	// ConfigFn, if non-nil, returns the effective config for GET /v1/config.
 	ConfigFn func() any
+	// CacheCheckFn, if non-nil, inspects the cache decision for a URL.
+	// Mounted at GET /v1/debug/cachecheck?url=...
+	CacheCheckFn func(ctx context.Context, rawURL string) CacheCheckResult
 }
 
 // Condition is a readiness condition status entry for the
@@ -301,6 +304,9 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.ConfigFn != nil {
 		mux.HandleFunc("GET /v1/config", s.configHandler)
+	}
+	if cfg.CacheCheckFn != nil {
+		mux.HandleFunc("GET /v1/debug/cachecheck", s.cacheCheck)
 	}
 	if cfg.PeerFetchHandler != nil {
 		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
@@ -695,6 +701,18 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 // CloudflareStatus is returned by GET /v1/cloudflare/status.
+
+// CacheCheckResult is returned by GET /v1/debug/cachecheck.
+type CacheCheckResult struct {
+	URL         string `json:"url"`
+	KeyHex      string `json:"key_hex"`
+	Source      string `json:"source"`       // hot, warm, peer, origin, miss
+	CacheResult string `json:"cache_result"` // HIT, MISS, BYPASS, STALE, REVALIDATED
+	Route       string `json:"route,omitempty"`
+	Pool        string `json:"pool,omitempty"`
+	TTL         string `json:"ttl,omitempty"`
+	Age         string `json:"age,omitempty"`
+}
 type CloudflareStatus struct {
 	// Enabled reports whether CF propagation is configured.
 	Enabled bool `json:"enabled"`
@@ -722,4 +740,14 @@ func (s *Server) stats(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) configHandler(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.cfg.ConfigFn())
+}
+
+func (s *Server) cacheCheck(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing url query parameter"})
+		return
+	}
+	result := s.cfg.CacheCheckFn(r.Context(), rawURL)
+	writeJSON(w, http.StatusOK, result)
 }

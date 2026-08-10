@@ -516,6 +516,40 @@ func sanitizedConfig(cfg config.Config) config.Config {
 	return out
 }
 
+// cacheCheck inspects the cache decision for a URL. It builds the
+// cache key using the default key policy, looks up the store, and
+// returns what the cache engine would do with this request.
+func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheCheckResult {
+	policy := cache.NewKeyPolicy(nil, nil, nil, nil, false, false)
+	key := cache.BuildKeyFromURL(rawURL, policy)
+	result := admin.CacheCheckResult{
+		URL:    rawURL,
+		KeyHex: key.Hex(),
+	}
+	if key.IsZero() {
+		result.CacheResult = "BYPASS"
+		result.Source = "origin"
+		return result
+	}
+	obj, source, err := rs.store.Get(ctx, key)
+	if err != nil || obj == nil {
+		result.CacheResult = "MISS"
+		result.Source = "origin"
+		return result
+	}
+	result.Source = string(source)
+	now := time.Now()
+	switch {
+	case obj.Fresh(now):
+		result.CacheResult = "HIT"
+	case obj.StaleButServable(now):
+		result.CacheResult = "STALE"
+	default:
+		result.CacheResult = "MISS"
+	}
+	return result
+}
+
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
 // The broadcaster internally detaches from the engine's root context so
 // peer fan-out survives shutdown; local store operations use dCtx.
@@ -568,14 +602,17 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	dashMux := e.buildDashboard(rs, addr, ops)
 
 	srv := admin.New(admin.Config{
-		Addr:               addr,
-		Token:              rs.token,
-		Logger:             e.logger,
-		Metrics:            e.metrics,
-		PeersFn:            rs.peersFn,
-		CFStatusFn:         rs.cfProp.Status,
-		StatsFn:            func() api.Stats { return rs.store.Stats() },
-		ConfigFn:           func() any { return sanitizedConfig(*e.cfg) },
+		Addr:       addr,
+		Token:      rs.token,
+		Logger:     e.logger,
+		Metrics:    e.metrics,
+		PeersFn:    rs.peersFn,
+		CFStatusFn: rs.cfProp.Status,
+		StatsFn:    func() api.Stats { return rs.store.Stats() },
+		ConfigFn:   func() any { return sanitizedConfig(*e.cfg) },
+		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
+			return cacheCheck(ctx, rawURL, rs)
+		},
 		ReadyFn:            rs.seq.IsReady,
 		ConditionsFn:       conditionsFn,
 		DrainFn:            drainFn,

@@ -36,7 +36,7 @@ jobs:
         uses: azure/setup-helm@v5
 
       - name: Import GPG signing key
-        uses: crazy-max/ghaction-import-gpg@v6
+        uses: crazy-max/ghaction-import-gpg@v7
         with:
           gpg_private_key: ${{ secrets.HELM_CHART_GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.HELM_CHART_GPG_PASSPHRASE }}

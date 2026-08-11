@@ -47,10 +47,8 @@ jobs:
           mkdir -p .cr-release-packages
           # helm's Go openpgp library cannot read the modern keybox (.kbx)
           # format that gpg uses by default. Export the imported key to a
-          # legacy secring that helm can parse. The loopback pinentry is
+          # legacy secring that helm can parse. --pinentry-mode loopback is
           # required so gpg can use the passphrase non-interactively in CI.
-          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg.conf
-          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
           gpg --batch --yes --pinentry-mode loopback \
             --passphrase "${{ secrets.HELM_CHART_GPG_PASSPHRASE }}" \
             --export-secret-keys "${{ vars.HELM_CHART_GPG_KEY_ID }}" > ~/.gnupg/secring.gpg

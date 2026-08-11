@@ -247,6 +247,12 @@ func isCacheBlocked(status int, respCC Directives, hasCDN bool, reqHeader, respH
 			return true
 		}
 	}
+	// RFC 9111 §4.1: a stored response with Vary:* "always fails to
+	// match." RFC 9111 permits storing such responses but forbids
+	// serving without revalidation; bouine refuses to store them at
+	// all. This is the sole gate — VariantKey/variantKeyFromRaw return
+	// primary for Vary:* (a no-op), relying on this gate to prevent
+	// storage.
 	if hasVaryStar(respHeader) {
 		return true
 	}

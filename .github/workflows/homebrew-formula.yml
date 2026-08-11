@@ -85,6 +85,8 @@ jobs:
           sed -i "s/__DARWIN_ARM64_SHA__/${DARWIN_ARM64_SHA}/" Formula/bouine.rb
 
       - name: Commit and push
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
@@ -93,5 +95,5 @@ jobs:
             echo "No changes to formula — skipping push"
             exit 0
           fi
-          git commit -m "chore: update bouine formula to ${{ steps.ver.outputs.version }}"
+          git commit -m "chore: update bouine formula to ${VERSION}"
           git push origin main

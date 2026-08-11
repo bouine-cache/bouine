@@ -822,6 +822,217 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	h.variantMu.Unlock()
 }
 
+// TestHandler_PurgeDeletesVariants pins RFC 9111 §4.2.4: purging a primary
+// key MUST invalidate every Vary variant stored under composite keys.
+// Before the fix, Purge deleted only the primary key and left all variant
+// entries live in the store, so subsequent requests for different variants
+// were served stale hits.
+func TestHandler_PurgeDeletesVariants(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.Vary, "X-Test-Variant")
+		_, _ = w.Write([]byte(r.Header.Get("X-Test-Variant")))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	// Populate two distinct variants under composite keys.
+	reqA := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	reqA.Header.Set("X-Test-Variant", "a")
+	h.ServeHTTP(httptest.NewRecorder(), reqA)
+
+	reqB := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	reqB.Header.Set("X-Test-Variant", "b")
+	h.ServeHTTP(httptest.NewRecorder(), reqB)
+
+	primaryKey := h.buildKey(reqA)
+	keyA := VariantKey(primaryKey, "X-Test-Variant", reqA.Header, nil)
+	keyB := VariantKey(primaryKey, "X-Test-Variant", reqB.Header, nil)
+	require.NotEqual(t, primaryKey, keyA)
+	require.NotEqual(t, primaryKey, keyB)
+
+	// Sanity: both variants and the primary are live in the store.
+	objA, _, _ := store.Get(context.Background(), keyA)
+	require.NotNil(t, objA)
+	objB, _, _ := store.Get(context.Background(), keyB)
+	require.NotNil(t, objB)
+	objPK, _, _ := store.Get(context.Background(), primaryKey)
+	require.NotNil(t, objPK)
+
+	// Purge the primary key — must delete the primary AND every variant.
+	owned, err := h.Purge(context.Background(), primaryKey)
+	require.NoError(t, err)
+	require.True(t, owned, "handler should own the key it cached")
+
+	// All three keys must be gone from the store.
+	if obj, _, _ := store.Get(context.Background(), primaryKey); obj != nil {
+		t.Fatal("primary key still in store after Purge")
+	}
+	if obj, _, _ := store.Get(context.Background(), keyA); obj != nil {
+		t.Fatal("variant A still in store after Purge")
+	}
+	if obj, _, _ := store.Get(context.Background(), keyB); obj != nil {
+		t.Fatal("variant B still in store after Purge")
+	}
+
+	// variantSets entry for the primary key must be cleared.
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	h.variantMu.Unlock()
+	if len(set) != 0 {
+		t.Fatalf("expected variantSets[primary] cleared, got %d entries", len(set))
+	}
+
+	// Subsequent requests must miss and re-fetch from origin (no stale hits).
+	rrA := httptest.NewRecorder()
+	h.ServeHTTP(rrA, reqA)
+	require.Equal(t, "MISS", rrA.Header().Get(header.XCache))
+	require.Equal(t, "a", rrA.Body.String())
+}
+
+// TestHandler_PurgeNoVariants verifies Purge works when the primary key has
+// no Vary variants (the common case): it deletes the primary and clears a
+// possibly-empty variantSets entry.
+func TestHandler_PurgeNoVariants(t *testing.T) {
+	t.Parallel()
+
+	orig := origin200("body")
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/plain", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	key := h.buildKey(req)
+	obj, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+
+	owned, err := h.Purge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned, "handler should own the key it cached")
+	if obj, _, _ := store.Get(context.Background(), key); obj != nil {
+		t.Fatal("key still in store after Purge")
+	}
+}
+
+// TestHandler_PurgeUnknownKey verifies Purge is a no-op (no error, no panic)
+// for a primary key that was never stored.
+func TestHandler_PurgeUnknownKey(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: origin200("body"),
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+	owned, err := h.Purge(context.Background(), testkey.Key(42))
+	require.NoError(t, err)
+	require.False(t, owned, "handler should not own an unknown key")
+}
+
+// TestHandler_PurgeVariantsUnregistersRefresh confirms that Purge also
+// unregisters purged keys from the refresh registry so background
+// revalidation does not resurrect purged objects.
+func TestHandler_PurgeVariantsUnregistersRefresh(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.Vary, "X-Test-Variant")
+		_, _ = w.Write([]byte(r.Header.Get("X-Test-Variant")))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:            orig,
+		Store:               store,
+		Logger:              slog.Default(),
+		RefreshBeforeExpiry: true,
+		RefreshMinHits:      0,
+	})
+
+	reqA := httptest.NewRequest("GET", "http://example.com/vary", nil)
+	reqA.Header.Set("X-Test-Variant", "a")
+	h.ServeHTTP(httptest.NewRecorder(), reqA)
+
+	primaryKey := h.buildKey(reqA)
+	keyA := VariantKey(primaryKey, "X-Test-Variant", reqA.Header, nil)
+
+	// Both the primary and the variant should be in the refresh registry.
+	require.NotNil(t, h.refreshRegistry.Lookup(primaryKey))
+	require.NotNil(t, h.refreshRegistry.Lookup(keyA))
+
+	owned, err := h.Purge(context.Background(), primaryKey)
+	require.NoError(t, err)
+	require.True(t, owned, "handler should own the key it cached")
+
+	// After purge, neither key should be in the refresh registry.
+	require.Nil(t, h.refreshRegistry.Lookup(primaryKey))
+	require.Nil(t, h.refreshRegistry.Lookup(keyA))
+}
+
+// TestHandler_PurgeNonOwningHandlerSkipsStoreDelete verifies that after one
+// handler purges a key, a second handler sharing the store does NOT call
+// store.Delete (which would write a spurious warm-tier tombstone). This is
+// the unit-level guarantee that purgeKey relies on: it stops after the
+// first owning handler, and subsequent handlers see the key gone and
+// return owned=false without any store mutation.
+func TestHandler_PurgeNonOwningHandlerSkipsStoreDelete(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+
+	// Handler A caches a key; handler B shares the store but never
+	// caches anything.
+	orig := origin200("body")
+	hA := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+	hB := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/owned-by-a", nil)
+	hA.ServeHTTP(httptest.NewRecorder(), req)
+	key := hA.buildKey(req)
+
+	// Confirm the key is in the store.
+	obj, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+
+	// Purge through handler A (owning). Must return owned=true
+	// and delete the key.
+	owned, err := hA.Purge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned, "handler A should own the key it cached")
+
+	obj, _, _ = store.Get(context.Background(), key)
+	require.Nil(t, obj, "key must be gone after owning Purge")
+
+	// Purge through handler B (non-owning, key already gone). Must
+	// return owned=false and must NOT error — the key is already
+	// deleted, so there is nothing for handler B to do.
+	owned, err = hB.Purge(context.Background(), key)
+	require.NoError(t, err)
+	require.False(t, owned, "handler B should not own an already-purged key")
+}
+
 func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	t.Parallel()
 	// In eventual mode, ownerFn and peerFetch are nil. A miss goes

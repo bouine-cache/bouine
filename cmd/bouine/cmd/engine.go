@@ -64,7 +64,7 @@ type runState struct {
 	headerRing   *observability.OriginHeaderRing
 	snapshotPath string
 	token        string
-	handlers     []*cache.Handler // refresh-enabled handlers, closed before store on shutdown
+	handlers     []*cache.Handler // all cache.Handler instances; refresh-enabled ones filtered via RefreshEnabled()
 
 	clusterNode    *cluster.Cluster
 	peerFetcher    *cluster.PeerFetcher
@@ -280,7 +280,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	rings, snapshotPath := e.initRings()
 	dpMetrics.Rings = rings
 
-	clusterNode, peerFetcher, broadcaster, peersFn, clusterMetrics := e.initCluster(ctx, store, token)
+	clusterNode, peerFetcher, broadcaster, peersFn, clusterMetrics := e.initCluster(ctx, token)
 
 	cfCtx, cfCancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cfCancel is stored in runState and called during shutdown
 	cfProp := e.initCloudflare(dpMetrics, cfCtx)                //nolint:contextcheck // detached lifecycle for CF async goroutines
@@ -306,6 +306,19 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
 		seq:            seq,
+	}
+	// Wire the gossip invalidator after rs is created so the purge
+	// closure can call rs.purgeKey for variant-aware deletion.
+	if clusterNode != nil {
+		clusterNode.SetInvalidator(cluster.Invalidator{
+			PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
+				return rs.purgeKey(ctx, evt.Key)
+			},
+			BanFn: func(ctx context.Context, evt api.BanEvent) error {
+				_, err := store.Ban(ctx, evt.Predicate)
+				return err
+			},
+		})
 	}
 	return rs, shutdownTracer, nil
 }
@@ -361,7 +374,6 @@ func (e *engine) initRings() (*observability.Rings, string) {
 
 func (e *engine) initCluster(
 	ctx context.Context,
-	store storage.Store,
 	token string,
 ) (*cluster.Cluster, *cluster.PeerFetcher, *cluster.Broadcaster, func() []api.PeerInfo, *cluster.Metrics) {
 	if e.cfg.Listen.Cluster == "" {
@@ -389,16 +401,6 @@ func (e *engine) initCluster(
 
 	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry, e.cfg.Cluster.HopLimit)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
-
-	clusterNode.SetInvalidator(cluster.Invalidator{
-		PurgeFn: func(ctx context.Context, evt api.PurgeEvent) error {
-			return store.Delete(ctx, evt.Key)
-		},
-		BanFn: func(ctx context.Context, evt api.BanEvent) error {
-			_, err := store.Ban(ctx, evt.Predicate)
-			return err
-		},
-	})
 
 	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {
 		e.logger.Warn("cluster.hop_limit has no effect in non-strong mode",
@@ -493,6 +495,9 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 				}
 				// Refresh gauges: poll scheduler heap and registry sizes.
 				for _, h := range rs.handlers {
+					if !h.RefreshEnabled() {
+						continue
+					}
 					scheduled, registry := h.RefreshStats()
 					route := h.RouteName()
 					if route != "" && rs.dpMetrics.RefreshScheduled != nil {
@@ -550,6 +555,22 @@ func cacheCheck(ctx context.Context, rawURL string, rs *runState) admin.CacheChe
 	return result
 }
 
+// purgeKey purges a key and its Vary variants from the local store,
+// stopping after the first handler that owns the key. Cluster broadcast
+// is the caller's responsibility.
+func (rs *runState) purgeKey(ctx context.Context, key api.Key) error {
+	for _, h := range rs.handlers {
+		owned, err := h.Purge(ctx, key)
+		if err != nil {
+			return err
+		}
+		if owned {
+			return nil
+		}
+	}
+	return nil
+}
+
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
 // The broadcaster internally detaches from the engine's root context so
 // peer fan-out survives shutdown; local store operations use dCtx.
@@ -557,7 +578,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 	return invalidationOps{
 		PurgeFn: func(dCtx context.Context, urlStr string) error {
 			key := cache.BuildKeyFromURL(urlStr, nil)
-			if err := rs.store.Delete(dCtx, key); err != nil {
+			if err := rs.purgeKey(dCtx, key); err != nil {
 				return err
 			}
 			if rs.broadcaster != nil {
@@ -579,7 +600,7 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 			return n, nil
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			if err := rs.store.Delete(dCtx, cache.BuildKeyFromURL(urlStr, nil)); err != nil {
+			if err := rs.purgeKey(dCtx, cache.BuildKeyFromURL(urlStr, nil)); err != nil {
 				return err
 			}
 			rs.cfProp.PropagateForRefresh(dCtx, urlStr)
@@ -625,7 +646,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			rs.cfProp.PropagateForBan(bCtx, expr)
 		},
 		PurgeFn: func(key api.Key) error {
-			if err := rs.store.Delete(ctx, key); err != nil {
+			if err := rs.purgeKey(ctx, key); err != nil {
 				return err
 			}
 			if rs.broadcaster != nil {
@@ -644,10 +665,10 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return n, nil
 		},
 		RefreshFn: func(key api.Key) error {
-			return rs.store.Delete(ctx, key)
+			return rs.purgeKey(ctx, key)
 		},
 		PeerPurgeHandler: cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
-			return rs.store.Delete(ctx, evt.Key)
+			return rs.purgeKey(ctx, evt.Key)
 		}),
 		PeerBanHandler: cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
 			_, err := rs.store.Ban(ctx, evt.Predicate)
@@ -904,6 +925,9 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 		rs.seq.AddStep("drain-refresh-handlers", 10*time.Second, func(ctx context.Context) error {
 			var wg errgroup.Group
 			for _, h := range rs.handlers {
+				if !h.RefreshEnabled() {
+					continue
+				}
 				wg.Go(func() error { return h.Close(ctx) })
 			}
 			return wg.Wait()

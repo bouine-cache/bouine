@@ -35,6 +35,10 @@ type Store interface {
 	// key is not in the hot tier. Used by the cache layer's refresh
 	// popularity gate to evaluate per-TTL-window access frequency.
 	WindowHits(key api.Key) int64
+	// Has reports whether key is present in any tier, without side
+	// effects. Unlike Get, it does not update access statistics or
+	// eviction state.
+	Has(key api.Key) bool
 }
 
 // KeyLister returns all cache keys in the store. Implemented by HotStore

@@ -575,6 +575,17 @@ func (h *HotStore) sweeper() {
 	}
 }
 
+// Has reports whether key is present in the hot tier, without side
+// effects. Unlike Get, it does not increment hit counters, mark SIEVE
+// entries as visited, or touch windowHits.
+func (h *HotStore) Has(key api.Key) bool {
+	s := h.shard(key)
+	s.mu.RLock()
+	_, ok := s.entries[key]
+	s.mu.RUnlock()
+	return ok
+}
+
 // Delete removes a key from the hot tier.
 func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	s := h.shard(key)

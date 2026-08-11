@@ -532,6 +532,20 @@ func (t *TieredStore) Put(ctx context.Context, key api.Key, obj *api.Object) err
 	return nil
 }
 
+// Has reports whether key is present in either tier, without side
+// effects. Checks the hot tier first (shard map lookup), then the
+// warm-tier index if the key is not hot.
+func (t *TieredStore) Has(key api.Key) bool {
+	if t.hot.Has(key) {
+		return true
+	}
+	if t.warm == nil {
+		return false
+	}
+	_, _, ok := t.warm.Lookup(key)
+	return ok
+}
+
 // Delete removes from both tiers.
 func (t *TieredStore) Delete(ctx context.Context, key api.Key) error {
 	if err := t.hot.Delete(ctx, key); err != nil {

@@ -1043,3 +1043,100 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	}
 	return 0
 }
+
+// TestHotStore_Has_NoSideEffects verifies that Has does not increment
+// hit counters, miss counters, or windowHits — unlike Get, which does.
+// Has is used by Handler.Purge to probe ownership without inflating
+// metrics on the purge path.
+func TestHotStore_Has_NoSideEffects(t *testing.T) {
+	t.Parallel()
+
+	store := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	t.Cleanup(func() { _ = store.Close(context.Background()) })
+
+	k := testkey.Hash([]byte("has-test"))
+	obj := bigObj(k, 100)
+	require.NoError(t, store.Put(context.Background(), k, obj))
+
+	// Record stats after Put (Get during Put path is absent — Put
+	// doesn't call Get).
+	before := store.Stats()
+
+	// Call Has 5 times. None should change any counter.
+	for i := 0; i < 5; i++ {
+		require.True(t, store.Has(k), "Has should find the key")
+	}
+
+	after := store.Stats()
+	require.Equal(t, before.Hits, after.Hits, "Has must not increment hits")
+	require.Equal(t, before.Misses, after.Misses, "Has must not increment misses")
+
+	// Has on a missing key must also be side-effect-free.
+	missing := testkey.Hash([]byte("does-not-exist"))
+	for i := 0; i < 5; i++ {
+		require.False(t, store.Has(missing), "Has should not find missing key")
+	}
+
+	afterMissing := store.Stats()
+	require.Equal(t, after.Hits, afterMissing.Hits, "Has on missing key must not increment hits")
+	require.Equal(t, after.Misses, afterMissing.Misses, "Has on missing key must not increment misses")
+
+	// WindowHits must be unchanged — Get increments it, Has must not.
+	require.Equal(t, int64(0), store.WindowHits(k), "Has must not increment windowHits")
+}
+
+// TestTieredStore_Has_NoWarmTombstone proves that Has does not write a
+// warm-tier tombstone. This is the storage-level guarantee that
+// Handler.Purge relies on: when purgeKey iterates non-owning handlers,
+// Has returns false and store.Delete is never called, so no spurious
+// tombstone is appended to the warm-tier segment.
+func TestTieredStore_Has_NoWarmTombstone(t *testing.T) {
+	t.Parallel()
+
+	ts := tieredStore(t, true)
+	k := testkey.Hash([]byte("warm-has-test"))
+	o := bigObj(k, 8192) // above 1024 threshold → stored in warm too
+
+	require.NoError(t, ts.Put(context.Background(), k, o))
+
+	// Confirm the key is in both tiers.
+	require.True(t, ts.Has(k), "key should be present")
+
+	diskBefore := ts.Stats().WarmDiskBytes
+
+	// Has must not write a tombstone — it's a read-only check.
+	for i := 0; i < 10; i++ {
+		require.True(t, ts.Has(k))
+	}
+
+	diskAfter := ts.Stats().WarmDiskBytes
+	require.Equal(t, diskBefore, diskAfter, "Has must not increase warm disk bytes (no tombstone)")
+
+	// Now prove that Delete DOES write a tombstone (sanity check that
+	// the test setup is actually detecting tombstone growth).
+	require.NoError(t, ts.Delete(context.Background(), k))
+	diskAfterDelete := ts.Stats().WarmDiskBytes
+	require.Greater(t, diskAfterDelete, diskBefore, "Delete must increase warm disk bytes (tombstone written)")
+}
+
+// TestTieredStore_Delete_MissingKey_WritesTombstone documents the
+// behavior that motivated the Has-based ownership probe in
+// Handler.Purge: TieredStore.Delete on a key that was never cached
+// still writes a warm-tier tombstone. This is why purgeKey must use
+// Has to skip non-owning handlers instead of blindly calling Delete.
+func TestTieredStore_Delete_MissingKey_WritesTombstone(t *testing.T) {
+	t.Parallel()
+
+	ts := tieredStore(t, true)
+
+	missing := testkey.Hash([]byte("never-cached"))
+	diskBefore := ts.Stats().WarmDiskBytes
+
+	// Delete a key that was never Put. HotStore.Delete is a no-op, but
+	// TieredStore.Delete calls evictWarmErr which unconditionally writes
+	// a warm-tier tombstone.
+	require.NoError(t, ts.Delete(context.Background(), missing))
+
+	diskAfter := ts.Stats().WarmDiskBytes
+	require.Greater(t, diskAfter, diskBefore, "Delete on missing key must still write a warm tombstone")
+}

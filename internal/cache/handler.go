@@ -479,6 +479,39 @@ func (h *Handler) Close(ctx context.Context) error {
 	}
 }
 
+// Purge invalidates a primary cache key and every Vary variant stored under
+// it, enforcing RFC 9111 §4.2.4: when a resource is invalidated, all stored
+// variants MUST be invalidated too.
+//
+// Returns owned=true when this handler had the key (tracked variants or a
+// store hit). When owned=false, no store mutation was performed.
+func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	delete(h.variantSets, primaryKey)
+	h.variantMu.Unlock()
+
+	if len(set) == 0 && !h.store.Has(primaryKey) {
+		return false, nil
+	}
+
+	// Best-effort variant deletes: a missing key is not an error
+	// (SIEVE may have evicted it already).
+	for vk := range set {
+		_ = h.store.Delete(ctx, vk)
+		if h.refreshRegistry != nil {
+			h.refreshRegistry.Unregister(vk)
+		}
+	}
+	if err := h.store.Delete(ctx, primaryKey); err != nil {
+		return true, err
+	}
+	if h.refreshRegistry != nil {
+		h.refreshRegistry.Unregister(primaryKey)
+	}
+	return true, nil
+}
+
 // lookupForRefresh returns the live object for key, or nil if the
 // key is gone or stale. Used by the scheduler's compaction pass.
 func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
@@ -675,6 +708,14 @@ func (h *Handler) RefreshStats() (scheduled, registry int) {
 // when unset. Used by the engine to label refresh gauge metrics.
 func (h *Handler) RouteName() string {
 	return h.routeName
+}
+
+// RefreshEnabled reports whether this handler was configured with
+// refresh-before-expiry. Used by the engine to filter handlers for
+// shutdown drain and refresh-metric polling without maintaining a
+// separate slice.
+func (h *Handler) RefreshEnabled() bool {
+	return h.refreshBeforeExpiry
 }
 
 // buildKey constructs the cache key, applying the route's KeyPolicy
@@ -1374,22 +1415,17 @@ func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
 		getReq := r.Clone(r.Context())
 		getReq.Method = http.MethodGet
 		key := h.buildKey(getReq)
-		_ = h.store.Delete(r.Context(), key)
-		h.variantMu.Lock()
-		delete(h.variantSets, key)
-		h.variantMu.Unlock()
-		if h.refreshRegistry != nil {
-			h.refreshRegistry.Unregister(key)
-		}
+		_, _ = h.Purge(r.Context(), key)
 
 		// Also evict Content-Location and Location URLs (RFC 9111
 		// §4.4). These are URI references (RFC 9110 §8.7) and may be
-		// absolute, relative, or same-origin bare paths.
+		// absolute, relative, or same-origin bare paths. Use Purge so
+		// any Vary variants stored under those URLs are also deleted.
 		for _, hdr := range []string{header.ContentLocation, header.Location} {
 			if loc := rec.header.Get(hdr); loc != "" {
 				locKey := h.buildLocationKey(r, loc)
 				if !locKey.IsZero() {
-					_ = h.store.Delete(r.Context(), locKey)
+					_, _ = h.Purge(r.Context(), locKey)
 				}
 			}
 		}

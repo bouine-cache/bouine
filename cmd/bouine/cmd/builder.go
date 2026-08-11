@@ -195,8 +195,8 @@ func (e *engine) buildPools(metrics *origin.Metrics) (map[string]*origin.Pool, e
 //     can route the request to the consistent-hash owner node.
 //   - In eventual mode neither is set; every node caches independently.
 //
-// Handlers with refresh-before-expiry enabled are collected into rs.handlers
-// so the engine can Close them before store.Close during shutdown.
+// All cache handlers are collected into rs.handlers; the engine
+// filters via Handler.RefreshEnabled() for shutdown drain and metric polling.
 func (e *engine) buildRouter(rs *runState) *server.Router {
 	router := server.NewRouter(server.RouterConfig{Logger: e.logger})
 	for _, rc := range e.cfg.Routes {
@@ -255,9 +255,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			}
 		}
 		cached := cache.NewHandler(cfg)
-		if cfg.RefreshBeforeExpiry {
-			rs.handlers = append(rs.handlers, cached)
-		}
+		rs.handlers = append(rs.handlers, cached)
 		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached)
 	}
 	return router
@@ -323,9 +321,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			}
 		}
 		cached := cache.NewHandler(cfg)
-		if cfg.RefreshBeforeExpiry {
-			rs.handlers = append(rs.handlers, cached)
-		}
+		rs.handlers = append(rs.handlers, cached)
 		handler = cached
 	}
 

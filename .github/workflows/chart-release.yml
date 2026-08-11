@@ -45,19 +45,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .cr-release-packages
-          # helm's Go openpgp library cannot read the modern keybox (.kbx)
-          # format that gpg uses by default. Export the imported key to a
-          # legacy secring outside ~/.gnupg/ so GPG does not auto-migrate
-          # it back to the keybox (which would delete the file).
-          # --pinentry-mode loopback lets gpg use the passphrase in CI.
+          # Package without --sign; we sign with gpg directly below.
+          # helm's built-in signer uses a Go openpgp library that cannot
+          # read modern GPG keyboxes, so we produce the .prov file with
+          # gpg --detach-sign instead (same format helm/artifacthub expect).
+          helm package deploy/helm/bouine \
+            --destination .cr-release-packages
+          # Sign the .tgz with gpg to produce the .prov provenance file.
+          # The passphrase is pre-seeded into gpg-agent by ghaction-import-gpg.
+          CHART_PKG="$(ls .cr-release-packages/*.tgz)"
           gpg --batch --yes --pinentry-mode loopback \
             --passphrase "${{ secrets.HELM_CHART_GPG_PASSPHRASE }}" \
-            --export-secret-keys "${{ vars.HELM_CHART_GPG_KEY_ID }}" > secring.gpg
-          helm package deploy/helm/bouine \
-            --destination .cr-release-packages \
-            --sign \
-            --key "${{ vars.HELM_CHART_GPG_KEY_ID }}" \
-            --keyring secring.gpg
+            --detach-sign --armor \
+            --output "${CHART_PKG}.prov" \
+            "$CHART_PKG"
           # Verify the .prov provenance file was created alongside the .tgz
           ls -la .cr-release-packages/*.tgz .cr-release-packages/*.tgz.prov
 

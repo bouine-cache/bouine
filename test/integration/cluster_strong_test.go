@@ -23,7 +23,7 @@ func TestStrong_MissThenHit(t *testing.T) {
 	got := resp.Header.Get("X-Cache")
 	require.Equal(t, "MISS", got)
 	resp = s.Get(t, 0, "/hit?x=strong-miss-then-hit-a")
-	got := resp.Header.Get("X-Cache")
+	got = resp.Header.Get("X-Cache")
 	require.Equal(t, "HIT", got)
 }
 
@@ -35,9 +35,9 @@ func TestStrong_PeerFetch(t *testing.T) {
 	// Wait a moment for single-flight to complete.
 	time.Sleep(200 * time.Millisecond)
 
-	// Fetch the same URL from all three nodes and assert each can serve it.
+	// Fetch the same URL from all alive nodes and assert each can serve it.
 	// In strong mode, non-owner nodes peer-fetch from the owner.
-	for i := range s.Nodes {
+	for _, i := range s.AliveNodes() {
 		resp := s.Get(t, i, "/hit?x=strong-peerfetch")
 		assert.Equal(t, 200, resp.StatusCode)
 	}
@@ -45,7 +45,7 @@ func TestStrong_PeerFetch(t *testing.T) {
 	// Confirm that peer-fetch hit counter is non-zero somewhere in the cluster.
 	// (If node 0 happens to own the key, all requests hit locally — no fetch.)
 	var totalPeerHits float64
-	for i := range s.Nodes {
+	for _, i := range s.AliveNodes() {
 		totalPeerHits += s.MetricValue(t, i, "bouine_peer_fetch_hits_total")
 	}
 	if totalPeerHits == 0 {
@@ -62,8 +62,8 @@ func TestStrong_PurgePropagation(t *testing.T) {
 	// Give the single-flight a moment.
 	time.Sleep(200 * time.Millisecond)
 
-	// All nodes should be able to serve the object now.
-	for i := range s.Nodes {
+	// All alive nodes should be able to serve the object now.
+	for _, i := range s.AliveNodes() {
 		s.Get(t, i, path)
 	}
 
@@ -87,7 +87,10 @@ func TestStrong_PurgePropagation(t *testing.T) {
 	// repeating the request on nodes 1 and 2 returns a new MISS from
 	// origin (not a stale HIT) — the old peer-fetched entry is gone and
 	// the re-fetched object is fresh.
-	for i := 1; i < 3; i++ {
+	for i := 1; i < len(s.Nodes); i++ {
+		if !s.IsAlive(i) {
+			continue
+		}
 		resp = s.Get(t, i, path)
 		// After purge, the old peer-fetched entry should be gone.
 		// The request falls through to origin (node i's HTTP address
@@ -107,8 +110,8 @@ func TestStrong_BanPropagation(t *testing.T) {
 
 	path := "/hit?x=strong-ban"
 
-	// Prime all nodes.
-	for i := range s.Nodes {
+	// Prime all alive nodes.
+	for _, i := range s.AliveNodes() {
 		s.Get(t, i, path)
 		time.Sleep(100 * time.Millisecond)
 		s.Get(t, i, path) // make sure it's a HIT before banning
@@ -121,7 +124,7 @@ func TestStrong_BanPropagation(t *testing.T) {
 
 	// In strong mode, HTTP fan-out is synchronous: all peers receive the ban
 	// immediately (no gossip wait needed).
-	for i := range s.Nodes {
+	for _, i := range s.AliveNodes() {
 		resp := s.Get(t, i, path)
 		got := resp.Header.Get("X-Cache")
 		assert.NotEqual(t, "HIT", got)

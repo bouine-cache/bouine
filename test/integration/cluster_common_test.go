@@ -15,10 +15,11 @@ func TestCluster_Formation(t *testing.T) {
 	for _, mode := range clusterModes {
 		t.Run(mode, func(t *testing.T) {
 			s := sharedCluster(t, mode)
-			for i, node := range s.Nodes {
+			for _, i := range s.AliveNodes() {
+				node := s.Nodes[i]
 				peers := s.Peers(t, i)
-				if len(peers) != 3 {
-					t.Errorf("node %s: got %d peers, want 3", node.Name, len(peers))
+				if len(peers) != len(s.AliveNodes()) {
+					t.Errorf("node %s: got %d peers, want %d", node.Name, len(peers), len(s.AliveNodes()))
 				}
 			}
 		})
@@ -27,6 +28,13 @@ func TestCluster_Formation(t *testing.T) {
 
 // TestCluster_SingleNodeFailure verifies that killing one node leaves the
 // surviving nodes serving 200.
+//
+// This test kills node 2 and does NOT restart it — memberlist rejoin
+// with fresh ports is unreliable in-process. Subsequent tests must
+// tolerate node 2 being absent. When run via `make integration`, this
+// test executes in its own process (test-integration-cluster-common)
+// so the killed node does not affect the strong/eventual test runs
+// which get fresh clusters in separate processes.
 func TestCluster_SingleNodeFailure(t *testing.T) {
 	for _, mode := range clusterModes {
 		t.Run(mode, func(t *testing.T) {
@@ -57,6 +65,9 @@ func TestCluster_SingleNodeFailure(t *testing.T) {
 					t.Errorf("node %d after kill: status = %d", n, resp.StatusCode)
 				}
 			}
+
+			// Node 2 is intentionally left killed. Subsequent tests must
+			// tolerate its absence (only hit nodes 0 and 1).
 		})
 	}
 }

@@ -106,16 +106,19 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	}
 	seedList := `["` + strings.Join(seeds, `","`) + `"]`
 
+	configDir, err := os.MkdirTemp("", "bouine-integration-*")
+	if err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
 	s := &ClusterStack{
 		Mode:      opts.Mode,
 		OriginURL: origin.URL,
 		origin:    origin,
 		originCtl: originCtl,
-		configDir: t.TempDir(),
+		configDir: configDir,
 	}
 
 	// Write configs and start each node.
-	configDir := s.configDir
 	for i := range 3 {
 		p := ports[i]
 		name := fmt.Sprintf("bouine-%d", i+1)
@@ -129,7 +132,6 @@ admin:
 storage:
   hot_max_bytes: 128MiB
 cluster:
-  enabled: true
   node_name: %s
   mode: %s
   join: %s
@@ -145,7 +147,7 @@ routes:
 `, p.http, p.admin, p.gossip, IntegrationToken, name, opts.Mode, seedList,
 			origin.Listener.Addr().String())
 
-		cfgPath := filepath.Join(configDir, name+".yaml")
+		cfgPath := filepath.Join(s.configDir, name+".yaml")
 		if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 			t.Fatalf("write config %s: %v", name, err)
 		}
@@ -199,10 +201,26 @@ func (s *ClusterStack) waitHealthy(t *testing.T, timeout time.Duration) {
 	}
 }
 
+// IsAlive reports whether node n is currently running.
+func (s *ClusterStack) IsAlive(n int) bool {
+	return s.cancels[n] != nil
+}
+
+// AliveNodes returns the indices of nodes that are currently running.
+func (s *ClusterStack) AliveNodes() []int {
+	var out []int
+	for i := range s.Nodes {
+		if s.IsAlive(i) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 func (s *ClusterStack) waitMembership(t *testing.T, timeout time.Duration, expected int) {
 	t.Helper()
 	poll.Eventually(t, timeout, 200*time.Millisecond, func() bool {
-		for i := range s.Nodes {
+		for _, i := range s.AliveNodes() {
 			peers := s.Peers(t, i)
 			if len(peers) < expected {
 				return false
@@ -228,10 +246,11 @@ func (s *ClusterStack) Down() {
 		s.origin.Close()
 		s.origin = nil
 	}
+	if s.configDir != "" {
+		_ = os.RemoveAll(s.configDir)
+		s.configDir = ""
+	}
 }
-
-// ConfigDir returns an empty string (no temp config dir to expose).
-func (s *ClusterStack) ConfigDir() string { return "" }
 
 // Dump is a no-op for in-process nodes (logs go to stderr).
 func (s *ClusterStack) Dump(_ *testing.T) {}
@@ -261,7 +280,6 @@ admin:
 storage:
   hot_max_bytes: 128MiB
 cluster:
-  enabled: true
   node_name: %s
   mode: %s
   join: %s

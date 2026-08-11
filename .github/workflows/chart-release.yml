@@ -45,27 +45,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .cr-release-packages
-          # Debug: verify the key was imported by the previous step
-          gpg --list-secret-keys --keyid-format LONG || true
-          # helm's Go openpgp library cannot read the modern keybox (.kbx)
-          # format that gpg uses by default. Export the imported key to a
-          # legacy secring that helm can parse. The secring MUST live outside
-          # ~/.gnupg/ — if it's inside, gpg auto-migrates it to the keybox on
-          # next invocation, stripping the secret key before helm can read it.
-          # --pinentry-mode loopback is required so gpg can use the passphrase
-          # non-interactively in CI.
-          secring="$(mktemp -d)/secring.gpg"
+          # helm's --sign uses the Go openpgp library, which does not support
+          # ed25519 keys. Package without --sign, then create the provenance
+          # file manually with gpg --detach-sign.
+          helm package deploy/helm/bouine \
+            --destination .cr-release-packages
+          chart="$(ls .cr-release-packages/*.tgz)"
           gpg --batch --yes --pinentry-mode loopback \
             --passphrase "${{ secrets.HELM_CHART_GPG_PASSPHRASE }}" \
-            --export-secret-keys "${{ vars.HELM_CHART_GPG_KEY_ID }}" > "$secring"
-          echo "secring size: $(wc -c < "$secring") bytes"
-          test -s "$secring"
-          helm package deploy/helm/bouine \
-            --destination .cr-release-packages \
-            --sign \
-            --key "${{ vars.HELM_CHART_GPG_KEY_ID }}" \
-            --keyring "$secring"
-          # Verify the .prov provenance file was created alongside the .tgz
+            --local-user "${{ vars.HELM_CHART_GPG_KEY_ID }}" \
+            --detach-sign --armor "$chart"
+          # gpg produces .asc; rename to .prov so chart-releaser / Artifact Hub
+          # recognises the provenance sidecar.
+          mv "${chart}.asc" "${chart}.prov"
+          # Verify both files exist
           ls -la .cr-release-packages/*.tgz .cr-release-packages/*.tgz.prov
 
       - name: Run chart-releaser

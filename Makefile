@@ -73,7 +73,13 @@ conformance-view: build ## Run conformance tests then open the comparison UI in 
 	bash test/cachetests/view.sh
 
 .PHONY: test-integration-cluster
-test-integration-cluster: test-integration-cluster-strong test-integration-cluster-eventual ## Run all cluster consistency mode tests sequentially.
+test-integration-cluster: test-integration-cluster-common test-integration-cluster-strong test-integration-cluster-eventual ## Run all cluster consistency mode tests sequentially.
+
+.PHONY: test-integration-cluster-common
+test-integration-cluster-common: ## Run cluster-wide tests (formation, single-node failure).
+	@echo ">>> Cluster integration: COMMON (formation + failure)"
+	go test -v -race -count=1 -timeout=5m -tags=integration \
+	    -run TestCluster ./test/integration/...
 
 .PHONY: test-integration-cluster-strong
 test-integration-cluster-strong: ## Run strong-mode cluster integration tests.

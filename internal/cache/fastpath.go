@@ -743,21 +743,14 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 
 // variantKeyFromRaw computes the variant key from a RawRequest.
 // It mirrors VariantKey but reads header values from RawRequest
-// instead of http.Header.
+// instead of http.Header. Vary:* returns primary (RFC 9111 §4.1;
+// isCacheBlocked prevents such objects from being stored).
 func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
 	if vary == "" {
 		return primary
 	}
 	if varyContainsStar(vary) {
-		// Hash all request headers.
-		h := xxhash.New()
-		_, _ = h.WriteString("*")
-		for i := 0; i < req.NHeaders; i++ {
-			hdr := &req.Headers[i]
-			_, _ = h.WriteString(hdr.Key)
-			_, _ = h.WriteString(hdr.Value)
-		}
-		return primary.WithVary(h.Sum64())
+		return primary
 	}
 
 	// Parse and sort Vary field names.

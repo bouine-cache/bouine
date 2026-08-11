@@ -22,8 +22,7 @@ const MaxVariants = 64
 const maxVaryFields = 16
 
 // varyContainsStar reports whether the Vary header value contains "*"
-// as one of its field names. "Vary: *, foo" and "Vary: foo, *" both
-// mean "every request is unique" (RFC 9110 §12.5.5).
+// as one of its field names (RFC 9110 §12.5.5, RFC 9111 §4.1).
 func varyContainsStar(vary string) bool {
 	for f := range strings.SplitSeq(vary, ",") {
 		if strings.TrimSpace(f) == "*" {
@@ -34,11 +33,12 @@ func varyContainsStar(vary string) bool {
 }
 
 // VariantKey computes a composite storage key from the primary key and
-// the Vary header. If the response has no Vary (or Vary contains *),
-// only the primary key is used. Header names listed in exclude are
-// skipped — the variant key is computed as if those headers were absent
-// from the Vary list. When exclusion empties the Vary list entirely,
-// the variant key collapses to the primary key.
+// the Vary header. If the response has no Vary (or Vary contains "*",
+// which is unmatchable per RFC 9111 §4.1), the primary key is returned.
+// Header names listed in exclude are skipped — the variant key is
+// computed as if those headers were absent from the Vary list. When
+// exclusion empties the Vary list entirely, the variant key collapses
+// to the primary key.
 //
 // Zero-alloc fast path: when the Vary header has ≤ maxVaryFields fields
 // and the total hash input fits in 256 bytes, the function uses a
@@ -52,15 +52,11 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *Key
 		return primary
 	}
 	if varyContainsStar(vary) {
-		h := xxhash.New()
-		_, _ = h.WriteString("*")
-		for k, vals := range reqHeader {
-			_, _ = h.WriteString(k)
-			for _, v := range vals {
-				_, _ = h.WriteString(v)
-			}
-		}
-		return primary.WithVary(h.Sum64())
+		// Vary:* is unmatchable (RFC 9111 §4.1). isCacheBlocked
+		// refuses to store such responses, so this branch is never
+		// reached against real stored data. Returning primary makes
+		// the branch a no-op if the gate is ever bypassed.
+		return primary
 	}
 
 	// Parse and sort Vary field names using a stack-allocated array.

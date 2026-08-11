@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
@@ -43,14 +44,29 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 	require.Equal(t, k2, k1)
 }
 
+// TestVariantKey_VaryStar verifies that Vary:* returns the primary key
+// (a no-op). RFC 9111 §4.1: a stored response with Vary:* "always fails
+// to match," so no variant key is computed. isCacheBlocked is the sole
+// gate that prevents Vary:* responses from being stored.
 func TestVariantKey_VaryStar(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
 	h1 := http.Header{header.Accept: {"text/html"}}
 	h2 := http.Header{header.Accept: {"application/json"}}
-	k1 := VariantKey(primary, "*", h1, nil)
-	k2 := VariantKey(primary, "*", h2, nil)
-	require.NotEqual(t, k2, k1)
+	require.Equal(t, primary, VariantKey(primary, "*", h1, nil))
+	require.Equal(t, primary, VariantKey(primary, "*", h2, nil))
+
+	// Fast path must match.
+	raw := &api.RawRequest{NHeaders: 1}
+	raw.Headers[0] = api.RawHeader{Key: "Accept", Value: "text/html"}
+	require.Equal(t, primary, variantKeyFromRaw(primary, "*", raw, nil))
+
+	// Nil header must not panic.
+	require.Equal(t, primary, VariantKey(primary, "*", nil, nil))
+
+	// Policy exclusions don't change the result — still primary.
+	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false)
+	require.Equal(t, primary, VariantKey(primary, "*", h1, policy))
 }
 
 func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {

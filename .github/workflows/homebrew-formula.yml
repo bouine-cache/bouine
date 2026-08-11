@@ -1,0 +1,97 @@
+name: Homebrew Formula
+
+# Updates the bouine formula in bouine-cache/homebrew-bouine with the
+# new version and SHA256 checksums from the release assets, then pushes
+# directly to the tap's main branch so `brew install` picks it up
+# immediately.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update-formula:
+    name: Update formula in homebrew-bouine
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v7
+        with:
+          repository: bouine-cache/homebrew-bouine
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          fetch-depth: 0
+
+      - name: Extract version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch SHA256 checksums
+        id: sha
+        run: |
+          set -euo pipefail
+          base="https://github.com/bouine-cache/bouine/releases/download/${GITHUB_REF_NAME}"
+          darwin_amd64=$(curl -fsSL "${base}/SHA256SUMS" | grep "darwin-amd64" | awk '{print $1}')
+          darwin_arm64=$(curl -fsSL "${base}/SHA256SUMS" | grep "darwin-arm64" | awk '{print $1}')
+          echo "darwin_amd64=${darwin_amd64}" >> "$GITHUB_OUTPUT"
+          echo "darwin_arm64=${darwin_arm64}" >> "$GITHUB_OUTPUT"
+
+      - name: Update formula
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          DARWIN_AMD64_SHA: ${{ steps.sha.outputs.darwin_amd64 }}
+          DARWIN_ARM64_SHA: ${{ steps.sha.outputs.darwin_arm64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          cat > Formula/bouine.rb <<'RUBY'
+          class Bouine < Formula
+            desc "Cloud-native HTTP cache in Go — RFC 9111 compliant, zero-alloc hit path"
+            homepage "https://github.com/bouine-cache/bouine"
+            version "__VERSION__"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/bouine-cache/bouine/releases/download/v#{version}/bouine-v#{version}-darwin-arm64"
+                sha256 "__DARWIN_ARM64_SHA__"
+              end
+              on_intel do
+                url "https://github.com/bouine-cache/bouine/releases/download/v#{version}/bouine-v#{version}-darwin-amd64"
+                sha256 "__DARWIN_AMD64_SHA__"
+              end
+            end
+
+            def install
+              on_arm do
+                bin.install "bouine-v#{version}-darwin-arm64" => "bouine"
+              end
+              on_intel do
+                bin.install "bouine-v#{version}-darwin-amd64" => "bouine"
+              end
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/bouine version")
+            end
+          end
+          RUBY
+          sed -i "s/__VERSION__/${VERSION}/" Formula/bouine.rb
+          sed -i "s/__DARWIN_AMD64_SHA__/${DARWIN_AMD64_SHA}/" Formula/bouine.rb
+          sed -i "s/__DARWIN_ARM64_SHA__/${DARWIN_ARM64_SHA}/" Formula/bouine.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git add Formula/bouine.rb
+          if git diff --cached --quiet; then
+            echo "No changes to formula — skipping push"
+            exit 0
+          fi
+          git commit -m "chore: update bouine formula to ${{ steps.ver.outputs.version }}"
+          git push origin main

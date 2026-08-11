@@ -45,6 +45,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .cr-release-packages
+          # Debug: verify the key was imported by the previous step
+          gpg --list-secret-keys --keyid-format LONG || true
           # helm's Go openpgp library cannot read the modern keybox (.kbx)
           # format that gpg uses by default. Export the imported key to a
           # legacy secring that helm can parse. The secring MUST live outside
@@ -56,6 +58,8 @@ jobs:
           gpg --batch --yes --pinentry-mode loopback \
             --passphrase "${{ secrets.HELM_CHART_GPG_PASSPHRASE }}" \
             --export-secret-keys "${{ vars.HELM_CHART_GPG_KEY_ID }}" > "$secring"
+          echo "secring size: $(wc -c < "$secring") bytes"
+          test -s "$secring"
           helm package deploy/helm/bouine \
             --destination .cr-release-packages \
             --sign \

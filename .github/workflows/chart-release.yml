@@ -47,16 +47,17 @@ jobs:
           mkdir -p .cr-release-packages
           # helm's Go openpgp library cannot read the modern keybox (.kbx)
           # format that gpg uses by default. Export the imported key to a
-          # legacy secring that helm can parse. --pinentry-mode loopback is
-          # required so gpg can use the passphrase non-interactively in CI.
+          # legacy secring outside ~/.gnupg/ so GPG does not auto-migrate
+          # it back to the keybox (which would delete the file).
+          # --pinentry-mode loopback lets gpg use the passphrase in CI.
           gpg --batch --yes --pinentry-mode loopback \
             --passphrase "${{ secrets.HELM_CHART_GPG_PASSPHRASE }}" \
-            --export-secret-keys "${{ vars.HELM_CHART_GPG_KEY_ID }}" > ~/.gnupg/secring.gpg
+            --export-secret-keys "${{ vars.HELM_CHART_GPG_KEY_ID }}" > secring.gpg
           helm package deploy/helm/bouine \
             --destination .cr-release-packages \
             --sign \
             --key "${{ vars.HELM_CHART_GPG_KEY_ID }}" \
-            --keyring ~/.gnupg/secring.gpg
+            --keyring secring.gpg
           # Verify the .prov provenance file was created alongside the .tgz
           ls -la .cr-release-packages/*.tgz .cr-release-packages/*.tgz.prov
 

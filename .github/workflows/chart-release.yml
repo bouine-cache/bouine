@@ -63,7 +63,7 @@ jobs:
           ls -la .cr-release-packages/*.tgz .cr-release-packages/*.tgz.prov
 
       - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.7.0
+        uses: helm/chart-releaser-action@v1.7.1
         with:
           charts_dir: deploy/helm
           # Use the pre-packaged .tgz from the previous step instead of

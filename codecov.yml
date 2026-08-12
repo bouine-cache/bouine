@@ -1,0 +1,39 @@
+# Codecov configuration for bouine
+# Per-package coverage targets follow AGENTS.md §8:
+#   - 85% default across all packages
+#   - 95% for internal/cache and internal/storage (the core tiers)
+# Free for public/OSS repos — no paid plan required.
+coverage:
+  status:
+    project:
+      default:
+        target: 85%
+        threshold: 1%
+      cache:
+        target: 95%
+        threshold: 1%
+        paths:
+          - internal/cache
+      storage:
+        target: 95%
+        threshold: 1%
+        paths:
+          - internal/storage
+    patch:
+      default:
+        target: 85%
+        threshold: 1%
+
+comment:
+  layout: "reach,diff,flags,files,footer"
+  show_carryforward_flags: false
+
+github_checks:
+  annotations: false
+
+ignore:
+  - "**/*_templ.go"
+  - "**/testdata/**"
+  - "**/doc.go"
+  - "cmd/**"
+  - "pkg/api/**"

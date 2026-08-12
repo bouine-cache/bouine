@@ -55,6 +55,12 @@ jobs:
       - run: go test -race -count=1 -timeout=120s -coverprofile=coverage.out ./...
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
+          verbose: true
 
   test-macos:
     name: test (macos-14)

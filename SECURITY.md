@@ -20,6 +20,12 @@ If you operate a `bouine` deployment older than 6 months behind the
 latest minor, please upgrade before reporting issues unless you can
 reproduce on a supported version.
 
+## Security Contacts
+
+- **Email**: [bouine@pm.me](mailto:bouine@pm.me)
+- **GitHub**: [@bouine-cache/maintainers](https://github.com/orgs/bouine-cache/teams/maintainers)
+- **Private reporting**: [GitHub Private Vulnerability Reporting](https://github.com/bouine-cache/bouine/security/advisories/new)
+
 ## Reporting a Vulnerability
 
 **Do not open a public GitHub issue for security reports.**
@@ -27,8 +33,9 @@ reproduce on a supported version.
 Report privately via GitHub's
 [Private vulnerability reporting](https://github.com/bouine-cache/bouine/security/advisories/new)
 — it creates a tracked, embargoed advisory and is the only supported
-channel. (No security email alias is published; GitHub PVR keeps reports
-and fixes in one place.)
+channel. You may also email the security team at
+**bouine@pm.me**; GitHub PVR is preferred so that reports and fixes stay
+in one place.
 
 Please include:
 

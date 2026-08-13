@@ -170,4 +170,8 @@ func TestTLS_MinVersionEnforced(t *testing.T) {
 		conn.Close()
 		t.Fatal("TLS 1.0 handshake should be rejected by server with min_version=1.2")
 	}
+	// Verify the error is a TLS-level rejection, not a network error
+	// (e.g., connection refused if the node had crashed).
+	assert.Contains(t, err.Error(), "tls",
+		"error should be a TLS handshake rejection, got: %v", err)
 }

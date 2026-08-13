@@ -357,12 +357,24 @@ func (s *ClusterStack) Dump(_ *testing.T) {}
 // RestartNode re-boots a previously killed node with fresh ports to
 // avoid bind conflicts from lingering sockets.
 func (s *ClusterStack) RestartNode(t *testing.T, n int) {
+	s.restartNode(t, n, nil)
+}
+
+// RestartNodeWithTLS re-boots a killed node with fresh ports and a new
+// TLS cert/key pair. This is used for certificate-rotation tests.
+func (s *ClusterStack) RestartNodeWithTLS(t *testing.T, n int, tlsOpts TLSOptions) {
+	s.restartNode(t, n, &tlsOpts)
+}
+
+// restartNode is the shared implementation for RestartNode and
+// RestartNodeWithTLS. When tlsOpts is non-nil, the node is configured
+// with an HTTPS listener and the provided cert/key pair.
+func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 	t.Helper()
 	if s.cancels[n] != nil {
 		return
 	}
 
-	// Allocate fresh ports — the old ones may still be in TIME_WAIT.
 	httpPort := freePort(t)
 	adminPort := freePort(t)
 	gossipPort := freePort(t)
@@ -370,23 +382,37 @@ func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 	name := s.Nodes[n].Name
 	seedList := s.gossipSeeds()
 
+	var httpsPort int
+	if tlsOpts != nil {
+		httpsPort = freePort(t)
+	}
+
 	cfg := buildNodeConfig(nodeConfigParams{
 		name:       name,
 		mode:       s.Mode,
 		httpPort:   httpPort,
+		httpsPort:  httpsPort,
 		adminPort:  adminPort,
 		gossipPort: gossipPort,
 		seedList:   seedList,
 		originAddr: s.origin.Listener.Addr().String(),
+		tls:        tlsOpts,
 	})
 
-	cfgPath := filepath.Join(s.configDir, name+"-restart.yaml")
+	suffix := "-restart"
+	if tlsOpts != nil {
+		suffix = "-restart-tls"
+	}
+	cfgPath := filepath.Join(s.configDir, name+suffix+".yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write restart config: %v", err)
 	}
 
 	s.Nodes[n].HTTPAddr = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
-	s.Nodes[n].HTTPSAddr = "" // RestartNode does not configure TLS
+	s.Nodes[n].HTTPSAddr = ""
+	if tlsOpts != nil {
+		s.Nodes[n].HTTPSAddr = fmt.Sprintf("https://127.0.0.1:%d", httpsPort)
+	}
 	s.Nodes[n].AdminAddr = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
 	s.Nodes[n].GossipAddr = fmt.Sprintf("127.0.0.1:%d", gossipPort)
 	s.Nodes[n].cfgPath = cfgPath
@@ -401,7 +427,6 @@ func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 		ch <- root.ExecuteContext(ctx)
 	}(s.errChs[n])
 
-	// Wait for health.
 	poll.Eventually(t, 30*time.Second, 50*time.Millisecond, func() bool {
 		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
 		if err != nil {
@@ -413,67 +438,6 @@ func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 		if ok {
 			t.Logf("cluster: restarted %s on %s", name, s.Nodes[n].HTTPAddr)
 		}
-		return ok
-	})
-}
-
-// RestartNodeWithTLS re-boots a killed node with fresh ports and a new
-// TLS cert/key pair. This is used for certificate-rotation tests.
-func (s *ClusterStack) RestartNodeWithTLS(t *testing.T, n int, tlsOpts TLSOptions) {
-	t.Helper()
-	if s.cancels[n] != nil {
-		return
-	}
-
-	httpPort := freePort(t)
-	httpsPort := freePort(t)
-	adminPort := freePort(t)
-	gossipPort := freePort(t)
-
-	name := s.Nodes[n].Name
-	seedList := s.gossipSeeds()
-
-	cfg := buildNodeConfig(nodeConfigParams{
-		name:       name,
-		mode:       s.Mode,
-		httpPort:   httpPort,
-		httpsPort:  httpsPort,
-		adminPort:  adminPort,
-		gossipPort: gossipPort,
-		seedList:   seedList,
-		originAddr: s.origin.Listener.Addr().String(),
-		tls:        &tlsOpts,
-	})
-
-	cfgPath := filepath.Join(s.configDir, name+"-restart-tls.yaml")
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
-		t.Fatalf("write restart config: %v", err)
-	}
-
-	s.Nodes[n].HTTPAddr = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
-	s.Nodes[n].HTTPSAddr = fmt.Sprintf("https://127.0.0.1:%d", httpsPort)
-	s.Nodes[n].AdminAddr = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
-	s.Nodes[n].GossipAddr = fmt.Sprintf("127.0.0.1:%d", gossipPort)
-	s.Nodes[n].cfgPath = cfgPath
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancels[n] = cancel
-	s.errChs[n] = make(chan error, 1)
-
-	root := cmd.Root()
-	root.SetArgs([]string{"serve", "--config", cfgPath, "--log-level", "warn"})
-	go func(ch chan error) {
-		ch <- root.ExecuteContext(ctx)
-	}(s.errChs[n])
-
-	poll.Eventually(t, 30*time.Second, 50*time.Millisecond, func() bool {
-		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
-		if err != nil {
-			return false
-		}
-		ok := resp.StatusCode == 200
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
 		return ok
 	})
 }

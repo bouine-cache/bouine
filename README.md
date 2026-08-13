@@ -14,6 +14,7 @@
   <a href="https://hub.docker.com/r/bouinecache/bouine"><img src="https://img.shields.io/docker/v/bouinecache/bouine?logoColor=blue&color=blue" alt="Docker"></a>
   <a href="https://artifacthub.io/packages/helm/bouine/bouine"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/bouine" alt="Artifact Hub"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
+  <a href="https://www.bestpractices.dev/projects/14035"><img src="https://www.bestpractices.dev/projects/14035/badge" alt="OpenSSF Best Practices"></a>
 </p>
 
 bouine is a cloud-native HTTP cache in Go — RFC 9111

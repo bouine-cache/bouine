@@ -1648,31 +1648,38 @@ func writeRecordAt(f *os.File, offset int64, magic uint32, key api.Key, body []b
 	if err == nil && n == expected {
 		return nil
 	}
-	// A short write (0 < n < expected) leaves n bytes committed at
-	// offset. A torn record on disk is a data-integrity risk, so always
-	// complete the remaining expected-n bytes via sequential WriteAt
-	// starting at offset+n. Once the record is fully on disk, return nil
-	// — the caller must advance seg.size regardless of what pwritev
-	// reported. Returning an error after a completed write would cause
-	// the caller to skip the seg.size advance, and the next Put would
-	// overwrite the completed record.
+	// n > 0: pwritev reported partial or full progress. On Linux a
+	// real short write leaves n bytes committed at offset; a torn record
+	// on disk is a data-integrity risk, so always complete the remaining
+	// expected-n bytes via sequential WriteAt starting at offset+n. The
+	// syscall cannot return n == expected with a non-nil err, but a
+	// test-injected pwritevFn could; in that case writeRemaining is a
+	// no-op (all buffers skipped) and returns nil. Once the record is
+	// fully on disk, return nil — the caller must advance seg.size
+	// regardless of what pwritev reported. Returning an error after a
+	// completed write would cause the caller to skip the seg.size
+	// advance, and the next Put would overwrite the completed record.
 	if n > 0 {
-		return writeRemaining(f, offset+int64(n), iov[:nbuf], n)
+		return writeRemaining(f.WriteAt, offset+int64(n), iov[:nbuf], n)
 	}
-	// n == 0: ErrPwritevUnsupported (non-Linux, benign fallback), a real
-	// error with zero progress, or an unexpected (0, nil) with non-empty
-	// buffers. In all cases, write the full record sequentially from
-	// offset. If writeRemaining succeeds the record is on disk; return
-	// nil so the caller advances seg.size.
-	return writeRemaining(f, offset, iov[:nbuf], 0)
+	// n <= 0: ErrPwritevUnsupported (non-Linux, benign fallback), a real
+	// Linux pwritev error (returns -1, zero bytes committed), or an
+	// unexpected (0, nil) with non-empty buffers. In all cases, write the
+	// full record sequentially from offset. If writeRemaining succeeds the
+	// record is on disk; return nil so the caller advances seg.size.
+	return writeRemaining(f.WriteAt, offset, iov[:nbuf], 0)
 }
 
 // writeRemaining writes the buffers that were not consumed by a prior
 // Pwritev call. alreadyWritten is the number of bytes already committed
 // at baseOffset; the function walks the iovec list, skipping fully
 // consumed buffers and partial-writing the first partially-written one,
-// then writes every remaining buffer sequentially via WriteAt.
-func writeRemaining(f *os.File, baseOffset int64, iov [][]byte, alreadyWritten int) error {
+// then writes every remaining buffer sequentially via writeAt.
+//
+// writeAt is injected (callers pass *os.File.WriteAt) so tests can
+// simulate short writes, I/O errors, and the (0, nil) guard without a
+// real file descriptor.
+func writeRemaining(writeAt func([]byte, int64) (int, error), baseOffset int64, iov [][]byte, alreadyWritten int) error {
 	off := baseOffset
 	remaining := alreadyWritten
 	for _, buf := range iov {
@@ -1684,12 +1691,12 @@ func writeRemaining(f *os.File, baseOffset int64, iov [][]byte, alreadyWritten i
 		// Write the unwritten tail of this buffer, then all of the rest.
 		w := buf[remaining:]
 		remaining = 0
-		// WriteAt can return a short write (n < len(w), nil). Retry
+		// writeAt can return a short write (n < len(w), nil). Retry
 		// until the full buffer is on disk — this is the data-integrity
 		// completion path and must not leave gaps. A (0, nil) return
 		// would loop forever; guard against it explicitly.
 		for len(w) > 0 {
-			nw, werr := f.WriteAt(w, off)
+			nw, werr := writeAt(w, off)
 			if werr != nil {
 				return werr
 			}

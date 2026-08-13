@@ -85,6 +85,13 @@ const EstimatedWarmLocHeapBytes = 160
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
+// pwritevFn is the scatter-gather write function used by writeRecordAt.
+// It defaults to platform.Pwritev; tests override it to simulate short
+// writes and I/O errors without a real pwritev syscall. Package-level
+// mutable state (AGENTS.md §2.3 exception): matches the existing
+// sync.Pool pattern; only written by tests, never at runtime.
+var pwritevFn = platform.Pwritev
+
 // recordHdrPool pools the fixed-size 24-byte header buffer used by
 // readRecordAt. The header is read, parsed, and discarded on every
 // warm-tier read; without pooling this is a per-call heap allocation
@@ -1637,26 +1644,61 @@ func writeRecordAt(f *os.File, offset int64, magic uint32, key api.Key, body []b
 	iov[nbuf] = foot
 	nbuf++
 	expected := len(hdr) + len(body) + len(foot)
-	n, err := platform.Pwritev(int(f.Fd()), iov[:nbuf], offset)
+	n, err := pwritevFn(int(f.Fd()), iov[:nbuf], offset) //nolint:gosec // fd from os.OpenFile; small non-negative integer
 	if err == nil && n == expected {
 		return nil
 	}
-	if n != 0 {
-		return io.ErrShortWrite
+	// A short write (0 < n < expected) leaves n bytes committed at
+	// offset. A torn record on disk is a data-integrity risk, so always
+	// complete the remaining expected-n bytes via sequential WriteAt
+	// starting at offset+n. Once the record is fully on disk, return nil
+	// — the caller must advance seg.size regardless of what pwritev
+	// reported. Returning an error after a completed write would cause
+	// the caller to skip the seg.size advance, and the next Put would
+	// overwrite the completed record.
+	if n > 0 {
+		return writeRemaining(f, offset+int64(n), iov[:nbuf], n)
 	}
+	// n == 0: ErrPwritevUnsupported (non-Linux, benign fallback), a real
+	// error with zero progress, or an unexpected (0, nil) with non-empty
+	// buffers. In all cases, write the full record sequentially from
+	// offset. If writeRemaining succeeds the record is on disk; return
+	// nil so the caller advances seg.size.
+	return writeRemaining(f, offset, iov[:nbuf], 0)
+}
 
-	if _, err := f.WriteAt(hdr, offset); err != nil {
-		return err
-	}
-	off := offset + int64(len(hdr))
-	if len(body) > 0 {
-		if _, err := f.WriteAt(body, off); err != nil {
-			return err
+// writeRemaining writes the buffers that were not consumed by a prior
+// Pwritev call. alreadyWritten is the number of bytes already committed
+// at baseOffset; the function walks the iovec list, skipping fully
+// consumed buffers and partial-writing the first partially-written one,
+// then writes every remaining buffer sequentially via WriteAt.
+func writeRemaining(f *os.File, baseOffset int64, iov [][]byte, alreadyWritten int) error {
+	off := baseOffset
+	remaining := alreadyWritten
+	for _, buf := range iov {
+		if remaining >= len(buf) {
+			// This buffer was fully written by Pwritev; skip it.
+			remaining -= len(buf)
+			continue
 		}
-		off += int64(len(body))
-	}
-	if _, err := f.WriteAt(foot, off); err != nil {
-		return err
+		// Write the unwritten tail of this buffer, then all of the rest.
+		w := buf[remaining:]
+		remaining = 0
+		// WriteAt can return a short write (n < len(w), nil). Retry
+		// until the full buffer is on disk — this is the data-integrity
+		// completion path and must not leave gaps. A (0, nil) return
+		// would loop forever; guard against it explicitly.
+		for len(w) > 0 {
+			nw, werr := f.WriteAt(w, off)
+			if werr != nil {
+				return werr
+			}
+			if nw == 0 {
+				return fmt.Errorf("warm: writeRemaining: WriteAt returned 0 bytes without error at offset %d", off)
+			}
+			off += int64(nw)
+			w = w[nw:]
+		}
 	}
 	return nil
 }

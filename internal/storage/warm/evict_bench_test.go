@@ -7,16 +7,20 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 )
 
-// BenchmarkWarmEvict_AllVisited_1M measures a single evictOne() call on a
+// BenchmarkSingle_WarmEvict_AllVisited_1M measures a single evictOne() call on a
 // warm store with 1 M entries where all entries have been accessed via Get
 // (visited=true). With the sweep cap (maxSweepProbes=256), the SIEVE sweep
 // is bounded at 256 probes and returns false instead of scanning 2M entries.
 //
 // The store is built once (all-visited). Only a single evictOne() is
 // measured per run — use -benchtime=1x -count=10 for 10 benchstat samples.
+// It skips itself under time-driven benchtime because the list state
+// evolves across iterations (visited bits cleared, entries evicted),
+// so the metric would reflect a mix of states rather than the pure
+// all-visited worst case.
 //
-// Usage: go test -bench=BenchmarkWarmEvict_AllVisited_1M -benchtime=1x -count=10 -benchmem ./internal/storage/warm/
-func BenchmarkWarmEvict_AllVisited_1M(b *testing.B) {
+// Usage: go test -bench=BenchmarkSingle_WarmEvict_AllVisited_1M -benchtime=1x -count=10 -benchmem ./internal/storage/warm/
+func BenchmarkSingle_WarmEvict_AllVisited_1M(b *testing.B) {
 	if testing.Short() {
 		b.Skip("1 M entry benchmark, skipped in -short mode")
 	}
@@ -49,7 +53,12 @@ func BenchmarkWarmEvict_AllVisited_1M(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
+	first := true
 	for b.Loop() {
+		if !first {
+			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+		}
+		first = false
 		start := time.Now()
 		_, ok := s.evictOne()
 		elapsed := time.Since(start)

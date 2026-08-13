@@ -45,7 +45,7 @@ DURATION_H=72 RPS=2500 NODES=127.0.0.1:18081 make soak
 The benchmark establishes the canonical capacity on the CI runner:
 
 ```bash
-make bench   # writes bench/results/baseline.txt
+make bench-all   # writes bench/results/baseline.txt
 ```
 
 50 % and 25 % capacity figures are calculated from the p50 RPS in

@@ -72,7 +72,7 @@ For any non-trivial change:
 3. **Implement** — smallest reasonable change, follow neighboring
    patterns, add tests as you go.
 4. **Verify** — `make ci` minimum. If you touched L1–L6, run
-   `make bench` and include the `benchstat` diff in the PR. If you
+   `make bench-all` and include the `benchstat` diff in the PR. If you
    touched cache logic, run `make conformance`. If you touched
    cluster code, run `make integration`.
 5. **Document** — update godoc, runbooks, and ADRs as needed.

@@ -710,7 +710,7 @@ simpler and avoids the "warm tier exceeds budget" tradeoff.
 
 All benchmarks must run with `-race`, N >= 10, compared via `benchstat`.
 The `make conformance` gate (AGENTS.md section 16.4) must not regress. The
-`make bench` gate (section 7) must not regress on the canonical RPS or
+`make bench-gate` gate (section 7) must not regress on the canonical RPS or
 p99.
 
 ---

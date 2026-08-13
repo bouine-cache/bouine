@@ -14,7 +14,7 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-func BenchmarkHotStore_Get_Hit(b *testing.B) {
+func BenchmarkGate_HotStore_Get_Hit(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	k := testkey.Hash([]byte("bench-hit"))
 	_ = s.Put(context.Background(), k, obj(k, 1024))
@@ -73,7 +73,7 @@ func BenchmarkHotStore_Put_Eviction(b *testing.B) {
 	}
 }
 
-func BenchmarkSIEVE_Access(b *testing.B) {
+func BenchmarkGate_SIEVE_Access(b *testing.B) {
 	// Benchmark the SIEVE access path in isolation.
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 1})
 	k := testkey.Hash([]byte("sieve-bench"))

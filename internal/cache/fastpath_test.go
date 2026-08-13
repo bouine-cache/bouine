@@ -207,7 +207,7 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 	fp.Release(resp)
 }
 
-func BenchmarkFastPath_Hit(b *testing.B) {
+func BenchmarkGate_FastPath_Hit(b *testing.B) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	fp := NewFastPathHandlerFromStore(store)
 
@@ -412,11 +412,11 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 	}
 }
 
-// BenchmarkFastPath_HitWithWrite measures the full hit path including
+// BenchmarkGate_FastPath_HitWithWrite measures the full hit path including
 // net.Buffers.WriteTo — the operation that consumes the Buffers slice.
 // This is the real production path: TryHit → WriteTo → Release → reuse.
 // allocs/op must be 0 to prove pool reuse survives WriteTo consumption.
-func BenchmarkFastPath_HitWithWrite(b *testing.B) {
+func BenchmarkGate_FastPath_HitWithWrite(b *testing.B) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	fp := NewFastPathHandlerFromStore(store)
 

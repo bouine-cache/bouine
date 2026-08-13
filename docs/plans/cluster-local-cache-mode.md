@@ -600,7 +600,7 @@ allocation overhead.
 - `eventual` hit path: same hot-tier lookup, zero alloc (no peer-fetch code executed).
 - `full` hit path: same as `eventual` on hit; `ReplicateFn` call on miss-path fill adds one `json.Marshal` of the object body.
 
-`make bench` must show no p99 regression within 2%.
+`make bench-gate` must show no p99 regression within 2%.
 
 ### 12b. Conformance gate
 
@@ -649,6 +649,6 @@ Steps 3, 4, and 5 are the critical path.
 - [ ] `full`: kill one node; remaining nodes serve HITs from replicated data.
 - [ ] Dashboard shows mode-appropriate cluster page (ring vs. eventual info vs. full info).
 - [ ] Integration tests pass for all three modes.
-- [ ] `make bench`: no p99 or allocation regression on hit path.
+- [ ] `make bench-gate`: no p99 or allocation regression on hit path.
 - [ ] `make conformance`: score unchanged.
 - [ ] ADR-0008 merged; docs/migration guide published.

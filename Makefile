@@ -53,12 +53,13 @@ integration: test-integration-cluster ## Alias: run the cluster integration suit
 chaos: test-chaos ## Alias: run the chaos scenarios.
 
 
-.PHONY: bench
-bench: ## Run the benchmark suite and compare against the committed baseline.
-	bash bench/run.sh
-	@command -v benchstat >/dev/null || $(GO) install golang.org/x/perf/cmd/benchstat@latest
-	@test -f bench/results/baseline.txt || { echo "no baseline — copy bench/results/current.txt to bench/results/baseline.txt first"; exit 1; }
-	benchstat bench/results/baseline.txt bench/results/current.txt
+.PHONY: bench-gate
+bench-gate: ## Run the gating benchmark suite and compare against the committed baseline.
+	bash bench/run.sh gate
+
+.PHONY: bench-all
+bench-all: ## Run every benchmark in cache/storage/h1parser (slow — for deep analysis, not the gate).
+	bash bench/run.sh all
 
 .PHONY: conformance
 conformance: build ## Run the http-tests/cache-tests conformance harness.

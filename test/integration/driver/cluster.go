@@ -7,6 +7,8 @@ package driver
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,11 +40,13 @@ const (
 
 // ClusterNode describes one bouine node.
 type ClusterNode struct {
-	Name      string
-	HTTPAddr  string
-	AdminAddr string
-	Token     string
-	cfgPath   string // path to config YAML (for RestartNode)
+	Name       string
+	HTTPAddr   string
+	HTTPSAddr  string // empty when TLS is not configured
+	AdminAddr  string
+	GossipAddr string // host:port for cluster gossip
+	Token      string
+	cfgPath    string // path to config YAML (for RestartNode)
 }
 
 // ClusterStack holds a live in-process 3-node cluster + origin.
@@ -63,6 +67,27 @@ type ClusterStack struct {
 type ClusterOptions struct {
 	Mode          string
 	NoAutoCleanup bool
+	TLS           TLSOptions
+}
+
+// TLSOptions configures data-plane TLS for the cluster. When Enabled is
+// true, each node gets a listen.https address and the provided cert/key
+// pair is referenced in the tls.certs config section. ExtraCerts adds
+// additional cert entries for SNI-based selection.
+type TLSOptions struct {
+	Enabled    bool
+	CertFile   string
+	KeyFile    string
+	SNI        []string // optional SNI matches; empty = match all
+	MinVersion string   // optional: "1.2" (default) or "1.3"
+	ExtraCerts []TLSCertEntry
+}
+
+// TLSCertEntry is an additional cert/key pair for SNI selection.
+type TLSCertEntry struct {
+	CertFile string
+	KeyFile  string
+	SNI      []string
 }
 
 // freePort returns an available TCP port on localhost.
@@ -77,6 +102,19 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// formatCertEntry renders a single tls.certs entry in YAML.
+func formatCertEntry(certFile, keyFile string, sni []string) string {
+	entry := fmt.Sprintf("    - cert_file: %q\n      key_file: %q", certFile, keyFile)
+	if len(sni) > 0 {
+		quoted := make([]string, len(sni))
+		for i, s := range sni {
+			quoted[i] = fmt.Sprintf("%q", s)
+		}
+		entry += "\n      sni: [" + strings.Join(quoted, ", ") + "]"
+	}
+	return entry + "\n"
+}
+
 // BootCluster starts a 3-node in-process bouine cluster with an httptest origin.
 func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	t.Helper()
@@ -88,7 +126,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 
 	// Allocate ports for all nodes upfront so gossip seeds are known.
 	type nodePorts struct {
-		http, admin, gossip int
+		http, https, admin, gossip int
 	}
 	ports := [3]nodePorts{}
 	for i := range ports {
@@ -96,6 +134,9 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			http:   freePort(t),
 			admin:  freePort(t),
 			gossip: freePort(t),
+		}
+		if opts.TLS.Enabled {
+			ports[i].https = freePort(t)
 		}
 	}
 
@@ -144,8 +185,30 @@ routes:
     pool: origin
     cache:
       ttl_default: 60s
-`, p.http, p.admin, p.gossip, IntegrationToken, name, opts.Mode, seedList,
+`,
+			p.http, p.admin, p.gossip, IntegrationToken, name, opts.Mode, seedList,
 			origin.Listener.Addr().String())
+
+		if opts.TLS.Enabled {
+			// Insert https listener into the listen block by replacing
+			// the first line, then append the tls section.
+			cfg = strings.Replace(cfg,
+				`listen:
+  http: "127.0.0.1:`+fmt.Sprintf("%d", p.http)+`"`,
+				`listen:
+  http: "127.0.0.1:`+fmt.Sprintf("%d", p.http)+`"
+  https: "127.0.0.1:`+fmt.Sprintf("%d", p.https)+`"`, 1)
+
+			minVer := opts.TLS.MinVersion
+			if minVer == "" {
+				minVer = "1.2"
+			}
+			cfg += "tls:\n  min_version: " + fmt.Sprintf("%q", minVer) + "\n  certs:\n"
+			cfg += formatCertEntry(opts.TLS.CertFile, opts.TLS.KeyFile, opts.TLS.SNI)
+			for _, ec := range opts.TLS.ExtraCerts {
+				cfg += formatCertEntry(ec.CertFile, ec.KeyFile, ec.SNI)
+			}
+		}
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
 		if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
@@ -153,11 +216,15 @@ routes:
 		}
 
 		s.Nodes[i] = ClusterNode{
-			Name:      name,
-			HTTPAddr:  fmt.Sprintf("http://127.0.0.1:%d", p.http),
-			AdminAddr: fmt.Sprintf("http://127.0.0.1:%d", p.admin),
-			Token:     IntegrationToken,
-			cfgPath:   cfgPath,
+			Name:       name,
+			HTTPAddr:   fmt.Sprintf("http://127.0.0.1:%d", p.http),
+			AdminAddr:  fmt.Sprintf("http://127.0.0.1:%d", p.admin),
+			GossipAddr: fmt.Sprintf("127.0.0.1:%d", p.gossip),
+			Token:      IntegrationToken,
+			cfgPath:    cfgPath,
+		}
+		if opts.TLS.Enabled {
+			s.Nodes[i].HTTPSAddr = fmt.Sprintf("https://127.0.0.1:%d", p.https)
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -302,6 +369,7 @@ routes:
 
 	s.Nodes[n].HTTPAddr = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
 	s.Nodes[n].AdminAddr = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
+	s.Nodes[n].GossipAddr = fmt.Sprintf("127.0.0.1:%d", gossipPort)
 	s.Nodes[n].cfgPath = cfgPath
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -330,14 +398,96 @@ routes:
 	})
 }
 
+// RestartNodeWithTLS re-boots a killed node with fresh ports and a new
+// TLS cert/key pair. This is used for certificate-rotation tests.
+func (s *ClusterStack) RestartNodeWithTLS(t *testing.T, n int, tlsOpts TLSOptions) {
+	t.Helper()
+	if s.cancels[n] != nil {
+		return
+	}
+
+	httpPort := freePort(t)
+	httpsPort := freePort(t)
+	adminPort := freePort(t)
+	gossipPort := freePort(t)
+
+	name := s.Nodes[n].Name
+	seedList := s.gossipSeeds()
+
+	minVer := tlsOpts.MinVersion
+	if minVer == "" {
+		minVer = "1.2"
+	}
+
+	cfg := fmt.Sprintf(`listen:
+  http: "127.0.0.1:%d"
+  https: "127.0.0.1:%d"
+  admin: "127.0.0.1:%d"
+  cluster: "127.0.0.1:%d"
+admin:
+  token: %s
+storage:
+  hot_max_bytes: 128MiB
+cluster:
+  node_name: %s
+  mode: %s
+  join: %s
+  hop_limit: 2
+upstream_pools:
+  - name: origin
+    targets: [%q]
+routes:
+  - match: {}
+    pool: origin
+    cache:
+      ttl_default: 60s
+tls:
+  min_version: %q
+  certs:
+%s`,
+		httpPort, httpsPort, adminPort, gossipPort, IntegrationToken, name, s.Mode, seedList,
+		s.origin.Listener.Addr().String(), minVer,
+		formatCertEntry(tlsOpts.CertFile, tlsOpts.KeyFile, tlsOpts.SNI))
+
+	cfgPath := filepath.Join(s.configDir, name+"-restart-tls.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write restart config: %v", err)
+	}
+
+	s.Nodes[n].HTTPAddr = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
+	s.Nodes[n].HTTPSAddr = fmt.Sprintf("https://127.0.0.1:%d", httpsPort)
+	s.Nodes[n].AdminAddr = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
+	s.Nodes[n].GossipAddr = fmt.Sprintf("127.0.0.1:%d", gossipPort)
+	s.Nodes[n].cfgPath = cfgPath
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancels[n] = cancel
+	s.errChs[n] = make(chan error, 1)
+
+	root := cmd.Root()
+	root.SetArgs([]string{"serve", "--config", cfgPath, "--log-level", "warn"})
+	go func(ch chan error) {
+		ch <- root.ExecuteContext(ctx)
+	}(s.errChs[n])
+
+	poll.Eventually(t, 30*time.Second, 50*time.Millisecond, func() bool {
+		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
+		if err != nil {
+			return false
+		}
+		ok := resp.StatusCode == 200
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return ok
+	})
+}
+
 // gossipSeeds returns the gossip join list from live nodes.
 func (s *ClusterStack) gossipSeeds() string {
 	var seeds []string
 	for i := range s.Nodes {
-		if s.cancels[i] != nil {
-			// Extract gossip port from config — it's the cluster listen port.
-			// Parse from the admin addr as a proxy (gossip port is adjacent).
-			seeds = append(seeds, "127.0.0.1:"+s.extractGossipPort(i))
+		if s.cancels[i] != nil && s.Nodes[i].GossipAddr != "" {
+			seeds = append(seeds, s.Nodes[i].GossipAddr)
 		}
 	}
 	if len(seeds) == 0 {
@@ -346,27 +496,10 @@ func (s *ClusterStack) gossipSeeds() string {
 	return `["` + strings.Join(seeds, `","`) + `"]`
 }
 
+// gossipSeeds returns the gossip join list from live nodes.
+// Deprecated: use gossipSeeds instead. Kept for backward compatibility.
 func (s *ClusterStack) extractGossipPort(n int) string {
-	// Read the config file to find the cluster listen port.
-	data, err := os.ReadFile(s.Nodes[n].cfgPath)
-	if err != nil {
-		return "7000"
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "cluster:") {
-			continue
-		}
-		// Look for the listen.cluster line: `cluster: "127.0.0.1:PORT"`
-		if strings.Contains(line, "cluster:") && strings.Contains(line, "127.0.0.1:") {
-			parts := strings.Split(line, ":")
-			if len(parts) >= 3 {
-				port := strings.Trim(parts[len(parts)-1], `" `)
-				return port
-			}
-		}
-	}
-	return "7000"
+	return s.Nodes[n].GossipAddr[strings.LastIndex(s.Nodes[n].GossipAddr, ":")+1:]
 }
 
 // PauseNode sets a per-node gate that blocks the origin from responding,
@@ -575,4 +708,77 @@ func RetryUntil(t *testing.T, deadline time.Duration, interval time.Duration, f 
 // XCache returns the X-Cache header value.
 func XCache(resp *http.Response) string {
 	return resp.Header.Get("X-Cache")
+}
+
+// httpsClient returns an HTTP client configured for HTTPS with
+// InsecureSkipVerify (test certs are self-signed) and HTTP/2 enabled.
+func (s *ClusterStack) httpsClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
+			ForceAttemptHTTP2: true,
+		},
+	}
+}
+
+// GetTLS performs a GET request over HTTPS against node n.
+func (s *ClusterStack) GetTLS(t *testing.T, n int, path string) *http.Response {
+	t.Helper()
+	return s.GetTLSWithHost(t, n, path, "")
+}
+
+// GetTLSWithHost performs a GET over HTTPS with a specific Host header
+// (also used as SNI for the TLS handshake).
+func (s *ClusterStack) GetTLSWithHost(t *testing.T, n int, path string, host string) *http.Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPSAddr + path
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	if host != "" {
+		req.Host = host
+	}
+	resp, err := s.httpsClient().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return resp
+}
+
+// GetTLSResponse performs a GET over HTTPS and returns the raw response
+// without draining the body. The caller is responsible for closing the body.
+func (s *ClusterStack) GetTLSResponse(t *testing.T, n int, path string) *http.Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPSAddr + path
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	resp, err := s.httpsClient().Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
+// TLSServerCerts returns the peer certificates from a TLS connection to
+// node n. This is used to verify SNI-based cert selection.
+func (s *ClusterStack) TLSServerCerts(t *testing.T, n int, serverName string) []*x509.Certificate {
+	t.Helper()
+	hostPort := strings.TrimPrefix(s.Nodes[n].HTTPSAddr, "https://")
+	conf := &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test
+		ServerName:         serverName,
+		NextProtos:         []string{"h2", "http/1.1"},
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", hostPort, conf)
+	if err != nil {
+		t.Fatalf("TLS dial %s (SNI=%s): %v", hostPort, serverName, err)
+	}
+	defer conn.Close()
+	return conn.ConnectionState().PeerCertificates
 }

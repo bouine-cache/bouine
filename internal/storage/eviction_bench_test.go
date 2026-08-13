@@ -11,16 +11,20 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// BenchmarkWarmSyncCycle_1M measures a single runWarmSyncCycle call with
+// BenchmarkSingle_WarmSyncCycle_1M measures a single runWarmSyncCycle call with
 // 1 M hot-only entries (no warm entries). The plan predicts ~500 MB of
 // transient allocation: hot.Keys() (~24 MB), warm.Keys() (~8 MB at 1 M),
 // and the warmSet diff map (~40 MB at 1 M).
 //
 // The store is built once. Only a single runWarmSyncCycle is measured per
-// run — use -benchtime=1x -count=10 for 10 benchstat samples.
+// run — use -benchtime=1x -count=10 for 10 benchstat samples. It skips
+// itself under time-driven benchtime because the first sync populates the
+// warm tier, so subsequent iterations measure a no-op diff (no new hot
+// entries to sync), not the cold-start cost the benchmark is designed to
+// measure.
 //
-// Usage: go test -bench=BenchmarkWarmSyncCycle_1M -benchtime=1x -count=10 -benchmem ./internal/storage/
-func BenchmarkWarmSyncCycle_1M(b *testing.B) {
+// Usage: go test -bench=BenchmarkSingle_WarmSyncCycle_1M -benchtime=1x -count=10 -benchmem ./internal/storage/
+func BenchmarkSingle_WarmSyncCycle_1M(b *testing.B) {
 	if testing.Short() {
 		b.Skip("1 M entry benchmark, skipped in -short mode")
 	}
@@ -53,7 +57,12 @@ func BenchmarkWarmSyncCycle_1M(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
+	first := true
 	for b.Loop() {
+		if !first {
+			b.Skip("single-shot benchmark: use -benchtime=1x -count=10")
+		}
+		first = false
 		start := time.Now()
 		ts.runWarmSyncCycle(context.Background())
 		elapsed := time.Since(start)

@@ -22,14 +22,14 @@ been separated. Move them into a `runner` type in
 
 #### Refresh benchmark baseline
 
-After the engine.go reduction, re-run `make bench` and overwrite
+After the engine.go reduction, re-run `make bench-all` and overwrite
 `bench/results/baseline.txt` so `make benchstat` diffs are meaningful.
 
 **Exit criteria:**
 - `cmd/bouine/cmd/engine.go` ≤ 300 LOC.
 - `bench/results/baseline.txt` updated; no regression on `make benchstat`.
 - `golangci-lint unused` and `staticcheck U1000` zero findings.
-- `make bench` gates pass; `make conformance` score unchanged.
+- `make bench-gate` gates pass; `make conformance` score unchanged.
 
 ---
 

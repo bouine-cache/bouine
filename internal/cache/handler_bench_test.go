@@ -11,42 +11,7 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// BenchmarkHandler_CacheHit_WithHttptestRecorder measures the cache hit
-// path using httptest.NewRecorder, which allocates per call. The
-// allocs/op figure is dominated by the recorder, not the hit path.
-// Use BenchmarkHandler_CacheHit_ReusableWriter for the real hit-path
-// allocation benchmark.
-func BenchmarkHandler_CacheHit_WithHttptestRecorder(b *testing.B) {
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.ETag, `"bench"`)
-		w.WriteHeader(200)
-		_, _ = w.Write(make([]byte, 1024))
-	})
-	store := storage.NewHotStore(storage.HotConfig{
-		MaxBytes:  256 << 20,
-		NumShards: 16,
-	})
-	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
-
-	// Warm the cache.
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://bench.local/hit", nil))
-	if rr.Header().Get(header.XCache) != "MISS" {
-		b.Fatal("warmup should be MISS")
-	}
-
-	req := httptest.NewRequest("GET", "http://bench.local/hit", nil)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for b.Loop() {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-	}
-}
-
-func BenchmarkHandler_CacheHit_ReusableWriter(b *testing.B) {
+func BenchmarkGate_Handler_CacheHit_ReusableWriter(b *testing.B) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)
@@ -124,7 +89,7 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 	}
 }
 
-// BenchmarkHandler_CacheMiss_Cacheable measures the full cacheable miss
+// BenchmarkGate_Handler_CacheMiss_Cacheable measures the full cacheable miss
 // path: origin fetch → response copy → cacheability check → buildObject
 // → storeObject. Unlike BenchmarkHandler_CacheMiss (no-store), this
 // exercises the storage path and is the primary benchmark for the
@@ -132,7 +97,7 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 //
 // The upstream returns 6 headers — a realistic subset that exercises
 // item 1.1's ownership transfer (savings scale with header count).
-func BenchmarkHandler_CacheMiss_Cacheable(b *testing.B) {
+func BenchmarkGate_Handler_CacheMiss_Cacheable(b *testing.B) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)
@@ -201,16 +166,6 @@ func BenchmarkHandler_CacheMiss_Vary(b *testing.B) {
 	}
 }
 
-func BenchmarkBuildKey(b *testing.B) {
-	req := httptest.NewRequest("GET", "http://example.com/api/v1/users?page=1&sort=name", nil)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for b.Loop() {
-		_ = BuildKey(req, nil)
-	}
-}
-
 func BenchmarkBuildKey_LongURL(b *testing.B) {
 	// Exercises the heap fallback path: canonical key exceeds the
 	// 512-byte stack buffer. This URL is ~5 KB of path + query.
@@ -224,7 +179,7 @@ func BenchmarkBuildKey_LongURL(b *testing.B) {
 	}
 }
 
-func BenchmarkEvaluate_Hit(b *testing.B) {
+func BenchmarkGate_Evaluate_Hit(b *testing.B) {
 	req := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(60)
 

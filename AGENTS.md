@@ -253,7 +253,19 @@ L1 → L7, /pkg/api
 - **Chaos**: kill a peer, drop packets, slow the disk. Lives under
   `test/chaos`, runs nightly, not on every PR.
 - **Benchmarks**: `bench/` runs on a pinned self-hosted runner with CPU
-  affinity. `benchstat` compares HEAD vs `main`, N ≥ 10.
+  affinity. `benchstat` compares HEAD vs `main`, N ≥ 10. Benchmark
+  naming convention:
+  - `BenchmarkGate_*` — hot-path, alloc-budgeted, time-driven. Selected
+    and enforced by `make bench-gate`. Every `BenchmarkGate_*` must have
+    an entry in the `BUDGETS` map in `bench/run.sh`; the gate fails if a
+    benchmark runs without a budget (drift) or a budget exists without a
+    benchmark (stale).
+  - `BenchmarkSingle_*` — single-shot, not time-driven. Must skip itself
+    under time-driven benchtime (skip on second `b.Loop()` iteration).
+    Run manually with `-benchtime=1x -count=10`. Never appears in
+    `make bench-gate`; self-skips in `make bench-all`.
+  - `Benchmark*` (no prefix) — regular time-driven benchmarks. Run in
+    `make bench-all` only.
 - **No flaky tests.** A test that flakes twice in a week is quarantined
   (`-skip` with a tracking issue) within one business day.
 - **Determinism**: no `time.Now()` in tests; use the injected clock. No
@@ -367,7 +379,8 @@ make test            # go test -race ./...
 make test-short      # go test -race -short ./... (prek)
 make lint            # golangci-lint run
 make vet             # go vet ./...
-make bench           # bench harness, writes bench/results/, diffs baseline
+make bench-gate      # gating benchmarks, enforces alloc budgets, diffs baseline
+make bench-all       # full benchmarks (no gates), diffs baseline
 make conformance     # run http-tests/cache-tests, write report
 make integration     # cluster integration suite (alias: test-integration-cluster)
 make chaos           # chaos scenarios (alias: test-chaos)
@@ -392,7 +405,7 @@ make hooks           # install prek hooks into .git/hooks
 3. `coverage` gate.
 4. `fuzz` (short, time-boxed; long-running nightly).
 5. `conformance` (`cache-tests`), publish score.
-6. `bench` on self-hosted runner, `benchstat` diff vs `main`.
+6. `bench-gate` on self-hosted runner, `benchstat` diff vs `main`.
 7. `integration` (3-node cluster).
 8. `release` (tagged refs only): SBOM (`syft`), provenance, signed
    container image (`cosign`).
@@ -543,7 +556,7 @@ For every task an agent starts, execute this loop. No shortcuts.
        consistency modes (strong, eventual, full).
      - `make chaos` — chaos scenarios (peer kill, origin flap, slow
        origin, rolling restart, origin down, concurrent purge, rejoin).
-   - Additionally, if touching L1–L4: `make bench` and compare to `main`.
+   - Additionally, if touching L1–L4: `make bench-all` and compare to `main`.
    - If touching `cache`: `make conformance`.
    - A task with any failing gate is not done — fix or explain why
      the failure is unrelated before reporting completion.

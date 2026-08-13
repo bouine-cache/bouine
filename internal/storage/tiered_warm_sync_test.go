@@ -551,3 +551,99 @@ func TestTombstoneDrain_ConfigurableQueueSize(t *testing.T) {
 	require.Equal(t, 32, cap(ts.tombstoneQueue))
 	require.Equal(t, 32, cap(ts.warmEvictQueue))
 }
+
+// TestWarmSync_CacheSurvivalRate verifies that cache entries survive a
+// restart with and without the warm sync loop. Without warm sync, only
+// objects above body_threshold are persisted to warm. With warm sync,
+// all hot-only entries are synced to warm before restart and survive.
+func TestWarmSync_CacheSurvivalRate(t *testing.T) {
+	const (
+		smallObjCount = 1000
+		largeObjCount = 100
+		bodyThreshold = 1024
+		totalKeys     = smallObjCount + largeObjCount
+	)
+
+	cases := []struct {
+		name           string
+		warmSyncOn     bool
+		minSurvivalPct float64 // minimum expected survival rate
+	}{
+		{"before_warmSyncOff", false, 0}, // only large objects survive
+		{"after_warmSyncOn", true, 100},  // all objects survive
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			warmDir := filepath.Join(dir, "warm")
+			walPath := filepath.Join(dir, "index.wal")
+
+			ts1, err := NewTieredStore(TieredConfig{
+				Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+				Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+				WALDir:                 walPath,
+				BodyThreshold:          int64(bodyThreshold),
+				WarmSyncInterval:       -1,
+				WarmSyncBatchSize:      5000,
+				TombstoneDrainInterval: -1,
+			})
+			require.NoError(t, err, "NewTieredStore")
+
+			for i := range smallObjCount {
+				k := testkey.Key(uint64(i))
+				require.NoError(t, ts1.Put(context.Background(), k, obj(k, 100)))
+			}
+			for i := range largeObjCount {
+				k := testkey.Key(uint64(smallObjCount + i))
+				require.NoError(t, ts1.Put(context.Background(), k, bigObj(k, 2000)))
+			}
+
+			if tc.warmSyncOn {
+				ts1.runWarmSyncCycle(context.Background())
+			}
+
+			require.NoError(t, ts1.Close(context.Background()))
+
+			ts2, err := NewTieredStore(TieredConfig{
+				Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 4},
+				Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 100 << 20, SegMax: 1 << 20},
+				WALDir:                 walPath,
+				BodyThreshold:          int64(bodyThreshold),
+				WarmSyncInterval:       -1,
+				WarmSyncBatchSize:      5000,
+				TombstoneDrainInterval: -1,
+			})
+			require.NoError(t, err, "reopen")
+			t.Cleanup(func() { _ = ts2.Close(context.Background()) })
+
+			warmKeys := ts2.warm.Keys()
+			survived := len(warmKeys)
+			survivalRate := float64(survived) / float64(totalKeys) * 100
+
+			smallSurvived := 0
+			largeSurvived := 0
+			for _, k := range warmKeys {
+				if int(k.Hash64()) < smallObjCount {
+					smallSurvived++
+				} else {
+					largeSurvived++
+				}
+			}
+
+			t.Logf("survived=%d/%d (%.1f%%), small=%d, large=%d",
+				survived, totalKeys, survivalRate, smallSurvived, largeSurvived)
+
+			require.GreaterOrEqual(t, survivalRate, tc.minSurvivalPct,
+				"survival rate below expected minimum")
+
+			if tc.warmSyncOn {
+				require.Equal(t, smallObjCount, smallSurvived, "small objects should survive with warm sync")
+				require.Equal(t, largeObjCount, largeSurvived, "large objects should survive with warm sync")
+			} else {
+				require.Equal(t, largeObjCount, largeSurvived, "large objects should always survive")
+				require.Equal(t, 0, smallSurvived, "small objects should not survive without warm sync")
+			}
+		})
+	}
+}

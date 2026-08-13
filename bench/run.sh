@@ -1,48 +1,91 @@
 #!/usr/bin/env bash
-# bench/run.sh — Run the bouine benchmark suite and enforce gates.
+# bench/run.sh — Run the bouine benchmark suite.
 #
 # Usage:
-#   make bench              # run and save results
-#   make benchstat          # compare HEAD results vs baseline
+#   bench/run.sh gate    # run only BenchmarkGate_* and enforce alloc budgets
+#   bench/run.sh all     # run every benchmark in cache/storage/h1parser (no gates)
 #
-# Gates (fail the script if breached):
-#   - Evaluate_Hit:                          allocs/op must be 0
-#   - HotStore_Get_Hit:                      allocs/op must be 0
-#   - Handler_CacheHit_ReusableWriter:        allocs/op must be ≤ 9 (6 are test harness)
-#   - Handler_CacheMiss_Cacheable:            allocs/op must be ≤ 58
-#   - FastPath_Hit:                           allocs/op must be 0
-#   - FastPath_HitWithWrite:                  allocs/op must be 0 (includes WriteTo consumption)
+# Benchmark naming convention:
+#   BenchmarkGate_*    Hot-path, alloc-budgeted, time-driven. Enforced in gate mode.
+#   BenchmarkSingle_*  Single-shot, skips under time-driven benchtime. Never gated.
+#   Benchmark*          Regular time-driven benchmarks. Run in `all` mode only.
 #
-# The script writes results to bench/results/current.txt and exits
-# non-zero if any gate is breached.
+# The `gate` mode is the CI/PR gate: it runs all BenchmarkGate_* benchmarks
+# with count=5 and fails if any allocs/op budget is breached. It also fails
+# if a BenchmarkGate_* benchmark ran but has no budget defined (drift), or
+# if a budget is defined but the benchmark didn't run (stale budget).
+#
+# The `all` mode is for deep analysis: it runs the full -bench=. set with
+# count=3 and performs no gate checks. BenchmarkSingle_* self-skip under
+# time-driven benchtime so -bench=. is safe.
+#
+# Both modes write results to bench/results/current.txt.
+#
+# Gate budgets (allocs/op, keyed by the suffix after BenchmarkGate_):
+#   Evaluate_Hit:                     0
+#   HotStore_Get_Hit:                 0
+#   Handler_CacheHit_ReusableWriter: 13  (6 are test harness)
+#   Handler_CacheMiss_Cacheable:     58
+#   SIEVE_Access:                     0
+#   FastPath_Hit:                     0
+#   FastPath_HitWithWrite:             0  (includes WriteTo consumption)
+#   H1Parse_Get:                      0
 
 set -euo pipefail
+
+MODE="${1:-gate}"
 
 RESULTS_DIR="bench/results"
 mkdir -p "$RESULTS_DIR"
 OUTFILE="$RESULTS_DIR/current.txt"
 
-echo ">>> Running benchmarks (count=5)..."
-go test -bench=. -benchmem -count=5 -timeout=120s \
-    ./internal/cache/... \
-    ./internal/storage/... \
-    ./internal/server/h1parser/... \
-    | tee "$OUTFILE"
+PACKAGES=(
+    ./internal/cache/...
+    ./internal/storage/...
+    ./internal/server/h1parser/...
+)
 
-echo ""
-echo ">>> Results saved to $OUTFILE"
-echo ""
+# Gate benchmarks are selected by prefix — no explicit list to maintain.
+GATE_BENCH='^BenchmarkGate_'
 
-# Gate checks: parse allocs/op from the output.
+# Allocs/op budgets keyed by the suffix after BenchmarkGate_.
+declare -A BUDGETS=(
+    [Evaluate_Hit]=0
+    [HotStore_Get_Hit]=0
+    [Handler_CacheHit_ReusableWriter]=13
+    [Handler_CacheMiss_Cacheable]=58
+    [SIEVE_Access]=0
+    [FastPath_Hit]=0
+    [FastPath_HitWithWrite]=0
+    [H1Parse_Get]=0
+)
+
+run_bench() {
+    local bench_pattern="$1"
+    local count="$2"
+    echo ">>> Running benchmarks (count=${count}, pattern=${bench_pattern})..."
+    go test -bench="${bench_pattern}" -benchmem -count="${count}" -timeout=120s \
+        "${PACKAGES[@]}" \
+        | tee "$OUTFILE"
+    echo ""
+    echo ">>> Results saved to $OUTFILE"
+    echo ""
+}
+
+# parse_allocs <bench_name> -> prints min allocs/op across runs
+parse_allocs() {
+    grep "$1" "$OUTFILE" | awk '{for(i=1;i<=NF;i++) if($(i+1)=="allocs/op") print $i}' | sort -n | head -1
+}
+
+# check_allocs <bench_name> <max_allocs>
 check_allocs() {
     local bench="$1"
     local max_allocs="$2"
-    # Extract the median allocs/op (last column before "allocs/op").
     local allocs
-    allocs=$(grep "$bench" "$OUTFILE" | awk '{for(i=1;i<=NF;i++) if($(i+1)=="allocs/op") print $i}' | sort -n | head -1)
+    allocs=$(parse_allocs "$bench")
     if [ -z "$allocs" ]; then
-        echo "WARN: benchmark $bench not found in results"
-        return 0
+        echo "FAIL: $bench not found in results"
+        return 1
     fi
     if [ "$allocs" -gt "$max_allocs" ]; then
         echo "FAIL: $bench has $allocs allocs/op (max: $max_allocs)"
@@ -52,22 +95,70 @@ check_allocs() {
     return 0
 }
 
-echo ">>> Gate checks..."
-FAILED=0
-check_allocs "BenchmarkEvaluate_Hit" 0 || FAILED=1
-check_allocs "BenchmarkHotStore_Get_Hit" 0 || FAILED=1
-check_allocs "BenchmarkHandler_CacheHit_ReusableWriter" 13 || FAILED=1
-check_allocs "BenchmarkHandler_CacheMiss_Cacheable" 58 || FAILED=1
-check_allocs "BenchmarkSIEVE_Access" 0 || FAILED=1
-check_allocs "BenchmarkFastPath_Hit" 0 || FAILED=1
-check_allocs "BenchmarkFastPath_HitWithWrite" 0 || FAILED=1
-check_allocs "BenchmarkH1Parse_Get" 0 || FAILED=1
+run_gates() {
+    echo ">>> Gate checks..."
+    local failed=0
 
-if [ "$FAILED" -ne 0 ]; then
+    # Extract all BenchmarkGate_* names that actually ran.
+    local found
+    found=$(grep -oE 'BenchmarkGate_[A-Za-z0-9_]+' "$OUTFILE" | sort -u)
+
+    # 1. Every benchmark that ran must have a budget.
+    for bench in $found; do
+        local suffix="${bench#BenchmarkGate_}"
+        if [ -z "${BUDGETS[$suffix]+x}" ]; then
+            echo "FAIL: $bench ran but has no alloc budget defined (add to BUDGETS)"
+            failed=1
+        fi
+    done
+
+    # 2. Every budget must have a matching benchmark that ran.
+    for suffix in "${!BUDGETS[@]}"; do
+        if ! echo "$found" | grep -q "BenchmarkGate_${suffix}"; then
+            echo "FAIL: budget defined for BenchmarkGate_${suffix} but it didn't run"
+            failed=1
+        fi
+    done
+
+    # 3. Check allocs/op against budgets.
+    for suffix in "${!BUDGETS[@]}"; do
+        check_allocs "BenchmarkGate_${suffix}" "${BUDGETS[$suffix]}" || failed=1
+    done
+
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo ">>> BENCHMARK GATES BREACHED — see above."
+        exit 1
+    fi
     echo ""
-    echo ">>> BENCHMARK GATES BREACHED — see above."
-    exit 1
-fi
+    echo ">>> All gates passed."
+}
 
-echo ""
-echo ">>> All gates passed."
+run_diff() {
+    if ! command -v benchstat >/dev/null 2>&1; then
+        echo ">>> benchstat not found; installing..."
+        go install golang.org/x/perf/cmd/benchstat@latest
+    fi
+    if [ ! -f "$RESULTS_DIR/baseline.txt" ]; then
+        echo ">>> no baseline — copy $OUTFILE to $RESULTS_DIR/baseline.txt first"
+        return 0
+    fi
+    echo ">>> benchstat diff vs baseline..."
+    benchstat "$RESULTS_DIR/baseline.txt" "$OUTFILE"
+}
+
+case "$MODE" in
+    gate)
+        run_bench "$GATE_BENCH" 5
+        run_gates
+        run_diff
+        ;;
+    all)
+        run_bench "." 3
+        run_diff
+        ;;
+    *)
+        echo "usage: $0 {gate|all}" >&2
+        exit 2
+        ;;
+esac

@@ -96,7 +96,7 @@ func TestRawRequest_Header(t *testing.T) {
 	assert.Equal(t, "", v)
 }
 
-func BenchmarkH1Parse_Get(b *testing.B) {
+func BenchmarkGate_H1Parse_Get(b *testing.B) {
 	raw := []byte("GET /api/v1/users/42 HTTP/1.1\r\nHost: example.com\r\nAccept: application/json\r\nUser-Agent: Bouine-Test/1.0\r\nX-Forwarded-For: 10.0.0.1\r\n\r\n")
 	b.ReportAllocs()
 	b.ResetTimer()

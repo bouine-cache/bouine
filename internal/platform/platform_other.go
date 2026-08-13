@@ -52,6 +52,9 @@ func EffectiveGOMAXPROCS() int { return runtime.NumCPU() }
 // runtime or OS manages file descriptor limits outside the process.
 func RaiseFileLimit(want uint64) (uint64, error) { return 0, nil }
 
-// Pwritev falls back to sequential writes on non-Linux platforms.
-// Callers should use it but expect it to be unused (they fall back to Write).
-func Pwritev(fd int, buffers [][]byte, offset int64) (int, error) { return 0, nil }
+// Pwritev returns ErrPwritevUnsupported on non-Linux platforms. Callers
+// must check errors.Is(err, ErrPwritevUnsupported) and fall back to
+// sequential WriteAt writes.
+func Pwritev(fd int, buffers [][]byte, offset int64) (int, error) {
+	return 0, ErrPwritevUnsupported
+}

@@ -146,3 +146,170 @@ func TestRequestMessage(t *testing.T) {
 		assert.Equal(t, tc.want, got)
 	}
 }
+
+func TestMiddleware_DurationAndProtoFields(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	h := Middleware(logger, inner)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/data", nil)
+	req.Proto = "HTTP/2.0"
+	req.RemoteAddr = "10.0.0.1:1234"
+	h.ServeHTTP(rr, req)
+
+	var rec map[string]any
+	err := json.Unmarshal(buf.Bytes(), &rec)
+	require.NoError(t, err, "unmarshal")
+	assert.Equal(t, "HTTP/2.0", rec["proto"])
+	assert.Equal(t, "10.0.0.1:1234", rec["remote"])
+	durMs, ok := rec["dur_ms"]
+	require.True(t, ok, "dur_ms field must be present")
+	durVal, ok := durMs.(float64)
+	require.True(t, ok, "dur_ms must be a number")
+	assert.GreaterOrEqual(t, durVal, float64(0), "dur_ms must be non-negative")
+}
+
+func TestMiddleware_CacheStatusFieldPropagated(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		header string
+		want   string
+	}{
+		{"HIT", "HIT"},
+		{"MISS", "MISS"},
+		{"STALE", "STALE"},
+		{"BYPASS", "BYPASS"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.header, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(header.XCache, tc.header)
+				w.WriteHeader(http.StatusOK)
+			})
+
+			h := Middleware(logger, inner)
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			h.ServeHTTP(rr, req)
+
+			var rec map[string]any
+			err := json.Unmarshal(buf.Bytes(), &rec)
+			require.NoError(t, err, "unmarshal")
+			assert.Equal(t, tc.want, rec["cache_status"])
+		})
+	}
+}
+
+func TestMiddleware_200SamplingByKey(t *testing.T) {
+	t.Parallel()
+
+	// With sample rate 100, only keys whose hash % 100 == 0 should be logged.
+	var buf bytes.Buffer
+	logger := observability.NewSampledLogger(
+		slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		100,
+	)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.XCache, "HIT")
+		w.WriteHeader(http.StatusOK)
+		if rw, ok := w.(*responsewriter.ResponseWriter); ok {
+			rw.SetCacheKey(testkey.Key(100))
+		}
+	})
+
+	h := Middleware(logger, inner)
+
+	// Key(0) has hash % 100 == 0, so it should be sampled.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+	assert.NotEqual(t, 0, buf.Len(), "key with hash%%100==0 should be sampled")
+}
+
+func TestMiddleware_200SamplingExcludedByKey(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := observability.NewSampledLogger(
+		slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		100,
+	)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.XCache, "HIT")
+		w.WriteHeader(http.StatusOK)
+		if rw, ok := w.(*responsewriter.ResponseWriter); ok {
+			// Key(1) has hash % 100 != 0, so it should NOT be sampled.
+			rw.SetCacheKey(testkey.Key(1))
+		}
+	})
+
+	h := Middleware(logger, inner)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+	assert.Equal(t, 0, buf.Len(), "key with hash%%100!=0 should not be sampled")
+}
+
+func TestMiddleware_Non200AlwaysLoggedDespiteSampling(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	// High sample rate — Info would be filtered, but Warn must always log.
+	logger := observability.NewSampledLogger(
+		slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		1000,
+	)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+
+	h := Middleware(logger, inner)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+
+	require.NotEqual(t, 0, buf.Len(), "non-200 must always be logged regardless of sampling")
+
+	var rec map[string]any
+	err := json.Unmarshal(buf.Bytes(), &rec)
+	require.NoError(t, err, "unmarshal")
+	assert.Equal(t, "request completed with error", rec["msg"])
+	assert.Equal(t, float64(http.StatusBadGateway), rec["status"])
+}
+
+func TestMiddleware_BytesOutAccurate(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	body := "hello world response body"
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+
+	h := Middleware(logger, inner)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+
+	var rec map[string]any
+	err := json.Unmarshal(buf.Bytes(), &rec)
+	require.NoError(t, err, "unmarshal")
+	assert.Equal(t, float64(len(body)), rec["bytes_out"])
+}

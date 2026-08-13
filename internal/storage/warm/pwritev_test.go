@@ -31,14 +31,14 @@ func withPwritevFn(t *testing.T, fn func(fd int, buffers [][]byte, offset int64)
 // errno values.
 var errSimulatedIO = errors.New("simulated I/O error")
 
-// verifyRecord reads the full record from f at offset 0 and asserts
+// verifyRecord reads the full record from f at offset and asserts
 // that every field (magic, key, bodyLen, body, CRC) is correct and
 // that the record is fully on disk. Shared by all writeRecordAt tests.
-func verifyRecord(t *testing.T, f *os.File, wantMagic uint32, wantKey api.Key, wantBody []byte) {
+func verifyRecord(t *testing.T, f *os.File, offset int64, wantMagic uint32, wantKey api.Key, wantBody []byte) {
 	t.Helper()
 	totalSize := int64(HeaderLen + len(wantBody) + FooterLen)
 	buf := make([]byte, totalSize)
-	n, err := f.ReadAt(buf, 0)
+	n, err := f.ReadAt(buf, offset)
 	require.NoError(t, err, "read back")
 	require.Equal(t, int(totalSize), n, "expected full record on disk")
 
@@ -73,7 +73,7 @@ func TestWriteRecordAt_HappyPath(t *testing.T) {
 	body := []byte("happy path body")
 	err = writeRecordAt(f, 0, magicLive, key, body)
 	require.NoError(t, err, "writeRecordAt happy path")
-	verifyRecord(t, f, magicLive, key, body)
+	verifyRecord(t, f, 0, magicLive, key, body)
 }
 
 // TestWriteRecordAt_ShortWriteCompletes simulates pwritev writing only
@@ -102,7 +102,7 @@ func TestWriteRecordAt_ShortWriteCompletes(t *testing.T) {
 
 	err = writeRecordAt(f, 0, magicLive, key, body)
 	require.NoError(t, err, "writeRecordAt should complete the full record after short write")
-	verifyRecord(t, f, magicLive, key, body)
+	verifyRecord(t, f, 0, magicLive, key, body)
 }
 
 // TestWriteRecordAt_ShortWriteWithErrorCompletes simulates pwritev
@@ -129,7 +129,7 @@ func TestWriteRecordAt_ShortWriteWithErrorCompletes(t *testing.T) {
 
 	err = writeRecordAt(f, 0, magicLive, key, body)
 	require.NoError(t, err, "record must be completed despite pwritev error; caller must advance seg.size")
-	verifyRecord(t, f, magicLive, key, body)
+	verifyRecord(t, f, 0, magicLive, key, body)
 }
 
 // TestWriteRecordAt_NonLinuxFallback verifies the ErrPwritevUnsupported
@@ -152,7 +152,7 @@ func TestWriteRecordAt_NonLinuxFallback(t *testing.T) {
 
 	err = writeRecordAt(f, 0, magicLive, key, body)
 	require.NoError(t, err, "sequential fallback should succeed")
-	verifyRecord(t, f, magicLive, key, body)
+	verifyRecord(t, f, 0, magicLive, key, body)
 }
 
 // TestWriteRecordAt_EmptyBody verifies the short-write completion path
@@ -167,7 +167,31 @@ func TestWriteRecordAt_EmptyBody(t *testing.T) {
 	key := testkey.Key(42)
 	err = writeRecordAt(f, 0, magicDead, key, nil)
 	require.NoError(t, err)
-	verifyRecord(t, f, magicDead, key, nil)
+	verifyRecord(t, f, 0, magicDead, key, nil)
+}
+
+// TestWriteRecordAt_NonZeroOffset verifies writeRecordAt and verifyRecord
+// handle a non-zero offset — the real segment append path writes at
+// seg.size, not 0. Guards against hardcoded-offset regressions in
+// verifyRecord.
+func TestWriteRecordAt_NonZeroOffset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "offset.bin")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+
+	// Pre-fill the first 64 bytes so the record does not start at 0.
+	prefix := make([]byte, 64)
+	_, err = f.WriteAt(prefix, 0)
+	require.NoError(t, err)
+
+	offset := int64(64)
+	key := testkey.Key(13)
+	body := []byte("non-zero offset body")
+	err = writeRecordAt(f, offset, magicLive, key, body)
+	require.NoError(t, err, "writeRecordAt at non-zero offset")
+	verifyRecord(t, f, offset, magicLive, key, body)
 }
 
 // TestWriteRemaining_FullFallback verifies writeRemaining writes all
@@ -184,7 +208,7 @@ func TestWriteRemaining_FullFallback(t *testing.T) {
 	body := []byte("BODY-DATA")
 	foot := []byte("FOOT")
 	iov := [][]byte{hdr, body, foot}
-	err = writeRemaining(f, 0, iov, 0)
+	err = writeRemaining(f.WriteAt, 0, iov, 0)
 	require.NoError(t, err)
 
 	total := len(hdr) + len(body) + len(foot)
@@ -212,7 +236,7 @@ func TestWriteRemaining_PartialFirstBuffer(t *testing.T) {
 
 	// Simulate Pwritev wrote 8 bytes (all of hdr + first 2 of body).
 	alreadyWritten := 8
-	err = writeRemaining(f, int64(alreadyWritten), iov, alreadyWritten)
+	err = writeRemaining(f.WriteAt, int64(alreadyWritten), iov, alreadyWritten)
 	require.NoError(t, err)
 
 	total := len(hdr) + len(body) + len(foot)
@@ -240,7 +264,7 @@ func TestWriteRemaining_PartialSecondBuffer(t *testing.T) {
 
 	// Pwritev wrote 5 bytes: all of hdr (3) + first 2 of body ("BO").
 	alreadyWritten := 5
-	err = writeRemaining(f, int64(alreadyWritten), iov, alreadyWritten)
+	err = writeRemaining(f.WriteAt, int64(alreadyWritten), iov, alreadyWritten)
 	require.NoError(t, err)
 
 	total := len(hdr) + len(body) + len(foot)
@@ -249,4 +273,67 @@ func TestWriteRemaining_PartialSecondBuffer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte{0, 0, 0, 0, 0}, buf[0:5], "Pwritev prefix untouched")
 	assert.Equal(t, "DYDATAFOOT", string(buf[5:]), "remaining body + foot written sequentially")
+}
+
+// TestWriteRemaining_WriteAtError verifies the WriteAt error path: when
+// writeAt returns an error mid-completion, writeRemaining returns it
+// immediately without retrying. Covers the werr != nil branch.
+func TestWriteRemaining_WriteAtError(t *testing.T) {
+	t.Parallel()
+	iov := [][]byte{[]byte("HDR"), []byte("BODY"), []byte("FOOT")}
+
+	writeAt := func([]byte, int64) (int, error) {
+		return 0, errSimulatedIO
+	}
+	err := writeRemaining(writeAt, 0, iov, 0)
+	require.ErrorIs(t, err, errSimulatedIO, "writeRemaining must surface the WriteAt error")
+}
+
+// TestWriteRemaining_WriteAtZeroNoError verifies the (0, nil) guard: if
+// writeAt returns zero bytes without an error, writeRemaining must fail
+// rather than loop forever. Covers the nw == 0 branch.
+func TestWriteRemaining_WriteAtZeroNoError(t *testing.T) {
+	t.Parallel()
+	iov := [][]byte{[]byte("HDR"), []byte("BODY"), []byte("FOOT")}
+
+	writeAt := func([]byte, int64) (int, error) {
+		return 0, nil
+	}
+	err := writeRemaining(writeAt, 0, iov, 0)
+	require.Error(t, err, "writeRemaining must fail on a (0, nil) writeAt return")
+	assert.Contains(t, err.Error(), "returned 0 bytes without error")
+}
+
+// TestWriteRemaining_WriteAtShortWrite verifies the short-write retry
+// loop: writeAt returns partial writes, and writeRemaining must keep
+// retrying until the full buffer is on disk.
+func TestWriteRemaining_WriteAtShortWrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shortwriteat.bin")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+
+	hdr := []byte("HDR")
+	body := []byte("BODYDATA")
+	foot := []byte("FOOT")
+	iov := [][]byte{hdr, body, foot}
+
+	total := len(hdr) + len(body) + len(foot)
+	written := 0
+	// writeAt writes 1 byte at a time to exercise the retry loop.
+	writeAt := func(p []byte, off int64) (int, error) {
+		n, werr := f.WriteAt(p[:1], off)
+		written += n
+		return n, werr
+	}
+	err = writeRemaining(writeAt, 0, iov, 0)
+	require.NoError(t, err)
+	assert.Equal(t, total, written, "all bytes written one at a time")
+
+	buf := make([]byte, total)
+	_, err = f.ReadAt(buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "HDRBODYDATAFOOT", string(buf), "full record on disk via short writes")
 }

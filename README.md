@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://codecov.io/gh/bouine-cache/bouine"><img src="https://codecov.io/gh/bouine-cache/bouine/branch/main/graph/badge.svg" alt="Coverage"></a>
+  <a href="https://codecov.io/github/bouine-cache/bouine"><img src="https://codecov.io/github/bouine-cache/bouine/graph/badge.svg?token=1GDSEX7MNA" alt="codecov"></a>
   <a href="https://github.com/bouine-cache/bouine/actions/workflows/release.yml"><img src="https://github.com/bouine-cache/bouine/actions/workflows/release.yml/badge.svg" alt="Release"></a>
   <a href="https://github.com/bouine-cache/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/bouine-cache/bouine" alt="Latest Release"></a>
   <a href="https://hub.docker.com/r/bouinecache/bouine"><img src="https://img.shields.io/docker/pulls/bouinecache/bouine" alt="Docker Pulls"></a>

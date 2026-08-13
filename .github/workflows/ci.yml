@@ -44,7 +44,7 @@ jobs:
       - run: govulncheck ./...
 
   test-linux:
-    name: test (linux/amd64)
+    name: test (ubuntu-latest)
     runs-on: [self-hosted, ci]
     steps:
       - uses: actions/checkout@v7
@@ -61,6 +61,17 @@ jobs:
           files: ./coverage.out
           fail_ci_if_error: false
           verbose: true
+
+  test-arm:
+    name: test (ubuntu-24.04-arm)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - run: go test -race -count=1 -timeout=120s ./...
 
   test-macos:
     name: test (macos-14)

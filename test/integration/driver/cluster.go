@@ -115,6 +115,68 @@ func formatCertEntry(certFile, keyFile string, sni []string) string {
 	return entry + "\n"
 }
 
+// nodeConfigParams holds the parameters for generating a bouine node's
+// YAML config file. It is shared by BootCluster, RestartNode, and
+// RestartNodeWithTLS to keep the config template in one place.
+type nodeConfigParams struct {
+	name       string
+	mode       string
+	httpPort   int
+	httpsPort  int // 0 when TLS is not configured
+	adminPort  int
+	gossipPort int
+	seedList   string
+	originAddr string
+	tls        *TLSOptions // nil when TLS is not configured
+}
+
+// buildNodeConfig renders the YAML config for a single bouine node.
+// When tls is non-nil, the https listener and tls section are included.
+func buildNodeConfig(p nodeConfigParams) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `listen:
+  http: "127.0.0.1:%d"
+`, p.httpPort)
+	if p.tls != nil {
+		fmt.Fprintf(&b, "  https: \"127.0.0.1:%d\"\n", p.httpsPort)
+	}
+	fmt.Fprintf(&b, `  admin: "127.0.0.1:%d"
+  cluster: "127.0.0.1:%d"
+admin:
+  token: %s
+storage:
+  hot_max_bytes: 128MiB
+cluster:
+  node_name: %s
+  mode: %s
+  join: %s
+  hop_limit: 2
+upstream_pools:
+  - name: origin
+    targets: [%q]
+routes:
+  - match: {}
+    pool: origin
+    cache:
+      ttl_default: 60s
+`,
+		p.adminPort, p.gossipPort, IntegrationToken, p.name, p.mode, p.seedList,
+		p.originAddr)
+
+	if p.tls != nil {
+		minVer := p.tls.MinVersion
+		if minVer == "" {
+			minVer = "1.2"
+		}
+		b.WriteString("tls:\n  min_version: " + fmt.Sprintf("%q", minVer) + "\n  certs:\n")
+		b.WriteString(formatCertEntry(p.tls.CertFile, p.tls.KeyFile, p.tls.SNI))
+		for _, ec := range p.tls.ExtraCerts {
+			b.WriteString(formatCertEntry(ec.CertFile, ec.KeyFile, ec.SNI))
+		}
+	}
+	return b.String()
+}
+
 // BootCluster starts a 3-node in-process bouine cluster with an httptest origin.
 func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	t.Helper()
@@ -164,51 +226,21 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		p := ports[i]
 		name := fmt.Sprintf("bouine-%d", i+1)
 
-		cfg := fmt.Sprintf(`listen:
-  http: "127.0.0.1:%d"
-  admin: "127.0.0.1:%d"
-  cluster: "127.0.0.1:%d"
-admin:
-  token: %s
-storage:
-  hot_max_bytes: 128MiB
-cluster:
-  node_name: %s
-  mode: %s
-  join: %s
-  hop_limit: 2
-upstream_pools:
-  - name: origin
-    targets: [%q]
-routes:
-  - match: {}
-    pool: origin
-    cache:
-      ttl_default: 60s
-`,
-			p.http, p.admin, p.gossip, IntegrationToken, name, opts.Mode, seedList,
-			origin.Listener.Addr().String())
-
+		var tlsOpts *TLSOptions
 		if opts.TLS.Enabled {
-			// Insert https listener into the listen block by replacing
-			// the first line, then append the tls section.
-			cfg = strings.Replace(cfg,
-				`listen:
-  http: "127.0.0.1:`+fmt.Sprintf("%d", p.http)+`"`,
-				`listen:
-  http: "127.0.0.1:`+fmt.Sprintf("%d", p.http)+`"
-  https: "127.0.0.1:`+fmt.Sprintf("%d", p.https)+`"`, 1)
-
-			minVer := opts.TLS.MinVersion
-			if minVer == "" {
-				minVer = "1.2"
-			}
-			cfg += "tls:\n  min_version: " + fmt.Sprintf("%q", minVer) + "\n  certs:\n"
-			cfg += formatCertEntry(opts.TLS.CertFile, opts.TLS.KeyFile, opts.TLS.SNI)
-			for _, ec := range opts.TLS.ExtraCerts {
-				cfg += formatCertEntry(ec.CertFile, ec.KeyFile, ec.SNI)
-			}
+			tlsOpts = &opts.TLS
 		}
+		cfg := buildNodeConfig(nodeConfigParams{
+			name:       name,
+			mode:       opts.Mode,
+			httpPort:   p.http,
+			httpsPort:  p.https,
+			adminPort:  p.admin,
+			gossipPort: p.gossip,
+			seedList:   seedList,
+			originAddr: origin.Listener.Addr().String(),
+			tls:        tlsOpts,
+		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
 		if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
@@ -338,29 +370,15 @@ func (s *ClusterStack) RestartNode(t *testing.T, n int) {
 	name := s.Nodes[n].Name
 	seedList := s.gossipSeeds()
 
-	cfg := fmt.Sprintf(`listen:
-  http: "127.0.0.1:%d"
-  admin: "127.0.0.1:%d"
-  cluster: "127.0.0.1:%d"
-admin:
-  token: %s
-storage:
-  hot_max_bytes: 128MiB
-cluster:
-  node_name: %s
-  mode: %s
-  join: %s
-  hop_limit: 2
-upstream_pools:
-  - name: origin
-    targets: [%q]
-routes:
-  - match: {}
-    pool: origin
-    cache:
-      ttl_default: 60s
-`, httpPort, adminPort, gossipPort, IntegrationToken, name, s.Mode, seedList,
-		s.origin.Listener.Addr().String())
+	cfg := buildNodeConfig(nodeConfigParams{
+		name:       name,
+		mode:       s.Mode,
+		httpPort:   httpPort,
+		adminPort:  adminPort,
+		gossipPort: gossipPort,
+		seedList:   seedList,
+		originAddr: s.origin.Listener.Addr().String(),
+	})
 
 	cfgPath := filepath.Join(s.configDir, name+"-restart.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
@@ -368,6 +386,7 @@ routes:
 	}
 
 	s.Nodes[n].HTTPAddr = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
+	s.Nodes[n].HTTPSAddr = "" // RestartNode does not configure TLS
 	s.Nodes[n].AdminAddr = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
 	s.Nodes[n].GossipAddr = fmt.Sprintf("127.0.0.1:%d", gossipPort)
 	s.Nodes[n].cfgPath = cfgPath
@@ -414,40 +433,17 @@ func (s *ClusterStack) RestartNodeWithTLS(t *testing.T, n int, tlsOpts TLSOption
 	name := s.Nodes[n].Name
 	seedList := s.gossipSeeds()
 
-	minVer := tlsOpts.MinVersion
-	if minVer == "" {
-		minVer = "1.2"
-	}
-
-	cfg := fmt.Sprintf(`listen:
-  http: "127.0.0.1:%d"
-  https: "127.0.0.1:%d"
-  admin: "127.0.0.1:%d"
-  cluster: "127.0.0.1:%d"
-admin:
-  token: %s
-storage:
-  hot_max_bytes: 128MiB
-cluster:
-  node_name: %s
-  mode: %s
-  join: %s
-  hop_limit: 2
-upstream_pools:
-  - name: origin
-    targets: [%q]
-routes:
-  - match: {}
-    pool: origin
-    cache:
-      ttl_default: 60s
-tls:
-  min_version: %q
-  certs:
-%s`,
-		httpPort, httpsPort, adminPort, gossipPort, IntegrationToken, name, s.Mode, seedList,
-		s.origin.Listener.Addr().String(), minVer,
-		formatCertEntry(tlsOpts.CertFile, tlsOpts.KeyFile, tlsOpts.SNI))
+	cfg := buildNodeConfig(nodeConfigParams{
+		name:       name,
+		mode:       s.Mode,
+		httpPort:   httpPort,
+		httpsPort:  httpsPort,
+		adminPort:  adminPort,
+		gossipPort: gossipPort,
+		seedList:   seedList,
+		originAddr: s.origin.Listener.Addr().String(),
+		tls:        &tlsOpts,
+	})
 
 	cfgPath := filepath.Join(s.configDir, name+"-restart-tls.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
@@ -494,12 +490,6 @@ func (s *ClusterStack) gossipSeeds() string {
 		return `[]`
 	}
 	return `["` + strings.Join(seeds, `","`) + `"]`
-}
-
-// gossipSeeds returns the gossip join list from live nodes.
-// Deprecated: use gossipSeeds instead. Kept for backward compatibility.
-func (s *ClusterStack) extractGossipPort(n int) string {
-	return s.Nodes[n].GossipAddr[strings.LastIndex(s.Nodes[n].GossipAddr, ":")+1:]
 }
 
 // PauseNode sets a per-node gate that blocks the origin from responding,

@@ -4,8 +4,10 @@ package integration
 
 import (
 	"crypto/tls"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,7 +37,7 @@ func TestTLS_TerminationAndH2(t *testing.T) {
 	stack := bootTLSCluster(t)
 
 	// Prime the cache with the first request (MISS), then verify the
-	// second request is a HIT over the same HTTPS connection.
+	// second request is a HIT and negotiated HTTP/2 via ALPN.
 	resp := stack.GetTLS(t, 0, "/hit")
 	require.Equal(t, 200, resp.StatusCode, "HTTPS request should succeed")
 	assert.Equal(t, "MISS", driver.XCache(resp), "first request should be a MISS")
@@ -155,15 +157,15 @@ func TestTLS_MinVersionEnforced(t *testing.T) {
 
 	// Attempt a TLS 1.0 handshake — must be rejected because the
 	// server enforces min_version 1.2.
-	hostPort := stack.Nodes[1].HTTPSAddr
-	hostPort = hostPort[strings.LastIndex(hostPort, "//")+2:]
+	hostPort := strings.TrimPrefix(stack.Nodes[1].HTTPSAddr, "https://")
 	conf := &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // test
 		ServerName:         "localhost",
 		MinVersion:         tls.VersionTLS10,
 		MaxVersion:         tls.VersionTLS10,
 	}
-	conn, err := tls.Dial("tcp", hostPort, conf)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", hostPort, conf)
 	if err == nil {
 		conn.Close()
 		t.Fatal("TLS 1.0 handshake should be rejected by server with min_version=1.2")

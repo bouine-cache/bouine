@@ -145,7 +145,7 @@ func TestH2_GracefulShutdownStopsNewRequests(t *testing.T) {
 }
 
 func TestH2C_PlaintextH2(t *testing.T) {
-	stack := bootTLSCluster(t)
+	stack := driver.BootCluster(t, driver.ClusterOptions{Mode: "strong"})
 
 	// Create an h2c client — plaintext HTTP/2 without TLS. The Go
 	// standard library's http.Transport does not negotiate h2c

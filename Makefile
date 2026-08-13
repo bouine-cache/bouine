@@ -47,7 +47,7 @@ vet: ## Run go vet across all packages.
 	$(GO) vet ./...
 
 .PHONY: integration
-integration: test-integration-cluster ## Alias: run the cluster integration suite.
+integration: test-integration-cluster test-integration-tls-h2 ## Alias: run the cluster + TLS/H2 integration suite.
 
 .PHONY: chaos
 chaos: test-chaos ## Alias: run the chaos scenarios.
@@ -75,6 +75,12 @@ conformance-view: build ## Run conformance tests then open the comparison UI in 
 
 .PHONY: test-integration-cluster
 test-integration-cluster: test-integration-cluster-common test-integration-cluster-strong test-integration-cluster-eventual ## Run all cluster consistency mode tests sequentially.
+
+.PHONY: test-integration-tls-h2
+test-integration-tls-h2: ## Run TLS and HTTP/2 integration tests.
+	@echo ">>> Integration: TLS + HTTP/2"
+	go test -v -race -count=1 -timeout=5m -tags=integration \
+	    -run 'TestTLS_|TestH2_|TestH2C_' ./test/integration/...
 
 .PHONY: test-integration-cluster-common
 test-integration-cluster-common: ## Run cluster-wide tests (formation, single-node failure).

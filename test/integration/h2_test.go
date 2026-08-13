@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 	"github.com/bouine-cache/bouine/test/integration/driver"
 )
@@ -128,19 +129,23 @@ func TestH2_GracefulShutdownStopsNewRequests(t *testing.T) {
 	// model cancels the context, which triggers http.Server.Shutdown.
 	stack.KillNode(t, 0)
 
-	// Poll on the test goroutine (not a separate goroutine) until the
-	// server stops accepting new connections.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// Poll until the server stops accepting new connections.
+	poll.Eventually(t, 5*time.Second, 50*time.Millisecond, func() bool {
 		r, err := client.Get(url)
 		if err != nil {
-			break
+			return true
 		}
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
+		return false
+	})
+
+	// Final assertion: the server must reject new requests.
+	resp, err = client.Get(url)
+	if resp != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}
-	// If we get here without an error, the server didn't shut down.
-	_, err = client.Get(url)
 	assert.Error(t, err, "server should reject new requests after shutdown")
 }
 

@@ -12,7 +12,7 @@ permissions:
   attestations: write
 
 env:
-  GO_VERSION: "1.26.5"
+  GO_VERSION: "1.26.6"
   DOCKER_IMAGE: bouinecache/bouine
 
 jobs:

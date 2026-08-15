@@ -1,12 +1,15 @@
 package staticfile
 
-import "mime"
+import "strings"
 
-// bundledMIMEs is a curated set of web MIME types registered at package
-// load time. This ensures consistent Content-Type across all nodes
-// regardless of host OS MIME database differences (/etc/mime.types on
-// Linux, registry on Windows). Unknown extensions fall back to
-// application/octet-stream.
+// bundledMIMEs is a curated set of web MIME types looked up directly by the
+// handler. This ensures consistent Content-Type across all nodes regardless
+// of host OS MIME database differences (/etc/mime.types on Linux, registry
+// on Windows). Unknown extensions fall back to application/octet-stream.
+//
+// Per ADR-0017 §6, Content-Type is set from this bundled map, not the host
+// OS MIME database. The handler lowercases the extension before lookup to
+// preserve the case-insensitive matching that mime.TypeByExtension provided.
 var bundledMIMEs = map[string]string{
 	".html":  "text/html; charset=utf-8",
 	".htm":   "text/html; charset=utf-8",
@@ -32,12 +35,12 @@ var bundledMIMEs = map[string]string{
 	".map":   "application/json",
 }
 
-// init registers bundled MIME types with the stdlib mime package so that
-// mime.TypeByExtension returns consistent values across all platforms.
-// This only calls mime.AddExtensionType (registering encoders with the
-// stdlib registry) — no I/O or goroutines, per AGENTS.md §4.
-func init() {
-	for ext, typ := range bundledMIMEs {
-		_ = mime.AddExtensionType(ext, typ)
+// contentTypeByExtension returns the MIME type for a file extension from the
+// bundled map. The extension is lowercased to preserve case-insensitive
+// matching. Returns "application/octet-stream" for unknown extensions.
+func contentTypeByExtension(ext string) string {
+	if ct, ok := bundledMIMEs[strings.ToLower(ext)]; ok {
+		return ct
 	}
+	return "application/octet-stream"
 }

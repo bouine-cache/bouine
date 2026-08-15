@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,6 +75,43 @@ func TestHandler_ContentTypes(t *testing.T) {
 		got := w.Header().Get("Content-Type")
 		assert.Equal(t, tt.wantCT, got)
 	}
+}
+
+func TestHandler_ContentTypes_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+	h := newTestHandler(t, map[string]string{
+		"INDEX.HTML": "<h1>hi</h1>",
+		"STYLE.CSS":  "body{}",
+		"SCRIPT.JS":  "console.log(1);",
+	}, Config{})
+	tests := []struct {
+		path   string
+		wantCT string
+	}{
+		{"/INDEX.HTML", "text/html; charset=utf-8"},
+		{"/STYLE.CSS", "text/css; charset=utf-8"},
+		{"/SCRIPT.JS", "application/javascript"},
+	}
+	for _, tt := range tests {
+		w := doRequest(t, h, "GET", tt.path)
+		assert.Equal(t, 200, w.Code)
+		got := w.Header().Get("Content-Type")
+		assert.Equal(t, tt.wantCT, got, "path %s", tt.path)
+	}
+}
+
+func TestMIME_BundledTypesServedDirectly(t *testing.T) {
+	// ADR-0017 §6: Content-Type is set from a bundled MIME map, not the
+	// host OS MIME database. This test verifies the handler resolves
+	// Content-Type from bundledMIMEs directly — the .webp entry exists
+	// in the map regardless of whether the host OS knows about it.
+	t.Parallel()
+	h := newTestHandler(t, map[string]string{
+		"image.webp": "fake-webp",
+	}, Config{})
+	w := doRequest(t, h, "GET", "/image.webp")
+	require.Equal(t, 200, w.Code)
+	assert.Equal(t, "image/webp", w.Header().Get("Content-Type"))
 }
 
 func TestHandler_NotFound(t *testing.T) {
@@ -195,6 +233,183 @@ func TestHandler_ETagSet(t *testing.T) {
 	}
 }
 
+func TestHandler_ETagIsStrongHash_NotMtime(t *testing.T) {
+	t.Parallel()
+	h := newTestHandler(t, map[string]string{
+		"file.txt": "hello world",
+	}, Config{})
+	w := doRequest(t, h, "GET", "/file.txt")
+	etag := w.Header().Get("Etag")
+	require.NotEqual(t, "", etag, "ETag must be set")
+	// A strong xxhash64 ETag is a quoted hex string, not a decimal
+	// nanosecond mtime. This catches the old mtime-based fallback.
+	require.Equal(t, `"`, string(etag[0]))
+	require.Equal(t, `"`, string(etag[len(etag)-1]))
+	hex := etag[1 : len(etag)-1]
+	for _, r := range hex {
+		assert.True(t, (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f'),
+			"ETag %q contains non-hex char %q — looks like mtime fallback", etag, r)
+	}
+}
+
+// readErrFile wraps an http.File but returns an error on Read, simulating
+// a file that can be opened and stat'd but whose content can't be read
+// (e.g. a file on a failing disk). This tests the computeETag error path.
+type readErrFile struct {
+	http.File
+}
+
+func (f *readErrFile) Read(p []byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+// readErrFS wraps an http.FileSystem so that all opened files fail on Read.
+type readErrFS struct {
+	inner http.FileSystem
+}
+
+func (fs *readErrFS) Open(name string) (http.File, error) {
+	f, err := fs.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &readErrFile{File: f}, nil
+}
+
+// seekErrFile wraps an http.File but returns an error on Seek. When
+// failOnlyOnPositiveOffset is true, Seek(0, SeekStart) succeeds (delegated
+// to the inner file) but Seek with a positive offset fails. This isolates
+// the handleRange Seek(start>0) error path from computeETag's Seek(0).
+type seekErrFile struct {
+	http.File
+	failOnlyOnPositiveOffset bool
+}
+
+func (f *seekErrFile) Seek(offset int64, whence int) (int64, error) {
+	if f.failOnlyOnPositiveOffset {
+		if offset == 0 && whence == io.SeekStart {
+			return f.File.Seek(offset, whence)
+		}
+		return 0, io.ErrUnexpectedEOF
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+// seekErrFS wraps an http.FileSystem so that all opened files fail on Seek.
+type seekErrFS struct {
+	inner                    http.FileSystem
+	failOnlyOnPositiveOffset bool
+}
+
+func (fs *seekErrFS) Open(name string) (http.File, error) {
+	f, err := fs.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &seekErrFile{File: f, failOnlyOnPositiveOffset: fs.failOnlyOnPositiveOffset}, nil
+}
+
+func TestHandler_ETagNoMtimeFallbackOnReadFailure(t *testing.T) {
+	t.Parallel()
+	// Build a handler normally, then swap its fs for a readErrFS so
+	// that computeETag's io.Copy(hasher, f) fails. The old code would
+	// fall back to a mtime-based ETag; the fix must omit the ETag
+	// entirely (return empty string).
+	h := newTestHandler(t, map[string]string{
+		"file.txt": "hello world",
+	}, Config{})
+	// Clear the etag cache so computeETag tries to hash the file.
+	h.etagCache = sync.Map{}
+	// Replace the fs so that files fail on Read.
+	h.fs = &readErrFS{inner: h.fs}
+
+	w := doRequest(t, h, "GET", "/file.txt")
+	// The response should still be 200 (the file is "open"), but the
+	// ETag must be omitted because the content hash failed.
+	require.Equal(t, 200, w.Code)
+	etag := w.Header().Get("Etag")
+	require.Empty(t, etag,
+		"ETag must be omitted when content hash fails, not mtime-based")
+}
+
+func TestHandler_ETagNoMtimeFallbackOnSeekFailure(t *testing.T) {
+	t.Parallel()
+	// When computeETag's pre-hash Seek(0) fails, the ETag must be
+	// omitted (not mtime-based). Additionally, ServeHTTP's post-headers
+	// Seek(0) will also fail, producing a 500 — the file offset is
+	// indeterminate and the body can't be streamed safely.
+	h := newTestHandler(t, map[string]string{
+		"file.txt": "hello world",
+	}, Config{})
+	h.etagCache = sync.Map{}
+	h.fs = &seekErrFS{inner: h.fs}
+
+	w := doRequest(t, h, "GET", "/file.txt")
+	// ServeHTTP's Seek(0) fails → 500.
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	// No ETag should be set.
+	etag := w.Header().Get("Etag")
+	require.Empty(t, etag, "ETag must be omitted when seek fails")
+}
+
+func TestHandler_RangeSeekError_Returns500WithoutContentRange(t *testing.T) {
+	t.Parallel()
+	// When handleRange's Seek(start>0) fails, the response must be 500
+	// with no Content-Range or Content-Length headers (RFC 9110 §14.5
+	// forbids Content-Range on non-206/416 responses).
+	h := newTestHandler(t, map[string]string{
+		"file.txt": "0123456789",
+	}, Config{})
+
+	// Prime the ETag cache so computeETag returns early (no Seek needed).
+	w0 := doRequest(t, h, "GET", "/file.txt")
+	require.Equal(t, 200, w0.Code)
+
+	// Swap the fs so that Seek(n>0) fails. The existing opened file from
+	// resolveFile will be wrapped — computeETag cache hit (no Seek),
+	// ServeHTTP's Seek(0) succeeds, handleRange's Seek(2) fails.
+	h.fs = &seekErrFS{inner: h.fs, failOnlyOnPositiveOffset: true}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/file.txt", nil)
+	r.Header.Set("Range", "bytes=2-5")
+	h.ServeHTTP(w, r)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Empty(t, w.Header().Get("Content-Range"),
+		"Content-Range must be absent on 500 (RFC 9110 §14.5)")
+	require.Empty(t, w.Header().Get("Content-Length"),
+		"Content-Length must be absent on 500 (http.Error deletes it)")
+}
+
+func TestHandler_RangeStreamError_ReturnsTrue(t *testing.T) {
+	t.Parallel()
+	// When io.CopyBuffer fails during range body streaming (e.g. disk
+	// read error mid-transfer), handleRange must log and return true
+	// (response already committed via WriteHeader).
+	h := newTestHandler(t, map[string]string{
+		"file.txt": "0123456789",
+	}, Config{})
+
+	// Prime the ETag cache so computeETag returns early.
+	w0 := doRequest(t, h, "GET", "/file.txt")
+	require.Equal(t, 200, w0.Code)
+
+	// Swap fs so Read fails. Seek(0) succeeds (delegated), so
+	// ServeHTTP's Seek(0) passes, but handleRange's io.CopyBuffer
+	// calls Read → fails.
+	h.fs = &readErrFS{inner: h.fs}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/file.txt", nil)
+	r.Header.Set("Range", "bytes=0-4")
+	h.ServeHTTP(w, r)
+
+	// WriteHeader(206) was called before the stream error, so the
+	// status is 206. The body is empty because Read failed immediately.
+	require.Equal(t, http.StatusPartialContent, w.Code)
+}
+
 func TestHandler_ETagConsistency(t *testing.T) {
 	t.Parallel()
 	h := newTestHandler(t, map[string]string{
@@ -238,6 +453,23 @@ func TestHandler_IfModifiedSince_304(t *testing.T) {
 	r2.Header.Set("If-Modified-Since", lastMod)
 	h.ServeHTTP(w2, r2)
 	require.Equal(t, http.StatusNotModified, w2.Code)
+}
+
+func TestHandler_RangeInvalid_FallsThroughToFullBody(t *testing.T) {
+	t.Parallel()
+	h := newTestHandler(t, map[string]string{
+		"file.txt": "0123456789",
+	}, Config{})
+	// A malformed Range header (missing "bytes=" prefix) should cause
+	// handleRange to return false before any Seek, and the handler should
+	// fall through to streaming the full body from offset 0.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/file.txt", nil)
+	r.Header.Set("Range", "0-5")
+	h.ServeHTTP(w, r)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "0123456789", w.Body.String(),
+		"full body must be served when range is invalid — seek offset invariant")
 }
 
 func TestHandler_RangeSingle(t *testing.T) {

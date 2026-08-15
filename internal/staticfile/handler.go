@@ -3,7 +3,6 @@ package staticfile
 import (
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -176,14 +175,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.setHeaders(w, servedPath, stat)
+	h.setHeaders(w, f, servedPath, stat)
+
+	// computeETag may have advanced the file offset while hashing. Ensure
+	// the file is at offset 0 before any body streaming path (conditional
+	// fallthrough, range, or full body). On cache hit computeETag returns
+	// early without seeking, so this is a no-op extra lseek on the hot
+	// path. On cache miss the seek is necessary to undo the hash read.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		h.logger.Warn("staticfile: seek to start failed", "path", servedPath, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	if h.handleConditional(w, r, stat) {
 		return
 	}
 
 	if rng := r.Header.Get(header.Range); rng != "" {
-		if h.handleRange(w, r, servedPath, rng, stat.Size()) {
+		if h.handleRange(w, r, f, rng, stat.Size()) {
 			return
 		}
 	}
@@ -262,22 +272,20 @@ func (h *Handler) resolveIndex(cleanedPath string) (http.File, os.FileInfo, stri
 }
 
 // setHeaders sets Content-Length, Content-Type, Last-Modified, and ETag
-// headers on the response.
-func (h *Handler) setHeaders(w http.ResponseWriter, cleanedPath string, stat os.FileInfo) {
+// headers on the response. The already-opened file f is used for ETag
+// computation to avoid a redundant open syscall.
+func (h *Handler) setHeaders(w http.ResponseWriter, f http.File, cleanedPath string, stat os.FileInfo) {
 	w.Header().Set(header.ContentLength, strconv.FormatInt(stat.Size(), 10))
 
 	ext := filepath.Ext(cleanedPath)
-	if ct := mime.TypeByExtension(ext); ct != "" {
-		w.Header().Set(header.ContentType, ct)
-	} else {
-		w.Header().Set(header.ContentType, "application/octet-stream")
-	}
+	w.Header().Set(header.ContentType, contentTypeByExtension(ext))
 
 	lastMod := stat.ModTime().UTC()
 	w.Header().Set(header.LastModified, lastMod.Format(http.TimeFormat))
 
-	etag := h.computeETag(cleanedPath, stat)
-	w.Header().Set(header.ETag, etag)
+	if etag := h.computeETag(f, cleanedPath, stat); etag != "" {
+		w.Header().Set(header.ETag, etag)
+	}
 }
 
 // handleConditional checks If-None-Match and If-Modified-Since headers
@@ -324,7 +332,16 @@ func (h *Handler) streamFile(w http.ResponseWriter, f http.File, cleanedPath str
 // keyed by path + mtime so unchanged files are only hashed once. The
 // ETag is the xxhash64 of the file content, formatted as a quoted hex
 // string.
-func (h *Handler) computeETag(cleanedPath string, stat os.FileInfo) string {
+//
+// The already-opened file f is used for hashing to avoid a redundant
+// open syscall. The file offset is advanced to EOF after hashing;
+// ServeHTTP resets it to 0 before any body streaming.
+//
+// Returns an empty string if the content hash cannot be computed
+// (seek/read error). Per ADR-0017 §7, a missing ETag is strictly safer
+// than a wrong mtime-based one: clients fall back to If-Modified-Since
+// validation, which is correct.
+func (h *Handler) computeETag(f http.File, cleanedPath string, stat os.FileInfo) string {
 	mtime := stat.ModTime()
 	if cached, ok := h.etagCache.Load(cleanedPath); ok {
 		if e, ok := cached.(etagEntry); ok && e.mtime.Equal(mtime) {
@@ -332,15 +349,15 @@ func (h *Handler) computeETag(cleanedPath string, stat os.FileInfo) string {
 		}
 	}
 
-	f, err := h.fs.Open(filepath.ToSlash(cleanedPath))
-	if err != nil {
-		return fmt.Sprintf(`"%x"`, stat.ModTime().UnixNano())
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		h.logger.Warn("staticfile: etag seek error", "path", cleanedPath, "error", err)
+		return ""
 	}
-	defer func() { _ = f.Close() }()
 
 	hasher := xxhash.New()
 	if _, err := io.Copy(hasher, f); err != nil {
-		return fmt.Sprintf(`"%x"`, stat.ModTime().UnixNano())
+		h.logger.Warn("staticfile: etag hash error", "path", cleanedPath, "error", err)
+		return ""
 	}
 
 	etag := fmt.Sprintf(`"%x"`, hasher.Sum64())
@@ -405,7 +422,15 @@ const (
 //
 // Per RFC 9110 §14.3.2, a server MAY collapse a multipart range request
 // into a single 206 response. We serve the first range only.
-func (h *Handler) handleRange(w http.ResponseWriter, r *http.Request, cleanedPath, rangeHeader string, size int64) bool {
+//
+// The already-opened file f is reused from resolveFile — no second
+// open syscall. The file offset must be at 0 when handleRange is called
+// (guaranteed by ServeHTTP's Seek(0) after setHeaders, or by
+// resolveFile opening a fresh handle on cache hit). When handleRange
+// returns false (rangeInvalid), it must NOT have called Seek on f, so
+// the caller can safely fall through to streamFile which reads from
+// offset 0.
+func (h *Handler) handleRange(w http.ResponseWriter, r *http.Request, f http.File, rangeHeader string, size int64) bool {
 	start, end, status := parseRangeSpec(rangeHeader, size)
 	switch status {
 	case rangeInvalid:
@@ -421,16 +446,16 @@ func (h *Handler) handleRange(w http.ResponseWriter, r *http.Request, cleanedPat
 	w.Header().Set(header.ContentRange, fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 	w.Header().Set(header.ContentLength, strconv.FormatInt(length, 10))
 
-	full := filepath.Join(h.root, filepath.FromSlash(cleanedPath))
-	f, err := os.Open(full) //nolint:gosec // path is already validated by isPathContained
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-
 	if start > 0 {
 		if _, err := f.Seek(start, io.SeekStart); err != nil {
-			return false
+			h.logger.Warn("staticfile: range seek error", "error", err)
+			// Content-Range and Content-Length were set for the 206
+			// response. Remove them so the error response is clean —
+			// RFC 9110 §14.5 forbids Content-Range on non-206/416.
+			w.Header().Del(header.ContentRange)
+			w.Header().Del(header.ContentLength)
+			http.Error(w, "range seek error", http.StatusInternalServerError)
+			return true
 		}
 	}
 
@@ -446,7 +471,7 @@ func (h *Handler) handleRange(w http.ResponseWriter, r *http.Request, cleanedPat
 
 	written, err := io.CopyBuffer(w, io.LimitReader(f, length), buf)
 	if err != nil {
-		h.logger.Warn("staticfile: range stream error", "path", cleanedPath, "error", err)
+		h.logger.Warn("staticfile: range stream error", "error", err)
 		return true
 	}
 	h.recordServed(written)

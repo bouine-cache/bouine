@@ -10,6 +10,12 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- Capped the gossip broadcast queue at `cluster.gossip_queue_depth`
+  (default 4096) to prevent unbounded memory growth and OOM under purge
+  storms. Added `bouine_cluster_gossip_queue_dropped_total` counter and
+  `bouine_cluster_gossip_queue_depth` gauge for observability.
+
 ### Removed
 - **Breaking (SDK):** removed `bouineapi.Client.Reload` and `ReloadResult`.
   The admin `POST /v1/config/reload` endpoint, the dashboard "Reload config"

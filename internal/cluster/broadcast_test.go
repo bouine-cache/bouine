@@ -240,7 +240,7 @@ func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
 
 func minimalCluster(_ *testing.T, _ string) *Cluster {
 	return &Cluster{
-		cfg:     Config{NodeName: "node-0", Mode: "strong"},
+		cfg:     Config{NodeName: "node-0", Mode: "strong", GossipQueueDepth: defaultGossipQueueDepth},
 		peers:   make(map[string]*Member),
 		ring:    newRing(256),
 		logger:  observability.NoopLogger{},

@@ -31,6 +31,16 @@ type Metrics struct {
 	// overflowed. Non-zero indicates the HandoffQueueDepth may need
 	// tuning or invalidation bursts need throttling. See issue #201.
 	GossipDrops prometheus.Counter
+	// GossipQueueDropped counts messages dropped from the local gossip
+	// broadcast queue because it was full (drop-newest). Non-zero
+	// indicates the GossipQueueDepth may need tuning or invalidation
+	// bursts need throttling. See issue #297.
+	GossipQueueDropped prometheus.Counter
+	// GossipQueueDepth is the current number of pending messages in the
+	// local gossip broadcast queue. Updated on every GetBroadcasts drain
+	// (memberlist gossip interval, ~200ms-1s), not on every enqueue, to
+	// avoid lock-held gauge updates on the hot path. See issue #297.
+	GossipQueueDepth prometheus.Gauge
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -70,6 +80,16 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_gossip_drops_total",
 			Help:      "Memberlist handler queue full warnings — messages dropped because the receiving node's handoff queue overflowed.",
 		}),
+		GossipQueueDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_gossip_queue_dropped_total",
+			Help:      "Messages dropped from the local gossip broadcast queue because it was full (drop-newest). See issue #297.",
+		}),
+		GossipQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "bouine",
+			Name:      "cluster_gossip_queue_depth",
+			Help:      "Current number of pending messages in the local gossip broadcast queue.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -77,6 +97,8 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.InvalidationsHTTP,
 		m.BroadcastFailures,
 		m.GossipDrops,
+		m.GossipQueueDropped,
+		m.GossipQueueDepth,
 	)
 	return m
 }
@@ -132,6 +154,26 @@ func (m *Metrics) IncGossipDrop() {
 		return
 	}
 	m.GossipDrops.Inc()
+}
+
+// IncGossipQueueDropped increments the gossip-queue-dropped counter.
+// Called when QueueBroadcast drops a message because the local gossip
+// queue is full (drop-newest). See issue #297.
+func (m *Metrics) IncGossipQueueDropped() {
+	if m == nil || m.GossipQueueDropped == nil {
+		return
+	}
+	m.GossipQueueDropped.Inc()
+}
+
+// SetGossipQueueDepth sets the gossip-queue-depth gauge to the current
+// number of pending messages. Called from GetBroadcasts after draining.
+// See issue #297.
+func (m *Metrics) SetGossipQueueDepth(n int) {
+	if m == nil || m.GossipQueueDepth == nil {
+		return
+	}
+	m.GossipQueueDepth.Set(float64(n))
 }
 
 // BroadcastFailuresCount returns the total number of broadcast failures

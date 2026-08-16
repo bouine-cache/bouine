@@ -197,13 +197,8 @@ func TestAdversarial_OversizedBody_Batch(t *testing.T) {
 	})
 	var sb strings.Builder
 	sb.WriteString(`{"urls":["`)
-	for i := 0; i < 50; i++ {
-		if i > 0 {
-			sb.WriteString(`","`)
-		}
-		sb.WriteString("https://example.com/path/")
-	}
-	sb.WriteString(`"]}`)
+	sb.WriteString(strings.Repeat(`https://example.com/path/","`, 49))
+	sb.WriteString(`https://example.com/path/"]}`)
 	require.Greater(t, sb.Len(), 128)
 
 	rr := httptest.NewRecorder()
@@ -301,12 +296,6 @@ func TestAdversarial_ConcurrentPurgeBan(t *testing.T) {
 // patterns in ban expressions are rejected with 400 before reaching BanFn.
 func TestAdversarial_InvalidRegex(t *testing.T) {
 	t.Parallel()
-	var banCalled atomic.Bool
-	s := New(Config{
-		Token:  "secret",
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		BanFn:  func(_ api.BanExpr) (int, error) { banCalled.Store(true); return 0, nil },
-	})
 
 	cases := []struct {
 		name string
@@ -321,6 +310,12 @@ func TestAdversarial_InvalidRegex(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var banCalled atomic.Bool
+			s := New(Config{
+				Token:  "secret",
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				BanFn:  func(_ api.BanExpr) (int, error) { banCalled.Store(true); return 0, nil },
+			})
 			code, body := postWithToken(t, s, "/v1/ban", tc.body)
 			require.Equal(t, http.StatusBadRequest, code, "body: %s", body)
 			require.False(t, banCalled.Load(), "BanFn must not be called for invalid regex")
@@ -488,10 +483,11 @@ func TestAdversarial_WrongMethod(t *testing.T) {
 
 // --- adversarial deep-nesting / structure tests ---
 
-// TestAdversarial_DeeplyNestedJSON verifies that a deeply nested JSON
-// structure does not cause a stack overflow. Go's encoding/json has a
-// default recursion limit of 10000; the body limit middleware
-// provides a second defence layer.
+// TestAdversarial_DeeplyNestedJSON verifies that deeply nested JSON
+// (500 levels of {"a":{...}}) does not cause a stack overflow.
+// Go's encoding/json has a recursion limit; the body limit middleware
+// provides a second defence layer. The nested object is assigned to
+// an unknown field so the handler rejects it with 400 after decoding.
 func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 	t.Parallel()
 	s := New(Config{
@@ -500,13 +496,19 @@ func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	var sb strings.Builder
-	sb.WriteString(`{"url":"https://example.com/"`)
+	sb.WriteString(`{"url":"https://example.com/","x":`)
 	for range 500 {
-		sb.WriteString(`,"x":{"a":1}`)
+		sb.WriteString(`{"a":`)
+	}
+	sb.WriteString(`1`)
+	for range 500 {
+		sb.WriteString(`}`)
 	}
 	sb.WriteString(`}`)
 	code, _ := postWithToken(t, s, "/v1/purge", sb.String())
 	// DisallowUnknownFields rejects the unknown "x" key with 400.
+	// The point is that the decoder does not stack-overflow on the
+	// 500-level nesting before reaching the unknown-field check.
 	require.Equal(t, http.StatusBadRequest, code)
 }
 

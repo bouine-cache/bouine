@@ -7,7 +7,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/dashboard/insights"
+	"github.com/bouine-cache/bouine/internal/dashboard/templates"
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/origin"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -319,4 +323,158 @@ func TestValidateRegex_Invalid(t *testing.T) {
 	result := validateRegex("field", "[invalid")
 	assert.Contains(t, result, "field")
 	assert.Contains(t, result, "regex")
+}
+
+// TestConvertInsightCards verifies the insight card mapping and severity counting.
+func TestConvertInsightCards(t *testing.T) {
+	t.Parallel()
+	raw := []insights.Insight{
+		{ID: "1", Severity: insights.SeverityHigh, Category: insights.CategoryCDN, Title: "High", Detail: "d", Evidence: "e", Routes: []string{"r1"}, Action: "fix"},
+		{ID: "2", Severity: insights.SeverityMed, Category: insights.CategoryCluster, Title: "Med", Detail: "d2"},
+		{ID: "3", Severity: insights.SeverityLow, Category: insights.CategoryConfig, Title: "Low", Detail: "d3"},
+	}
+	cards, high, med, low := convertInsightCards(raw, map[string]string{"r1": "pool1"})
+	assert.Equal(t, 3, len(cards))
+	assert.Equal(t, 1, high)
+	assert.Equal(t, 1, med)
+	assert.Equal(t, 1, low)
+	assert.Equal(t, "1", cards[0].ID)
+	assert.Equal(t, "HIGH", cards[0].Severity)
+	assert.Contains(t, cards[0].NodeIDs, "cdn")
+}
+
+// TestInsightNodeIDs verifies the node ID mapping for different categories.
+func TestInsightNodeIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		category insights.Category
+		routes   []string
+		wantIDs  []string
+	}{
+		{"cdn", insights.CategoryCDN, nil, []string{"cdn"}},
+		{"cluster", insights.CategoryCluster, nil, []string{"bouine"}},
+		{"config", insights.CategoryConfig, nil, []string{"bouine"}},
+		{"route_with_pool", insights.CategoryCache, []string{"api"}, []string{"pool:origin1"}},
+		{"route_no_pool", insights.CategoryCache, []string{"unknown"}, []string{"bouine"}},
+	}
+	routeToPool := map[string]string{"api": "origin1"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ins := insights.Insight{Category: tt.category, Routes: tt.routes}
+			ids := insightNodeIDs(ins, routeToPool)
+			assert.Equal(t, tt.wantIDs, ids)
+		})
+	}
+}
+
+// TestBuildRouteToPool_WithConfig verifies route-to-pool mapping from config.
+func TestBuildRouteToPool_WithConfig(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{
+		Config: &config.Config{
+			Routes: []config.Route{
+				{Name: "api", Pool: "origin1"},
+				{Name: "static", Pool: "origin2"},
+				{Match: config.RouteMatch{PathPrefix: "/fallback"}, Pool: "origin3"},
+			},
+		},
+	}}
+	m := h.buildRouteToPool()
+	assert.Equal(t, "origin1", m["api"])
+	assert.Equal(t, "origin2", m["static"])
+	assert.Equal(t, "origin3", m["/fallback"])
+}
+
+// TestClientNode verifies the client architecture node.
+func TestClientNode(t *testing.T) {
+	t.Parallel()
+	n := clientNode()
+	assert.Equal(t, "client", n.ID)
+	assert.Equal(t, "Clients", n.Label)
+	assert.Equal(t, "healthy", n.Status)
+}
+
+// TestCDNNode verifies the CDN architecture node.
+func TestCDNNode(t *testing.T) {
+	t.Parallel()
+	card := &templates.CFStatusCard{ZoneID: "zone123", Async: true}
+	n := cdnNode(card)
+	assert.Equal(t, "cdn", n.ID)
+	assert.Contains(t, n.Detail, "zone123")
+	assert.Contains(t, n.Detail, "async")
+}
+
+// TestClusterNode verifies the cluster architecture node.
+func TestClusterNode(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{ClusterMeta: templates.ClusterMeta{Mode: "full"}}}
+	peers := []PeerResult{
+		{NodeName: "node1", Stale: false},
+		{NodeName: "node2", Stale: true},
+	}
+	n := h.clusterNode(peers, api.Stats{})
+	assert.Equal(t, "bouine", n.ID)
+	assert.Equal(t, "degraded", n.Status)
+	assert.Equal(t, 2, len(n.Peers))
+}
+
+// TestClusterNode_AllStale verifies all-stale peers result in unhealthy status.
+func TestClusterNode_AllStale(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	peers := []PeerResult{
+		{NodeName: "node1", Stale: true},
+		{NodeName: "node2", Stale: true},
+	}
+	n := h.clusterNode(peers, api.Stats{})
+	assert.Equal(t, "unhealthy", n.Status)
+}
+
+// TestClusterNode_NoPeers verifies no peers results in healthy status.
+func TestClusterNode_NoPeers(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	n := h.clusterNode(nil, api.Stats{})
+	assert.Equal(t, "healthy", n.Status)
+}
+
+// TestPoolNodeStatus verifies pool health status mapping.
+func TestPoolNodeStatus(t *testing.T) {
+	t.Parallel()
+	poolHealth := map[string][]origin.TargetStatus{
+		"origin1": {
+			{Healthy: true},
+			{Healthy: true},
+		},
+		"origin2": {
+			{Healthy: false},
+		},
+	}
+	status, detail := poolNodeStatus("origin1", poolHealth)
+	assert.Equal(t, "healthy", status)
+	assert.NotEmpty(t, detail)
+
+	status2, detail2 := poolNodeStatus("origin2", poolHealth)
+	assert.Equal(t, "unhealthy", status2)
+	assert.NotEmpty(t, detail2)
+
+	// Unknown pool defaults to healthy.
+	status3, _ := poolNodeStatus("unknown", poolHealth)
+	assert.Equal(t, "healthy", status3)
+}
+
+// TestStorageTiers verifies the storage tier status mapping.
+func TestStorageTiers(t *testing.T) {
+	t.Parallel()
+	tiers := storageTiers(5000, 1000, api.Stats{HotBytes: 100, WarmBytes: 500})
+	assert.NotEmpty(t, tiers)
+}
+
+// TestStorageTiers_ZeroMax verifies zero max returns 0%.
+func TestStorageTiers_ZeroMax(t *testing.T) {
+	t.Parallel()
+	tiers := storageTiers(0, 0, api.Stats{})
+	assert.NotEmpty(t, tiers)
 }

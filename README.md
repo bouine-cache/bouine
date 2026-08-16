@@ -62,10 +62,10 @@ It targets the same problem space as a classic HTTP cache but is designed from d
 
 ```
                     ┌─────────────────────────────────────────┐
-  Client ──HTTP──►  │                 bouine                  │  ──►  Origin
+  Client ── HTTP──► │                 bouine                  │  ──►  Origin
                     │  ┌───────────┐   ┌───────────┐          │
-                    │  │ Hot tier  │   │ Warm tier  │          │
-                    │  │ (RAM)     │   │ (mmap disk)│          │
+                    │  │ Hot tier  │   │ Warm tier  │         │
+                    │  │ (RAM)     │   │ (mmap disk)│         │
                     │  └───────────┘   └───────────┘          │
                     │  ┌────────────────────────────┐         │
                     │  │ Cache engine (RFC 9111)    │         │
@@ -76,8 +76,8 @@ It targets the same problem space as a classic HTTP cache but is designed from d
                               │         │          │
                      ┌────────▼───┐     │     ┌────▼─────┐
                      │  peers     │◄────┘     │  Prom    │
-                     │ (cluster)  │          │  OTel    │
-                     └────────────┘          └──────────┘
+                     │ (cluster)  │           │  OTel    │
+                     └────────────┘           └──────────┘
 ```
 
 ---

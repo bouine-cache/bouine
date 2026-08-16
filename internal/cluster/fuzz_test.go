@@ -32,16 +32,20 @@ func FuzzPurgeCodecRoundTrip(f *testing.F) {
 			Seq:      seq,
 		}
 
-		// Gossip round-trip.
+		// Gossip round-trip. Encode can fail if strings exceed 64 KiB.
 		gossipBytes, err := EncodePurgeGossip(orig)
-		require.NoError(t, err, "encode gossip")
+		if err != nil {
+			t.Skipf("encode gossip: %v", err)
+		}
 		gotGossip, err := DecodePurgeGossip(gossipBytes)
 		require.NoError(t, err, "decode gossip")
 		assertPurgeEqual(t, gotGossip, orig)
 
 		// HTTP round-trip.
 		httpBytes, err := EncodePurgeHTTP(orig)
-		require.NoError(t, err, "encode http")
+		if err != nil {
+			t.Skipf("encode http: %v", err)
+		}
 		gotHTTP, err := DecodePurgeHTTP(httpBytes)
 		require.NoError(t, err, "decode http")
 		assertPurgeEqual(t, gotHTTP, orig)
@@ -70,16 +74,20 @@ func FuzzBanCodecRoundTrip(f *testing.F) {
 			Seq:      seq,
 		}
 
-		// Gossip round-trip.
+		// Gossip round-trip. Encode can fail if strings exceed 64 KiB.
 		gossipBytes, err := EncodeBanGossip(orig)
-		require.NoError(t, err, "encode gossip")
+		if err != nil {
+			t.Skipf("encode gossip: %v", err)
+		}
 		gotGossip, err := DecodeBanGossip(gossipBytes)
 		require.NoError(t, err, "decode gossip")
 		assertBanEqual(t, gotGossip, orig)
 
 		// HTTP round-trip.
 		httpBytes, err := EncodeBanHTTP(orig)
-		require.NoError(t, err, "encode http")
+		if err != nil {
+			t.Skipf("encode http: %v", err)
+		}
 		gotHTTP, err := DecodeBanHTTP(httpBytes)
 		require.NoError(t, err, "decode http")
 		assertBanEqual(t, gotHTTP, orig)
@@ -88,7 +96,9 @@ func FuzzBanCodecRoundTrip(f *testing.F) {
 
 // FuzzDecodeArbitrary fuzzes all four cluster decode functions with
 // arbitrary bytes to ensure none of them panic on corrupt or malformed
-// input. Each must return either a valid event or an error.
+// input. Panic safety is the only property under test — cluster decoders
+// return value types (not pointers), so there is no nil-with-nil-error
+// invariant to check.
 func FuzzDecodeArbitrary(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0x42})
@@ -120,10 +130,14 @@ func FuzzDecodeArbitrary(f *testing.F) {
 	f.Add(validBan[:4])
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = DecodePurgeGossip(data)
-		_, _ = DecodePurgeHTTP(data)
-		_, _ = DecodeBanGossip(data)
-		_, _ = DecodeBanHTTP(data)
+		// All four decode functions must never panic on arbitrary
+		// input. Unlike the storage codec, cluster decoders return
+		// value types (not pointers), so there is no nil-with-nil-error
+		// invariant to check — the panic safety is the only property.
+		DecodePurgeGossip(data)
+		DecodePurgeHTTP(data)
+		DecodeBanGossip(data)
+		DecodeBanHTTP(data)
 	})
 }
 

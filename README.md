@@ -13,6 +13,7 @@
   <a href="https://github.com/bouine-cache/bouine/releases/latest"><img src="https://img.shields.io/github/v/release/bouine-cache/bouine" alt="Latest Release"></a>
   <a href="https://hub.docker.com/r/bouinecache/bouine"><img src="https://img.shields.io/docker/pulls/bouinecache/bouine" alt="Docker Pulls"></a>
   <a href="https://hub.docker.com/r/bouinecache/bouine"><img src="https://img.shields.io/docker/v/bouinecache/bouine?logoColor=blue&color=blue" alt="Docker"></a>
+  <a href="https://hub.docker.com/r/bouinecache/bouine/tags"><img src="https://img.shields.io/docker/image-size/bouinecache/bouine" alt="Docker Image Size"></a>
   <a href="https://artifacthub.io/packages/helm/bouine/bouine"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/bouine" alt="Artifact Hub"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
   <a href="https://www.bestpractices.dev/projects/14035"><img src="https://www.bestpractices.dev/projects/14035/badge" alt="OpenSSF Best Practices"></a>

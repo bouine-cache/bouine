@@ -1,0 +1,24 @@
+# Fuzz corpus for internal/cluster fuzz targets.
+# Each entry corresponds to a Go fuzz seed added via f.Add() in fuzz_test.go.
+# The corpus is committed to satisfy AGENTS.md §8: "At least one corpus
+# per fuzzer committed under testdata/fuzz/."
+#
+# FuzzPurgeCodecRoundTrip seeds:
+# - normal purge event
+# - empty VaryKey
+# - empty issuer
+# - max uint64 seq
+#
+# FuzzBanCodecRoundTrip seeds:
+# - ban with host and path regexes
+# - ban with surrogate key only
+# - ban with empty fields
+# - max uint64 seq
+#
+# FuzzDecodeArbitrary seeds:
+# - empty, truncated frames
+# - wrong magic byte (0x00 instead of 0x42)
+# - wrong version byte
+# - wrong msgType byte
+# - valid purge/ban frames with trailing garbage
+# - random bytes

@@ -1,0 +1,36 @@
+# Fuzz corpus for internal/cache fuzz targets.
+# Each entry corresponds to a Go fuzz seed added via f.Add() in fuzz_test.go.
+# The corpus is committed to satisfy AGENTS.md §8: "At least one corpus
+# per fuzzer committed under testdata/fuzz/."
+#
+# FuzzBuildKey seeds:
+# - normal GET with query params
+# - HEAD method (tests HEAD→GET normalization)
+# - uppercase host (tests case-insensitive canonicalization)
+# - default ports (:80, :443) (tests port stripping)
+# - duplicate slashes in path (tests slash collapsing)
+# - empty path (tests default-to-slash)
+# - duplicate query params (tests dedup logic)
+# - empty inputs
+#
+# FuzzParseCacheControl seeds:
+# - standard directives: no-cache, no-store, max-age, s-maxage
+# - SWR/SIE directives
+# - quoted values: no-cache="Set-Cookie"
+# - empty, commas only, garbage
+# - overflow values
+#
+# FuzzVariantKey seeds:
+# - single Vary field
+# - multiple Vary fields (tests sorting)
+# - reversed field order (tests commutativity)
+# - Vary:* (tests unmatchable short-circuit)
+# - empty Vary (tests no-op)
+# - comma-separated header values (tests normalization)
+#
+# FuzzEvaluate seeds:
+# - fresh hit, stale, stale-with-SWR, stale-with-SIE
+# - no-cache, no-store, must-revalidate
+# - max-age, max-stale, min-fresh request directives
+# - only-if-cached
+# - immutable

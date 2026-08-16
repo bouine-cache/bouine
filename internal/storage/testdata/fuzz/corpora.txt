@@ -1,0 +1,20 @@
+# Fuzz corpus for internal/storage fuzz targets.
+# Each entry corresponds to a Go fuzz seed added via f.Add() in fuzz_test.go.
+# The corpus is committed to satisfy AGENTS.md §8: "At least one corpus
+# per fuzzer committed under testdata/fuzz/."
+#
+# FuzzCodecRoundTrip seeds:
+# - 200 OK with normal body and headers
+# - 404 with empty body
+# - 301 redirect with no-cache
+# - 500 with null bytes in body
+# - 200 with large body (exercises heap path)
+# - 204 No Content (empty body)
+#
+# FuzzDecodeObjectArbitrary seeds:
+# - empty bytes
+# - single version byte
+# - truncated valid blob
+# - wrong version byte (0xFE)
+# - random text
+# - valid blob with trailing garbage

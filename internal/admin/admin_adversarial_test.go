@@ -407,6 +407,27 @@ func TestAdversarial_UnicodeBanRegex(t *testing.T) {
 	require.Equal(t, "^/商品/.*", gotExpr.PathRegex)
 }
 
+// TestAdversarial_SurrogateKeyWithRegexChars verifies that a
+// surrogate_key containing regex metacharacters is treated as a
+// literal string, not rejected as invalid regex. Only host_regex and
+// path_regex are validated as regex; surrogate_key is an exact match.
+func TestAdversarial_SurrogateKeyWithRegexChars(t *testing.T) {
+	t.Parallel()
+	var gotExpr api.BanExpr
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		BanFn: func(expr api.BanExpr) (int, error) {
+			gotExpr = expr
+			return 1, nil
+		},
+	})
+	body := `{"surrogate_key":"product-.*\\.html"}`
+	code, _ := postWithToken(t, s, "/v1/ban", body)
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, "product-.*\\.html", gotExpr.SurrogateKey)
+}
+
 // TestAdversarial_NULByteInURL verifies that a NUL byte in the URL
 // field is handled without crashing. The JSON decoder accepts NUL
 // bytes inside strings (\u0000); the purge handler passes the string
@@ -483,11 +504,11 @@ func TestAdversarial_WrongMethod(t *testing.T) {
 
 // --- adversarial deep-nesting / structure tests ---
 
-// TestAdversarial_DeeplyNestedJSON verifies that deeply nested JSON
-// (500 levels of {"a":{...}}) does not cause a stack overflow.
-// Go's encoding/json has a recursion limit; the body limit middleware
-// provides a second defence layer. The nested object is assigned to
-// an unknown field so the handler rejects it with 400 after decoding.
+// TestAdversarial_DeeplyNestedJSON verifies that a large JSON body
+// containing a deeply nested object under an unknown field is rejected
+// with 400. DisallowUnknownFields catches the unknown "x" key at the
+// top level before parsing the nested content. The test confirms the
+// handler does not panic or hang on a large, complex body.
 func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 	t.Parallel()
 	s := New(Config{
@@ -506,9 +527,6 @@ func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 	}
 	sb.WriteString(`}`)
 	code, _ := postWithToken(t, s, "/v1/purge", sb.String())
-	// DisallowUnknownFields rejects the unknown "x" key with 400.
-	// The point is that the decoder does not stack-overflow on the
-	// 500-level nesting before reaching the unknown-field check.
 	require.Equal(t, http.StatusBadRequest, code)
 }
 

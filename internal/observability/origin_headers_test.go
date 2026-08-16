@@ -81,3 +81,10 @@ func TestOriginHeaderRing_Concurrent(t *testing.T) {
 	s := audit["p"]
 	assert.Equal(t, int64(1000), s.SampleCount)
 }
+
+func TestTruncate(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "short", truncate("short", 256))
+	assert.Equal(t, "ab", truncate("abcdef", 2))
+	assert.Equal(t, "", truncate("", 10))
+}

@@ -142,3 +142,48 @@ func TestNoopLogger_AllMethods(t *testing.T) {
 	l.Error("test")
 	l.Debug("test")
 }
+
+// TestSampledLogger_WarnNeverSampled verifies Warn is never sampled.
+func TestSampledLogger_WarnNeverSampled(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	base := slog.New(slog.NewTextHandler(&buf, nil))
+	l := NewSampledLogger(base, 2) // 1-in-2 sampling
+	l.Warn("warn-msg", "key", "val")
+	assert.Contains(t, buf.String(), "warn-msg")
+}
+
+// TestSampledLogger_ErrorNeverSampled verifies Error is never sampled.
+func TestSampledLogger_ErrorNeverSampled(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	base := slog.New(slog.NewTextHandler(&buf, nil))
+	l := NewSampledLogger(base, 2)
+	l.Error("error-msg", "key", "val")
+	assert.Contains(t, buf.String(), "error-msg")
+}
+
+// TestSampledLogger_DebugNeverSampled verifies Debug is never sampled.
+func TestSampledLogger_DebugNeverSampled(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	base := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	l := NewSampledLogger(base, 2)
+	l.Debug("debug-msg", "key", "val")
+	assert.Contains(t, buf.String(), "debug-msg")
+}
+
+// TestSampledLogger_InfoZeroRateAlwaysLogs verifies that sampleRate=0
+// disables sampling — every Info call is logged.
+func TestSampledLogger_InfoZeroRateAlwaysLogs(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	base := slog.New(slog.NewTextHandler(&buf, nil))
+	l := NewSampledLogger(base, 0)
+	for i := range 10 {
+		l.Info("msg", "key", testkey.Key(uint64(i)))
+	}
+	// All 10 should be logged — count newlines.
+	lines := bytes.Count(buf.Bytes(), []byte{'\n'})
+	assert.Equal(t, 10, lines)
+}

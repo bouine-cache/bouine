@@ -638,6 +638,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		ConditionsFn:       conditionsFn,
 		DrainFn:            drainFn,
 		MaxBatchSize:       e.cfg.Admin.MaxBatchSize,
+		MaxBodyBytes:       e.cfg.Admin.MaxBodyBytes,
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
 		PprofEnabled:       e.cfg.Admin.PprofEnabled,
 		OnPurged:           rs.cfProp.PropagateForPurge,

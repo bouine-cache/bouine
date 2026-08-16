@@ -3,7 +3,6 @@ package admin
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -429,10 +428,14 @@ func TestAdversarial_SurrogateKeyWithRegexChars(t *testing.T) {
 }
 
 // TestAdversarial_NULByteInURL verifies that a NUL byte in the URL
-// field is handled without crashing. The JSON decoder accepts NUL
-// bytes inside strings (\u0000); the purge handler passes the string
-// to BuildKeyFromURL which should handle it gracefully. The URL is
-// non-empty so the handler returns 200.
+// field does not crash the server. The JSON decoder accepts NUL bytes
+// inside strings (\u0000); the purge handler does not validate URL
+// content beyond checking for non-empty, so it passes the string to
+// BuildKeyFromURL. The resulting key will never match a real cached
+// object (HTTP parsers reject NUL bytes in request lines), making
+// this a silent no-op purge. The test asserts 200 to document the
+// current behaviour: the admin layer defers URL validation to
+// BuildKeyFromURL, which produces a key for any non-empty string.
 func TestAdversarial_NULByteInURL(t *testing.T) {
 	t.Parallel()
 	s := New(Config{
@@ -531,9 +534,11 @@ func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 }
 
 // TestAdversarial_BatchWithNullURLs verifies that a batch purge
-// containing null entries in the URLs array is handled without
-// crashing. null entries decode as empty strings in a []string slice;
-// the handler treats them as valid (zero-key) purges.
+// containing null entries in the URLs array is rejected with 400.
+// null entries decode as empty strings in a []string slice; the
+// handler rejects them consistently with the single-purge endpoint,
+// which requires a non-empty url field. Allowing empty entries would
+// purge a zero key (api.Key{}) — a silent no-op at best.
 func TestAdversarial_BatchWithNullURLs(t *testing.T) {
 	t.Parallel()
 	var purgeCalls atomic.Int64
@@ -547,11 +552,6 @@ func TestAdversarial_BatchWithNullURLs(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/",null,"https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	require.Equal(t, http.StatusOK, code)
-	// All 3 entries (including null→"") are purged.
-	require.Equal(t, int64(3), purgeCalls.Load(), "all 3 entries must be purged")
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(respBody, &resp), "unmarshal response")
-	require.Equal(t, float64(3), resp["count"], "count must be 3")
-	require.Equal(t, float64(0), resp["failed"], "failed must be 0")
+	require.Equal(t, http.StatusBadRequest, code, "body: %s", respBody)
+	require.Equal(t, int64(0), purgeCalls.Load(), "no entries must be purged when the batch contains a null")
 }

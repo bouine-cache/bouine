@@ -626,6 +626,10 @@ type AdminConfig struct {
 	// POST /v1/purge/batch request. Zero (default) applies a safe
 	// built-in limit (1000).
 	MaxBatchSize int `yaml:"max_batch_size,omitempty" json:"max_batch_size,omitempty"`
+	// MaxBodyBytes caps the request body for admin write endpoints
+	// (POST). Zero (default) applies a 1 MiB limit, matching the peer
+	// RPC request body limit in internal/cluster/handlers.go.
+	MaxBodyBytes int `yaml:"max_body_bytes,omitempty" json:"max_body_bytes,omitempty"`
 	// RateLimitPerSecond caps the number of write requests per second
 	// on the admin API. Zero (default) disables rate limiting.
 	RateLimitPerSecond int `yaml:"rate_limit_per_second,omitempty" json:"rate_limit_per_second,omitempty"`

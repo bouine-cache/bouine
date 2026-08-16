@@ -464,6 +464,17 @@ func (s *Server) purgeBatch(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Reject empty or null entries. A null in the JSON array decodes
+	// to "" in a []string; the single-purge handler rejects empty URLs,
+	// and batch must be consistent with that. Allowing empty entries
+	// would purge a zero key (api.Key{}) — a silent no-op at best, a
+	// correctness bug at worst.
+	for _, urlStr := range req.URLs {
+		if urlStr == "" {
+			http.Error(w, "bad request: urls must not contain empty or null entries", http.StatusBadRequest)
+			return
+		}
+	}
 	purged := 0
 	failed := 0
 	for _, urlStr := range req.URLs {

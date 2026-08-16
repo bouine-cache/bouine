@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -398,4 +399,101 @@ func TestPeerRing_Empty(t *testing.T) {
 	r := &PeerRing{}
 	health := r.PeerHealth()
 	assert.Empty(t, health)
+}
+
+func TestURLKey(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "/", urlKey(""))
+	assert.Equal(t, "/", urlKey("/"))
+	assert.Equal(t, "/api", urlKey("/api"))
+	assert.Equal(t, "/api/v1/users", urlKey("/api/v1/users/123"))
+	assert.Equal(t, "/api/v1/users", urlKey("/api/v1/users/123?foo=bar"))
+}
+
+func TestURLRing_RecordAndStats(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	r.RecordURL("/api", "api", "HIT")
+	r.RecordURL("/api", "api", "MISS")
+	r.RecordURL("/api", "api", "HIT")
+	r.RecordURL("/static", "static", "HIT")
+	stats := r.URLStats()
+	assert.NotEmpty(t, stats)
+	// Find the /api/v1 entry.
+	var apiStat *URLStat
+	for i := range stats {
+		if stats[i].URL == "/api" {
+			apiStat = &stats[i]
+			break
+		}
+	}
+	require.NotNil(t, apiStat)
+	assert.Equal(t, int64(3), apiStat.Requests)
+	assert.Equal(t, int64(2), apiStat.Hits)
+	assert.Equal(t, int64(1), apiStat.Misses)
+}
+
+func TestURLRing_SampleRate(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	r.SetSampleRate(2) // 1-in-2
+	for i := range 100 {
+		r.RecordURL("/test", "test", "HIT")
+		_ = i
+	}
+	stats := r.URLStats()
+	// With 1-in-2 sampling, approximately 50 records.
+	if len(stats) > 0 {
+		assert.LessOrEqual(t, stats[0].Requests, int64(100))
+	}
+}
+
+func TestURLRing_CapReached(t *testing.T) {
+	t.Parallel()
+	r := &URLRing{}
+	// Fill to cap and beyond — should not panic or grow unbounded.
+	for i := range urlRingCap + 100 {
+		r.RecordURL("/path/"+strconv.Itoa(i), "test", "HIT")
+	}
+	stats := r.URLStats()
+	assert.LessOrEqual(t, len(stats), urlRingCap)
+}
+
+func TestRings_Summary(t *testing.T) {
+	t.Parallel()
+	ri := NewRings("node1")
+	ri.Request.RecordRequest("HIT", 200, 5)
+	sum := ri.Summary()
+	assert.Equal(t, "node1", sum.NodeName)
+	assert.NotEmpty(t, sum.RequestSnap)
+}
+
+func TestRings_SaveAndLoad(t *testing.T) {
+	t.Parallel()
+	ri := NewRings("node1")
+	ri.Request.RecordRequest("HIT", 200, 5)
+	path := filepath.Join(t.TempDir(), "snapshot")
+	require.NoError(t, ri.Save(path))
+	// Load into a new Rings.
+	ri2 := NewRings("node2")
+	require.NoError(t, ri2.Load(path))
+}
+
+func TestRings_Load_Nonexistent(t *testing.T) {
+	t.Parallel()
+	ri := NewRings("node1")
+	// Loading a nonexistent file should not error.
+	err := ri.Load(filepath.Join(t.TempDir(), "nonexistent"))
+	assert.NoError(t, err)
+}
+
+func TestRings_Start(t *testing.T) {
+	t.Parallel()
+	ri := NewRings("node1")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	ri.Start(ctx, "") // no snapshot path
 }

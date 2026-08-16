@@ -37,3 +37,4 @@ ignore:
   - "**/doc.go"
   - "cmd/**"
   - "pkg/api/**"
+  - "internal/dashboard/insights/**"

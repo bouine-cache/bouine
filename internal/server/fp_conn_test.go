@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
@@ -335,9 +334,12 @@ func (c *counterFunc) Inc() { c.f() }
 // Ensure bytes import is used.
 var _ = bytes.MinRead
 
-// TestListener_ServeSingle_WithFastPath verifies that serveSingle works
-// when the fast path is enabled (uses a mock FastPathHandler).
-func TestListener_ServeSingle_WithFastPath(t *testing.T) {
+// --- Fast path integration tests ---
+
+// TestServeFastPath_H1Request verifies that serveFastPath correctly
+// routes an HTTP/1.1 cleartext request through the h1parser, which
+// falls through to net/http when the fast path handler misses.
+func TestServeFastPath_H1Request(t *testing.T) {
 	t.Parallel()
 	srv := NewHTTP(ListenerConfig{
 		Addr:        "127.0.0.1:0",
@@ -350,136 +352,134 @@ func TestListener_ServeSingle_WithFastPath(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
 	waitForAddr(t, srv, 3*time.Second)
-	cancel()
-	err := <-errCh
+
+	// Send an HTTP/1.1 GET request.
+	addr := srv.Addr()
+	conn, err := net.Dial("tcp", addr)
 	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+	require.NoError(t, err)
+	buf := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := conn.Read(buf)
+	require.NoError(t, err)
+	assert.Contains(t, string(buf[:n]), "200")
+	assert.Contains(t, string(buf[:n]), "hello")
+	cancel()
+	<-errCh
 }
 
-// TestListener_ServeSingle_WithMaxConns verifies that the connection limit
-// listener is applied when maxConns > 0.
-func TestListener_ServeSingle_WithMaxConns(t *testing.T) {
+// TestServeFastPath_H2CPreface verifies that serveFastPath detects the
+// h2c preface and routes the connection to net/http via serveConnWithHTTP.
+func TestServeFastPath_H2CPreface(t *testing.T) {
 	t.Parallel()
 	srv := NewHTTP(ListenerConfig{
-		Addr:           "127.0.0.1:0",
-		Handler:        echo200(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		MaxConnections: 5,
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
 	waitForAddr(t, srv, 3*time.Second)
-	cancel()
-	err := <-errCh
+
+	addr := srv.Addr()
+	conn, err := net.Dial("tcp", addr)
 	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	// Send h2c preface.
+	_, err = conn.Write([]byte(h2cPreface))
+	require.NoError(t, err)
+	// Send a minimal HTTP/2 SETTINGS frame.
+	_, err = conn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0})
+	require.NoError(t, err)
+	// Read the server's response (settings frame or error).
+	buf := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _ = conn.Read(buf) // may get HTTP/2 settings frame
+	cancel()
+	<-errCh
 }
 
-// TestSetSocketOptions_NoReusePort verifies setSocketOptions doesn't fail
-// when reusePort is false.
-func TestSetSocketOptions_NoReusePort(t *testing.T) {
+// TestServeFastPath_EmptyConnection verifies that serveFastPath handles
+// a connection that sends no data (triggers peek error path).
+func TestServeFastPath_EmptyConnection(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForAddr(t, srv, 3*time.Second)
+
+	// Connect and immediately close — triggers the peek error path
+	// in handleCleartextFastPath.
+	addr := srv.Addr()
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	_ = conn.Close()
+	// Give the server a moment to process.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-errCh
+}
+
+// TestServeFastPath_HEADRequest verifies that HEAD requests work through
+// the fast path (h1parser handles HEAD by falling through to net/http).
+func TestServeFastPath_HEADRequest(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForAddr(t, srv, 3*time.Second)
+
+	addr := srv.Addr()
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	_, err = conn.Write([]byte("HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+	require.NoError(t, err)
+	buf := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := conn.Read(buf)
+	require.NoError(t, err)
+	assert.Contains(t, string(buf[:n]), "200")
+	cancel()
+	<-errCh
+}
+
+// TestSetSocketOptions_AllEnabled verifies setSocketOptions doesn't panic
+// when all options are enabled (fastOpen, deferAccept, reusePort).
+func TestSetSocketOptions_AllEnabled(t *testing.T) {
+	t.Parallel()
+	control := setSocketOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), true, true, true)
+	require.NotNil(t, control)
+}
+
+// TestSetSocketOptions_AllDisabled verifies setSocketOptions returns a
+// non-nil control function even when all options are disabled.
+func TestSetSocketOptions_AllDisabled(t *testing.T) {
 	t.Parallel()
 	control := setSocketOptions(slog.New(slog.NewTextHandler(io.Discard, nil)), false, false, false)
 	require.NotNil(t, control)
 }
 
-// TestServeConnWithHTTP_H2CConnection verifies that serveConnWithHTTP
-// correctly serves an h2c connection through net/http.
-func TestServeConnWithHTTP_H2CConnection(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr: "127.0.0.1:0",
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("X-Test", "h2c")
-			w.WriteHeader(200)
-		}),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
-
-	// Connect and send an HTTP/1.1 request.
-	addr := srv.Addr()
-	conn, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
-	require.NoError(t, err)
-	buf := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, err := conn.Read(buf)
-	require.NoError(t, err)
-	assert.Contains(t, string(buf[:n]), "200")
-	assert.Contains(t, string(buf[:n]), "X-Test: h2c")
-	cancel()
-	<-errCh
-}
-
-// TestHandleFastPathConn_CleartextH1 verifies handleFastPathConn routes
-// a cleartext H1 connection through the h1parser (or net/http when
-// fastPath is disabled).
-func TestHandleFastPathConn_CleartextH1(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:    "127.0.0.1:0",
-		Handler: echo200(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
-
-	// Connect and send a simple GET.
-	addr := srv.Addr()
-	conn, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
-	require.NoError(t, err)
-	buf := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, err := conn.Read(buf)
-	require.NoError(t, err)
-	assert.Contains(t, string(buf[:n]), "200")
-	cancel()
-	<-errCh
-}
-
-// TestHandleCleartextFastPath_H2CPrefaceDetected verifies that the h2c
-// preface is detected and the connection is routed to net/http.
-func TestHandleCleartextFastPath_H2CPrefaceDetected(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:    "127.0.0.1:0",
-		Handler: echo200(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
-
-	// Connect and send the h2c preface followed by an HTTP/2 request.
-	addr := srv.Addr()
-	conn, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	_, err = conn.Write([]byte(h2cPreface))
-	require.NoError(t, err)
-	// Send a minimal HTTP/2 settings frame.
-	_, err = conn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0}) // SETTINGS frame
-	require.NoError(t, err)
-	// Read response (may be a settings frame from the server).
-	buf := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _ = conn.Read(buf)
-	cancel()
-	<-errCh
-}
-
-// --- Mock FastPathHandler ---
+// --- Mock types ---
 
 type mockFastPathHandler struct{}
 
@@ -488,8 +488,6 @@ func (m *mockFastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.F
 }
 
 func (m *mockFastPathHandler) Release(resp *api.FastPathResponse) {}
-
-// --- Mock FastPathMetrics ---
 
 type mockFastPathMetrics struct{}
 

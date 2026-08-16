@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,9 +14,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -141,12 +142,12 @@ func TestAdversarial_MalformedJSON_AllEndpoints(t *testing.T) {
 // value, which is the standard behaviour.
 func TestAdversarial_JSONDuplicateFields(t *testing.T) {
 	t.Parallel()
-	var purgedURL string
+	var purgedKey api.Key
 	s := New(Config{
 		Token:  "secret",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(key api.Key) error {
-			purgedURL = string(key[:])
+			purgedKey = key
 			return nil
 		},
 	})
@@ -154,7 +155,8 @@ func TestAdversarial_JSONDuplicateFields(t *testing.T) {
 	code, _ := postWithToken(t, s, "/v1/purge", body)
 	require.Equal(t, http.StatusOK, code)
 	// Go's json decoder uses the last value for duplicate keys.
-	require.NotEqual(t, "https://first.com/", purgedURL)
+	expectedKey := cache.BuildKeyFromURL("https://second.com/", nil)
+	require.Equal(t, expectedKey, purgedKey, "purge must use the last URL when keys are duplicated")
 }
 
 // --- adversarial oversized payload tests ---
@@ -412,8 +414,9 @@ func TestAdversarial_UnicodeBanRegex(t *testing.T) {
 
 // TestAdversarial_NULByteInURL verifies that a NUL byte in the URL
 // field is handled without crashing. The JSON decoder accepts NUL
-// bytes inside strings; the purge handler passes the string to
-// BuildKeyFromURL which should handle it gracefully.
+// bytes inside strings (\u0000); the purge handler passes the string
+// to BuildKeyFromURL which should handle it gracefully. The URL is
+// non-empty so the handler returns 200.
 func TestAdversarial_NULByteInURL(t *testing.T) {
 	t.Parallel()
 	s := New(Config{
@@ -424,10 +427,7 @@ func TestAdversarial_NULByteInURL(t *testing.T) {
 	// JSON string with an embedded NUL byte (\u0000).
 	body := `{"url":"https://example.com/\u0000path"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	// We don't assert a specific status code — the point is that the
-	// server does not panic or hang. 200 or 400 are both acceptable.
-	assert.True(t, code == http.StatusOK || code == http.StatusBadRequest,
-		"expected 200 or 400, got %d", code)
+	require.Equal(t, http.StatusOK, code)
 }
 
 // --- adversarial edge cases on empty / whitespace bodies ---
@@ -512,7 +512,8 @@ func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 
 // TestAdversarial_BatchWithNullURLs verifies that a batch purge
 // containing null entries in the URLs array is handled without
-// crashing.
+// crashing. null entries decode as empty strings in a []string slice;
+// the handler treats them as valid (zero-key) purges.
 func TestAdversarial_BatchWithNullURLs(t *testing.T) {
 	t.Parallel()
 	var purgeCalls atomic.Int64
@@ -526,10 +527,11 @@ func TestAdversarial_BatchWithNullURLs(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/",null,"https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	// null entries decode as empty strings. BuildKeyFromURL on an
-	// empty string may produce a zero key; the handler does not
-	// validate individual URLs in the batch. The response should
-	// still be 200 with a count.
 	require.Equal(t, http.StatusOK, code)
-	require.True(t, bytes.Contains(respBody, []byte(`"count":`)))
+	// All 3 entries (including null→"") are purged.
+	require.Equal(t, int64(3), purgeCalls.Load(), "all 3 entries must be purged")
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(respBody, &resp), "unmarshal response")
+	require.Equal(t, float64(3), resp["count"], "count must be 3")
+	require.Equal(t, float64(0), resp["failed"], "failed must be 0")
 }

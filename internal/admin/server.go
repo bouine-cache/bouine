@@ -634,9 +634,9 @@ func (s *Server) rateLimitMiddleware(next http.Handler, perSecond int) http.Hand
 // bodyLimitMiddleware caps the request body for POST requests at
 // maxBytes. GET requests (probes, reads) are never limited here. When
 // the limit is exceeded the underlying http.MaxBytesReader causes
-// json.Decode to return an error that the handler maps to 413 via
-// writeBodyTooLarge. The middleware replaces r.Body so handlers
-// downstream see the limited reader transparently.
+// json.Decode to return a *http.MaxBytesError, which decodeJSON maps
+// to 413. The middleware replaces r.Body so handlers downstream see
+// the limited reader transparently.
 func (s *Server) bodyLimitMiddleware(next http.Handler, maxBytes int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil && r.Method == http.MethodPost {

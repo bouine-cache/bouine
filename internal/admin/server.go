@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -54,6 +55,11 @@ type Config struct {
 	Token string
 	// MaxBatchSize caps URLs per POST /v1/purge/batch. Zero = 1000.
 	MaxBatchSize int
+	// MaxBodyBytes caps the request body for write endpoints (POST).
+	// Zero defaults to 1 MiB, matching the peer RPC limit in
+	// internal/cluster/handlers.go. Enforced via http.MaxBytesReader
+	// so oversized bodies fail fast with 413 instead of being buffered.
+	MaxBodyBytes int
 	// RateLimitPerSecond caps write requests per second. Zero = unlimited.
 	RateLimitPerSecond int
 	// RefreshFn, if non-nil, handles soft-purge (refresh) requests.
@@ -234,6 +240,11 @@ func New(cfg Config) *Server {
 	s.mountOptionalRoutes(mux, cfg)
 
 	topHandler := s.authMiddleware(mux)
+	maxBody := cfg.MaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = 1 << 20 // 1 MiB, matching internal/cluster/handlers.go
+	}
+	topHandler = s.bodyLimitMiddleware(topHandler, maxBody)
 	if cfg.RateLimitPerSecond > 0 {
 		topHandler = s.rateLimitMiddleware(topHandler, cfg.RateLimitPerSecond)
 	}
@@ -412,10 +423,7 @@ func (s *Server) purge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.URL == "" {
@@ -441,10 +449,7 @@ func (s *Server) purgeBatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URLs []string `json:"urls"`
 	}
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if len(req.URLs) == 0 {
@@ -485,15 +490,28 @@ func (s *Server) authCheck(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) ban(w http.ResponseWriter, r *http.Request) {
 	var expr api.BanExpr
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&expr); err != nil {
-		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &expr) {
 		return
 	}
 	if expr.HostRegex == "" && expr.PathRegex == "" && expr.SurrogateKey == "" {
 		http.Error(w, "bad request: at least one of host_regex, path_regex, or surrogate_key is required", http.StatusBadRequest)
 		return
+	}
+	// Validate regex syntax before passing to BanFn. This is a syntax
+	// gate only — the storage layer remains the authority on which
+	// patterns are semantically acceptable. Catching syntax errors here
+	// avoids storing a ban that would panic on every cache lookup.
+	if expr.HostRegex != "" {
+		if _, err := regexp.Compile(expr.HostRegex); err != nil {
+			http.Error(w, "bad request: invalid host_regex: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if expr.PathRegex != "" {
+		if _, err := regexp.Compile(expr.PathRegex); err != nil {
+			http.Error(w, "bad request: invalid path_regex: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	count, err := s.cfg.BanFn(expr)
 	if err != nil {
@@ -510,10 +528,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.URL == "" {
@@ -616,6 +631,21 @@ func (s *Server) rateLimitMiddleware(next http.Handler, perSecond int) http.Hand
 	})
 }
 
+// bodyLimitMiddleware caps the request body for POST requests at
+// maxBytes. GET requests (probes, reads) are never limited here. When
+// the limit is exceeded the underlying http.MaxBytesReader causes
+// json.Decode to return an error that the handler maps to 413 via
+// writeBodyTooLarge. The middleware replaces r.Body so handlers
+// downstream see the limited reader transparently.
+func (s *Server) bodyLimitMiddleware(next http.Handler, maxBytes int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // authMiddleware enforces bearer token authentication on all
 // requests except paths in the exempt map and (when enabled) pprof
 // endpoints matched by the prefix check below. Exempt paths include
@@ -698,6 +728,28 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set(header.ContentType, "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// decodeJSON decodes a JSON request body into v. It maps the
+// http.MaxBytesError (raised by http.MaxBytesReader when the body
+// exceeds MaxBodyBytes) to 413 and all other decode errors to 400.
+// Returns false if the response has already been written; the caller
+// must return immediately.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": "request body too large",
+			})
+		} else {
+			http.Error(w, "bad request: invalid or malformed JSON", http.StatusBadRequest)
+		}
+		return false
+	}
+	return true
 }
 
 // CloudflareStatus is returned by GET /v1/cloudflare/status.

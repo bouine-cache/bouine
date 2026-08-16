@@ -1,12 +1,14 @@
 package dashboard
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 func TestSortRouteStats(t *testing.T) {
@@ -160,4 +162,161 @@ func TestEncodeJSON_Nil(t *testing.T) {
 	b, err := EncodeJSON(nil)
 	require.NoError(t, err)
 	assert.Equal(t, "null\n", string(b))
+}
+
+func TestParseTimeRange(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input   string
+		buckets int
+		label   string
+	}{
+		{"1h", 360, "1h"},
+		{"24h", 2160, "24h"},
+		{"", 2160, "6h"},
+		{"invalid", 2160, "6h"},
+	}
+	for _, tt := range tests {
+		buckets, label := parseTimeRange(tt.input)
+		assert.Equal(t, tt.buckets, buckets)
+		assert.Equal(t, tt.label, label)
+	}
+}
+
+func TestLatHistToInts(t *testing.T) {
+	t.Parallel()
+	h := observability.LatencyHistogram{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0}
+	ints := latHistToInts(h)
+	assert.Equal(t, []int64{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0}, ints)
+}
+
+func TestBuildOverviewStats(t *testing.T) {
+	t.Parallel()
+	snap := []observability.RequestBucket{
+		{Timestamp: 1, Requests: 10, Hits: 8, Misses: 1, Errors: 1, P99MS: 50},
+		{Timestamp: 2, Requests: 20, Hits: 15, Misses: 3, Errors: 2, P99MS: 80},
+		{Timestamp: 3, Requests: 15, Hits: 12, Misses: 2, Errors: 1, P99MS: 60},
+		{Timestamp: 4, Requests: 25, Hits: 20, Misses: 4, Errors: 1, P99MS: 90},
+		{Timestamp: 5, Requests: 30, Hits: 25, Misses: 4, Errors: 1, P99MS: 70},
+		{Timestamp: 6, Requests: 20, Hits: 18, Misses: 1, Errors: 1, P99MS: 55},
+	}
+	stats := buildOverviewStats(snap, len(snap))
+	// Recent window is last 6 buckets: 10+20+15+25+30+20 = 120.
+	assert.Equal(t, int64(120), stats.totalReq)
+	assert.Greater(t, stats.hitPct, 0.0)
+}
+
+func TestBuildOverviewStats_Empty(t *testing.T) {
+	t.Parallel()
+	stats := buildOverviewStats(nil, 0)
+	assert.Equal(t, int64(0), stats.totalReq)
+}
+
+func TestToPeerResultsEnriched(t *testing.T) {
+	t.Parallel()
+	in := []PeerResult{
+		{NodeName: "node1", Summary: observability.MetricsSummary{NodeName: "node1"}, Stale: false},
+		{NodeName: "node2", Summary: observability.MetricsSummary{NodeName: "node2"}, Stale: true},
+	}
+	peersFn := func() []api.PeerInfo {
+		return []api.PeerInfo{
+			{Name: "node1", DataAddr: "1.1.1.1:8080", AdminAddr: "1.1.1.1:9090", Weight: 1},
+			{Name: "node2", DataAddr: "2.2.2.2:8080", AdminAddr: "2.2.2.2:9090", Weight: 2},
+		}
+	}
+	out := toPeerResultsEnriched(in, peersFn)
+	assert.Equal(t, 2, len(out))
+	assert.Equal(t, "1.1.1.1:8080", out[0].DataAddr)
+	assert.Equal(t, "2.2.2.2:8080", out[1].DataAddr)
+	assert.True(t, out[1].Stale)
+}
+
+func TestToPeerResultsEnriched_NilPeersFn(t *testing.T) {
+	t.Parallel()
+	in := []PeerResult{{NodeName: "node1"}}
+	out := toPeerResultsEnriched(in, nil)
+	assert.Equal(t, 1, len(out))
+	assert.Equal(t, "node1", out[0].NodeName)
+	assert.Empty(t, out[0].DataAddr)
+}
+
+func TestNew_CreatesHandler(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	h := New(Config{
+		Token: "test-token",
+	}, mux)
+	require.NotNil(t, h)
+	require.NotNil(t, h.auth)
+}
+
+func TestHandler_NodeName(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	assert.Equal(t, "unknown", h.nodeName())
+}
+
+func TestHandler_NodeName_WithRings(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{Rings: observability.NewRings("my-node")}}
+	assert.Equal(t, "my-node", h.nodeName())
+}
+
+func TestHandler_SidebarProps_NoRings(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	reqs, hitPct, peerCount, live := h.sidebarProps("6h")
+	assert.Equal(t, 0.0, reqs)
+	assert.Equal(t, 0.0, hitPct)
+	assert.Equal(t, 1, peerCount)
+	assert.Equal(t, 1, live)
+}
+
+func TestHandler_SidebarProps_WithPeersFn(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{
+		PeersFn: func() []api.PeerInfo {
+			return []api.PeerInfo{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+		},
+	}}
+	_, _, peerCount, live := h.sidebarProps("6h")
+	assert.Equal(t, 3, peerCount)
+	assert.Equal(t, 3, live)
+}
+
+func TestHandler_CFStatusCard_Nil(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	assert.Nil(t, h.cfStatusCard())
+}
+
+func TestHandler_StoreStats_NoStoreFn(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	hotBytes, _, _, _, _, _, _ := h.storeStats()
+	assert.Equal(t, int64(0), hotBytes)
+}
+
+func TestHandler_BuildRouteToPool_NoConfig(t *testing.T) {
+	t.Parallel()
+	h := &Handler{cfg: Config{}}
+	m := h.buildRouteToPool()
+	assert.Empty(t, m)
+}
+
+func TestValidateRegex_Empty(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "", validateRegex("field", ""))
+}
+
+func TestValidateRegex_Valid(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "", validateRegex("field", "^/api/.*$"))
+}
+
+func TestValidateRegex_Invalid(t *testing.T) {
+	t.Parallel()
+	result := validateRegex("field", "[invalid")
+	assert.Contains(t, result, "field")
+	assert.Contains(t, result, "regex")
 }

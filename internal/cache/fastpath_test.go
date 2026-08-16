@@ -786,3 +786,349 @@ func TestNewFastPathHandler(t *testing.T) {
 	require.NotNil(t, resp)
 	fp.Release(resp)
 }
+
+// TestFastPathHandler_VaryHit verifies that TryHit resolves Vary variants
+// correctly: a request matching the stored variant's Vary key is served
+// from the fast path, and a request with a different Accept-Encoding
+// (no matching variant) misses.
+func TestFastPathHandler_VaryHit(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	// Build a primary key for "GET /vary-example host example.com".
+	reqBase := &api.RawRequest{
+		Method: "GET",
+		Path:   "/vary-example",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	primary := buildKeyFromRaw(reqBase, nil)
+
+	// Store the primary object with a Vary header.
+	primaryObj := &api.Object{
+		Key:        primary,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding"}}),
+		Body:       []byte("primary"),
+		BodySize:   7,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
+
+	// Build a variant key for Accept-Encoding: gzip.
+	reqGzip := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-example",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 1,
+	}
+	reqGzip.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
+	varyKeyGzip := variantKeyFromRaw(primary, "Accept-Encoding", reqGzip, nil)
+
+	// Store the gzip variant under its variant key.
+	gzipObj := &api.Object{
+		Key:        varyKeyGzip,
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			header.Vary:          {"Accept-Encoding"},
+			header.ContentLength: {"10"},
+		}),
+		Body:     []byte("gzip-body!"),
+		BodySize: 10,
+		StoredAt: time.Now(),
+		TTL:      60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), varyKeyGzip, gzipObj))
+
+	// TryHit with Accept-Encoding: gzip — should find the variant and serve it.
+	resp, ok := fp.TryHit(reqGzip, time.Now())
+	require.True(t, ok, "TryHit should serve the gzip variant")
+	require.NotNil(t, resp)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, 10, resp.BytesOut)
+	// Verify the body is the gzip variant, not the primary.
+	require.GreaterOrEqual(t, len(resp.Buffers), 3)
+	assert.Equal(t, "gzip-body!", string(resp.Buffers[2]))
+	// Verify the Vary header is present in the serialized response headers.
+	assert.Contains(t, string(resp.Buffers[1]), "Vary: Accept-Encoding")
+	fp.Release(resp)
+
+	// TryHit with Accept-Encoding: br — no variant stored, should miss.
+	reqBr := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-example",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 1,
+	}
+	reqBr.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "br"}
+	resp2, ok := fp.TryHit(reqBr, time.Now())
+	assert.False(t, ok, "TryHit should miss for br variant (not stored)")
+	assert.Nil(t, resp2)
+}
+
+// TestFastPathHandler_VaryStaleHit verifies that a stale-but-SWR variant
+// is served as STALE through the fast path.
+func TestFastPathHandler_VaryStaleHit(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	reqBase := &api.RawRequest{
+		Method: "GET",
+		Path:   "/vary-stale",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	primary := buildKeyFromRaw(reqBase, nil)
+
+	primaryObj := &api.Object{
+		Key:        primary,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding"}}),
+		Body:       []byte("primary"),
+		BodySize:   7,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
+
+	reqGzip := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-stale",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 1,
+	}
+	reqGzip.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
+	varyKeyGzip := variantKeyFromRaw(primary, "Accept-Encoding", reqGzip, nil)
+
+	// Store a stale-but-SWR gzip variant.
+	gzipObj := &api.Object{
+		Key:        varyKeyGzip,
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			header.Vary:          {"Accept-Encoding"},
+			header.ContentLength: {"11"},
+		}),
+		Body:                 []byte("stale-gzip!"),
+		BodySize:             11,
+		StoredAt:             time.Now().Add(-10 * time.Second),
+		TTL:                  1 * time.Second,
+		StaleWhileRevalidate: 60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), varyKeyGzip, gzipObj))
+
+	resp, ok := fp.TryHit(reqGzip, time.Now())
+	require.True(t, ok, "TryHit should serve stale gzip variant within SWR window")
+	assert.Equal(t, "STALE", resp.CacheResult)
+	assert.Equal(t, 11, resp.BytesOut)
+	fp.Release(resp)
+}
+
+// TestFastPathHandler_VaryVariantMiss verifies that TryHit returns false
+// when the primary object has a Vary header but the specific variant is
+// not in the store (variant miss).
+func TestFastPathHandler_VaryVariantMiss(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	reqBase := &api.RawRequest{
+		Method: "GET",
+		Path:   "/vary-miss",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	primary := buildKeyFromRaw(reqBase, nil)
+
+	// Store only the primary (with Vary header) — no variants.
+	primaryObj := &api.Object{
+		Key:        primary,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding"}}),
+		Body:       []byte("primary"),
+		BodySize:   7,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
+
+	// Verify the primary is in the store (so a miss means the variant
+	// wasn't found, not that the primary was missing).
+	gotObj, _, err := store.Get(context.Background(), primary)
+	require.NoError(t, err)
+	require.NotNil(t, gotObj, "primary must be in store for the miss to be meaningful")
+
+	// Request with Accept-Encoding: gzip — variant key != primary, variant
+	// not in store → TryHit should return false (miss).
+	reqGzip := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-miss",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 1,
+	}
+	reqGzip.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
+	resp, ok := fp.TryHit(reqGzip, time.Now())
+	assert.False(t, ok, "TryHit should miss when variant is not stored")
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_VaryMultiField verifies that TryHit resolves
+// Vary with multiple fields correctly. Two requests that differ only
+// in the order of Vary field values must produce different variant
+// keys if the values differ, and the same key if the values match.
+func TestFastPathHandler_VaryMultiField(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	reqBase := &api.RawRequest{
+		Method: "GET",
+		Path:   "/vary-multi",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	primary := buildKeyFromRaw(reqBase, nil)
+
+	primaryObj := &api.Object{
+		Key:        primary,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding, Accept-Language"}}),
+		Body:       []byte("primary"),
+		BodySize:   7,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
+
+	// Build variant key for Accept-Encoding: gzip, Accept-Language: en.
+	reqGzipEn := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-multi",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 2,
+	}
+	reqGzipEn.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
+	reqGzipEn.Headers[1] = api.RawHeader{Key: "Accept-Language", Value: "en"}
+	varyKeyGzipEn := variantKeyFromRaw(primary, "Accept-Encoding, Accept-Language", reqGzipEn, nil)
+
+	// Store the gzip+en variant.
+	variantObj := &api.Object{
+		Key:        varyKeyGzipEn,
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			header.Vary:          {"Accept-Encoding, Accept-Language"},
+			header.ContentLength: {"8"},
+		}),
+		Body:     []byte("gzip-en!"),
+		BodySize: 8,
+		StoredAt: time.Now(),
+		TTL:      60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), varyKeyGzipEn, variantObj))
+
+	// TryHit with gzip+en — should serve the variant.
+	resp, ok := fp.TryHit(reqGzipEn, time.Now())
+	require.True(t, ok, "TryHit should serve the gzip+en variant")
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, 8, resp.BytesOut)
+	require.GreaterOrEqual(t, len(resp.Buffers), 3)
+	assert.Equal(t, "gzip-en!", string(resp.Buffers[2]))
+	fp.Release(resp)
+
+	// TryHit with gzip+fr — different variant, not stored → miss.
+	reqGzipFr := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-multi",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 2,
+	}
+	reqGzipFr.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
+	reqGzipFr.Headers[1] = api.RawHeader{Key: "Accept-Language", Value: "fr"}
+	resp2, ok := fp.TryHit(reqGzipFr, time.Now())
+	assert.False(t, ok, "TryHit should miss for gzip+fr variant (not stored)")
+	assert.Nil(t, resp2)
+}
+
+// TestFastPathHandler_VarySameKey verifies that when the variant key
+// equals the primary key (e.g. Vary header is empty after policy
+// exclusion), TryHit serves the primary object directly without a
+// second store.Get.
+func TestFastPathHandler_VarySameKey(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	policy := NewKeyPolicy(nil, nil, map[string]bool{"x-trace-id": true}, nil, false, false)
+	fp := &FastPathHandler{store: store, policy: policy}
+
+	reqBase := &api.RawRequest{
+		Method: "GET",
+		Path:   "/vary-same",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	primary := buildKeyFromRaw(reqBase, nil)
+
+	primaryObj := &api.Object{
+		Key:        primary,
+		StatusCode: 200,
+		Header: header.FromHTTP(http.Header{
+			header.Vary:          {"X-Trace-Id"},
+			header.ContentLength: {"4"},
+		}),
+		Body:     []byte("body"),
+		BodySize: 4,
+		StoredAt: time.Now(),
+		TTL:      60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
+
+	// Request with X-Trace-Id — policy excludes it, so variant key == primary.
+	req := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/vary-same",
+		Host:     "example.com",
+		Scheme:   "http",
+		NHeaders: 1,
+	}
+	req.Headers[0] = api.RawHeader{Key: "X-Trace-Id", Value: "abc123"}
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok, "TryHit should serve primary when variant key == primary")
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, 4, resp.BytesOut)
+	fp.Release(resp)
+}
+
+// TestFastPathHandler_BuildKeyFromRawOverflow verifies that buildKeyFromRaw
+// correctly falls back to the heap buffer when the canonical key exceeds
+// the 512-byte stack buffer.
+func TestFastPathHandler_BuildKeyFromRawOverflow(t *testing.T) {
+	t.Parallel()
+	// Construct a path that exceeds 512 bytes when combined with scheme+host+query.
+	longPath := "/" + strings.Repeat("a", 600)
+	req := &api.RawRequest{
+		Method: "GET",
+		Path:   longPath,
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	key := buildKeyFromRaw(req, nil)
+	assert.False(t, key.IsZero(), "overflow key should not be zero")
+}
+
+// TestFastPathHandler_SchemeDefault verifies that an empty scheme
+// defaults to "http" in buildKeyFromRaw.
+func TestFastPathHandler_SchemeDefault(t *testing.T) {
+	t.Parallel()
+	reqHTTP := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
+	reqEmpty := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: ""}
+	assert.Equal(t, buildKeyFromRaw(reqHTTP, nil), buildKeyFromRaw(reqEmpty, nil))
+}

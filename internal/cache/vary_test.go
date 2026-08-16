@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
@@ -182,4 +183,89 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	require.Equal(t, "STALE", xc)
 	w := rr.Header().Get(header.Warning)
 	require.True(t, strings.HasPrefix(w, "110"))
+}
+
+func TestNormalizeHeaderValue(t *testing.T) {
+	t.Parallel()
+	t.Run("no_comma_lowercase", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "gzip", normalizeHeaderValue("GZIP"))
+	})
+	t.Run("comma_separated_sorted", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "en,fr", normalizeHeaderValue("fr, en"))
+	})
+	t.Run("same_order_regardless_of_input", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, normalizeHeaderValue("en,FR"), normalizeHeaderValue("fr, en"))
+	})
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "", normalizeHeaderValue(""))
+	})
+	t.Run("whitespace_trimmed", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "gzip", normalizeHeaderValue("  gzip  "))
+	})
+}
+
+func TestVaryContainsStar(t *testing.T) {
+	t.Parallel()
+	t.Run("star_alone", func(t *testing.T) {
+		t.Parallel()
+		require.True(t, varyContainsStar("*"))
+	})
+	t.Run("star_with_spaces", func(t *testing.T) {
+		t.Parallel()
+		require.True(t, varyContainsStar(" * "))
+	})
+	t.Run("non_star", func(t *testing.T) {
+		t.Parallel()
+		require.False(t, varyContainsStar("Accept-Encoding"))
+	})
+	t.Run("accept_and_star", func(t *testing.T) {
+		t.Parallel()
+		require.True(t, varyContainsStar("Accept, *"))
+	})
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		require.False(t, varyContainsStar(""))
+	})
+}
+
+func TestVariantKeySlow_TooManyFields(t *testing.T) {
+	t.Parallel()
+	primary := testkey.Key(100)
+	h := http.Header{}
+	// >16 Vary fields triggers variantKeySlow fallback.
+	vary := ""
+	for i := range 20 {
+		if i > 0 {
+			vary += ", "
+		}
+		vary += "X-H" + string(rune('0'+i))
+		h.Set("X-H"+string(rune('0'+i)), "val")
+	}
+	// Should produce a non-primary key (variantKeySlow processes all fields).
+	result := VariantKey(primary, vary, h, nil)
+	assert.NotEqual(t, primary, result)
+}
+
+func TestVariantKeySlow_LongValue(t *testing.T) {
+	t.Parallel()
+	primary := testkey.Key(100)
+	h := http.Header{}
+	// A single Vary field with a very long value that exceeds the 256-byte buffer.
+	h.Set("Accept-Encoding", string(make([]byte, 300)))
+	result := VariantKey(primary, "Accept-Encoding", h, nil)
+	// Should NOT return primary (it should hash the long value).
+	assert.NotEqual(t, primary, result)
+}
+
+func TestNormaliseListHeader_Comma(t *testing.T) {
+	t.Parallel()
+	// "b, a" and "a, b" should produce the same output (sorted).
+	assert.Equal(t, normaliseListHeader("b, a"), normaliseListHeader("a, b"))
+	// Should be trimmed and sorted.
+	assert.Equal(t, "a,b", normaliseListHeader(" b ,  a "))
 }

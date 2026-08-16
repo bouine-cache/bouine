@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
@@ -1906,4 +1908,1186 @@ func TestHandler_SWR_Close_NoNewRevalidateAfterClose(t *testing.T) {
 	}
 
 	_ = innerStore.Close(context.Background())
+}
+
+func TestErrorType(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "timeout", errorType(errors.New("context deadline exceeded")))
+	assert.Equal(t, "connection", errorType(errors.New("connection refused")))
+	assert.Equal(t, "connection", errorType(errors.New("dial tcp: EOF")))
+	assert.Equal(t, "other", errorType(errors.New("something else")))
+	assert.Equal(t, "unknown", errorType(nil))
+}
+
+func TestParseSurrogateKeys(t *testing.T) {
+	t.Parallel()
+	t.Run("surrogate_key", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set("Surrogate-Key", "key1 key2")
+		keys := parseSurrogateKeys(h)
+		assert.Equal(t, []string{"key1", "key2"}, keys)
+	})
+	t.Run("cache_tag", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set("Cache-Tag", "tag1,tag2")
+		keys := parseSurrogateKeys(h)
+		assert.Equal(t, []string{"tag1", "tag2"}, keys)
+	})
+	t.Run("x_cache_tags", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set("X-Cache-Tags", "t1 t2, t3")
+		keys := parseSurrogateKeys(h)
+		assert.Equal(t, []string{"t1", "t2", "t3"}, keys)
+	})
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		assert.Nil(t, parseSurrogateKeys(h))
+	})
+	t.Run("dedup", func(t *testing.T) {
+		t.Parallel()
+		h := http.Header{}
+		h.Set("Surrogate-Key", "key1 key1 key2")
+		keys := parseSurrogateKeys(h)
+		assert.Equal(t, []string{"key1", "key2"}, keys)
+	})
+}
+
+func TestStripNoCacheFields(t *testing.T) {
+	t.Parallel()
+	dst := http.Header{
+		header.CacheControl: {"max-age=60"},
+		"Set-Cookie":        {"sid=abc"},
+		"Content-Encoding":  {"gzip"},
+		"ETag":              {`"v1"`},
+	}
+	stripNoCacheFields(dst, `no-cache="Set-Cookie, Content-Encoding"`)
+	assert.NotContains(t, dst, "Set-Cookie")
+	assert.NotContains(t, dst, "Content-Encoding")
+	assert.Contains(t, dst, "ETag")
+}
+
+func TestStripNoCacheFields_Empty(t *testing.T) {
+	t.Parallel()
+	dst := http.Header{"ETag": {`"v1"`}}
+	stripNoCacheFields(dst, "")
+	stripNoCacheFields(dst, "max-age=60")
+	assert.Contains(t, dst, "ETag")
+}
+
+func TestIsInvalidating(t *testing.T) {
+	t.Parallel()
+	assert.True(t, isInvalidating(http.MethodPost))
+	assert.True(t, isInvalidating(http.MethodPut))
+	assert.True(t, isInvalidating(http.MethodDelete))
+	assert.True(t, isInvalidating(http.MethodPatch))
+	assert.False(t, isInvalidating(http.MethodGet))
+	assert.False(t, isInvalidating(http.MethodHead))
+}
+
+func TestStaleFallbackAllowed(t *testing.T) {
+	t.Parallel()
+	t.Run("no_restrictions", func(t *testing.T) {
+		t.Parallel()
+		obj := &api.Object{CacheControl: "max-age=60"}
+		assert.True(t, staleFallbackAllowed(obj))
+	})
+	t.Run("must_revalidate_blocks", func(t *testing.T) {
+		t.Parallel()
+		obj := &api.Object{CacheControl: "max-age=60, must-revalidate"}
+		assert.False(t, staleFallbackAllowed(obj))
+	})
+	t.Run("no_cache_blocks", func(t *testing.T) {
+		t.Parallel()
+		obj := &api.Object{CacheControl: "no-cache"}
+		assert.False(t, staleFallbackAllowed(obj))
+	})
+}
+
+func TestSourceSlice(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, []string{"hot"}, sourceSlice(api.SourceHot))
+	assert.Equal(t, []string{"warm"}, sourceSlice(api.SourceWarm))
+	assert.Equal(t, []string{"peer"}, sourceSlice(api.SourcePeer))
+	assert.Equal(t, []string{"origin"}, sourceSlice(api.SourceOrigin))
+}
+
+func TestComputeTTL_NegativeTTL(t *testing.T) {
+	t.Parallel()
+	h := http.Header{}
+	ttl := computeTTL(h, 404, Directives{}, 30*time.Second, 0, 0, 0, time.Now())
+	assert.Equal(t, 30*time.Second, ttl)
+}
+
+func TestComputeTTL_HeuristicTTL(t *testing.T) {
+	t.Parallel()
+	h := http.Header{
+		header.Date:         {"Mon, 01 Jan 2024 00:00:00 GMT"},
+		header.LastModified: {"Mon, 01 Jan 2023 00:00:00 GMT"},
+	}
+	ttl := computeTTL(h, 200, Directives{}, 0, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, 876*time.Hour, ttl)
+}
+
+func TestComputeTTL_DefaultTTL(t *testing.T) {
+	t.Parallel()
+	h := http.Header{}
+	ttl := computeTTL(h, 200, Directives{}, 0, 60*time.Second, 0, 0, time.Now())
+	assert.Equal(t, 60*time.Second, ttl)
+}
+
+func TestHandler_OnlyIfCachedBypass(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	r := httptest.NewRequest("GET", "http://example.com/nonexistent", nil)
+	r.Header.Set(header.CacheControl, "only-if-cached")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
+	assert.Equal(t, "MISS", rr.Header().Get(header.XCache))
+}
+
+func TestHandler_RefreshStats(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	// No refresh configured → zeros.
+	scheduled, registry := h.RefreshStats()
+	assert.Equal(t, 0, scheduled)
+	assert.Equal(t, 0, registry)
+}
+
+func TestHandler_RouteName(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	assert.Equal(t, "", h.RouteName())
+}
+
+func TestHandler_RefreshEnabled(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	assert.False(t, h.RefreshEnabled())
+}
+
+func TestBuildObject_CDNCacheControl(t *testing.T) {
+	t.Parallel()
+	resHeader := http.Header{}
+	resHeader.Set("CDN-Cache-Control", "max-age=120")
+	resHeader.Set(header.ContentType, "text/html")
+	res := fetchResult{
+		StatusCode: 200,
+		Header:     resHeader,
+		Body:       []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 0, 0, 0, nil)
+	require.NotNil(t, obj)
+	assert.Equal(t, 120*time.Second, obj.TTL)
+	assert.Contains(t, obj.CacheControl, "max-age=120")
+}
+
+func TestBuildObject_OverrideTTL(t *testing.T) {
+	t.Parallel()
+	res := fetchResult{
+		StatusCode: 200,
+		Header: http.Header{
+			header.CacheControl: {"max-age=60"},
+		},
+		Body: []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 300*time.Second, 0, 0, 0, nil)
+	require.NotNil(t, obj)
+	assert.Equal(t, 300*time.Second, obj.TTL)
+}
+
+func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
+	t.Parallel()
+	res := fetchResult{
+		StatusCode: 200,
+		Header:     http.Header{header.CacheControl: {"max-age=60"}},
+		Body:       []byte("hello world"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 0, 0, 0, nil)
+	require.NotNil(t, obj)
+	assert.Equal(t, "11", obj.Header.Get(header.ContentLength))
+}
+
+func TestBuildObject_DateApparentAge(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	res := fetchResult{
+		StatusCode: 200,
+		Header: http.Header{
+			header.CacheControl: {"max-age=60"},
+			header.Date:         {now.Add(-10 * time.Second).Format(http.TimeFormat)},
+			header.Age:          {"5"},
+		},
+		Body: []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 0, 0, 0, nil)
+	require.NotNil(t, obj)
+	// OriginAge should be max(5s from Age header, ~10s apparent age from Date).
+	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
+}
+
+func TestBuildObject_LastModifiedParsed(t *testing.T) {
+	t.Parallel()
+	res := fetchResult{
+		StatusCode: 200,
+		Header: http.Header{
+			header.CacheControl: {"max-age=60"},
+			header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"},
+		},
+		Body: []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 0, 0, 0, nil)
+	require.NotNil(t, obj)
+	assert.False(t, obj.LastModified.IsZero())
+}
+
+func TestBuildObject_SWRDefault(t *testing.T) {
+	t.Parallel()
+	res := fetchResult{
+		StatusCode: 200,
+		Header:     http.Header{header.CacheControl: {"max-age=60"}},
+		Body:       []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 30*time.Second, 0, 0, nil)
+	require.NotNil(t, obj)
+	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
+}
+
+func TestBuildObject_SIEDefault(t *testing.T) {
+	t.Parallel()
+	res := fetchResult{
+		StatusCode: 200,
+		Header:     http.Header{header.CacheControl: {"max-age=60"}},
+		Body:       []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 0, 60*time.Second, 0, nil)
+	require.NotNil(t, obj)
+	assert.Equal(t, 60*time.Second, obj.StaleIfError)
+}
+
+func TestBuildObject_VaryKeyComputed(t *testing.T) {
+	t.Parallel()
+	res := fetchResult{
+		StatusCode: 200,
+		Header: http.Header{
+			header.CacheControl: {"max-age=60"},
+			header.Vary:         {"Accept-Encoding"},
+		},
+		Body: []byte("hello"),
+	}
+	r := httptest.NewRequest("GET", "http://example.com/", nil)
+	r.Header.Set(header.AcceptEncoding, "gzip")
+	obj := buildObject(api.Key{}, r, res, 0, 0, 0, 0, 0, 0, nil)
+	require.NotNil(t, obj)
+	// VaryKey should be non-empty (the object has a Vary header).
+	assert.NotEqual(t, "", obj.VaryKey)
+}
+
+func TestDoBackgroundRefresh_EntryNil(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	ctx := context.Background()
+	// Call with a key that's not registered — should skip.
+	h.doBackgroundRefresh(ctx, testkey.Key(999), &api.Object{
+		StoredAt: time.Now(),
+		TTL:      60 * time.Second,
+	}, 0)
+	// No panic, no store change.
+}
+
+func TestDoBackgroundRefresh_BadURL(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(1)
+	// Register with a URL containing a control character that url.Parse rejects.
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: "GET",
+		URL:    &url.URL{Scheme: "http", Host: "example.com", Path: "/\x00"},
+	}, "", 0)
+	// This should unregister and skip without panicking.
+	h.doBackgroundRefresh(context.Background(), key, &api.Object{
+		StoredAt: time.Now(),
+		TTL:      60 * time.Second,
+	}, 0)
+	assert.Equal(t, 0, h.refreshRegistry.Len())
+}
+
+func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(1)
+	// Register the key with a valid URL.
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/test"),
+		Header: http.Header{},
+	}
+	h.refreshRegistry.Register(key, req, "", 0)
+	// Use an upstream that returns 502 (error response).
+	h.upstream = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(502)
+	})
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	h.refreshTimeout = 5 * time.Second
+	h.doBackgroundRefresh(context.Background(), key, stale, 0)
+	// The entry should still be registered (re-scheduled with backoff).
+	assert.Equal(t, 1, h.refreshRegistry.Len())
+}
+
+func TestDoBackgroundRefresh_ContextCancelled(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(2)
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/test"),
+		Header: http.Header{},
+	}
+	h.refreshRegistry.Register(key, req, "", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	h.refreshTimeout = 5 * time.Second
+	// Should return without panicking.
+	h.doBackgroundRefresh(ctx, key, stale, 0)
+}
+
+func TestDoBackgroundRefresh_UncacheableSkip(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(3)
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/test"),
+		Header: http.Header{},
+	}
+	h.refreshRegistry.Register(key, req, "", 0)
+	// Upstream returns no-store (uncacheable).
+	h.upstream = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "no-store")
+		w.WriteHeader(200)
+	})
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	h.refreshTimeout = 5 * time.Second
+	h.doBackgroundRefresh(context.Background(), key, stale, 0)
+}
+
+func TestDoBackgroundRefresh_SetCookieSkip(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	h.allowSetCookie = false
+	key := testkey.Key(4)
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/test"),
+		Header: http.Header{},
+	}
+	h.refreshRegistry.Register(key, req, "", 0)
+	h.upstream = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.SetCookie, "sid=abc")
+		w.WriteHeader(200)
+	})
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	h.refreshTimeout = 5 * time.Second
+	h.doBackgroundRefresh(context.Background(), key, stale, 0)
+}
+
+func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	h.maxObjectSize = 5
+	key := testkey.Key(5)
+	req := &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/test"),
+		Header: http.Header{},
+	}
+	h.refreshRegistry.Register(key, req, "", 0)
+	h.upstream = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "this is a very long body that exceeds the max object size")
+	})
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	h.refreshTimeout = 5 * time.Second
+	h.doBackgroundRefresh(context.Background(), key, stale, 0)
+}
+
+func TestWriteAndMaybeStore_VariantStore(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.Vary, "Accept-Encoding")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "body-"+r.Header.Get(header.AcceptEncoding))
+		}),
+		Store: store,
+	})
+	// First request — MISS, stores with Vary.
+	r1 := httptest.NewRequest("GET", "http://example.com/v", nil)
+	r1.Header.Set(header.AcceptEncoding, "gzip")
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, r1)
+	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+	// Second request with different encoding — MISS, stores variant.
+	r2 := httptest.NewRequest("GET", "http://example.com/v", nil)
+	r2.Header.Set(header.AcceptEncoding, "br")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, r2)
+	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	// Third request with gzip — HIT.
+	r3 := httptest.NewRequest("GET", "http://example.com/v", nil)
+	r3.Header.Set(header.AcceptEncoding, "gzip")
+	rr3 := httptest.NewRecorder()
+	h.ServeHTTP(rr3, r3)
+	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
+}
+
+func TestTryConditional304_Match(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set(header.IfNoneMatch, `"v1"`)
+	rr := httptest.NewRecorder()
+	ok := h.tryConditional304(rr, r, obj, api.SourceHot)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusNotModified, rr.Code)
+	assert.Equal(t, `"v1"`, rr.Header().Get(header.ETag))
+	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
+}
+
+func TestTryConditional304_NoMatch(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set(header.IfNoneMatch, `"v2"`)
+	rr := httptest.NewRecorder()
+	ok := h.tryConditional304(rr, r, obj, api.SourceHot)
+	require.False(t, ok)
+}
+
+func TestAgeHeader_Fallback(t *testing.T) {
+	t.Parallel()
+	// Age >= 600s uses the fallback allocation path.
+	got := ageHeader(600 * time.Second)
+	assert.Equal(t, "600", got[0])
+	got = ageHeader(-1 * time.Second)
+	assert.Equal(t, "-1", got[0])
+}
+
+func TestShouldRefresh_ScoreGate(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	h.refreshMinScore = 1000
+	// staleHits * BodySize < 1000 → false.
+	obj := &api.Object{BodySize: 10}
+	assert.False(t, h.shouldRefresh(5, obj))
+	// staleHits * BodySize >= 1000 → true.
+	obj = &api.Object{BodySize: 200}
+	assert.True(t, h.shouldRefresh(5, obj))
+}
+
+func TestDoFetch_Truncated(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		// Write more than maxResponseBytes.
+		_, _ = w.Write(make([]byte, 2*(1<<20))) // 2 MiB
+	}))
+	h.maxResponseBytes = 1 << 20 // 1 MiB
+	req := httptest.NewRequest("GET", "/", nil)
+	res := h.doFetch(req)
+	require.NotNil(t, res.Err)
+	assert.Contains(t, res.Err.Error(), "exceeds")
+}
+
+func TestHandleBypass_OnlyIfCached_504(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	r := httptest.NewRequest("GET", "http://example.com/nonexistent", nil)
+	r.Header.Set(header.CacheControl, "only-if-cached")
+	rr := httptest.NewRecorder()
+	h.handleBypass(rr, r)
+	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
+}
+
+func TestBuildLocationKey_AbsoluteURL(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	r := httptest.NewRequest("POST", "http://example.com/submit", nil)
+	key := h.buildLocationKey(r, "http://example.com/other")
+	require.False(t, key.IsZero())
+}
+
+func TestBuildLocationKey_RelativePath(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	r := httptest.NewRequest("POST", "http://example.com/api/submit", nil)
+	key := h.buildLocationKey(r, "../v2")
+	require.False(t, key.IsZero())
+}
+
+func TestBuildLocationKey_InvalidURL(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	r := httptest.NewRequest("POST", "http://example.com/submit", nil)
+	key := h.buildLocationKey(r, "ht\ttp://invalid")
+	require.True(t, key.IsZero())
+}
+
+func TestLookupForRefresh_StaleObject(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	// Store a stale object.
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/stale", nil), nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=1"}}),
+		Body:       []byte("stale"),
+		BodySize:   5,
+		StoredAt:   time.Now().Add(-10 * time.Second),
+		TTL:        time.Second,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	// lookupForRefresh should return nil for stale.
+	result := h.lookupForRefresh(key)
+	require.Nil(t, result)
+}
+
+func TestLookupForRefresh_FreshObject(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/fresh", nil), nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}}),
+		Body:       []byte("fresh"),
+		BodySize:   5,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	result := h.lookupForRefresh(key)
+	require.NotNil(t, result)
+}
+
+func TestLookupForRefresh_NotFound(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/missing", nil), nil)
+	result := h.lookupForRefresh(key)
+	require.Nil(t, result)
+}
+
+func TestStoreObject_RefreshScheduling(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(10)
+	r := httptest.NewRequest("GET", "http://example.com/test", nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	h.storeObject(context.Background(), key, obj, r, false, 0)
+	// Should be registered in the refresh registry.
+	assert.Equal(t, 1, h.refreshRegistry.Len())
+	// Should be scheduled in the scheduler.
+	assert.Equal(t, 1, h.scheduler.Len())
+}
+
+func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := testkey.Key(11)
+	r := httptest.NewRequest("GET", "http://example.com/404", nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 404,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=30"}}),
+		Body:       []byte("not found"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        30 * time.Second,
+	}
+	h.storeObject(context.Background(), key, obj, r, false, 0)
+	// Negative cacheable objects should NOT be scheduled for refresh.
+	assert.Equal(t, 0, h.refreshRegistry.Len())
+}
+
+func TestInvalidateAndProxy_5xxNoInvalidation(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(500)
+			return
+		}
+		calls.Add(1)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
+	// Populate cache with GET.
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest("GET", "http://example.com/res", nil))
+	// POST with 5xx should NOT invalidate.
+	r := httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data"))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	assert.Equal(t, 500, rr.Code)
+	// GET should still be HIT (not invalidated).
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/res", nil))
+	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+}
+
+func TestMaybeStorePostResponse_NonPOST(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	r := httptest.NewRequest("GET", "http://example.com/res", nil)
+	getReq := httptest.NewRequest("GET", "http://example.com/res", nil)
+	key := h.buildKey(getReq)
+	rec := acquireRecorder(h.maxResponseBytes)
+	rec.statusCode = 200
+	rec.header.Set(header.CacheControl, "max-age=60")
+	_, _ = rec.Write([]byte("body"))
+	releaseRecorder(rec)
+	// Non-POST should be a no-op.
+	h.maybeStorePostResponse(r, getReq, key, rec)
+}
+
+func TestHandleCacheMiss_PeerFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	peerObj := &api.Object{
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}}),
+		Body:       []byte("from-peer"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	var originCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			originCalls.Add(1)
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "from-origin")
+		}),
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "peer1:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+			return peerObj, nil
+		},
+	})
+	r := httptest.NewRequest("GET", "http://example.com/peer", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, 200, rr.Code)
+	assert.Equal(t, "from-peer", rr.Body.String())
+	assert.Equal(t, int32(0), originCalls.Load())
+}
+
+func TestLookup_VaryVariantMiss(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.Vary, "Accept-Encoding")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body-"+r.Header.Get(header.AcceptEncoding))
+	}))
+	// Populate with gzip variant.
+	r1 := httptest.NewRequest("GET", "http://example.com/vary-miss", nil)
+	r1.Header.Set(header.AcceptEncoding, "gzip")
+	h.ServeHTTP(httptest.NewRecorder(), r1)
+	// Request with br — should miss (variant not found), then store.
+	r2 := httptest.NewRequest("GET", "http://example.com/vary-miss", nil)
+	r2.Header.Set(header.AcceptEncoding, "br")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, r2)
+	assert.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+}
+
+func TestAppendCanonicalQueryString_Policy(t *testing.T) {
+	t.Parallel()
+	var buf [256]byte
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	// "q=test&utm=x" → should strip utm, keep q.
+	n := appendCanonicalQueryString(buf[:], 0, "q=test&utm=x", policy)
+	result := string(buf[:n])
+	assert.Contains(t, result, "q=test")
+	assert.NotContains(t, result, "utm")
+}
+
+func TestAppendCanonicalQueryString_PercentEncoded(t *testing.T) {
+	t.Parallel()
+	var buf [256]byte
+	n := appendCanonicalQueryStringNoPolicy(buf[:], 0, "a=%31&b=2")
+	// Should produce sorted: a=1&b=2 (after percent-decode).
+	result := string(buf[:n])
+	assert.Contains(t, result, "a=")
+	assert.Contains(t, result, "b=2")
+}
+
+func TestAppendCanonicalQueryString_MoreThan8Params(t *testing.T) {
+	t.Parallel()
+	var buf [512]byte
+	raw := "a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=9"
+	n := appendCanonicalQueryStringNoPolicy(buf[:], 0, raw)
+	require.Greater(t, n, 0)
+}
+
+func TestAppendCanonicalQuerySlowString_Policy(t *testing.T) {
+	t.Parallel()
+	var buf [512]byte
+	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
+	n := appendCanonicalQuerySlowString(buf[:], 0, "q=test&utm=x&fbclid=123", policy)
+	result := string(buf[:n])
+	assert.Contains(t, result, "q=test")
+	assert.NotContains(t, result, "utm")
+	assert.NotContains(t, result, "fbclid")
+}
+
+func mustURL(raw string) *url.URL {
+	u, _ := url.Parse(raw)
+	return u
+}
+
+func TestTriggerBgRefresh_304Refresh(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	h := testRefreshHandler(t, 1)
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/refresh304", nil), nil)
+	// Upstream returns 200 on first call, 304 on subsequent.
+	h.upstream = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(header.IfNoneMatch) != "" {
+			w.Header().Set(header.CacheControl, "max-age=120")
+			w.WriteHeader(304)
+			return
+		}
+		calls.Add(1)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("body"))
+	})
+	// Store a fresh object.
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/refresh304"),
+		Header: http.Header{},
+	}, "", 0)
+	// Schedule to fire immediately.
+	h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
+	// Wait for the background refresh to complete.
+	time.Sleep(500 * time.Millisecond)
+	// The refresh should have been called (304 path updates TTL).
+	updated, _, _ := h.store.Get(context.Background(), key)
+	require.NotNil(t, updated)
+	// TTL should be refreshed (was 60s, now 120s from 304 response).
+	assert.Equal(t, 120*time.Second, updated.TTL)
+}
+
+func TestTriggerBgRefresh_RateLimited(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	h.refreshLimiter = newRefreshRateLimiter(0) // 0 RPS = always deny
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/rl", nil), nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/rl"),
+		Header: http.Header{},
+	}, "", 0)
+	h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
+	time.Sleep(300 * time.Millisecond)
+	// The key should still be registered (re-scheduled with jitter, not unregistered).
+	assert.Equal(t, 1, h.refreshRegistry.Len())
+}
+
+func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	// Fill the refresh semaphore.
+	for range cap(h.refreshSem) {
+		h.refreshSem <- struct{}{}
+	}
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/sem", nil), nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/sem"),
+		Header: http.Header{},
+	}, "", 0)
+	h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
+	time.Sleep(300 * time.Millisecond)
+	// The key should still be registered (semaphore_full skip).
+	assert.Equal(t, 1, h.refreshRegistry.Len())
+	// Drain the semaphore so Close can proceed.
+	for range cap(h.refreshSem) {
+		<-h.refreshSem
+	}
+}
+
+func TestHeaderGuard_BypassWrite(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "text/html")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("bypass-body"))
+	}))
+	r := httptest.NewRequest("GET", "http://example.com/bypass-write", nil)
+	r.Header.Set(header.CacheControl, "no-store")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	assert.Equal(t, "BYPASS", rr.Header().Get(header.XCache))
+	assert.Equal(t, "bypass-body", rr.Body.String())
+}
+
+func TestPurge_WithVariants(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.Vary, "Accept-Encoding")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("body-" + r.Header.Get(header.AcceptEncoding)))
+	}))
+	r1 := httptest.NewRequest("GET", "http://example.com/purge-var", nil)
+	r1.Header.Set(header.AcceptEncoding, "gzip")
+	h.ServeHTTP(httptest.NewRecorder(), r1)
+	r2 := httptest.NewRequest("GET", "http://example.com/purge-var", nil)
+	r2.Header.Set(header.AcceptEncoding, "br")
+	h.ServeHTTP(httptest.NewRecorder(), r2)
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/purge-var", nil), nil)
+	owned, err := h.Purge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/purge-var", nil))
+	assert.Equal(t, "MISS", rr.Header().Get(header.XCache))
+}
+
+func TestPurge_NotOwned(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/nonexistent", nil), nil)
+	owned, err := h.Purge(context.Background(), key)
+	require.NoError(t, err)
+	require.False(t, owned)
+}
+
+func TestDoBackgroundRevalidate_DirectCall(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(header.IfNoneMatch) != "" {
+			w.Header().Set(header.CacheControl, "max-age=120")
+			w.WriteHeader(304)
+			return
+		}
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("body"))
+	}))
+	url := "http://example.com/reval-direct"
+	r := httptest.NewRequest("GET", url, nil)
+	key := BuildKey(r, nil)
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("old"),
+		BodySize:   3,
+		StoredAt:   time.Now().Add(-10 * time.Second),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = h.store.Put(context.Background(), key, stale)
+	h.doBackgroundRevalidate(context.Background(), r, key, stale)
+	obj, _, _ := h.store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+}
+
+func TestTriggerBgRefresh_NotFound(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	// Schedule a key that doesn't exist in the store.
+	key := testkey.Key(999)
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/test"),
+		Header: http.Header{},
+	}, "", 0)
+	// Schedule to fire immediately.
+	h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
+	// Wait for the scheduler to pop and triggerBgRefresh to run.
+	time.Sleep(300 * time.Millisecond)
+	// The key should have been unregistered (not_found path).
+	assert.Equal(t, 0, h.refreshRegistry.Len())
+}
+
+func TestTriggerBgRefresh_StaleObject(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/stale", nil), nil)
+	// Store a stale object.
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=1"}}),
+		Body:       []byte("stale"),
+		BodySize:   5,
+		StoredAt:   time.Now().Add(-10 * time.Second),
+		TTL:        time.Second,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/stale"),
+		Header: http.Header{},
+	}, "", 0)
+	// Schedule to fire immediately.
+	h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
+	time.Sleep(300 * time.Millisecond)
+	// The key should have been unregistered (stale path).
+	assert.Equal(t, 0, h.refreshRegistry.Len())
+}
+
+func TestTriggerBgRefresh_FreshObject(t *testing.T) {
+	t.Parallel()
+	h := testRefreshHandler(t, 1)
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/fresh", nil), nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("fresh"),
+		BodySize:   5,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = h.store.Put(context.Background(), key, obj)
+	h.refreshRegistry.Register(key, &http.Request{
+		Method: http.MethodGet,
+		URL:    mustURL("http://example.com/fresh"),
+		Header: http.Header{},
+	}, "", 0)
+	// Schedule to fire immediately.
+	h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
+	// Wait for the background refresh to complete.
+	time.Sleep(500 * time.Millisecond)
+}
+
+func TestHeaderGuard_Write(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+	// Create a bypass request to test headerGuard.
+	r := httptest.NewRequest("GET", "http://example.com/bypass", nil)
+	r.Header.Set(header.CacheControl, "no-store")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	// The bypass path wraps the writer in headerGuard which sets X-Cache.
+	assert.Equal(t, "BYPASS", rr.Header().Get(header.XCache))
+}
+
+func TestResponseRecorder_WriteHeader(t *testing.T) {
+	t.Parallel()
+	rec := acquireRecorder(1 << 20)
+	rec.WriteHeader(200)
+	assert.Equal(t, 200, rec.statusCode)
+	releaseRecorder(rec)
+}
+
+func TestResponseRecorder_Write(t *testing.T) {
+	t.Parallel()
+	rec := acquireRecorder(1 << 20)
+	_, _ = rec.Write([]byte("hello"))
+	assert.Equal(t, 5, rec.body.Len())
+	releaseRecorder(rec)
+}
+
+func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(503)
+		}),
+		Store:       store,
+		StayinAlive: true,
+	})
+	// Store a stale object manually.
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/stayin5xx", nil), nil)
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=1, stale-while-revalidate=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("stale-body"),
+		BodySize:   9,
+		StoredAt:   time.Now().Add(-10 * time.Second),
+		TTL:        time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = store.Put(context.Background(), key, stale)
+	// Call fetchAndStoreStayinAlive directly.
+	r := httptest.NewRequest("GET", "http://example.com/stayin5xx", nil)
+	rr := httptest.NewRecorder()
+	h.fetchAndStoreStayinAlive(rr, r, key, key, stale, time.Now(), api.SourceHot)
+	assert.Equal(t, "STALE", rr.Header().Get(header.XCache))
+	assert.Equal(t, "stale-body", rr.Body.String())
+}
+
+func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Origin down: block until context cancelled (timeout).
+			<-r.Context().Done()
+		}),
+		Store:        store,
+		StayinAlive:  true,
+		FetchTimeout: 100 * time.Millisecond,
+	})
+	key := BuildKey(httptest.NewRequest("GET", "http://example.com/stayin-err", nil), nil)
+	stale := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=1, stale-while-revalidate=60"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("stale-body"),
+		BodySize:   9,
+		StoredAt:   time.Now().Add(-10 * time.Second),
+		TTL:        time.Second,
+		ETag:       `"v1"`,
+	}
+	_ = store.Put(context.Background(), key, stale)
+	r := httptest.NewRequest("GET", "http://example.com/stayin-err", nil)
+	rr := httptest.NewRecorder()
+	h.fetchAndStoreStayinAlive(rr, r, key, key, stale, time.Now(), api.SourceHot)
+	assert.Equal(t, "STALE", rr.Header().Get(header.XCache))
 }

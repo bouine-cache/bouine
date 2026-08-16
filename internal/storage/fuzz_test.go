@@ -16,7 +16,13 @@ import (
 // fuzzFixedTime is a deterministic timestamp for fuzz round-trip tests.
 // Using a fixed time instead of time.Now() ensures reproducibility and
 // complies with AGENTS.md §8: "no time.Now() in tests."
-var fuzzFixedTime = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+//
+// fuzzFixedTime and fuzzModifiedTime are deliberately distinct so that a
+// codec bug swapping StoredAt and LastModified would be caught.
+var (
+	fuzzFixedTime    = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	fuzzModifiedTime = time.Date(2024, 6, 15, 12, 30, 0, 0, time.UTC)
+)
 
 // FuzzCodecRoundTrip fuzzes the object encode/decode round-trip with
 // arbitrary field values. DecodeObject(EncodeObject(obj)) must reproduce
@@ -47,7 +53,7 @@ func FuzzCodecRoundTrip(f *testing.F) {
 			StaleWhileRevalidate: 30 * time.Second,
 			StaleIfError:         5 * time.Minute,
 			ETag:                 etag,
-			LastModified:         fuzzFixedTime,
+			LastModified:         fuzzModifiedTime,
 			SurrogateKeys:        []string{"product-42", "category-7"},
 			Hits:                 99,
 		})
@@ -148,6 +154,9 @@ func assertCodecRoundTrip(t *testing.T, orig *api.Object) {
 				t.Errorf("SurrogateKey[%d] mismatch: got %q want %q", i, decoded.SurrogateKeys[i], sk)
 			}
 		}
+	}
+	if decoded.Header.Len() != orig.Header.Len() {
+		t.Errorf("Header count mismatch: got %d want %d", decoded.Header.Len(), orig.Header.Len())
 	}
 	orig.Header.Range(func(k, want string) bool {
 		if got := decoded.Header.Get(k); got != want {

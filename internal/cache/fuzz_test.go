@@ -143,30 +143,37 @@ func FuzzVariantKey(f *testing.F) {
 // request methods, Cache-Control headers, response Cache-Control headers,
 // TTL values, origin age, and elapsed time offsets. Evaluate must never
 // panic and must be deterministic for the same inputs. It exercises the
-// hit, miss (nil obj), stale, revalidate, and bypass paths.
+// hit, miss (nil obj), stale, revalidate, and bypass paths, including
+// the no-validator path where stale/no-cache objects cannot revalidate.
 func FuzzEvaluate(f *testing.F) {
-	f.Add("GET", "no-cache", "public, max-age=600", 600, 0, 100, false)
-	f.Add("GET", "no-store", "public, max-age=600", 600, 0, 0, false)
-	f.Add("GET", "", "public, max-age=600", 600, 0, 300, false)
-	f.Add("GET", "", "public, max-age=600", 600, 0, 700, false)
-	f.Add("GET", "", "no-cache", 600, 0, 0, false)
-	f.Add("GET", "", "public, max-age=600, stale-while-revalidate=60", 600, 0, 650, false)
-	f.Add("GET", "", "public, max-age=600, stale-if-error=300", 600, 0, 800, false)
-	f.Add("GET", "max-age=300", "public, max-age=600", 600, 0, 400, false)
-	f.Add("GET", "max-stale=100", "public, max-age=600", 600, 120, 700, false)
-	f.Add("GET", "min-fresh=60", "public, max-age=600", 600, 0, 580, false)
-	f.Add("GET", "", "must-revalidate", 600, 0, 700, false)
-	f.Add("GET", "only-if-cached", "public, max-age=600", 600, 0, 0, false)
-	f.Add("GET", "", "immutable", 600, 0, 999999, false)
-	f.Add("GET", "", "", 0, 0, 0, false)
-	f.Add("HEAD", "", "public, max-age=600", 600, 0, 300, false)
-	f.Add("POST", "", "public, max-age=600", 600, 0, 0, false)
-	f.Add("GET", "", "public, max-age=600", 600, 0, 100, true)
-	f.Add("GET", "no-cache", "", 0, 0, 0, true)
-	f.Add("GET", "only-if-cached", "", 0, 0, 0, true)
-	f.Add("GET", "pragma:no-cache", "public, max-age=600", 600, 0, 100, false)
+	f.Add("GET", "no-cache", "public, max-age=600", 600, 0, 100, false, true)
+	f.Add("GET", "no-store", "public, max-age=600", 600, 0, 0, false, true)
+	f.Add("GET", "", "public, max-age=600", 600, 0, 300, false, true)
+	f.Add("GET", "", "public, max-age=600", 600, 0, 700, false, true)
+	f.Add("GET", "", "no-cache", 600, 0, 0, false, true)
+	f.Add("GET", "", "public, max-age=600, stale-while-revalidate=60", 600, 0, 650, false, true)
+	f.Add("GET", "", "public, max-age=600, stale-if-error=300", 600, 0, 800, false, true)
+	f.Add("GET", "max-age=300", "public, max-age=600", 600, 0, 400, false, true)
+	f.Add("GET", "max-stale=100", "public, max-age=600", 600, 120, 700, false, true)
+	f.Add("GET", "min-fresh=60", "public, max-age=600", 600, 0, 580, false, true)
+	f.Add("GET", "", "must-revalidate", 600, 0, 700, false, true)
+	f.Add("GET", "only-if-cached", "public, max-age=600", 600, 0, 0, false, true)
+	f.Add("GET", "", "immutable", 600, 0, 999999, false, true)
+	f.Add("GET", "", "", 0, 0, 0, false, true)
+	f.Add("HEAD", "", "public, max-age=600", 600, 0, 300, false, true)
+	f.Add("POST", "", "public, max-age=600", 600, 0, 0, false, true)
+	f.Add("GET", "", "public, max-age=600", 600, 0, 100, true, true)
+	f.Add("GET", "no-cache", "", 0, 0, 0, true, true)
+	f.Add("GET", "only-if-cached", "", 0, 0, 0, true, true)
+	f.Add("GET", "pragma:no-cache", "public, max-age=600", 600, 0, 100, false, true)
+	// No-validator seeds: stale/no-cache objects without ETag or
+	// LastModified must fall back to Miss, not Revalidate.
+	f.Add("GET", "", "public, max-age=600", 600, 0, 700, false, false)
+	f.Add("GET", "no-cache", "public, max-age=600", 600, 0, 100, false, false)
+	f.Add("GET", "", "no-cache", 600, 0, 0, false, false)
+	f.Add("GET", "", "must-revalidate", 600, 0, 700, false, false)
 
-	f.Fuzz(func(t *testing.T, method, reqCC, respCC string, ttlSec, ageSec, elapsedSec int, nilObj bool) {
+	f.Fuzz(func(t *testing.T, method, reqCC, respCC string, ttlSec, ageSec, elapsedSec int, nilObj, hasValidator bool) {
 		u, err := url.Parse("http://example.com/")
 		if err != nil {
 			t.Skip()
@@ -202,15 +209,17 @@ func FuzzEvaluate(f *testing.F) {
 				StoredAt:     storedAt,
 				TTL:          ttl,
 				OriginAge:    durationFromSec(ageSec),
-				ETag:         `"etag-fuzz"`,
+			}
+			if hasValidator {
+				obj.ETag = `"etag-fuzz"`
 			}
 		}
 
 		d1 := Evaluate(req, obj, now)
 		d2 := Evaluate(req, obj, now)
 		if d1.Decision != d2.Decision {
-			t.Fatalf("Evaluate not deterministic: %d != %d for method=%q reqCC=%q respCC=%q ttl=%d age=%d elapsed=%d nilObj=%v",
-				d1.Decision, d2.Decision, method, reqCC, respCC, ttlSec, ageSec, elapsedSec, nilObj)
+			t.Fatalf("Evaluate not deterministic: %d != %d for method=%q reqCC=%q respCC=%q ttl=%d age=%d elapsed=%d nilObj=%v hasValidator=%v",
+				d1.Decision, d2.Decision, method, reqCC, respCC, ttlSec, ageSec, elapsedSec, nilObj, hasValidator)
 		}
 	})
 }
@@ -220,8 +229,10 @@ func FuzzEvaluate(f *testing.F) {
 // AGENTS.md §8: "no time.Now() in tests."
 var fuzzFixedTime = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// durationFromSec converts an int to time.Duration, handling negative
-// values gracefully (returns 0 for negatives, as TTLs are non-negative).
+// durationFromSec converts an int to time.Duration, clamping negatives to
+// 0. Used for TTL, origin age, and elapsed time — all non-negative in
+// practice, and negative values from the fuzzer would produce negative
+// durations that don't make semantic sense for freshness calculations.
 func durationFromSec(s int) time.Duration {
 	if s < 0 {
 		return 0

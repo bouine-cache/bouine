@@ -119,3 +119,26 @@ func TestInfoNoKeyUsesCounterSampling(t *testing.T) {
 	l.Info("no key here")
 	require.NotEqual(t, 0, buf.Len())
 }
+
+func TestResolveLogger_Nil(t *testing.T) {
+	t.Parallel()
+	l := ResolveLogger(nil)
+	assert.NotNil(t, l)
+	assert.IsType(t, NoopLogger{}, l)
+}
+
+func TestResolveLogger_NonNil(t *testing.T) {
+	t.Parallel()
+	nl := NoopLogger{}
+	l := ResolveLogger(nl)
+	assert.Equal(t, nl, l)
+}
+
+func TestNoopLogger_AllMethods(t *testing.T) {
+	t.Parallel()
+	l := NoopLogger{}
+	l.Info("test")
+	l.Warn("test")
+	l.Error("test")
+	l.Debug("test")
+}

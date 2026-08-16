@@ -378,3 +378,24 @@ func TestMergeSummaries_LatencyHistogram(t *testing.T) {
 		}
 	}
 }
+
+func TestPeerRing_RecordAndHealth(t *testing.T) {
+	t.Parallel()
+	r := &PeerRing{}
+	r.Record("node1", true)
+	r.Record("node1", true)
+	r.Record("node1", false)
+	r.Record("node2", true)
+
+	health := r.PeerHealth()
+	assert.Equal(t, 2, len(health))
+	assert.InDelta(t, 66.67, health["node1"], 0.1)
+	assert.Equal(t, 100.0, health["node2"])
+}
+
+func TestPeerRing_Empty(t *testing.T) {
+	t.Parallel()
+	r := &PeerRing{}
+	health := r.PeerHealth()
+	assert.Empty(t, health)
+}

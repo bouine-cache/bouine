@@ -159,26 +159,3 @@ func TestEvictBounded_ProgressAcrossCalls(t *testing.T) {
 	delete(m, key)
 	require.Equal(t, 199, l.Len())
 }
-
-func TestEvict_EquivalentToEvictBoundedLen2(t *testing.T) {
-	t.Parallel()
-	l := NewList[uint64]()
-	m := map[uint64]*evictor.Entry[uint64]{}
-
-	for _, k := range []uint64{1, 2, 3} {
-		e, _ := l.Access(k, func(uint64) *evictor.Entry[uint64] { return nil })
-		m[k] = e
-	}
-
-	// Evict() should behave the same as EvictBounded(l.len * 2) = EvictBounded(6).
-	key, ok := l.Evict()
-	require.True(t, ok)
-	require.Equal(t, 2, l.Len())
-	delete(m, key)
-
-	// EvictBounded(l.len * 2) on the remaining should also work.
-	key2, ok2 := l.EvictBounded(l.Len() * 2)
-	require.True(t, ok2)
-	require.Equal(t, 1, l.Len())
-	delete(m, key2)
-}

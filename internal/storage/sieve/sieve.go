@@ -70,25 +70,6 @@ func (l *List[K]) Access(key K, lookup func(K) *evictor.Entry[K]) (*evictor.Entr
 	return e, true
 }
 
-// Evict removes and returns the key of the evicted entry. The caller
-// must delete the corresponding data from the shard map.
-//
-// The caller MUST hold a write lock that excludes concurrent
-// MarkVisited callers. Without this, a racing MarkVisited could set
-// every visited bit to true between the hand's read and advance,
-// making the loop revisit the same entries indefinitely.
-//
-// Returns the evicted key and true, or the zero value and false if
-// the list is empty or no evictable entry is found within two full
-// sweeps (a defensive bound; one sweep clears all visited bits, so
-// the second sweep must find an evictable entry under the write-lock
-// invariant).
-//
-// Evict is equivalent to EvictBounded(l.len * 2).
-func (l *List[K]) Evict() (K, bool) {
-	return l.EvictBounded(l.len * 2)
-}
-
 // EvictBounded removes and returns the key of the evicted entry,
 // scanning at most maxProbes entries. The caller must hold the write
 // lock as for Evict.
@@ -154,21 +135,6 @@ func (l *List[K]) Remove(e *evictor.Entry[K]) {
 	}
 	l.remove(e)
 	l.pool.Put(e)
-}
-
-// Defer moves an entry to the head of the list without changing its
-// visited bit and without returning it to the pool. This is used by
-// eviction policies that want to skip an entry and give it another
-// chance without losing its access history.
-func (l *List[K]) Defer(e *evictor.Entry[K]) {
-	if e == nil {
-		return
-	}
-	if l.hand == e {
-		l.hand = e.Prev()
-	}
-	l.remove(e)
-	l.pushHead(e)
 }
 
 func (l *List[K]) pushHead(e *evictor.Entry[K]) {

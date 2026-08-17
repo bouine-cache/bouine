@@ -56,3 +56,7 @@ field to `Superseded by ADR-NNNN`.
 | 0025   | Remove full cluster mode                             | Accepted |
 | 0026   | SIEVE sweep cap                                      | Accepted |
 | 0027   | Remove dead Stable wire types from pkg/api           | Accepted |
+| 0028   | Use testify for test assertions                      | Accepted |
+| 0029   | Dedicated tombstone drain goroutine                  | Accepted |
+| 0030   | 128-bit cache key via XXH128                         | Accepted |
+| 0031   | Pluggable eviction framework                         | Accepted |

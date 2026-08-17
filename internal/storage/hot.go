@@ -118,8 +118,10 @@ var hotEntryPool = sync.Pool{
 }
 
 // newEvictList builds a per-shard eviction list. SIEVE is the only
-// policy; the dispatch function exists so a future policy can be
-// selected via config without touching call sites.
+// policy today; the dispatch function is staging for a follow-up PR
+// that adds a HotConfig.EvictionAlgorithm branch selecting between
+// sieve and sieve_freq. Keeping the indirection here means that PR
+// does not touch any call site in this file.
 func newEvictList() evictor.List[api.Key] {
 	return sieve.NewList[api.Key]()
 }
@@ -861,7 +863,8 @@ func (h *HotStore) ClearBacked(key api.Key) {
 
 // evictPreferBacked selects and removes an entry from the SIEVE list,
 // preferring entries with a backup. It tries up to maxSkips
-// SIEVE evictions, deferring hot-only entries back into the list.
+// SIEVE evictions, re-inserting hot-only entries at the head for a
+// second chance (via Access + MarkVisited).
 // If no backed entries are found, falls back to standard eviction.
 const maxEvictSkips = 4
 
@@ -892,7 +895,14 @@ func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 			// Access (not Defer, which assumes the entry is still linked
 			// in the list — calling Defer on an unlinked entry corrupts
 			// head/tail and orphans every other entry).
+			//
+			// Access pulls a fresh entry from the pool via Reset, which
+			// clears visited to false. Mark it visited so the re-inserted
+			// entry gets a full second chance (one sweep to clear visited,
+			// a second to evict) — matching the semantic the old Defer
+			// path provided by preserving the visited bit.
 			he.entry, _ = s.evict.Access(k, func(api.Key) *evictor.Entry[api.Key] { return nil })
+			he.entry.MarkVisited()
 		}
 	}
 	// Fall back to standard eviction after skips exhausted.

@@ -93,11 +93,6 @@ type List[K comparable] interface {
 	// the entry and whether it was newly inserted.
 	Access(key K, lookup func(K) *Entry[K]) (*Entry[K], bool)
 
-	// Evict removes and returns the key of the evicted entry. Equivalent
-	// to EvictBounded(len * 2). Returns the zero key and false if the
-	// list is empty.
-	Evict() (K, bool)
-
 	// EvictBounded removes and returns the key of the evicted entry,
 	// scanning at most maxProbes entries. Returns the zero key and false
 	// if the list is empty or no evictable entry is found within the
@@ -107,11 +102,6 @@ type List[K comparable] interface {
 	// Remove explicitly removes an entry from the list (for Delete /
 	// reaper / ban operations, not eviction).
 	Remove(e *Entry[K])
-
-	// Defer moves an entry to the head without changing its visited bit
-	// and without returning it to the pool. Used by eviction policies
-	// that want to skip an entry and give it another chance.
-	Defer(e *Entry[K])
 
 	// Len returns the number of entries.
 	Len() int

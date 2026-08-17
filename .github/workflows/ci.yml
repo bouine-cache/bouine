@@ -89,7 +89,6 @@ jobs:
   conformance:
     name: build + cache-tests conformance
     runs-on: [self-hosted, ci]
-    needs: [prek, test-linux]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -141,7 +140,6 @@ jobs:
   bench:
     name: benchmark gate
     runs-on: [self-hosted, ci]
-    needs: [prek, test-linux]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7
@@ -163,7 +161,6 @@ jobs:
   integration:
     name: integration + chaos
     runs-on: [self-hosted, ci]
-    needs: [prek, test-linux]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7

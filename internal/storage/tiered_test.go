@@ -416,8 +416,10 @@ func TestTieredStore_OverBudget(t *testing.T) {
 	// deterministic. The sweeper would otherwise evict the oversized
 	// object before we can observe OverBudget. Closing done stops both
 	// the sweeper and reaper goroutines; we skip Close in cleanup to
-	// avoid a double-close on done.
+	// avoid a double-close on done. Wait for both goroutines to fully
+	// exit so the oversized Put's evictSignal has no live consumer.
 	close(ts.hot.done)
+	ts.hot.wg.Wait()
 
 	overK := testkey.Hash([]byte("oversized"))
 	err = ts.Put(ctx, overK, bigObj(overK, maxBytes*2))

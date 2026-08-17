@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -375,4 +376,47 @@ func TestInitWAL_WALReplayEmptyIndex(t *testing.T) {
 	obj, _, err := ts.Get(context.Background(), testkey.Key(42))
 	require.NoError(t, err, "get non-existent key")
 	require.Nil(t, obj, "key not present after empty WAL replay")
+}
+
+// failingTruncateWAL wraps a *wal.Log but makes Truncate always fail,
+// so the Close() path that logs "wal truncate after final snapshot
+// failed" can be exercised. Every other method delegates to the
+// embedded *wal.Log, so the real WAL (and its async sync loop) is
+// closed cleanly by Close().
+type failingTruncateWAL struct {
+	*wal.Log
+}
+
+func (failingTruncateWAL) Truncate() error { return errors.New("injected truncate failure") }
+
+// TestClose_FinalSnapshotTruncateFailure covers the Close() branch
+// where WriteSnapshot succeeds but Truncate fails: Close must log the
+// Warn (not return an error), leave the snapshot on disk, and still
+// close the WAL and tiers cleanly.
+func TestClose_FinalSnapshotTruncateFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts := newTieredStoreWithDir(t, dir)
+
+	for i := range 5 {
+		k := testkey.Key(uint64(i + 1))
+		err := ts.Put(context.Background(), k, bigObj(k, 2048))
+		require.NoErrorf(t, err, "put %d", i)
+	}
+	require.Equal(t, int64(5), ts.walEntryCount.Load(),
+		"precondition: WAL has uncheckpointed entries")
+
+	snapPath := ts.warm.SnapshotPath()
+
+	ts.walMu.Lock()
+	orig := ts.wal.(*wal.Log)
+	ts.wal = &failingTruncateWAL{Log: orig}
+	ts.walMu.Unlock()
+
+	err := ts.Close(context.Background())
+	require.NoError(t, err, "close does not fail on truncate error")
+
+	fi, err := os.Stat(snapPath)
+	require.NoError(t, err, "snapshot written despite truncate failure")
+	require.Greater(t, fi.Size(), int64(0), "snapshot is not empty")
 }

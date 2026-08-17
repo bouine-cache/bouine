@@ -17,6 +17,20 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
+// walStore is the subset of *wal.Log that TieredStore calls. It is
+// declared here (the consumer) per the layer rule in AGENTS.md §3.1 so
+// the storage package depends on the operations it needs, not on the
+// concrete wal.Log type. *wal.Log satisfies this interface.
+type walStore interface {
+	Enqueue(entry wal.Entry) error
+	EnqueueBatch(entries []wal.Entry)
+	Sync() error
+	Truncate() error
+	LastSyncTime() time.Time
+	DroppedEntries() int64
+	Close() error
+}
+
 // TieredStore wraps a hot tier (RAM) and an optional warm tier (disk)
 // into a single Store. Objects smaller than a threshold live in the
 // hot tier only; larger objects are demoted to the warm tier. The WAL
@@ -28,7 +42,7 @@ import (
 type TieredStore struct {
 	hot    *HotStore
 	warm   *warm.Store
-	wal    *wal.Log
+	wal    walStore
 	walMu  sync.Mutex // guards wal field access during rewriteWAL vs concurrent Enqueue/EnqueueBatch
 	logger observability.Logger
 

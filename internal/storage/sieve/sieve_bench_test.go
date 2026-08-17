@@ -3,6 +3,8 @@ package sieve
 import (
 	"testing"
 	"time"
+
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 )
 
 // BenchmarkSingle_SIEVE_Evict_AllVisited_1M measures a single EvictBounded(128)
@@ -23,14 +25,14 @@ import (
 func BenchmarkSingle_SIEVE_Evict_AllVisited_1M(b *testing.B) {
 	const n = 1_000_000
 	l := NewList[uint64]()
-	m := make(map[uint64]*Entry[uint64], n)
+	m := make(map[uint64]*evictor.Entry[uint64], n)
 
 	for i := range n {
-		e, _ := l.Access(uint64(i), func(uint64) *Entry[uint64] { return nil })
+		e, _ := l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return nil })
 		m[uint64(i)] = e
 	}
 	for i := range n {
-		l.Access(uint64(i), func(uint64) *Entry[uint64] { return m[uint64(i)] })
+		l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return m[uint64(i)] })
 	}
 
 	b.ResetTimer()

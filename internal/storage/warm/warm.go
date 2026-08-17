@@ -41,6 +41,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/bouine-cache/bouine/internal/platform"
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -73,12 +74,12 @@ const (
 
 // EstimatedWarmLocHeapBytes is the approximate Go heap cost per warm
 // index entry: warmLoc struct (segID int + offset int64 + size int64 +
-// sieve pointer 8B + protected bool padded to 8B = ~40B, unchanged — the
+// entry pointer 8B + protected bool padded to 8B = ~40B, unchanged — the
 // Key lives in the map, not warmLoc) + map overhead (~58B at load factor
-// 6.5 with 16-byte keys) + sieve.Entry[api.Key] (40B: 16B key + 4B
+// 6.5 with 16-byte keys) + evictor.Entry[api.Key] (40B: 16B key + 4B
 // atomic.Bool + 4B pad + 8B prev + 8B next) = ~138B. Rounded to 160 for
 // alignment and safety margin.
-// Update if warmLoc or sieve.Entry struct layout changes.
+// Update if warmLoc or evictor.Entry struct layout changes.
 // The same value is inlined in config/loader.go ResolveWarmMaxEntries
 // to avoid a circular import.
 const EstimatedWarmLocHeapBytes = 160
@@ -341,7 +342,7 @@ func (c *fdCache) Len() int {
 // size field stores the on-disk record size (HeaderLen + body + FooterLen)
 // so Delete can subtract it from stats.bytes without re-reading the record.
 //
-// sieve points to the entry's node in the SIEVE eviction list. It is
+// entry points to the entry's node in the SIEVE eviction list. It is
 // set on Put/SetIndex and cleared on Delete/eviction. The visited bit
 // on the SIEVE entry is set atomically by Get under idxMu.RLock — no
 // write lock needed for access tracking.
@@ -353,7 +354,7 @@ type warmLoc struct {
 	segID     int
 	offset    int64
 	size      int64
-	sieve     *sieve.Entry[api.Key]
+	entry     *evictor.Entry[api.Key]
 	protected bool
 }
 
@@ -376,7 +377,7 @@ type Store struct {
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
-	evictList *sieve.List[api.Key]
+	evictList evictor.List[api.Key]
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
 	// (compactLoop), so no synchronization is needed. The buffer grows
@@ -711,13 +712,13 @@ func (s *Store) Put(key api.Key, body []byte) (segID int, offset int64, err erro
 		// reuse the existing entry and mark it visited. Otherwise, insert a
 		// new entry at head with visited=false. The bool return (newly
 		// inserted) is discarded — the entry pointer is sufficient.
-		e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
+		e, _ := s.evictList.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 			if loc, ok := s.index[k]; ok {
-				return loc.sieve
+				return loc.entry
 			}
 			return nil
 		})
-		s.index[key] = warmLoc{segID: seg.ID, offset: off, size: recSize, sieve: e}
+		s.index[key] = warmLoc{segID: seg.ID, offset: off, size: recSize, entry: e}
 		s.idxMu.Unlock()
 
 		return seg.ID, off, nil
@@ -771,8 +772,8 @@ func (s *Store) Delete(key api.Key) (segID int, err error) {
 		s.idxMu.Lock()
 		loc, existed := s.index[key]
 		if existed {
-			if loc.sieve != nil {
-				s.evictList.Remove(loc.sieve)
+			if loc.entry != nil {
+				s.evictList.Remove(loc.entry)
 			}
 			delete(s.index, key)
 			s.stats.entries.Add(-1)
@@ -862,8 +863,8 @@ func (s *Store) Get(key api.Key) ([]byte, error) {
 	// that was evicted and reused between the initial RLock and now.
 	s.idxMu.RLock()
 	defer s.idxMu.RUnlock()
-	if cur, ok := s.index[key]; ok && cur.segID == loc.segID && cur.offset == loc.offset && cur.sieve != nil {
-		cur.sieve.MarkVisited()
+	if cur, ok := s.index[key]; ok && cur.segID == loc.segID && cur.offset == loc.offset && cur.entry != nil {
+		cur.entry.MarkVisited()
 	}
 
 	return rec.Body, nil
@@ -880,13 +881,13 @@ func (s *Store) Get(key api.Key) ([]byte, error) {
 func (s *Store) SetIndex(key api.Key, segID int, offset int64) {
 	s.idxMu.Lock()
 	defer s.idxMu.Unlock()
-	e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
+	e, _ := s.evictList.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 		if loc, ok := s.index[k]; ok {
-			return loc.sieve
+			return loc.entry
 		}
 		return nil
 	})
-	s.index[key] = warmLoc{segID: segID, offset: offset, sieve: e}
+	s.index[key] = warmLoc{segID: segID, offset: offset, entry: e}
 }
 
 // SetIndexWithSize is like SetIndex but also sets the on-disk record
@@ -896,13 +897,13 @@ func (s *Store) SetIndex(key api.Key, segID int, offset int64) {
 func (s *Store) SetIndexWithSize(key api.Key, segID int, offset, size int64) {
 	s.idxMu.Lock()
 	defer s.idxMu.Unlock()
-	e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
+	e, _ := s.evictList.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 		if loc, ok := s.index[k]; ok {
-			return loc.sieve
+			return loc.entry
 		}
 		return nil
 	})
-	s.index[key] = warmLoc{segID: segID, offset: offset, size: size, sieve: e}
+	s.index[key] = warmLoc{segID: segID, offset: offset, size: size, entry: e}
 }
 
 // IndexLen returns the number of entries currently in the warm-tier
@@ -950,8 +951,8 @@ func (s *Store) LookupWithSize(key api.Key) (segID int, offset, size int64, ok b
 func (s *Store) DelIndex(key api.Key) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
-		if loc.sieve != nil {
-			s.evictList.Remove(loc.sieve)
+		if loc.entry != nil {
+			s.evictList.Remove(loc.entry)
 		}
 		delete(s.index, key)
 	}
@@ -1127,8 +1128,8 @@ func (s *Store) SelfHeals() int64 {
 func (s *Store) dropStaleIndex(key api.Key, stale warmLoc) {
 	s.idxMu.Lock()
 	if cur, ok := s.index[key]; ok && cur.segID == stale.segID && cur.offset == stale.offset {
-		if cur.sieve != nil {
-			s.evictList.Remove(cur.sieve)
+		if cur.entry != nil {
+			s.evictList.Remove(cur.entry)
 		}
 		delete(s.index, key)
 		s.stats.entries.Add(-1)
@@ -1350,9 +1351,9 @@ func (s *Store) pickEvictVictim() (key api.Key, loc warmLoc, found bool) {
 			// Give the protected entry a second chance: re-insert
 			// at head with visited=true. The hand will clear visited
 			// on a future sweep and reconsider it.
-			e, _ := s.evictList.Access(cand, func(api.Key) *sieve.Entry[api.Key] { return nil })
+			e, _ := s.evictList.Access(cand, func(api.Key) *evictor.Entry[api.Key] { return nil })
 			e.MarkVisited()
-			candLoc.sieve = e
+			candLoc.entry = e
 			s.index[cand] = candLoc
 			continue
 		}
@@ -1366,8 +1367,8 @@ func (s *Store) pickEvictVictim() (key api.Key, loc warmLoc, found bool) {
 // The SIEVE entry was removed by EvictBounded, so a fresh entry is inserted
 // at the head with visited=false; the next Get will re-mark it.
 func (s *Store) restoreSIEVEEntry(key api.Key, loc warmLoc) {
-	e, _ := s.evictList.Access(key, func(api.Key) *sieve.Entry[api.Key] { return nil })
-	loc.sieve = e
+	e, _ := s.evictList.Access(key, func(api.Key) *evictor.Entry[api.Key] { return nil })
+	loc.entry = e
 	s.index[key] = loc
 }
 
@@ -2006,9 +2007,9 @@ func (s *Store) Compact() error {
 	// runs under s.mu.Lock so the index cannot change concurrently.
 	newEvictList := sieve.NewList[api.Key]()
 	for _, key := range orderedKeys {
-		e, _ := newEvictList.Access(key, func(api.Key) *sieve.Entry[api.Key] { return nil })
+		e, _ := newEvictList.Access(key, func(api.Key) *evictor.Entry[api.Key] { return nil })
 		loc := newIndex[key]
-		loc.sieve = e
+		loc.entry = e
 		newIndex[key] = loc
 	}
 	var liveBytes int64

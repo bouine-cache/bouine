@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -88,14 +89,14 @@ type activeBan struct {
 type shard struct {
 	mu          sync.RWMutex
 	entries     map[api.Key]*hotEntry
-	evict       *sieve.List[api.Key]
+	evict       evictor.List[api.Key]
 	bytes       int64
 	backedCount int64 // entries with a backup (cheap to evict)
 }
 
 type hotEntry struct {
 	obj   *api.Object
-	sieve *sieve.Entry[api.Key]
+	entry *evictor.Entry[api.Key]
 	// hasBackup is true when the object also exists in a slower tier.
 	// Eviction prefers these entries because they can be recovered
 	// from disk.
@@ -114,6 +115,13 @@ type hotEntry struct {
 // clears it, but defensive).
 var hotEntryPool = sync.Pool{
 	New: func() any { return new(hotEntry) },
+}
+
+// newEvictList builds a per-shard eviction list. SIEVE is the only
+// policy; the dispatch function exists so a future policy can be
+// selected via config without touching call sites.
+func newEvictList() evictor.List[api.Key] {
+	return sieve.NewList[api.Key]()
 }
 
 // evictionLog is a deferred log record collected under the shard lock
@@ -211,7 +219,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 	shards := make([]shard, n)
 	for i := range shards {
 		shards[i].entries = make(map[api.Key]*hotEntry)
-		shards[i].evict = sieve.NewList[api.Key]()
+		shards[i].evict = newEvictList()
 	}
 	reaperInterval := defaultReaperInterval
 	if cfg.ReaperInterval > 0 {
@@ -265,7 +273,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	// already set, no write is needed — just return the object.
 	s.mu.RLock()
 	e := s.entries[key]
-	if e != nil && e.sieve.Visited() {
+	if e != nil && e.entry.Visited() {
 		e.windowHits.Add(1)
 		stored := e.obj
 		ret := h.detachBody(stored)
@@ -291,8 +299,8 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	e = s.entries[key]
 	var stored *api.Object
 	if e != nil {
-		s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
-			return e.sieve
+		s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
+			return e.entry
 		})
 		e.obj.Hits++
 		e.windowHits.Add(1)
@@ -368,11 +376,11 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 	if cur, ok := s.entries[key]; ok && cur.obj == obj {
 		h.notifyEvict(key, cur, &slabFrees)
 		s.bytes -= objSize(obj)
-		s.evict.Remove(cur.sieve)
+		s.evict.Remove(cur.entry)
 		delete(s.entries, key)
 		h.stats.evictions.Add(1)
 		cur.obj = nil
-		cur.sieve = nil
+		cur.entry = nil
 		cur.hasBackup = false
 		cur.windowHits.Store(0)
 		hotEntryPool.Put(cur)
@@ -430,7 +438,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
 			old.obj = nil
-			old.sieve = nil
+			old.entry = nil
 			old.hasBackup = false
 			old.windowHits.Store(0)
 			hotEntryPool.Put(old)
@@ -444,23 +452,23 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	if old, exists := s.entries[key]; exists {
 		h.notifyEvict(key, old, &slabFrees)
 		s.bytes -= objSize(old.obj)
-		s.evict.Remove(old.sieve)
+		s.evict.Remove(old.entry)
 		if old.hasBackup {
 			s.backedCount--
 		}
 		old.obj = nil
-		old.sieve = nil
+		old.entry = nil
 		old.hasBackup = false
 		old.windowHits.Store(0)
 		hotEntryPool.Put(old)
 	}
 
-	se, _ := s.evict.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
+	se, _ := s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 		return nil // force insert
 	})
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
-	e.sieve = se
+	e.entry = se
 	s.entries[key] = e
 	s.bytes += size
 	s.mu.Unlock()
@@ -521,11 +529,11 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 			recordEviction(&logs, key, e, "expired")
 			h.notifyEvict(key, e, &slabFrees)
 			s.bytes -= objSize(e.obj)
-			s.evict.Remove(e.sieve)
+			s.evict.Remove(e.entry)
 			delete(s.entries, key)
 			h.stats.evictions.Add(1)
 			e.obj = nil
-			e.sieve = nil
+			e.entry = nil
 			e.hasBackup = false
 			e.windowHits.Store(0)
 			hotEntryPool.Put(e)
@@ -562,7 +570,7 @@ func (h *HotStore) sweeper() {
 					delete(s.entries, evKey)
 					h.stats.evictions.Add(1)
 					old.obj = nil
-					old.sieve = nil
+					old.entry = nil
 					old.hasBackup = false
 					old.windowHits.Store(0)
 					hotEntryPool.Put(old)
@@ -593,11 +601,11 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	s.mu.Lock()
 	if e, ok := s.entries[key]; ok {
 		s.bytes -= objSize(e.obj)
-		s.evict.Remove(e.sieve)
+		s.evict.Remove(e.entry)
 		h.notifyEvict(key, e, &slabFrees)
 		delete(s.entries, key)
 		e.obj = nil
-		e.sieve = nil
+		e.entry = nil
 		e.hasBackup = false
 		e.windowHits.Store(0)
 		hotEntryPool.Put(e)
@@ -664,12 +672,12 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 		if pred(e.obj) {
 			h.notifyEvict(key, e, &slabFrees)
 			s.bytes -= objSize(e.obj)
-			s.evict.Remove(e.sieve)
+			s.evict.Remove(e.entry)
 			delete(s.entries, key)
 			h.stats.evictions.Add(1)
 			n++
 			e.obj = nil
-			e.sieve = nil
+			e.entry = nil
 			e.hasBackup = false
 			e.windowHits.Store(0)
 			hotEntryPool.Put(e)
@@ -878,9 +886,13 @@ func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 				s.backedCount--
 				return k, true
 			}
-			// Hot-only entry: defer it back to the head without
-			// resetting the visited bit.
-			s.evict.Defer(he.sieve)
+			// Hot-only entry: re-insert at the head to give it another
+			// chance. EvictBounded already removed the entry from the
+			// list and returned it to the pool, so we must re-insert via
+			// Access (not Defer, which assumes the entry is still linked
+			// in the list — calling Defer on an unlinked entry corrupts
+			// head/tail and orphans every other entry).
+			he.entry, _ = s.evict.Access(k, func(api.Key) *evictor.Entry[api.Key] { return nil })
 		}
 	}
 	// Fall back to standard eviction after skips exhausted.
@@ -978,7 +990,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 const (
 	objectStructSize    int64 = 272 // unsafe.Sizeof(api.Object{}) — Key grew 8→16 B inline. Update when fields are added.
 	hotEntrySize        int64 = 32
-	sieveEntrySize      int64 = 40 // unsafe.Sizeof(sieve.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
+	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
 	headerEntriesSlice int64 = 24 // []headerEntry slice header

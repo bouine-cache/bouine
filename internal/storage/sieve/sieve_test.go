@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -13,20 +14,20 @@ import (
 func TestSieve_InsertAndAccess(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
-	e1, ins := l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
+	e1, ins := l.Access(1, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 	require.True(t, ins)
 	m[1] = e1
 
-	e2, ins := l.Access(2, func(k uint64) *Entry[uint64] { return m[k] })
+	e2, ins := l.Access(2, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 	require.True(t, ins)
 	m[2] = e2
 
 	require.Equal(t, 2, l.Len())
 
 	// Re-access key 1 — should not insert, should mark visited.
-	_, ins = l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
+	_, ins = l.Access(1, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 	require.False(t, ins)
 	require.Equal(t, 2, l.Len())
 }
@@ -34,17 +35,17 @@ func TestSieve_InsertAndAccess(t *testing.T) {
 func TestSieve_EvictsLeastRecent(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	// Insert 1, 2, 3.
 	for _, k := range []uint64{1, 2, 3} {
-		e, _ := l.Access(k, func(k uint64) *Entry[uint64] { return m[k] })
+		e, _ := l.Access(k, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 		m[k] = e
 	}
 
 	// Access 1 and 3 so they get visited=true.
-	l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
-	l.Access(3, func(k uint64) *Entry[uint64] { return m[k] })
+	l.Access(1, func(k uint64) *evictor.Entry[uint64] { return m[k] })
+	l.Access(3, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 
 	// Evict — should evict 2 (not visited, at tail after 1 was visited).
 	key, ok := l.Evict()
@@ -58,10 +59,10 @@ func TestSieve_EvictsLeastRecent(t *testing.T) {
 func TestSieve_EvictAll(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	for _, k := range []uint64{10, 20, 30} {
-		e, _ := l.Access(k, func(k uint64) *Entry[uint64] { return m[k] })
+		e, _ := l.Access(k, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 		m[k] = e
 	}
 
@@ -83,10 +84,10 @@ func TestSieve_EvictAll(t *testing.T) {
 func TestSieve_Remove(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	for _, k := range []uint64{1, 2, 3} {
-		e, _ := l.Access(k, func(k uint64) *Entry[uint64] { return m[k] })
+		e, _ := l.Access(k, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 		m[k] = e
 	}
 
@@ -108,17 +109,17 @@ func TestSieve_Remove(t *testing.T) {
 func TestSieve_SecondChance(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	// Insert A, B.
 	for _, k := range []uint64{1, 2} {
-		e, _ := l.Access(k, func(k uint64) *Entry[uint64] { return m[k] })
+		e, _ := l.Access(k, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 		m[k] = e
 	}
 
 	// Visit both.
-	l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
-	l.Access(2, func(k uint64) *Entry[uint64] { return m[k] })
+	l.Access(1, func(k uint64) *evictor.Entry[uint64] { return m[k] })
+	l.Access(2, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 
 	// First evict: both visited, so both get second chance; then one
 	// is evicted (the one the hand lands on after clearing visited).
@@ -131,15 +132,15 @@ func TestSieve_SecondChance(t *testing.T) {
 func TestSieve_Defer_PreservesVisitedBit(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	for _, k := range []uint64{1, 2, 3} {
-		e, _ := l.Access(k, func(k uint64) *Entry[uint64] { return m[k] })
+		e, _ := l.Access(k, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 		m[k] = e
 	}
 
 	// Visit key 1 (visited=true).
-	l.Access(1, func(k uint64) *Entry[uint64] { return m[k] })
+	l.Access(1, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 	require.True(t, m[1].Visited())
 
 	// Defer key 1 — move to head, preserve visited bit.
@@ -163,7 +164,7 @@ func TestSieve_Defer_PreservesVisitedBit(t *testing.T) {
 }
 func TestEntry_MarkVisited(t *testing.T) {
 	t.Parallel()
-	e := &Entry[int]{Key: 42}
+	e := &evictor.Entry[int]{Key: 42}
 	assert.False(t, e.Visited())
 	e.MarkVisited()
 	assert.True(t, e.Visited())
@@ -172,8 +173,8 @@ func TestEntry_MarkVisited(t *testing.T) {
 func TestList_Clear(t *testing.T) {
 	t.Parallel()
 	l := NewList[int]()
-	e1, _ := l.Access(1, func(k int) *Entry[int] { return nil })
-	e2, _ := l.Access(2, func(k int) *Entry[int] { return nil })
+	e1, _ := l.Access(1, func(k int) *evictor.Entry[int] { return nil })
+	e2, _ := l.Access(2, func(k int) *evictor.Entry[int] { return nil })
 	require.Equal(t, 2, l.Len())
 	assert.NotNil(t, e1)
 	assert.NotNil(t, e2)
@@ -188,12 +189,12 @@ func TestList_ClearAndReuse(t *testing.T) {
 	t.Parallel()
 	l := NewList[int]()
 	for i := range 10 {
-		l.Access(i, func(k int) *Entry[int] { return nil })
+		l.Access(i, func(k int) *evictor.Entry[int] { return nil })
 	}
 	l.Clear()
 	assert.Equal(t, 0, l.Len())
 	// Reuse after clear.
-	e, isNew := l.Access(100, func(k int) *Entry[int] { return nil })
+	e, isNew := l.Access(100, func(k int) *evictor.Entry[int] { return nil })
 	assert.True(t, isNew)
 	assert.NotNil(t, e)
 	assert.Equal(t, 1, l.Len())
@@ -209,7 +210,7 @@ func TestList_ClearEmpty(t *testing.T) {
 func TestEntry_VisitedWithGenericKey(t *testing.T) {
 	t.Parallel()
 	type k string
-	e := &Entry[k]{Key: "test"}
+	e := &evictor.Entry[k]{Key: "test"}
 	e.MarkVisited()
 	assert.True(t, e.Visited())
 }
@@ -217,10 +218,10 @@ func TestEntry_VisitedWithGenericKey(t *testing.T) {
 func TestList_AccessExistingKey(t *testing.T) {
 	t.Parallel()
 	l := NewList[int]()
-	e1, isNew1 := l.Access(1, func(k int) *Entry[int] { return nil })
+	e1, isNew1 := l.Access(1, func(k int) *evictor.Entry[int] { return nil })
 	require.True(t, isNew1)
 	// Access same key again — should find existing entry and mark visited.
-	e2, isNew2 := l.Access(1, func(k int) *Entry[int] {
+	e2, isNew2 := l.Access(1, func(k int) *evictor.Entry[int] {
 		if k == 1 {
 			return e1
 		}
@@ -235,7 +236,7 @@ func TestList_AccessWithTestKey(t *testing.T) {
 	t.Parallel()
 	l := NewList[api.Key]()
 	k := testkey.Key(42)
-	e, isNew := l.Access(k, func(key api.Key) *Entry[api.Key] { return nil })
+	e, isNew := l.Access(k, func(key api.Key) *evictor.Entry[api.Key] { return nil })
 	require.True(t, isNew)
 	assert.Equal(t, k, e.Key)
 }

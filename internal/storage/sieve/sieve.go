@@ -1,4 +1,4 @@
-// Package sieve implements the SIEVE cache eviction algorithm.
+// Package sieve implements the SIEVE cache eviction policy.
 //
 // SIEVE is a simple, near-LRU-K algorithm with O(1) amortized per
 // operation and O(maxSweepProbes) worst case. It uses a doubly-linked
@@ -6,56 +6,33 @@
 // the list; entries with visited=true get a second chance (visited
 // cleared), entries with visited=false are evicted.
 //
+// This package implements ONLY the SIEVE policy. Both hot and warm tiers
+// use it via the evictor.List interface. See ADR-0031 for the pluggable
+// eviction framework.
+//
 // Reference: "SIEVE is Simpler than LRU: an Efficient Turn-Key
 // Eviction Algorithm for Web Caches" (Zhang et al., NSDI 2024).
 package sieve
 
 import (
-	"sync"
-	"sync/atomic"
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 )
 
-// Entry is a node in the SIEVE eviction list. Exported so the hot
-// tier can embed it alongside the cached object.
-//
-// The visited field uses atomic.Bool so the hot store can read it safely
-// under a read lock (RLock fast path) without a data race against the
-// eviction path that writes under a write lock.
-type Entry[K comparable] struct {
-	Key     K
-	visited atomic.Bool // safe to read under RLock; written under WLock
-	prev    *Entry[K]
-	next    *Entry[K]
-}
-
-// Visited returns the current value of the visited bit.
-// Safe to call while holding only the shard read lock.
-func (e *Entry[K]) Visited() bool { return e.visited.Load() }
-
-// MarkVisited sets the visited bit to true. Safe to call under a read
-// lock — the underlying store is atomic.Bool. Callers that hold only a
-// read lock can record access without upgrading to a write lock.
-func (e *Entry[K]) MarkVisited() { e.visited.Store(true) }
-
 // List is a SIEVE eviction list. It is NOT goroutine-safe; the caller
-// (the per-shard hot tier) must hold the shard write lock for all
-// mutations. Reads of the visited bit via Entry.Visited() are safe
-// under the shard read lock.
+// (the per-shard hot tier or the warm tier) must hold the appropriate
+// lock for all mutations. Reads of the visited bit via Entry.Visited()
+// are safe under the shard read lock.
 type List[K comparable] struct {
-	head *Entry[K]
-	tail *Entry[K]
-	hand *Entry[K]
+	head *evictor.Entry[K]
+	tail *evictor.Entry[K]
+	hand *evictor.Entry[K]
 	len  int
-	pool sync.Pool
+	pool *evictor.EntryPool[K]
 }
 
 // NewList creates an empty SIEVE list.
 func NewList[K comparable]() *List[K] {
-	l := &List[K]{}
-	l.pool = sync.Pool{
-		New: func() any { return new(Entry[K]) },
-	}
-	return l
+	return &List[K]{pool: evictor.NewEntryPool[K]()}
 }
 
 // Clear removes all entries from the list, returning them to the pool.
@@ -65,7 +42,7 @@ func NewList[K comparable]() *List[K] {
 func (l *List[K]) Clear() {
 	for l.head != nil {
 		e := l.head
-		l.head = e.next
+		l.head = e.Next()
 		l.pool.Put(e)
 	}
 	l.head = nil
@@ -82,18 +59,13 @@ func (l *List[K]) Len() int { return l.len }
 // head and returned.
 //
 // Returns the entry and whether it was newly inserted.
-func (l *List[K]) Access(key K, lookup func(K) *Entry[K]) (*Entry[K], bool) {
+func (l *List[K]) Access(key K, lookup func(K) *evictor.Entry[K]) (*evictor.Entry[K], bool) {
 	if e := lookup(key); e != nil {
-		e.visited.Store(true)
+		e.MarkVisited()
 		return e, false
 	}
-	e := l.pool.Get().(*Entry[K])
-	// Reset fields individually: atomic.Bool must not be copied via struct
-	// assignment (the zero value of atomic.Bool has a noCopy sentinel).
+	e := l.pool.Get()
 	e.Key = key
-	e.visited.Store(false)
-	e.prev = nil
-	e.next = nil
 	l.pushHead(e)
 	return e, true
 }
@@ -130,15 +102,13 @@ func (l *List[K]) Evict() (K, bool) {
 // an evictable entry within a few probes.
 //
 // Returns the evicted key and true, or the zero value and false if
-// the list is empty or no evictable entry is found within maxProbes
-// probes.
+// the list is empty or no evictable entry is found within maxProbes.
 func (l *List[K]) EvictBounded(maxProbes int) (K, bool) {
 	if l.len == 0 || maxProbes <= 0 {
 		var zero K
 		return zero, false
 	}
 
-	// Start from the hand (or tail if hand is nil).
 	if l.hand == nil {
 		l.hand = l.tail
 	}
@@ -146,7 +116,6 @@ func (l *List[K]) EvictBounded(maxProbes int) (K, bool) {
 	for range maxProbes {
 		cur := l.hand
 		if cur == nil {
-			// Wrapped around: reset hand to tail.
 			l.hand = l.tail
 			cur = l.hand
 			if cur == nil {
@@ -155,36 +124,33 @@ func (l *List[K]) EvictBounded(maxProbes int) (K, bool) {
 			}
 		}
 
-		if !cur.visited.Load() {
-			// Evict this entry.
-			l.hand = cur.prev
+		if !cur.Visited() {
+			l.hand = cur.Prev()
 			l.remove(cur)
 			key := cur.Key
 			l.pool.Put(cur)
 			return key, true
 		}
 
-		// Give a second chance.
-		cur.visited.Store(false)
-		l.hand = cur.prev
+		cur.ClearVisited()
+		l.hand = cur.Prev()
 		if l.hand == nil {
 			l.hand = l.tail
 		}
 	}
 
-	// Capped out without finding an unvisited entry.
 	var zero K
 	return zero, false
 }
 
 // Remove explicitly removes an entry from the list (for Delete
 // operations, not eviction).
-func (l *List[K]) Remove(e *Entry[K]) {
+func (l *List[K]) Remove(e *evictor.Entry[K]) {
 	if e == nil {
 		return
 	}
 	if l.hand == e {
-		l.hand = e.prev
+		l.hand = e.Prev()
 	}
 	l.remove(e)
 	l.pool.Put(e)
@@ -194,22 +160,22 @@ func (l *List[K]) Remove(e *Entry[K]) {
 // visited bit and without returning it to the pool. This is used by
 // eviction policies that want to skip an entry and give it another
 // chance without losing its access history.
-func (l *List[K]) Defer(e *Entry[K]) {
+func (l *List[K]) Defer(e *evictor.Entry[K]) {
 	if e == nil {
 		return
 	}
 	if l.hand == e {
-		l.hand = e.prev
+		l.hand = e.Prev()
 	}
 	l.remove(e)
 	l.pushHead(e)
 }
 
-func (l *List[K]) pushHead(e *Entry[K]) {
-	e.prev = nil
-	e.next = l.head
+func (l *List[K]) pushHead(e *evictor.Entry[K]) {
+	e.SetPrev(nil)
+	e.SetNext(l.head)
 	if l.head != nil {
-		l.head.prev = e
+		l.head.SetPrev(e)
 	}
 	l.head = e
 	if l.tail == nil {
@@ -218,18 +184,18 @@ func (l *List[K]) pushHead(e *Entry[K]) {
 	l.len++
 }
 
-func (l *List[K]) remove(e *Entry[K]) {
-	if e.prev != nil {
-		e.prev.next = e.next
+func (l *List[K]) remove(e *evictor.Entry[K]) {
+	if e.Prev() != nil {
+		e.Prev().SetNext(e.Next())
 	} else {
-		l.head = e.next
+		l.head = e.Next()
 	}
-	if e.next != nil {
-		e.next.prev = e.prev
+	if e.Next() != nil {
+		e.Next().SetPrev(e.Prev())
 	} else {
-		l.tail = e.prev
+		l.tail = e.Prev()
 	}
-	e.prev = nil
-	e.next = nil
+	e.SetPrev(nil)
+	e.SetNext(nil)
 	l.len--
 }

@@ -3,6 +3,11 @@ name: Auto-rebase
 # Keeps open PRs up-to-date with main so that branch protection's
 # "Require branches to be up to date" can pass and auto-merge can fire.
 #
+# Uses a PAT (REBASE_TOKEN) instead of GITHUB_TOKEN so that rebase
+# pushes appear as a real user, not github-actions[bot]. GitHub
+# requires manual approval before running workflows on commits pushed
+# by github-actions[bot], which would stall CI on every auto-rebase.
+#
 # Triggers:
 #   - Every push to main (immediate)
 #   - Every 6 hours (catches manual pushes, force-pushes to main, etc.)
@@ -28,7 +33,7 @@ jobs:
       - name: Update PR branches
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.REBASE_TOKEN }}
         run: |
           set -eo pipefail
 

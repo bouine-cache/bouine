@@ -4,20 +4,22 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 )
 
 func TestEvictBounded_AllVisited_ReturnsFalse(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	// Insert 10 entries, all visited.
 	for i := range 10 {
-		e, _ := l.Access(uint64(i), func(uint64) *Entry[uint64] { return nil })
+		e, _ := l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return nil })
 		m[uint64(i)] = e
 	}
 	for i := range 10 {
-		l.Access(uint64(i), func(uint64) *Entry[uint64] { return m[uint64(i)] })
+		l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return m[uint64(i)] })
 	}
 
 	// With maxProbes < len, all visited: should return false.
@@ -31,15 +33,15 @@ func TestEvictBounded_AllVisited_ReturnsFalse(t *testing.T) {
 func TestEvictBounded_AllVisited_FindsAfterClearing(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	// Insert 4 entries, all visited.
 	for i := range 4 {
-		e, _ := l.Access(uint64(i), func(uint64) *Entry[uint64] { return nil })
+		e, _ := l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return nil })
 		m[uint64(i)] = e
 	}
 	for i := range 4 {
-		l.Access(uint64(i), func(uint64) *Entry[uint64] { return m[uint64(i)] })
+		l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return m[uint64(i)] })
 	}
 
 	// With maxProbes >= len: one sweep clears all visited bits (4 probes),
@@ -56,15 +58,15 @@ func TestEvictBounded_AllVisited_FindsAfterClearing(t *testing.T) {
 func TestEvictBounded_PreservesUnvisitedEntries(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	// Insert 100 entries, all visited.
 	for i := range 100 {
-		e, _ := l.Access(uint64(i), func(uint64) *Entry[uint64] { return nil })
+		e, _ := l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return nil })
 		m[uint64(i)] = e
 	}
 	for i := range 100 {
-		l.Access(uint64(i), func(uint64) *Entry[uint64] { return m[uint64(i)] })
+		l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return m[uint64(i)] })
 	}
 
 	// EvictBounded(10) should return false (all visited, 10 probes
@@ -91,7 +93,7 @@ func TestEvictBounded_Zero_ReturnsFalse(t *testing.T) {
 	l := NewList[uint64]()
 
 	// Insert one entry.
-	_, _ = l.Access(1, func(uint64) *Entry[uint64] { return nil })
+	_, _ = l.Access(1, func(uint64) *evictor.Entry[uint64] { return nil })
 
 	_, ok := l.EvictBounded(0)
 	require.False(t, ok)
@@ -102,7 +104,7 @@ func TestEvictBounded_Negative_ReturnsFalse(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
 
-	_, _ = l.Access(1, func(uint64) *Entry[uint64] { return nil })
+	_, _ = l.Access(1, func(uint64) *evictor.Entry[uint64] { return nil })
 
 	_, ok := l.EvictBounded(-1)
 	require.False(t, ok)
@@ -121,7 +123,7 @@ func TestEvictBounded_UnvisitedEntryEvictedImmediately(t *testing.T) {
 	l := NewList[uint64]()
 
 	// Insert one entry (not visited).
-	_, _ = l.Access(42, func(uint64) *Entry[uint64] { return nil })
+	_, _ = l.Access(42, func(uint64) *evictor.Entry[uint64] { return nil })
 
 	key, ok := l.EvictBounded(128)
 	require.True(t, ok)
@@ -132,15 +134,15 @@ func TestEvictBounded_UnvisitedEntryEvictedImmediately(t *testing.T) {
 func TestEvictBounded_ProgressAcrossCalls(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	// Insert 200 entries, all visited.
 	for i := range 200 {
-		e, _ := l.Access(uint64(i), func(uint64) *Entry[uint64] { return nil })
+		e, _ := l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return nil })
 		m[uint64(i)] = e
 	}
 	for i := range 200 {
-		l.Access(uint64(i), func(uint64) *Entry[uint64] { return m[uint64(i)] })
+		l.Access(uint64(i), func(uint64) *evictor.Entry[uint64] { return m[uint64(i)] })
 	}
 
 	// First call: 128 probes clear 128 visited bits, no eviction.
@@ -161,10 +163,10 @@ func TestEvictBounded_ProgressAcrossCalls(t *testing.T) {
 func TestEvict_EquivalentToEvictBoundedLen2(t *testing.T) {
 	t.Parallel()
 	l := NewList[uint64]()
-	m := map[uint64]*Entry[uint64]{}
+	m := map[uint64]*evictor.Entry[uint64]{}
 
 	for _, k := range []uint64{1, 2, 3} {
-		e, _ := l.Access(k, func(uint64) *Entry[uint64] { return nil })
+		e, _ := l.Access(k, func(uint64) *evictor.Entry[uint64] { return nil })
 		m[k] = e
 	}
 

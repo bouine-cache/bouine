@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
@@ -294,13 +294,13 @@ func (s *Store) LoadSnapshot(path string) error {
 		offset := int64(binary.LittleEndian.Uint64(ee[20:28]))     //nolint:gosec // offset fits int64
 		size := int64(binary.LittleEndian.Uint64(ee[28:36]))       //nolint:gosec // size fits int64
 
-		e, _ := s.evictList.Access(key, func(k api.Key) *sieve.Entry[api.Key] {
+		e, _ := s.evictList.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 			if loc, ok := s.index[k]; ok {
-				return loc.sieve
+				return loc.entry
 			}
 			return nil
 		})
-		s.index[key] = warmLoc{segID: segID, offset: offset, size: size, sieve: e}
+		s.index[key] = warmLoc{segID: segID, offset: offset, size: size, entry: e}
 	}
 	s.idxMu.Unlock()
 

@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bouine-cache/bouine/internal/storage/sieve"
+	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -217,7 +217,7 @@ func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 	assert.Equal(t, want, objectStructSize)
 	want = int64(unsafe.Sizeof(hotEntry{}))
 	assert.Equal(t, want, hotEntrySize)
-	want = int64(unsafe.Sizeof(sieve.Entry[api.Key]{}))
+	want = int64(unsafe.Sizeof(evictor.Entry[api.Key]{}))
 	assert.Equal(t, want, sieveEntrySize)
 }
 

@@ -1040,13 +1040,13 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKe
 func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source) {
 	res := h.collapsedFetch(r, lookupKey)
 	if res.Err != nil {
-		h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
+		h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", lookupKey)
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
 	}
 	if res.StatusCode >= 500 {
-		h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
+		h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
 			"status", res.StatusCode, "key", lookupKey)
 		h.serveObject(w, r, stale, now, cacheStale, src)
 		return
@@ -1082,10 +1082,10 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 	// stale-warning-stored), matching Trafficserver and squid.
 	if h.stayinAlive && (res.Err != nil || res.StatusCode >= 500) {
 		if res.Err != nil {
-			h.logger.Warn("stayin-alive: upstream unreachable, serving stale indefinitely",
+			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
 				"error", res.Err, "key", stale.Key)
 		} else {
-			h.logger.Warn("stayin-alive: upstream 5xx, serving stale indefinitely",
+			h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
 				"status", res.StatusCode, "key", stale.Key)
 		}
 		h.serveObject(w, r, stale, now, cacheStale, src)

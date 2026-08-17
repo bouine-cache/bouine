@@ -334,11 +334,18 @@ func (t *TieredStore) initWAL(walDir string) error {
 
 	// Try to load the index snapshot first. If successful, the WAL is
 	// replayed as a delta on top of the snapshot instead of from scratch.
+	// A missing snapshot on a fresh start (no file) is expected and logged
+	// at info level; the WAL is then replayed. A corrupt/unreadable
+	// snapshot is a warning.
 	snapshotLoaded := false
 	if snapPath := t.warm.SnapshotPath(); snapPath != "" {
 		if err := t.warm.LoadSnapshot(snapPath); err != nil {
-			t.logger.Warn("index snapshot load failed; falling back to WAL replay",
-				"error", err)
+			if os.IsNotExist(err) {
+				t.logger.Info("no index snapshot found; falling back to WAL replay")
+			} else {
+				t.logger.Warn("index snapshot load failed; falling back to WAL replay",
+					"error", err)
+			}
 		} else {
 			snapshotLoaded = true
 			t.logger.Info("index snapshot loaded",
@@ -394,6 +401,14 @@ func (t *TieredStore) initWAL(walDir string) error {
 	if needRebuild {
 		if rErr != nil {
 			t.logger.Warn("rebuilding index from segment scan after WAL replay error")
+		} else if walEntries == 0 {
+			// Fresh start: no snapshot, no WAL entries, no index. This is
+			// expected on first boot or after the warm dir was cleaned.
+			// Run the segment scan in case segment files exist from a
+			// previous run that was checkpointed (WAL truncated) but the
+			// snapshot was lost. If there are no segments either, the
+			// scan is a no-op.
+			t.logger.Info("warm index is empty; running segment scan for existing data")
 		} else {
 			t.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
 		}
@@ -1284,6 +1299,14 @@ func (t *TieredStore) WindowHits(key api.Key) int64 {
 // The compaction, warm-sync, and tombstone-drain goroutines are stopped
 // and joined before the warm store is closed, preventing use-after-close
 // on file handles. A final drain flushes pending tombstones before close.
+//
+// If there are uncheckpointed WAL entries, a final checkpoint is
+// performed on close: the index snapshot is written and the WAL is
+// truncated, so the next startup loads the snapshot directly without
+// WAL replay or a segment scan. The sequence mirrors checkpoint()
+// (snapshot first, then truncate) and is crash-safe: a crash between
+// the two leaves the WAL intact, and restart replays it idempotently
+// on top of the possibly-stale snapshot.
 func (t *TieredStore) Close(ctx context.Context) error {
 	close(t.done)
 	t.compactWg.Wait()
@@ -1300,6 +1323,28 @@ func (t *TieredStore) Close(ctx context.Context) error {
 		}
 		if err := t.wal.Sync(); err != nil {
 			t.logger.Warn("wal sync on close failed", "error", err)
+		}
+		// Crash-safe final checkpoint: write the index snapshot, then
+		// truncate the WAL. Mirrors the checkpoint() sequence (steps 4-6):
+		// if we write the snapshot without truncating, the next startup
+		// loads the snapshot AND replays the now-redundant WAL — and the
+		// WAL grows across restarts, compounding the latency we set out
+		// to fix. Skipping the snapshot entirely leaves the next startup
+		// on WAL replay or segment scan. Order matters: snapshot first,
+		// then truncate. A crash between the two leaves the WAL intact;
+		// restart replays it on top of the (possibly stale) snapshot,
+		// which is idempotent.
+		// t.warm is guaranteed non-nil here: the WAL is only created
+		// when warm is configured (see NewTieredStore), so the nil
+		// check is redundant inside this block.
+		if t.walEntryCount.Load() > 0 {
+			if err := t.warm.WriteSnapshot(); err != nil {
+				t.logger.Warn("final snapshot write on close failed", "error", err)
+			} else if err := t.wal.Truncate(); err != nil {
+				t.logger.Warn("wal truncate after final snapshot failed", "error", err)
+			} else {
+				t.walEntryCount.Store(0)
+			}
 		}
 		if err := t.wal.Close(); err != nil {
 			t.logger.Warn("wal close error", "error", err)

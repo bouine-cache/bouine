@@ -32,13 +32,25 @@ import (
 // warmMetrics, when non-nil, is injected into the warm store so it can
 // increment over-budget, eviction, and compaction counters inline.
 func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
-	hotCfg := storage.HotConfig{MaxBytes: e.cfg.Storage.HotMaxBytes.Bytes(), Slab: e.cfg.Storage.HotMmapSlab}
+	hotAlgo := e.cfg.Storage.HotEvictionAlgorithm
+	if hotAlgo == "" {
+		hotAlgo = e.cfg.Storage.EvictionAlgorithm
+	}
+	warmAlgo := e.cfg.Storage.WarmEvictionAlgorithm
+	if warmAlgo == "" {
+		warmAlgo = e.cfg.Storage.EvictionAlgorithm
+	}
+	hotCfg := storage.HotConfig{
+		MaxBytes:          e.cfg.Storage.HotMaxBytes.Bytes(),
+		Slab:              e.cfg.Storage.HotMmapSlab,
+		EvictionAlgorithm: hotAlgo,
+	}
 	if e.cfg.Storage.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
 	}
 	return storage.NewTieredStore(storage.TieredConfig{
 		Hot:                    hotCfg,
-		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(), MaxEntries: e.cfg.Storage.WarmMaxEntries, SegmentCacheSize: e.cfg.Storage.SegmentCacheSize, MaxDiskBytes: e.cfg.Storage.WarmMaxDiskBytes.Bytes(), MinFreeDisk: e.cfg.Storage.MinFreeDisk.Bytes(), Preallocate: e.cfg.Storage.WarmPreallocate.Bytes()},
+		Warm:                   &warm.Config{Dir: e.cfg.Storage.WarmDir, MaxBytes: e.cfg.Storage.WarmMaxBytes.Bytes(), MaxEntries: e.cfg.Storage.WarmMaxEntries, SegmentCacheSize: e.cfg.Storage.SegmentCacheSize, MaxDiskBytes: e.cfg.Storage.WarmMaxDiskBytes.Bytes(), MinFreeDisk: e.cfg.Storage.MinFreeDisk.Bytes(), Preallocate: e.cfg.Storage.WarmPreallocate.Bytes(), EvictionAlgorithm: warmAlgo},
 		WALDir:                 e.cfg.Storage.WarmDir + "/bouine.wal",
 		BodyThreshold:          e.cfg.Storage.BodyThreshold.Bytes(),
 		WarmSyncInterval:       e.cfg.Storage.WarmSyncInterval,

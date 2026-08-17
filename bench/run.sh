@@ -27,6 +27,9 @@
 #   Handler_CacheHit_ReusableWriter: 13  (6 are test harness)
 #   Handler_CacheMiss_Cacheable:     58
 #   SIEVE_Access:                     0
+#   Cachaner_Access:                   0
+#   Cachaner_AccessSlowPath:           0
+#   Cachaner_EvictBounded:             0
 #   FastPath_Hit:                     0
 #   FastPath_HitWithWrite:             0  (includes WriteTo consumption)
 #   H1Parse_Get:                      0
@@ -55,6 +58,9 @@ declare -A BUDGETS=(
     [Handler_CacheHit_ReusableWriter]=13
     [Handler_CacheMiss_Cacheable]=58
     [SIEVE_Access]=0
+    [Cachaner_Access]=0
+    [Cachaner_AccessSlowPath]=0
+    [Cachaner_EvictBounded]=0
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
     [H1Parse_Get]=0

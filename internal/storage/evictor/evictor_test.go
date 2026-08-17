@@ -144,6 +144,18 @@ func TestEntryPool_Concurrent_Use(t *testing.T) {
 	wg.Wait()
 }
 
+func TestEntry_IOBits_RoundTrip(t *testing.T) {
+	t.Parallel()
+	e := &Entry[uint64]{Key: 1}
+	assert.Equal(t, uint32(0), e.IOBits(), "fresh entry ioBits=0")
+
+	e.SetIOBits(7)
+	assert.Equal(t, uint32(7), e.IOBits())
+
+	e.SetIOBits(0)
+	assert.Equal(t, uint32(0), e.IOBits())
+}
+
 func TestEntry_Size_40Bytes_64Bit(t *testing.T) {
 	// Pins the struct layout contract referenced by
 	// hot.sieveEntrySize and warm.EstimatedWarmLocHeapBytes.

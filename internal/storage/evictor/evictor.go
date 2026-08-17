@@ -8,7 +8,7 @@
 // write lock.
 //
 // List is the interface that concrete eviction policies (sieve.List,
-// freqcost.List) implement. Tiers hold a List value and dispatch through it
+// cachaner.List) implement. Tiers hold a List value and dispatch through it
 // for insertion, access recording, and eviction. The hit-path fast path does
 // NOT dispatch through this interface: it reads Entry.Visited() directly
 // under the shard read lock. Interface dispatch happens only on the slow
@@ -30,13 +30,20 @@ import (
 // under a read lock (RLock fast path) without a data race against the
 // eviction path that writes under a write lock.
 //
-// Struct size on 64-bit: 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B
-// next = 40B. Policies that need extra per-entry state (e.g. a frequency
-// counter) should add it in a way that fills the existing 4B padding slot so
-// SIEVE users see no memory regression.
+// The ioBits field is a plain uint32 used by freq-aware policies (e.g.
+// cachaner) to pack a 3-bit frequency counter. It is accessed only
+// under the shard write lock — the hit-path fast path reads only
+// visited, never ioBits. Under plain SIEVE ioBits stays at its zero
+// value. The field fills the 4B padding slot that would otherwise
+// follow atomic.Bool, so Entry stays at 40B with zero memory overhead
+// for SIEVE users.
+//
+// Struct size on 64-bit: 16B key + 4B atomic.Bool + 4B ioBits + 8B
+// prev + 8B next = 40B.
 type Entry[K comparable] struct {
 	Key     K
 	visited atomic.Bool // safe to read under RLock; written under WLock
+	ioBits  uint32      // freq packing (cachaner); zero under SIEVE; WLock-only
 	prev    *Entry[K]
 	next    *Entry[K]
 }
@@ -61,9 +68,19 @@ func (e *Entry[K]) ClearVisited() { e.visited.Store(false) }
 func (e *Entry[K]) Reset() {
 	e.Key = *new(K)
 	e.visited.Store(false)
+	e.ioBits = 0
 	e.prev = nil
 	e.next = nil
 }
+
+// IOBits returns the current ioBits value. Used by freq-aware policies
+// to read the packed freq field. The caller MUST hold the shard write
+// lock — ioBits is a plain uint32, not atomic. Exported for testing.
+func (e *Entry[K]) IOBits() uint32 { return e.ioBits }
+
+// SetIOBits stores val as the entry's ioBits. The caller MUST hold the
+// shard write lock.
+func (e *Entry[K]) SetIOBits(val uint32) { e.ioBits = val }
 
 // Prev returns the previous entry in the list (nil at the head).
 func (e *Entry[K]) Prev() *Entry[K] { return e.prev }
@@ -80,7 +97,7 @@ func (e *Entry[K]) SetPrev(p *Entry[K]) { e.prev = p }
 func (e *Entry[K]) SetNext(n *Entry[K]) { e.next = n }
 
 // List is the eviction-policy interface implemented by concrete policies
-// (sieve.List, freqcost.List). Tiers hold a List value and dispatch
+// (sieve.List, cachaner.List). Tiers hold a List value and dispatch
 // insertion, access recording, and eviction through it.
 //
 // The hit-path fast path does NOT call through this interface — it reads

@@ -705,3 +705,56 @@ routes:
 	require.NoError(t, err)
 	require.Equal(t, "origin.example.com:8080", cfg.UpstreamPools[0].Targets[0])
 }
+
+func TestParse_HotEvictionAlgorithm_Default(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse(nil)
+	require.NoError(t, err)
+	require.Equal(t, "", cfg.Storage.HotEvictionAlgorithm)
+	require.Equal(t, "", cfg.Storage.WarmEvictionAlgorithm)
+	require.Equal(t, "", cfg.Storage.EvictionAlgorithm)
+}
+
+func TestParse_EvictionAlgorithm_Invalid(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+storage:
+  hot_eviction_algorithm: random
+`
+	_, err := Parse([]byte(yamlSrc))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `eviction_algorithm`)
+}
+
+func TestParse_HotEvictionAlgorithm_Cachaner(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+storage:
+  hot_eviction_algorithm: cachaner
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.Equal(t, "cachaner", cfg.Storage.HotEvictionAlgorithm)
+}
+
+func TestParse_SharedEvictionAlgorithm_Cachaner(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+storage:
+  eviction_algorithm: cachaner
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.Equal(t, "cachaner", cfg.Storage.EvictionAlgorithm)
+}
+
+func TestParse_WarmEvictionAlgorithm_Cachaner(t *testing.T) {
+	t.Parallel()
+	yamlSrc := `
+storage:
+  warm_eviction_algorithm: cachaner
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err)
+	require.Equal(t, "cachaner", cfg.Storage.WarmEvictionAlgorithm)
+}

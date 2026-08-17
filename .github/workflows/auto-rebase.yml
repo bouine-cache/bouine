@@ -22,13 +22,15 @@ permissions:
 jobs:
   rebase:
     name: Rebase open PRs onto main
-    runs-on: [self-hosted, ci]
+    runs-on: ubuntu-latest
     if: github.repository == 'bouine-cache/bouine'
     steps:
       - name: Update PR branches
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eo pipefail
           gh pr list --repo "$GITHUB_REPOSITORY" --state open \
             --json number,headRefName,mergeStateStatus \
             --jq '.[] | select(.mergeStateStatus == "BEHIND") | "\(.number) \(.headRefName)"' \

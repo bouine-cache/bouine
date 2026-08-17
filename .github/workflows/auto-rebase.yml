@@ -31,17 +31,49 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
+
+          # Get the current main SHA.
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/main" --jq '.object.sha')
+
+          # List all open PRs with their head SHA. We don't filter on
+          # mergeStateStatus == "BEHIND" because GitHub sets that field
+          # to UNKNOWN after every push to main (while recomputing
+          # mergeability), which would cause the filter to miss PRs
+          # exactly when they most need rebasing.
           gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-            --json number,headRefName,mergeStateStatus \
-            --jq '.[] | select(.mergeStateStatus == "BEHIND") | "\(.number) \(.headRefName)"' \
-            | while read -r number branch; do
-                echo "::group::Rebasing PR #$number ($branch)"
+            --json number,headRefName,headRefOid \
+            --jq '.[] | "\(.number) \(.headRefName) \(.headRefOid)"' \
+            | while read -r number branch head_sha; do
+                echo "::group::Checking PR #$number ($branch)"
+
+                # Check if the PR head is already a descendant of main.
+                # If so, skip — no rebase needed. The compare API
+                # returns status "ahead" or "identical" when the head
+                # contains main; "behind" or "diverged" when it doesn't.
+                status=$(gh api \
+                  "repos/$GITHUB_REPOSITORY/compare/$main_sha...$head_sha" \
+                  --jq '.status' 2>/dev/null || echo "error")
+
+                case "$status" in
+                  ahead|identical)
+                    echo "PR #$number is up to date with main (status: $status)"
+                    echo "::endgroup::"
+                    continue
+                    ;;
+                  behind|diverged)
+                    echo "PR #$number needs rebase (status: $status)"
+                    ;;
+                  *)
+                    echo "::warning::Could not determine merge status for PR #$number (status: $status)"
+                    echo "::endgroup::"
+                    continue
+                    ;;
+                esac
+
                 gh api --method PUT \
                   "repos/$GITHUB_REPOSITORY/pulls/$number/update-branch" \
                   -f update_method=rebase \
-                  -f expected_head_sha="$(
-                    gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" --jq '.object.sha'
-                  )" \
+                  -f expected_head_sha="$head_sha" \
                   2>&1 || echo "::warning::Could not rebase PR #$number"
                 echo "::endgroup::"
               done

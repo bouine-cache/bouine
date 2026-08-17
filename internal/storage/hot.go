@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/storage/cachaner"
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -117,12 +118,17 @@ var hotEntryPool = sync.Pool{
 	New: func() any { return new(hotEntry) },
 }
 
-// newEvictList builds a per-shard eviction list. SIEVE is the only
-// policy today; the dispatch function is staging for a follow-up PR
-// that adds a HotConfig.EvictionAlgorithm branch selecting between
-// sieve and sieve_freq. Keeping the indirection here means that PR
-// does not touch any call site in this file.
-func newEvictList() evictor.List[api.Key] {
+// newEvictList builds a per-shard eviction list from the HotConfig's
+// algorithm selection. SIEVE is the default (zero-value config). When
+// EvictionAlgorithm == "cachaner" the list is a cachaner list that
+// uses a 3-bit freq counter packed into ioBits to give hot objects up
+// to 7 second chances (vs SIEVE's 1). Both implementations satisfy the
+// evictor.List interface so the rest of the hot tier is agnostic to the
+// active policy. The warm tier has an identical dispatch function.
+func newEvictList(cfg HotConfig) evictor.List[api.Key] {
+	if cfg.EvictionAlgorithm == "cachaner" {
+		return cachaner.NewList[api.Key]()
+	}
 	return sieve.NewList[api.Key]()
 }
 
@@ -202,6 +208,12 @@ type HotConfig struct {
 	// Violating this constraint stalls all readers and writers on the
 	// shard.
 	OnEvict func(key api.Key)
+
+	// EvictionAlgorithm selects the eviction policy for the hot tier.
+	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
+	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
+	// hot objects up to 7 second chances (vs SIEVE's 1) before eviction.
+	EvictionAlgorithm string
 }
 
 // NewHotStore creates a sharded in-memory store and starts the
@@ -221,7 +233,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 	shards := make([]shard, n)
 	for i := range shards {
 		shards[i].entries = make(map[api.Key]*hotEntry)
-		shards[i].evict = newEvictList()
+		shards[i].evict = newEvictList(cfg)
 	}
 	reaperInterval := defaultReaperInterval
 	if cfg.ReaperInterval > 0 {

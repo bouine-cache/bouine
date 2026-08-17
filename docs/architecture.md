@@ -95,7 +95,9 @@ surface that serves ≤ 10 RPS.
 /internal/server             L1 — HTTP/1, /2, TLS, route matching
 /internal/cache              L3 — RFC 9111 state machine, Vary, conditionals
 /internal/storage            L2 — RAM tier, mmap tier, eviction, WAL
-/internal/storage/sieve      SIEVE eviction implementation
+/internal/storage/evictor   Shared eviction Entry/List abstraction
+/internal/storage/sieve     SIEVE eviction policy
+/internal/storage/cachaner  cachaner eviction policy (SIEVE + freq counter)
 /internal/origin             L4 — upstream pool, health, hedge, breaker
 /internal/staticfile        L4 — local file serving (alternative to upstream pool)
 /internal/cluster            L5 — memberlist gossip, consistent hash, peer fetch
@@ -221,10 +223,34 @@ into `br | zstd | gzip | identity` to bound variant count.
 
 ### 4.2 Eviction
 
-Primary: **SIEVE** (near-LRU-K performance, O(1) per op). Ban check uses a
-lock-free atomic counter fast path — the global mutex is only taken when the
-ban list is non-empty. Eviction runs off the request critical path via a
-background sweeper with a bounded inline cap per `Put`.
+The hot tier supports pluggable eviction policies via the
+`internal/storage/evictor` package. The policy is selected by
+`storage.hot_eviction_algorithm` in config:
+
+- **`sieve`** (default): SIEVE, a near-LRU-K algorithm with O(1)
+  amortized per op and a 1-bit visited field. A hand pointer sweeps
+  the list; visited entries get a second chance (visited cleared),
+  unvisited entries are evicted.
+- **`cachaner`**: SIEVE with a 3-bit saturating frequency counter
+  packed into the `evictor.Entry`'s `ioBits` field. Hot objects get up
+  to 7 second chances (vs SIEVE's 1) before eviction, reducing origin
+  bandwidth and RSS at a small p50 latency cost. See ADR-0031.
+
+Both tiers support both policies. `storage.eviction_algorithm` sets
+the default for both tiers; `storage.hot_eviction_algorithm` and
+`storage.warm_eviction_algorithm` override it per-tier. When non-empty,
+the per-tier field takes precedence.
+
+Both policies share the same `evictor.Entry` struct (40B on 64-bit).
+The `ioBits` field fills the 4B padding slot after `atomic.Bool`, so
+SIEVE users see zero memory overhead. The hit-path fast path reads
+`Entry.Visited()` directly — no interface dispatch, zero allocations.
+
+Ban check uses a lock-free atomic counter fast path — the global mutex
+is only taken when the ban list is non-empty. Eviction runs off the
+request critical path via a background sweeper with a bounded inline
+cap per `Put`. The sweep is capped at `maxSweepProbes = 128` (see
+ADR-0026) regardless of policy.
 
 ### 4.3 Durability
 

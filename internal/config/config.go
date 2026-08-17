@@ -202,6 +202,21 @@ type Storage struct {
 	// disable the dedicated drain goroutine (drains only on the warm
 	// sync cycle, which may cause drops under sustained eviction).
 	TombstoneDrainInterval time.Duration `yaml:"tombstone_drain_interval,omitempty" json:"tombstone_drain_interval,omitempty"`
+	// EvictionAlgorithm selects the eviction policy for both tiers.
+	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
+	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
+	// hot objects up to 7 second chances (vs SIEVE's 1) before
+	// eviction. This is the shared default; per-tier fields below
+	// override it.
+	EvictionAlgorithm string `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
+	// HotEvictionAlgorithm overrides the eviction policy for the hot
+	// tier only. When non-empty, it takes precedence over
+	// EvictionAlgorithm. Accepts the same values.
+	HotEvictionAlgorithm string `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
+	// WarmEvictionAlgorithm overrides the eviction policy for the warm
+	// tier only. When non-empty, it takes precedence over
+	// EvictionAlgorithm. Accepts the same values.
+	WarmEvictionAlgorithm string `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are

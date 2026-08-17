@@ -41,6 +41,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/bouine-cache/bouine/internal/platform"
+	"github.com/bouine-cache/bouine/internal/storage/cachaner"
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
 	"github.com/bouine-cache/bouine/internal/storage/sieve"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -378,6 +379,10 @@ type Store struct {
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
 	evictList evictor.List[api.Key]
+	// evictionAlgorithm records the configured policy so compact can
+	// rebuild the correct list type. Stored separately from evictList
+	// because evictList is replaced during compaction.
+	evictionAlgorithm string
 	// compactKeysBuf is a reusable buffer for collecting keys in append
 	// order during compaction. Compaction runs on a single goroutine
 	// (compactLoop), so no synchronization is needed. The buffer grows
@@ -407,12 +412,14 @@ type Store struct {
 	fdCache *fdCache
 }
 
-// newEvictList builds the warm-tier eviction list. SIEVE is the only
-// policy today; the dispatch function is staging for a follow-up PR
-// that adds per-tier config selection, mirroring the hot tier's
-// newEvictList. The warm tier is expected to stay SIEVE-only in that
-// PR, but the indirection keeps both tiers symmetric.
-func newEvictList() evictor.List[api.Key] {
+// newEvictList builds the warm-tier eviction list from the Config's
+// algorithm selection. SIEVE is the default (zero-value config). When
+// EvictionAlgorithm == "cachaner" the list is a cachaner list,
+// mirroring the hot tier's dispatch.
+func newEvictList(cfg Config) evictor.List[api.Key] {
+	if cfg.EvictionAlgorithm == "cachaner" {
+		return cachaner.NewList[api.Key]()
+	}
 	return sieve.NewList[api.Key]()
 }
 
@@ -471,6 +478,12 @@ type Config struct {
 	// Metrics receives warm-tier Prometheus collectors. Nil disables
 	// metric collection (single-node mode without a registry).
 	Metrics *Metrics
+	// EvictionAlgorithm selects the eviction policy for the warm tier.
+	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
+	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
+	// hot objects up to 7 second chances (vs SIEVE's 1) before
+	// eviction.
+	EvictionAlgorithm string
 }
 
 // NewStore creates or opens a warm store in dir.
@@ -486,16 +499,17 @@ func NewStore(cfg Config) (*Store, error) {
 	}
 
 	s := &Store{
-		dir:          cfg.Dir,
-		maxBytes:     cfg.MaxBytes,
-		maxEntries:   cfg.MaxEntries,
-		maxDiskBytes: cfg.MaxDiskBytes,
-		minFreeDisk:  cfg.MinFreeDisk,
-		preallocate:  cfg.Preallocate,
-		segMax:       cfg.SegMax,
-		index:        make(map[api.Key]warmLoc),
-		evictList:    newEvictList(),
-		metrics:      cfg.Metrics,
+		dir:               cfg.Dir,
+		maxBytes:          cfg.MaxBytes,
+		maxEntries:        cfg.MaxEntries,
+		maxDiskBytes:      cfg.MaxDiskBytes,
+		minFreeDisk:       cfg.MinFreeDisk,
+		preallocate:       cfg.Preallocate,
+		segMax:            cfg.SegMax,
+		index:             make(map[api.Key]warmLoc),
+		evictList:         newEvictList(cfg),
+		evictionAlgorithm: cfg.EvictionAlgorithm,
+		metrics:           cfg.Metrics,
 	}
 	if cfg.SegmentCacheSize != -1 {
 		cacheSize := cfg.SegmentCacheSize
@@ -2012,9 +2026,9 @@ func (s *Store) Compact() error {
 		return fmt.Errorf("compact: close temp: %w", err)
 	}
 
-	// Build the SIEVE list and compute live bytes. This is O(N) but
+	// Build the eviction list and compute live bytes. This is O(N) but
 	// runs under s.mu.Lock so the index cannot change concurrently.
-	freshEvictList := newEvictList()
+	freshEvictList := newEvictList(Config{EvictionAlgorithm: s.evictionAlgorithm})
 	for _, key := range orderedKeys {
 		e, _ := freshEvictList.Access(key, func(api.Key) *evictor.Entry[api.Key] { return nil })
 		loc := newIndex[key]

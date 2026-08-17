@@ -86,6 +86,29 @@ func BenchmarkGate_SIEVE_Access(b *testing.B) {
 	}
 }
 
+// BenchmarkGate_Cachaner_Access measures the cachaner hit path in
+// isolation. The visited bit is pre-set so every Get takes the RLock
+// fast path — the same path as SIEVE. The slow path (freq increment)
+// and eviction path are benchmarked in the cachaner package directly
+// (BenchmarkGate_Cachaner_EvictBounded). Alloc budget: 0.
+func BenchmarkGate_Cachaner_Access(b *testing.B) {
+	s := NewHotStore(HotConfig{
+		MaxBytes:          256 << 20,
+		NumShards:         1,
+		EvictionAlgorithm: "cachaner",
+	})
+	k := testkey.Hash([]byte("cachaner-bench"))
+	_ = s.Put(context.Background(), k, obj(k, 64))
+	// Prime visited bit so subsequent Gets take the fast path.
+	_, _, _ = s.Get(context.Background(), k)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
 // BenchmarkHotGet_NoBans_Parallel measures the concurrent hit path with
 // no active bans. After the Phase 1 atomic banCount fast path, the global
 // bansMu is never taken, so ns/op should stay roughly flat as GOMAXPROCS

@@ -493,6 +493,27 @@ func (c *Config) validateCluster() error {
 	if c.Storage.TombstoneDrainInterval < -1 {
 		return fmt.Errorf("config: storage.tombstone_drain_interval must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
 	}
+	if err := validateEvictionAlgorithm(&c.Storage); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateEvictionAlgorithm checks the eviction policy selection for
+// both tiers. The shared EvictionAlgorithm sets the default for both
+// tiers; HotEvictionAlgorithm and WarmEvictionAlgorithm override it
+// per-tier. All three accept "", "sieve", or "cachaner".
+//
+// This function is a pure check — it does not mutate s.
+func validateEvictionAlgorithm(s *Storage) error {
+	for _, algo := range []string{s.EvictionAlgorithm, s.HotEvictionAlgorithm, s.WarmEvictionAlgorithm} {
+		switch algo {
+		case "", "sieve", "cachaner":
+			// valid
+		default:
+			return fmt.Errorf("config: storage eviction_algorithm must be \"sieve\" or \"cachaner\", got %q", algo)
+		}
+	}
 	return nil
 }
 

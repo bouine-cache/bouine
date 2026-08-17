@@ -654,6 +654,161 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	}
 }
 
+// TestHandler_StayinAlive_FetchAndStore_ServesStaleOn5xx exercises the
+// fetchAndStoreStayinAlive path (miss → stale fallback) with a 5xx upstream
+// response. Unlike the revalidate tests above, the second request does NOT
+// send no-cache, so the dispatch is Miss (not Revalidate) and the request
+// goes through handleCacheMiss → fetchAndStoreStayinAlive.
+func TestHandler_StayinAlive_FetchAndStore_ServesStaleOn5xx(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "fresh-body")
+			return
+		}
+		w.WriteHeader(503)
+	})
+
+	h := testHandlerStayinAlive(t, upstream)
+	url := "http://example.com/sa-miss-5xx"
+
+	// Populate cache.
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	require.Equal(t, 200, rr1.Code)
+
+	// Manually expire the stored object past TTL + SWR + SIE so Evaluate
+	// returns Miss (not StaleHit or Revalidate).
+	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	obj, _, _ := h.store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+	stale := obj.CloneForRefresh()
+	stale.StoredAt = time.Now().Add(-2 * time.Minute) // past max-age=60
+	stale.StaleWhileRevalidate = 0                    // no SWR window
+	stale.StaleIfError = 0                            // no SIE window
+	require.NoError(t, h.store.Put(context.Background(), key, stale))
+
+	// Second request without no-cache → Miss → fetchAndStoreStayinAlive.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
+	require.Equal(t, 200, rr2.Code, "stale served on 5xx")
+	require.Contains(t, rr2.Body.String(), "fresh-body")
+}
+
+// TestHandler_StayinAlive_FetchAndStore_ServesStaleOnErr exercises the
+// fetchAndStoreStayinAlive path with a connection error (upstream aborts
+// via http.ErrAbortHandler). This covers the res.Err != nil branch.
+func TestHandler_StayinAlive_FetchAndStore_ServesStaleOnErr(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "err-body")
+			return
+		}
+		panic(http.ErrAbortHandler)
+	})
+
+	h := testHandlerStayinAlive(t, upstream)
+	url := "http://example.com/sa-miss-err"
+
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	require.Equal(t, 200, rr1.Code)
+
+	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	obj, _, _ := h.store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+	stale := obj.CloneForRefresh()
+	stale.StoredAt = time.Now().Add(-2 * time.Minute)
+	stale.StaleWhileRevalidate = 0
+	stale.StaleIfError = 0
+	require.NoError(t, h.store.Put(context.Background(), key, stale))
+
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
+	require.Equal(t, 200, rr2.Code, "stale served on upstream error")
+	require.Contains(t, rr2.Body.String(), "err-body")
+}
+
+// TestHandler_StayinAlive_Revalidate_ServesStaleOnErr exercises the
+// revalidate path with a connection error. The existing 5xx revalidate
+// test covers res.StatusCode >= 500; this covers res.Err != nil.
+// Requires an ETag on the stored response so evalNoCache returns
+// Revalidate (without a validator, no-cache dispatches as Miss).
+func TestHandler_StayinAlive_Revalidate_ServesStaleOnErr(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=1")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "reval-err-body")
+			return
+		}
+		panic(http.ErrAbortHandler)
+	})
+
+	h := testHandlerStayinAlive(t, upstream)
+	url := "http://example.com/sa-reval-err"
+
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	require.Equal(t, 200, rr1.Code)
+
+	// no-cache + ETag forces the Revalidate dispatch → revalidate path.
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", url, nil)
+	req2.Header.Set(header.CacheControl, "no-cache")
+	h.ServeHTTP(rr2, req2)
+	require.Equal(t, 200, rr2.Code, "stale served on revalidation error")
+	require.Contains(t, rr2.Body.String(), "reval-err-body")
+}
+
+// TestHandler_StayinAlive_Revalidate_ServesStaleOn5xx exercises the
+// revalidate path's 5xx branch with stayinAlive. The existing
+// ServesStaleon5xx test lacks an ETag, so it goes through
+// fetchAndStoreStayinAlive (Miss dispatch), not revalidate. This test
+// adds an ETag so no-cache triggers Revalidate dispatch.
+func TestHandler_StayinAlive_Revalidate_ServesStaleOn5xx(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set(header.CacheControl, "max-age=1")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "reval-5xx-body")
+			return
+		}
+		w.WriteHeader(503)
+	})
+
+	h := testHandlerStayinAlive(t, upstream)
+	url := "http://example.com/sa-reval-5xx"
+
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	require.Equal(t, 200, rr1.Code)
+
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", url, nil)
+	req2.Header.Set(header.CacheControl, "no-cache")
+	h.ServeHTTP(rr2, req2)
+	require.Equal(t, 200, rr2.Code, "stale served on revalidation 5xx")
+	require.Contains(t, rr2.Body.String(), "reval-5xx-body")
+}
+
 // TestMaxVariants_CapIsEnforced verifies that once MaxVariants distinct
 // Vary variants are stored for a primary key, subsequent variants are
 // silently dropped and VaryCapHits is incremented.

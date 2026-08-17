@@ -491,7 +491,7 @@ func TestTiered_EvictsLegacyCodecBlobOnGet(t *testing.T) {
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
 	segID, offset, err := ts1.warm.Put(k, legacyBlob)
 	require.NoError(t, err, "warm.Put")
-	err = ts1.wal.Append(wal.PutEntry(k, int32(segID), offset))
+	err = ts1.wal.(*wal.Log).Append(wal.PutEntry(k, int32(segID), offset))
 	require.NoError(t, err, "wal.Append")
 
 	// Get must treat the undecodable blob as a miss, not an error.
@@ -590,7 +590,7 @@ func TestTiered_EvictsLegacyBlobAfterReopen(t *testing.T) {
 	legacyBlob := []byte{0x01, 0x02, 0x03, 0x04}
 	segID, offset, err := ts1.warm.Put(legacyKey, legacyBlob)
 	require.NoError(t, err, "warm.Put legacy")
-	err = ts1.wal.Append(wal.PutEntry(legacyKey, int32(segID), offset))
+	err = ts1.wal.(*wal.Log).Append(wal.PutEntry(legacyKey, int32(segID), offset))
 	require.NoError(t, err, "wal.Append")
 	err = ts1.Close(ctx)
 	require.NoError(t, err, "ts1.Close")

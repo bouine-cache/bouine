@@ -407,6 +407,15 @@ type Store struct {
 	fdCache *fdCache
 }
 
+// newEvictList builds the warm-tier eviction list. SIEVE is the only
+// policy today; the dispatch function is staging for a follow-up PR
+// that adds per-tier config selection, mirroring the hot tier's
+// newEvictList. The warm tier is expected to stay SIEVE-only in that
+// PR, but the indirection keeps both tiers symmetric.
+func newEvictList() evictor.List[api.Key] {
+	return sieve.NewList[api.Key]()
+}
+
 // rebuildSegByID updates the segByID index from the current segs slice.
 // Must be called under s.mu.Lock whenever segs is modified.
 func (s *Store) rebuildSegByID() {
@@ -485,7 +494,7 @@ func NewStore(cfg Config) (*Store, error) {
 		preallocate:  cfg.Preallocate,
 		segMax:       cfg.SegMax,
 		index:        make(map[api.Key]warmLoc),
-		evictList:    sieve.NewList[api.Key](),
+		evictList:    newEvictList(),
 		metrics:      cfg.Metrics,
 	}
 	if cfg.SegmentCacheSize != -1 {
@@ -2005,9 +2014,9 @@ func (s *Store) Compact() error {
 
 	// Build the SIEVE list and compute live bytes. This is O(N) but
 	// runs under s.mu.Lock so the index cannot change concurrently.
-	newEvictList := sieve.NewList[api.Key]()
+	freshEvictList := newEvictList()
 	for _, key := range orderedKeys {
-		e, _ := newEvictList.Access(key, func(api.Key) *evictor.Entry[api.Key] { return nil })
+		e, _ := freshEvictList.Access(key, func(api.Key) *evictor.Entry[api.Key] { return nil })
 		loc := newIndex[key]
 		loc.entry = e
 		newIndex[key] = loc
@@ -2046,7 +2055,7 @@ func (s *Store) Compact() error {
 	// s.mu.RLock.
 	s.idxMu.Lock()
 	s.index = newIndex
-	s.evictList = newEvictList
+	s.evictList = freshEvictList
 	s.idxMu.Unlock()
 
 	s.stats.entries.Store(int64(len(newIndex)))

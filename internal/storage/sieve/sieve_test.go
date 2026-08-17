@@ -48,7 +48,7 @@ func TestSieve_EvictsLeastRecent(t *testing.T) {
 	l.Access(3, func(k uint64) *evictor.Entry[uint64] { return m[k] })
 
 	// Evict — should evict 2 (not visited, at tail after 1 was visited).
-	key, ok := l.Evict()
+	key, ok := l.EvictBounded(l.Len() * 2)
 	require.True(t, ok)
 	delete(m, key)
 
@@ -68,7 +68,7 @@ func TestSieve_EvictAll(t *testing.T) {
 
 	evicted := map[uint64]bool{}
 	for range 3 {
-		k, ok := l.Evict()
+		k, ok := l.EvictBounded(l.Len() * 2)
 		require.True(t, ok)
 		evicted[k] = true
 		delete(m, k)
@@ -77,7 +77,7 @@ func TestSieve_EvictAll(t *testing.T) {
 	require.Len(t, evicted, 3)
 	require.Equal(t, 0, l.Len())
 
-	_, ok := l.Evict()
+	_, ok := l.EvictBounded(l.Len() * 2)
 	require.False(t, ok)
 }
 
@@ -99,7 +99,7 @@ func TestSieve_Remove(t *testing.T) {
 	// Evict remaining — should get 1 and 3 in some order.
 	var keys []uint64
 	for range 2 {
-		k, ok := l.Evict()
+		k, ok := l.EvictBounded(l.Len() * 2)
 		require.True(t, ok)
 		keys = append(keys, k)
 	}
@@ -123,45 +123,12 @@ func TestSieve_SecondChance(t *testing.T) {
 
 	// First evict: both visited, so both get second chance; then one
 	// is evicted (the one the hand lands on after clearing visited).
-	k1, ok := l.Evict()
+	k1, ok := l.EvictBounded(l.Len() * 2)
 	require.True(t, ok)
 	delete(m, k1)
 	require.Equal(t, 1, l.Len())
 }
 
-func TestSieve_Defer_PreservesVisitedBit(t *testing.T) {
-	t.Parallel()
-	l := NewList[uint64]()
-	m := map[uint64]*evictor.Entry[uint64]{}
-
-	for _, k := range []uint64{1, 2, 3} {
-		e, _ := l.Access(k, func(k uint64) *evictor.Entry[uint64] { return m[k] })
-		m[k] = e
-	}
-
-	// Visit key 1 (visited=true).
-	l.Access(1, func(k uint64) *evictor.Entry[uint64] { return m[k] })
-	require.True(t, m[1].Visited())
-
-	// Defer key 1 — move to head, preserve visited bit.
-	l.Defer(m[1])
-
-	require.True(t, m[1].Visited())
-	require.Equal(t, 3, l.Len())
-
-	// Key 1 should now get a second chance during eviction.
-	// Evict twice — key 1 (visited) should survive the first evict.
-	evicted := []uint64{}
-	for range 2 {
-		k, ok := l.Evict()
-		require.True(t, ok)
-		evicted = append(evicted, k)
-		delete(m, k)
-	}
-	for _, k := range evicted {
-		require.NotEqual(t, 1, k)
-	}
-}
 func TestEntry_MarkVisited(t *testing.T) {
 	t.Parallel()
 	e := &evictor.Entry[int]{Key: 42}

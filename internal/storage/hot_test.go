@@ -433,35 +433,57 @@ func TestHotStore_EvictPreferBacked(t *testing.T) {
 	assert.NotNil(t, got)
 }
 
-func TestHotStore_EvictPreferBacked_PreservesVisitedBit(t *testing.T) {
+func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	t.Parallel()
-	// Single shard, 2 KiB budget. Insert k1 (hot-only) and access it to
-	// set visited=true. Then insert k2 (backed). k2 should be evicted
-	// first because it's backed. k1's visited bit should be preserved
-	// by the Defer path.
+	// This test exercises the hot-only skip branch in evictPreferBacked
+	// and proves that the MarkVisited after re-insert is load-bearing.
+	//
+	// When EvictBounded returns a hot-only entry (hasBackup=false), the
+	// entry is re-inserted at the head via Access + MarkVisited.
+	// Access pulls a fresh entry from the pool (Reset clears visited to
+	// false), so without MarkVisited the re-inserted entry is in the
+	// MOST evictable state and gets evicted on the very next sweep —
+	// defeating the "second chance" semantic.
+	//
+	// Scenario (single shard, 3 KiB budget, obj ~1498 B → 2 fit):
+	//  1. Insert k1 (hot-only), k2 (backed). SetBacked(k2).
+	//  2. Insert k3 → first eviction: k1 (tail, unvisited) is swept,
+	//     re-inserted at head via Access + MarkVisited (visited=true).
+	//     k2 (backed) then evicted. List: k3 → k1. k1.visited=true.
+	//  3. Insert k4 → second eviction: k1 (visited=true) gets a second
+	//     chance (visited cleared, not evicted); k3 evicted instead.
+	//     WITHOUT MarkVisited: k1 (visited=false) evicted immediately.
+	//
+	// No Get() calls between evictions — Get marks visited and would
+	// contaminate the state under test.
 	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
 	ctx := context.Background()
 
 	k1 := testkey.Hash([]byte("hot"))
-	k2 := testkey.Hash([]byte("warm"))
+	k2 := testkey.Hash([]byte("backed"))
 	_ = s.Put(ctx, k1, obj(k1, 1024))
 	_ = s.Put(ctx, k2, obj(k2, 1024))
-
-	// Access k1 to set visited=true.
-	_, _, _ = s.Get(ctx, k1)
-
-	// Mark k2 as backed.
 	s.SetBacked(k2)
 
-	// k3 triggers eviction. k2 (backed) should be evicted, k1 (hot, visited)
-	// should survive with its visited bit intact.
-	k3 := testkey.Hash([]byte("new"))
+	// First eviction: k1 re-inserted with visited=true, k2 evicted.
+	k3 := testkey.Hash([]byte("k3"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
+	// Second eviction: k1's visited bit (from MarkVisited) gives it a
+	// second chance; k3 is evicted instead. If MarkVisited were missing,
+	// k1 (visited=false at tail) would be evicted here.
+	k4 := testkey.Hash([]byte("k4"))
+	_ = s.Put(ctx, k4, obj(k4, 1024))
+
+	// Assertions after all evictions (no Get between evictions).
 	got, _, _ := s.Get(ctx, k1)
-	assert.NotNil(t, got)
+	assert.NotNil(t, got, "k1 must survive both evictions — MarkVisited gave it a second chance")
 	got, _, _ = s.Get(ctx, k2)
-	assert.Nil(t, got)
+	assert.Nil(t, got, "k2 (backed) must be evicted in first sweep")
+	got, _, _ = s.Get(ctx, k3)
+	assert.Nil(t, got, "k3 must be evicted in second sweep (k1's second chance consumed the probe)")
+	got, _, _ = s.Get(ctx, k4)
+	assert.NotNil(t, got, "k4 must be present")
 }
 
 func TestHotStore_EvictFallbackNoBacked(t *testing.T) {

@@ -93,9 +93,9 @@ func BenchmarkGate_SIEVE_Access(b *testing.B) {
 // (BenchmarkGate_Cachaner_EvictBounded). Alloc budget: 0.
 func BenchmarkGate_Cachaner_Access(b *testing.B) {
 	s := NewHotStore(HotConfig{
-		MaxBytes:          256 << 20,
-		NumShards:         1,
-		EvictionAlgorithm: "cachaner",
+		MaxBytes:             256 << 20,
+		NumShards:            1,
+		HotEvictionAlgorithm: "cachaner",
 	})
 	k := testkey.Hash([]byte("cachaner-bench"))
 	_ = s.Put(context.Background(), k, obj(k, 64))

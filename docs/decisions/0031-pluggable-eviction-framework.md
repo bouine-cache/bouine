@@ -62,7 +62,8 @@ that defines the common data structures and interface:
 Both tiers hold `evictor.List[api.Key]` and `*evictor.Entry[api.Key]`
 instead of concrete `sieve` types. Each tier has a `newEvictList`
 dispatch function that returns `sieve.NewList()` by default and
-branches on `cfg.EvictionAlgorithm` when a second policy is selected.
+branches on `cfg.HotEvictionAlgorithm` / `cfg.WarmEvictionAlgorithm`
+when a second policy is selected.
 
 ### `cachaner` policy
 

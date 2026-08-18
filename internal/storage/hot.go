@@ -120,13 +120,13 @@ var hotEntryPool = sync.Pool{
 
 // newEvictList builds a per-shard eviction list from the HotConfig's
 // algorithm selection. SIEVE is the default (zero-value config). When
-// EvictionAlgorithm == "cachaner" the list is a cachaner list that
+// HotEvictionAlgorithm == "cachaner" the list is a cachaner list that
 // uses a 3-bit freq counter packed into ioBits to give hot objects up
 // to 7 second chances (vs SIEVE's 1). Both implementations satisfy the
 // evictor.List interface so the rest of the hot tier is agnostic to the
 // active policy. The warm tier has an identical dispatch function.
 func newEvictList(cfg HotConfig) evictor.List[api.Key] {
-	if cfg.EvictionAlgorithm == "cachaner" {
+	if cfg.HotEvictionAlgorithm == "cachaner" {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()
@@ -209,11 +209,17 @@ type HotConfig struct {
 	// shard.
 	OnEvict func(key api.Key)
 
-	// EvictionAlgorithm selects the eviction policy for the hot tier.
+	// HotEvictionAlgorithm selects the eviction policy for the hot tier.
 	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
 	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
 	// hot objects up to 7 second chances (vs SIEVE's 1) before eviction.
-	EvictionAlgorithm string
+	//
+	// This is the resolved per-tier value: builders copy either
+	// config.Storage.HotEvictionAlgorithm (when set) or the shared
+	// config.Storage.EvictionAlgorithm into this field. The distinct
+	// name from the shared config field keeps `grep EvictionAlgorithm`
+	// unambiguous.
+	HotEvictionAlgorithm string
 }
 
 // NewHotStore creates a sharded in-memory store and starts the

@@ -414,10 +414,10 @@ type Store struct {
 
 // newEvictList builds the warm-tier eviction list from the Config's
 // algorithm selection. SIEVE is the default (zero-value config). When
-// EvictionAlgorithm == "cachaner" the list is a cachaner list,
+// WarmEvictionAlgorithm == "cachaner" the list is a cachaner list,
 // mirroring the hot tier's dispatch.
 func newEvictList(cfg Config) evictor.List[api.Key] {
-	if cfg.EvictionAlgorithm == "cachaner" {
+	if cfg.WarmEvictionAlgorithm == "cachaner" {
 		return cachaner.NewList[api.Key]()
 	}
 	return sieve.NewList[api.Key]()
@@ -478,12 +478,18 @@ type Config struct {
 	// Metrics receives warm-tier Prometheus collectors. Nil disables
 	// metric collection (single-node mode without a registry).
 	Metrics *Metrics
-	// EvictionAlgorithm selects the eviction policy for the warm tier.
+	// WarmEvictionAlgorithm selects the eviction policy for the warm tier.
 	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
 	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
 	// hot objects up to 7 second chances (vs SIEVE's 1) before
 	// eviction.
-	EvictionAlgorithm string
+	//
+	// This is the resolved per-tier value: builders copy either
+	// config.Storage.WarmEvictionAlgorithm (when set) or the shared
+	// config.Storage.EvictionAlgorithm into this field. The distinct
+	// name from the shared config field keeps `grep EvictionAlgorithm`
+	// unambiguous.
+	WarmEvictionAlgorithm string
 }
 
 // NewStore creates or opens a warm store in dir.
@@ -508,7 +514,7 @@ func NewStore(cfg Config) (*Store, error) {
 		segMax:            cfg.SegMax,
 		index:             make(map[api.Key]warmLoc),
 		evictList:         newEvictList(cfg),
-		evictionAlgorithm: cfg.EvictionAlgorithm,
+		evictionAlgorithm: cfg.WarmEvictionAlgorithm,
 		metrics:           cfg.Metrics,
 	}
 	if cfg.SegmentCacheSize != -1 {
@@ -2028,7 +2034,7 @@ func (s *Store) Compact() error {
 
 	// Build the eviction list and compute live bytes. This is O(N) but
 	// runs under s.mu.Lock so the index cannot change concurrently.
-	freshEvictList := newEvictList(Config{EvictionAlgorithm: s.evictionAlgorithm})
+	freshEvictList := newEvictList(Config{WarmEvictionAlgorithm: s.evictionAlgorithm})
 	for _, key := range orderedKeys {
 		e, _ := freshEvictList.Access(key, func(api.Key) *evictor.Entry[api.Key] { return nil })
 		loc := newIndex[key]

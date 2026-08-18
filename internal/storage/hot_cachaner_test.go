@@ -13,10 +13,10 @@ import (
 func cachanerHotStore(t *testing.T, budget int64) *HotStore {
 	t.Helper()
 	return NewHotStore(HotConfig{
-		MaxBytes:          budget,
-		NumShards:         1,
-		EvictionAlgorithm: "cachaner",
-		ReaperInterval:    -1,
+		MaxBytes:             budget,
+		NumShards:            1,
+		HotEvictionAlgorithm: "cachaner",
+		ReaperInterval:       -1,
 	})
 }
 

@@ -100,11 +100,14 @@ The lead maintainer arbitrates if maintainers disagree.
 
 ## 4. Access continuity
 
-bouine is designed to survive the loss of any single contributor.
-The [`@bouine-cache/maintainers`](https://github.com/orgs/bouine-cache/teams/maintainers)
+bouine has a **bus factor of 2**. The
+[`@bouine-cache/maintainers`](https://github.com/orgs/bouine-cache/teams/maintainers)
 team currently has two members with admin access to the repository
 and the GitHub organization: [`@thylong`](https://github.com/thylong)
-and [`@chridupin-33`](https://github.com/chridupin-33).
+and [`@chridupin-33`](https://github.com/chridupin-33). Both are
+familiar with the codebase architecture, the release pipeline, and the
+security response process. The loss of either one leaves the other
+fully capable of continuing the project without interruption.
 
 No critical capability depends on a single person. If any one
 individual becomes unavailable (death, incapacitation, or departure),

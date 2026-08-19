@@ -1,0 +1,75 @@
+name: Changelog Promote
+
+# Promotes the [Unreleased] section in CHANGELOG.md into a versioned
+# section after a successful release, then opens a PR against main.
+#
+# Triggered after the Release workflow completes successfully on a tag,
+# so the GitHub Release assets are already published.
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+    branches: [v*.*.*]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote-changelog:
+    name: Promote CHANGELOG.md
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Get release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            tag="${{ github.event.workflow_run.head_branch }}"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract version
+        id: ver
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run changelog-promote
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: python3 scripts/changelog-promote.py "$VERSION"
+
+      - name: Create PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="docs/changelog-${VERSION}"
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No changes to CHANGELOG.md -- skipping PR"
+            exit 0
+          fi
+          git commit -m "docs: promote CHANGELOG to v${VERSION}"
+          git push origin "$branch"
+          gh pr create \
+            --title "docs: promote CHANGELOG to v${VERSION}" \
+            --body "Automated CHANGELOG.md promotion for release v${VERSION}. Cut the [Unreleased] section into a versioned section and added a fresh [Unreleased]." \
+            --base main \
+            --head "$branch"

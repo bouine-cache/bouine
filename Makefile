@@ -12,10 +12,14 @@ PKGS          ?= ./...
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE          ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# Strip flags — can be overridden to preserve debug symbols.
+# Use `make build STRIPFLAGS=` or `STRIPFLAGS= make build` to keep
+# DWARF debug info and the symbol table for debugging or hardening audits.
+STRIPFLAGS    ?= -s -w
 # Project-specific Go linker flags (injected via -ldflags).  We append
 # to any caller-provided LDFLAGS rather than replacing them, so that
 # distribution hardening flags or ASAN-related linker options are honored.
-LDFLAGS       += -s -w \
+LDFLAGS       += $(STRIPFLAGS) \
                  -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$(VERSION) \
                  -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=$(COMMIT) \
                  -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(DATE)

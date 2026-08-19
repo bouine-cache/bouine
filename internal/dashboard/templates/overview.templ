@@ -91,12 +91,12 @@ templ Overview(d OverviewData) {
 			</div>
 			<table id="ov-route-tbl">
 				<thead><tr>
-					<th class="sortable" onclick="sortTable('ov-route-tbl',0,this)">Prefix<span class="sort-icon"></span></th>
-					<th class="sortable" onclick="sortTable('ov-route-tbl',1,this)">Pool<span class="sort-icon"></span></th>
-					<th class="sortable desc" onclick="sortTable('ov-route-tbl',2,this)">Hit %<span class="sort-icon"></span></th>
-					<th class="sortable" onclick="sortTable('ov-route-tbl',3,this)">Req/min<span class="sort-icon"></span></th>
-					<th class="sortable" onclick="sortTable('ov-route-tbl',4,this)">TTL<span class="sort-icon"></span></th>
-					<th>Trend</th>
+					<th scope="col" class="sortable" tabindex="0" onclick="sortTable('ov-route-tbl',0,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('ov-route-tbl',0,this)}">Prefix<span class="sort-icon"></span></th>
+					<th scope="col" class="sortable" tabindex="0" onclick="sortTable('ov-route-tbl',1,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('ov-route-tbl',1,this)}">Pool<span class="sort-icon"></span></th>
+					<th scope="col" class="sortable desc" tabindex="0" onclick="sortTable('ov-route-tbl',2,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('ov-route-tbl',2,this)}">Hit %<span class="sort-icon"></span></th>
+					<th scope="col" class="sortable" tabindex="0" onclick="sortTable('ov-route-tbl',3,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('ov-route-tbl',3,this)}">Req/min<span class="sort-icon"></span></th>
+					<th scope="col" class="sortable" tabindex="0" onclick="sortTable('ov-route-tbl',4,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('ov-route-tbl',4,this)}">TTL<span class="sort-icon"></span></th>
+					<th scope="col">Trend</th>
 				</tr></thead>
 				<tbody>
 					if len(d.RouteRows) == 0 {

@@ -283,6 +283,7 @@ func (s *Store) LoadSnapshot(path string) error {
 	for k := range s.index {
 		delete(s.index, k)
 	}
+	s.protectedCount.Store(0)           // snapshot entries load as unprotected
 	if len(s.index) < int(entryCount) { //nolint:gosec // entryCount fits int
 		s.index = make(map[api.Key]warmLoc, entryCount)
 	}

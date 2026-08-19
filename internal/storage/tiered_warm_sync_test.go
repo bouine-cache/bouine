@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func tieredStoreWithSync(t *testing.T, batchSize int) *TieredStore {
@@ -121,22 +123,35 @@ func TestWarmSync_TombstonesWarmBackedEvictions(t *testing.T) {
 		_ = ts.Put(context.Background(), k2, bigObj(k2, 2000))
 	}
 
-	// Drain tombstones — evicted backed keys should be removed
-	// from the warm tier.
+	// Drain queues — SIEVE-evicted backed keys are Unprotected
+	// (demoted to SIEVE-managed), not tombstoned. The warm copy
+	// stays live; only non-SIEVE removals (reaper, ban, Delete)
+	// tombstone.
 	ts.runWarmSyncCycle(context.Background())
 
-	warmKeysAfter := len(ts.warm.Keys())
-	// Without tombstoning, warm would have 51 keys (1 original + 50 new).
-	// With tombstoning, the original key 400 should be removed from warm.
-	// Some of the 50 new entries may also be evicted and tombstoned,
-	// so we check that key 400 is gone specifically.
-	if warmKeysAfter >= 51 {
-		t.Fatalf("warm key count should reflect tombstone drain: before=%d, after=%d (expected < 51)",
-			warmKeysBefore, warmKeysAfter)
+	// k should still be in warm (Unprotected, not deleted).
+	warmKeys := ts.warm.Keys()
+	found := false
+	for _, wk := range warmKeys {
+		if wk == k {
+			found = true
+			break
+		}
 	}
-	for _, wk := range ts.warm.Keys() {
-		require.NotEqual(t, k, wk)
-	}
+	require.True(t, found, "SIEVE-evicted backed key should be Unprotected, not tombstoned (warm copy retained)")
+
+	// Some of the 50 competing entries may still be backed (still in hot),
+	// so ProtectedCount may be > 0. What matters is that k was demoted:
+	// it should be in warm but not protected. Verify via warm.Get +
+	// ProtectedCount — k is unprotected if protectedCount < total warm
+	// entries (at least k was demoted). More directly: the SIEVE-evicted
+	// key k should not be counted as protected.
+	// Since we can't check per-key protected status via the public API,
+	// verify that at least one entry was demoted (protectedCount < warm
+	// entry count — not all entries are protected, which would be the
+	// stranded state).
+	require.Less(t, ts.warm.ProtectedCount(), len(warmKeys),
+		"at least one warm entry should be unprotected (demoted by SIEVE eviction)")
 }
 
 func TestWarmSync_TombstoneQueueOverflowNonBlocking(t *testing.T) {
@@ -428,6 +443,7 @@ func TestOnEvictCallback(t *testing.T) {
 
 	var mu sync.Mutex
 	var evictedKeys []api.Key
+	var demotedKeys []api.Key
 
 	s := NewHotStore(HotConfig{
 		MaxBytes:  1 << 14, // 16 KiB — very small to force eviction
@@ -435,6 +451,11 @@ func TestOnEvictCallback(t *testing.T) {
 		OnEvict: func(key api.Key) {
 			mu.Lock()
 			evictedKeys = append(evictedKeys, key)
+			mu.Unlock()
+		},
+		OnEvictDemoted: func(key api.Key) {
+			mu.Lock()
+			demotedKeys = append(demotedKeys, key)
 			mu.Unlock()
 		},
 	})
@@ -454,15 +475,17 @@ func TestOnEvictCallback(t *testing.T) {
 		_ = s.Put(context.Background(), k2, obj(k2, 100))
 	}
 
-	// Wait for sweeper to process overshoot and evict k1.
+	// Wait for sweeper to process overshoot and evict k1. SIEVE
+	// evictions of backed entries call OnEvictDemoted (not OnEvict),
+	// so k1 should appear in demotedKeys.
 	poll.Eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return slices.Contains(evictedKeys, k1)
+		return slices.Contains(demotedKeys, k1)
 	})
 
 	mu.Lock()
-	found := slices.Contains(evictedKeys, k1)
+	found := slices.Contains(demotedKeys, k1)
 	mu.Unlock()
 
 	require.True(t, found)
@@ -646,4 +669,385 @@ func TestWarmSync_CacheSurvivalRate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// churnResult captures the metrics from a single churn scenario run.
+type churnResult struct {
+	phase2Evictions int64
+	hotEntries      int64
+	hits            int
+	misses          int
+	warmEntries     int64
+	warmDiskBytes   int64
+	warmMaxBytes    int64
+	protectedCount  int
+}
+
+func (r churnResult) churnRatio() float64 {
+	if r.hotEntries == 0 {
+		return 0
+	}
+	return float64(r.phase2Evictions) / float64(r.hotEntries)
+}
+
+// churnKeyCount is the key count used by the churn regression test.
+const churnKeyCount = 200
+
+// zipfishAccess returns a deterministic access sequence where ~pct%
+// of accesses go to the top `topN` keys. Uses math/rand/v2 with a
+// fixed PCG seed for reproducibility (AGENTS.md §8: no time.Now in
+// tests; the seed is fixed, not time-derived).
+func zipfishAccess(keyCount, count, topN, pct int) []int {
+	rnd := rand.New(rand.NewPCG(484, 0))
+	seq := make([]int, count)
+	for i := range count {
+		if rnd.IntN(100) < pct {
+			seq[i] = rnd.IntN(topN)
+		} else {
+			seq[i] = topN + rnd.IntN(keyCount-topN)
+		}
+	}
+	return seq
+}
+
+// runChurnScenario executes a churn workload and returns metrics.
+//
+// The workload fills `churnKeyCount` backed entries into a small hot
+// tier, then performs `accessCount` Zipf-skewed accesses over `rounds`
+// rounds. Cold misses are re-Put (simulating origin fetch). The clock
+// is not advanced — TTL expiry is tested separately. This isolates the
+// SIEVE-eviction-driven churn that the fix targets.
+func runChurnScenario(t *testing.T) churnResult {
+	t.Helper()
+
+	const (
+		accessCount = 5000
+		rounds      = 10
+		bodySize    = 2000 // > bodyThreshold=1024 → backed
+		topN        = 40   // top 20% = working set
+		skewPct     = 99   // 99% of accesses to top 40
+	)
+
+	// Size hot to hold ~50 entries (slightly above the working set of 40).
+	hotMaxBytes := int64(50 * 2500) // ~50 entries at ~2500 bytes/entry
+
+	ts := tieredStore484(t, hotMaxBytes)
+	ts.warmSyncBatchSize = 1000
+
+	// Phase 1: Fill all keys. All backed (bodySize > bodyThreshold).
+	for i := range churnKeyCount {
+		k := testkey.Key(uint64(i))
+		require.NoError(t, ts.Put(context.Background(), k, bigObj(k, bodySize)))
+	}
+	ts.drainQueues()
+
+	// Record evictions after fill — the initial fill churn is excluded
+	// from the ratio (it's setup, not the loop being tested).
+	fillEvictions := ts.Stats().Evictions
+
+	// Phase 2: Access phase — Zipf-skewed, 99% to top 40.
+	// No clock advance — isolates SIEVE-driven churn.
+	accessSeq := zipfishAccess(churnKeyCount, accessCount, topN, skewPct)
+	hits, misses := 0, 0
+	perRound := accessCount / rounds
+	for r := range rounds {
+		_ = r
+		for i := range perRound {
+			keyIdx := accessSeq[r*perRound+i]
+			k := testkey.Key(uint64(keyIdx))
+			obj, _, err := ts.Get(context.Background(), k)
+			require.NoError(t, err)
+			if obj != nil {
+				hits++
+				// Warm hit or hot hit — TieredStore.Get already re-promotes
+				// warm hits via hot.Put internally. No re-Put needed.
+			} else {
+				misses++
+				// Cold miss — simulate origin fetch by re-Putting.
+				require.NoError(t, ts.Put(context.Background(), k, bigObj(k, bodySize)))
+			}
+		}
+		ts.drainQueues()
+	}
+
+	stats := ts.Stats()
+	result := churnResult{
+		phase2Evictions: stats.Evictions - fillEvictions,
+		hotEntries:      stats.HotEntries,
+		hits:            hits,
+		misses:          misses,
+		warmEntries:     stats.WarmEntries,
+		warmDiskBytes:   stats.WarmDiskBytes,
+		warmMaxBytes:    stats.WarmMaxBytes,
+		protectedCount:  ts.warm.ProtectedCount(), // test-only accessor
+	}
+	t.Logf("phase2 evictions=%d, hot=%d, churn=%.1fx, hits=%d, misses=%d, warm=%d, disk=%d, protected=%d",
+		result.phase2Evictions, result.hotEntries,
+		result.churnRatio(), result.hits, result.misses,
+		result.warmEntries, result.warmDiskBytes, result.protectedCount)
+	return result
+}
+
+// TestTiered_484_ChurnRegression is the load-bearing regression test
+// for issue #484. It proves the SIEVE-eviction → warm-Unprotect path
+// breaks the 32× dual-tier destruction feedback loop.
+//
+// Assertions:
+//   - Churn < 2× entries (the issue's acceptance criterion).
+//   - No stranded protected entries (protected ≤ hot entries).
+//   - Warm disk within budget.
+//   - 0 cold misses (all warm hits, no dual-tier destruction).
+//   - All keys retained in warm (no tombstone destruction).
+func TestTiered_484_ChurnRegression(t *testing.T) {
+	t.Parallel()
+	r := runChurnScenario(t)
+
+	// Churn < 2× entries (the issue's acceptance criterion).
+	require.Less(t, r.phase2Evictions, 2*r.hotEntries,
+		"churn should be < 2× entries (got %.1fx)", r.churnRatio())
+
+	// No stranded protected entries.
+	require.LessOrEqual(t, r.protectedCount, int(r.hotEntries),
+		"no stranded protected entries (protected=%d, hot=%d)",
+		r.protectedCount, r.hotEntries)
+
+	// Warm disk within budget.
+	require.Less(t, r.warmDiskBytes, r.warmMaxBytes,
+		"warm disk should be within budget (disk=%d, max=%d)",
+		r.warmDiskBytes, r.warmMaxBytes)
+
+	// 0 cold misses (all warm hits, no dual-tier destruction).
+	require.Equal(t, 0, r.misses,
+		"should have 0 cold misses (all warm hits)")
+
+	// All keys retained in warm (no tombstone destruction).
+	require.Equal(t, int64(churnKeyCount), r.warmEntries,
+		"warm should retain all keys (got %d, want %d)",
+		r.warmEntries, churnKeyCount)
+}
+
+// tieredStore484 builds a TieredStore with all background goroutines
+// disabled for deterministic testing.
+func tieredStore484(t *testing.T, hotMaxBytes int64) *TieredStore {
+	t.Helper()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot: HotConfig{
+			MaxBytes:       hotMaxBytes,
+			NumShards:      1,
+			ReaperInterval: -1,
+		},
+		Warm: &warm.Config{
+			Dir:      filepath.Join(dir, "warm"),
+			MaxBytes: 100 << 20,
+			SegMax:   1 << 20,
+		},
+		WALDir:                 "",
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+	return ts
+}
+
+// TestTiered_484_NonSIEVERemovalsTombstoneWarm verifies that the three
+// non-SIEVE hot-removal paths (reaper, ban, Delete) still tombstone
+// (delete) the warm copy of backed entries. This preserves RFC 9111
+// freshness semantics: expired/banned/deleted objects must not be
+// served from warm after the hot tier drops them.
+func TestTiered_484_NonSIEVERemovalsTombstoneWarm(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_000_000, 0)
+
+	tests := []struct {
+		name    string
+		key     api.Key
+		setup   func(o *api.Object)
+		trigger func(t *testing.T, ts *TieredStore)
+	}{
+		{
+			name: "reaper",
+			key:  testkey.Key(42),
+			setup: func(o *api.Object) {
+				o.TTL = 10 * time.Second
+				o.StaleWhileRevalidate = 0
+				o.StaleIfError = 0
+				o.StoredAt = now
+			},
+			trigger: func(t *testing.T, ts *TieredStore) {
+				ts.hot.reapExpired(now.Add(11 * time.Second))
+				ts.drainQueues()
+			},
+		},
+		{
+			name: "ban",
+			key:  testkey.Key(99),
+			setup: func(o *api.Object) {
+				o.Header.Set(header.XBouinePath, "/ban-me")
+			},
+			trigger: func(t *testing.T, ts *TieredStore) {
+				_, err := ts.Ban(context.Background(), api.BanExpr{PathRegex: "^/ban-me"})
+				require.NoError(t, err, "Ban")
+				ts.drainQueues()
+			},
+		},
+		{
+			name:  "delete",
+			key:   testkey.Key(77),
+			setup: func(o *api.Object) {},
+			trigger: func(t *testing.T, ts *TieredStore) {
+				require.NoError(t, ts.Delete(context.Background(), testkey.Key(77)))
+				ts.drainQueues()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := tieredStore484(t, 1<<20)
+
+			o := bigObj(tt.key, 2000)
+			tt.setup(o)
+			require.NoError(t, ts.Put(context.Background(), tt.key, o))
+			require.Len(t, ts.warm.Keys(), 1, "warm should have the backed entry")
+
+			tt.trigger(t, ts)
+
+			body, err := ts.warm.Get(tt.key)
+			require.NoError(t, err)
+			require.Nil(t, body, "%s should tombstone warm copy", tt.name)
+		})
+	}
+}
+
+// TestTiered_484_DrainWarmUnprotects_NilWarm verifies that
+// drainWarmUnprotects is a no-op when the warm tier is nil
+// (hot-only store).
+func TestTiered_484_DrainWarmUnprotects_NilWarm(t *testing.T) {
+	t.Parallel()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot: HotConfig{
+			MaxBytes:       1 << 20,
+			NumShards:      1,
+			ReaperInterval: -1,
+		},
+		Warm:                   nil, // hot-only — no warm tier
+		WALDir:                 "",
+		BodyThreshold:          1 << 20, // everything hot-only
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	for i := range 5 {
+		k := testkey.Key(uint64(i))
+		require.NoError(t, ts.Put(context.Background(), k, obj(k, 100)))
+	}
+
+	// drainQueues guards on t.warm == nil before calling
+	// drainWarmUnprotects, so exercise the latter directly to cover its
+	// own nil-warm early return.
+	require.Equal(t, 0, ts.drainWarmUnprotects(), "drainWarmUnprotects no-op when warm is nil")
+	ts.drainQueues()
+	require.Equal(t, int64(0), ts.droppedWarmUnprotects.Load())
+}
+
+// TestTiered_484_OverflowFallsBackToTombstone verifies that when
+// warmUnprotectQueue is full, the OnEvictDemoted callback falls back
+// to tombstoneQueue instead of stranding the entry as permanently
+// protected.
+func TestTiered_484_OverflowFallsBackToTombstone(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// TombstoneQueueSize=1 so both queues have capacity 1.
+	ts, err := NewTieredStore(TieredConfig{
+		Hot: HotConfig{
+			MaxBytes:       4 << 10, // 4 KiB — ~1 bigObj(2000)
+			NumShards:      1,
+			ReaperInterval: -1,
+		},
+		Warm: &warm.Config{
+			Dir:      filepath.Join(dir, "warm"),
+			MaxBytes: 100 << 20,
+			SegMax:   1 << 20,
+		},
+		WALDir:                 "",
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
+		TombstoneQueueSize:     1, // tiny queue → overflow on 2nd eviction
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	for i := range 3 {
+		k := testkey.Key(uint64(i))
+		require.NoError(t, ts.Put(context.Background(), k, bigObj(k, 2000)))
+	}
+
+	require.GreaterOrEqual(t, ts.droppedWarmUnprotects.Load(), int64(1),
+		"overflow should increment droppedWarmUnprotects")
+
+	ts.drainQueues()
+
+	warmKeys := ts.warm.Keys()
+	require.Less(t, len(warmKeys), 3,
+		"overflow fallback should have tombstoned at least one warm entry")
+}
+
+// TestTiered_484_OverflowBothQueuesFull verifies the inner-default branch
+// of OnEvictDemoted: when both warmUnprotectQueue and tombstoneQueue are
+// full, the callback increments droppedTombstones (the entry is dropped
+// rather than stranded). Covers tiered.go lines 287-288.
+func TestTiered_484_OverflowBothQueuesFull(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ts, err := NewTieredStore(TieredConfig{
+		Hot: HotConfig{
+			MaxBytes:       4 << 10,
+			NumShards:      1,
+			ReaperInterval: -1,
+		},
+		Warm: &warm.Config{
+			Dir:      filepath.Join(dir, "warm"),
+			MaxBytes: 100 << 20,
+			SegMax:   1 << 20,
+		},
+		WALDir:                 "",
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
+		TombstoneQueueSize:     1, // both queues cap=1
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	// Pre-fill both queues to capacity so the next OnEvictDemoted hits
+	// the inner default (both selects fall through).
+	ts.warmUnprotectQueue <- testkey.Key(9001)
+	ts.tombstoneQueue <- testkey.Key(9002)
+	droppedBefore := ts.droppedTombstones.Load()
+
+	// Put a backed entry then evict it via SIEVE by overfilling hot.
+	for i := range 3 {
+		k := testkey.Key(uint64(i))
+		require.NoError(t, ts.Put(context.Background(), k, bigObj(k, 2000)))
+	}
+
+	require.Greater(t, ts.droppedTombstones.Load(), droppedBefore,
+		"inner default should increment droppedTombstones when both queues are full")
+	require.GreaterOrEqual(t, ts.droppedWarmUnprotects.Load(), int64(1),
+		"droppedWarmUnprotects should also increment")
 }

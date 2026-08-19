@@ -375,6 +375,14 @@ type Store struct {
 	stats        warmStats
 	idxMu        sync.RWMutex
 	index        map[api.Key]warmLoc
+	// protectedCount tracks the number of warm entries currently marked
+	// protected (backed by a live hot entry). Maintained as an atomic
+	// so ProtectedCount is O(1) — no index scan, no lock contention.
+	// Incremented by Protect (false→true), decremented by Unprotect
+	// (true→false), Delete (if the removed entry was protected), and
+	// Put overwrite (if the old entry was protected and the new one is
+	// not, which is the default — callers re-Protect if needed).
+	protectedCount atomic.Int64
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
@@ -733,6 +741,12 @@ func (s *Store) Put(key api.Key, body []byte) (segID int, offset int64, err erro
 			if old.size > 0 {
 				s.stats.bytes.Add(-old.size)
 			}
+			// Overwrite replaces the index entry with protected=false (zero
+			// value). If the old entry was protected, decrement now — the
+			// caller (TieredStore.Put) re-Protects afterwards if needed.
+			if old.protected {
+				s.protectedCount.Add(-1)
+			}
 		} else {
 			s.stats.entries.Add(1)
 		}
@@ -801,6 +815,9 @@ func (s *Store) Delete(key api.Key) (segID int, err error) {
 		s.idxMu.Lock()
 		loc, existed := s.index[key]
 		if existed {
+			if loc.protected {
+				s.protectedCount.Add(-1)
+			}
 			if loc.entry != nil {
 				s.evictList.Remove(loc.entry)
 			}
@@ -980,6 +997,9 @@ func (s *Store) LookupWithSize(key api.Key) (segID int, offset, size int64, ok b
 func (s *Store) DelIndex(key api.Key) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
+		if loc.protected {
+			s.protectedCount.Add(-1)
+		}
 		if loc.entry != nil {
 			s.evictList.Remove(loc.entry)
 		}
@@ -1157,6 +1177,9 @@ func (s *Store) SelfHeals() int64 {
 func (s *Store) dropStaleIndex(key api.Key, stale warmLoc) {
 	s.idxMu.Lock()
 	if cur, ok := s.index[key]; ok && cur.segID == stale.segID && cur.offset == stale.offset {
+		if cur.protected {
+			s.protectedCount.Add(-1)
+		}
 		if cur.entry != nil {
 			s.evictList.Remove(cur.entry)
 		}
@@ -1189,25 +1212,71 @@ func (s *Store) Keys() []api.Key {
 // acceleration tier would immediately re-sync. If the key is not in
 // the warm index this is a no-op.
 //
-// There is deliberately no Unprotect. The invariant that prevents
-// stranded protected entries is: Protect is always called together
-// with hot.SetBacked (see TieredStore.Put and writeHotOnlyToWarm in
-// tiered.go). When the hot tier evicts a backed entry, its OnEvict
-// callback enqueues a tombstone, and drainTombstones calls warm.Delete
-// — which removes the warm entry entirely, clearing protected as a
-// side effect. So a protected warm entry is always backed by a live
-// hot entry, and the hot entry's eviction path always deletes the
-// warm entry. A standalone Unprotect would need to be wired into
-// every hot-tier removal path to match this lifecycle; the paired
-// Protect+SetBacked + Delete-on-hot-eviction lifecycle is simpler
-// and already correct.
+// Protect is always called together with hot.SetBacked (see
+// TieredStore.Put and writeHotOnlyToWarm in tiered.go). The lifecycle
+// of a protected warm entry is:
+//
+//   - Protect(key) + hot.SetBacked(key) are paired on insert/promotion.
+//   - Hot SIEVE-eviction of a backed entry → warm.Unprotect(key) (demote
+//     to SIEVE-managed) when experimental.storage.hot_evict_no_warm_tomb
+//     is on, or warm.Delete(key) (tombstone) when it is off. The warm
+//     copy either stays live and SIEVE-evictable (Unprotect) or is
+//     removed entirely (Delete, clears protected as a side effect).
+//   - Hot reaper / ban / Delete / Put-overwrite → warm.Delete(key)
+//     (tombstone) regardless of the flag — the warm copy must be
+//     removed for freshness/ban correctness.
+//
+// A protected warm entry is always backed by a live hot entry. When
+// the hot entry is SIEVE-evicted, Unprotect demotes the warm copy so
+// warm SIEVE can reclaim it under pressure. When the hot entry is
+// removed by reaper/ban/Delete, the warm copy is deleted. Either way,
+// no protected entry is stranded (protected without a hot backing).
 func (s *Store) Protect(key api.Key) {
 	s.idxMu.Lock()
 	if loc, ok := s.index[key]; ok {
-		loc.protected = true
-		s.index[key] = loc
+		if !loc.protected {
+			loc.protected = true
+			s.index[key] = loc
+			s.protectedCount.Add(1)
+		}
 	}
 	s.idxMu.Unlock()
+}
+
+// Unprotect clears the protected flag on a warm-tier entry, allowing
+// warm SIEVE to evict it under pressure. The warm copy stays live and
+// readable until warm SIEVE evicts it (or an explicit Delete removes
+// it). Used by the hot tier's SIEVE-eviction path to demote a backed
+// hot entry to warm-managed without destroying the warm copy (Fix A
+// for #484).
+//
+// Unlike Delete, Unprotect does NOT write a tombstone: the on-disk
+// record stays live. This is safe because warm SIEVE will write its
+// own tombstone when it eventually evicts the now-unprotected entry
+// (evictOneLocked at warm.go:evictOneLocked), and warmSyncLoop drains
+// the warmEvictQueue for the WAL delete at that point.
+//
+// Idempotent: no-op if the key is absent or already unprotected.
+// Must NOT be called under a hot shard write lock — see the
+// lock-ordering note in tiered.go's warmUnprotectQueue drain path.
+func (s *Store) Unprotect(key api.Key) {
+	s.idxMu.Lock()
+	if loc, ok := s.index[key]; ok && loc.protected {
+		loc.protected = false
+		s.index[key] = loc
+		s.protectedCount.Add(-1)
+	}
+	s.idxMu.Unlock()
+}
+
+// ProtectedCount returns the number of warm-tier entries currently
+// marked protected (backed by a live hot entry). O(1) — reads an
+// atomic counter maintained by Protect/Unprotect/Delete/Put. Used
+// for observability (a future bouine_warm_protected gauge can read
+// this directly) and test assertions (the §4.1 regression test
+// verifies no protected entries are stranded after Fix A).
+func (s *Store) ProtectedCount() int {
+	return int(s.protectedCount.Load())
 }
 
 // writeTombstoneLocked writes a tombstone record for key to the active
@@ -2076,6 +2145,18 @@ func (s *Store) Compact() error {
 	s.idxMu.Lock()
 	s.index = newIndex
 	s.evictList = freshEvictList
+	// Recompute protectedCount from newIndex under idxMu — Protect
+	// and Unprotect only acquire idxMu (not s.mu), so they can race
+	// with a Store outside the lock. Holding idxMu here serializes
+	// the recompute against any concurrent Protect/Unprotect that
+	// slipped in via a non-Put path (e.g. TieredStore callbacks).
+	var protected int64
+	for _, loc := range newIndex {
+		if loc.protected {
+			protected++
+		}
+	}
+	s.protectedCount.Store(protected)
 	s.idxMu.Unlock()
 
 	s.stats.entries.Store(int64(len(newIndex)))

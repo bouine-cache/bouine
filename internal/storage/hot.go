@@ -73,9 +73,15 @@ type HotStore struct {
 	// this, a goroutine mid-flushSlabFrees could access munmap'd
 	// memory and segfault.
 	wg sync.WaitGroup
-	// onEvict is called when a backed entry is evicted. Set via
-	// HotConfig.OnEvict. See HotConfig.OnEvict for the constraint.
+	// onEvict is called when a backed entry is removed by a non-SIEVE
+	// path. Set via HotConfig.OnEvict. See HotConfig.OnEvict for the
+	// constraint.
 	onEvict func(key api.Key)
+	// onEvictDemoted is called when a backed entry is SIEVE-evicted.
+	// Set via HotConfig.OnEvictDemoted. The TieredStore uses it to
+	// Unprotect (not Delete) the warm copy — demoting it to
+	// SIEVE-managed without destroying it (#484).
+	onEvictDemoted func(key api.Key)
 	// slab allocates body bytes from mmap'd regions to reduce GC
 	// pressure. nil means use Go heap (default, backward compatible).
 	slab *SlabAllocator
@@ -178,6 +184,18 @@ type hotStats struct {
 	evictions atomic.Int64
 }
 
+// evictReason classifies the caller of notifyEvict so the OnEvict
+// callback can be suppressed for SIEVE-eviction-only paths (Fix A
+// for #484) while remaining active for reaper/ban/Delete paths.
+type evictReason int
+
+const (
+	evictReasonSIEVE  evictReason = iota // inline Put, background sweeper
+	evictReasonReaper                    // reapShard — TTL expiry
+	evictReasonBan                       // evictBanned, banShard
+	evictReasonDelete                    // Delete, Put overwrite-replace
+)
+
 // HotConfig configures the hot store.
 type HotConfig struct {
 	// MaxBytes is the total memory budget across all shards.
@@ -198,9 +216,14 @@ type HotConfig struct {
 	// wrapping slog.Default().
 	Logger observability.Logger
 	// OnEvict is called when a backed entry (hasBackup == true) is
-	// evicted from the hot tier. The key should be tombstoned in the
-	// backup tier so stale unpopular objects are not served after
-	// restart.
+	// removed from the hot tier by a non-SIEVE path (reaper, ban,
+	// Delete, Put-overwrite). The key should be tombstoned in the
+	// backup tier so stale objects are not served after the hot tier
+	// drops them.
+	//
+	// OnEvict is NOT called for evictReasonSIEVE — instead
+	// OnEvictDemoted is called so the TieredStore can Unprotect (not
+	// Delete) the warm copy, keeping it live and SIEVE-evictable (#484).
 	//
 	// CONSTRAINT: This callback is invoked while the shard write lock
 	// is held. It MUST NOT block, perform I/O, or call back into
@@ -208,6 +231,17 @@ type HotConfig struct {
 	// Violating this constraint stalls all readers and writers on the
 	// shard.
 	OnEvict func(key api.Key)
+	// OnEvictDemoted is called when a backed entry is SIEVE-evicted
+	// from the hot tier. Instead of tombstoning the warm copy
+	// (OnEvict), the TieredStore uses this callback to Unprotect the
+	// warm copy — demoting it to SIEVE-managed without deleting it
+	// (#484).
+	//
+	// CONSTRAINT: Same as OnEvict — invoked under the shard write lock.
+	// Must only enqueue for async processing (the TieredStore enqueues
+	// to a warmUnprotectQueue drained outside the hot lock to avoid a
+	// lock-ordering cycle with warm.idxMu).
+	OnEvictDemoted func(key api.Key)
 
 	// HotEvictionAlgorithm selects the eviction policy for the hot tier.
 	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
@@ -254,6 +288,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
 		onEvict:        cfg.OnEvict,
+		onEvictDemoted: cfg.OnEvictDemoted,
 	}
 	if cfg.Slab {
 		slab, err := NewSlabAllocator()
@@ -371,11 +406,25 @@ func (h *HotStore) detachBody(obj *api.Object) *api.Object {
 // bodies that must be returned to the free list after the shard lock
 // is released (slab.Free takes a per-region mutex and must not be
 // called under the shard lock).
-func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry, slabFrees *[][]byte) {
+func (h *HotStore) notifyEvict(key api.Key, entry *hotEntry, slabFrees *[][]byte, reason evictReason) {
 	if h.slab != nil && entry.obj != nil {
 		*slabFrees = append(*slabFrees, entry.obj.Body)
 	}
-	if h.onEvict != nil && entry.hasBackup {
+	if !entry.hasBackup {
+		return
+	}
+	// SIEVE evictions demote the warm copy (Unprotect) instead of
+	// tombstoning it, so the warm entry stays live and SIEVE-evictable
+	// under warm pressure. Non-SIEVE removals (reaper, ban, Delete,
+	// Put-overwrite) still tombstone — see tiered.go's
+	// warmUnprotectQueue drain path (#484).
+	if reason == evictReasonSIEVE {
+		if h.onEvictDemoted != nil {
+			h.onEvictDemoted(key)
+		}
+		return
+	}
+	if h.onEvict != nil {
 		h.onEvict(key)
 	}
 }
@@ -394,7 +443,7 @@ func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 	var slabFrees [][]byte
 	s.mu.Lock()
 	if cur, ok := s.entries[key]; ok && cur.obj == obj {
-		h.notifyEvict(key, cur, &slabFrees)
+		h.notifyEvict(key, cur, &slabFrees, evictReasonBan)
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.entry)
 		delete(s.entries, key)
@@ -453,7 +502,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		}
 		if old, exists := s.entries[evKey]; exists {
 			recordEviction(&logs, evKey, old, "inline_overshoot")
-			h.notifyEvict(evKey, old, &slabFrees)
+			h.notifyEvict(evKey, old, &slabFrees, evictReasonSIEVE)
 			s.bytes -= objSize(old.obj)
 			delete(s.entries, evKey)
 			h.stats.evictions.Add(1)
@@ -470,7 +519,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 
 	// Remove old entry if replacing, return to pool.
 	if old, exists := s.entries[key]; exists {
-		h.notifyEvict(key, old, &slabFrees)
+		h.notifyEvict(key, old, &slabFrees, evictReasonDelete)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.entry)
 		if old.hasBackup {
@@ -486,6 +535,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	se, _ := s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 		return nil // force insert
 	})
+	se.MarkVisited() // one sweep of protection on insert (#484)
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
 	e.entry = se
@@ -547,7 +597,7 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
 			recordEviction(&logs, key, e, "expired")
-			h.notifyEvict(key, e, &slabFrees)
+			h.notifyEvict(key, e, &slabFrees, evictReasonReaper)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.entry)
 			delete(s.entries, key)
@@ -585,7 +635,7 @@ func (h *HotStore) sweeper() {
 				}
 				if old, exists := s.entries[evKey]; exists {
 					recordEviction(&logs, evKey, old, "sweeper_overshoot")
-					h.notifyEvict(evKey, old, &slabFrees)
+					h.notifyEvict(evKey, old, &slabFrees, evictReasonSIEVE)
 					s.bytes -= objSize(old.obj)
 					delete(s.entries, evKey)
 					h.stats.evictions.Add(1)
@@ -622,7 +672,7 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	if e, ok := s.entries[key]; ok {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.entry)
-		h.notifyEvict(key, e, &slabFrees)
+		h.notifyEvict(key, e, &slabFrees, evictReasonDelete)
 		delete(s.entries, key)
 		e.obj = nil
 		e.entry = nil
@@ -690,7 +740,7 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 	s.mu.Lock()
 	for key, e := range s.entries {
 		if pred(e.obj) {
-			h.notifyEvict(key, e, &slabFrees)
+			h.notifyEvict(key, e, &slabFrees, evictReasonBan)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.entry)
 			delete(s.entries, key)

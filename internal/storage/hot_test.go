@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage/evictor"
+	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -48,7 +51,11 @@ func TestHotStore_PutGet(t *testing.T) {
 	require.NoError(t, err, "get")
 	require.NotNil(t, got)
 	require.Equal(t, 200, got.StatusCode)
-	require.Equal(t, uint64(1), got.Hits)
+	// Put inserts with visited=true (one SIEVE sweep of protection),
+	// so the first Get takes the fast path which does not increment
+	// Object.Hits (only the slow path does). The hit is counted in
+	// stats.hits and windowHits (both atomic), not Object.Hits.
+	require.Equal(t, uint64(0), got.Hits)
 	require.Equal(t, api.SourceHot, src)
 }
 
@@ -445,13 +452,22 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	// MOST evictable state and gets evicted on the very next sweep —
 	// defeating the "second chance" semantic.
 	//
+	// With visited=true on insert (#484), all freshly inserted entries
+	// get one SIEVE sweep of protection. To isolate the re-insert
+	// MarkVisited, we ClearVisited on k1, k2, and k3 after their
+	// respective inserts, restoring the pre-#484 visited=false insert
+	// state. This ensures only the re-insert MarkVisited (not the
+	// insert MarkVisited) provides k1's second chance.
+	//
 	// Scenario (single shard, 3 KiB budget, obj ~1498 B → 2 fit):
-	//  1. Insert k1 (hot-only), k2 (backed). SetBacked(k2).
-	//  2. Insert k3 → first eviction: k1 (tail, unvisited) is swept,
+	//  1. Insert k1 (hot-only), k2 (backed). ClearVisited both. SetBacked(k2).
+	//  2. Insert k3 → first eviction: k1 (tail, visited=false) is swept,
 	//     re-inserted at head via Access + MarkVisited (visited=true).
-	//     k2 (backed) then evicted. List: k3 → k1. k1.visited=true.
-	//  3. Insert k4 → second eviction: k1 (visited=true) gets a second
-	//     chance (visited cleared, not evicted); k3 evicted instead.
+	//     k2 (backed, visited=false) then evicted. List: k3 → k1.
+	//     k1.visited=true (from re-insert MarkVisited).
+	//  3. ClearVisited k3 → k3.visited=false (isolate re-insert MarkVisited).
+	//  4. Insert k4 → second eviction: k1 (visited=true) gets a second
+	//     chance (visited cleared, not evicted); k3 (visited=false) evicted.
 	//     WITHOUT MarkVisited: k1 (visited=false) evicted immediately.
 	//
 	// No Get() calls between evictions — Get marks visited and would
@@ -465,23 +481,44 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	_ = s.Put(ctx, k2, obj(k2, 1024))
 	s.SetBacked(k2)
 
-	// First eviction: k1 re-inserted with visited=true, k2 evicted.
+	// Reset visited bits on k1 and k2 so the first eviction sweep sees
+	// them in the old visited=false insert state. Without this, the
+	// visited=true from insert (#484) would give both entries a free
+	// pass on the first sweep, changing the eviction order and
+	// obscuring the re-insert MarkVisited behavior under test.
+	shard := &s.shards[0]
+	shard.mu.Lock()
+	shard.entries[k1].entry.ClearVisited()
+	shard.entries[k2].entry.ClearVisited()
+	shard.mu.Unlock()
+
+	// First eviction: k1 (visited=false) is swept and re-inserted at
+	// head via Access + MarkVisited (visited=true). k2 (backed,
+	// visited=false) is then evicted. List: k3 → k1.
 	k3 := testkey.Hash([]byte("k3"))
 	_ = s.Put(ctx, k3, obj(k3, 1024))
 
-	// Second eviction: k1's visited bit (from MarkVisited) gives it a
-	// second chance; k3 is evicted instead. If MarkVisited were missing,
-	// k1 (visited=false at tail) would be evicted here.
+	// Reset k3's visited bit so the second eviction sees k3 in the old
+	// visited=false insert state. This ensures k3 is immediately
+	// evictable, so k1 (protected by re-insert MarkVisited) survives
+	// and k3 is evicted — proving the re-insert MarkVisited is
+	// load-bearing.
+	shard.mu.Lock()
+	shard.entries[k3].entry.ClearVisited()
+	shard.mu.Unlock()
+
+	// Second eviction: k1 (visited=true from re-insert) gets a second
+	// chance; k3 (visited=false) is evicted.
 	k4 := testkey.Hash([]byte("k4"))
 	_ = s.Put(ctx, k4, obj(k4, 1024))
 
 	// Assertions after all evictions (no Get between evictions).
 	got, _, _ := s.Get(ctx, k1)
-	assert.NotNil(t, got, "k1 must survive both evictions — MarkVisited gave it a second chance")
+	assert.NotNil(t, got, "k1 must survive all evictions — MarkVisited on re-insert gave it a second chance")
 	got, _, _ = s.Get(ctx, k2)
 	assert.Nil(t, got, "k2 (backed) must be evicted in first sweep")
 	got, _, _ = s.Get(ctx, k3)
-	assert.Nil(t, got, "k3 must be evicted in second sweep (k1's second chance consumed the probe)")
+	assert.Nil(t, got, "k3 must be evicted in second sweep")
 	got, _, _ = s.Get(ctx, k4)
 	assert.NotNil(t, got, "k4 must be present")
 }
@@ -759,4 +796,119 @@ func TestHotStore_BanSkipsObjectStoredAfterBan(t *testing.T) {
 
 	got, _, _ := s.Get(context.Background(), k)
 	require.NotNil(t, got)
+}
+
+// TestHot_484_SieveEvictionDemotesWarm verifies that SIEVE eviction of
+// a backed hot entry demotes the warm copy (clears protected) instead
+// of tombstoning it. The warm copy stays live and SIEVE-evictable
+// (not stranded).
+func TestHot_484_SieveEvictionDemotesWarm(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Small hot tier (holds ~1 entry) so a single competing Put evicts k.
+	// Small warm tier (holds ~2 entries) to force warm SIEVE eviction.
+	ts, err := NewTieredStore(TieredConfig{
+		Hot: HotConfig{
+			MaxBytes:       4 << 10, // 4 KiB — holds ~1 bigObj(2000)
+			NumShards:      1,
+			ReaperInterval: -1,
+		},
+		Warm: &warm.Config{
+			Dir:      filepath.Join(dir, "warm"),
+			MaxBytes: 5 << 10, // 5 KiB — holds ~2 entries, forces warm SIEVE eviction
+			SegMax:   1 << 20,
+		},
+		WALDir:                 "",
+		BodyThreshold:          1024,
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	// Step 1: Insert a large backed entry k.
+	k := testkey.Key(1000)
+	require.NoError(t, ts.Put(context.Background(), k, bigObj(k, 2000)))
+
+	// Verify warm has k and it's protected.
+	require.Len(t, ts.warm.Keys(), 1, "warm should have the backed entry")
+	require.Equal(t, 1, ts.warm.ProtectedCount(), "k should be protected")
+
+	// Step 2: Insert a competing entry to force SIEVE eviction of k.
+	// Hot holds ~1 entry, so the second Put evicts k (backed, preferred).
+	k2 := testkey.Key(2000)
+	require.NoError(t, ts.Put(context.Background(), k2, bigObj(k2, 2000)))
+
+	// Drain the warm unprotect queue (async — avoids lock-ordering cycle).
+	ts.drainQueues()
+
+	// Step 3: Assert k is still in warm (retained, not tombstoned).
+	warmKeys := ts.warm.Keys()
+	require.True(t, slices.Contains(warmKeys, k),
+		"warm copy of SIEVE-evicted key should be retained (not tombstoned)")
+
+	// Step 4: Assert k's warm copy is now unprotected (demoted).
+	// Only k2 (still in hot, backed) should be protected.
+	require.Equal(t, 1, ts.warm.ProtectedCount(),
+		"only entries still backed by hot should be protected (k2)")
+
+	// Step 5: Assert no tombstones were enqueued for SIEVE evictions.
+	require.Equal(t, int64(0), ts.droppedTombstones.Load(),
+		"no tombstones should be enqueued for SIEVE evictions")
+
+	// Step 6: Verify k is evictable by warm SIEVE (not stranded).
+	// Warm has 2 entries (k unprotected + k2 protected) at ~4 KB,
+	// budget 5 KB. One more Put triggers eviction. k is the only
+	// unprotected, non-visited entry → warm SIEVE evicts it.
+	k3 := testkey.Key(3000)
+	_, _, err = ts.warm.Put(k3, make([]byte, 2000))
+	require.NoError(t, err, "warm.Put should succeed (evicting unprotected entry k)")
+
+	// k should have been evicted by warm SIEVE (it was unprotected, not stranded).
+	warmKeys = ts.warm.Keys()
+	require.False(t, slices.Contains(warmKeys, k),
+		"demoted warm entry should be evictable by warm SIEVE (not stranded)")
+}
+
+// TestHot_484_FreshInsertVisited verifies that a freshly inserted hot
+// entry has visited=true, giving it one SIEVE sweep of protection
+// before it can be evicted.
+func TestHot_484_FreshInsertVisited(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ts, err := NewTieredStore(TieredConfig{
+		Hot: HotConfig{
+			MaxBytes:       50 << 10, // 50 KiB — ~20 entries
+			NumShards:      1,
+			ReaperInterval: -1,
+		},
+		Warm: &warm.Config{
+			Dir:      filepath.Join(dir, "warm"),
+			MaxBytes: 100 << 20,
+			SegMax:   1 << 20,
+		},
+		WALDir:                 "",
+		BodyThreshold:          1 << 20, // bodies stay hot-only (no warm backing)
+		WarmSyncInterval:       -1,
+		WarmSyncBatchSize:      100,
+		TombstoneDrainInterval: -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(context.Background()) })
+
+	k := testkey.Key(42)
+	require.NoError(t, ts.Put(context.Background(), k, obj(k, 2000)))
+
+	// Freshly inserted entry should have visited=true.
+	ts.hot.shards[0].mu.RLock()
+	entry, exists := ts.hot.shards[0].entries[k]
+	require.True(t, exists, "k should be in hot")
+	visited := entry.entry.Visited()
+	ts.hot.shards[0].mu.RUnlock()
+
+	require.True(t, visited,
+		"freshly inserted entry should have visited=true (one sweep of protection)")
 }

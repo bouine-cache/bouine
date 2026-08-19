@@ -1436,9 +1436,11 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	// After the test's Get, Hits=1 (first access, slow path). With
-	// minHits=2, the gate should block re-scheduling.
-	require.Equal(t, uint64(1), obj.Hits)
+	// After the test's Get, obj.Hits=0 (fast path: visited=true on
+	// insert #484 skips the slow-path Hits increment). The per-window
+	// WindowHits counter is 1. With minHits=2, the gate should block
+	// re-scheduling (staleHits=0 passed below).
+	require.GreaterOrEqual(t, h.store.WindowHits(key), int64(1))
 	h.doBackgroundRefresh(ctx, key, obj, 0)
 
 	// After refresh with Hits=1 < minHits=2, the object should NOT be
@@ -1452,9 +1454,10 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	defer h.Close(context.Background())
 
-	// Store (MISS) then access (HIT → Hits=1 on slow path).
-	// The test's store.Get will use the fast path (visited=true),
-	// so Hits stays at 1.
+	// Store (MISS) then access (HIT). With visited=true on insert
+	// (#484), the fast path skips the Object.Hits increment, so
+	// obj.Hits=0. The per-window WindowHits counter is incremented
+	// on both fast and slow paths and is what the refresh gate uses.
 	url := "http://example.com/popular"
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
@@ -1469,8 +1472,8 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 1 {
-		t.Fatalf("expected >= 1 hits, got %d", obj.Hits)
+	if h.store.WindowHits(key) < 1 {
+		t.Fatalf("expected >= 1 windowHits, got %d", h.store.WindowHits(key))
 	}
 
 	// Simulate a background refresh. Since the object was accessed
@@ -1524,7 +1527,10 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	})
 	defer h.Close(context.Background())
 
-	// Store (MISS) then access (HIT → Hits=1).
+	// Store (MISS) then access (HIT). With visited=true on insert
+	// (#484), the fast path skips Object.Hits, so obj.Hits=0. The
+	// per-window WindowHits counter is 1 and is what the refresh
+	// gate uses.
 	url := "http://example.com/hits"
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
@@ -1534,8 +1540,8 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	if obj.Hits < 1 {
-		t.Fatalf("expected >= 1 hit before refresh, got %d", obj.Hits)
+	if h.store.WindowHits(key) < 1 {
+		t.Fatalf("expected >= 1 windowHit before refresh, got %d", h.store.WindowHits(key))
 	}
 
 	// doBackgroundRefresh triggers a 200 (upstream never returns 304).
@@ -1572,10 +1578,11 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	// After Get, Hits=1 (visited bit flip). With minHits=2, the gate
-	// would block. But persist=3 should keep it alive for 3 more cycles.
-	// We pass staleHits=0 to each doBackgroundRefresh — the 304 path
-	// resets Hits to 0 and the gate checks staleHits (0 < minHits=2).
+	// After Get, obj.Hits=0 (fast path: visited=true on insert #484).
+	// With minHits=2, the gate would block. But persist=3 should keep
+	// it alive for 3 more cycles. We pass staleHits=0 to each
+	// doBackgroundRefresh — the 304 path resets Hits to 0 and the gate
+	// checks staleHits (0 < minHits=2).
 
 	// Refresh 1: Hits=1 < minHits=2, persist=3 → decrement to 2, re-schedule.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)
@@ -1619,7 +1626,8 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	defer h.Close(context.Background())
 
 	url := "http://example.com/reset"
-	// MISS → Hits=1 (visited bit flip). Registered with persist=2.
+	// MISS → stores with visited=true (#484). Registered with persist=2.
+	// Object.Hits stays 0 (fast path); WindowHits=1 after the test's Get.
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// Clear scheduler.
@@ -1632,9 +1640,10 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	require.Equal(t, uint64(1), obj.Hits)
+	// obj.Hits=0 (fast path: visited=true on insert #484). WindowHits=1.
+	require.GreaterOrEqual(t, h.store.WindowHits(key), int64(1))
 
-	// Unpopular refresh: windowHits=0 < minHits=2 → persist 2→1, re-scheduled.
+	// Unpopular refresh: windowHits=1 < minHits=2 → persist 2→1, re-scheduled.
 	staleHits := h.store.WindowHits(key)
 	h.doBackgroundRefresh(context.Background(), key, obj, staleHits)
 	scheduled := h.scheduler.Len()
@@ -1692,7 +1701,9 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
 	}
-	require.Equal(t, uint64(1), obj.Hits)
+	// obj.Hits=0 (fast path: visited=true on insert #484). WindowHits=1.
+	// With minHits=2, the gate blocks (staleHits=0 passed below).
+	require.GreaterOrEqual(t, h.store.WindowHits(key), int64(1))
 
 	// Hits=1 < minHits=2, persist=0 → gate blocks immediately.
 	h.doBackgroundRefresh(context.Background(), key, obj, 0)

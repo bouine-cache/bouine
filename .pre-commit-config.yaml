@@ -92,6 +92,13 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      - id: changelog-reminder
+        name: changelog-reminder
+        entry: bash scripts/changelog-reminder.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
   # ---------------------------------------------------------------------
   # Helm: lint the chart on both commit and push when chart files change.
   # ---------------------------------------------------------------------

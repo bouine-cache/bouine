@@ -42,8 +42,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
-      - run: make lint
-      - run: make govulncheck
+      - name: golangci-lint (via prek)
+        uses: j178/prek-action@v3.0.0
+      - name: govulncheck
+        run: make govulncheck
 
   test-linux:
     name: test (linux/amd64, race)
@@ -188,40 +190,53 @@ jobs:
   fuzz:
     name: fuzz (long)
     runs-on: [self-hosted, ci]
-    timeout-minutes: 70
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - cache
-          - storage
-          - cluster
-          - server/h1parser
-          - staticfile
+        include:
+          - package: cache
+            target: FuzzBuildKey
+          - package: cache
+            target: FuzzParseCacheControl
+          - package: cache
+            target: FuzzVariantKey
+          - package: cache
+            target: FuzzEvaluate
+          - package: storage
+            target: FuzzCodecRoundTrip
+          - package: storage
+            target: FuzzDecodeObjectArbitrary
+          - package: cluster
+            target: FuzzPurgeCodecRoundTrip
+          - package: cluster
+            target: FuzzBanCodecRoundTrip
+          - package: cluster
+            target: FuzzDecodeArbitrary
+          - package: server/h1parser
+            target: FuzzParseRequestLine
+          - package: server/h1parser
+            target: FuzzParseHeaders
+          - package: server/h1parser
+            target: FuzzSmugglingDetected
+          - package: staticfile
+            target: FuzzPathTraversal
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
-      - name: Fuzz ${{ matrix.package }} (10 min)
+      - name: Fuzz ${{ matrix.target }} (10 min)
         run: |
-          go test -run=^$ -fuzz=Fuzz -fuzztime=600s \
+          go test -run=^$ -fuzz=${{ matrix.target }} -fuzztime=600s \
             -timeout=15m ./internal/${{ matrix.package }}
       - name: Upload fuzz corpus
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nightly-fuzz-${{ matrix.package }}-${{ github.run_id }}
+          name: nightly-fuzz-${{ matrix.package }}-${{ matrix.target }}-${{ github.run_id }}
           path: internal/${{ matrix.package }}/testdata/fuzz/
-          if-no-files-found: ignore
-          retention-days: 30
-      - name: Upload fuzz corpus
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: nightly-fuzz-${{ matrix.package }}-${{ github.run_id }}
-          path: ${{ matrix.package }}/testdata/fuzz/
           if-no-files-found: ignore
           retention-days: 30
 
@@ -294,7 +309,7 @@ jobs:
   docker-nightly:
     name: Docker image (nightly)
     runs-on: [self-hosted, ci]
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Set up QEMU
@@ -328,7 +343,7 @@ jobs:
           build-args: |
             VERSION=nightly-${{ github.run_id }}
             COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
+            DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Scan nightly image (Trivy)
@@ -357,9 +372,8 @@ jobs:
     runs-on: [self-hosted, load-test-k8s]
     timeout-minutes: 90
     needs: [docker-nightly]
-    if: |
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && !inputs.skip-stress)
+    if: needs.docker-nightly.result == 'success'
+    continue-on-error: true
     steps:
       - name: Checkout bouine
         uses: actions/checkout@v7

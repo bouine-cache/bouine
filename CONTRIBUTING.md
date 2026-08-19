@@ -13,7 +13,7 @@ contributors.
 
 ## Quick links
 
-- Roadmap: [`docs/architecture.md`](docs/architecture.md)
+- Roadmap: [`ROADMAP.md`](ROADMAP.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
 - Working agreement (binding for all contributors): [`AGENTS.md`](AGENTS.md)
@@ -26,10 +26,9 @@ contributors.
 
 ## Before you start
 
-1. Read [`docs/architecture.md`](docs/architecture.md) so you know which phase the project is in.
-   We do not accept features that are not on the roadmap for the
-   current phase. Open a discussion issue first if you want to argue
-   for inclusion.
+1. Read [`ROADMAP.md`](ROADMAP.md) so you know where the project is
+   heading. We do not accept features that are not on the roadmap.
+   Open a discussion issue first if you want to argue for inclusion.
 2. Read [`AGENTS.md`](AGENTS.md) end to end. The non-negotiable rules
    in §2 apply to every contributor, AI or human.
 3. Search existing issues and PRs to avoid duplicate work.
@@ -65,7 +64,7 @@ still fail the build.
 
 For any non-trivial change:
 
-1. **Orient** — re-read the relevant sections of `docs/architecture.md` and
+1. **Orient** — re-read the relevant sections of `ROADMAP.md` and
    `AGENTS.md`. Identify which architectural layer(s) you are touching
    (see [`AGENTS.md §3`](AGENTS.md)).
 2. **Plan** — open or comment on an issue describing the approach.

@@ -1552,7 +1552,7 @@ func TestCacheCheck_WithStoredObject(t *testing.T) {
 	t.Parallel()
 	metrics := observability.NewMetrics()
 	e := &engine{
-		cfg:     &config.Config{},
+		cfg:     &config.Config{Storage: config.Storage{HotMaxBytes: 1 << 20}},
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}

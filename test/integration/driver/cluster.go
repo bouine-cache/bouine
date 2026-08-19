@@ -286,7 +286,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 func (s *ClusterStack) waitHealthy(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	for _, node := range s.Nodes {
-		ep := node.AdminAddr + "/healthz"
+		ep := node.AdminAddr + "/readyz"
 		poll.Eventually(t, timeout, 50*time.Millisecond, func() bool {
 			resp, err := http.Get(ep) //nolint:noctx
 			if err != nil {
@@ -428,7 +428,7 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 	}(s.errChs[n])
 
 	poll.Eventually(t, 30*time.Second, 50*time.Millisecond, func() bool {
-		resp, err := http.Get(s.Nodes[n].AdminAddr + "/healthz") //nolint:noctx
+		resp, err := http.Get(s.Nodes[n].AdminAddr + "/readyz") //nolint:noctx
 		if err != nil {
 			return false
 		}

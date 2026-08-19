@@ -89,7 +89,8 @@ review.
 - [ ] `prek run --all-files` passes locally.
 - [ ] Layer dependencies respected (`depguard` clean).
 - [ ] `make ci` is green locally.
-- [ ] Tests added or updated; coverage not reduced.
+- [ ] Tests added or updated; coverage not reduced. If this PR adds major
+      new functionality, tests for the new functionality MUST be included.
 - [ ] If you touched the hot path: zero-alloc benchmark proves it.
 - [ ] If you touched cache logic: `cache-tests` score not regressed.
 - [ ] If you touched config: `config.Validate` updated and the new field
@@ -161,6 +162,10 @@ Performance is a feature. See [`AGENTS.md §7`](AGENTS.md). Highlights:
 
 See [`AGENTS.md §8`](AGENTS.md). Highlights:
 
+- **Tests MUST accompany new functionality.** When major new
+  functionality is added, tests for that functionality MUST be added to
+  an automated test suite in the same PR. A PR without tests will be
+  rejected.
 - Unit tests live alongside code, table-driven, `-race` on.
 - Coverage gate: `≥ 85%` per package, `≥ 95%` for `internal/cache` and
   `internal/storage`.

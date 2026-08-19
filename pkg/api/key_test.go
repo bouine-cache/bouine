@@ -94,3 +94,19 @@ func TestKeyUnmarshalJSONRejectsBadInput(t *testing.T) {
 	err = json.Unmarshal([]byte(`["a","b"]`), &k)
 	require.Error(t, err)
 }
+
+func TestKeyLogValue(t *testing.T) {
+	t.Parallel()
+	k := fromUint64(0x42)
+	lv := k.LogValue()
+	require.Equal(t, k.Hex(), lv.String())
+}
+
+func TestKeyIsZero_BothHalves(t *testing.T) {
+	t.Parallel()
+	require.True(t, Key{}.IsZero())
+	// Zero high half, non-zero low half
+	var k Key
+	binary.BigEndian.PutUint64(k[8:], 1)
+	require.False(t, k.IsZero())
+}

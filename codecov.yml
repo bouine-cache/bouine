@@ -38,3 +38,4 @@ ignore:
   - "cmd/**"
   - "pkg/api/**"
   - "internal/dashboard/insights/**"
+  - "internal/testutil/**"

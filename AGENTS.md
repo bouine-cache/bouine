@@ -484,6 +484,11 @@ register at minimum:
 - **Conventional Commits** — a `commit-msg` stage hook validating the
   message header against the `feat|fix|chore|docs|refactor|test|perf|build|ci`
   prefix list. Required because release notes are generated from commits.
+- **DCO sign-off** — a `commit-msg` stage hook (`scripts/check-dco.sh`)
+  requiring a `Signed-off-by:` trailer on every commit. See
+  `CONTRIBUTING.md § "Developer Certificate of Origin (DCO)"`. Use
+  `git commit -s` to add the trailer automatically. CI also runs a
+  separate `dco` job that checks all commits in a PR.
 
 **Operational rules:**
 

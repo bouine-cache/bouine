@@ -1,4 +1,4 @@
-# ADR-0020: RPS-based HPA autoscaling
+# ADR-0033: RPS-based HPA autoscaling
 
 - **Status**: Proposed
 - **Date**: 2026-07-07

@@ -817,7 +817,7 @@ request headers only. Lazy cancellation via `store.Get` on pop.
 
 No `cache-tests` regression expected — refresh-before-expiry is a
 background feature that does not change the RFC 9111 freshness model.
-The conformance score must remain ≥ 93.2%.
+The conformance score must remain ≥ 93.7%.
 
 ### Benchmarks
 

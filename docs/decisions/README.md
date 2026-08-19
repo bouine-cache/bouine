@@ -60,3 +60,5 @@ field to `Superseded by ADR-NNNN`.
 | 0029   | Dedicated tombstone drain goroutine                  | Accepted |
 | 0030   | 128-bit cache key via XXH128                         | Accepted |
 | 0031   | Pluggable eviction framework                         | Accepted |
+| 0032   | Changelog automation                                 | Accepted |
+| 0033   | RPS-based HPA autoscaling                            | Proposed |

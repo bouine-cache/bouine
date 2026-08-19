@@ -158,7 +158,7 @@ Age: 1
 brew install bouine-cache/bouine/bouine
 
 # Prebuilt binary (from releases)
-curl -L https://github.com/bouine-cache/bouine/releases/latest/download/bouine-v0.3.7-linux-amd64 -o bouine
+curl -L https://github.com/bouine-cache/bouine/releases/latest/download/bouine-v0.4.1-linux-amd64 -o bouine
 chmod +x bouine
 
 # or via Go

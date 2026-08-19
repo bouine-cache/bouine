@@ -5,21 +5,14 @@ read at 3 AM. Each runbook addresses a specific failure mode or
 operator task. Per `AGENTS.md §10`, runbooks are updated alongside the
 code change that introduces a new failure mode.
 
-Naming convention: `NN-topic.md` where `NN` is a two-digit category:
+## Available runbooks
 
-- `00-` — daily ops (start, stop, reload, drain).
-- `10-` — capacity & scaling.
-- `20-` — purge & cache invalidation.
-- `30-` — cluster operations.
-- `40-` — TLS & certificates.
-- `50-` — incident response.
-- `90-` — postmortems index.
-
-Phase-by-phase delivery:
-
-- Phase 1 → `00-lifecycle.md`, `10-capacity.md`.
-- Phase 3 → `20-purge-ban.md`.
-- Phase 4 → `30-cluster.md`, `40-tls.md`.
-- Phase 4.5 → `50-incidents.md`, `90-postmortems/`.
-
-The full set of runbooks is a phase 4.5 exit criterion (`docs/architecture.md §15`).
+| File | Topic |
+|------|-------|
+| [`00-lifecycle.md`](00-lifecycle.md) | Start, stop, reload, drain. |
+| [`10-cluster-modes.md`](10-cluster-modes.md) | Cluster modes (strong, eventual, full) and capacity. |
+| [`20-purge-ban.md`](20-purge-ban.md) | Purge and ban invalidation. |
+| [`30-rolling-restart.md`](30-rolling-restart.md) | Rolling restarts and cluster operations. |
+| [`40-memory-accounting.md`](40-memory-accounting.md) | Memory accounting and tuning. |
+| [`50-warm-disk-exhaustion.md`](50-warm-disk-exhaustion.md) | Warm-disk exhaustion and incident response. |
+| [`static-files.md`](static-files.md) | Static file serving. |

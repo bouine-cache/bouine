@@ -76,7 +76,7 @@ without explicit override), it must not be stored — see T13/T14 below.
                        └────────────┬─────────────┘
                                     │  TB5
                        ┌────────────▼─────────────┐
-                       │  Admin API (Fiber, L7)   │
+                       │  Admin API (net/http, L7)│
                        │  bearer / mTLS auth      │
                        └──────────────────────────┘
 
@@ -261,7 +261,7 @@ operators know where to put the control.
 - This document is reviewed at the start and end of every phase.
 - Every new dependency triggers a row in `docs/deps.md` AND a fresh
   pass through §4 to check for new attacker capability.
-- Every CVE in `quic-go`, `golang.org/x/net/http2`, `fiber`, or
+- Every CVE in `golang.org/x/net/http2` or
   `memberlist` triggers a review of the relevant threat rows.
 - PRs touching a threat row must update this document in the same
   change, otherwise CI fails (a doc-coverage check verifies every Txx

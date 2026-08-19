@@ -258,3 +258,217 @@ func TestClient_HTTPClientOverrideWins(t *testing.T) {
 	c.HTTPClient = override
 	assert.Equal(t, override, c.httpClient())
 }
+
+func TestClient_HTTPClientFallback(t *testing.T) {
+	t.Parallel()
+	// A Client literal constructed without New must still get the
+	// package default HTTP client.
+	c := &Client{BaseURL: "http://127.0.0.1:0"}
+	require.Equal(t, defaultHTTPClient, c.httpClient())
+}
+
+func TestClient_Readyz(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "application/json")
+		_ = json.NewEncoder(w).Encode(api.HealthStatus{Status: "ready"})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	got, err := c.Readyz(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "ready", got.Status)
+}
+
+func TestClient_Stats(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "application/json")
+		_ = json.NewEncoder(w).Encode(api.Stats{HotEntries: 7, WarmEntries: 42})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	got, err := c.Stats(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), got.HotEntries)
+	assert.Equal(t, int64(42), got.WarmEntries)
+}
+
+func TestClient_BatchPurge(t *testing.T) {
+	t.Parallel()
+	var receivedCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			URLs []string `json:"urls"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		receivedCount = len(body.URLs)
+		w.Header().Set(header.ContentType, "application/json")
+		_ = json.NewEncoder(w).Encode(BatchPurgeResult{Status: "ok", Count: len(body.URLs)})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	got, err := c.BatchPurge(context.Background(), []string{"https://a.com", "https://b.com"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Count)
+	assert.Equal(t, 2, receivedCount)
+}
+
+func TestClient_AuthCheck(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	require.NoError(t, c.AuthCheck(context.Background()))
+}
+
+func TestClient_Peers_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "internal", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Peers(context.Background())
+	require.Error(t, err)
+}
+
+func TestClient_Version_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Version(context.Background())
+	require.Error(t, err)
+}
+
+func TestClient_Purge_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Purge(context.Background(), "https://x.com")
+	require.Error(t, err)
+}
+
+func TestClient_Ban_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Ban(context.Background(), api.BanExpr{HostRegex: "x.com"})
+	require.Error(t, err)
+}
+
+func TestClient_Refresh_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Refresh(context.Background(), "https://x.com")
+	require.Error(t, err)
+}
+
+func TestClient_Readyz_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Readyz(context.Background())
+	require.Error(t, err)
+}
+
+func TestClient_Stats_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.Stats(context.Background())
+	require.Error(t, err)
+}
+
+func TestClient_BatchPurge_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "nope", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.BatchPurge(context.Background(), []string{"https://a.com"})
+	require.Error(t, err)
+}
+
+func TestClient_AuthCheck_Error(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	require.Error(t, c.AuthCheck(context.Background()))
+}
+
+func TestClient_Get_InvalidURL(t *testing.T) {
+	t.Parallel()
+	c := New("http://[::1]:named") // invalid URL
+	_, err := c.Healthz(context.Background())
+	require.Error(t, err)
+}
+
+func TestClient_Post_InvalidURL(t *testing.T) {
+	t.Parallel()
+	c := New("http://[::1]:named") // invalid URL
+	_, err := c.Purge(context.Background(), "https://x.com")
+	require.Error(t, err)
+}
+
+func TestClient_Post_MarshalError(t *testing.T) {
+	t.Parallel()
+	c := &Client{BaseURL: "http://127.0.0.1:0"}
+	// A value that cannot be marshaled (e.g. a channel) triggers the
+	// json.Marshal error branch in post.
+	err := c.post(context.Background(), "/v1/purge", make(chan int), nil)
+	require.Error(t, err)
+}
+
+func TestClient_EmptyResponseBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.ContentType, "application/json")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	// out is nil-ish (empty body) — doJSON should return nil without
+	// attempting unmarshal.
+	require.NoError(t, c.AuthCheck(context.Background()))
+}

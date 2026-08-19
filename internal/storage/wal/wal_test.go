@@ -388,3 +388,159 @@ func TestEntry_OpTypes(t *testing.T) {
 	assert.NotEqual(t, PutEntry(key, 0, 0).Op, DeleteEntry(key).Op)
 	assert.NotEqual(t, PutEntry(key, 0, 0).Op, PutEntryWithSize(key, 0, 0, 0).Op)
 }
+
+func TestOpen_Error_Path(t *testing.T) {
+	t.Parallel()
+	// Opening a WAL in a non-existent directory must fail.
+	_, err := Open(filepath.Join(t.TempDir(), "no", "such", "dir", "test.wal"))
+	require.Error(t, err)
+}
+
+func TestOpenAsync_Error_Path(t *testing.T) {
+	t.Parallel()
+	_, err := OpenAsync(filepath.Join(t.TempDir(), "no", "dir", "test.wal"), 50*time.Millisecond)
+	require.Error(t, err)
+}
+
+func TestReplay_V2Entries(t *testing.T) {
+	t.Parallel()
+	l, path := tmpWAL(t)
+	entries := []Entry{
+		PutEntryWithSize(testkey.Key(10), 0, 0, 100),
+		PutEntryWithSize(testkey.Key(20), 1, 512, 2048),
+		DeleteEntry(testkey.Key(10)),
+	}
+	for _, e := range entries {
+		require.NoError(t, l.Append(e))
+	}
+
+	var replayed []Entry
+	err := Replay(path, func(e Entry) error {
+		replayed = append(replayed, e)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, replayed, len(entries))
+	// v2 entries should carry size.
+	assert.Equal(t, int64(100), replayed[0].Size)
+	assert.Equal(t, int64(2048), replayed[1].Size)
+	assert.True(t, replayed[0].HasSize())
+}
+
+func TestReplay_CallbackError(t *testing.T) {
+	t.Parallel()
+	l, path := tmpWAL(t)
+	require.NoError(t, l.Append(PutEntry(testkey.Key(1), 0, 0)))
+	require.NoError(t, l.Append(PutEntry(testkey.Key(2), 0, 0)))
+	_ = l.Close()
+
+	stopErr := assert.AnError
+	err := Replay(path, func(e Entry) error {
+		return stopErr
+	})
+	require.ErrorIs(t, err, stopErr)
+}
+
+func TestReplay_ReadError(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "notawal.txt")
+	require.NoError(t, os.WriteFile(path, []byte("garbage"), 0o600))
+
+	// Not a valid WAL — short read returns nil (treated as truncated).
+	err := Replay(path, func(_ Entry) error { return nil })
+	require.NoError(t, err)
+}
+
+func TestAppendBatch_EmptySlice(t *testing.T) {
+	t.Parallel()
+	l, _ := tmpWAL(t)
+	require.NoError(t, l.AppendBatch(nil))
+	require.NoError(t, l.AppendBatch([]Entry{}))
+}
+
+func TestAppendBatch_MixedEntries(t *testing.T) {
+	t.Parallel()
+	l, path := tmpWAL(t)
+	entries := []Entry{
+		PutEntry(testkey.Key(1), 0, 0),
+		PutEntryWithSize(testkey.Key(2), 0, 100, 200),
+		DeleteEntry(testkey.Key(1)),
+	}
+	require.NoError(t, l.AppendBatch(entries))
+
+	var count int
+	require.NoError(t, Replay(path, func(_ Entry) error { count++; return nil }))
+	assert.Equal(t, 3, count)
+}
+
+func TestEnqueueBatch_SyncOnlyLog(t *testing.T) {
+	t.Parallel()
+	l, path := tmpWAL(t)
+	entries := []Entry{
+		PutEntry(testkey.Key(1), 0, 0),
+		PutEntry(testkey.Key(2), 0, 100),
+	}
+	l.EnqueueBatch(entries)
+
+	var count int
+	require.NoError(t, Replay(path, func(_ Entry) error { count++; return nil }))
+	assert.Equal(t, 2, count)
+}
+
+func TestSync_SyncOnlyLog_NoOp(t *testing.T) {
+	t.Parallel()
+	l, _ := tmpWAL(t)
+	// Sync on a sync-only log (syncCh == nil) is a no-op.
+	require.NoError(t, l.Sync())
+}
+
+func TestTruncate_AfterClose_Error(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "trunc.wal")
+	l, err := Open(path)
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	// Truncate on a closed file should error.
+	err = l.Truncate()
+	require.Error(t, err)
+}
+
+func TestAppend_AfterClose_Error(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "appendclosed.wal")
+	l, err := Open(path)
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	err = l.Append(PutEntry(testkey.Key(1), 0, 0))
+	require.Error(t, err)
+}
+
+func TestReplay_V2TornRecord(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "v2torn.wal")
+	l, err := Open(path)
+	require.NoError(t, err)
+
+	require.NoError(t, l.Append(PutEntryWithSize(testkey.Key(1), 0, 0, 100)))
+	_ = l.Close()
+
+	// Append a partial v2 record (only the base 33 bytes, missing the 8 size bytes).
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600)
+	require.NoError(t, err)
+	buf := make([]byte, recLen)
+	buf[0] = opPutV2
+	key2 := testkey.Key(2)
+	copy(buf[1:17], key2[:])
+	// Write only the base 33 bytes — the v2 extra 8 bytes are missing.
+	_, err = f.Write(buf)
+	require.NoError(t, err)
+	_ = f.Close()
+
+	// Replay should return the first valid entry and skip the torn v2 tail.
+	var count int
+	err = Replay(path, func(_ Entry) error { count++; return nil })
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}

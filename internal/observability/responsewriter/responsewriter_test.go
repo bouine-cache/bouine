@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
 type fullResponseWriter struct {
@@ -158,6 +160,52 @@ func TestInterfaceGuards(t *testing.T) {
 	require.True(t, ok)
 	_, ok = any(rw).(io.ReaderFrom)
 	require.True(t, ok)
+}
+
+func TestNewDefaultsTo200(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := New(rec)
+	require.Equal(t, 200, rw.Status)
+	require.Equal(t, int64(0), rw.Bytes)
+	rw.WriteHeader(http.StatusNotFound)
+	require.Equal(t, http.StatusNotFound, rw.Status)
+}
+
+func TestSetCacheKeySingle(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := Acquire(rec)
+	defer Release(rw)
+
+	key := api.Key{0xde, 0xad, 0xbe, 0xef}
+	rw.SetCacheKey(key)
+	require.Equal(t, key, rw.Key)
+}
+
+func TestSetCacheKeyNested(t *testing.T) {
+	inner := Acquire(httptest.NewRecorder())
+	defer Release(inner)
+
+	outer := Acquire(inner)
+	defer Release(outer)
+
+	key := api.Key{0xca, 0xfe, 0xba, 0xbe}
+	outer.SetCacheKey(key)
+
+	require.Equal(t, key, outer.Key)
+	require.Equal(t, key, inner.Key)
+}
+
+func TestSetCacheKeyStopsAtNonWrapper(t *testing.T) {
+	inner := Acquire(httptest.NewRecorder())
+	defer Release(inner)
+
+	outer := Acquire(inner)
+	defer Release(outer)
+
+	key := api.Key{0x12, 0x34}
+	outer.SetCacheKey(key)
+	require.Equal(t, key, outer.Key)
+	require.Equal(t, key, inner.Key)
 }
 
 func BenchmarkResponseWriterPool_AcquireRelease(b *testing.B) {

@@ -20,6 +20,101 @@ the curated, human-readable summary.
   must remove that call. Config and TLS changes take effect on the next pod
   restart.
 
+## [0.4.1] - 2026-08-17
+
+### Fixed
+- Go stdlib CVE fixes (toolchain bumped to 1.26.6).
+- Static-file handler: removed global MIME table mutation, fixed range
+  double-open, added mtime ETag fallback.
+- Platform `pwritev`: completed short writes and returned a typed error
+  from the non-Linux stub.
+- Admin API: wired `MaxBodyBytes` through config and rejected empty batch
+  URLs (adversarial input hardening).
+
+### Added
+- Homebrew formula and automated update workflow.
+- CodeQL code-scanning workflow for Go.
+- Codecov coverage reporting and badge.
+- Fuzz targets for cache key, Vary, storage codec, and cluster codec.
+- Goroutine-leak detection and storage-corruption tests.
+- TLS and HTTP/2 integration tests.
+
+### Changed
+- Test coverage push: cache 67.8% → 91.1%, server 34.1% → 65.2%,
+  dashboard 27.8% → 58.4%, observability 55.0% → 79.8%, platform 9.1% →
+  100% (non-Linux).
+- Merged standalone `_extra_test.go` / `coverage_test.go` files into
+  existing test files.
+- Auto-rebase CI hardened (PAT, mergeStateStatus UNKNOWN, self-hosted
+  runner no-op).
+
+## [0.4.0] - 2026-08-11
+
+URL normalization, 128-bit cache keys, admin API & CLI additions,
+Helm/Grafana expansion. A release candidate (`v0.4.0-rc1`) was published
+on 2026-08-11 with the same content.
+
+### Added
+- **URL normalization** for cache-key canonicalisation (maximises hit
+  ratio across equivalent URLs).
+- **128-bit cache key** via a single XXH128, replacing the previous
+  double-hash scheme.
+- **Admin API:** `GET /v1/stats`, `GET /v1/config`, and
+  `GET /v1/debug/cachecheck` (cache-key debugging endpoint).
+- **CLI:** `config validate`, `config schema`, shell completion commands,
+  and `surrogate_key` support on purge/ban/refresh.
+- **Config:** environment-variable interpolation in config files.
+- **Helm chart:** ServiceAccount, Ingress, PodMonitor, extraVolumes,
+  NOTES.txt, values schema, GPG signing for Artifact Hub,
+  PrometheusRule CRD with alerting rules, chart tests, and values
+  examples.
+- **Grafana:** storage, cluster, and ops dashboards.
+- **OpenAPI 3.0** spec for the admin API.
+- Warm-tier disk-exhaustion runbook.
+- Community section, contributors section, architecture diagram, and
+  pronunciation guide in README.
+- CodeQL and benchmark/conformance/integration/chaos CI gates enabled.
+
+### Changed
+- **Breaking (SDK):** removed `bouineapi.Client.Reload` and `ReloadResult`
+  (see `[Unreleased]` above). The admin `POST /v1/config/reload` endpoint,
+  the dashboard "Reload config" button, and `ReloadFn` are gone; bouine
+  applies config via rolling pod restart.
+- Simplified config by dropping dead fields and inferring others.
+- Test assertions migrated to testify (ADR-0028).
+- Linux CI jobs moved to self-hosted runners.
+- Cosign-signed Docker images in the release workflow.
+- Docker images signed; base image and dependencies bumped for CVE fixes.
+
+### Fixed
+- Cache: purge now deletes Vary variants stored under composite keys;
+  `Vary:*` is non-matchable per RFC 9111 §4.1; restored stale-on-error
+  fallback without SIE window; stopped value-copying
+  `api.Object`'s `atomic.Pointer[[]byte]`; owned SWR background
+  goroutines to prevent use-after-close on shutdown.
+- Cluster: capped `HandoffQueueDepth` upper bound in `cluster.New`;
+  eliminated data race in gossip drop metric; detached broadcast context
+  from engine lifecycle and shared fetcher TLS transport; increased
+  handoff queue depth.
+- Storage: prevented warm.Compact racing with concurrent Puts; prevented
+  tombstone queue overflow with a dedicated drain goroutine; report
+  dropped tombstones in drain goroutine.
+- Admin: exempted `/v1/peer/metrics` from auth; cleared per-request write
+  deadline on `/drain` so the preStop hook survives; dropped no-op
+  config-reload feature.
+- Origin: split active/passive health counters, fixed ejection dead under
+  load.
+- Server: added HTTP smuggling defenses to `h1parser`.
+- Observability: prevented attacker-controlled `route` label via inbound
+  header.
+- Dashboard: closed reflected-XSS in `apiOK`/`apiError` via templ.
+- SDK: capped error body, added default timeout, removed dead `Stable`
+  types.
+- Bench: raised `Handler_CacheMiss_Cacheable` gate to 58.
+- Six low-effort correctness and security fixes from status review.
+- Anonymised internal infrastructure leaks and added benchmark disclaimer.
+- Corrected inaccurate NGINX and Varnish migration guides.
+
 ## [0.3.7] - 2026-07-16
 
 ### Changed
@@ -420,7 +515,9 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.1
+[0.4.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.0
 [0.3.7]: https://github.com/bouine-cache/bouine/releases/tag/v0.3.7
 [0.3.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.3.6
 [0.3.5]: https://github.com/bouine-cache/bouine/releases/tag/v0.3.5

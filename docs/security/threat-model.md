@@ -94,6 +94,21 @@ without explicit override), it must not be stored — see T13/T14 below.
 | TB5 | Operator ↔ admin API                  | Bearer token or mTLS. Separate port. |
 | TB6 | Process ↔ disk / kernel               | OS isolation; encryption-at-rest delegated to volume. |
 
+### 2.1 Secure design principles applied
+
+bouine follows these secure design principles (Saltzer and Schroeder,
+1975; OWASP Application Security Verification Standard):
+
+| Principle | How bouine applies it |
+|-----------|----------------------|
+| **Fail-safe defaults** | Access decisions deny by default: admin API requires a valid bearer token or mTLS (empty/missing token = 401). Upstream TLS verification is enabled by default; `insecure_skip_verify` is refused in release builds. The Helm chart binds the admin port to cluster-internal only by default. `Set-Cookie` responses are not cached by default (ADR-0012). The container runs as non-root with `readOnlyRootFilesystem` by default. |
+| **Complete mediation** | Every admin write request (purge, ban, refresh, config) is authenticated and authorized through a single middleware chain — there is no bypass path. Every data-plane request passes through the route matcher and cache engine; there is no shortcut that skips RFC 9111 freshness evaluation. Peer-fetch requests require mTLS on every call, not just at connection time. |
+| **Least privilege** | The container runs as `nonroot:nonroot` with dropped Linux capabilities. CI workflows use minimal GitHub Actions permissions (`contents: read` by default). The admin token is scoped to admin operations only — it cannot modify data-plane traffic or bypass cache logic. Cluster mTLS uses a separate CA from the data-plane TLS certs. |
+| **Economy of mechanism** | One HTTP stack (`net/http`) for both data and admin planes (ADR-0006), reducing the attack surface. A single config file in declarative YAML — no imperative scripting, no VCL eval. No web framework; `net/http.ServeMux` pattern routing only. |
+| **Defense in depth** | HTTP smuggling defenses (reject ambiguous framing) + header hygiene (strip hop-by-hop) + private response protection (never cache `Authorization`/`Set-Cookie`) + path traversal prevention (hashed storage keys) + resource limits (connection caps, body size limits, bounded queues). Each layer defends independently. |
+| **Separation of privilege** | Admin port and data port are separate listeners on separate ports. Cluster mTLS CA is separate from data-plane TLS CA. Admin tokens are stored in env vars or files, never in CLI flags or config files. |
+| **Psychological acceptability** | Security defaults are documented in the Helm chart values and the hardening checklist in `SECURITY.md`. Operators are not required to understand TLS internals — secure defaults are on, and insecure options require explicit opt-in with visible config flags. |
+
 ---
 
 ## 3. Attacker Classes

@@ -171,6 +171,28 @@ hooks: ## Install prek hooks (commit + commit-msg + pre-push).
 	prek install --hook-type pre-push
 	@echo "prek hooks installed."
 
+.PHONY: setup-dev
+setup-dev: ## Install all development tools and hooks. Run this once after cloning.
+	@echo ">>> Installing Go development tools..."
+	@command -v golangci-lint >/dev/null || go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	@command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@latest
+	@command -v gitleaks >/dev/null || go install github.com/gitleaks/gitleaks@latest
+	@command -v templ >/dev/null || go install github.com/a-h/templ/cmd/templ@latest
+	@echo ">>> Downloading Go module dependencies..."
+	go mod download
+	@echo ">>> Installing prek hooks..."
+	@$(MAKE) hooks
+	@echo ">>> Verifying build..."
+	@$(MAKE) build
+	@echo ">>> Running short tests..."
+	@$(MAKE) test-short
+	@echo ""
+	@echo "Setup complete! You can now:"
+	@echo "  make build    - build the binary"
+	@echo "  make test     - run all tests"
+	@echo "  make lint     - run golangci-lint"
+	@echo "  make ci       - run the full CI gate locally"
+
 .PHONY: hooks-run
 hooks-run: ## Run prek on all files (mirrors CI's first stage).
 	prek run --all-files --show-diff-on-failure

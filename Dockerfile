@@ -12,6 +12,8 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
+# Set STRIPFLAGS to empty to preserve debug symbols in the image.
+ARG STRIPFLAGS=-s -w
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -23,7 +25,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
-    -ldflags "-s -w \
+    -ldflags "${STRIPFLAGS} \
       -X github.com/bouine-cache/bouine/internal/buildinfo.Version=${VERSION} \
       -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=${COMMIT} \
       -X github.com/bouine-cache/bouine/internal/buildinfo.Date=${DATE}" \

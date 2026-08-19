@@ -17,6 +17,33 @@ env:
   CGO_ENABLED: "1"
 
 jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check all commits have Signed-off-by
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            range="HEAD~1..HEAD"
+          fi
+          missing=$(git log --format='%H %s' --no-merges "$range" | while read -r hash subject; do
+            if ! git log -1 --format='%B' "$hash" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "  $hash $subject"
+            fi
+          done)
+          if [ -n "$missing" ]; then
+            echo "The following commits are missing a Signed-off-by trailer (DCO requirement):"
+            echo "$missing"
+            echo ""
+            echo "Fix with: git rebase --exec 'git commit --amend --no-edit -s' <base>"
+            exit 1
+          fi
+
   prek:
     name: prek
     runs-on: [self-hosted, ci]

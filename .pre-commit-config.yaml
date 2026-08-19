@@ -148,6 +148,17 @@ repos:
           - ci
 
   # ---------------------------------------------------------------------
+  # DCO — requires a Signed-off-by trailer on every commit message.
+  # ---------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: dco-check
+        name: DCO sign-off (Signed-off-by)
+        entry: bash scripts/check-dco.sh
+        language: system
+        stages: [commit-msg]
+
+  # ---------------------------------------------------------------------
   # Block AI-assistant trailers and internal-plan artifact names from
   # entering commit messages (history was scrubbed of these; keep it clean).
   # ---------------------------------------------------------------------

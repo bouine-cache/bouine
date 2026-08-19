@@ -114,14 +114,17 @@ Allowed prefixes:
 Examples:
 
 ```
-feat(cache): implement stale-while-revalidate state machine
-fix(listener): reject obs-fold in HTTP/1.1 headers
-perf(storage): eliminate alloc on hot-tier lookup
-docs(threat-model): add T36 peer-fetch loop mitigation
+git commit -s -m "feat(cache): implement stale-while-revalidate state machine"
+git commit -s -m "fix(listener): reject obs-fold in HTTP/1.1 headers"
+git commit -s -m "perf(storage): eliminate alloc on hot-tier lookup"
+git commit -s -m "docs(threat-model): add T36 peer-fetch loop mitigation"
 ```
 
-The `commit-msg` prek hook validates the header. Release notes
-are generated from these prefixes.
+The `-s` flag adds the `Signed-off-by:` trailer required by the DCO
+(see [below](#developer-certificate-of-origin-dco)).
+
+The `commit-msg` prek hooks validate the header prefix and enforce
+the DCO sign-off. Release notes are generated from these prefixes.
 
 ---
 
@@ -221,13 +224,86 @@ Use the issue templates under `.github/ISSUE_TEMPLATE/`. Include:
 ## License
 
 By contributing, you agree that your contributions are licensed under
-the [Apache License 2.0](LICENSE).
-This is an **inbound = outbound** model: you license your contribution
-under the same terms the project distributes. No separate CLA (Contributor
-License Agreement) or DCO (Developer Certificate of Origin) sign-off is
-required — the act of submitting a PR under this file is the agreement.
+the [Apache License 2.0](LICENSE). This is an **inbound = outbound**
+model: you license your contribution under the same terms the project
+distributes.
 
 Source files in this repository do **not** carry per-file license headers.
 The project-level LICENSE file is sufficient; contributors are not expected
 to add headers to their files. If a third-party file is imported, its own
 license applies.
+
+---
+
+## Developer Certificate of Origin (DCO)
+
+Every commit **must** include a `Signed-off-by:` trailer to certify that
+the contributor has the right to submit the work under the project's
+license. This is the [Developer Certificate of Origin](https://developercertificate.org/),
+a lightweight alternative to a CLA.
+
+### How to sign off
+
+The easiest way is to pass `-s` (or `--signoff`) to `git commit`:
+
+```bash
+git commit -s -m "feat(cache): implement stale-while-revalidate state machine"
+```
+
+This automatically adds a trailer like:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+If you forgot to sign off, amend the commit:
+
+```bash
+git commit --amend -s --no-edit
+```
+
+### What you are certifying
+
+By adding `Signed-off-by`, you certify the following:
+
+> Developer Certificate of Origin
+> Version 1.1
+>
+> Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+>
+> Everyone is permitted to copy and distribute verbatim copies of this
+> license document, but changing it is not allowed.
+>
+> Developer's Certificate of Origin 1.1
+>
+> By making a contribution to this project, I certify that:
+>
+> (a) The contribution was created in whole or in part by me and I
+>     have the right to submit it under the open source license
+>     indicated in the file; or
+>
+> (b) The contribution is based upon previous work that, to the best
+>     of my knowledge, is covered under an appropriate open source
+>     license and I have the right under that license to submit that
+>     work with modifications, whether created in whole or in part
+>     by me, under the same open source license (unless I am
+>     permitted to submit under a different license), as indicated
+>     in the file; or
+>
+> (c) The contribution was provided directly to me by some other
+>     person who certified (a), (b) or (c) and I have not modified
+>     it.
+>
+> (d) I understand and agree that this project and the contribution
+>     are public and that a record of the contribution (including all
+>     personal information I submit with it, including my sign-off) is
+>     maintained indefinitely and may be redistributed consistent with
+>     this project or the open source license(s) involved.
+
+The full text is available at <https://developercertificate.org/>.
+
+### Enforcement
+
+A `commit-msg` prek hook (`scripts/check-dco.sh`) rejects commits
+without a valid `Signed-off-by:` trailer. CI re-runs this check on
+every push, so bypassing the local hook will still fail the build.

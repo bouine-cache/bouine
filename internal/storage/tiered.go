@@ -81,6 +81,22 @@ type TieredStore struct {
 	// droppedWarmEvicts counts warm-eviction WAL entries dropped.
 	droppedWarmEvicts atomic.Int64
 
+	// warmUnprotectQueue receives keys SIEVE-evicted from the hot tier
+	// when hotEvictNoWarmTomb is true (Fix A for #484). Drained by
+	// drainQueues/runWarmSyncCycle outside the hot shard lock to avoid
+	// a hot.mu → warm.idxMu → hot.mu lock-ordering cycle. Each key is
+	// passed to warm.Unprotect, which clears the protected flag so warm
+	// SIEVE can reclaim the entry under pressure. Buffered; non-blocking
+	// sends — on overflow the key falls back to tombstoneQueue so the
+	// warm entry is deleted (reclaimed) rather than stranded as
+	// permanently protected, which would re-introduce the 32×
+	// destruction loop's symptom (warm evictions = 0, disk climbing).
+	// `dropped_warm_unprotects` in the drain log counts these
+	// fallbacks; treat any non-zero value as a capacity signal.
+	warmUnprotectQueue chan api.Key
+	// droppedWarmUnprotects counts warm-unprotect entries dropped.
+	droppedWarmUnprotects atomic.Int64
+
 	// walPath is the WAL file path, stored for WAL rewrite after compaction.
 	walPath string
 
@@ -232,6 +248,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		warmSyncBatchSize:      cfg.WarmSyncBatchSize,
 		tombstoneQueue:         make(chan api.Key, tombstoneQueueSize),
 		warmEvictQueue:         make(chan api.Key, tombstoneQueueSize),
+		warmUnprotectQueue:     make(chan api.Key, tombstoneQueueSize),
 		done:                   make(chan struct{}),
 		logger:                 cfg.Logger,
 		walSyncInterval:        walSyncInterval,
@@ -242,13 +259,35 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		tombstoneDrainInterval: tombstoneDrainInterval,
 	}
 
-	// Wire the eviction callback so backed evictions enqueue
-	// tombstones for async processing by warmSyncLoop.
+	// Wire the eviction callbacks. SIEVE evictions call onEvictDemoted
+	// (enqueues to warmUnprotectQueue) so the warm copy is Unprotected
+	// (demoted to SIEVE-managed) instead of tombstoned. Non-SIEVE
+	// removals (reaper, ban, Delete, Put-overwrite) always call onEvict
+	// (tombstone) — those paths must delete the warm copy for
+	// freshness/ban correctness (#484).
 	cfg.Hot.OnEvict = func(key api.Key) {
 		select {
 		case ts.tombstoneQueue <- key:
 		default:
 			ts.droppedTombstones.Add(1)
+		}
+	}
+	cfg.Hot.OnEvictDemoted = func(key api.Key) {
+		select {
+		case ts.warmUnprotectQueue <- key:
+		default:
+			// Queue overflow: fall back to tombstone so the warm
+			// entry is reclaimed (Delete clears protected as a
+			// side effect) rather than stranded as permanently
+			// protected. Stranding re-introduces the 32× loop's
+			// symptom (warm evictions = 0, disk climbing). Losing
+			// the warm copy for this key is the lesser evil.
+			select {
+			case ts.tombstoneQueue <- key:
+			default:
+				ts.droppedTombstones.Add(1)
+			}
+			ts.droppedWarmUnprotects.Add(1)
 		}
 	}
 	ts.hot = NewHotStore(cfg.Hot)
@@ -825,6 +864,7 @@ func (t *TieredStore) drainQueues() {
 	var walEntries []wal.Entry
 	tombstoned := t.drainTombstones(&walEntries)
 	warmEvicted := t.drainWarmEvicts(&walEntries)
+	unprotected := t.drainWarmUnprotects()
 
 	if len(walEntries) > 0 {
 		if err := t.warm.Sync(); err != nil {
@@ -835,19 +875,22 @@ func (t *TieredStore) drainQueues() {
 		}
 	}
 
-	if tombstoned > 0 || warmEvicted > 0 {
+	if tombstoned > 0 || warmEvicted > 0 || unprotected > 0 {
 		t.logger.Info("tombstone drain cycle complete",
 			"tombstoned", tombstoned,
 			"warm_evicted", warmEvicted,
+			"unprotected", unprotected,
 		)
 	}
 
 	droppedTomb := t.droppedTombstones.Swap(0)
 	droppedEvict := t.droppedWarmEvicts.Swap(0)
-	if droppedTomb > 0 || droppedEvict > 0 {
+	droppedUnprotect := t.droppedWarmUnprotects.Swap(0)
+	if droppedTomb > 0 || droppedEvict > 0 || droppedUnprotect > 0 {
 		t.logger.Warn("tombstone drain: queue overflow — entries dropped",
 			"dropped_tombstones", droppedTomb,
 			"dropped_warm_evicts", droppedEvict,
+			"dropped_warm_unprotects", droppedUnprotect,
 		)
 	}
 }
@@ -887,6 +930,7 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	var walEntries []wal.Entry
 	tombstoned := t.drainTombstones(&walEntries)
 	warmEvicted := t.drainWarmEvicts(&walEntries)
+	unprotected := t.drainWarmUnprotects()
 
 	// Skip promotion when the warm tier is over its byte budget — every
 	// Put would return ErrOverBudget, wasting I/O and log noise. Tombstone
@@ -913,22 +957,26 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 
 	droppedTomb := t.droppedTombstones.Swap(0)
 	droppedEvict := t.droppedWarmEvicts.Swap(0)
+	droppedUnprotect := t.droppedWarmUnprotects.Swap(0)
 
 	t.logger.Info("warm sync cycle complete",
 		"synced", synced,
 		"tombstoned", tombstoned,
 		"warm_evicted", warmEvicted,
+		"unprotected", unprotected,
 		"skipped", skipped,
 		"promotion_skipped", promotionSkipped,
 		"skipped_over_budget", skippedOverBudget,
 		"dropped_tombstones", droppedTomb,
 		"dropped_warm_evicts", droppedEvict,
+		"dropped_warm_unprotects", droppedUnprotect,
 		"dur_ms", time.Since(start).Milliseconds(),
 	)
-	if droppedTomb > 0 || droppedEvict > 0 {
+	if droppedTomb > 0 || droppedEvict > 0 || droppedUnprotect > 0 {
 		t.logger.Warn("warm sync: eviction/tombstone WAL entries dropped (queue full)",
 			"dropped_tombstones", droppedTomb,
 			"dropped_warm_evicts", droppedEvict,
+			"dropped_warm_unprotects", droppedUnprotect,
 			"note", "evicted keys rely on rebuildIndexFromScan tombstones for durability; dropped WAL deletes delay replay recovery")
 	}
 }
@@ -1042,6 +1090,29 @@ func (t *TieredStore) drainWarmEvicts(walEntries *[]wal.Entry) int {
 			evicted++
 		default:
 			return evicted
+		}
+	}
+}
+
+// drainWarmUnprotects drains the warmUnprotectQueue, calling
+// warm.Unprotect on each key. This is the Fix A drain path: SIEVE
+// evictions enqueue keys here (via OnEvictDemoted), and this function
+// clears the protected flag outside the hot shard lock, avoiding the
+// hot.mu → warm.idxMu lock-ordering cycle (see plan §5). No WAL
+// entries — Unprotect does not write to disk; the on-disk record stays
+// live until warm SIEVE evicts it and writes its own tombstone.
+func (t *TieredStore) drainWarmUnprotects() int {
+	if t.warm == nil {
+		return 0
+	}
+	unprotected := 0
+	for {
+		select {
+		case key := <-t.warmUnprotectQueue:
+			t.warm.Unprotect(key)
+			unprotected++
+		default:
+			return unprotected
 		}
 	}
 }

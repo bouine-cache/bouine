@@ -2017,3 +2017,224 @@ func newTestStore(t *testing.T) *Store {
 
 // Ensure api import is used.
 var _ = api.Key{}
+
+// TestProtectUnprotect_ProtectedCount verifies that Protect increments
+// the protectedCount counter and Unprotect decrements it. This covers
+// the #484 code paths (warm.Unprotect and ProtectedCount) that are
+// only otherwise exercised via the tiered package.
+func TestProtectUnprotect_ProtectedCount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	k0 := testkey.Key(0)
+	k1 := testkey.Key(1)
+
+	_, _, err = s.Put(k0, []byte("data0"))
+	require.NoError(t, err)
+	_, _, err = s.Put(k1, []byte("data1"))
+	require.NoError(t, err)
+
+	require.Equal(t, 0, s.ProtectedCount(), "no entries protected yet")
+
+	s.Protect(k0)
+	require.Equal(t, 1, s.ProtectedCount(), "one protected after Protect(k0)")
+
+	s.Protect(k1)
+	require.Equal(t, 2, s.ProtectedCount(), "two protected after Protect(k1)")
+
+	// Protect is idempotent — re-protecting does not double-count.
+	s.Protect(k0)
+	require.Equal(t, 2, s.ProtectedCount(), "Protect is idempotent")
+
+	s.Unprotect(k0)
+	require.Equal(t, 1, s.ProtectedCount(), "one protected after Unprotect(k0)")
+
+	// Unprotect is idempotent — unprotecting an already-unprotected
+	// entry does not underflow.
+	s.Unprotect(k0)
+	require.Equal(t, 1, s.ProtectedCount(), "Unprotect idempotent (no underflow)")
+
+	// Unprotecting a missing key is a no-op.
+	s.Unprotect(testkey.Key(999))
+	require.Equal(t, 1, s.ProtectedCount(), "Unprotect missing key is no-op")
+}
+
+// TestUnprotect_MakesEntryEvictable verifies that after Unprotect,
+// pickEvictVictim considers the entry (it was skipped while protected).
+func TestUnprotect_MakesEntryEvictable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	k := testkey.Key(42)
+	_, _, err = s.Put(k, []byte("data"))
+	require.NoError(t, err)
+
+	s.Protect(k)
+	require.Equal(t, 1, s.ProtectedCount())
+
+	// Protected entry cannot be evicted.
+	_, _, found := s.pickEvictVictim()
+	require.False(t, found, "protected entry should not be evictable")
+
+	// Unprotect makes it evictable.
+	s.Unprotect(k)
+	require.Equal(t, 0, s.ProtectedCount())
+
+	key, loc, found := s.pickEvictVictim()
+	require.True(t, found, "unprotected entry should be evictable")
+	require.Equal(t, k, key)
+	require.False(t, loc.protected, "victim should be unprotected")
+}
+
+// TestRemove_DecrementProtectedCount verifies that every removal path
+// (Delete, Put-overwrite, DelIndex) decrements protectedCount when the
+// removed entry was protected. The new entry (for Put-overwrite) starts
+// unprotected; callers re-Protect if needed.
+func TestRemove_DecrementProtectedCount(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		remove func(s *Store, k api.Key)
+	}{
+		{
+			name: "Delete",
+			remove: func(s *Store, k api.Key) {
+				_, err := s.Delete(k)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "Put_overwrite",
+			remove: func(s *Store, k api.Key) {
+				_, _, err := s.Put(k, []byte("second"))
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "DelIndex",
+			remove: func(s *Store, k api.Key) {
+				s.DelIndex(k)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+			require.NoError(t, err, "NewStore")
+			t.Cleanup(func() { _ = s.Close() })
+
+			k := testkey.Key(7)
+			_, _, err = s.Put(k, []byte("data"))
+			require.NoError(t, err)
+
+			s.Protect(k)
+			require.Equal(t, 1, s.ProtectedCount())
+
+			tt.remove(s, k)
+			require.Equal(t, 0, s.ProtectedCount(),
+				"%s should decrement protectedCount", tt.name)
+		})
+	}
+
+	// Delete of a non-protected entry does not underflow.
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	k2 := testkey.Key(8)
+	_, _, err = s.Put(k2, []byte("data2"))
+	require.NoError(t, err)
+	_, err = s.Delete(k2)
+	require.NoError(t, err)
+	require.Equal(t, 0, s.ProtectedCount(), "Delete of unprotected entry does not underflow")
+}
+
+// TestDropStaleIndex_DecrementProtectedCount verifies that dropStaleIndex
+// (the self-heal path triggered by Get on a stale-segment entry) decrements
+// protectedCount when the dropped entry was protected. Covers the
+// protected branch of dropStaleIndex added by #484.
+func TestDropStaleIndex_DecrementProtectedCount(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	k := testkey.Key(33)
+	_, _, err := s.Put(k, []byte("data"))
+	require.NoError(t, err)
+
+	s.Protect(k)
+	require.Equal(t, 1, s.ProtectedCount())
+
+	// Read the current loc so dropStaleIndex's compare-and-delete
+	// matches (same segID + offset) and the entry is actually dropped.
+	s.idxMu.RLock()
+	cur := s.index[k]
+	s.idxMu.RUnlock()
+
+	s.dropStaleIndex(k, cur)
+	require.Equal(t, 0, s.ProtectedCount(), "dropStaleIndex should decrement protectedCount")
+	require.Equal(t, int64(1), s.SelfHeals(), "self-heal counter should increment")
+}
+
+// TestCompact_RecomputesProtectedCount verifies that Compact recomputes
+// protectedCount from the compacted index, preserving the protected flag
+// on surviving entries. Covers the protected++ recompute branch added by
+// #484 (warm.go Compact).
+func TestCompact_RecomputesProtectedCount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 1 << 20})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write enough entries that Compact has live records to carry over.
+	const liveKeys = 50
+	for i := range liveKeys {
+		body := []byte{byte(i), byte(i + 1), byte(i + 2)}
+		segID, off, err := s.Put(testkey.Key(uint64(i)), body)
+		require.NoErrorf(t, err, "Put %d", i)
+		s.SetIndex(testkey.Key(uint64(i)), segID, off)
+	}
+	// Delete the first half to create tombstone waste so Compact does work.
+	for i := range liveKeys / 2 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+	// Overwrite the second half so old records become dead bytes.
+	for i := liveKeys / 2; i < liveKeys; i++ {
+		body := []byte{byte(i), byte(i + 1), byte(i + 2), byte(i + 3)}
+		segID, off, err := s.Put(testkey.Key(uint64(i)), body)
+		require.NoErrorf(t, err, "Put v2 %d", i)
+		s.SetIndex(testkey.Key(uint64(i)), segID, off)
+	}
+
+	// Protect every surviving (second-half) entry.
+	for i := liveKeys / 2; i < liveKeys; i++ {
+		s.Protect(testkey.Key(uint64(i)))
+	}
+	wantProtected := liveKeys / 2
+	require.Equal(t, wantProtected, s.ProtectedCount(), "pre-compact protected count")
+
+	require.NoError(t, s.Compact(), "Compact")
+
+	require.Equal(t, wantProtected, s.ProtectedCount(),
+		"Compact should recompute protectedCount and preserve protected flags")
+
+	// Surviving entries must still be readable.
+	for i := liveKeys / 2; i < liveKeys; i++ {
+		got, err := s.Get(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Get %d after compact", i)
+		require.Len(t, got, 4)
+	}
+}

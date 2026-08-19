@@ -146,6 +146,28 @@ A large gap between the two means compaction is overdue.
 - Track open issues: #206 (data-plane backpressure), #207
   (`NeedsCompaction` disk-pressure gate).
 
+### Hot SIEVE demotion (#484)
+
+Hot SIEVE eviction of a backed entry demotes the warm copy
+(`warm.Unprotect`) instead of deleting it. The warm copy stays live
+until warm SIEVE evicts it under its own pressure. Two operational
+consequences:
+
+- **Warm disk may grow faster under churn.** Hot SIEVE no longer
+  tombstones the warm copy, so demoted entries accumulate until warm
+  SIEVE reclaims them. Bounded by `WarmMaxBytes` / `WarmMaxDiskBytes`
+  / compaction. If warm disk grows unexpectedly, verify warm SIEVE
+  evictions are non-zero (`bouine_warm_evictions_total`) — a
+  sustained zero rate under pressure means entries are stranded
+  protected (see ADR-0032 Risks).
+- **Unprotect queue overflow.** If the `warmUnprotectQueue` fills
+  (burst > `TombstoneQueueSize` between drain cycles), overflowed
+  keys fall back to tombstone (warm copy deleted, not stranded).
+  Monitor `dropped_warm_unprotects` in the drain log: any non-zero
+  value is a capacity signal. Sustained overflow means the drain
+  interval is too slow — increase `TombstoneQueueSize` or shorten
+  `TombstoneDrainInterval`.
+
 ---
 
 ## Monitoring
@@ -163,5 +185,6 @@ A large gap between the two means compaction is overdue.
 - [ADR-0020](../decisions/0020-hot-to-warm-sync.md) — Hot→warm background sync
 - [ADR-0023](../decisions/0023-warm-tier-eviction.md) — SIEVE eviction for warm tier
 - [ADR-0026](../decisions/0026-sieve-sweep-cap.md) — SIEVE eviction worst-case bound
+- [ADR-0032](../decisions/0032-hot-evict-warm-decouple.md) — Hot SIEVE eviction → warm Unprotect (demotion)
 - Parent issue: [#202](https://github.com/bouine-cache/bouine/issues/202)
 - Open sub-issues: [#206](https://github.com/bouine-cache/bouine/issues/206), [#207](https://github.com/bouine-cache/bouine/issues/207)

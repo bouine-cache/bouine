@@ -36,6 +36,7 @@
 /SECURITY.md                @bouine-cache/maintainers
 
 # Governance documents — changes require explicit sign-off.
+/GOVERNANCE.md              @bouine-cache/maintainers
 /PLAN.md                    @bouine-cache/maintainers
 /AGENTS.md                  @bouine-cache/maintainers
 /CONTRIBUTING.md            @bouine-cache/maintainers

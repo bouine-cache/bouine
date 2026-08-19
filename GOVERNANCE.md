@@ -33,7 +33,7 @@ team, ensuring the right reviewers are auto-requested.
 
 | Role | Who | Responsibilities | Key tasks |
 |------|-----|-------------------|-----------|
-| **Lead maintainer** | Current: [`@theotime-leveque`](https://github.com/theotime-leveque) | Final tie-breaker, release cadence, roadmap arbitration, security response coordination. | Arbitrate disputes that stall at maintainer level; cut releases and tag versions; coordinate vulnerability response with security contacts; approve roadmap changes. |
+| **Lead maintainer** | Current: [`@thylong`](https://github.com/thylong) (Théotime Lévêque) | Final tie-breaker, release cadence, roadmap arbitration, security response coordination. | Arbitrate disputes that stall at maintainer level; cut releases and tag versions; coordinate vulnerability response with security contacts; approve roadmap changes. |
 | **Maintainer** | Members of [`@bouine-cache/maintainers`](https://github.com/orgs/bouine-cache/teams/maintainers) | Review and merge PRs, approve architectural changes, triage issues, mentor contributors. | Review PRs against the [PR checklist](CONTRIBUTING.md#pull-request-checklist); ensure CI is green before merging; approve ADRs (two approvals required for architectural changes); triage and label incoming issues; guide new contributors; enforce the [Code of Conduct](CODE_OF_CONDUCT.md). |
 | **Contributor** | Anyone with a merged PR | Propose changes, participate in discussions, fix bugs. | Open issues for bugs and feature requests; submit PRs following [CONTRIBUTING.md](CONTRIBUTING.md); sign commits with `Signed-off-by` (DCO); participate in design discussions and ADR reviews. |
 | **AI agent** | Automated contributors (e.g. Crush, Claude Code) | Execute well-scoped coding tasks under human supervision. | Follow [`AGENTS.md`](AGENTS.md) strictly; cannot merge, cannot approve PRs, cannot make policy or governance decisions; all AI-generated PRs require a human maintainer for review and merge. |
@@ -101,17 +101,44 @@ The lead maintainer arbitrates if maintainers disagree.
 ## 4. Access continuity
 
 bouine is designed to survive the loss of any single contributor.
+The [`@bouine-cache/maintainers`](https://github.com/orgs/bouine-cache/teams/maintainers)
+team currently has two members with admin access to the repository
+and the GitHub organization: [`@thylong`](https://github.com/thylong)
+and [`@chridupin-33`](https://github.com/chridupin-33).
 
-- The `@bouine-cache/maintainers` GitHub team has at least two members
-  with admin access to the repository and the GitHub organization.
-- Release credentials (Docker Hub, cosign keys, GitHub Actions
-  environments) are stored in GitHub Secrets, accessible to all
-  maintainers with admin role — not on any individual's machine.
-- The `main` branch is protected: direct pushes are blocked, merges
-  require CI to pass and at least one maintainer approval.
-- If the lead maintainer becomes unavailable, any other maintainer can
-  create releases, merge PRs, and respond to security reports within
-  one week.
+No critical capability depends on a single person. If any one
+individual becomes unavailable (death, incapacitation, or departure),
+the remaining admin(s) can perform all of the following within one
+week of confirmation:
+
+- **Create and close issues** — both admins have triage and admin
+  permissions on the repository.
+- **Accept proposed changes (merge PRs)** — both admins can approve and
+  merge pull requests. The `main` branch is protected (direct pushes
+  blocked, CI must pass, at least one maintainer approval required),
+  but any admin can override or adjust branch protection if needed.
+- **Release versions of software** — release credentials are stored in
+  GitHub Secrets (not on any individual's machine), accessible to all
+  organization admins:
+  - Docker Hub push credentials (for container images).
+  - Cosign keyless signing via GitHub Actions OIDC (no private key to
+    manage; tied to the GitHub workflow, not an individual).
+  - GitHub Actions release environment.
+  - Artifact Hub Helm chart publishing.
+  A new release is cut by tagging a version (`git tag v1.x.y`) and
+  pushing the tag, which triggers the `release.yml` workflow
+  automatically.
+- **Respond to security reports** — all maintainers are security
+  contacts and can receive private vulnerability reports via GitHub
+  Private Vulnerability Reporting.
+- **Manage the GitHub organization** — both admins can add or remove
+  team members, adjust repository settings, and rotate secrets.
+
+The project has no external infrastructure dependencies (no separate
+DNS, no standalone CI runner, no external package registry beyond
+Docker Hub and Artifact Hub) that would require credentials outside
+GitHub. This eliminates the need for a lockbox or will; all access is
+through the GitHub organization, which has two admins.
 
 ---
 

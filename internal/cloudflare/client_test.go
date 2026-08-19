@@ -239,3 +239,85 @@ func TestErrorType(t *testing.T) {
 		})
 	}
 }
+
+func TestNew_Success(t *testing.T) {
+	t.Parallel()
+	c, err := cf.New(cf.Config{ZoneID: "zone1", APIToken: "tok"})
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	require.Equal(t, "zone1", c.ZoneID())
+}
+
+func TestNew_DefaultsTimeoutAndRetryDelay(t *testing.T) {
+	t.Parallel()
+	c, err := cf.New(cf.Config{ZoneID: "zone1", APIToken: "tok"})
+	require.NoError(t, err)
+	require.NotNil(t, c)
+}
+
+func TestZoneID_NilClient(t *testing.T) {
+	t.Parallel()
+	var c *cf.Client
+	require.Equal(t, "", c.ZoneID())
+}
+
+func TestClient_PurgePrefixes_Success(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgePrefixes(context.Background(), []string{"/api/v1/"})
+	require.NoError(t, err, "PurgePrefixes")
+	require.Len(t, purger.calls, 1)
+}
+
+func TestClient_PurgePrefixes_Empty_NoOp(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgePrefixes(context.Background(), nil)
+	require.NoError(t, err, "empty PurgePrefixes should no-op,")
+	require.Len(t, purger.calls, 0)
+}
+
+func TestClient_PurgeHosts_Success(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgeHosts(context.Background(), []string{"example.com"})
+	require.NoError(t, err, "PurgeHosts")
+	require.Len(t, purger.calls, 1)
+}
+
+func TestClient_PurgeHosts_Empty_NoOp(t *testing.T) {
+	t.Parallel()
+	purger := &fakePurger{}
+	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
+
+	err := c.PurgeHosts(context.Background(), nil)
+	require.NoError(t, err, "empty PurgeHosts should no-op,")
+	require.Len(t, purger.calls, 0)
+}
+
+func TestNilClient_AllInvalidators(t *testing.T) {
+	t.Parallel()
+	var c *cf.Client
+	require.NoError(t, c.PurgePrefixes(context.Background(), []string{"/p"}))
+	require.NoError(t, c.PurgeHosts(context.Background(), []string{"h"}))
+}
+
+func TestRateLimitError_Message(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "cloudflare: rate limit exceeded", (&cf.RateLimitError{}).Error())
+	require.Equal(t,
+		"cloudflare: rate limit exceeded, retry after 5s",
+		(&cf.RateLimitError{RetryAfter: 5 * time.Second}).Error(),
+	)
+}
+
+func TestZoneConfigError_Message(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "bad zone", (&cf.ZoneConfigError{Msg: "bad zone"}).Error())
+}

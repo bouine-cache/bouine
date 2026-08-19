@@ -1,7 +1,11 @@
 package shutdown
 
 import (
+	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -9,7 +13,7 @@ import (
 )
 
 func newTestLogger() observability.Logger {
-	return observability.NewSampledLogger(nil, 0)
+	return observability.NoopLogger{}
 }
 
 func TestReadinessGate_AllConditionsTrue(t *testing.T) {
@@ -99,4 +103,48 @@ func TestReadinessGate_ConditionsEmpty(t *testing.T) {
 	g := NewReadinessGate()
 	conds := g.Conditions()
 	require.Len(t, conds, 0)
+}
+
+func TestSequencer_AddStepAndExecute(t *testing.T) {
+	s := NewSequencer(newTestLogger())
+
+	var first atomic.Bool
+	var second atomic.Bool
+
+	s.AddStep("first", 100*time.Millisecond, func(ctx context.Context) error {
+		first.Store(true)
+		return nil
+	})
+	s.AddStep("second", 100*time.Millisecond, func(ctx context.Context) error {
+		second.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.Execute(ctx)
+
+	require.True(t, first.Load(), "first step should have run")
+	require.True(t, second.Load(), "second step should have run")
+	require.False(t, s.IsReady(), "sequencer should not be ready after Execute")
+}
+
+func TestSequencer_ExecuteLogsStepErrorsButContinues(t *testing.T) {
+	s := NewSequencer(newTestLogger())
+
+	var ranAfterError atomic.Bool
+
+	s.AddStep("fails", 100*time.Millisecond, func(ctx context.Context) error {
+		return errors.New("boom")
+	})
+	s.AddStep("after-error", 100*time.Millisecond, func(ctx context.Context) error {
+		ranAfterError.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	s.Execute(ctx)
+
+	require.True(t, ranAfterError.Load(), "step after error should still run")
 }

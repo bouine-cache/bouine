@@ -7,13 +7,13 @@ high. This document describes the rules for humans; AI agents follow
 contributors.
 
 > If a rule here conflicts with `AGENTS.md`, `AGENTS.md` wins for
-> *how*, and [`PLAN.md`](PLAN.md) wins for *what*.
+> *how*, and [`docs/architecture.md`](docs/architecture.md) wins for *what*.
 
 ---
 
 ## Quick links
 
-- Roadmap: [`PLAN.md`](PLAN.md)
+- Roadmap: [`docs/architecture.md`](docs/architecture.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Working agreement (binding for all contributors): [`AGENTS.md`](AGENTS.md)
 - Security policy and reporting: [`SECURITY.md`](SECURITY.md)
@@ -25,7 +25,7 @@ contributors.
 
 ## Before you start
 
-1. Read [`PLAN.md`](PLAN.md) so you know which phase the project is in.
+1. Read [`docs/architecture.md`](docs/architecture.md) so you know which phase the project is in.
    We do not accept features that are not on the roadmap for the
    current phase. Open a discussion issue first if you want to argue
    for inclusion.
@@ -64,7 +64,7 @@ still fail the build.
 
 For any non-trivial change:
 
-1. **Orient** — re-read the relevant sections of `PLAN.md` and
+1. **Orient** — re-read the relevant sections of `docs/architecture.md` and
    `AGENTS.md`. Identify which architectural layer(s) you are touching
    (see [`AGENTS.md §3`](AGENTS.md)).
 2. **Plan** — open or comment on an issue describing the approach.

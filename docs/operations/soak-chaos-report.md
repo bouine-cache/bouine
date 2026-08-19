@@ -1,13 +1,13 @@
 # Soak + Chaos Report
 
 > **Status**: Framework complete; full soak runs must be attached to the
-> v1.0 release tag per PLAN.md §4.5. See §6 for required evidence.
+> v1.0 release tag per `docs/architecture.md §15`. See §6 for required evidence.
 
 ---
 
 ## 1. Overview
 
-This document records the soak and chaos testing required by PLAN.md §4.5
+This document records the soak and chaos testing required by `docs/architecture.md §15`
 to clear the Phase 4.5 exit criteria before Phase 5 begins.
 
 | Criterion | Required | Status |
@@ -126,7 +126,7 @@ steady load across all nodes throughout the restart sequence.
 
 **Pass/fail criterion**: `errors5xx == 0` across all background requests.
 
-This directly validates the Phase 4 exit criterion from PLAN.md:
+This directly validates the Phase 4 exit criterion from `docs/architecture.md`:
 > "rolling restart of all 3 pods returns zero 5xx in the load-generator timeline."
 
 ---

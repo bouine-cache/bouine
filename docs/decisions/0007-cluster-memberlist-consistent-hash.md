@@ -72,8 +72,8 @@ Specifically:
 
 ## References
 
-- `PLAN.md §5` (Clustering)
-- `PLAN.md §5.5` (Wire protocol versioning)
+- `docs/architecture.md §5` (Clustering)
+- `docs/architecture.md §5.5` (Wire protocol versioning)
 - `docs/security/threat-model.md` T01, T35, T36
 - [memberlist](https://github.com/hashicorp/memberlist)
 - [Consistent Hashing with Bounded Loads](https://arxiv.org/abs/1608.01350)

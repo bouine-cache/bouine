@@ -10,7 +10,7 @@
 ## Context
 
 What is the situation? What forces are at play? Why is a decision
-needed *now*? Cite specific sections of `PLAN.md`, `AGENTS.md`, or
+needed *now*? Cite specific sections of `docs/architecture.md`, `AGENTS.md`, or
 the threat model when relevant.
 
 ## Decision
@@ -36,5 +36,5 @@ For each alternative: what it is, why it was rejected.
 ## References
 
 - Related ADRs.
-- Sections of `PLAN.md` / `AGENTS.md` / threat model.
+- Sections of `docs/architecture.md` / `AGENTS.md` / threat model.
 - External specs / papers / blog posts.

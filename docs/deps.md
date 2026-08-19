@@ -20,7 +20,7 @@ aren't `slog`-compatible, HTTP servers other than
 
 | Module                                          | License    | Used by                  | Reason |
 |-------------------------------------------------|------------|--------------------------|--------|
-| `github.com/spf13/cobra`                        | Apache-2.0 | `cmd/bouine`             | CLI framework chosen in `PLAN.md`. |
+| `github.com/spf13/cobra`                        | Apache-2.0 | `cmd/bouine`             | CLI framework chosen in `docs/architecture.md`. |
 | `github.com/spf13/pflag`                        | BSD-3      | (transitive)             | Cobra dependency. |
 | `github.com/hashicorp/memberlist`               | MPL-2.0    | `internal/cluster`       | Gossip membership (ADR-0007). Pre-approved `AGENTS.md §5`. |
 | `github.com/hashicorp/go-msgpack/v2`            | MIT        | (transitive)             | memberlist serialisation. |

@@ -4,7 +4,7 @@
 **Scope:** Per-route opt-in background conditional revalidation that fires
 *before* an object's TTL expires, keeping the hot cache perpetually fresh
 and reducing origin traffic to lightweight 304s.
-**Roadmap ref:** PLAN.md backlog — new entry. Supersedes the always-warm
+**Roadmap ref:** `docs/architecture.md §1.2` backlog — new entry. Supersedes the always-warm
 concept (backlog #18). Always-warm handled eviction; refresh-before-expiry
 handles the common case (TTL expiry) and is the primary tool for
 "almost zero origin traffic."
@@ -769,7 +769,7 @@ request headers only. Lazy cancellation via `store.Get` on pop.
 - Threat model update (T-RBE-01 through T-RBE-04)
 - Runbook entry: "Refresh-Before-Expiry: when to use, when not to"
 - Update `docs/architecture.md` §2.2 (prefetch now implemented)
-- Move PLAN.md backlog item to active phase
+- Move `docs/architecture.md` backlog item to active phase
 
 ---
 
@@ -852,7 +852,7 @@ The conformance score must remain ≥ 93.2%.
 | `docs/security/threat-model.md` | T-RBE-01 through T-RBE-04 |
 | `docs/runbook/refresh-before-expiry.md` | **New** operator guide |
 | `docs/architecture.md` | Update §2.2 (proactive refresh now implemented) |
-| `PLAN.md` | Add refresh-before-expiry to roadmap |
+| `docs/architecture.md` | Add refresh-before-expiry to roadmap |
 
 ---
 

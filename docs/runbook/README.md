@@ -22,4 +22,4 @@ Phase-by-phase delivery:
 - Phase 4 → `30-cluster.md`, `40-tls.md`.
 - Phase 4.5 → `50-incidents.md`, `90-postmortems/`.
 
-The full set of runbooks is a phase 4.5 exit criterion (`PLAN.md §15`).
+The full set of runbooks is a phase 4.5 exit criterion (`docs/architecture.md §15`).

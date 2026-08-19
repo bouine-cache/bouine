@@ -15,7 +15,8 @@
 
 This document enumerates the assets, trust boundaries, attacker classes,
 and threats that `bouine` must defend against, together with the controls
-implemented (or planned) in each phase. It is referenced from `PLAN.md`
+implemented (or planned) in each phase. It is referenced from
+[`docs/architecture.md`](../architecture.md)
 and is binding for security-relevant design decisions.
 
 If a code change touches a threat listed here, the PR description must
@@ -161,10 +162,10 @@ risk after controls.
 | T21 | Log leakage of `Authorization` / `Cookie` / body | I | C6,C8 | A6,A8 | ✓ Default access-log schema strips secret headers; full-header log is opt-in per route with a config warning. Bodies never logged. | Low |
 | T22 | Metric cardinality leak (e.g., raw URL as label) | I,D | C1 | A8,A9 | ✓ Cardinality budget enforced by unit test; labels are pre-declared allow-list. Reviewers reject high-cardinality labels (see `AGENTS.md §9`). | Low |
 | T23 | Memory disclosure via reused pooled buffers | I | C1,C2 | A1,A9 | ✓ All pooled buffers (`sync.Pool`) zeroed on Put. Fuzz tests exercise concurrent put/get/get. | Low |
-| T24 | Cross-tenant disclosure (when multiple vhosts share storage) | I | C1,C2 | A1 | ✓ Cache key includes scheme + host. Per-route ACL stage runs before lookup. Multi-tenant scoping beyond vhost is deferred (see `PLAN.md §18`). | Medium |
+| T24 | Cross-tenant disclosure (when multiple vhosts share storage) | I | C1,C2 | A1 | ✓ Cache key includes scheme + host. Per-route ACL stage runs before lookup. Multi-tenant scoping beyond vhost is deferred (see `docs/architecture.md §1.2`). | Medium |
 | T25 | Compression-oracle attacks (BREACH / CRIME) | I | C2,C4 | A1 | ✓ Default policy: store responses in the encoding the origin produced; never recompress secret responses (responses with `Cache-Control: private` would not be stored anyway). HTTP/2 `HPACK` and HTTP/3 `QPACK` settings disable dynamic-table sensitive headers. | Low |
 | T26 | OCSP / SCT / cert-transparency information leak | I | C4 | A4 | Documented residual. Stapling is enabled where the origin supplies it; bouine does not fetch OCSP itself to avoid leaking traffic patterns. | Medium |
-| T27 | Disk warm-tier exposure on shared host | I | C7 | A10 | ✓ Permissions `0600` on segments; encryption-at-rest delegated to the cloud volume (see `PLAN.md §17.2`). | Medium |
+| T27 | Disk warm-tier exposure on shared host | I | C7 | A10 | ✓ Permissions `0600` on segments; encryption-at-rest delegated to the cloud volume (see `docs/architecture.md §1.2`). | Medium |
 
 ### Denial of Service
 
@@ -189,7 +190,7 @@ risk after controls.
 | ID  | Threat | STRIDE | Attackers | Assets | Controls | Residual |
 |-----|--------|--------|-----------|--------|----------|----------|
 | T41 | Admin token theft → cluster-wide purge | E | C1,C8 | A3,A6 | ✓ Tokens short-lived (operator policy); rotation supported by reading from file; admin write endpoints (purge/ban/refresh) check token equality in constant time. Cobra never accepts a token via flag (env var / file only). | Medium |
-| T42 | VCL shim escape to host code | E | C6 (malicious VCL) | process | ✓ Shim is a translator to the native config tree; no embedded interpreter, no eval; no inline-C support (out of scope in `PLAN.md §17.4`). | Low |
+| T42 | VCL shim escape to host code | E | C6 (malicious VCL) | process | ✓ Shim is a translator to the native config tree; no embedded interpreter, no eval; no inline-C support (out of scope in `docs/architecture.md §1.2`). | Low |
 | T43 | Path traversal in storage layout | E | C1,C2 | A10 | ✓ Disk paths derived from `xxhash64(key)` hex, never from user input. Static analysis bans `os.Open` with user input. | Low |
 | T44 | Supply-chain code injection via dependency | E | C8 | process | ✓ Dependency allow-list (`docs/deps.md`), `govulncheck` in CI, signed container images (cosign), SBOM (syft), Dependabot reviews. | Medium |
 | T45 | Container privilege | E | C7,C8 | process | ✓ Distroless base, non-root UID, read-only root FS, `securityContext` defaults in Helm chart (`runAsNonRoot`, `allowPrivilegeEscalation: false`, drop ALL caps, seccomp `RuntimeDefault`). | Low |
@@ -219,14 +220,14 @@ operators know where to put the control.
 - **DDoS scrubbing at L3/L4** — delegated to the cloud edge / CDN in
   front of bouine.
 - **End-user authentication / authorization on the data plane** —
-  deferred (see `PLAN.md §18`). Today bouine forwards the auth headers
+  deferred (see `docs/architecture.md §1.2`). Today bouine forwards the auth headers
   and trusts the origin to enforce.
 - **Encryption-at-rest of the warm tier** — delegated to the cloud
   volume (LUKS, EBS encryption, etc.).
 - **Per-tenant isolation beyond virtual host** — deferred. Operators
   who need strong tenant isolation run one bouine deployment per
   tenant.
-- **Rate-limiting on the data plane** — deferred (see `PLAN.md §18`).
+- **Rate-limiting on the data plane** — deferred (see `docs/architecture.md §1.2`).
   Backpressure exists for connections and slow bodies; per-route
   request-rate limiting is not yet a feature.
 

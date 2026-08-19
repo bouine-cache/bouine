@@ -12,7 +12,7 @@
 |--------|-------|---------|
 | ✅ Shipped | 30 | Control implemented in code and exercised by tests |
 | 🟡 Partial / runtime-provided | 8 | Mitigated (often by the Go runtime / netpol / edge) but not an explicit bouine control |
-| 🔵 Deferred | 11 | Feature not implemented in v1.0 — explicit backlog (`PLAN.md`) |
+| 🔵 Deferred | 11 | Feature not implemented in v1.0 — explicit backlog (`docs/architecture.md §1.2`) |
 | 🟣 Documented residual | 2 | Accepted, out of scope (T20, T26) |
 | ❌ Unaddressed | 0 | — |
 
@@ -39,7 +39,7 @@ are reclassified in `threat-model.md` and itemised here for honesty:
 | T05 | "Fuzz corpus from PortSwigger papers"; `bouine_smuggling_rejects_total` | No fuzz corpus and no dedicated metric. **Real control:** Go `net/http` strict RFC 9112 parser rejects CL+TE / dual CL / obs-fold by construction. → 🟡 runtime-provided |
 | T10 | Explicit `SETTINGS_MAX_CONCURRENT_STREAMS` + RST cap config | No bouine config. **Real control:** Go 1.26 `net/http` HTTP/2 server enforces a default stream cap and includes the CVE-2023-44487 RST-flood mitigation. HTTP/3 part is deferred. → 🟡 runtime-provided |
 | T23 | "All pooled buffers zeroed on Put" | Not explicitly zeroed. → 🟡 partial (residual: pooled body buffers may retain prior bytes; not cross-tenant because keys include host) |
-| T32 | "Admin API rate limit per token" | Not implemented. → 🔵 deferred (`PLAN.md` backlog: per-route/admin rate limiting) |
+| T32 | "Admin API rate limit per token" | Not implemented. → 🔵 deferred (`docs/architecture.md §1.2` backlog: per-route/admin rate limiting) |
 | T33 | ESI include caps | ESI not implemented. → 🔵 deferred |
 | T34 | Prefetch concurrency caps | Prefetcher not implemented. → 🔵 deferred |
 | T39 | QUIC address validation | HTTP/3 not implemented. → 🔵 deferred |

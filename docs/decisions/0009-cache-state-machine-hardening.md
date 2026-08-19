@@ -8,7 +8,7 @@
 
 `make conformance` scored **87.9 % (321/365)** against
 [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
-`PLAN.md §4` sets the phase-4 exit criterion at ≥ 84 % (307/365), which
+`docs/architecture.md §4` sets the phase-4 exit criterion at ≥ 84 % (307/365), which
 was already met, but a targeted hardening pass was undertaken to close
 the gap before the next phase begins.
 
@@ -198,6 +198,6 @@ CC-based stale objects revalidate. The narrower heuristic-only criterion
 - RFC 9213 §2 (CDN-Cache-Control Structured Fields)
 - RFC 7234 §5.5.3 (Warning: 110)
 - RFC 5861 §3–4 (stale-while-revalidate, stale-if-error)
-- `PLAN.md §12.2` — conformance gate
+- `docs/architecture.md §12` — conformance gate
 - `AGENTS.md §2.5` — never weaken the cache-tests score
 - ADR-0001 through ADR-0008 — prior decisions this extends

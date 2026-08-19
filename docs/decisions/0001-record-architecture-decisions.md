@@ -7,7 +7,7 @@
 
 ## Context
 
-bouine is a multi-phase project (`PLAN.md`) with strict layering and
+bouine is a multi-phase project (`docs/architecture.md`) with strict layering and
 non-trivial cross-cutting concerns (performance, RFC 9111 conformance,
 security, observability). Decisions taken now will be revisited and
 challenged by future contributors — human and AI. We need a durable
@@ -38,7 +38,7 @@ record architecture decisions.
 - New contributors can read the *why* without archaeology.
 - AI agents have a structured place to consult before making
   architectural changes (see `AGENTS.md §16`).
-- The threat model and `PLAN.md` link to ADRs for context.
+- The threat model and `docs/architecture.md` link to ADRs for context.
 
 ### Negative / trade-offs
 - Slight friction on PRs that introduce architectural changes.
@@ -64,4 +64,4 @@ record architecture decisions.
 - [ADR GitHub Organization](https://adr.github.io/)
 - [MADR](https://adr.github.io/madr/)
 - `AGENTS.md §10`
-- `PLAN.md`
+- `docs/architecture.md`

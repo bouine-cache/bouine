@@ -7,10 +7,10 @@ body:
       value: |
         Thanks for proposing a feature. Before filing, please check:
 
-        - The current phase in [`PLAN.md`](https://github.com/bouine-cache/bouine/blob/main/PLAN.md).
+        - The current phase in [`docs/architecture.md`](https://github.com/bouine-cache/bouine/blob/main/docs/architecture.md).
           Features outside the current phase are normally deferred.
         - The deferred-features list in
-          [`PLAN.md §18`](https://github.com/bouine-cache/bouine/blob/main/PLAN.md#18-out-of-scope--future-roadmap-post-v10).
+          [`docs/architecture.md §1.2`](https://github.com/bouine-cache/bouine/blob/main/docs/architecture.md#12-non-gools).
           If your request is already there, comment on the related issue
           instead of opening a new one.
         - The threat model in
@@ -41,7 +41,7 @@ body:
     id: phase
     attributes:
       label: Roadmap phase
-      description: Which phase in `PLAN.md` does this belong to?
+      description: Which phase in `docs/architecture.md` does this belong to?
       options:
         - Phase 0 — bootstrap
         - Phase 1 — listeners / proxy

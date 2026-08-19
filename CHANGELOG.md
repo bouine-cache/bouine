@@ -412,7 +412,7 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - **342/365 (93.7%)** on
   [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).
 
-### Not yet implemented (deferred — see `PLAN.md`)
+### Not yet implemented (deferred — see `docs/architecture.md §1.2`)
 
 - Prefetching (Link preload / sitemap crawler).
 - HTTP/3 (client- and origin-facing).

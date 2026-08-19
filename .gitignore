@@ -51,6 +51,9 @@ testdata/fuzz/*/
 .env
 .env.local
 
+# Python bytecode (prek / helper scripts)
+scripts/__pycache__/
+
 # Local-only plan — followed but never committed or pushed
 /docs/plans/open-sourcing.md
 

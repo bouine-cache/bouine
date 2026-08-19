@@ -15,6 +15,7 @@ contributors.
 
 - Roadmap: [`docs/architecture.md`](docs/architecture.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
+- Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
 - Working agreement (binding for all contributors): [`AGENTS.md`](AGENTS.md)
 - Security policy and reporting: [`SECURITY.md`](SECURITY.md)
 - Code of Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)

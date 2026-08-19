@@ -1,0 +1,133 @@
+# bouine — Project Governance
+
+This document describes how `bouine` makes decisions, who holds key roles,
+and how disputes are resolved. It is the authoritative governance reference;
+[`AGENTS.md`](AGENTS.md) governs *how* contributors work day-to-day, and
+[`docs/architecture.md`](docs/architecture.md) governs *what* is built.
+
+---
+
+## 1. Model
+
+bouine uses a **maintainer collective** governance model. A small group
+of maintainers shares decision-making authority. There is no single
+benevolent dictator; decisions are made by consensus among maintainers,
+with the lead maintainer as tie-breaker when consensus cannot be reached.
+
+This model was chosen because:
+
+- The project spans multiple specialized areas (HTTP parsing, caching,
+  storage, clustering, observability) where no single person has deep
+  expertise in all of them.
+- A collective reduces the bus factor risk and ensures continuity.
+- It keeps the review burden distributed.
+
+---
+
+## 2. Roles
+
+| Role | Who | Responsibilities |
+|------|-----|-------------------|
+| **Lead maintainer** | Current: `@theotime-leveque` | Final tie-breaker, release cadence, roadmap arbitration, security response coordination. |
+| **Maintainer** | Members of `@bouine-cache/maintainers` | Review and merge PRs, approve architectural changes (ADRs), triage issues, mentor contributors. |
+| **Contributor** | Anyone with a merged PR | Proposes changes via PRs, participates in discussions, fixes bugs. |
+| **AI agent** | Automated contributors | Follows [`AGENTS.md`](AGENTS.md) strictly; cannot merge, cannot approve, cannot make policy decisions. |
+
+### 2.1 Becoming a maintainer
+
+A contributor may be nominated as a maintainer by an existing maintainer
+after demonstrating sustained, high-quality contributions across multiple
+areas. Nominations are discussed privately among maintainers and require
+unanimous agreement. A new maintainer is added to the
+`@bouine-cache/maintainers` GitHub team and is given write access to the
+repository.
+
+### 2.2 Removing a maintainer
+
+A maintainer may step down at any time. A maintainer who is inactive
+(no commits, reviews, or discussions) for 6 months may be moved to
+emeritus status by consensus of the remaining maintainers. Emeritus
+maintainers retain credit but lose write access.
+
+---
+
+## 3. Decision-making
+
+### 3.1 Day-to-day changes
+
+Standard PRs (bug fixes, documentation, non-breaking improvements) require
+**at least one maintainer review and approval** before merge. The reviewer
+is responsible for checking the [PR checklist](CONTRIBUTING.md#pull-request-checklist)
+and ensuring CI is green.
+
+### 3.2 Architectural changes
+
+Changes that affect the layer model, public API, wire format, eviction
+algorithm, cluster protocol, or the VCL shim require:
+
+1. An **ADR** (Architecture Decision Record) under
+   [`docs/decisions/`](docs/decisions/) describing the problem, options,
+   and rationale.
+2. **Two maintainer approvals** (including the lead maintainer or the
+   area owner from `CODEOWNERS`).
+3. A 48-hour waiting period for community feedback after the ADR is
+   opened, unless the change is a security fix.
+
+### 3.3 Roadmap changes
+
+The roadmap lives in [`docs/architecture.md`](docs/architecture.md).
+Adding, removing, or reordering a phase requires maintainer consensus.
+The lead maintainer arbitrates if maintainers disagree.
+
+### 3.4 Dispute resolution
+
+1. **Discuss first.** Disagreements are resolved in the PR, the linked
+   issue, or a GitHub Discussion. Focus on technical merit, citing RFC
+   clauses, benchmarks, or design docs.
+2. **Escalate to maintainers.** If the discussion stalls, any maintainer
+   can request a maintainer-level review by mentioning
+   `@bouine-cache/maintainers`.
+3. **Lead maintainer decides.** If maintainers cannot reach consensus
+   within one week, the lead maintainer makes the final decision and
+   documents the rationale in the PR or ADR.
+
+---
+
+## 4. Access continuity
+
+bouine is designed to survive the loss of any single contributor.
+
+- The `@bouine-cache/maintainers` GitHub team has at least two members
+  with admin access to the repository and the GitHub organization.
+- Release credentials (Docker Hub, cosign keys, GitHub Actions
+  environments) are stored in GitHub Secrets, accessible to all
+  maintainers with admin role — not on any individual's machine.
+- The `main` branch is protected: direct pushes are blocked, merges
+  require CI to pass and at least one maintainer approval.
+- If the lead maintainer becomes unavailable, any other maintainer can
+  create releases, merge PRs, and respond to security reports within
+  one week.
+
+---
+
+## 5. Security governance
+
+Security-related decisions follow the process in
+[`SECURITY.md`](SECURITY.md). The lead maintainer coordinates
+vulnerability response. All maintainers are security contacts and can
+receive private vulnerability reports via GitHub Private Vulnerability
+Reporting. See also
+[`docs/security/threat-model.md`](docs/security/threat-model.md).
+
+---
+
+## 6. Changes to this document
+
+Changes to `GOVERNANCE.md` require:
+
+1. A PR with the proposed change.
+2. **Two maintainer approvals** (including the lead maintainer).
+3. A 7-day comment period for community feedback.
+
+The file is listed in [`CODEOWNERS`](CODEOWNERS) and auto-requests
+maintainer review on any change.

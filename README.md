@@ -216,6 +216,7 @@ below are the canonical source the site is built from.
 | Migration from NGINX             | [`docs/migration/nginx.md`](docs/migration/nginx.md)   |
 | Migration from Varnish           | [`docs/migration/varnish.md`](docs/migration/varnish.md) |
 | Contributing                     | [`CONTRIBUTING.md`](CONTRIBUTING.md)                  |
+| Governance                       | [`GOVERNANCE.md`](GOVERNANCE.md)                      |
 | Changelog                        | [`CHANGELOG.md`](CHANGELOG.md)                        |
 | Security policy & disclosure     | [`SECURITY.md`](SECURITY.md)                          |
 | Discussions & community          | [GitHub Discussions](https://github.com/bouine-cache/bouine/discussions) |

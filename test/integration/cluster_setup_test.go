@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bouine-cache/bouine/test/integration/driver"
 	"go.uber.org/goleak"
@@ -43,9 +44,11 @@ func TestMain(m *testing.M) {
 	}
 	clusterMu.Unlock()
 	if code == 0 {
-		// Use goleak.Find instead of VerifyTestMain because we need
-		// cluster teardown to run before the leak check. Find polls
-		// with backoff, so no manual sleep is needed.
+		// memberlist.Shutdown() returns before all internal goroutines
+		// (probe, gossip, schedule) have fully exited. goleak.Find polls
+		// with backoff, but memberlist's cleanup can take a few seconds
+		// on slow CI runners. Give the goroutines time to drain.
+		time.Sleep(3 * time.Second)
 		if err := goleak.Find(); err != nil {
 			fmt.Fprintf(os.Stderr, "goleak: %v\n", err)
 			code = 1

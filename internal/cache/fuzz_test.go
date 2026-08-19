@@ -31,6 +31,13 @@ func FuzzBuildKey(f *testing.F) {
 	f.Add("GET", "example.com", "/path?already=has=query", "extra=true")
 
 	f.Fuzz(func(t *testing.T, method, host, path, query string) {
+		// Limit input sizes to prevent pathological cases from stalling
+		// the fuzzer (e.g. extremely long query strings that cause
+		// url.Query() to allocate gigabytes on the slow path).
+		if len(method) > 64 || len(host) > 512 || len(path) > 4096 || len(query) > 4096 {
+			t.Skip()
+		}
+
 		// Build the URL manually instead of httptest.NewRequest, which
 		// panics on methods containing spaces or other invalid tokens.
 		rawURL := "http://" + host + path

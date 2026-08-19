@@ -3,6 +3,7 @@ package staticfile
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,9 +53,17 @@ func FuzzPathTraversal(f *testing.F) {
 				t.Skip()
 			}
 		}
+		// Skip paths that would produce an invalid HTTP request line
+		// (e.g. urlPath starting with a space creates " HTTP/1.0").
+		if len(urlPath) > 0 && (urlPath[0] == ' ' || urlPath[0] == '\t') {
+			t.Skip()
+		}
 
+		// Construct the request manually to avoid httptest.NewRequest
+		// panicking on invalid URL escapes (e.g. "%" without hex digits).
+		u := &url.URL{Path: "/" + urlPath}
+		r := &http.Request{Method: "GET", URL: u}
 		w := httptest.NewRecorder()
-		r := httptest.NewRequest("GET", "/"+urlPath, nil)
 		h.ServeHTTP(w, r)
 
 		// The handler must NEVER return the secret file content.

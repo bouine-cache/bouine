@@ -38,6 +38,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -191,6 +193,7 @@ jobs:
     name: fuzz (long)
     runs-on: [self-hosted, ci]
     timeout-minutes: 20
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -235,7 +238,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nightly-fuzz-${{ matrix.package }}-${{ matrix.target }}-${{ github.run_id }}
+          name: nightly-fuzz-${{ matrix.target }}-${{ github.run_id }}
           path: internal/${{ matrix.package }}/testdata/fuzz/
           if-no-files-found: ignore
           retention-days: 30
@@ -329,6 +332,9 @@ jobs:
           tags: |
             type=raw,value=nightly
             type=raw,value=nightly-${{ github.run_id }}
+      - name: Get build date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7.3.0
@@ -343,7 +349,7 @@ jobs:
           build-args: |
             VERSION=nightly-${{ github.run_id }}
             COMMIT=${{ github.sha }}
-            DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            DATE=${{ steps.date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Scan nightly image (Trivy)

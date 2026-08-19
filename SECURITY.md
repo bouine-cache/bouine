@@ -4,6 +4,76 @@
 treated as the highest-priority work; they are not negotiable against
 features or performance.
 
+## Security Requirements
+
+This section describes what users can and cannot expect from bouine in
+terms of security. It is the authoritative reference for the security
+guarantees the software is intended to provide.
+
+### What bouine provides
+
+- **TLS on the data plane** — minimum TLS 1.2, prefer 1.3, with a
+  pinned cipher suite list and SNI required. See `AGENTS.md §6`.
+- **TLS / mTLS for cluster traffic** — peer-to-peer communication uses
+  mutual TLS. See `docs/security/threat-model.md` TB4.
+- **Admin authentication** — the admin API requires a bearer token
+  (constant-time compare) or mTLS. Write methods refuse insecure
+  transports by default. Tokens are read from env vars or files, never
+  from CLI flags.
+- **HTTP smuggling defenses** — ambiguous framing
+  (`Content-Length` + `Transfer-Encoding`, duplicate `Content-Length`,
+  obs-fold) is rejected with `400` and a metric increment. Fuzz-tested
+  via a committed corpus.
+- **Header hygiene** — hop-by-hop headers (`Connection`, `Keep-Alive`,
+  `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-*`) are
+  stripped per RFC 9110 §7.6.1 and never forwarded blindly.
+- **Private response protection** — responses with `Cache-Control:
+  private`, `Authorization`, or `Set-Cookie` (without explicit
+  override) are never stored in the cache.
+- **Path traversal prevention** — storage paths are derived from xxhash64
+  of cache keys, never from user-controlled strings. Static file serving
+  is fuzz-tested against path traversal.
+- **Resource limits** — connection limits, in-flight request caps,
+  storage admission control, request-collapsing latch caps, and bounded
+  queues prevent unbounded memory growth. Every parser has a byte cap
+  (headers <= 64 KiB, URLs <= 8 KiB, max 100 headers).
+- **Secret-free logging** — `Authorization`, `Cookie`, `Set-Cookie`,
+  custom auth headers, and request/response bodies are never logged by
+  default. Operators may opt in per route.
+- **Signed releases** — container images and release artifacts are
+  signed with cosign (keyless, via GitHub OIDC). SBOM (SPDX) is
+  generated for every release.
+- **Vulnerability scanning** — `govulncheck` runs in CI and on
+  pre-push. `gitleaks` scans every commit for leaked credentials.
+  `Trivy` scans released images for HIGH/CRITICAL vulnerabilities.
+- **No plaintext secrets in code or logs** — enforced by `gosec` and
+  `gitleaks` in CI.
+
+### What bouine does NOT provide (security non-goals)
+
+- **Data-plane authentication / authorization** — bouine does not
+  authenticate end users or enforce authorization on the data plane.
+  It forwards `Authorization` / `Cookie` headers and lets the origin
+  enforce. `auth_request`-style external auth is planned for v1.1 (see
+  [`ROADMAP.md`](ROADMAP.md)).
+- **Rate limiting** — per-route request-rate limiting is not shipped in
+  v1.0. Connection and slow-body backpressure exist, but token-bucket
+  per-route limiting is deferred.
+- **WAF / DDoS scrubbing** — delegated to a sidecar or Layer-7 load
+  balancer.
+- **Encryption at rest of the warm tier** — delegated to the cloud
+  volume (EBS/PD/Azure Disk). bouine does not encrypt disk storage.
+- **Multi-tenant isolation beyond virtual host** — operators with
+  strong tenancy needs should run one deployment per tenant.
+- **Built-in ACME / certificate issuance** — bouine reloads certs from
+  disk; ACME is delegated to cert-manager or a sidecar.
+
+The full threat model with STRIDE analysis, assets, trust boundaries,
+and per-threat controls lives in
+[`docs/security/threat-model.md`](docs/security/threat-model.md).
+
+---
+
 ## Supported Versions
 
 Until v1.0, only `main` and the most recent tagged pre-release receive

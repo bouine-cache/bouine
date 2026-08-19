@@ -16,6 +16,10 @@ cover.html
 *.local.yml
 .env
 .env.local
+.envrc
+
+# Local secrets / cluster credentials (never in image)
+kubeconfig.yaml
 
 # Git
 .git/
@@ -34,6 +38,29 @@ HANDOFF.md
 bench/
 test/
 testdata/
+
+# Deploy / infra / dev tooling (not compiled into the binary)
+deploy/
+scripts/
+lint/
+examples/
+api/
+
+# Repo metadata & dev configs (not needed at runtime)
+Dockerfile
+.dockerignore
+.gitignore
+.golangci.yaml
+.gitleaks.toml
+.pre-commit-config.yaml
+codecov.yml
+CODEOWNERS
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+LICENSE
+Makefile
+package-lock.json
 
 # Stray directories that can appear from kubectl port-forward cleanup
 origin

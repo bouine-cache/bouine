@@ -18,7 +18,7 @@ coupled both tiers to a single policy and meant that adding a new
 policy (e.g. LRU-K, LFU, ARC) required touching
 every call site in both tiers.
 
-`PLAN.md` phase 3 introduces `cachaner` as an alternative policy and
+`docs/architecture.md` phase 3 introduces `cachaner` as an alternative policy and
 requires that the policy be selectable via config per tier. That is
 not achievable when the tier code constructs concrete `sieve.List`
 directly.
@@ -221,7 +221,7 @@ common struct. This is a deliberate tradeoff:
   tier policy.
 - ADR-0026: SIEVE sweep cap — introduced `maxSweepProbes` and
   `EvictBounded`; the basis for removing `Evict()`.
-- `PLAN.md` phase 3: `cachaner` policy, per-tier config selection.
+- `docs/architecture.md` phase 3: `cachaner` policy, per-tier config selection.
 - `AGENTS.md` §7: hit-path budget (0 allocs, < 5 us p50).
 - `AGENTS.md` §10: ADR required for eviction-algorithm changes.
 - SIEVE paper: Zhang et al., "SIEVE is Simpler than LRU", NSDI 2024

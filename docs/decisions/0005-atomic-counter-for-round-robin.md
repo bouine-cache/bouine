@@ -10,7 +10,7 @@
 `internal/origin` (L5) must pick a target inside an upstream pool on
 every fetch. Phase-1 ships the simplest reasonable selector —
 round-robin — and graduates to weighted / least-conn / P2C in phase 5
-(`PLAN.md §15`).
+(`docs/architecture.md §15`).
 
 The seed strategy matters in three places:
 
@@ -59,7 +59,7 @@ func (r *RR) Pick(targets []*Target) *Target {
   could confuse the very first integration test. Mitigated by the
   health-check warmup period (phase 1) that staggers traffic.
 - Round-robin is naïve. Weighted / EWMA selection ship in phase 5 and
-  remain optional (`PLAN.md §15`).
+  remain optional (`docs/architecture.md §15`).
 
 ### Risks
 - None notable.
@@ -77,5 +77,5 @@ func (r *RR) Pick(targets []*Target) *Target {
 
 ## References
 
-- `PLAN.md §6`, `§15`
+- `docs/architecture.md §6`, `§15`
 - `AGENTS.md §7` (hit-path budget), `§11` (concurrency)

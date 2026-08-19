@@ -7,7 +7,7 @@
 
 ## Context
 
-The original design (PLAN.md §2.1) used Fiber v3 for the admin
+The original design (`docs/architecture.md §2.1`) used Fiber v3 for the admin
 control-plane surface. Fiber wraps `valyala/fasthttp`, which is a
 complete reimplementation of HTTP/1.1 parsing, buffer management, and
 connection pooling — separate from Go's `net/http`.
@@ -92,6 +92,6 @@ listeners (ADR-0004).
 ## References
 
 - `AGENTS.md §2` (Fiber never on data plane)
-- `PLAN.md §2.1` (updated to remove Fiber)
+- `docs/architecture.md §2.1` (updated to remove Fiber)
 - ADR-0004 (per-listener http.Server model)
 - Go 1.22 release notes: enhanced ServeMux routing

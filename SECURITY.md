@@ -71,7 +71,7 @@ Out of scope:
 - Denial-of-service achievable only with operator credentials (auth
   abuse).
 - Findings against features explicitly listed as deferred in
-  [`PLAN.md §18`](PLAN.md#18-out-of-scope--future-roadmap-post-v10)
+  [`docs/architecture.md §1.2`](docs/architecture.md#12-non-goals)
   (data-plane auth, rate limiting, multi-tenant isolation beyond vhost,
   etc.).
 

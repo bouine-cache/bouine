@@ -20,7 +20,7 @@ There are two reasonable structural choices:
    pipeline handler but own their own goroutines, timeouts, and
    shutdown context.
 
-`PLAN.md §14.1` mandates a precise graceful-shutdown sequence:
+`docs/architecture.md §14.1` mandates a precise graceful-shutdown sequence:
 
 > Stop H1 listener with `Connection: close`, then send `GOAWAY` on H2,
 > then `GOAWAY` on H3, then drain.
@@ -37,7 +37,7 @@ owned by its own `*http.Server` (or `http3.Server`) instance.
 - Every listener is launched in a goroutine owned by an
   `internal/runtime/supervised.Group`.
 - Each listener has its own `Close(ctx)` method, called in the order
-  spelled out in `PLAN.md §14.1`.
+  spelled out in `docs/architecture.md §14.1`.
 - Listeners share **only** the L2 pipeline handler (an `http.Handler`)
   and configuration — no state, no global mux.
 - The PROXY-protocol shim, when enabled, lives at the `net.Listener`
@@ -80,6 +80,6 @@ trail.
 
 ## References
 
-- `PLAN.md §2.2`, `§7`, `§14.1`
+- `docs/architecture.md §2.2`, `§7`, `§14.1`
 - `docs/security/threat-model.md` T05, T10, T28, T39
 - `AGENTS.md §11` (concurrency / shutdown)

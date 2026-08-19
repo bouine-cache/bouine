@@ -6,7 +6,7 @@ traffic through it.
 
 > Status: **skeleton**. Tests are gated by the `integration` build tag
 > and ignored by `make test`. They run from `make integration`, which
-> lands in phase 4 (`PLAN.md §15`). Until then this directory pins the
+> lands in phase 4 (`docs/architecture.md §15`). Until then this directory pins the
 > structure so phase-1 listener PRs can drop scenarios in without
 > bikeshedding the layout.
 
@@ -55,7 +55,7 @@ so it is excluded from the default `go test ./...`.
 
 ## Phase-1 expectations
 
-The phase-1 exit criterion in `PLAN.md §15` is:
+The phase-1 exit criterion in `docs/architecture.md §15` is:
 
 > `bouine serve` proxies traffic on all 3 protocols; integration tests
 > show parity with `curl --http1.1/--http2/--http3`.

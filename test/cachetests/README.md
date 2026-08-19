@@ -57,7 +57,7 @@ between client and origin. bouine must pass `PUT` through to the
 origin without caching it. The cache handler already does this —
 `PUT` is an invalidating method and is forwarded directly.
 
-## Exit criteria (PLAN.md §15 phase 3)
+## Exit criteria (`docs/architecture.md §15` phase 3)
 
 > ≥ Varnish score on cache-tests.
 

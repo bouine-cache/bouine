@@ -1,9 +1,9 @@
 # AGENTS.md — Working Agreement for AI Agents on `bouine`
 
 This file is the operating manual for any AI agent (single or in a swarm)
-contributing to `bouine`. It is binding. **Read `PLAN.md` first**, then this
-file, then start work. If anything in this file conflicts with `PLAN.md`,
-`PLAN.md` wins for *what* to build; this file wins for *how* to build it.
+contributing to `bouine`. It is binding. **Read [`docs/architecture.md`](docs/architecture.md) first**, then this
+file, then start work. If anything in this file conflicts with `docs/architecture.md`,
+`docs/architecture.md` wins for *what* to build; this file wins for *how* to build it.
 
 > One-line summary: build a horizontally-scalable, observability-first HTTP/1.1+2+3
 > reverse-proxy cache in Go 1.26 that matches Varnish on
@@ -85,7 +85,7 @@ These rules override autonomy. Break them and the change must be reverted.
 9. **Never silently approximate RFC 9111.** If the spec is ambiguous, cite
    the clause in a code comment and add a test that pins the chosen
    behavior. Same rule applies to the VCL shim.
-10. **Never expand scope.** If `PLAN.md` doesn't list a feature for the
+10. **Never expand scope.** If `docs/architecture.md` doesn't list a feature for the
     current phase, you may not add it. Open a discussion issue instead.
 11. **Never commit with `prek` disabled or skipped.** Hooks must run
     and pass locally before any commit. `git commit --no-verify`, `SKIP=`,
@@ -522,7 +522,7 @@ When more than one agent is working concurrently:
 6. **Conflict resolution**: the agent that landed the interface owns
    conflicts on that interface. The data-plane on-call rule applies:
    regressions to L1–L3 take priority over any other work.
-7. **Single source of truth**: `PLAN.md` for *what*, `AGENTS.md` for
+7. **Single source of truth**: `docs/architecture.md` for *what*, `AGENTS.md` for
    *how*, `docs/decisions/` for *why*. If they disagree, escalate to the
    user — don't pick.
 8. **Hand-off protocol**: when stopping mid-task, leave a `HANDOFF.md`
@@ -536,7 +536,7 @@ When more than one agent is working concurrently:
 For every task an agent starts, execute this loop. No shortcuts.
 
 1. **Orient**
-   - Re-read `PLAN.md` sections relevant to the task.
+   - Re-read `docs/architecture.md` sections relevant to the task.
    - Re-read this file's sections relevant to the task.
    - `git status` + `git log -n 20` for recent context.
    - Search for existing implementations (`grep`, `rg`, LSP).
@@ -563,7 +563,7 @@ For every task an agent starts, execute this loop. No shortcuts.
 5. **Document**
    - Update godoc.
    - Update `docs/runbook` and `docs/decisions` when warranted.
-   - Update `PLAN.md` only if scope/exit-criteria actually changed and the
+   - Update `docs/architecture.md` only if scope/exit-criteria actually changed and the
      user approved the change.
 6. **Report**
    - Concise summary (≤ 4 lines unless complex).
@@ -611,7 +611,7 @@ Before declaring a change ready:
 - ❌ A goroutine without an owner or a way to stop it.
 - ❌ Catching an error and returning `nil` with a log.
 - ❌ Spec deviation ("close enough to RFC 9111").
-- ❌ Touching `PLAN.md` without explicit user approval.
+- ❌ Touching `docs/architecture.md` without explicit user approval.
 
 ---
 
@@ -669,4 +669,4 @@ substitutes.
 
 ---
 
-*Last updated alongside `PLAN.md`. When you change one, check the other.*
+*Last updated alongside `docs/architecture.md`. When you change one, check the other.*

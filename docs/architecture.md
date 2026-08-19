@@ -3,7 +3,6 @@
 `bouine` is a horizontally-scalable, observability-first HTTP reverse-proxy
 cache written in Go 1.26. This document is the design reference: goals,
 layer model, implementation decisions, and operational characteristics.
-For pending work see [`PLAN.md`](../PLAN.md).
 
 ---
 
@@ -116,7 +115,7 @@ surface that serves ≤ 10 RPS.
 ```
 
 > L8 (AI insights, `/internal/ai`) is a **design target, not yet
-> implemented** — see the roadmap backlog in `PLAN.md`. The same applies to
+> implemented** — see the backlog below. The same applies to
 > prefetching and the VCL shim listed under Goals above.
 
 ### 2.3 Cross-cutting principles

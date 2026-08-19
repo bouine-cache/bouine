@@ -271,7 +271,95 @@ operators know where to put the control.
 
 ---
 
-## 8. Review & maintenance
+## 8. Assurance case
+
+This section provides a structured argument that bouine's security
+requirements (documented in
+[`SECURITY.md`](../../SECURITY.md#security-requirements)) are met. It
+references the threat model (§§1-7), trust boundaries (§2), secure
+design principles (§2.1), and common implementation weaknesses (below).
+
+### 8.1 Threat model
+
+The threat model is documented in §§1-7 of this file. It enumerates:
+
+- **13 assets** (§1) with confidentiality, integrity, and availability
+  classifications.
+- **6 trust boundaries** (§2): TB1 Internet/data-plane, TB2
+  listener/engine, TB3 bouine/origin, TB4 bouine/peer, TB5
+  operator/admin, TB6 process/disk.
+- **8 attacker classes** (§3): external anonymous, malicious client,
+  hostile origin, on-path attacker, compromised peer, insider,
+  co-tenant, supply-chain.
+- **40+ threat rows** (§4) mapped to STRIDE categories with controls
+  and residual risk ratings.
+
+### 8.2 Trust boundaries
+
+Trust boundaries are clearly identified in §2 with an ASCII diagram and
+a table. Each boundary has documented trust assumptions and controls:
+TB1 terminates TLS; TB2 is in-process (goroutine safety); TB3 uses TLS
+verification by default; TB4 requires mTLS; TB5 requires bearer token
+or mTLS; TB6 relies on OS isolation.
+
+### 8.3 Secure design principles
+
+§2.1 maps each Saltzer-Schroeder / OWASP secure design principle to
+concrete bouine implementations:
+
+| Principle | Argument |
+|-----------|----------|
+| Fail-safe defaults | Admin denies by default, TLS verify on by default, Set-Cookie not cached by default, non-root container |
+| Complete mediation | Every admin write authenticated, every data-plane request through RFC 9111 evaluation, peer-fetch mTLS on every call |
+| Least privilege | Non-root, dropped capabilities, minimal CI permissions, separate CAs |
+| Economy of mechanism | Single HTTP stack, declarative YAML, no web framework |
+| Defense in depth | Smuggling detection + header hygiene + private response protection + path traversal prevention + resource limits |
+| Separation of privilege | Separate admin/data ports, separate cluster/data-plane CAs, tokens in env vars |
+| Psychological acceptability | Secure defaults documented, insecure options require explicit opt-in |
+
+### 8.4 Common implementation security weaknesses countered
+
+The following table maps OWASP Top 10 (2021) and CWE Top 25 categories
+to bouine's controls:
+
+| OWASP / CWE category | How bouine counters it |
+|----------------------|----------------------|
+| **A01 — Broken Access Control** (CWE-284, CWE-862) | Admin API requires bearer token (constant-time compare) or mTLS on every write. Auth-exempt paths are an explicit allowlist. Admin port is separate from data port and bound cluster-internal by default in Helm chart. No bypass paths. |
+| **A02 — Cryptographic Failures** (CWE-327, CWE-295) | TLS 1.2+ minimum, certificate verification on by default (no `InsecureSkipVerify` in production code), cluster mTLS with separate CA, stdlib `crypto/*` only (no hand-rolled primitives), `gosec` enforces zero findings. |
+| **A03 — Injection** (CWE-78, CWE-89) | No SQL (no database). No shell execution (no `os/exec` in production code). Storage paths derived from xxhash64, never user-controlled strings. Regex ban predicates compiled with `regexp.Compile` and errors returned, not executed. Config uses YAML strict mode (`KnownFields(true)`) rejecting unknown fields. |
+| **A04 — Insecure Design** | Secure design principles applied (see §2.1 above). Threat model is living document, reviewed every phase. Architecture decisions recorded as ADRs. |
+| **A05 — Security Misconfiguration** (CWE-16) | Secure defaults: TLS on, admin port internal, non-root container, read-only rootfs, all capabilities dropped, seccomp RuntimeDefault. `insecure_skip_verify` refused in release builds. Hardening checklist in SECURITY.md. |
+| **A06 — Vulnerable and Outdated Components** (CWE-937, CWE-1035) | `govulncheck` in CI and pre-push hook. Dependabot weekly updates. Trivy scans released images (HIGH/CRITICAL = exit 1). Dependency allow-list in `docs/deps.md`, new deps require ADR. |
+| **A07 — Identification and Authentication Failures** (CWE-287, CWE-384) | Admin token via constant-time comparison (`subtle.ConstantTimeCompare`). Token stored in env var or file, never CLI flag. Auto-generated random token if none configured (logged as WARN). Session cookies signed with HMAC derived from admin token. |
+| **A08 — Software and Data Integrity Failures** (CWE-502) | Releases signed with cosign (keyless Sigstore). SBOM generated per release. Cluster protocol has magic byte + version validation. No deserialization of untrusted data without validation (binary codec bounds-checks every field). |
+| **A09 — Security Logging and Monitoring Failures** (CWE-778) | `slog` structured JSON logging. Access log sampled (1:100) with always-on for errors. Prometheus metrics for smuggling rejects, vary evictions, cluster protocol mismatches. pprof endpoints on admin port only. |
+| **A10 — Server-Side Request Forgery** (CWE-918) | bouine does not perform server-side requests based on user input. Origin targets are configured in YAML, not derived from request parameters. Peer-fetch targets are cluster members validated via gossip membership, not user-controlled. |
+| **CWE-125 — Out-of-bounds Read** | Go is memory-safe with bounds checking. No C/C++ code. Cluster binary codec bounds-checks every field read (`offset+n > len(buf)`). Fuzz-tested with `FuzzDecodeArbitrary`. |
+| **CWE-190 — Integer Overflow** | Go integers do not overflow silently (they wrap, but `math/bits` and explicit checks are used where needed). Config validation rejects negative values for sizes and durations. |
+| **CWE-400 — Uncontrolled Resource Consumption** | Connection limits, in-flight request caps, body size limits (64 KiB headers, 1 MiB admin body, 10 MiB file serving), bounded queues, storage admission control, request-collapsing latch caps, 100 header max. Every queue is bounded. |
+| **CWE-444 — HTTP Request Smuggling** | Explicit smuggling detection in H1 parser: rejects CL+TE conflict, duplicate Content-Length, obs-fold. Fuzz-tested with `FuzzSmugglingDetected`. Metric `bouine_smuggling_rejects_total` tracks rejections. |
+| **CWE-22 — Path Traversal** | Static file serving uses `path.Clean` + `isPathContained()` check. Storage paths are xxhash64 hashes, not user strings. Fuzz-tested with `FuzzPathTraversal` (12 seed corpus entries including `../`, `%2e%2e`, `..%5c`). |
+| **CWE-79 — Cross-Site Scripting** | Dashboard uses `templ` which auto-escapes all interpolated content. Reflected XSS in `apiOK`/`apiError` was fixed and tested (`handler_invalidation_test.go`). Dashboard auth via session cookie with HMAC. |
+| **CWE-352 — Cross-Site Request Forgery** | Admin write endpoints require bearer token in `Authorization` header (not cookie-based), which is not automatically sent by browsers. Dashboard uses session cookie with HMAC signature. |
+
+### 8.5 Conclusion
+
+The assurance case is built on:
+1. A comprehensive threat model (§§1-7) with STRIDE methodology.
+2. Clearly identified trust boundaries (§2) with per-boundary controls.
+3. Documented secure design principles (§2.1) with concrete
+   implementations.
+4. Systematic mapping of OWASP Top 10 and CWE Top 25 to controls.
+
+The security requirements in
+[`SECURITY.md`](../../SECURITY.md#security-requirements) are met by the
+controls documented in this threat model. Residual risks are documented
+per-threat in §4 and are all rated Low or Medium with deferral notes for
+not-yet-shipped features.
+
+---
+
+## 9. Review & maintenance
 
 - This document is reviewed at the start and end of every phase.
 - Every new dependency triggers a row in `docs/deps.md` AND a fresh

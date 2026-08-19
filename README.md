@@ -179,6 +179,45 @@ make build   # -> ./bin/bouine
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
 
+### Verifying release signatures
+
+All releases are cryptographically signed using [cosign](https://github.com/sigstore/cosign)
+with keyless signing (Sigstore, via GitHub Actions OIDC). The private key
+is never stored on any distribution server — signatures are generated in
+CI using ephemeral credentials tied to the GitHub workflow.
+
+**Verify a binary release:**
+
+```bash
+# Download the release assets
+curl -L -O https://github.com/bouine-cache/bouine/releases/latest/download/SHA256SUMS
+curl -L -O https://github.com/bouine-cache/bouine/releases/latest/download/SHA256SUMS.sig
+curl -L -O https://github.com/bouine-cache/bouine/releases/latest/download/SHA256SUMS.pem
+
+# Verify the checksums signature
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature SHA256SUMS.sig \
+  --certificate-identity https://github.com/bouine-cache/bouine/.github/workflows/release.yml@refs/tags/v0.4.1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+# Verify the binary matches the checksums
+sha256sum -c SHA256SUMS
+```
+
+**Verify the Docker image:**
+
+```bash
+cosign verify --certificate-identity-regexp "https://github.com/bouine-cache/bouine/.github/workflows/release.yml@refs/tags/" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  bouinecache/bouine:latest
+```
+
+The signing certificate's identity is tied to the `release.yml` workflow
+in the `bouine-cache/bouine` repository, so only releases built by the
+official CI pipeline can produce valid signatures.
+
 ---
 
 ## Kubernetes

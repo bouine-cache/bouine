@@ -212,6 +212,7 @@ below are the canonical source the site is built from.
 |----------------------------------|--------------------------------------------------------|
 | Getting started & install        | [bouine.org/docs/getting-started](https://bouine.org/docs/getting-started/) |
 | Architecture reference           | [`docs/architecture.md`](docs/architecture.md)        |
+| Roadmap                          | [`PLAN.md`](PLAN.md)                                  |
 | Configuration reference          | [bouine.org/docs/configuration](https://bouine.org/docs/configuration/) |
 | Migration from NGINX             | [`docs/migration/nginx.md`](docs/migration/nginx.md)   |
 | Migration from Varnish           | [`docs/migration/varnish.md`](docs/migration/varnish.md) |

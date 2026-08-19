@@ -1,0 +1,413 @@
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC every day — one hour after load-test-nightly (02:00 UTC)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      skip-stress:
+        description: "Skip the stress-test job (useful for debugging other jobs)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.26.6"
+  CGO_ENABLED: "1"
+  DOCKER_IMAGE: bouinecache/bouine
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Full CI gate — re-runs the same suite as ci.yml against main to catch
+  # flakiness, dependency regressions, and environment drift.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint + govulncheck
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - run: make lint
+      - run: make govulncheck
+
+  test-linux:
+    name: test (linux/amd64, race)
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - run: go test -race -count=1 -timeout=120s -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          fail_ci_if_error: false
+          verbose: true
+
+  test-arm:
+    name: test (linux/arm64, race)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - run: go test -race -count=1 -timeout=120s ./...
+
+  test-macos:
+    name: test (darwin/arm64, race)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - run: go test -race -count=1 -timeout=120s ./...
+
+  conformance:
+    name: cache-tests conformance
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+      - name: Run cache-tests conformance suite
+        run: make conformance
+      - name: Check conformance score
+        run: |
+          RESULTS_FILE="test/cachetests/results/bouine.json"
+          if [ ! -s "$RESULTS_FILE" ]; then
+            echo "FAIL: results file is empty"
+            exit 1
+          fi
+          PASS=$(node -e "
+            const r = JSON.parse(require('fs').readFileSync('$RESULTS_FILE','utf8').trim());
+            let pass = 0;
+            for (const [, arr] of Object.entries(r)) {
+              if (!Array.isArray(arr) || arr.length === 0) pass++;
+            }
+            console.log(pass);
+          " 2>/dev/null || echo "0")
+          echo "Conformance: $PASS tests passing"
+          if [ "$PASS" -lt 339 ]; then
+            echo "FAIL: conformance score $PASS is below baseline of 339"
+            exit 1
+          fi
+          echo "PASS: conformance score $PASS >= 339"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-conformance-${{ github.run_id }}
+          path: test/cachetests/results/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  bench-all:
+    name: full benchmark suite
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Run full benchmark suite
+        run: make bench-all
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-bench-${{ github.run_id }}
+          path: bench/results/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  integration:
+    name: integration + chaos
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Run integration tests (strong + eventual)
+        run: make integration
+      - name: Run chaos tests
+        run: make chaos
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-integration-logs-${{ github.run_id }}
+          path: |
+            test/integration/*.out
+            test/chaos/*.out
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Fuzz — long-running, time-boxed per target. Runs each fuzzer for 10 min
+  # (total ~50 min across 5 targets). Corpus is committed under testdata/fuzz.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: fuzz (long)
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - cache
+          - storage
+          - cluster
+          - server/h1parser
+          - staticfile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Fuzz ${{ matrix.package }} (10 min)
+        run: |
+          go test -run=^$ -fuzz=Fuzz -fuzztime=600s \
+            -timeout=15m ./internal/${{ matrix.package }}
+      - name: Upload fuzz corpus
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-fuzz-${{ matrix.package }}-${{ github.run_id }}
+          path: internal/${{ matrix.package }}/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload fuzz corpus
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-fuzz-${{ matrix.package }}-${{ github.run_id }}
+          path: ${{ matrix.package }}/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Build + nightly artifacts — multi-arch binaries, SBOM, cosign signing,
+  # and a nightly container image tagged `nightly` (not a release tag).
+  # ---------------------------------------------------------------------------
+  build-binaries:
+    name: Build binaries (multi-arch)
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build (multi-arch)
+        env:
+          VERSION: nightly-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          platforms=(
+            linux/amd64
+            linux/arm64
+            darwin/amd64
+            darwin/arm64
+          )
+          for os_arch in "${platforms[@]}"; do
+            GOOS=${os_arch%/*}
+            GOARCH=${os_arch#*/}
+            bin="bouine-nightly-${GOOS}-${GOARCH}"
+            echo ">> building $bin"
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
+              -trimpath \
+              -ldflags "-s -w \
+                -X github.com/bouine-cache/bouine/internal/buildinfo.Version=$VERSION \
+                -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=$GITHUB_SHA \
+                -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -o "dist/${bin}" ./cmd/bouine
+          done
+          cd dist
+          sha256sum bouine-* > SHA256SUMS
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          path: ./
+          format: spdx-json
+          upload-artifact: false
+          upload-release-assets: false
+          output-file: dist/bouine-nightly.spdx.json
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign checksums
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
+      - name: Upload nightly binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-binaries-${{ github.run_id }}
+          path: dist/
+          retention-days: 30
+
+  docker-nightly:
+    name: Docker image (nightly)
+    runs-on: [self-hosted, ci]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.2.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=raw,value=nightly
+            type=raw,value=nightly-${{ github.run_id }}
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            VERSION=nightly-${{ github.run_id }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Scan nightly image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign Docker image
+        run: |
+          cosign sign --yes \
+            "${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}"
+
+  # ---------------------------------------------------------------------------
+  # Stress test — checks out the bouine-stress-test repo as a sibling, builds
+  # the stress image, and runs a k8s job against the nightly bouine image.
+  # Depends on docker-nightly so the `nightly` tag is available.
+  # ---------------------------------------------------------------------------
+  stress-test:
+    name: Stress test (k8s)
+    runs-on: [self-hosted, load-test-k8s]
+    timeout-minutes: 90
+    needs: [docker-nightly]
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.skip-stress)
+    steps:
+      - name: Checkout bouine
+        uses: actions/checkout@v7
+        with:
+          path: bouine
+
+      - name: Checkout bouine-stress-test
+        uses: actions/checkout@v7
+        with:
+          repository: bouine-cache/bouine-stress-test
+          path: bouine-stress-test
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Configure kubeconfig
+        run: |
+          if [ -n "${{ secrets.STRESS_KUBECONFIG }}" ]; then
+            echo "${{ secrets.STRESS_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          else
+            echo "STRESS_KUBECONFIG secret not set — using runner default kubeconfig"
+          fi
+
+      - name: Run stress test (prod scenario, 30 min)
+        working-directory: bouine-stress-test
+        env:
+          BOUINE_IMAGE: ${{ env.DOCKER_IMAGE }}:nightly
+        run: |
+          ./k8s/run-job.sh \
+            --run-name nightly-$(date -u +%Y%m%d) \
+            --scenario prod \
+            --policy sieve \
+            --duration 30m \
+            --rate 2000 \
+            --nodes 3 \
+            --base-rtt 50ms \
+            --bandwidth 100 \
+            --bouine-image "${BOUINE_IMAGE}"
+
+      - name: Upload stress results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-stress-${{ github.run_id }}
+          path: bouine-stress-test/results/
+          if-no-files-found: ignore
+          retention-days: 30

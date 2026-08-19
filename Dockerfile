@@ -11,6 +11,10 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=unknown
+# For reproducible builds, pass --build-arg SOURCE_DATE_EPOCH=<timestamp>
+# and --build-arg DATE=<derived ISO timestamp>. When SOURCE_DATE_EPOCH
+# is set and DATE is not, the build derives a stable timestamp from it.
+ARG SOURCE_DATE_EPOCH=
 ARG DATE=unknown
 # Set STRIPFLAGS to empty to preserve debug symbols in the image.
 ARG STRIPFLAGS=-s -w
@@ -21,6 +25,14 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
 
+# Derive DATE from SOURCE_DATE_EPOCH if DATE was not explicitly set.
+RUN if [ -n "${SOURCE_DATE_EPOCH}" ] && [ "${DATE}" = "unknown" ]; then \
+      DATE=$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r ${SOURCE_DATE_EPOCH} +%Y-%m-%dT%H:%M:%SZ); \
+      echo "DATE=$DATE" > /tmp/build_date.env; \
+    else \
+      echo "DATE=${DATE}" > /tmp/build_date.env; \
+    fi
+
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
@@ -28,7 +40,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -ldflags "${STRIPFLAGS} \
       -X github.com/bouine-cache/bouine/internal/buildinfo.Version=${VERSION} \
       -X github.com/bouine-cache/bouine/internal/buildinfo.Commit=${COMMIT} \
-      -X github.com/bouine-cache/bouine/internal/buildinfo.Date=${DATE}" \
+      -X github.com/bouine-cache/bouine/internal/buildinfo.Date=$(cat /tmp/build_date.env | cut -d= -f2)" \
     -o /bouine ./cmd/bouine
 
 # ---- Final stage ----

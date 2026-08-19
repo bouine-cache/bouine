@@ -11,7 +11,15 @@ BIN           := $(BIN_DIR)/bouine
 PKGS          ?= ./...
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# DATE: defaults to the current time.  For reproducible builds, set
+# SOURCE_DATE_EPOCH (seconds since Unix epoch) and the Makefile will
+# derive a stable timestamp from it, producing bit-for-bit identical
+# binaries across runs.
+ifdef SOURCE_DATE_EPOCH
+DATE          ?= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r $(SOURCE_DATE_EPOCH) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)
+else
 DATE          ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+endif
 # Strip flags — can be overridden to preserve debug symbols.
 # Use `make build STRIPFLAGS=` or `STRIPFLAGS= make build` to keep
 # DWARF debug info and the symbol table for debugging or hardening audits.

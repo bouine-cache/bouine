@@ -374,6 +374,7 @@ Observability is a product feature, not an afterthought.
 ### 14.1 Commands
 
 ```
+make setup-dev       # install all dev tools (golangci-lint, govulncheck, gitleaks, templ), hooks, verify build + tests
 make build           # binary to ./bin/bouine
 make test            # go test -race ./...
 make test-short      # go test -race -short ./... (prek)
@@ -389,6 +390,8 @@ make govulncheck     # govulncheck ./...
 make ci              # lint + test-short + build + hooks-run (CI gate)
 make templ           # go generate ./internal/dashboard/templates/ (requires templ CLI)
 make hooks           # install prek hooks into .git/hooks
+make install         # install binary to PREFIX (default /usr/local); honors DESTDIR
+make uninstall       # remove binary from PREFIX; honors DESTDIR
 ```
 
 > There is no JSON-schema generator or in-repo docs-site build: config is

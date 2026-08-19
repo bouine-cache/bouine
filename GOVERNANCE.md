@@ -26,12 +26,17 @@ This model was chosen because:
 
 ## 2. Roles
 
-| Role | Who | Responsibilities |
-|------|-----|-------------------|
-| **Lead maintainer** | Current: `@theotime-leveque` | Final tie-breaker, release cadence, roadmap arbitration, security response coordination. |
-| **Maintainer** | Members of `@bouine-cache/maintainers` | Review and merge PRs, approve architectural changes (ADRs), triage issues, mentor contributors. |
-| **Contributor** | Anyone with a merged PR | Proposes changes via PRs, participates in discussions, fixes bugs. |
-| **AI agent** | Automated contributors | Follows [`AGENTS.md`](AGENTS.md) strictly; cannot merge, cannot approve, cannot make policy decisions. |
+The current list of maintainers and their GitHub handles is visible on
+the [`@bouine-cache/maintainers`](https://github.com/orgs/bouine-cache/teams/maintainers)
+team page. The `CODEOWNERS` file maps each area of the codebase to the
+team, ensuring the right reviewers are auto-requested.
+
+| Role | Who | Responsibilities | Key tasks |
+|------|-----|-------------------|-----------|
+| **Lead maintainer** | Current: [`@theotime-leveque`](https://github.com/theotime-leveque) | Final tie-breaker, release cadence, roadmap arbitration, security response coordination. | Arbitrate disputes that stall at maintainer level; cut releases and tag versions; coordinate vulnerability response with security contacts; approve roadmap changes. |
+| **Maintainer** | Members of [`@bouine-cache/maintainers`](https://github.com/orgs/bouine-cache/teams/maintainers) | Review and merge PRs, approve architectural changes, triage issues, mentor contributors. | Review PRs against the [PR checklist](CONTRIBUTING.md#pull-request-checklist); ensure CI is green before merging; approve ADRs (two approvals required for architectural changes); triage and label incoming issues; guide new contributors; enforce the [Code of Conduct](CODE_OF_CONDUCT.md). |
+| **Contributor** | Anyone with a merged PR | Propose changes, participate in discussions, fix bugs. | Open issues for bugs and feature requests; submit PRs following [CONTRIBUTING.md](CONTRIBUTING.md); sign commits with `Signed-off-by` (DCO); participate in design discussions and ADR reviews. |
+| **AI agent** | Automated contributors (e.g. Crush, Claude Code) | Execute well-scoped coding tasks under human supervision. | Follow [`AGENTS.md`](AGENTS.md) strictly; cannot merge, cannot approve PRs, cannot make policy or governance decisions; all AI-generated PRs require a human maintainer for review and merge. |
 
 ### 2.1 Becoming a maintainer
 

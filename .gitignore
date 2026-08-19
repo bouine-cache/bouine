@@ -65,3 +65,4 @@ testdata/fuzz/*/
 .env
 .envrc
 kubeconfig.yaml
+scripts/__pycache__/

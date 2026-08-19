@@ -29,7 +29,7 @@ if [ -z "$commits" ]; then
 fi
 
 # Check if CHANGELOG.md was modified in the push range.
-if git diff --name-only "$range_base..HEAD" 2>/dev/null | grep -q "^${changelog}\$"; then
+if git diff --name-only "$range_base..HEAD" 2>/dev/null | grep -Fxq "$changelog"; then
   exit 0
 fi
 

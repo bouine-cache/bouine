@@ -34,7 +34,7 @@ def main(argv: list[str]) -> int:
         print(f"usage: {argv[0]} <version> [date]", file=sys.stderr)
         return 2
 
-    version = argv[1].lstrip("v")
+    version = argv[1].removeprefix("v")
     date = argv[2] if len(argv) == 3 else datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -91,20 +91,33 @@ def main(argv: list[str]) -> int:
     releases_base = f"https://github.com/{REPO}/releases/tag"
 
     # Replace the [Unreleased] link to point at the new tag.
-    new_content = re.sub(
-        r"\[Unreleased\]: " + re.escape(compare_base) + r"/v[^\s]+",
+    old_pattern = r"\[Unreleased\]: " + re.escape(compare_base) + r"/v[^\s]+"
+    new_content, unreleased_sub_count = re.subn(
+        old_pattern,
         f"[Unreleased]: {compare_base}/{tag}...HEAD",
         new_content,
     )
+    if unreleased_sub_count == 0:
+        print(
+            "error: could not find [Unreleased] comparison link to update",
+            file=sys.stderr,
+        )
+        return 1
 
     # Insert the new version link right after the [Unreleased] link.
     version_link = f"[{version}]: {releases_base}/{tag}\n"
-    new_content = re.sub(
+    new_content, version_sub_count = re.subn(
         r"(\[Unreleased\]: [^\n]+\n)",
         r"\1" + version_link,
         new_content,
         count=1,
     )
+    if version_sub_count == 0:
+        print(
+            "error: could not insert version link after [Unreleased] link",
+            file=sys.stderr,
+        )
+        return 1
 
     CHANGELOG.write_text(new_content)
     print(f"promoted [Unreleased] to [{version}] - {date}")

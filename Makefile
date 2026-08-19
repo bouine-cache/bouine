@@ -9,6 +9,8 @@ GOFLAGS       ?=
 BIN_DIR       ?= bin
 BIN           := $(BIN_DIR)/bouine
 PKGS          ?= ./...
+PREFIX        ?= /usr/local
+DESTDIR       ?=
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 # DATE: defaults to the current time.  For reproducible builds, set
@@ -44,6 +46,15 @@ all: lint test build ## Lint, test, and build.
 build: ## Build the bouine binary to ./bin/bouine.
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/bouine
+
+.PHONY: install
+install: build ## Install the bouine binary to PREFIX (default /usr/local). Honors DESTDIR.
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 0755 $(BIN) $(DESTDIR)$(PREFIX)/bin/bouine
+
+.PHONY: uninstall
+uninstall: ## Uninstall the bouine binary from PREFIX (default /usr/local). Honors DESTDIR.
+	rm -f $(DESTDIR)$(PREFIX)/bin/bouine
 
 .PHONY: test
 test: ## Run unit tests with the race detector.

@@ -487,7 +487,7 @@ All subcommands honor `--server`, `--token`, and `--insecure`.
 | Layer | Approach |
 |-------|----------|
 | Unit | Per package, table-driven, `-race` always on. Coverage gate ≥ 85%; ≥ 95% for `cache` and `storage`. |
-| Conformance | [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests) harness in CI; score published as JSON badge; regressions block merge. Current: **93.2% (340/365)**. |
+| Conformance | [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests) harness in CI; score published as JSON badge; regressions block merge. Current: **93.7% (342/365)**. |
 | Integration | In-process 3-node cluster + chaos scenarios (peer kill, origin flap, slow origin, rolling restart, concurrent purge, rejoin). |
 | Benchmarks | `bench/` nightly + on every PR via `benchstat`. Gates: ≤ 2% p99 regression, ≤ 5% memory regression, zero hit-path allocation increase. |
 | Fuzz | `go test -fuzz` against header parsing, `Vary` canonicalisation, `Cache-Control` tokenizer. |

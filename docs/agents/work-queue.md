@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-_(none — phase 1 listeners are unclaimed; see docs/architecture.md §15)_
+_(none — all phases through 6 are complete; see ROADMAP.md for pending work)_
 
 ## Recently completed
 

@@ -10,7 +10,7 @@ body:
         - The current phase in [`docs/architecture.md`](https://github.com/bouine-cache/bouine/blob/main/docs/architecture.md).
           Features outside the current phase are normally deferred.
         - The deferred-features list in
-          [`docs/architecture.md §1.2`](https://github.com/bouine-cache/bouine/blob/main/docs/architecture.md#12-non-gools).
+          [`docs/architecture.md §1.2`](https://github.com/bouine-cache/bouine/blob/main/docs/architecture.md#12-non-goals).
           If your request is already there, comment on the related issue
           instead of opening a new one.
         - The threat model in
@@ -50,7 +50,9 @@ body:
         - Phase 4 — clustering / K8s
         - Phase 4.5 — hardening
         - Phase 5 — advanced features
-        - Phase 6 — AI / dashboard
+        - Phase 6 — dashboard UX
+        - Phase 7 — simplification
+        - Phase 8 — AI / dashboard
         - Post-v1.0 (see §18)
         - Not sure
     validations:

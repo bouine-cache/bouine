@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-19
+
 ### Removed
 - **Breaking (SDK):** removed `bouineapi.Client.Reload` and `ReloadResult`.
   The admin `POST /v1/config/reload` endpoint, the dashboard "Reload config"
@@ -515,7 +517,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.2
 [0.4.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.1
 [0.4.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.0
 [0.3.7]: https://github.com/bouine-cache/bouine/releases/tag/v0.3.7

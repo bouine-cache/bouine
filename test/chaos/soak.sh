@@ -5,7 +5,7 @@
 #   ./test/chaos/soak.sh [--duration HOURS] [--rps RPS] [--nodes NODE,NODE,...]
 #
 # Defaults:
-#   --duration 24          24-hour soak (PLAN.md §4.5 @ 50% capacity)
+#   --duration 24          24-hour soak (ROADMAP.md @ 50% capacity)
 #   --rps 5000             Request rate in req/s (canonical bench = 10 krps)
 #   --nodes 127.0.0.1:18081,127.0.0.1:18082,127.0.0.1:18083
 #
@@ -127,4 +127,4 @@ echo "" | tee -a "$OUTPUT_DIR/summary.txt"
 echo "End:  $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$OUTPUT_DIR/summary.txt"
 echo "Output: $OUTPUT_DIR"
 echo ""
-echo "Attach $OUTPUT_DIR/ to the release tag (PLAN.md §4.5 exit criterion)."
+echo "Attach $OUTPUT_DIR/ to the release tag (ROADMAP.md exit criterion)."

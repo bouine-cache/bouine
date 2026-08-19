@@ -80,7 +80,7 @@ algorithm, cluster protocol, or the VCL shim require:
 
 ### 3.3 Roadmap changes
 
-The roadmap lives in [`PLAN.md`](PLAN.md).
+The roadmap lives in [`ROADMAP.md`](ROADMAP.md).
 Adding, removing, or reordering a phase requires maintainer consensus.
 The lead maintainer arbitrates if maintainers disagree.
 

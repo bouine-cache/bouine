@@ -237,6 +237,16 @@ L1 → L7, /pkg/api
 
 ## 8. Testing Rules
 
+- **Test policy (formal, mandatory):** When major new functionality is
+  added to the software, tests for that functionality MUST be added to
+  an automated test suite in the same pull request. A PR that adds
+  major functionality without tests will be rejected by reviewers and
+  will fail the CI gate (`prek run --all-files` runs
+  `go test -race -short`). This policy applies to all new features,
+  behavior changes, and bug fixes. "Major new functionality" is defined
+  as any change that adds a new user-visible capability, a new
+  configuration option, a new API endpoint, or a new code path in the
+  cache, storage, cluster, or server layers.
 - **Unit tests** ship in the same package, `_test.go`. Table-driven.
   `-race` always on in CI.
 - **Coverage gates** per package: ≥ 85% default, ≥ 95% for

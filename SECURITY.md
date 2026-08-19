@@ -176,6 +176,52 @@ fix is non-trivial. Once a fix lands in a tagged release:
 Reporters are credited in the advisory and in `CHANGELOG.md` unless
 they ask otherwise.
 
+## Vulnerability Response Process
+
+When a vulnerability report is received, the maintainers follow this
+process:
+
+1. **Triage (within 3 business days).** A maintainer acknowledges
+   receipt via the GitHub PVR advisory or email, confirms the report is
+   in scope (see [Scope](#scope) above), and assigns a preliminary
+   severity using the [Severity Guidance](#severity-guidance) rubric.
+   If the report is out of scope, the reporter is told why.
+
+2. **Assess and reproduce (within 1 week of triage).** A maintainer
+   attempts to reproduce the issue on a supported version. If
+   reproducible, the severity is confirmed; if not, the report is
+   closed with an explanation. If the issue is already public, the
+   embargo is lifted and a fix is prioritized immediately.
+
+3. **Develop a fix.** The fix is developed on a private branch or via
+   the GitHub PVR advisory's draft. At least one other maintainer
+   reviews the fix. The fix includes:
+   - Code change with tests.
+   - Threat model update (`docs/security/threat-model.md`) if the
+     issue maps to a new or existing threat row.
+   - CHANGELOG entry under `### Security`.
+
+4. **Release.** A tagged release is cut containing the fix. The
+   release is signed with cosign and includes an SBOM. For critical
+   issues, an out-of-band release is issued; for medium/low issues, the
+   fix may batch into the next scheduled release.
+
+5. **Publish advisory.** Once the release is available:
+   - The GitHub Security Advisory (GHSA) is published.
+   - A CVE is requested if the issue is exploitable in default
+     configurations.
+   - The reporter is credited unless they requested anonymity.
+
+6. **Post-release review.** Within one week of the release, maintainers
+   review whether existing controls, fuzz corpora, or CI gates should be
+   strengthened to prevent similar issues. Action items are tracked as
+   GitHub issues.
+
+Throughout the embargo, the reporter receives at least weekly status
+updates. If a fix cannot be delivered within the target timeframe
+(30 days for high-severity, 90 days for medium-severity), the
+maintainers notify the reporter with a revised timeline and rationale.
+
 ## Hardening Checklist for Operators
 
 These are the most common misconfigurations we see in HTTP caches. Even

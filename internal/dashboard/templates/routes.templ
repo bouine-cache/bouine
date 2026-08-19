@@ -27,19 +27,19 @@ templ Routes(d RoutesData) {
 			<table id="route-tbl">
 				<thead>
 					<tr>
-						<th class="sortable" onclick="sortTable('route-tbl',0,this)">Route<span class="sort-icon"></span></th>
-						<th class="sortable" onclick="sortTable('route-tbl',1,this)">Pool<span class="sort-icon"></span></th>
-						<th title="match.methods: when set, this route only matches the listed HTTP methods. Lets GET and POST on the same path have different cache policies. Empty = all methods.">Methods</th>
-						<th class="sortable desc" onclick="sortTable('route-tbl',3,this)">Hit %<span class="sort-icon"></span></th>
-						<th class="sortable" onclick="sortTable('route-tbl',4,this)">Req/min<span class="sort-icon"></span></th>
-						<th class="sortable" onclick="sortTable('route-tbl',5,this)">TTL<span class="sort-icon"></span></th>
-						<th title="stale-while-revalidate: serve the stale cached response while revalidating with origin in the background for up to this duration after TTL expiry.">SWR</th>
-						<th title="stale-if-error: serve the stale cached response when origin returns a 5xx error or is unreachable, for up to this duration after TTL expiry.">SIE</th>
-						<th title="negative_ttl: cache error responses (404, 405, 410, 501) for this duration to reduce origin load from repeated requests for non-existent resources.">neg_ttl</th>
-						<th title="stayin_alive: when enabled, serve stale content indefinitely during an origin outage regardless of stale-if-error window. Useful for routes where stale is always better than an error.">stayin_alive</th>
-						<th title="jitter_percent: add a random ±N% variance to every TTL. Prevents cache stampedes where many entries expire simultaneously and flood the origin.">jitter</th>
-						<th title="Per-route features: ttl_override, allow_set_cookie, max_object_size, strip_prefix, strip_query_params.">Features</th>
-						<th>Trend</th>
+						<th scope="col" class="sortable" tabindex="0" onclick="sortTable('route-tbl',0,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('route-tbl',0,this)}">Route<span class="sort-icon"></span></th>
+						<th scope="col" class="sortable" tabindex="0" onclick="sortTable('route-tbl',1,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('route-tbl',1,this)}">Pool<span class="sort-icon"></span></th>
+						<th scope="col" title="match.methods: when set, this route only matches the listed HTTP methods. Lets GET and POST on the same path have different cache policies. Empty = all methods.">Methods</th>
+						<th scope="col" class="sortable desc" tabindex="0" onclick="sortTable('route-tbl',3,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('route-tbl',3,this)}">Hit %<span class="sort-icon"></span></th>
+						<th scope="col" class="sortable" tabindex="0" onclick="sortTable('route-tbl',4,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('route-tbl',4,this)}">Req/min<span class="sort-icon"></span></th>
+						<th scope="col" class="sortable" tabindex="0" onclick="sortTable('route-tbl',5,this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();sortTable('route-tbl',5,this)}">TTL<span class="sort-icon"></span></th>
+						<th scope="col" title="stale-while-revalidate: serve the stale cached response while revalidating with origin in the background for up to this duration after TTL expiry.">SWR</th>
+						<th scope="col" title="stale-if-error: serve the stale cached response when origin returns a 5xx error or is unreachable, for up to this duration after TTL expiry.">SIE</th>
+						<th scope="col" title="negative_ttl: cache error responses (404, 405, 410, 501) for this duration to reduce origin load from repeated requests for non-existent resources.">neg_ttl</th>
+						<th scope="col" title="stayin_alive: when enabled, serve stale content indefinitely during an origin outage regardless of stale-if-error window. Useful for routes where stale is always better than an error.">stayin_alive</th>
+						<th scope="col" title="jitter_percent: add a random ±N% variance to every TTL. Prevents cache stampedes where many entries expire simultaneously and flood the origin.">jitter</th>
+						<th scope="col" title="Per-route features: ttl_override, allow_set_cookie, max_object_size, strip_prefix, strip_query_params.">Features</th>
+						<th scope="col">Trend</th>
 					</tr>
 				</thead>
 				<tbody>

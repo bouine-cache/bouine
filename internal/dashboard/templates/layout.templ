@@ -19,6 +19,7 @@ templ Layout(props LayoutProps) {
 			@Styles()
 		</head>
 		<body hx-boost="true">
+			<a href="#main-content" class="skip-link">Skip to content</a>
 			<div id="bouine-tint" aria-hidden="true"></div>
 			<canvas id="bouine-noise" aria-hidden="true"></canvas>
 			<aside aria-label="Sidebar">
@@ -73,7 +74,7 @@ templ Layout(props LayoutProps) {
 					</div>
 				</div>
 			</aside>
-			<main role="main">
+			<main role="main" id="main-content">
 				<div class="hdr">
 					<span class="brand" aria-label="bouine">bouine</span>
 					<h1 class="ph">{ props.PageTitle }</h1>
@@ -105,7 +106,8 @@ templ Layout(props LayoutProps) {
 			<button
 				class="tog"
 				aria-label="Toggle colour theme"
-				onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙 dark':'☀ light';var lg=document.getElementById('bouine-logo');if(lg)lg.src=next==='light'?'/logo.png':'/logo-white.png';})(this)"
+				aria-pressed="false"
+				onclick="(function(b){var h=document.documentElement,d=h.getAttribute('data-theme');var next=d==='light'?'dark':'light';h.setAttribute('data-theme',next);localStorage.setItem('bouine-theme',next);b.textContent=next==='light'?'🌙 dark':'☀ light';b.setAttribute('aria-pressed',next==='light');var lg=document.getElementById('bouine-logo');if(lg)lg.src=next==='light'?'/logo.png':'/logo-white.png';})(this)"
 			>☀ light</button>
 			@noiseScript()
 			@tableHelperScript()

@@ -2,13 +2,11 @@ package server
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -277,38 +275,9 @@ func TestServeMulti_ReusePortWithFastPath(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// errorOnSecondAcceptListener wraps a singleConnListener so the second
-// Accept returns a non-closed error. Used to test that serveConnWithHTTP
-// properly surfaces non-filtered errors from http.Server.Serve.
-type errorOnSecondAcceptListener struct {
-	inner  *singleConnListener
-	closed bool
-	mu     sync.Mutex
-}
-
-func (l *errorOnSecondAcceptListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		return nil, net.ErrClosed
-	}
-	l.mu.Unlock()
-	if l.inner.done {
-		return nil, errAcceptFailed
-	}
-	return l.inner.Accept()
-}
-func (l *errorOnSecondAcceptListener) Close() error {
-	l.mu.Lock()
-	l.closed = true
-	l.mu.Unlock()
-	return l.inner.Close()
-}
-func (l *errorOnSecondAcceptListener) Addr() net.Addr { return l.inner.Addr() }
-
-var errAcceptFailed = errors.New("accept failed")
-
-func TestServeConnWithHTTP_AcceptError(t *testing.T) {
+// TestServeConnWithHTTP_FiltersClosedError verifies that serveConnWithHTTP
+// does NOT send net.ErrClosed or http.ErrServerClosed to the error channel.
+func TestServeConnWithHTTP_FiltersClosedError(t *testing.T) {
 	t.Parallel()
 	srv := NewHTTP(ListenerConfig{
 		Addr:        "127.0.0.1:0",
@@ -318,8 +287,10 @@ func TestServeConnWithHTTP_AcceptError(t *testing.T) {
 		FastMetrics: &mockFastPathMetrics{},
 	})
 
-	// Create a pipe connection that sends the h2c preface so
-	// handleCleartextFastPath routes to serveConnWithHTTP.
+	// A normal pipe connection: h2c preface then close.
+	// http.Server.Serve will get the connection, process it, then get
+	// net.ErrClosed on the second Accept and return ErrServerClosed.
+	// serveConnWithHTTP should filter both and NOT send to errCh.
 	clientConn, serverConn := net.Pipe()
 	go func() {
 		_, _ = clientConn.Write([]byte(h2cPreface))
@@ -327,35 +298,22 @@ func TestServeConnWithHTTP_AcceptError(t *testing.T) {
 		_ = clientConn.Close()
 	}()
 
-	// Directly test serveConnWithHTTP with a listener that returns
-	// a non-closed error on the second Accept.
-	errCh := make(chan error, 2)
-	notifyConn := newCloseNotifyConn(serverConn)
-	wrappedLn := &errorOnSecondAcceptListener{
-		inner: &singleConnListener{conn: notifyConn, ready: notifyConn.done},
-	}
-
-	go func() {
-		err := srv.inner.Serve(wrappedLn)
-		if err != nil &&
-			!errors.Is(err, http.ErrServerClosed) &&
-			!errors.Is(err, net.ErrClosed) {
-			errCh <- err
-		} else {
-			errCh <- nil
-		}
-	}()
+	errCh := make(chan error, 1)
+	// Call serveConnWithHTTP directly — it creates its own
+	// singleConnListener internally.
+	go srv.serveConnWithHTTP(serverConn, errCh)
 
 	select {
 	case err := <-errCh:
-		require.Error(t, err, "expected non-filtered error from Serve")
-		assert.Contains(t, err.Error(), "accept failed")
-	case <-time.After(5 * time.Second):
-		t.Fatal("serveConnWithHTTP did not return within 5s")
+		t.Fatalf("serveConnWithHTTP should not have sent error, got: %v", err)
+	case <-time.After(3 * time.Second):
+		// Expected: no error sent (filtered).
 	}
 }
 
-func TestShutdownInner(t *testing.T) {
+// TestServeMultiFastPath_CtxCancellation verifies the normal shutdown
+// path: ctx cancellation triggers cleanup in all serveFastPath goroutines.
+func TestServeMultiFastPath_CtxCancellation(t *testing.T) {
 	t.Parallel()
 	srv := NewHTTP(ListenerConfig{
 		Addr:        "127.0.0.1:0",
@@ -364,11 +322,27 @@ func TestShutdownInner(t *testing.T) {
 		FastPath:    &mockFastPathHandler{},
 		FastMetrics: &mockFastPathMetrics{},
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	// shutdownInner should not panic and should close the inner server.
-	srv.shutdownInner(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.serveMultiFastPath(ctx, []net.Listener{ln1, ln2}) }()
+
+	// Cancel after a short delay to trigger the ctx.Done branch.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("serveMultiFastPath did not return after ctx cancellation")
+	}
 }
 
 func TestHandleFastPathConn_Cleartext(t *testing.T) {

@@ -1365,3 +1365,80 @@ func TestRunCompaction_NoForceSkipsWhenNotNeeded(t *testing.T) {
 	ts.runCompaction("test-skip", false)
 	require.Equal(t, int64(0), ts.walEntryCount.Load(), "walEntryCount should remain 0 — compaction skipped")
 }
+
+// TestCompactLoop_PeriodicTickTriggersCompaction verifies that the
+// compactLoop background goroutine triggers global compaction via the
+// periodic tick when CompactInterval is very short. This covers the
+// periodicTick → NeedsCompaction → runCompaction path (lines 831-843).
+func TestCompactLoop_PeriodicTickTriggersCompaction(t *testing.T) {
+	// Sequential — not t.Parallel — to avoid interfering with other
+	// tests that check goroutine counts.
+	ctx := context.Background()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 1 << 30, SegMax: 512},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          0,
+		TombstoneDrainInterval: -1,
+		CompactStartupDelay:    -1, // start immediately
+		CompactInterval:        100 * time.Millisecond,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(ctx) })
+
+	// Write enough records to create dead bytes (>30% threshold).
+	for i := range 40 {
+		_, _, err := ts.warm.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	for i := range 20 {
+		_, err := ts.warm.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// The periodic tick fires every 100ms. Poll until compaction
+	// reduces the dead-byte ratio below the threshold (NeedsCompaction
+	// returns false after a successful global Compact).
+	poll.Eventually(t, 5*time.Second, 100*time.Millisecond, func() bool {
+		return !ts.warm.NeedsCompaction()
+	})
+}
+
+// TestCompactLoop_DiskOverBudgetTriggersCompaction verifies that the
+// compactLoop disk-over-budget path triggers global compaction on the
+// 30s check tick. Since the tick is hardcoded at 30s, we test the
+// underlying path (DiskOverBudget → runCompaction) directly.
+func TestCompactLoop_DiskOverBudgetTriggersCompaction(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 1 << 30, SegMax: 512, MaxDiskBytes: 1},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          0,
+		TombstoneDrainInterval: -1,
+		CompactStartupDelay:    -1,
+		CompactInterval:        -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(ctx) })
+
+	// Write records to exceed the tiny MaxDiskBytes=1.
+	for i := range 5 {
+		_, _, err := ts.warm.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	require.True(t, ts.warm.DiskOverBudget(), "should be over disk budget")
+
+	// Force compaction the same way the 30s tick would.
+	ts.runCompaction("disk over-budget", true)
+
+	// Keys should survive.
+	for i := range 5 {
+		got, err := ts.warm.Get(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Get %d", i)
+		require.NotNilf(t, got, "key %d should survive", i)
+	}
+}

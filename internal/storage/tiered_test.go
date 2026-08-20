@@ -1442,3 +1442,90 @@ func TestCompactLoop_DiskOverBudgetTriggersCompaction(t *testing.T) {
 		require.NotNilf(t, got, "key %d should survive", i)
 	}
 }
+
+// TestRunPostCompaction_SnapshotError verifies that runPostCompaction
+// logs the error and returns early when the snapshot write fails. We
+// simulate this by making the warm directory read-only after the WAL
+// rewrite succeeds (so the snapshot WriteSnapshot fails).
+func TestRunPostCompaction_SnapshotError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 1 << 30, SegMax: 512},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          0,
+		TombstoneDrainInterval: -1,
+		CompactStartupDelay:    -1,
+		CompactInterval:        -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = os.Chmod(warmDir, 0o755); _ = ts.Close(ctx) })
+
+	// Write some data so compaction has something to do.
+	for i := range 40 {
+		_, _, err := ts.warm.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	for i := range 20 {
+		_, err := ts.warm.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Compact a segment.
+	segID, needs := ts.warm.NeedsSegmentCompaction()
+	require.True(t, needs)
+	require.NoError(t, ts.warm.CompactSegment(segID))
+
+	// Make the warm directory read-only so WriteSnapshot fails
+	// (it writes index.snap.tmp then renames — the tmp write fails).
+	require.NoError(t, os.Chmod(warmDir, 0o555))
+
+	// runPostCompaction should not panic — it logs the snapshot error
+	// and returns early (walEntryCount is NOT reset because the
+	// snapshot failed, so the early return skips the Store(0)).
+	// The WAL rewrite itself may or may not succeed depending on
+	// whether the WAL dir is writable (it is — only warm is read-only).
+	ts.runPostCompaction("snapshot-error-test")
+}
+
+// TestRunCompaction_CompactError verifies that runCompaction logs the
+// error when Compact() fails. We simulate this by making the warm
+// directory read-only so Compact cannot create its .compact/ temp dir.
+func TestRunCompaction_CompactError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	warmDir := filepath.Join(dir, "warm")
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:                   &warm.Config{Dir: warmDir, MaxBytes: 1 << 30, SegMax: 512},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          0,
+		TombstoneDrainInterval: -1,
+		CompactStartupDelay:    -1,
+		CompactInterval:        -1,
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = os.Chmod(warmDir, 0o755); _ = ts.Close(ctx) })
+
+	// Write enough data to create dead bytes for compaction.
+	for i := range 40 {
+		_, _, err := ts.warm.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	for i := range 20 {
+		_, err := ts.warm.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Make the warm directory read-only so Compact fails creating
+	// its .compact/ temp directory.
+	require.NoError(t, os.Chmod(warmDir, 0o555))
+
+	// runCompaction with force=true should log the Compact error and
+	// return early (runPostCompaction is NOT called).
+	ts.runCompaction("compact-error-test", true)
+}

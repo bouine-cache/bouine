@@ -796,8 +796,14 @@ func (t *TieredStore) compactLoop() {
 			// segment at a time. Loop until no segment needs
 			// compaction or an error occurs — each CompactSegment
 			// call is cheap (scan under RLock, ms-scale swap).
+			// Cap at len(segs) iterations to prevent a live lock
+			// where a compacted segment's replacement still
+			// exceeds the dead-byte threshold (orphaned records
+			// from concurrent overwrites). Remaining segments
+			// are picked up on the next 30s tick.
 			compacted := false
-			for {
+			maxIters := t.warm.SegmentCount()
+			for range maxIters {
 				segID, needs := t.warm.NeedsSegmentCompaction()
 				if !needs {
 					break

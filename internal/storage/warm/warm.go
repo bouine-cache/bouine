@@ -2522,6 +2522,16 @@ func (s *Store) swapCompactSegment(segID, newSegID int, recs []compactRec) error
 	return nil
 }
 
+// SegmentCount returns the number of segments, including the active
+// segment. Used by compactLoop to cap the per-segment compaction loop
+// and prevent a live lock where a compacted segment's replacement
+// still exceeds the dead-byte threshold.
+func (s *Store) SegmentCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.segs)
+}
+
 // NeedsSegmentCompaction reports whether any non-active segment exceeds
 // the compaction dead-byte threshold. Returns the segID of the first
 // qualifying segment and true, or 0 and false if none qualify.
@@ -2533,12 +2543,19 @@ func (s *Store) swapCompactSegment(segID, newSegID int, recs []compactRec) error
 // of an O(N) index scan per call. The scan runs under idxMu.RLock
 // (read-only) and is called from the 30s compactLoop tick, not from
 // the hot path.
+//
+// s.mu is held only long enough to snapshot the segment slice — the
+// index scan and per-segment checks run without s.mu so they do not
+// block newSegment (which needs s.mu.Lock).
 func (s *Store) NeedsSegmentCompaction() (int, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if len(s.segs) <= 1 {
+		s.mu.RUnlock()
 		return 0, false
 	}
+	segs := make([]*Segment, len(s.segs))
+	copy(segs, s.segs)
+	s.mu.RUnlock()
 
 	// Sum live bytes per segment from the index.
 	s.idxMu.RLock()
@@ -2549,8 +2566,8 @@ func (s *Store) NeedsSegmentCompaction() (int, bool) {
 	s.idxMu.RUnlock()
 
 	// Check each non-active segment.
-	for i := range len(s.segs) - 1 {
-		seg := s.segs[i]
+	for i := range len(segs) - 1 {
+		seg := segs[i]
 		seg.mu.Lock()
 		segSize := seg.size
 		seg.mu.Unlock()

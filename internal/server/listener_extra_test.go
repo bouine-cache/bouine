@@ -27,7 +27,7 @@ func TestServeSingle_WithMaxConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	resp, err := http.Get("http://" + srv.Addr())
 	require.NoError(t, err)
@@ -196,7 +196,7 @@ func TestServe_ReusePortFallsBack(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	resp, err := http.Get("http://" + srv.Addr())
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func TestServe_ReusePortFallsBackWithFastPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	conn, err := net.Dial("tcp", srv.Addr())
 	require.NoError(t, err)

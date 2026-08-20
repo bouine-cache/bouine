@@ -17,9 +17,9 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 )
 
-func waitForAddr(t *testing.T, l *Listener, timeout time.Duration) {
+func waitForAddr(t *testing.T, l *Listener) {
 	t.Helper()
-	poll.Eventually(t, timeout, 10*time.Millisecond, func() bool {
+	poll.Eventually(t, 3*time.Second, 10*time.Millisecond, func() bool {
 		addr := l.Addr()
 		if addr == "" {
 			return false
@@ -52,7 +52,7 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
 
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	resp, err := http.Get("http://" + srv.Addr())
 	if err != nil {
@@ -90,7 +90,7 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
 
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	clientTLS := &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // test

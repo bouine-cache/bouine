@@ -43,6 +43,14 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
+		// Shut down the inner http.Server to close any active HTTP/2
+		// connections that serveConnWithHTTP handed off to net/http.
+		// Without this, h2c connections keep the WaitGroup blocked
+		// because http.Server.Serve does not observe listener closure.
+		shutCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = s.inner.Shutdown(shutCtx)
 	}()
 
 	for {
@@ -159,6 +167,12 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 		for _, l := range listeners {
 			_ = l.Close()
 		}
+		// Shut down the inner http.Server to close any active HTTP/2
+		// connections handed off to net/http via serveConnWithHTTP.
+		shutCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), 10*time.Second)
+		_ = s.inner.Shutdown(shutCtx)
+		cancel()
 		wg.Wait()
 		close(errCh)
 		for err := range errCh {
@@ -171,6 +185,7 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 		for _, l := range listeners {
 			_ = l.Close()
 		}
+		_ = s.inner.Close()
 		wg.Wait()
 		return err
 	}

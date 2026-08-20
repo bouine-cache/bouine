@@ -62,7 +62,7 @@ func TestServeMulti_FallbackToSingle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestServeMultiFastPath_FastPathWithReusePort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	// Make a request to verify the server works.
 	addr := srv.Addr()
 	conn, err := net.Dial("tcp", addr)
@@ -111,7 +111,7 @@ func TestServe_ReusePortNotSupported_Fallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestServeMulti_DirectCall_Fallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.serveMulti(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestServeMulti_DirectCall_WithFastPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.serveMulti(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	// On macOS, serveMulti falls back to serveSingle (reusePort unsupported).
@@ -171,7 +171,7 @@ func TestServeMulti_WithMaxConns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.serveMulti(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)

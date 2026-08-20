@@ -47,7 +47,7 @@ make test         # go test -race ./...
 
 You need:
 
-- Go 1.26.x (toolchain pinned in `go.mod`).
+- Go 1.27.x (toolchain pinned in `go.mod`).
 - `prek` (`brew install prek`, `pip install prek`, or `uv tool install prek`).
 - Docker (for integration and conformance tests).
 

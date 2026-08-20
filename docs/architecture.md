@@ -1,7 +1,7 @@
 # bouine — Architecture Reference
 
 `bouine` is a horizontally-scalable, observability-first HTTP reverse-proxy
-cache written in Go 1.26. This document is the design reference: goals,
+cache written in Go 1.27. This document is the design reference: goals,
 layer model, implementation decisions, and operational characteristics.
 
 ---

@@ -2,7 +2,7 @@
 # test/cachetests/run.sh — Run the http-tests/cache-tests conformance
 # suite against a local bouine instance.
 #
-# Prerequisites: Node.js 18+, npm, Go 1.26+
+# Prerequisites: Node.js 18+, npm, Go 1.27+
 # Usage: make conformance
 
 set -euo pipefail

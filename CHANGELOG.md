@@ -10,6 +10,10 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+- Toolchain bumped from Go 1.26.6 to Go 1.27.0 (Dockerfile, CI workflows,
+  go.mod, documentation).
+
 ### Removed
 - **Breaking (SDK):** removed `bouineapi.Client.Reload` and `ReloadResult`.
   The admin `POST /v1/config/reload` endpoint, the dashboard "Reload config"

@@ -739,6 +739,21 @@ func (t *TieredStore) Stats() api.Stats {
 // compactLoop runs the periodic warm-tier compaction until done is closed.
 // After a successful compaction the WAL is rewritten with the live index
 // so it stays bounded and restart replay is fast.
+//
+// The loop uses two compaction strategies:
+//   - Per-segment incremental compaction (CompactSegment) on the 30s
+//     tick: compacts individual non-active segments whose dead-byte
+//     ratio exceeds the threshold. The scan runs under s.mu.RLock
+//     (concurrent with Get/Put/Delete), and only the millisecond-scale
+//     swap holds s.mu.Lock. This eliminates the periodic latency spike
+//     caused by the global Compact holding s.mu.Lock for the full scan
+//     duration (issue #499).
+//   - Global compaction (Compact) on the 30m tick and disk-over-budget:
+//     rewrites all segments at once. Used as a fallback when per-segment
+//     compaction is insufficient (e.g., the active segment has
+//     accumulated tombstones that per-segment compaction cannot
+//     reclaim, or the disk is over budget and aggressive reclamation
+//     is needed).
 func (t *TieredStore) compactLoop() {
 	defer t.compactWg.Done()
 	startupDelay := t.compactStartupDelay
@@ -751,7 +766,8 @@ func (t *TieredStore) compactLoop() {
 	startupTimer := time.NewTimer(startupDelay)
 	defer startupTimer.Stop()
 	// Use configured interval, default 30m. -1 disables periodic
-	// compaction (disk over-budget check on the 30s tick still runs).
+	// global compaction (per-segment and disk over-budget checks on
+	// the 30s tick still run).
 	interval := t.compactInterval
 	if interval == 0 {
 		interval = 30 * time.Minute
@@ -761,7 +777,8 @@ func (t *TieredStore) compactLoop() {
 		ticker = time.NewTicker(interval)
 		defer ticker.Stop()
 	}
-	// Fast check tick for disk over-budget detection (every 30s).
+	// Fast check tick for per-segment compaction and disk over-budget
+	// detection (every 30s).
 	checkTicker := time.NewTicker(30 * time.Second)
 	defer checkTicker.Stop()
 	startupDone := false
@@ -775,9 +792,39 @@ func (t *TieredStore) compactLoop() {
 			if !startupDone {
 				continue
 			}
-			// Disk over-budget check: trigger compaction immediately
-			// if physical disk usage exceeds warm_max_disk_bytes or
-			// filesystem free space drops below min_free_disk.
+			// Per-segment incremental compaction: compact one
+			// segment at a time. Loop until no segment needs
+			// compaction or an error occurs — each CompactSegment
+			// call is cheap (scan under RLock, ms-scale swap).
+			compacted := false
+			for {
+				segID, needs := t.warm.NeedsSegmentCompaction()
+				if !needs {
+					break
+				}
+				if err := t.warm.CompactSegment(segID); err != nil {
+					if errors.Is(err, warm.ErrSegmentNotFound) {
+						// Segment was replaced by a concurrent
+						// compaction or a global Compact — retry
+						// to find the next candidate.
+						continue
+					}
+					t.logger.Error("warm tier per-segment compaction failed",
+						"segID", segID, "error", err)
+					break
+				}
+				compacted = true
+			}
+			if compacted {
+				t.runPostCompaction("per-segment")
+			}
+			// Disk over-budget check: trigger global compaction
+			// immediately if physical disk usage exceeds
+			// warm_max_disk_bytes or filesystem free space drops
+			// below min_free_disk. Global compaction is the
+			// fallback for aggressive reclamation that per-segment
+			// compaction cannot achieve (e.g., reclaiming the
+			// active segment's tombstones).
 			if t.warm.DiskOverBudget() {
 				t.runCompaction("disk over-budget", true)
 			}
@@ -785,6 +832,12 @@ func (t *TieredStore) compactLoop() {
 			if !startupDone {
 				continue // still in startup delay period
 			}
+			// Periodic global compaction as a fallback. Per-segment
+			// compaction on the 30s tick handles the steady state;
+			// this catches cases where the active segment has
+			// accumulated tombstones or the global dead-byte ratio
+			// is high but no individual non-active segment crossed
+			// the threshold.
 			if t.warm.NeedsCompaction() {
 				t.runCompaction("periodic", false)
 			}
@@ -801,8 +854,8 @@ func periodicTick(ticker *time.Ticker) <-chan time.Time {
 	return ticker.C
 }
 
-// runCompaction executes a compaction cycle with post-compaction WAL
-// rewrite and snapshot write. The reason string is included in log
+// runCompaction executes a global compaction cycle with post-compaction
+// WAL rewrite and snapshot write. The reason string is included in log
 // messages for observability (e.g., "periodic", "disk over-budget").
 // When force is true, the NeedsCompaction dead-byte ratio check is
 // skipped — used by the disk over-budget path where compaction must
@@ -816,14 +869,21 @@ func (t *TieredStore) runCompaction(reason string, force bool) {
 		return
 	}
 	t.logger.Info("warm tier compaction complete", "reason", reason)
+	t.runPostCompaction(reason)
+}
+
+// runPostCompaction rewrites the WAL with the live index and writes a
+// fresh snapshot. Called after both global and per-segment compaction
+// — segIDs and offsets changed, so the old WAL and snapshot are stale.
+func (t *TieredStore) runPostCompaction(reason string) {
 	if err := t.rewriteWAL(); err != nil {
-		t.logger.Error("wal rewrite after compaction failed", "error", err)
+		t.logger.Error("wal rewrite after compaction failed", "reason", reason, "error", err)
 		return
 	}
 	// Write a fresh snapshot after compaction — segIDs and offsets
 	// changed, the old snapshot is stale.
 	if err := t.warm.WriteSnapshot(); err != nil {
-		t.logger.Error("snapshot write after compaction failed", "error", err)
+		t.logger.Error("snapshot write after compaction failed", "reason", reason, "error", err)
 		return
 	}
 	t.walEntryCount.Store(0)

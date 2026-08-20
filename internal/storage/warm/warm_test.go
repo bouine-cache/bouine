@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2237,4 +2238,444 @@ func TestCompact_RecomputesProtectedCount(t *testing.T) {
 		require.NoErrorf(t, err, "Get %d after compact", i)
 		require.Len(t, got, 4)
 	}
+}
+
+// TestCompactSegment_BasicRewrite verifies that CompactSegment rewrites
+// a single non-active segment, dropping tombstones and preserving live
+// records. The active segment must be untouched.
+func TestCompactSegment_BasicRewrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Small SegMax to force segment rollover so we have multiple
+	// non-active segments.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write 10 records — each 24+4+4 = 32 bytes — so ~16 records per
+	// 512-byte segment. This creates multiple segments.
+	for i := range 20 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete keys 0–9 to create tombstones in the early segments.
+	for i := range 10 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Verify we have multiple segments and the first is non-active.
+	s.mu.RLock()
+	require.Greater(t, len(s.segs), 1, "need multiple segments")
+	targetSegID := s.segs[0].ID
+	activeSegID := s.segs[len(s.segs)-1].ID
+	s.mu.RUnlock()
+	require.NotEqual(t, targetSegID, activeSegID, "target must be non-active")
+
+	// Compact the first (non-active) segment.
+	err = s.CompactSegment(targetSegID)
+	require.NoError(t, err, "CompactSegment")
+
+	// Live keys 10–19 must still be readable.
+	for i := 10; i < 20; i++ {
+		got, err := s.Get(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Get %d after segment compaction", i)
+		require.NotNil(t, got, "key %d should be live", i)
+		require.Equal(t, byte(i), got[0])
+	}
+
+	// Deleted keys 0–9 must still be absent.
+	for i := range 10 {
+		got, err := s.Get(testkey.Key(uint64(i)))
+		require.NoError(t, err, "Get deleted %d", i)
+		require.Nil(t, got, "deleted key %d should be absent", i)
+	}
+
+	// The old segment ID should no longer be in segByID (it was
+	// replaced by a new segment with a new ID).
+	s.mu.RLock()
+	_, oldStillPresent := s.segByID[targetSegID]
+	s.mu.RUnlock()
+	require.False(t, oldStillPresent, "old segment should be replaced")
+}
+
+// TestCompactSegment_ActiveSegmentRejected verifies that CompactSegment
+// refuses to compact the active segment (Put writes to it, so compacting
+// it would race with concurrent writes — the #280 bug).
+func TestCompactSegment_ActiveSegmentRejected(t *testing.T) {
+	t.Parallel()
+	s := tmpStore(t)
+
+	_, _, err := s.Put(testkey.Key(1), []byte("data"))
+	require.NoError(t, err)
+
+	s.mu.RLock()
+	activeID := s.segs[len(s.segs)-1].ID
+	s.mu.RUnlock()
+
+	err = s.CompactSegment(activeID)
+	require.ErrorIs(t, err, ErrSegmentNotFound, "compacting active segment should be rejected")
+}
+
+// TestCompactSegment_ConcurrentPutNoDataLoss verifies that Put calls
+// concurrent with CompactSegment do not lose data. This is the #280
+// regression test for per-segment compaction — the fix relies on
+// non-active segments never being written to by Put.
+func TestCompactSegment_ConcurrentPutNoDataLoss(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Small SegMax to force many segments.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Populate with live records across many segments.
+	for i := range 200 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete first 100 to create dead bytes in early segments.
+	for i := range 100 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Collect the non-active segment IDs to compact.
+	s.mu.RLock()
+	var nonActiveIDs []int
+	for i := range len(s.segs) - 1 {
+		nonActiveIDs = append(nonActiveIDs, s.segs[i].ID)
+	}
+	s.mu.RUnlock()
+	require.NotEmpty(t, nonActiveIDs, "need non-active segments to compact")
+
+	// Start a Put goroutine that writes new keys concurrently.
+	var mu sync.Mutex
+	var written []uint64
+	stop := make(chan struct{})
+	var keyCounter atomic.Uint64
+	keyCounter.Store(1000) // new keys distinct from the initial set
+
+	started := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		first := true
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			key := keyCounter.Add(1)
+			if _, _, err := s.Put(testkey.Key(key), []byte{byte(key)}); err != nil {
+				t.Errorf("Put during segment compaction: %v", err)
+				return
+			}
+			mu.Lock()
+			written = append(written, key)
+			mu.Unlock()
+			if first {
+				first = false
+				close(started)
+			}
+		}
+	}()
+
+	// Wait for Put goroutine to start, then compact each non-active segment.
+	<-started
+	for _, segID := range nonActiveIDs {
+		if err := s.CompactSegment(segID); err != nil {
+			// Segment may have been replaced by a previous
+			// CompactSegment call — skip it.
+			if errors.Is(err, ErrSegmentNotFound) {
+				continue
+			}
+			t.Errorf("CompactSegment %d: %v", segID, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	// Every key written during compaction must be retrievable.
+	mu.Lock()
+	keys := written
+	mu.Unlock()
+	require.NotEmpty(t, keys)
+	seen := make(map[uint64]bool)
+	var missing []uint64
+	for _, k := range keys {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		got, err := s.Get(testkey.Key(k))
+		require.NoErrorf(t, err, "Get %d after segment compaction", k)
+		if got == nil {
+			missing = append(missing, k)
+		}
+	}
+	require.Empty(t, missing, "CompactSegment dropped keys written during compaction: %v", missing[:min(len(missing), 10)])
+}
+
+// TestCompactSegment_ConcurrentGetNoBlock verifies that Get calls
+// concurrent with CompactSegment are not blocked for the full scan
+// duration. Unlike the old Compact (which holds s.mu.Lock for the
+// entire ~90s scan), CompactSegment only holds s.mu.Lock for the
+// millisecond-scale swap phase.
+//
+// This test uses a timing assertion: if CompactSegment held s.mu.Lock
+// for the entire scan, the Get would block for the full duration and
+// the test would timeout. With the fix, Get should complete quickly.
+func TestCompactSegment_ConcurrentGetNoBlock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// SegMax large enough to hold many records in one segment so
+	// the scan takes measurable time, but small enough to create
+	// rollover.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 4096})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Fill the first segment with live records, then roll into a
+	// second segment (making the first non-active).
+	for i := range 100 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i), byte(i + 1)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete ~50% to create dead bytes in the first segment.
+	for i := range 50 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Identify the non-active segment.
+	s.mu.RLock()
+	require.Greater(t, len(s.segs), 1, "need multiple segments")
+	targetSegID := s.segs[0].ID
+	s.mu.RUnlock()
+
+	// Read a live key that is in the active segment (not the one
+	// being compacted) — this should not block during the scan.
+	liveKey := uint64(50)
+	getDone := make(chan error, 1)
+	go func() {
+		_, err := s.Get(testkey.Key(liveKey))
+		getDone <- err
+	}()
+
+	// Start CompactSegment concurrently.
+	compactDone := make(chan error, 1)
+	go func() {
+		compactDone <- s.CompactSegment(targetSegID)
+	}()
+
+	// The Get should complete quickly — it's reading from the
+	// active segment which is not being compacted.
+	select {
+	case err := <-getDone:
+		require.NoError(t, err, "Get should succeed during segment compaction")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Get was blocked for >10s during CompactSegment — lock not released during scan")
+	}
+
+	// Wait for compaction to finish.
+	select {
+	case err := <-compactDone:
+		require.NoError(t, err, "CompactSegment should succeed")
+	case <-time.After(30 * time.Second):
+		t.Fatal("CompactSegment did not complete within 30s")
+	}
+}
+
+// TestNeedsSegmentCompaction_DetectsDeadSegment verifies that
+// NeedsSegmentCompaction identifies a non-active segment whose
+// dead-byte ratio exceeds the compaction threshold.
+func TestNeedsSegmentCompaction_DetectsDeadSegment(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Small segments to make dead-byte ratios easy to compute.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Fill ~3 segments (each record is 32 bytes: 24 header + 1 body + 4 footer = 29,
+	// but actual size depends on body len = 1, so 24+1+4 = 29 bytes).
+	// Write 60 records → ~2 segments at ~16 records/seg.
+	for i := range 60 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete keys 0–15 (first segment) to make it >50% dead.
+	for i := range 16 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// NeedsSegmentCompaction should find the first segment.
+	segID, found := s.NeedsSegmentCompaction()
+	require.True(t, found, "should find a segment needing compaction")
+	require.GreaterOrEqual(t, segID, 0, "segID should be valid")
+
+	// After compacting that segment, it should no longer be flagged.
+	err = s.CompactSegment(segID)
+	require.NoError(t, err, "CompactSegment")
+
+	// The new segment should have 0 dead bytes. If the old segID
+	// is no longer present, that's fine — the new segment replaced it.
+	// Check that no remaining segment exceeds the threshold.
+	segID2, found2 := s.NeedsSegmentCompaction()
+	// It's possible the second segment also has dead bytes from
+	// tombstones written to the active segment, so we don't assert
+	// !found2 — we just verify the first segment is no longer flagged.
+	if found2 {
+		require.NotEqual(t, segID, segID2, "compacted segment should not be flagged again")
+	}
+}
+
+// TestCompactSegment_PreservesProtectedFlags verifies that per-segment
+// compaction preserves the protected flag on entries that survive into
+// the new segment.
+func TestCompactSegment_PreservesProtectedFlags(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write records across at least 2 segments.
+	for i := range 40 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete first 10 to create dead bytes in the first segment.
+	for i := range 10 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Protect the surviving keys in the first segment (keys 10–15ish).
+	for i := 10; i < 20; i++ {
+		s.Protect(testkey.Key(uint64(i)))
+	}
+	wantProtected := 10
+	require.Equal(t, wantProtected, s.ProtectedCount(), "pre-compact protected count")
+
+	// Compact the first segment.
+	s.mu.RLock()
+	targetSegID := s.segs[0].ID
+	s.mu.RUnlock()
+
+	err = s.CompactSegment(targetSegID)
+	require.NoError(t, err, "CompactSegment")
+
+	// Protected count should be unchanged for entries that survived.
+	// Some protected entries might have been in a later segment, so
+	// we check that at least some protected entries survived.
+	actualProtected := s.ProtectedCount()
+	require.Greater(t, actualProtected, 0, "some protected entries should survive")
+
+	// Verify the surviving protected keys are still readable.
+	for i := 10; i < 20; i++ {
+		got, err := s.Get(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Get protected %d", i)
+		if got != nil {
+			// Key survived compaction — it should still be protected.
+			s.idxMu.RLock()
+			loc, ok := s.index[testkey.Key(uint64(i))]
+			s.idxMu.RUnlock()
+			require.True(t, ok, "surviving key should be in index")
+			require.True(t, loc.protected, "surviving key should remain protected")
+		}
+	}
+}
+
+// TestCompactSegment_AllTombstones verifies that CompactSegment handles
+// the case where every record in the target segment is a tombstone (no
+// live records). The segment should be replaced with an empty segment
+// (size 0), and NeedsSegmentCompaction should no longer flag it.
+func TestCompactSegment_AllTombstones(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Fill one segment, then roll into a second to make the first
+	// non-active.
+	for i := range 20 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete all keys — tombstones go to the active segment, but the
+	// live records in the first segment become dead (index entries
+	// removed, so the records are unreferenced dead space).
+	for i := range 20 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	s.mu.RLock()
+	require.Greater(t, len(s.segs), 1, "need multiple segments")
+	targetSegID := s.segs[0].ID
+	s.mu.RUnlock()
+
+	// Compact the first segment — it has live records on disk but no
+	// index entries pointing at them (all deleted). The scan finds no
+	// matching idxSnap entries, so pending is empty.
+	err = s.CompactSegment(targetSegID)
+	require.NoError(t, err, "CompactSegment with all-dead segment")
+
+	// The old segment ID should be gone, replaced by a new empty one.
+	s.mu.RLock()
+	_, oldPresent := s.segByID[targetSegID]
+	s.mu.RUnlock()
+	require.False(t, oldPresent, "old segment should be replaced")
+
+	// All keys should be absent.
+	for i := range 20 {
+		got, err := s.Get(testkey.Key(uint64(i)))
+		require.NoError(t, err, "Get deleted %d", i)
+		require.Nil(t, got, "deleted key %d should be absent", i)
+	}
+
+	// The new segment should not be flagged by NeedsSegmentCompaction
+	// (it has size 0, which is skipped).
+	segID, found := s.NeedsSegmentCompaction()
+	if found {
+		require.NotEqual(t, segID, targetSegID, "compacted segment should not be flagged")
+	}
+}
+
+// TestOpenExisting_CleansStaleTempFiles verifies that openExisting
+// removes orphaned .tmp files from aborted CompactSegment runs at
+// startup, preventing disk space leaks.
+func TestOpenExisting_CleansStaleTempFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	_, _, err = s.Put(testkey.Key(1), []byte("data"))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Simulate a crashed CompactSegment: write a .tmp file directly
+	// into the segment directory.
+	tmpPath := filepath.Join(dir, "999.seg.tmp")
+	require.NoError(t, os.WriteFile(tmpPath, []byte("stale"), 0o600))
+
+	// Reopen — openExisting should remove the .tmp file.
+	s2, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore reopen")
+	t.Cleanup(func() { _ = s2.Close() })
+
+	_, statErr := os.Stat(tmpPath)
+	require.True(t, os.IsNotExist(statErr), "stale .tmp file should be removed at startup")
+
+	// The segment files should still be present (not removed).
+	s2.mu.RLock()
+	require.NotEmpty(t, s2.segs, "segment files should still be loaded")
+	s2.mu.RUnlock()
 }

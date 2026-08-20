@@ -140,6 +140,14 @@ func reportFastPathError(_ error, _ chan<- error) {}
 func (s *Listener) serveConnWithHTTP(conn net.Conn, errCh chan<- error) {
 	notifyConn := newCloseNotifyConn(conn)
 	cl := &singleConnListener{conn: notifyConn, ready: notifyConn.done}
+	s.serveListenerWithHTTP(cl, errCh)
+}
+
+// serveListenerWithHTTP calls s.inner.Serve on the given one-shot listener
+// and surfaces any non-filtered error to errCh. Filtered errors are
+// http.ErrServerClosed and net.ErrClosed, both expected during normal
+// connection lifecycle.
+func (s *Listener) serveListenerWithHTTP(cl net.Listener, errCh chan<- error) {
 	if err := s.inner.Serve(cl); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) &&
 		!errors.Is(err, net.ErrClosed) {
@@ -147,7 +155,6 @@ func (s *Listener) serveConnWithHTTP(conn net.Conn, errCh chan<- error) {
 	}
 }
 
-// serveMultiFastPath runs the fast-path accept loop across multiple
 // serveMultiFastPath runs the fast-path accept loop across multiple
 // SO_REUSEPORT listeners. Called from serveMulti when the fast path is enabled.
 func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Listener) error {
@@ -175,11 +182,9 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 	case <-ctx.Done():
 		// External cancellation — serveFastPath goroutines handle
 		// listener close and inner shutdown via their ctx.Done watcher.
-	case err := <-errCh:
+	case firstErr = <-errCh:
 		// One listener failed. Cancel multiCtx to trigger cleanup
-		// in all other serveFastPath goroutines (close listeners +
-		// inner shutdown).
-		firstErr = err
+		// in all other serveFastPath goroutines.
 		multiCancel()
 	}
 

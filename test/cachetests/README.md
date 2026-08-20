@@ -14,7 +14,7 @@ suite against a running `bouine` instance. The harness:
 
 ## Prerequisites
 
-- Go 1.26+ (to build bouine)
+- Go 1.27+ (to build bouine)
 - Node.js 18+ and npm (for the cache-tests harness)
 
 ## Running

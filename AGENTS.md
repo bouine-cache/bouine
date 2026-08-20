@@ -6,7 +6,7 @@ file, then start work. If anything in this file conflicts with `docs/architectur
 `docs/architecture.md` wins for *what* to build; this file wins for *how* to build it.
 
 > One-line summary: build a horizontally-scalable, observability-first HTTP/1.1+2+3
-> reverse-proxy cache in Go 1.26 that matches Varnish on
+> reverse-proxy cache in Go 1.27 that matches Varnish on
 > [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests),
 > never regresses on benchmarks, and stays maintainable across many phases
 > and many contributors.
@@ -18,7 +18,7 @@ file, then start work. If anything in this file conflicts with `docs/architectur
 1. Mission & Success Criteria
 2. Non-Negotiable Rules
 3. Layered Architecture Rules
-4. Coding Standards (Go 1.26)
+4. Coding Standards (Go 1.27)
 5. Dependency Policy
 6. Security Rules
 7. Performance Rules
@@ -131,9 +131,9 @@ L1 → L7, /pkg/api
 
 ---
 
-## 4. Coding Standards (Go 1.26)
+## 4. Coding Standards (Go 1.27)
 
-- **Toolchain pinned** in `go.mod` (`go 1.26.X`). Never bump unilaterally.
+- **Toolchain pinned** in `go.mod` (`go 1.27.X`). Never bump unilaterally.
 - **Formatting**: `gofmt -s` and `goimports`. Lines wrap at 100 columns
   except generated code.
 - **templ**: dashboard HTML lives in `internal/dashboard/templates/*.templ`.

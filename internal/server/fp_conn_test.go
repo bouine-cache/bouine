@@ -180,7 +180,7 @@ func TestListener_Shutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	// Shutdown should work.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
@@ -351,7 +351,7 @@ func TestServeFastPath_H1Request(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	// Send an HTTP/1.1 GET request.
 	addr := srv.Addr()
@@ -384,7 +384,7 @@ func TestServeFastPath_H2CPreface(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	addr := srv.Addr()
 	conn, err := net.Dial("tcp", addr)
@@ -422,7 +422,7 @@ func TestServeFastPath_EmptyConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	// Connect and immediately close — triggers the peek error path
 	// in handleCleartextFastPath.
@@ -450,7 +450,7 @@ func TestServeFastPath_HEADRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	addr := srv.Addr()
 	conn, err := net.Dial("tcp", addr)

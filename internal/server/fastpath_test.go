@@ -61,7 +61,7 @@ func TestListener_AddrAfterServe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	addr := srv.Addr()
 	assert.NotEmpty(t, addr)
 	cancel()
@@ -78,7 +78,7 @@ func TestServeSingle_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestHandleCleartextFastPath_H2CAndH1(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 
 	addr := srv.Addr()
 	conn, err := net.Dial("tcp", addr)
@@ -231,7 +231,7 @@ func TestServeFastPath_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
@@ -250,7 +250,7 @@ func TestServeMulti_ReusePort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
@@ -269,7 +269,7 @@ func TestServeMulti_ReusePortWithFastPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv, 3*time.Second)
+	waitForAddr(t, srv)
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)

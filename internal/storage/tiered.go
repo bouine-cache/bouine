@@ -740,20 +740,8 @@ func (t *TieredStore) Stats() api.Stats {
 // After a successful compaction the WAL is rewritten with the live index
 // so it stays bounded and restart replay is fast.
 //
-// The loop uses two compaction strategies:
-//   - Per-segment incremental compaction (CompactSegment) on the 30s
-//     tick: compacts individual non-active segments whose dead-byte
-//     ratio exceeds the threshold. The scan runs under s.mu.RLock
-//     (concurrent with Get/Put/Delete), and only the millisecond-scale
-//     swap holds s.mu.Lock. This eliminates the periodic latency spike
-//     caused by the global Compact holding s.mu.Lock for the full scan
-//     duration (issue #499).
-//   - Global compaction (Compact) on the 30m tick and disk-over-budget:
-//     rewrites all segments at once. Used as a fallback when per-segment
-//     compaction is insufficient (e.g., the active segment has
-//     accumulated tombstones that per-segment compaction cannot
-//     reclaim, or the disk is over budget and aggressive reclamation
-//     is needed).
+// compactLoop runs per-segment incremental compaction on the 30s tick
+// and global compaction on the 30m tick (or when disk is over budget).
 func (t *TieredStore) compactLoop() {
 	defer t.compactWg.Done()
 	startupDelay := t.compactStartupDelay
@@ -792,15 +780,9 @@ func (t *TieredStore) compactLoop() {
 			if !startupDone {
 				continue
 			}
-			// Per-segment incremental compaction: compact one
-			// segment at a time. Loop until no segment needs
-			// compaction or an error occurs — each CompactSegment
-			// call is cheap (scan under RLock, ms-scale swap).
-			// Cap at len(segs) iterations to prevent a live lock
-			// where a compacted segment's replacement still
-			// exceeds the dead-byte threshold (orphaned records
-			// from concurrent overwrites). Remaining segments
-			// are picked up on the next 30s tick.
+			// Per-segment compaction: compact one segment at a time.
+			// Cap at len(segs) to avoid a live lock where the
+			// replacement still exceeds the threshold.
 			compacted := false
 			maxIters := t.warm.SegmentCount()
 			for range maxIters {
@@ -810,9 +792,6 @@ func (t *TieredStore) compactLoop() {
 				}
 				if err := t.warm.CompactSegment(segID); err != nil {
 					if errors.Is(err, warm.ErrSegmentNotFound) {
-						// Segment was replaced by a concurrent
-						// compaction or a global Compact — retry
-						// to find the next candidate.
 						continue
 					}
 					t.logger.Error("warm tier per-segment compaction failed",
@@ -824,13 +803,7 @@ func (t *TieredStore) compactLoop() {
 			if compacted {
 				t.runPostCompaction("per-segment")
 			}
-			// Disk over-budget check: trigger global compaction
-			// immediately if physical disk usage exceeds
-			// warm_max_disk_bytes or filesystem free space drops
-			// below min_free_disk. Global compaction is the
-			// fallback for aggressive reclamation that per-segment
-			// compaction cannot achieve (e.g., reclaiming the
-			// active segment's tombstones).
+			// Disk over-budget: trigger global compaction.
 			if t.warm.DiskOverBudget() {
 				t.runCompaction("disk over-budget", true)
 			}
@@ -838,12 +811,7 @@ func (t *TieredStore) compactLoop() {
 			if !startupDone {
 				continue // still in startup delay period
 			}
-			// Periodic global compaction as a fallback. Per-segment
-			// compaction on the 30s tick handles the steady state;
-			// this catches cases where the active segment has
-			// accumulated tombstones or the global dead-byte ratio
-			// is high but no individual non-active segment crossed
-			// the threshold.
+			// Periodic global compaction fallback.
 			if t.warm.NeedsCompaction() {
 				t.runCompaction("periodic", false)
 			}
@@ -878,16 +846,13 @@ func (t *TieredStore) runCompaction(reason string, force bool) {
 	t.runPostCompaction(reason)
 }
 
-// runPostCompaction rewrites the WAL with the live index and writes a
-// fresh snapshot. Called after both global and per-segment compaction
-// — segIDs and offsets changed, so the old WAL and snapshot are stale.
+// runPostCompaction rewrites the WAL and writes a fresh snapshot.
 func (t *TieredStore) runPostCompaction(reason string) {
 	if err := t.rewriteWAL(); err != nil {
 		t.logger.Error("wal rewrite after compaction failed", "reason", reason, "error", err)
 		return
 	}
-	// Write a fresh snapshot after compaction — segIDs and offsets
-	// changed, the old snapshot is stale.
+	// Write a fresh snapshot — offsets changed during compaction.
 	if err := t.warm.WriteSnapshot(); err != nil {
 		t.logger.Error("snapshot write after compaction failed", "reason", reason, "error", err)
 		return

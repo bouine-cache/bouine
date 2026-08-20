@@ -333,9 +333,7 @@ func (c *fdCache) clear() {
 	c.lru = list.New()
 }
 
-// remove deletes a single segment from the cache without closing it.
-// Called by CompactSegment when replacing a segment — the caller
-// handles closing the old segment's fd.
+// remove drops a segment from the cache without closing its fd.
 func (c *fdCache) remove(segID int) {
 	if c == nil {
 		return
@@ -584,9 +582,7 @@ func (s *Store) openExisting() error {
 		if e.IsDir() {
 			continue
 		}
-		// Remove stale .tmp files from aborted CompactSegment runs.
-		// They are safe to delete — no live process is writing to them
-		// at startup, and openExisting only loads *.seg files.
+		// Clean up stale .tmp files from aborted compaction runs.
 		if strings.HasSuffix(e.Name(), segExt+".tmp") {
 			_ = os.Remove(filepath.Join(s.dir, e.Name()))
 			continue
@@ -2298,8 +2294,8 @@ func (s *Store) compactSegments(tmp *Store, segs []*Segment, idxSnap map[api.Key
 // compacted individually because Put writes to it).
 var ErrSegmentNotFound = errors.New("warm: segment not found or is active")
 
-// compactRec tracks a record written to the temp segment file during
-// per-segment compaction, so the swap phase can update index entries.
+// compactRec is a record written to the temp segment file during
+// per-segment compaction, used by the swap phase to update the index.
 type compactRec struct {
 	key    api.Key
 	segID  int
@@ -2307,24 +2303,11 @@ type compactRec struct {
 	size   int64
 }
 
-// CompactSegment compacts a single non-active segment, rewriting its
-// live records into a fresh segment file. Unlike Compact (which
-// rewrites all segments under s.mu.Lock for the entire duration),
-// CompactSegment scans the target segment under s.mu.RLock (allowing
-// concurrent Get/Put/Delete) and only holds s.mu.Lock for the
-// millisecond-scale swap phase.
-//
-// Only non-active segments can be compacted individually — Put writes
-// exclusively to the active segment (last in s.segs), so non-active
-// segments are never mutated by Put/Delete/evictOne. This sidesteps
-// the #280 data-loss race without holding the lock for the full scan.
+// CompactSegment compacts a single non-active segment. Returns
+// ErrSegmentNotFound for the active segment or a missing segID.
 func (s *Store) CompactSegment(segID int) error {
 	s.metrics.IncCompactionTriggered()
 
-	// Phase 1: Scan the target segment under s.mu.RLock.
-	// Concurrent Get/Put/Delete proceed normally — Get reads the
-	// segment concurrently (read/read, no conflict), Put doesn't
-	// touch non-active segments.
 	s.mu.RLock()
 	var target *Segment
 	for _, seg := range s.segs {
@@ -2337,17 +2320,11 @@ func (s *Store) CompactSegment(segID int) error {
 		s.mu.RUnlock()
 		return ErrSegmentNotFound
 	}
-	// Refuse to compact the active segment — Put writes to it,
-	// so compacting it would race with concurrent writes (#280).
 	if len(s.segs) > 0 && s.segs[len(s.segs)-1].ID == segID {
 		s.mu.RUnlock()
 		return ErrSegmentNotFound
 	}
 
-	// Snapshot index entries that point at this segment. Only those
-	// entries are candidates for the rewrite — the snapshot check
-	// (segID + offset match) in the scan callback prevents clobbering
-	// entries that a concurrent Put may have moved to the active segment.
 	s.idxMu.RLock()
 	idxSnap := make(map[api.Key]warmLoc)
 	for k, v := range s.index {
@@ -2357,18 +2334,12 @@ func (s *Store) CompactSegment(segID int) error {
 	}
 	s.idxMu.RUnlock()
 
-	// Ensure the segment file is open for scanning.
 	if err := target.ensureOpen(); err != nil {
 		s.mu.RUnlock()
 		return fmt.Errorf("compact segment: open: %w", err)
 	}
 	s.fdCache.touch(target)
 
-	// Scan the segment for live records. seg.mu.Lock prevents
-	// concurrent Get from closing the fd via fdCache eviction during
-	// the scan (Get increments readers before ensureOpen, so fdCache
-	// won't close it — but seg.mu.Lock is still needed for scanSegment
-	// to have exclusive access to the fd).
 	target.mu.Lock()
 	var pending []pendingRec
 	scanErr := scanSegment(target.f, target.ID, func(r Record) error {
@@ -2388,19 +2359,16 @@ func (s *Store) CompactSegment(segID int) error {
 		return fmt.Errorf("compact segment %d: scan: %w", segID, scanErr)
 	}
 
-	// Phase 2: Write live records to a temp segment file (no s.mu held).
 	newSegID, recs, err := s.writeCompactTemp(segID, pending)
 	if err != nil {
 		return err
 	}
 
-	// Phase 3: Swap — short s.mu.Lock + idxMu.Lock.
 	return s.swapCompactSegment(segID, newSegID, recs)
 }
 
-// writeCompactTemp writes live records to a new temp segment file and
-// returns the new segID plus metadata for the swap phase. No s.mu is
-// held, allowing concurrent Get/Put/Delete to proceed.
+// writeCompactTemp writes live records to a temp segment file and
+// returns the new segID plus record metadata for the swap phase.
 func (s *Store) writeCompactTemp(segID int, pending []pendingRec) (int, []compactRec, error) {
 	newSegID := int(s.nextID.Add(1) - 1)
 	tmpPath := filepath.Join(s.dir, segName(newSegID)+".tmp")
@@ -2438,17 +2406,15 @@ func (s *Store) writeCompactTemp(segID int, pending []pendingRec) (int, []compac
 	return newSegID, recs, nil
 }
 
-// swapCompactSegment performs the short locked swap: re-finds the target
-// segment under s.mu.Lock, renames the temp file to its final path, opens
-// the new segment, closes and removes the old segment, and updates index
-// entries that still point at the old segID.
+// swapCompactSegment atomically replaces the old segment with the new
+// one under s.mu.Lock and updates index entries still pointing at the
+// old segID.
 func (s *Store) swapCompactSegment(segID, newSegID int, recs []compactRec) error {
 	tmpPath := filepath.Join(s.dir, segName(newSegID)+".tmp")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Re-find the target segment's index in s.segs.
 	segIdx := -1
 	for i, seg := range s.segs {
 		if seg.ID == segID {
@@ -2460,22 +2426,17 @@ func (s *Store) swapCompactSegment(segID, newSegID int, recs []compactRec) error
 		_ = os.Remove(tmpPath)
 		return ErrSegmentNotFound
 	}
-	// Re-check it's still non-active (a new segment could have been
-	// appended, but the active segment is always the last — the
-	// target's index hasn't changed, and it's still not last).
 	if segIdx == len(s.segs)-1 {
 		_ = os.Remove(tmpPath)
 		return ErrSegmentNotFound
 	}
 
-	// Rename temp file to final segment path.
 	finalPath := filepath.Join(s.dir, segName(newSegID))
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("compact segment %d: rename: %w", segID, err)
 	}
 
-	// Open the new segment.
 	newSeg, err := openSegment(finalPath, newSegID, s.segMax)
 	if err != nil {
 		_ = os.Remove(finalPath)
@@ -2483,70 +2444,43 @@ func (s *Store) swapCompactSegment(segID, newSegID int, recs []compactRec) error
 	}
 	newSeg.tryMmap()
 
-	// Munmap and close the old segment, remove its file.
 	oldSeg := s.segs[segIdx]
 	oldSeg.munmap()
 	s.fdCache.remove(oldSeg.ID)
 	_ = oldSeg.Close()
 	_ = os.Remove(oldSeg.Path)
 
-	// Replace the old segment in s.segs and rebuild segByID.
 	s.segs[segIdx] = newSeg
 	s.rebuildSegByID()
 	s.fdCache.touch(newSeg)
 
-	// Update index entries: only touch keys whose current index
-	// entry still points at the old segment (segID match). This
-	// preserves concurrent Put updates (which moved the key to the
-	// active segment) and concurrent Delete (which removed the key).
 	s.idxMu.Lock()
 	defer s.idxMu.Unlock()
 	for _, nr := range recs {
 		cur, ok := s.index[nr.key]
 		if !ok || cur.segID != segID {
-			// Key was overwritten (Put moved it to active segment)
-			// or deleted — skip. The record in the new segment is
-			// orphaned dead space; it will be reclaimed on the next
-			// compaction of this new segment.
+			// Overwritten or deleted since the scan — leave the
+			// orphaned record as dead space for the next compaction.
 			continue
 		}
-		// Preserve the SIEVE entry and protected flag from the
-		// current index entry — only update the location.
 		cur.segID = nr.segID
 		cur.offset = nr.offset
 		cur.size = nr.size
 		s.index[nr.key] = cur
-		// stats.bytes is unchanged: the old record's size was already
-		// counted, and the new record has the same body size.
 	}
 	return nil
 }
 
-// SegmentCount returns the number of segments, including the active
-// segment. Used by compactLoop to cap the per-segment compaction loop
-// and prevent a live lock where a compacted segment's replacement
-// still exceeds the dead-byte threshold.
+// SegmentCount returns the number of segments including the active one.
 func (s *Store) SegmentCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.segs)
 }
 
-// NeedsSegmentCompaction reports whether any non-active segment exceeds
-// the compaction dead-byte threshold. Returns the segID of the first
-// qualifying segment and true, or 0 and false if none qualify.
-//
-// Dead bytes per segment are computed on-demand by summing the live
-// record sizes from the index for each segment and comparing against
-// the segment's on-disk size. This avoids maintaining per-segment
-// dead-byte atomics on the hot path (Put/Delete/evictOne) at the cost
-// of an O(N) index scan per call. The scan runs under idxMu.RLock
-// (read-only) and is called from the 30s compactLoop tick, not from
-// the hot path.
-//
-// s.mu is held only long enough to snapshot the segment slice — the
-// index scan and per-segment checks run without s.mu so they do not
-// block newSegment (which needs s.mu.Lock).
+// NeedsSegmentCompaction returns the segID of the first non-active
+// segment whose dead-byte ratio exceeds CompactionThreshold, or 0
+// and false if none qualify.
 func (s *Store) NeedsSegmentCompaction() (int, bool) {
 	s.mu.RLock()
 	if len(s.segs) <= 1 {
@@ -2557,7 +2491,6 @@ func (s *Store) NeedsSegmentCompaction() (int, bool) {
 	copy(segs, s.segs)
 	s.mu.RUnlock()
 
-	// Sum live bytes per segment from the index.
 	s.idxMu.RLock()
 	livePerSeg := make(map[int]int64)
 	for _, loc := range s.index {

@@ -72,6 +72,22 @@ type DataPlaneMetrics struct {
 	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
 	CFPurgeDuration *prometheus.HistogramVec // labels: operation
 	CFPurgeSkipped  *prometheus.CounterVec   // labels: reason
+	// Cloudflare batching metrics.
+	CFBatchFlushed  *prometheus.CounterVec // labels: kind
+	CFBatchDeduped  *prometheus.CounterVec // labels: kind
+	CFBatchFlushErr *prometheus.CounterVec // labels: kind, error_type
+	// Cloudflare token rotation metrics.
+	CFTokenRotated   prometheus.Counter
+	CFTokenAvailable prometheus.Gauge // number of tokens not in cooldown
+	// Cloudflare circuit breaker metrics.
+	CFCircuitRejected prometheus.Counter // calls rejected because circuit open
+	CFCircuitState    prometheus.Gauge   // 0=closed, 1=open, 2=half_open
+	// Cloudflare retry queue (DLQ) metrics.
+	CFDLQEnqueued *prometheus.CounterVec // labels: kind
+	CFDLQDropped  *prometheus.CounterVec // labels: kind
+	CFDLQRetried  *prometheus.CounterVec // labels: kind
+	CFDLQExpired  *prometheus.CounterVec // labels: kind
+	CFDLQDepth    prometheus.Gauge       // current queue depth
 	// Refresh-before-expiry metrics. Nil when no route enables the feature.
 	RefreshTotal        *prometheus.CounterVec // labels: route, result
 	RefreshErrorsTotal  *prometheus.CounterVec // labels: route, error_type
@@ -158,6 +174,10 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	})
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
+		m.CFBatchFlushed, m.CFBatchDeduped, m.CFBatchFlushErr,
+		m.CFTokenRotated, m.CFTokenAvailable,
+		m.CFCircuitRejected, m.CFCircuitState,
+		m.CFDLQEnqueued, m.CFDLQDropped, m.CFDLQRetried, m.CFDLQExpired, m.CFDLQDepth,
 		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
 		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
@@ -352,6 +372,66 @@ func (m *DataPlaneMetrics) initCFPurgeMetrics() {
 		Name:      "cloudflare_purge_skipped_total",
 		Help:      "Invalidations not forwarded to Cloudflare (disabled or incompatible regex).",
 	}, []string{"reason"})
+	m.CFBatchFlushed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_batch_flushed_total",
+		Help:      "Number of Cloudflare batch flushes by kind (urls, tags, prefixes, hosts).",
+	}, []string{"kind"})
+	m.CFBatchDeduped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_batch_deduped_total",
+		Help:      "Number of duplicate purge items deduplicated before reaching the Cloudflare API.",
+	}, []string{"kind"})
+	m.CFBatchFlushErr = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_batch_flush_error_total",
+		Help:      "Cloudflare batch flush errors by kind and error type.",
+	}, []string{"kind", "error_type"})
+	m.CFTokenRotated = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_token_rotated_total",
+		Help:      "Number of times a Cloudflare API token was marked as rate-limited and rotated.",
+	})
+	m.CFTokenAvailable = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_token_available",
+		Help:      "Number of Cloudflare API tokens currently available (not in cooldown).",
+	})
+	m.CFCircuitRejected = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_circuit_rejected_total",
+		Help:      "Number of CF purge calls rejected because the circuit breaker was open.",
+	})
+	m.CFCircuitState = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_circuit_state",
+		Help:      "Circuit breaker state: 0=closed, 1=open, 2=half_open.",
+	})
+	m.CFDLQEnqueued = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_dlq_enqueued_total",
+		Help:      "Number of failed purge items enqueued to the retry queue.",
+	}, []string{"kind"})
+	m.CFDLQDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_dlq_dropped_total",
+		Help:      "Number of failed purge items dropped because the retry queue was full.",
+	}, []string{"kind"})
+	m.CFDLQRetried = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_dlq_retried_total",
+		Help:      "Number of purge items retried from the retry queue.",
+	}, []string{"kind"})
+	m.CFDLQExpired = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_dlq_expired_total",
+		Help:      "Number of purge items expired from the retry queue after max retries.",
+	}, []string{"kind"})
+	m.CFDLQDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "cloudflare_dlq_depth",
+		Help:      "Current retry queue depth (number of pending items).",
+	})
 }
 
 // initWALMetrics creates the async-WAL collectors on m.

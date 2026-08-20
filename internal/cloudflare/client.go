@@ -44,12 +44,19 @@ type Client struct {
 	zoneID     string
 	timeout    time.Duration
 	retryDelay time.Duration
+	// tokenPool is non-nil when multiple API tokens are configured.
+	// nil for single-token mode.
+	tokenPool *TokenPool
 }
 
 // Config carries the credentials and behaviour knobs for the Cloudflare client.
 type Config struct {
-	ZoneID     string
-	APIToken   string
+	ZoneID   string
+	APIToken string
+	// APITokens is an optional list of additional API tokens for rate limit
+	// spreading. When non-empty, the client uses a TokenPool to rotate across
+	// all tokens (including APIToken). When empty, only APIToken is used.
+	APITokens  []string
 	Timeout    time.Duration
 	RetryDelay time.Duration // 0 = defaultRetryDelay
 }
@@ -59,11 +66,27 @@ func New(cfg Config) (*Client, error) {
 	if cfg.ZoneID == "" {
 		return nil, &ZoneConfigError{Msg: "cloudflare: zone_id must not be empty"}
 	}
-	if cfg.APIToken == "" {
+
+	// Collect all tokens (primary + additional).
+	allTokens := []string{cfg.APIToken}
+	allTokens = append(allTokens, cfg.APITokens...)
+	allTokens = nonEmpty(allTokens)
+
+	if len(allTokens) == 0 {
 		return nil, &ZoneConfigError{Msg: "cloudflare: api_token must not be empty"}
 	}
 
-	sdkClient := cloudflare.NewClient(option.WithAPIToken(cfg.APIToken))
+	var purger CachePurger
+	var pool *TokenPool
+	if len(allTokens) == 1 {
+		// Single token — use the SDK client directly (original path).
+		sdkClient := cloudflare.NewClient(option.WithAPIToken(allTokens[0]))
+		purger = sdkClient.Cache
+	} else {
+		// Multiple tokens — use a TokenPool for rate limit spreading.
+		pool = NewTokenPool(allTokens, 0)
+		purger = newMultiTokenPurger(pool, cfg.ZoneID)
+	}
 
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -75,11 +98,22 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	return &Client{
-		purger:     sdkClient.Cache,
+		purger:     purger,
 		zoneID:     cfg.ZoneID,
 		timeout:    timeout,
 		retryDelay: rd,
+		tokenPool:  pool,
 	}, nil
+}
+
+func nonEmpty(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // NewWithPurger creates a Client with a custom CachePurger (test helper).
@@ -98,6 +132,15 @@ func (c *Client) ZoneID() string {
 		return ""
 	}
 	return c.zoneID
+}
+
+// TokenPool returns the token pool when multi-token mode is enabled, or nil
+// for single-token mode. Callers can use this to wire metrics callbacks.
+func (c *Client) TokenPool() *TokenPool {
+	if c == nil {
+		return nil
+	}
+	return c.tokenPool
 }
 
 // PurgeURLs invalidates exact URLs (≤30 per CF API call).

@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/admin"
@@ -415,21 +416,39 @@ func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics, close
 	if cfAPIToken == "" {
 		cfAPIToken = os.Getenv("CF_API_TOKEN")
 	}
+	cfAPITokens := e.cfg.Cloudflare.APITokens
+	if len(cfAPITokens) == 0 {
+		if envTokens := os.Getenv("CF_API_TOKENS"); envTokens != "" {
+			cfAPITokens = strings.Split(envTokens, ",")
+			for i := range cfAPITokens {
+				cfAPITokens[i] = strings.TrimSpace(cfAPITokens[i])
+			}
+		}
+	}
 	var cfInvalidator bouinecf.Invalidator
-	if e.cfg.Cloudflare.ZoneID != "" && cfAPIToken != "" {
+	if e.cfg.Cloudflare.ZoneID != "" && (cfAPIToken != "" || len(cfAPITokens) > 0) {
 		cfClient, cfErr := bouinecf.New(bouinecf.Config{
-			ZoneID:   e.cfg.Cloudflare.ZoneID,
-			APIToken: cfAPIToken,
-			Timeout:  e.cfg.Cloudflare.Timeout,
+			ZoneID:    e.cfg.Cloudflare.ZoneID,
+			APIToken:  cfAPIToken,
+			APITokens: cfAPITokens,
+			Timeout:   e.cfg.Cloudflare.Timeout,
 		})
 		if cfErr != nil {
 			e.logger.Warn("cloudflare init failed — propagation disabled", "error", cfErr)
 		} else {
 			cfInvalidator = cfClient
+			// Wire token rotation metrics when multi-token mode is active.
+			if pool := cfClient.TokenPool(); pool != nil {
+				pool.OnRotate(func(idx int) {
+					dpMetrics.CFTokenRotated.Inc()
+					dpMetrics.CFTokenAvailable.Set(float64(pool.AvailableCount()))
+				})
+			}
 			e.logger.Info("cloudflare invalidation enabled",
 				"zone", cfClient.ZoneID(),
 				"async", e.cfg.Cloudflare.IsAsync(),
-				"propagate", e.cfg.Cloudflare.Propagate)
+				"propagate", e.cfg.Cloudflare.Propagate,
+				"token_count", 1+len(cfAPITokens))
 		}
 	}
 	return buildCFPropagator(cfInvalidator, e.cfg.Cloudflare, dpMetrics, e.logger, closeCtx)
@@ -629,8 +648,11 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		Metrics:    e.metrics,
 		PeersFn:    rs.peersFn,
 		CFStatusFn: rs.cfProp.Status,
-		StatsFn:    func() api.Stats { return rs.store.Stats() },
-		ConfigFn:   func() any { return sanitizedConfig(*e.cfg) },
+		CFPropagateFn: func(ctx context.Context, req admin.CFPropagateRequest) error {
+			return rs.cfProp.PropagateExternal(ctx, req)
+		},
+		StatsFn:  func() api.Stats { return rs.store.Stats() },
+		ConfigFn: func() any { return sanitizedConfig(*e.cfg) },
 		CacheCheckFn: func(ctx context.Context, rawURL string) admin.CacheCheckResult {
 			return cacheCheck(ctx, rawURL, rs)
 		},

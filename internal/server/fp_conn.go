@@ -148,49 +148,49 @@ func (s *Listener) serveConnWithHTTP(conn net.Conn, errCh chan<- error) {
 }
 
 // serveMultiFastPath runs the fast-path accept loop across multiple
+// serveMultiFastPath runs the fast-path accept loop across multiple
 // SO_REUSEPORT listeners. Called from serveMulti when the fast path is enabled.
 func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Listener) error {
+	// Derive a cancellable context so the error path can trigger the
+	// same cleanup as ctx.Done: each serveFastPath goroutine has its
+	// own ctx.Done watcher that closes the listener and calls
+	// s.inner.Shutdown. Cancelling here fires all of those watchers.
+	multiCtx, multiCancel := context.WithCancel(ctx)
+	defer multiCancel()
+
 	errCh := make(chan error, len(listeners))
 	var wg sync.WaitGroup
 	for _, ln := range listeners {
 		wg.Add(1)
 		go func(l net.Listener) {
 			defer wg.Done()
-			if err := s.serveFastPath(ctx, l); err != nil && !errors.Is(err, net.ErrClosed) {
+			if err := s.serveFastPath(multiCtx, l); err != nil && !errors.Is(err, net.ErrClosed) {
 				errCh <- err
 			}
 		}(ln)
 	}
 
-	var cancelErr error
+	var firstErr error
 	select {
 	case <-ctx.Done():
+		// External cancellation — serveFastPath goroutines handle
+		// listener close and inner shutdown via their ctx.Done watcher.
 	case err := <-errCh:
-		cancelErr = err
+		// One listener failed. Cancel multiCtx to trigger cleanup
+		// in all other serveFastPath goroutines (close listeners +
+		// inner shutdown).
+		firstErr = err
+		multiCancel()
 	}
 
-	for _, l := range listeners {
-		_ = l.Close()
-	}
-	s.shutdownInner(ctx)
 	wg.Wait()
 	close(errCh)
 	for err := range errCh {
-		if err != nil && cancelErr == nil {
-			cancelErr = err
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return cancelErr
-}
-
-// shutdownInner gracefully shuts down the inner http.Server to close
-// any active HTTP/2 connections handed off to net/http via
-// serveConnWithHTTP.
-func (s *Listener) shutdownInner(ctx context.Context) {
-	shutCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	_ = s.inner.Shutdown(shutCtx)
+	return firstErr
 }
 
 // closeNotifyConn wraps a net.Conn and closes a channel when Close is

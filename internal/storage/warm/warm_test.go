@@ -2840,3 +2840,151 @@ func TestCompactSegment_KeyDeletedDuringScanSkippedInSwap(t *testing.T) {
 	require.NoError(t, err, "Get deleted key 15")
 	require.Nil(t, got, "key 15 should be absent")
 }
+
+// TestCompactSegment_ConcurrentOverwriteHitsSkipBranch verifies the
+// swap-phase index skip branch (cur.segID != segID): a key from the
+// target segment is overwritten by a concurrent Put BETWEEN the idxSnap
+// being taken and the swap phase, moving its index entry to the active
+// segment. The swap must skip it to preserve the new location.
+//
+// This is the #280 scenario for per-segment compaction: the scan
+// captures the key in idxSnap, but a concurrent Put moves the index
+// entry to the active segment before the swap updates it.
+func TestCompactSegment_ConcurrentOverwriteHitsSkipBranch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Larger SegMax so all surviving keys are in the first segment —
+	// we need enough records that the scan takes measurable time for
+	// the concurrent Put to race.
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 4096})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write records to fill the first segment.
+	for i := range 100 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i), byte(i + 1)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	// Delete first 50 to create dead bytes (>30% threshold).
+	for i := range 50 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Roll into a second segment to make the first non-active.
+	_, _, err = s.Put(testkey.Key(200), []byte{0xFF})
+	require.NoError(t, err)
+
+	s.mu.RLock()
+	require.Greater(t, len(s.segs), 1, "need multiple segments")
+	targetSegID := s.segs[0].ID
+	s.mu.RUnlock()
+
+	// Start a goroutine that overwrites surviving keys (50–99) from
+	// the target segment concurrently with CompactSegment. The Put
+	// moves the index entry to the active segment. If the Put happens
+	// after idxSnap is taken but before the swap, the swap hits the
+	// cur.segID != segID skip branch.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 50
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _, _ = s.Put(testkey.Key(uint64(i)), []byte{0xFF, 0xFF})
+			i++
+			if i >= 100 {
+				i = 50
+			}
+		}
+	}()
+
+	// Give the goroutine time to start overwriting.
+	time.Sleep(10 * time.Millisecond)
+
+	// Compact the first segment. The concurrent Puts race with the
+	// scan/swap, hitting the skip branch for keys overwritten between
+	// idxSnap and swap.
+	err = s.CompactSegment(targetSegID)
+	close(stop)
+	wg.Wait()
+
+	// CompactSegment should succeed (errors in the swap skip branch
+	// are not errors — they're handled by skipping the index update).
+	require.NoError(t, err, "CompactSegment with concurrent overwrites")
+
+	// All surviving keys (50–99) must be readable. Some may have the
+	// overwritten value (if the Put won the race) and some may have
+	// the original value (if the scan beat the Put). Either way, they
+	// must be present.
+	for i := 50; i < 100; i++ {
+		got, err := s.Get(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Get %d", i)
+		require.NotNilf(t, got, "key %d should be present after compaction", i)
+	}
+}
+
+// TestWriteCompactTemp_DirReadOnly verifies that writeCompactTemp
+// returns an error when the warm directory is read-only (OpenFile
+// failure).
+func TestWriteCompactTemp_DirReadOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755); _ = s.Close() })
+
+	// Create multiple segments with dead bytes FIRST (while dir is
+	// writable).
+	for i := range 40 {
+		_, _, err := s.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	for i := range 20 {
+		_, err := s.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+	s.mu.RLock()
+	require.Greater(t, len(s.segs), 1, "need multiple segments")
+	targetSegID := s.segs[0].ID
+	s.mu.RUnlock()
+
+	// Now make the directory read-only — new file creation (.tmp)
+	// will fail, but the existing segment files are still readable.
+	require.NoError(t, os.Chmod(dir, 0o555))
+
+	// CompactSegment should fail at the writeCompactTemp phase
+	// (OpenFile on the .tmp file fails with permission denied).
+	err = s.CompactSegment(targetSegID)
+	require.Error(t, err, "CompactSegment should fail with read-only dir")
+	require.NotErrorIs(t, err, ErrSegmentNotFound, "should fail at I/O, not segment lookup")
+}
+
+// TestSwapCompactSegment_SegmentRemovedDuringSwap verifies that
+// swapCompactSegment returns ErrSegmentNotFound when the target
+// segment was removed between the scan and the swap (e.g., by a
+// concurrent global Compact that replaced all segments).
+func TestSwapCompactSegment_SegmentRemovedDuringSwap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})
+	require.NoError(t, err, "NewStore")
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Create a segment so nextID is advanced.
+	_, _, err = s.Put(testkey.Key(1), []byte("data"))
+	require.NoError(t, err)
+
+	// Call swapCompactSegment directly with a segID that doesn't
+	// exist in s.segs. This tests the segIdx < 0 branch (line 2459).
+	// We pass a valid newSegID so the tmpPath is computable, but
+	// the segment lookup will fail.
+	err = s.swapCompactSegment(99999, 100000, nil)
+	require.ErrorIs(t, err, ErrSegmentNotFound, "segment should not be found in swap phase")
+}

@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -310,6 +312,76 @@ func TestServeConnWithHTTP_FiltersClosedError(t *testing.T) {
 		// Expected: no error sent (filtered).
 	}
 }
+
+// TestServeListenerWithHTTP_SurfacesError verifies that
+// serveListenerWithHTTP sends non-filtered errors from
+// http.Server.Serve to the error channel.
+func TestServeListenerWithHTTP_SurfacesError(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
+	})
+
+	// Create a pipe connection that sends the h2c preface.
+	clientConn, serverConn := net.Pipe()
+	go func() {
+		_, _ = clientConn.Write([]byte(h2cPreface))
+		_, _ = clientConn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0})
+		_ = clientConn.Close()
+	}()
+
+	// Wrap in closeNotifyConn + errorOnSecondAcceptListener so
+	// http.Server.Serve gets errAcceptFailed on the second Accept.
+	notifyConn := newCloseNotifyConn(serverConn)
+	wrappedLn := &errorOnSecondAcceptListener{
+		inner: &singleConnListener{conn: notifyConn, ready: notifyConn.done},
+	}
+
+	errCh := make(chan error, 1)
+	go srv.serveListenerWithHTTP(wrappedLn, errCh)
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "accept failed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveListenerWithHTTP did not surface error within 5s")
+	}
+}
+
+// errorOnSecondAcceptListener wraps a singleConnListener so the second
+// Accept returns a non-closed error.
+type errorOnSecondAcceptListener struct {
+	inner  *singleConnListener
+	closed bool
+	mu     sync.Mutex
+}
+
+func (l *errorOnSecondAcceptListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+	l.mu.Unlock()
+	if l.inner.done {
+		return nil, errAcceptFailed
+	}
+	return l.inner.Accept()
+}
+func (l *errorOnSecondAcceptListener) Close() error {
+	l.mu.Lock()
+	l.closed = true
+	l.mu.Unlock()
+	return l.inner.Close()
+}
+func (l *errorOnSecondAcceptListener) Addr() net.Addr { return l.inner.Addr() }
+
+var errAcceptFailed = errors.New("accept failed")
 
 // TestServeMultiFastPath_CtxCancellation verifies the normal shutdown
 // path: ctx cancellation triggers cleanup in all serveFastPath goroutines.

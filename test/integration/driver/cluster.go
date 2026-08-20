@@ -728,8 +728,19 @@ func (s *ClusterStack) TLSServerCerts(t *testing.T, n int, serverName string) []
 		ServerName:         serverName,
 		NextProtos:         []string{"h2", "http/1.1"},
 	}
+	// Retry the TLS dial a few times. The admin /readyz check confirms
+	// the node process is up, but the TLS listener on the data port may
+	// not be accepting connections yet under CI load.
+	var conn *tls.Conn
+	var err error
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", hostPort, conf)
+	for range 5 {
+		conn, err = tls.DialWithDialer(dialer, "tcp", hostPort, conf)
+		if err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if err != nil {
 		t.Fatalf("TLS dial %s (SNI=%s): %v", hostPort, serverName, err)
 	}

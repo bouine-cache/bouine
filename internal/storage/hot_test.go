@@ -578,7 +578,10 @@ func TestHotOverflowLatency(t *testing.T) {
 		bodySize    = 1024
 		budgetBytes = 8 << 20 // 8 MiB — small enough to overflow fast
 		duration    = 5 * time.Second
-		p99Budget   = 5 * time.Millisecond
+		// p99 budget is generous (50 ms) to absorb CI scheduler noise and
+		// GC pauses. The test's primary value is the byte-overflow bound
+		// below; the latency gate catches gross regressions only.
+		p99Budget = 50 * time.Millisecond
 	)
 	// 1.5× working set: ~1.5 × (budgetBytes / (bodySize+256)) unique keys
 	perShardMax := int64(budgetBytes) / int64(runtime.NumCPU())

@@ -203,6 +203,11 @@
             "zone_id": {
               "type": "string"
             },
+            "api_tokens": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Additional API tokens for rate limit spreading. The primary token is injected via CF_API_TOKEN env var. Additional tokens can be injected via CF_API_TOKENS (comma-separated)."
+            },
             "propagate": {
               "type": "object",
               "properties": {
@@ -222,6 +227,42 @@
             },
             "timeout": {
               "type": "string"
+            },
+            "batch": {
+              "type": "object",
+              "description": "Purge batching and deduplication. When max_batch_size > 0, individual purges are coalesced into batched, deduplicated API calls to reduce CF rate limit pressure.",
+              "properties": {
+                "max_batch_size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Maximum items per CF API call. 0 disables batching (passthrough mode)."
+                },
+                "max_wait": {
+                  "type": "string",
+                  "description": "Maximum time an item waits before flush. Default 500ms."
+                }
+              }
+            },
+            "circuit": {
+              "type": "object",
+              "description": "Circuit breaker for CF API outage protection.",
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "failure_threshold": {"type": "integer", "minimum": 0},
+                "open_timeout": {"type": "string"},
+                "half_open_max_calls": {"type": "integer", "minimum": 0}
+              }
+            },
+            "retry": {
+              "type": "object",
+              "description": "Dead-letter queue for failed CF purges. Failed items are retried with exponential backoff.",
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "max_queue_size": {"type": "integer", "minimum": 0},
+                "max_retries": {"type": "integer", "minimum": 0},
+                "base_delay": {"type": "string"},
+                "max_delay": {"type": "string"}
+              }
             }
           }
         }

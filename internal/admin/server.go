@@ -74,6 +74,11 @@ type Config struct {
 	// CFStatusFn, if non-nil, returns a snapshot of the Cloudflare
 	// integration state for GET /v1/cloudflare/status.
 	CFStatusFn func() CloudflareStatus
+	// CFPropagateFn, if non-nil, propagates a purge request to Cloudflare
+	// via bouine's cfPropagator (batching, circuit breaker, DLQ, etc.).
+	// Used by cache-lifecycle to delegate CF purges to bouine.
+	// Mounted at POST /v1/cloudflare/propagate (requires auth token).
+	CFPropagateFn func(ctx context.Context, req CFPropagateRequest) error
 	// OnPurged, if non-nil, is called after a successful purge with the raw
 	// URL. Used for downstream CDN propagation (e.g. Cloudflare).
 	OnPurged func(ctx context.Context, url string)
@@ -309,6 +314,9 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.CFStatusFn != nil {
 		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
+	}
+	if cfg.CFPropagateFn != nil {
+		mux.HandleFunc("POST /v1/cloudflare/propagate", s.cloudflarePropagate)
 	}
 	if cfg.StatsFn != nil {
 		mux.HandleFunc("GET /v1/stats", s.stats)
@@ -790,11 +798,46 @@ type CloudflareStatus struct {
 	// LastLagMs is the duration between the last invalidation request
 	// and the CF API completion. 0 when no propagation has occurred.
 	LastLagMs int64 `json:"last_lag_ms,omitempty"`
+	// BatchEnabled reports whether batching/deduplication is active.
+	BatchEnabled bool `json:"batch_enabled,omitempty"`
+	// CircuitState is the current circuit breaker state, or "" when disabled.
+	CircuitState string `json:"circuit_state,omitempty"`
+	// DLQDepth is the current retry queue depth, or 0 when disabled.
+	DLQDepth int `json:"dlq_depth,omitempty"`
+	// TokenCount is the number of configured API tokens (1 for single-token mode).
+	TokenCount int `json:"token_count,omitempty"`
 }
 
 func (s *Server) cloudflareStatus(w http.ResponseWriter, _ *http.Request) {
 	status := s.cfg.CFStatusFn()
 	writeJSON(w, http.StatusOK, status)
+}
+
+// CFPropagateRequest is the body for POST /v1/cloudflare/propagate.
+// It allows external services (e.g. cache-lifecycle) to delegate CF
+// purges to bouine's cfPropagator, which handles batching, circuit
+// breaker, DLQ, and multi-token rotation.
+type CFPropagateRequest struct {
+	// Kind is the purge type: "urls", "tags", "prefixes", or "hosts".
+	Kind string `json:"kind"`
+	// Items is the list of items to purge (URLs, tags, prefixes, or hosts).
+	Items []string `json:"items"`
+}
+
+func (s *Server) cloudflarePropagate(w http.ResponseWriter, r *http.Request) {
+	var req CFPropagateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Kind == "" || len(req.Items) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind and items are required"})
+		return
+	}
+	if err := s.cfg.CFPropagateFn(r.Context(), req); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (s *Server) stats(w http.ResponseWriter, _ *http.Request) {

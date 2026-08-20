@@ -154,6 +154,37 @@ cloudflare:
   # Kubernetes Secret.
   # apiTokenSecretName: bouine-cf-token
   # apiTokenSecretKey: "CF_API_TOKEN"  # key inside the Secret (default shown)
+  #
+  # Additional API tokens for rate limit spreading. When multiple tokens are
+  # configured, bouine rotates across them to multiply the effective rate
+  # limit budget. Inject via CF_API_TOKENS env var (comma-separated).
+  # api_tokens: ["token2", "token3"]
+  #
+  # Batch configures purge batching and deduplication. When enabled,
+  # individual purge requests are coalesced into batched, deduplicated
+  # API calls to reduce CF rate limit pressure under burst traffic.
+  # batch:
+  #   max_batch_size: 30   # max items per CF API call (0 = passthrough)
+  #   max_wait: 500ms      # max time before flush (default 500ms)
+  #
+  # Circuit configures the circuit breaker for CF API outage protection.
+  # When enabled, the circuit opens after N consecutive failures, failing
+  # fast to avoid wasting resources on a known-down API.
+  # circuit:
+  #   enabled: true
+  #   failure_threshold: 5  # consecutive failures before opening
+  #   open_timeout: 30s      # time before probing (default 30s)
+  #   half_open_max_calls: 1 # probe calls in half-open state
+  #
+  # Retry configures the dead-letter queue for failed CF purges. Failed
+  # items are retried with exponential backoff. This survives transient
+  # CF outages without losing invalidations.
+  # retry:
+  #   enabled: true
+  #   max_queue_size: 1000  # max items in queue
+  #   max_retries: 3        # max retry attempts per item
+  #   base_delay: 1s        # initial retry delay
+  #   max_delay: 30s        # max retry delay cap
 
 # Extra environment variables injected into the bouine container.
 # Useful for secret references (e.g., admin token from a Secret):

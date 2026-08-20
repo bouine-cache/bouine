@@ -591,6 +591,11 @@ type CloudflareConfig struct {
 	// APIToken must have the "Cache Purge" permission for this zone.
 	// Inject via the CF_API_TOKEN environment variable; never hardcode.
 	APIToken string `yaml:"api_token,omitempty" json:"api_token,omitempty"`
+	// APITokens is an optional list of additional API tokens for rate limit
+	// spreading. When non-empty, the client rotates across all tokens
+	// (including APIToken) to multiply the effective rate limit budget.
+	// Inject via CF_API_TOKENS (comma-separated) environment variable.
+	APITokens []string `yaml:"api_tokens,omitempty" json:"api_tokens,omitempty"`
 	// Propagate controls which bouine operations forward to Cloudflare.
 	Propagate CloudflarePropagation `yaml:"propagate,omitempty" json:"propagate,omitempty"`
 	// Async controls whether CF propagation blocks the admin response.
@@ -600,6 +605,65 @@ type CloudflareConfig struct {
 	Async *bool `yaml:"async,omitempty" json:"async,omitempty"`
 	// Timeout for individual CF API calls (default 10s).
 	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Batch configures purge batching and deduplication to reduce CF API
+	// call volume. When MaxBatchSize > 0, individual purge requests are
+	// coalesced into batched, deduplicated API calls. When 0 (default),
+	// every purge fires an immediate individual API call (passthrough).
+	Batch CloudflareBatchConfig `yaml:"batch,omitempty" json:"batch,omitempty"`
+	// Circuit configures the circuit breaker that protects against
+	// cascading failures during CF API outages. When enabled, the circuit
+	// opens after N consecutive failures, failing fast to avoid wasting
+	// resources on a known-down API.
+	Circuit CloudflareCircuitConfig `yaml:"circuit,omitempty" json:"circuit,omitempty"`
+	// Retry configures the dead-letter queue for failed CF purges. When
+	// enabled, failed purge items are enqueued and retried with exponential
+	// backoff. This survives transient CF outages without losing
+	// invalidations, without increasing CF API request volume (items are
+	// deduplicated and go through the same batching pipeline on retry).
+	Retry CloudflareRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+}
+
+// CloudflareBatchConfig configures CF purge batching.
+type CloudflareBatchConfig struct {
+	// MaxBatchSize is the maximum number of items (URLs, tags, prefixes,
+	// or hosts) coalesced into a single CF API call. When reached the
+	// batch flushes immediately. 0 disables batching (passthrough mode).
+	MaxBatchSize int `yaml:"max_batch_size,omitempty" json:"max_batch_size,omitempty"`
+	// MaxWait is the maximum time an item waits before a flush is
+	// triggered. Default 500ms when 0 and batching is enabled.
+	MaxWait time.Duration `yaml:"max_wait,omitempty" json:"max_wait,omitempty"`
+}
+
+// CloudflareCircuitConfig configures the CF circuit breaker.
+type CloudflareCircuitConfig struct {
+	// Enabled controls whether the circuit breaker is active.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// FailureThreshold is the number of consecutive failures before the
+	// circuit opens. Default 5 when 0.
+	FailureThreshold int `yaml:"failure_threshold,omitempty" json:"failure_threshold,omitempty"`
+	// OpenTimeout is how long the circuit stays open before probing.
+	// Default 30s when 0.
+	OpenTimeout time.Duration `yaml:"open_timeout,omitempty" json:"open_timeout,omitempty"`
+	// HalfOpenMaxCalls is the number of probe calls in half-open state.
+	// Default 1 when 0.
+	HalfOpenMaxCalls int `yaml:"half_open_max_calls,omitempty" json:"half_open_max_calls,omitempty"`
+}
+
+// CloudflareRetryConfig configures the CF purge retry queue (DLQ).
+type CloudflareRetryConfig struct {
+	// Enabled controls whether the retry queue is active.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// MaxQueueSize is the maximum number of items the queue can hold.
+	// When full, new failed items are dropped. Default 1000 when 0.
+	MaxQueueSize int `yaml:"max_queue_size,omitempty" json:"max_queue_size,omitempty"`
+	// MaxRetries is the maximum number of retry attempts per item.
+	// Default 3 when 0.
+	MaxRetries int `yaml:"max_retries,omitempty" json:"max_retries,omitempty"`
+	// BaseDelay is the initial retry delay. Delays grow exponentially.
+	// Default 1s when 0.
+	BaseDelay time.Duration `yaml:"base_delay,omitempty" json:"base_delay,omitempty"`
+	// MaxDelay caps the exponential backoff. Default 30s when 0.
+	MaxDelay time.Duration `yaml:"max_delay,omitempty" json:"max_delay,omitempty"`
 }
 
 // IsAsync reports whether CF propagation should run asynchronously.

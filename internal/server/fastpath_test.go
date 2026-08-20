@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -273,6 +275,100 @@ func TestServeMulti_ReusePortWithFastPath(t *testing.T) {
 	cancel()
 	err := <-errCh
 	require.NoError(t, err)
+}
+
+// errorOnSecondAcceptListener wraps a singleConnListener so the second
+// Accept returns a non-closed error. Used to test that serveConnWithHTTP
+// properly surfaces non-filtered errors from http.Server.Serve.
+type errorOnSecondAcceptListener struct {
+	inner  *singleConnListener
+	closed bool
+	mu     sync.Mutex
+}
+
+func (l *errorOnSecondAcceptListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+	l.mu.Unlock()
+	if l.inner.done {
+		return nil, errAcceptFailed
+	}
+	return l.inner.Accept()
+}
+func (l *errorOnSecondAcceptListener) Close() error {
+	l.mu.Lock()
+	l.closed = true
+	l.mu.Unlock()
+	return l.inner.Close()
+}
+func (l *errorOnSecondAcceptListener) Addr() net.Addr { return l.inner.Addr() }
+
+var errAcceptFailed = errors.New("accept failed")
+
+func TestServeConnWithHTTP_AcceptError(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
+	})
+
+	// Create a pipe connection that sends the h2c preface so
+	// handleCleartextFastPath routes to serveConnWithHTTP.
+	clientConn, serverConn := net.Pipe()
+	go func() {
+		_, _ = clientConn.Write([]byte(h2cPreface))
+		_, _ = clientConn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0})
+		_ = clientConn.Close()
+	}()
+
+	// Directly test serveConnWithHTTP with a listener that returns
+	// a non-closed error on the second Accept.
+	errCh := make(chan error, 2)
+	notifyConn := newCloseNotifyConn(serverConn)
+	wrappedLn := &errorOnSecondAcceptListener{
+		inner: &singleConnListener{conn: notifyConn, ready: notifyConn.done},
+	}
+
+	go func() {
+		err := srv.inner.Serve(wrappedLn)
+		if err != nil &&
+			!errors.Is(err, http.ErrServerClosed) &&
+			!errors.Is(err, net.ErrClosed) {
+			errCh <- err
+		} else {
+			errCh <- nil
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err, "expected non-filtered error from Serve")
+		assert.Contains(t, err.Error(), "accept failed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveConnWithHTTP did not return within 5s")
+	}
+}
+
+func TestShutdownInner(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		FastPath:    &mockFastPathHandler{},
+		FastMetrics: &mockFastPathMetrics{},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// shutdownInner should not panic and should close the inner server.
+	srv.shutdownInner(ctx)
 }
 
 func TestHandleFastPathConn_Cleartext(t *testing.T) {

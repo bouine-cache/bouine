@@ -162,33 +162,35 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 		}(ln)
 	}
 
+	var cancelErr error
 	select {
 	case <-ctx.Done():
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-		// Shut down the inner http.Server to close any active HTTP/2
-		// connections handed off to net/http via serveConnWithHTTP.
-		shutCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), 10*time.Second)
-		_ = s.inner.Shutdown(shutCtx)
-		cancel()
-		wg.Wait()
-		close(errCh)
-		for err := range errCh {
-			if err != nil {
-				return err
-			}
-		}
-		return nil
 	case err := <-errCh:
-		for _, l := range listeners {
-			_ = l.Close()
-		}
-		_ = s.inner.Close()
-		wg.Wait()
-		return err
+		cancelErr = err
 	}
+
+	for _, l := range listeners {
+		_ = l.Close()
+	}
+	s.shutdownInner(ctx)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil && cancelErr == nil {
+			cancelErr = err
+		}
+	}
+	return cancelErr
+}
+
+// shutdownInner gracefully shuts down the inner http.Server to close
+// any active HTTP/2 connections handed off to net/http via
+// serveConnWithHTTP.
+func (s *Listener) shutdownInner(ctx context.Context) {
+	shutCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_ = s.inner.Shutdown(shutCtx)
 }
 
 // closeNotifyConn wraps a net.Conn and closes a channel when Close is

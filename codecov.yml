@@ -19,10 +19,11 @@ coverage:
         threshold: 1%
         paths:
           - internal/storage
-    patch:
-      default:
-        target: 85%
-        threshold: 1%
+    # No patch status — the project-level checks already guard against
+    # regressions (untested code lowers the package total). The patch
+    # check penalizes PRs for I/O error wrappers and doc comments that
+    # add no executable statements, without catching real gaps.
+    # See ADR-0030 for rationale.
 
 comment:
   layout: "reach,diff,flags,files,footer"

@@ -1529,3 +1529,50 @@ func TestRunCompaction_CompactError(t *testing.T) {
 	// return early (runPostCompaction is NOT called).
 	ts.runCompaction("compact-error-test", true)
 }
+
+// TestCompactLoop_30sTickPerSegmentCompaction verifies that the
+// compactLoop 30s check tick triggers per-segment compaction in the
+// background goroutine. This test waits ~35s for the tick to fire,
+// covering the checkTicker.C → per-segment compaction loop path.
+//
+// NOT t.Parallel — uses a 35s sleep and should run in the integration
+// test suite, not the short suite.
+func TestCompactLoop_30sTickPerSegmentCompaction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 30s tick test in short mode")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	ts, err := NewTieredStore(TieredConfig{
+		Hot:                    HotConfig{MaxBytes: 1 << 20, NumShards: 2},
+		Warm:                   &warm.Config{Dir: filepath.Join(dir, "warm"), MaxBytes: 1 << 30, SegMax: 512},
+		WALDir:                 filepath.Join(dir, "index.wal"),
+		BodyThreshold:          0,
+		TombstoneDrainInterval: -1,
+		CompactStartupDelay:    -1, // start immediately
+		CompactInterval:        -1, // disable periodic; rely on 30s tick only
+	})
+	require.NoError(t, err, "NewTieredStore")
+	t.Cleanup(func() { _ = ts.Close(ctx) })
+
+	// Write enough data to create dead bytes in non-active segments.
+	for i := range 40 {
+		_, _, err := ts.warm.Put(testkey.Key(uint64(i)), []byte{byte(i)})
+		require.NoErrorf(t, err, "Put %d", i)
+	}
+	for i := range 20 {
+		_, err := ts.warm.Delete(testkey.Key(uint64(i)))
+		require.NoErrorf(t, err, "Delete %d", i)
+	}
+
+	// Verify we have dead bytes before the tick.
+	_, needsBefore := ts.warm.NeedsSegmentCompaction()
+	require.True(t, needsBefore, "should need compaction before tick")
+
+	// Wait for the 30s check tick to fire and run per-segment
+	// compaction. The tick fires every 30s, so 35s gives it time.
+	poll.Eventually(t, 45*time.Second, 500*time.Millisecond, func() bool {
+		_, needs := ts.warm.NeedsSegmentCompaction()
+		return !needs
+	})
+}

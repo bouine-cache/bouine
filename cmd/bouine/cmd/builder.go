@@ -265,6 +265,13 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
+			// Write-to-owner RPC: a non-owner that fetches from origin
+			// forwards the object to the owner so subsequent peer-fetches
+			// hit (issue #509). PutAsync owns the goroutine and bounds
+			// fan-out via putSem (acquired before spawning).
+			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object, req *http.Request) {
+				rs.peerFetcher.PutAsync(ctx, owner, obj, req)
+			}
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
@@ -330,6 +337,13 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			}
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			}
+			// Write-to-owner RPC: a non-owner that fetches from origin
+			// forwards the object to the owner so subsequent peer-fetches
+			// hit (issue #509). PutAsync owns the goroutine and bounds
+			// fan-out via putSem (acquired before spawning).
+			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object, req *http.Request) {
+				rs.peerFetcher.PutAsync(ctx, owner, obj, req)
 			}
 		}
 		cached := cache.NewHandler(cfg)

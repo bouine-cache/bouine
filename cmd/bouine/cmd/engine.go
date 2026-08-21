@@ -698,12 +698,28 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return err
 		}),
 		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit),
+		PeerPutHandler:     e.buildPeerPutHandler(rs),
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:   dashMux,
 		FaviconHandler:     webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	minimalAdmin.SwapHandler(srv.Handler())
+}
+
+// buildPeerPutHandler creates the PeerPutHandler and wires its onStore
+// callback to the first refresh-enabled cache handler so forwarded
+// objects get refresh-before-expiry scheduling (issue #509). The store
+// is shared across all routes, so any handler can schedule the refresh.
+func (e *engine) buildPeerPutHandler(rs *runState) *cluster.PeerPutHandler {
+	h := cluster.NewPeerPutHandler(rs.store, e.logger)
+	for _, ch := range rs.handlers {
+		if ch.RefreshEnabled() {
+			h.SetOnStore(ch.StoreFromPeer)
+			break
+		}
+	}
+	return h
 }
 
 // buildDashboard wires and returns the dashboard ServeMux.

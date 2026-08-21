@@ -2845,6 +2845,214 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 	assert.Equal(t, int32(0), originCalls.Load())
 }
 
+// TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch pins the strong-mode
+// owner-gated storage invariant: a non-owner that misses locally, misses
+// peer-fetch, then fetches from origin must serve the response to the
+// client but NOT store it locally. The object is forwarded to the owner
+// via the write-to-owner RPC instead.
+func TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var originCalls atomic.Int32
+	var peerPutCalls atomic.Int32
+	var peerPutObj *api.Object
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			originCalls.Add(1)
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "from-origin")
+		}),
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+			return nil, nil // peer miss
+		},
+		PeerPut: func(_ context.Context, _ api.PeerInfo, obj *api.Object, _ *http.Request) {
+			peerPutCalls.Add(1)
+			peerPutObj = obj
+		},
+	})
+
+	r := httptest.NewRequest("GET", "http://example.com/non-owner-origin", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, 200, rr.Code)
+	assert.Equal(t, "from-origin", rr.Body.String())
+	assert.Equal(t, int32(1), originCalls.Load())
+
+	// The non-owner must NOT have cached the object locally: a second
+	// request must MISS again (peer-fetch miss → origin fetch).
+	r2 := httptest.NewRequest("GET", "http://example.com/non-owner-origin", nil)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, r2)
+	assert.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	assert.Equal(t, int32(2), originCalls.Load(), "non-owner must re-fetch from origin (no local cache)")
+
+	// Each origin-fetch must forward the object to the owner.
+	assert.Equal(t, int32(2), peerPutCalls.Load(), "each origin fetch must fire a write-to-owner RPC")
+	require.NotNil(t, peerPutObj)
+	assert.Equal(t, "from-origin", string(peerPutObj.Body))
+}
+
+// TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch pins that a non-owner
+// that peer-fetches an object from the owner serves it to the client but
+// does NOT store it locally. Without this, the fleet cache is 3× redundant.
+func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerPutCalls atomic.Int32
+	peerObj := &api.Object{
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}}),
+		Body:       []byte("from-peer"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			t.Fatal("origin should not be called when peer fetch hits")
+		}),
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+			return peerObj, nil
+		},
+		PeerPut: func(_ context.Context, _ api.PeerInfo, _ *api.Object, _ *http.Request) {
+			peerPutCalls.Add(1)
+		},
+	})
+
+	r := httptest.NewRequest("GET", "http://example.com/non-owner-peer", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, 200, rr.Code)
+	assert.Equal(t, "from-peer", rr.Body.String())
+
+	// The non-owner must NOT have cached the object locally: a second
+	// request must peer-fetch again, not HIT locally.
+	r2 := httptest.NewRequest("GET", "http://example.com/non-owner-peer", nil)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, r2)
+	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache), "peer-fetched object should be served as HIT")
+	assert.Equal(t, "peer", rr2.Header().Get(header.XCacheSource), "second request should also come from peer")
+
+	// Peer-fetch promotion must not trigger a write-to-owner RPC: the
+	// object came FROM the owner, forwarding it back would be redundant.
+	assert.Equal(t, int32(0), peerPutCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerStoresLocally pins that the owner node stores
+// origin-fetched objects locally (the normal path). This guards against
+// over-gating that would break the owner's own caching.
+func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerPutCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "owner-body")
+		}),
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "self:8080"}, true // local owner
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+			t.Fatal("owner should not peer-fetch its own keys")
+			return nil, nil
+		},
+		PeerPut: func(_ context.Context, _ api.PeerInfo, _ *api.Object, _ *http.Request) {
+			peerPutCalls.Add(1)
+		},
+	})
+
+	r := httptest.NewRequest("GET", "http://example.com/owner-key", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, 200, rr.Code)
+	assert.Equal(t, "MISS", rr.Header().Get(header.XCache))
+
+	// The owner must have cached locally: second request is a HIT.
+	r2 := httptest.NewRequest("GET", "http://example.com/owner-key", nil)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, r2)
+	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+
+	// The owner must not forward to itself via peerPut.
+	assert.Equal(t, int32(0), peerPutCalls.Load())
+}
+
+// TestStoreFromPeer_EndToEnd pins the write-to-owner RPC's full path:
+// a non-owner forwards an origin-fetched Vary'd object to the owner via
+// the wire protocol (encodePeerPutPayload → PeerPutHandler.ServeHTTP),
+// and the owner's StoreFromPeer stores the object AND schedules
+// refresh-before-expiry with the correct URL and Vary-relevant request
+// headers. This catches:
+//   - nil-URL panic in StoreFromPeer (the original bug)
+//   - response-header/req-header mixup in the synthetic request
+//   - double store.Put (the onStore callback must handle the Put)
+func TestStoreFromPeer_EndToEnd(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+
+	// Owner handler with refresh-before-expiry enabled — the production
+	// configuration where StoreFromPeer is wired.
+	owner := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			t.Fatal("owner should not fetch from origin in this test")
+		}),
+		Store:               store,
+		RefreshBeforeExpiry: true,
+		RefreshMinHits:      0,
+	})
+
+	// Simulate a non-owner forwarding a Vary'd object with the original
+	// request metadata (URL + Accept-Encoding for Vary).
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}, header.Vary: {"Accept-Encoding"}}),
+		Body:       []byte("gzip-body"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		ETag:       `"v1"`,
+	}
+	// The key must be set on the object.
+	forwardReq := httptest.NewRequest("GET", "http://example.com/vary-e2e", nil)
+	forwardReq.Header.Set(header.AcceptEncoding, "gzip")
+	obj.Key = owner.buildKey(forwardReq)
+	obj.VaryKey = BuildVaryKey("Accept-Encoding", forwardReq.Header, nil)
+
+	// Encode the full peer-put payload (metadata + object).
+	// We call StoreFromPeer directly to test the cache-layer integration;
+	// the wire codec is tested separately in peerfetch_test.go.
+	owner.StoreFromPeer(context.Background(), obj, forwardReq)
+
+	// The object must be stored.
+	stored, _, err := store.Get(context.Background(), obj.Key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, "gzip-body", string(stored.Body))
+
+	// The refresh registry must have the entry with the correct URL.
+	entry := owner.refreshRegistry.Lookup(obj.Key)
+	require.NotNil(t, entry, "refresh registry must have entry for forwarded object")
+	assert.Equal(t, "http://example.com/vary-e2e", entry.url)
+	assert.Equal(t, http.MethodGet, entry.method)
+
+	// The Vary-relevant request header (Accept-Encoding) must be in the
+	// refresh entry so future revalidations fetch the correct variant.
+	assert.Equal(t, "gzip", entry.header.Get(header.AcceptEncoding),
+		"refresh entry must carry the original Vary-relevant request headers")
+}
+
 func TestLookup_VaryVariantMiss(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

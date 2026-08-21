@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +50,10 @@ const maxPeerFetchBinaryBody = 512
 const (
 	// PeerFetchPath is the HTTP path for peer cache lookups.
 	PeerFetchPath = "/v1/peer/fetch"
+	// PeerPutPath is the HTTP path for write-to-owner RPCs: a non-owner
+	// that fetched from origin forwards the object to the owner so
+	// subsequent peer-fetches hit (issue #509).
+	PeerPutPath = "/v1/peer/put"
 	// MaxHops is the default maximum number of peers a single request
 	// may traverse before going to origin (threat T36).
 	MaxHops = 2
@@ -62,7 +68,7 @@ const (
 	// cluster fails detectably on version-mismatch instead of
 	// silently producing codec decode errors.
 	ClusterProtocolVersion = "3"
-	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
+	// peerFetchTimeout is the maximum time for a peer-fetch or peer-put RPC.
 	peerFetchTimeout = 500 * time.Millisecond
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
@@ -89,7 +95,10 @@ type PeerFetcher struct {
 	hopLimitHits atomic.Int64
 	maxBodyBytes int64
 	fetchSem     chan struct{}
-	logger       observability.Logger
+	// putSem bounds concurrent write-to-owner RPCs to prevent memory
+	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
+	putSem chan struct{}
+	logger observability.Logger
 	// Prometheus counters — registered if a non-nil registry is passed.
 	pHits     prometheus.Counter
 	pMisses   prometheus.Counter
@@ -155,6 +164,7 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 		hopLimit:     hopLimit,
 		maxBodyBytes: maxPeerFetchBytes,
 		fetchSem:     make(chan struct{}, defaultPeerFetchConcurrency),
+		putSem:       make(chan struct{}, defaultPeerFetchConcurrency),
 		logger:       observability.ResolveLogger(logger),
 	}
 	if reg != nil {
@@ -404,4 +414,331 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		*bufp = encoded[:0]
 		peerFetchEncodePool.Put(bufp)
 	}
+}
+
+// Put forwards obj to the owner peer via the write-to-owner RPC. Used in
+// strong mode so a non-owner that fetched from origin delivers the object
+// to the owner for future peer-fetches (issue #509). Best-effort: errors
+// are logged and returned but do not block the caller's response.
+// Bounded by putSem to prevent unbounded goroutine fan-out during miss
+// storms; if the semaphore is full, the RPC is skipped (best-effort).
+// The request metadata (URL and Vary-relevant headers) is encoded
+// alongside the object so the owner can schedule refresh-before-expiry
+// with the correct request context.
+func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Object, req *http.Request) error {
+	if obj == nil {
+		return nil
+	}
+	select {
+	case f.putSem <- struct{}{}:
+		defer func() { <-f.putSem }()
+	case <-ctx.Done():
+		return fmt.Errorf("peer put %s: %w", peer.Addr, ctx.Err())
+	}
+	fetchAddr := peer.AdminAddr
+	if fetchAddr == "" {
+		fetchAddr = peer.Addr
+	}
+	scheme := "http"
+	if f.useTLS {
+		scheme = "https"
+	}
+	url := scheme + "://" + fetchAddr + PeerPutPath
+
+	body := encodePeerPutPayload(obj, req)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("peer put request: %w", err)
+	}
+	httpReq.Header.Set(header.ContentType, "application/octet-stream")
+	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
+
+	resp, err := f.client.Do(httpReq) //nolint:gosec // G704: URL is built from peer.Addr, a trusted cluster peer (same as Fetch)
+	if err != nil {
+		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer put %s: status %d", peer.Addr, resp.StatusCode)
+	}
+	f.logger.Debug("peer put ok", "key", obj.Key, "peer", peer.Addr)
+	return nil
+}
+
+// PutAsync launches a fire-and-forget write-to-owner RPC in a goroutine
+// owned by the PeerFetcher. The goroutine is bounded by putSem (acquired
+// before spawning so a miss storm does not pin N goroutines each holding
+// a response body in memory). If the semaphore is full the RPC is dropped
+// (best-effort, matching the write-to-owner contract). The context is
+// detached from the caller so the RPC completes after the response is
+// sent. Used by the engine wiring in strong mode (issue #509).
+func (f *PeerFetcher) PutAsync(ctx context.Context, peer api.PeerInfo, obj *api.Object, req *http.Request) {
+	if obj == nil {
+		return
+	}
+	// Acquire the semaphore before spawning so a miss storm does not
+	// create N blocked goroutines each pinning a response body. If the
+	// sem is full, drop the RPC — best-effort, same contract as before.
+	select {
+	case f.putSem <- struct{}{}:
+	default:
+		return
+	}
+	go func() {
+		defer func() { <-f.putSem }()
+		putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), peerFetchTimeout)
+		defer cancel()
+		if err := f.Put(putCtx, peer, obj, req); err != nil {
+			f.logger.Debug("peer put error (non-fatal)",
+				"owner", peer.Name, "key", obj.Key, "error", err)
+		}
+	}()
+}
+
+// peerPutMeta carries the original request metadata needed by the
+// owner to schedule refresh-before-expiry for a forwarded object: the
+// URL (for the refresh registry) and the Vary-relevant request headers
+// (for content negotiation on future revalidations). Encoded alongside
+// the object in the peer-put wire payload (issue #509).
+type peerPutMeta struct {
+	method string
+	url    string
+	header http.Header // Vary-relevant request headers only
+}
+
+// encodePeerPutPayload serialises the request metadata and the object
+// into a single byte slice for the write-to-owner RPC. The format is:
+//   - method  (uvarint len + bytes)
+//   - url     (uvarint len + bytes)
+//   - headers (uvarint count; per header: uvarint key len + key + uvarint val len + val)
+//   - object  (raw storage.EncodeObject output)
+//
+// The object is last so storage.DecodeObject can alias the body slice
+// directly from the tail of the payload without a copy.
+func encodePeerPutPayload(obj *api.Object, req *http.Request) []byte {
+	objBytes := storage.EncodeObject(obj)
+	// Pre-allocate: method + url + header count + ~4 headers (16 bytes each) + object.
+	buf := make([]byte, 0, len(objBytes)+256)
+
+	method := req.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+	buf = binary.AppendUvarint(buf, uint64(len(method)))
+	buf = append(buf, method...)
+
+	urlStr := ""
+	if req.URL != nil {
+		urlStr = req.URL.String()
+	}
+	buf = binary.AppendUvarint(buf, uint64(len(urlStr)))
+	buf = append(buf, urlStr...)
+
+	if req.Header != nil {
+		buf = binary.AppendUvarint(buf, uint64(len(req.Header)))
+		for k, vs := range req.Header {
+			for _, v := range vs {
+				buf = binary.AppendUvarint(buf, uint64(len(k)))
+				buf = append(buf, k...)
+				buf = binary.AppendUvarint(buf, uint64(len(v)))
+				buf = append(buf, v...)
+			}
+		}
+	} else {
+		buf = binary.AppendUvarint(buf, 0)
+	}
+
+	buf = append(buf, objBytes...)
+	return buf
+}
+
+// peerPutReader is a cursor over the peer-put wire payload.
+type peerPutReader struct {
+	data []byte
+	pos  int
+}
+
+func (r *peerPutReader) uvarint() (uint64, error) {
+	v, n := binary.Uvarint(r.data[r.pos:])
+	if n <= 0 {
+		return 0, fmt.Errorf("peer put: corrupt uvarint at offset %d", r.pos)
+	}
+	r.pos += n
+	return v, nil
+}
+
+// bytes returns the next n bytes as a sub-slice (no copy). n must be
+// bounds-checked by the caller; readLen enforces the cap.
+func (r *peerPutReader) bytes(n int) ([]byte, error) {
+	if n < 0 || n > len(r.data)-r.pos {
+		return nil, fmt.Errorf("peer put: truncated at offset %d (need %d, have %d)", r.pos, n, len(r.data)-r.pos)
+	}
+	b := r.data[r.pos : r.pos+n]
+	r.pos += n
+	return b, nil
+}
+
+// readLen reads a uvarint length and the following bytes, enforcing a
+// maximum to prevent integer overflow on 32-bit platforms and reject
+// absurd payloads. The cap must be <= len(remaining data).
+func (r *peerPutReader) readLen(max int) ([]byte, error) {
+	v, err := r.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if v > uint64(max) { //nolint:gosec // G115: max is int (from len), always fits uint64 on real platforms
+		return nil, fmt.Errorf("peer put: length %d exceeds cap %d", v, max)
+	}
+	return r.bytes(int(v)) //nolint:gosec // bounded by max check above
+}
+
+// decodePeerPutPayload deserialises a peer-put payload into the object
+// and the original request metadata. The returned object's Body aliases
+// the input slice (no copy); callers must treat body as immutable.
+func decodePeerPutPayload(data []byte) (*api.Object, *peerPutMeta, error) {
+	r := &peerPutReader{data: data}
+	rem := len(data)
+
+	methodBytes, err := r.readLen(rem)
+	if err != nil {
+		return nil, nil, err
+	}
+	method := string(methodBytes)
+
+	urlBytes, err := r.readLen(rem)
+	if err != nil {
+		return nil, nil, err
+	}
+	urlStr := string(urlBytes)
+
+	hdr, err := decodePeerPutHeaders(r, rem)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	obj, err := storage.DecodeObject(r.data[r.pos:])
+	if err != nil {
+		return nil, nil, err
+	}
+	meta := &peerPutMeta{method: method, url: urlStr, header: hdr}
+	return obj, meta, nil
+}
+
+// decodePeerPutHeaders reads the header count and per-header key/value
+// pairs from the reader. rem is the remaining byte budget (used as the
+// per-field length cap).
+func decodePeerPutHeaders(r *peerPutReader, rem int) (http.Header, error) {
+	hdrCount, err := r.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if hdrCount == 0 {
+		return nil, nil
+	}
+	// Each header needs at least 2 uvarint lengths (2 bytes) + key + val.
+	remBytes := len(r.data) - r.pos
+	if int(hdrCount) > remBytes { //nolint:gosec // G115: hdrCount bounded by uvarint, remBytes is small
+		return nil, fmt.Errorf("peer put: header count %d exceeds remaining bytes", hdrCount)
+	}
+	hdr := make(http.Header, min(int(hdrCount), 16)) //nolint:gosec // bounded by remaining-length check
+	for range hdrCount {
+		keyBytes, err := r.readLen(rem)
+		if err != nil {
+			return nil, err
+		}
+		valBytes, err := r.readLen(rem)
+		if err != nil {
+			return nil, err
+		}
+		hdr.Add(string(keyBytes), string(valBytes))
+	}
+	return hdr, nil
+}
+
+// PeerPutHandler receives write-to-owner RPCs and stores the forwarded
+// object in the local store. Mounted on PeerPutPath. The owner node is
+// the destination for non-owner origin-fetches (issue #509).
+type PeerPutHandler struct {
+	store  PeerPutStore
+	logger observability.Logger
+	// onStore, if non-nil, is called after the object is stored. The
+	// cache handler wires this to its StoreFromPeer so refresh-before-
+	// expiry is scheduled for forwarded objects (which bypass the normal
+	// miss path on the owner). The forwarded request metadata (URL and
+	// Vary-relevant headers) is passed through so the refresh registry
+	// has the correct request context.
+	onStore func(ctx context.Context, obj *api.Object, req *http.Request)
+}
+
+// PeerPutStore is the minimal storage interface needed by peer put.
+// It is satisfied by storage.Store.
+type PeerPutStore interface {
+	Put(ctx context.Context, key api.Key, obj *api.Object) error
+}
+
+// NewPeerPutHandler creates a peer-put handler backed by store.
+func NewPeerPutHandler(store PeerPutStore, logger observability.Logger) *PeerPutHandler {
+	return &PeerPutHandler{store: store, logger: observability.ResolveLogger(logger)}
+}
+
+// SetOnStore sets a callback invoked after a successful store. Used by the
+// engine to wire refresh scheduling (StoreFromPeer) for forwarded objects.
+func (h *PeerPutHandler) SetOnStore(fn func(ctx context.Context, obj *api.Object, req *http.Request)) {
+	h.onStore = fn
+}
+
+// ServeHTTP handles peer put requests: decode the forwarded object and
+// request metadata, store the object, and fire the onStore callback so
+// the cache handler schedules refresh-before-expiry. The owner is the
+// authoritative store for this key.
+func (h *PeerPutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPeerFetchBytes))
+	if err != nil || len(body) == 0 {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	obj, meta, err := decodePeerPutPayload(body)
+	if err != nil {
+		h.logger.Warn("peer put decode failed", "error", err)
+		http.Error(w, "decode error", http.StatusBadRequest)
+		return
+	}
+	if obj == nil || obj.Key == (api.Key{}) {
+		http.Error(w, "missing key", http.StatusBadRequest)
+		return
+	}
+	// Build the synthetic request from the forwarded metadata. The
+	// onStore callback (StoreFromPeer → storeObject) handles both the
+	// store.Put and refresh scheduling, so we do NOT Put here — that
+	// would be a redundant write (issue #509 review finding).
+	reqURL, err := url.Parse(meta.url)
+	if err != nil || reqURL == nil {
+		reqURL = &url.URL{}
+	}
+	method := meta.method
+	if method == "" {
+		method = http.MethodGet
+	}
+	synReq := &http.Request{
+		Method: method,
+		URL:    reqURL,
+		Host:   reqURL.Host,
+		Header: meta.header,
+	}
+	if h.onStore != nil {
+		h.onStore(r.Context(), obj, synReq)
+	} else {
+		// No refresh wiring: store directly.
+		if err := h.store.Put(r.Context(), obj.Key, obj); err != nil {
+			h.logger.Warn("peer put store failed", "key", obj.Key, "error", err)
+			http.Error(w, "store error", http.StatusInternalServerError)
+			return
+		}
+	}
+	h.logger.Debug("served peer put", "key", obj.Key)
+	w.WriteHeader(http.StatusOK)
 }

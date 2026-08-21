@@ -786,7 +786,7 @@ func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
 		ProtocolVersion:  cluster.ClusterProtocolVersion,
 		GossipInterval:   "5s",
 		JoinRetryBudget:  "60s · 2s step",
-		PeerFetchTimeout: "500ms",
+		PeerFetchTimeout: "150ms",
 	}
 	if rs.clusterNode != nil {
 		meta.VirtualNodes = rs.clusterNode.Config().VirtualNodes

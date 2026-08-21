@@ -69,7 +69,12 @@ const (
 	// silently producing codec decode errors.
 	ClusterProtocolVersion = "3"
 	// peerFetchTimeout is the maximum time for a peer-fetch or peer-put RPC.
-	peerFetchTimeout = 500 * time.Millisecond
+	// Cluster peers are on the same LAN (sub-ms RTT); 150ms is generous for
+	// a full request-response cycle including TLS handshake. When a peer
+	// is dead, this bounds the penalty before the caller falls back to
+	// origin: 150ms instead of 500ms per request during the memberlist
+	// suspicion window (~5s). ECONNREFUSED returns immediately regardless.
+	peerFetchTimeout = 150 * time.Millisecond
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
@@ -134,6 +139,11 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer, hopLimit int)
 // traffic. Setting it to 64 matches the origin pool and keeps idle
 // connections warm for reuse. MaxConnsPerHost caps concurrent connections
 // per peer to prevent FD exhaustion during purge storms in strong mode.
+// The dial timeout is 200ms: cluster peers are on the same LAN, so a
+// healthy peer connects in <1ms. A dead peer's endpoint is typically
+// already removed by the kubelet (ECONNREFUSED, <1ms); the 200ms cap
+// covers the rare case where the IP is still routable but the process
+// is gone (no RST, SYN dropped).
 func newClusterTransport(tlsCfg *tls.Config) *http.Transport {
 	return &http.Transport{
 		ForceAttemptHTTP2:   true,
@@ -143,7 +153,7 @@ func newClusterTransport(tlsCfg *tls.Config) *http.Transport {
 		MaxConnsPerHost:     256,
 		IdleConnTimeout:     90 * time.Second,
 		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
+			Timeout:   200 * time.Millisecond,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}

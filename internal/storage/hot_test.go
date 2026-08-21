@@ -915,3 +915,209 @@ func TestHot_484_FreshInsertVisited(t *testing.T) {
 	require.True(t, visited,
 		"freshly inserted entry should have visited=true (one sweep of protection)")
 }
+
+// ---------------------------------------------------------------------------
+// matchesActiveBan / ban snapshot tests (issue #293)
+// ---------------------------------------------------------------------------
+
+// TestMatchesActiveBan_NoBans verifies that matchesActiveBan returns
+// false when no bans have been registered (nil atomic pointer).
+func TestMatchesActiveBan_NoBans(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	o := obj(testkey.Hash([]byte("x")), 50)
+	require.False(t, s.matchesActiveBan(o))
+}
+
+// TestMatchesActiveBan_MatchingBan verifies that a ban matching the
+// object's host triggers a positive match.
+func TestMatchesActiveBan_MatchingBan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "example\\.com",
+		CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+
+	o := obj(testkey.Hash([]byte("x")), 50)
+	o.Header.Set(header.XBouineHost, "example.com")
+	o.StoredAt = time.Now().Add(-1 * time.Hour)
+	require.True(t, s.matchesActiveBan(o))
+}
+
+// TestMatchesActiveBan_NonMatchingBan verifies that a ban that does not
+// match the object returns false.
+func TestMatchesActiveBan_NonMatchingBan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "other\\.com",
+		CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+
+	o := obj(testkey.Hash([]byte("x")), 50)
+	o.Header.Set(header.XBouineHost, "example.com")
+	o.StoredAt = time.Now().Add(-1 * time.Hour)
+	require.False(t, s.matchesActiveBan(o))
+}
+
+// TestMatchesActiveBan_StoredAfterBan verifies that an object stored
+// after the ban was created is exempt (RFC 9111 §4.4).
+func TestMatchesActiveBan_StoredAfterBan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	banTime := time.Now()
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "example\\.com",
+		CreatedAt: banTime,
+	})
+	require.NoError(t, err)
+
+	o := obj(testkey.Hash([]byte("x")), 50)
+	o.Header.Set(header.XBouineHost, "example.com")
+	o.StoredAt = banTime.Add(1 * time.Hour) // stored after ban
+	require.False(t, s.matchesActiveBan(o))
+}
+
+// TestBan_PruneExpiredBans verifies that Ban() prunes bans older than
+// banTTL (24h) when adding a new ban, keeping the snapshot bounded.
+func TestBan_PruneExpiredBans(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Add an expired ban (25h old). It must be pruned on the next Ban().
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "expired\\.com",
+		CreatedAt: time.Now().Add(-25 * time.Hour),
+	})
+	require.NoError(t, err)
+
+	// Add a live ban. The expired ban should be pruned during this call.
+	_, err = s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "live\\.com",
+		CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+
+	// The snapshot should contain only the live ban.
+	cur := s.bans.Load()
+	require.NotNil(t, cur)
+	require.Len(t, *cur, 1, "expired ban should be pruned")
+
+	// An object matching the expired ban's host but not the live ban
+	// should NOT be banned (the expired ban was pruned).
+	o := obj(testkey.Hash([]byte("x")), 50)
+	o.Header.Set(header.XBouineHost, "expired.com")
+	o.StoredAt = time.Now().Add(-26 * time.Hour) // before the expired ban
+	require.False(t, s.matchesActiveBan(o), "expired ban should not match")
+
+	// An object matching the live ban's host SHOULD be banned.
+	o2 := obj(testkey.Hash([]byte("y")), 50)
+	o2.Header.Set(header.XBouineHost, "live.com")
+	o2.StoredAt = time.Now().Add(-1 * time.Hour)
+	require.True(t, s.matchesActiveBan(o2), "live ban should match")
+}
+
+// TestBan_PruneKeepsLiveBans verifies that bans within the banTTL
+// window are kept when a new ban is added.
+func TestBan_PruneKeepsLiveBans(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Add a live ban (1h old).
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "live1\\.com",
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+	})
+	require.NoError(t, err)
+
+	// Add another live ban (just now).
+	_, err = s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "live2\\.com",
+		CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+
+	cur := s.bans.Load()
+	require.NotNil(t, cur)
+	require.Len(t, *cur, 2, "both live bans should be kept")
+}
+
+// TestBan_MultipleBansAllChecked verifies that matchesActiveBan
+// evaluates all bans in the snapshot and returns true if any match.
+func TestBan_MultipleBansAllChecked(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "first\\.com",
+		CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+
+	_, err = s.Ban(context.Background(), api.BanExpr{
+		HostRegex: "second\\.com",
+		CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+
+	// Object matches the second ban.
+	o := obj(testkey.Hash([]byte("x")), 50)
+	o.Header.Set(header.XBouineHost, "second.com")
+	o.StoredAt = time.Now().Add(-1 * time.Hour)
+	require.True(t, s.matchesActiveBan(o))
+}
+
+// TestMatchesActiveBan_ConcurrentReadsAndBan verifies no race or
+// deadlock when reads happen concurrently with a Ban() call.
+func TestMatchesActiveBan_ConcurrentReadsAndBan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Pre-populate an object.
+	k := testkey.Hash([]byte("concurrent"))
+	o := obj(k, 50)
+	o.Header.Set(header.XBouineHost, "example.com")
+	o.Header.Set(header.XBouinePath, "/path")
+	o.StoredAt = time.Now().Add(-1 * time.Hour)
+	_ = s.Put(context.Background(), k, o)
+
+	var wg sync.WaitGroup
+	var stop atomic.Bool
+
+	// Reader goroutine: hammer matchesActiveBan.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !stop.Load() {
+				_ = s.matchesActiveBan(o)
+			}
+		}()
+	}
+
+	// Writer: issue a few bans.
+	for i := range 5 {
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			HostRegex: fmt.Sprintf("host%d\\.com", i),
+			CreatedAt: time.Now(),
+		})
+	}
+
+	stop.Store(true)
+	wg.Wait()
+}

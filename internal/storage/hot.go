@@ -49,16 +49,15 @@ type HotStore struct {
 	maxBytes int64
 	stats    hotStats
 	logger   observability.Logger
-	// activeBans is the lazy ban list. Each entry was added via Ban() and
-	// is checked against objects returned by Get(). Objects stored AFTER
-	// the ban's CreatedAt are not subject to it (RFC 9111 §4.4 semantics).
-	bansMu     sync.Mutex
-	activeBans []activeBan
-	// banCount mirrors len(activeBans) for a lock-free fast path in
-	// matchesActiveBan. It is written only while holding bansMu but read
-	// without any lock on the hot Get path, so the global bansMu is never
-	// acquired on a cache hit in the common (no active bans) case.
-	banCount atomic.Int64
+	// bans is the lazy ban list, stored as an atomic pointer to an
+	// immutable snapshot. Ban() appends + prunes under bansMu, then
+	// publishes a new slice via atomic.Store. The read path
+	// (matchesActiveBan) does a lock-free atomic.Load and iterates the
+	// snapshot — no lock, no allocation, no mutation on the hit path.
+	// Objects stored AFTER a ban's CreatedAt are not subject to it
+	// (RFC 9111 §4.4 semantics).
+	bansMu sync.Mutex
+	bans   atomic.Pointer[[]activeBan]
 	// evictSignal receives shard indices that need further eviction after
 	// the inline cap was reached. Buffered to len(shards); non-blocking
 	// sends coalesce burst signals.
@@ -92,6 +91,13 @@ type activeBan struct {
 	pred    banPredicate
 	created time.Time
 }
+
+// banTTL is how long a lazy ban stays in the active list. Bans older
+// than this cannot match any live object: objects stored after the ban
+// are exempt (StoredAt > ban.created), and objects stored before it
+// have either been re-cached or expired by now. This is a bouine policy
+// constant, not an RFC requirement.
+const banTTL = 24 * time.Hour
 
 type shard struct {
 	mu          sync.RWMutex
@@ -721,8 +727,20 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 		createdAt = time.Now()
 	}
 	h.bansMu.Lock()
-	h.activeBans = append(h.activeBans, activeBan{pred: pred, created: createdAt})
-	h.banCount.Store(int64(len(h.activeBans)))
+	cur := h.bans.Load()
+	var base []activeBan
+	if cur != nil {
+		base = *cur
+	}
+	updated := make([]activeBan, 0, len(base)+1)
+	now := time.Now()
+	for _, b := range base {
+		if now.Sub(b.created) < banTTL {
+			updated = append(updated, b)
+		}
+	}
+	updated = append(updated, activeBan{pred: pred, created: createdAt})
+	h.bans.Store(&updated)
 	h.bansMu.Unlock()
 	return int(total.Load()), nil
 }
@@ -814,33 +832,16 @@ func (h *HotStore) MatchesActiveBan(obj *api.Object) bool {
 	return h.matchesActiveBan(obj)
 }
 
-// matchesActiveBan reports whether obj is subject to any active lazy ban.
-// Expired bans (where the ban's CreatedAt is far in the past and unlikely to
-// be relevant) are pruned to bound the list size.
-//
-// Fast path: when no bans are active (the steady-state case), a single
-// atomic load returns immediately without touching the global bansMu. This
-// keeps the hot Get path free of cross-shard lock contention.
+// matchesActiveBan reports whether obj is subject to any active lazy
+// ban. It loads the immutable ban snapshot via atomic.Pointer (lock-
+// free, zero allocation) and iterates it. Pruning of expired bans
+// happens in Ban(), not on the read path.
 func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
-	if h.banCount.Load() == 0 {
+	cur := h.bans.Load()
+	if cur == nil || len(*cur) == 0 {
 		return false
 	}
-	h.bansMu.Lock()
-	defer h.bansMu.Unlock()
-	if len(h.activeBans) == 0 {
-		return false
-	}
-	var live []activeBan
-	for _, b := range h.activeBans {
-		// Keep bans for 24h after creation; older bans cannot match objects
-		// stored after them (StoredAt > ban.created).
-		if time.Since(b.created) < 24*time.Hour {
-			live = append(live, b)
-		}
-	}
-	h.activeBans = live
-	h.banCount.Store(int64(len(live)))
-	for _, b := range live {
+	for _, b := range *cur {
 		if obj.StoredAt.After(b.created) {
 			continue // object stored after ban — not subject to it
 		}

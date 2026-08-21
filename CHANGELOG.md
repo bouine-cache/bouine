@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-21
+
 ### Changed
 - Toolchain bumped from Go 1.26.6 to Go 1.27.0 (Dockerfile, CI workflows,
   go.mod, documentation).
@@ -519,7 +521,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.3
 [0.4.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.1
 [0.4.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.0
 [0.3.7]: https://github.com/bouine-cache/bouine/releases/tag/v0.3.7

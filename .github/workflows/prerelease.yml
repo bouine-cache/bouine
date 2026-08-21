@@ -37,8 +37,11 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: prerelease-${{ inputs.tag }}
+  cancel-in-progress: true
+
 env:
-  GO_VERSION: "1.27.0"
   DOCKER_IMAGE: bouinecache/bouine
 
 jobs:
@@ -47,23 +50,29 @@ jobs:
     runs-on: [self-hosted, ci]
     environment: maintainers
     timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Validate tag
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag }}"
-          if [ -z "$tag" ]; then
+          if [ -z "$TAG" ]; then
             echo "::error::Tag is required"
             exit 1
           fi
           # Reject anything that could be mistaken for a release or latest tag.
-          case "$tag" in
-            latest|nightly)        echo "::error::Tag '$tag' is reserved"; exit 1 ;;
-            v[0-9]*)               echo "::error::Tag '$tag' looks like a release version (v*.*.*). Use a pre-release tag like pr-42-abc123."; exit 1 ;;
+          case "$TAG" in
+            latest|nightly) echo "::error::Tag '$TAG' is reserved"; exit 1 ;;
+            v[0-9].[0-9]*)  echo "::error::Tag '$TAG' looks like a release version (vX.Y.Z). Use a pre-release tag like pr-42-abc123."; exit 1 ;;
           esac
-          echo "Using pre-release tag: $tag"
+          # Docker tags: lowercase, [a-z0-9._-], max 128 chars.
+          if ! echo "$TAG" | grep -qE '^[a-z0-9._-]{1,128}$'; then
+            echo "::error::Tag '$TAG' is not a valid Docker tag (lowercase, [a-z0-9._-], max 128 chars)"
+            exit 1
+          fi
+          echo "Using pre-release tag: $TAG"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4.2.0
@@ -85,6 +94,10 @@ jobs:
           tags: |
             type=raw,value=${{ inputs.tag }}
 
+      - name: Get build date
+        id: date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7.3.0
@@ -99,7 +112,7 @@ jobs:
           build-args: |
             VERSION=pre-${{ inputs.tag }}
             COMMIT=${{ github.sha }}
-            DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            DATE=${{ steps.date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -135,6 +148,8 @@ jobs:
     runs-on: [self-hosted, ci]
     environment: maintainers
     timeout-minutes: 10
+    env:
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v7
 
@@ -144,24 +159,21 @@ jobs:
       - name: Package chart with pre-release version
         run: |
           set -euo pipefail
-          # Bump Chart.yaml version + appVersion to the pre-release tag so
-          # `helm upgrade --install` picks it up. The official chart-release.yml
-          # workflow is unaffected — this package is only a CI artifact.
-          sed -i \
-            -e "s/^version:.*/version: ${{ inputs.tag }}/" \
-            -e "s/^appVersion:.*/appVersion: \"${{ inputs.tag }}\"/" \
-            deploy/helm/bouine/Chart.yaml
+          # Set appVersion to the pre-release tag so helm can correlate the
+          # chart with the image. The --version flag sets the chart package
+          # version; we only need to patch appVersion in Chart.yaml.
+          sed -i "s/^appVersion:.*/appVersion: \"$TAG\"/" deploy/helm/bouine/Chart.yaml
           mkdir -p .cr-release-packages
           helm package deploy/helm/bouine \
             --destination .cr-release-packages \
-            --version ${{ inputs.tag }}
+            --version "$TAG"
           echo "## Helm chart packaged" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Chart version: \`${{ inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Chart version: \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Download the .tgz from the workflow artifacts, then:" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
-          echo "helm upgrade --install bouine ./bouine-${{ inputs.tag }}.tgz \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "helm upgrade --install bouine ./bouine-$TAG.tgz \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  --namespace thylong-innerspace \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  --values k8s/bouine-values.yaml" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

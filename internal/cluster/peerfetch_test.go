@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
@@ -27,6 +28,14 @@ type stubStore struct {
 
 func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
 	return s.objects[key], "", nil
+}
+
+func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
+	if s.objects == nil {
+		s.objects = make(map[api.Key]*api.Object)
+	}
+	s.objects[key] = obj
+	return nil
 }
 
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *httptest.ResponseRecorder {
@@ -156,6 +165,97 @@ func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerFetchPath, nil)
 	h.ServeHTTP(rr, r)
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func TestPeerPutHandler_Stores(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	h := NewPeerPutHandler(store, nil)
+	obj := &api.Object{
+		Key:        testkey.Key(42),
+		StatusCode: 200,
+		Body:       []byte("from-non-owner"),
+		BodySize:   15,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	encoded := storage.EncodeObject(obj)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(encoded))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, http.StatusOK, rr.Code)
+	stored, _, err := store.Get(context.Background(), obj.Key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, obj.Body, stored.Body)
+}
+
+func TestPeerPutHandler_OnStoreCallback(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	h := NewPeerPutHandler(store, nil)
+	var called atomic.Int32
+	h.SetOnStore(func(_ context.Context, obj *api.Object) {
+		called.Add(1)
+		assert.Equal(t, testkey.Key(42), obj.Key)
+	})
+	encoded := storage.EncodeObject(&api.Object{
+		Key:        testkey.Key(42),
+		StatusCode: 200,
+		Body:       []byte("x"),
+		BodySize:   1,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	})
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(encoded))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, int32(1), called.Load())
+}
+
+func TestPeerPutHandler_BadBody(t *testing.T) {
+	t.Parallel()
+	h := NewPeerPutHandler(&stubStore{}, nil)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader([]byte{0xFF, 0x00}))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestPeerPutHandler_WrongMethod(t *testing.T) {
+	t.Parallel()
+	h := NewPeerPutHandler(&stubStore{}, nil)
+	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerPutPath, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+}
+
+func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	srv := httptest.NewServer(NewPeerPutHandler(store, nil))
+	defer srv.Close()
+	f := NewPeerFetcher(nil, nil, 0)
+	obj := &api.Object{
+		Key:        testkey.Key(7),
+		StatusCode: 200,
+		Body:       []byte("payload"),
+		BodySize:   7,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	peer := api.PeerInfo{Addr: srv.Listener.Addr().String()}
+	err := f.Put(context.Background(), peer, obj)
+	require.NoError(t, err)
+	stored, _, err := store.Get(context.Background(), obj.Key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, obj.Body, stored.Body)
 }
 
 func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {

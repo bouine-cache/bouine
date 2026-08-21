@@ -125,15 +125,15 @@ func appendByte(dst []byte, n int, b byte) int {
 	return n + 1
 }
 
-// copyOverflow copies src into dst starting at offset n. If n is past
-// the end of dst, no bytes are copied but the full length of src is
-// returned, allowing callers to track the true canonical size for
-// overflow detection.
+// copyOverflow copies src into dst starting at offset n. The copy is
+// best-effort: only bytes that fit within dst are written. The return
+// value is always len(src), allowing callers to track the true canonical
+// size for overflow detection regardless of whether the copy was partial.
 func copyOverflow(dst []byte, n int, src string) int {
-	if n >= len(dst) {
-		return len(src)
+	if n < len(dst) {
+		copy(dst[n:], src)
 	}
-	return copy(dst[n:], src)
+	return len(src)
 }
 
 func appendCanonicalHost(buf []byte, n int, host string) int {

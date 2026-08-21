@@ -400,6 +400,10 @@ func TestServeFastPath_H2CPreface(t *testing.T) {
 	buf := make([]byte, 1024)
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	_, _ = conn.Read(buf) // may get HTTP/2 settings frame
+	// Close the client connection so the server's h2c goroutine unblocks
+	// and the WaitGroup drains. Without this, cancel() alone cannot stop
+	// the in-flight HTTP/2 connection handler.
+	_ = conn.Close()
 	cancel()
 	<-errCh
 }

@@ -65,6 +65,40 @@ func TestPeerBanHandler_DecodesAndCalls(t *testing.T) {
 	assert.Equal(t, "example.com", received.Predicate.HostRegex)
 }
 
+func TestPeerRefreshHandler_DecodesAndCalls(t *testing.T) {
+	t.Parallel()
+	var received api.RefreshEvent
+	handler := NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
+		received = evt
+		return nil
+	})
+
+	evt := api.RefreshEvent{Key: testkey.Key(42), Issuer: "node-0"}
+	body, _ := EncodeRefreshHTTP(evt)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/refresh", bytesReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, testkey.Key(42), received.Key)
+	assert.Equal(t, "node-0", received.Issuer)
+}
+
+func TestPeerRefreshHandler_BadBody(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerRefreshHandler(func(api.RefreshEvent) error {
+		t.Fatal("should not be called")
+		return nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/refresh", bytesReader([]byte("bad")))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
 type byteReader struct {
 	data []byte
 	pos  int

@@ -3606,3 +3606,426 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 		assert.Equal(t, 120*time.Second, updated.TTL)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// SoftPurge tests
+// ---------------------------------------------------------------------------
+
+// TestSoftPurge_MarksObjectStale verifies that SoftPurge reduces the
+// TTL to zero, making the object immediately stale while keeping it in
+// the store (unlike Purge which deletes it).
+func TestSoftPurge_MarksObjectStale(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		_, _ = w.Write([]byte("cached-body"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/soft-purge", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	key := h.buildKey(req)
+	obj, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+	require.True(t, obj.Fresh(time.Now()), "object should be fresh before soft purge")
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	// Object must still be in the store (not deleted).
+	obj2, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj2, "object must still be in store after soft purge")
+	// Object must now be stale (TTL reduced to zero).
+	require.False(t, obj2.Fresh(time.Now()), "object should be stale after soft purge")
+	// Object must be within the SWR window (servable while revalidating).
+	require.True(t, obj2.StaleForSWR(time.Now()), "object should be in SWR window after soft purge")
+	// Body must be preserved.
+	require.Equal(t, "cached-body", string(obj2.Body))
+}
+
+// TestSoftPurge_UnknownKeyReturnsFalse verifies that SoftPurge on a key
+// that was never cached returns owned=false with no error.
+func TestSoftPurge_UnknownKeyReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: origin200("x"),
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	owned, err := h.SoftPurge(context.Background(), testkey.Key(999))
+	require.NoError(t, err)
+	require.False(t, owned, "should not own unknown key")
+}
+
+// TestSoftPurge_NoSWRFallsBackToDelete verifies that when an object has
+// no stale-while-revalidate window, SoftPurge falls back to a hard delete
+// (since the stale body would not be servable).
+func TestSoftPurge_NoSWRFallsBackToDelete(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"v1"`)
+		_, _ = w.Write([]byte("no-swr"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/no-swr", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	key := h.buildKey(req)
+	obj, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+	require.Equal(t, time.Duration(0), obj.StaleWhileRevalidate)
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	// Object must be deleted (no SWR window to serve stale).
+	obj2, _, _ := store.Get(context.Background(), key)
+	require.Nil(t, obj2, "object should be deleted when no SWR window")
+}
+
+// TestSoftPurge_PreservesValidators verifies that ETag and Last-Modified
+// are preserved after a soft purge, enabling conditional revalidation.
+func TestSoftPurge_PreservesValidators(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"etag-123"`)
+		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		_, _ = w.Write([]byte("body"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/validators", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	key := h.buildKey(req)
+	_, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+
+	obj, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj)
+	require.Equal(t, `"etag-123"`, obj.ETag, "ETag must be preserved")
+	require.False(t, obj.LastModified.IsZero(), "LastModified must be preserved")
+}
+
+// TestSoftPurge_ServeStaleThenRevalidate verifies the end-to-end soft
+// purge flow: after soft purge, the next request serves the stale body
+// (STALE) and triggers a background revalidation.
+func TestSoftPurge_ServeStaleThenRevalidate(t *testing.T) {
+	t.Parallel()
+
+	var originHits atomic.Int64
+	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originHits.Add(1)
+		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		_, _ = w.Write([]byte("original"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/swr-flow", nil)
+
+	// First request: cache miss, fetches from origin.
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, req)
+	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+	require.Equal(t, int64(1), originHits.Load())
+
+	key := h.buildKey(req)
+
+	// Soft purge: mark the object stale.
+	_, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+
+	// Second request: should serve stale body (STALE) from cache.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req)
+	require.Equal(t, "STALE", rr2.Header().Get(header.XCache), "should serve stale after soft purge")
+	require.Equal(t, "original", rr2.Body.String(), "should serve the original cached body")
+
+	// The background revalidation should have fetched from origin
+	// (conditional request). Wait briefly for the background goroutine.
+	// The origin should have been hit again for the revalidation.
+	require.Eventually(t, func() bool {
+		return originHits.Load() >= 2
+	}, 2*time.Second, 10*time.Millisecond, "background revalidation should hit origin")
+}
+
+// TestSoftPurge_Variants verifies that SoftPurge marks all variants
+// stale when soft-purging the primary key.
+func TestSoftPurge_Variants(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.Header().Set(header.Vary, "X-Test-Variant")
+		_, _ = w.Write([]byte(r.Header.Get("X-Test-Variant")))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream: orig,
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	reqA := httptest.NewRequest("GET", "http://example.com/vary-sp", nil)
+	reqA.Header.Set("X-Test-Variant", "a")
+	h.ServeHTTP(httptest.NewRecorder(), reqA)
+
+	reqB := httptest.NewRequest("GET", "http://example.com/vary-sp", nil)
+	reqB.Header.Set("X-Test-Variant", "b")
+	h.ServeHTTP(httptest.NewRecorder(), reqB)
+
+	primaryKey := h.buildKey(reqA)
+	keyA := VariantKey(primaryKey, "X-Test-Variant", reqA.Header, nil)
+	keyB := VariantKey(primaryKey, "X-Test-Variant", reqB.Header, nil)
+
+	// All should be fresh.
+	objA, _, _ := store.Get(context.Background(), keyA)
+	require.NotNil(t, objA)
+	require.True(t, objA.Fresh(time.Now()))
+	objB, _, _ := store.Get(context.Background(), keyB)
+	require.NotNil(t, objB)
+	require.True(t, objB.Fresh(time.Now()))
+
+	// Soft purge the primary key.
+	owned, err := h.SoftPurge(context.Background(), primaryKey)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	// All variants should be stale but still in the store.
+	objA2, _, _ := store.Get(context.Background(), keyA)
+	require.NotNil(t, objA2, "variant A should still be in store")
+	require.False(t, objA2.Fresh(time.Now()), "variant A should be stale")
+	require.True(t, objA2.StaleForSWR(time.Now()), "variant A should be in SWR window")
+
+	objB2, _, _ := store.Get(context.Background(), keyB)
+	require.NotNil(t, objB2, "variant B should still be in store")
+	require.False(t, objB2.Fresh(time.Now()), "variant B should be stale")
+	require.True(t, objB2.StaleForSWR(time.Now()), "variant B should be in SWR window")
+}
+
+// TestSoftPurge_AlreadyStaleObject verifies that soft-purging an
+// already-stale object is a no-op that still returns owned=true.
+func TestSoftPurge_AlreadyStaleObject(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	key := testkey.Key(42)
+	obj := &api.Object{
+		Key:                  key,
+		StatusCode:           200,
+		Header:               header.FromHTTP(http.Header{header.CacheControl: {"max-age=1, stale-while-revalidate=60"}, header.ETag: {`"v1"`}}),
+		Body:                 []byte("stale"),
+		BodySize:             5,
+		StoredAt:             time.Now().Add(-10 * time.Second),
+		TTL:                  1 * time.Second,
+		StaleWhileRevalidate: 60 * time.Second,
+		ETag:                 `"v1"`,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+	require.False(t, obj.Fresh(time.Now()))
+
+	h := NewHandler(HandlerConfig{
+		Upstream: origin200("x"),
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned, "should own the stale object")
+
+	// Object should still be in the store and still stale.
+	obj2, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj2)
+	require.False(t, obj2.Fresh(time.Now()))
+	require.True(t, obj2.StaleForSWR(time.Now()))
+}
+
+// TestSoftPurge_SIEOnlyNoSWR verifies that an object with only
+// stale-if-error (no SWR) is still soft-purged (kept in store), since SIE
+// allows serving the stale body when the origin returns an error.
+func TestSoftPurge_SIEOnlyNoSWR(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	key := testkey.Key(77)
+	obj := &api.Object{
+		Key:          key,
+		StatusCode:   200,
+		Header:       header.FromHTTP(http.Header{header.CacheControl: {"max-age=3600, stale-if-error=60"}, header.ETag: {`"v1"`}}),
+		Body:         []byte("sie-only"),
+		BodySize:     8,
+		StoredAt:     time.Now(),
+		TTL:          3600 * time.Second,
+		StaleIfError: 60 * time.Second,
+		ETag:         `"v1"`,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	h := NewHandler(HandlerConfig{
+		Upstream: origin200("x"),
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	// SIE-only object should still be in the store and stale.
+	obj2, _, _ := store.Get(context.Background(), key)
+	require.NotNil(t, obj2, "SIE-only object should be kept in store (can serve stale on origin error)")
+	require.False(t, obj2.Fresh(time.Now()), "object should be stale")
+	require.True(t, obj2.StaleForSIE(time.Now()), "object should be in SIE window")
+}
+
+// TestSoftPurge_NoSWRAndNoSIE_FallsBackToDelete verifies that an object
+// with neither stale-while-revalidate nor stale-if-error is hard-deleted
+// by SoftPurge, since the stale body would never be servable.
+func TestSoftPurge_NoSWRAndNoSIE_FallsBackToDelete(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	key := testkey.Key(88)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=3600"}, header.ETag: {`"v1"`}}),
+		Body:       []byte("no-grace"),
+		BodySize:   8,
+		StoredAt:   time.Now(),
+		TTL:        3600 * time.Second,
+		ETag:       `"v1"`,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	h := NewHandler(HandlerConfig{
+		Upstream: origin200("x"),
+		Store:    store,
+		Logger:   slog.Default(),
+	})
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	obj2, _, _ := store.Get(context.Background(), key)
+	require.Nil(t, obj2, "object with no SWR and no SIE should be deleted")
+}
+
+// errorOnPutStore wraps a real store but returns an error on Put.
+type errorOnPutStore struct {
+	storage.Store
+	putErr error
+}
+
+func (s *errorOnPutStore) Put(_ context.Context, _ api.Key, _ *api.Object) error {
+	return s.putErr
+}
+
+// TestSoftPurge_PutError verifies that SoftPurge returns the error when
+// store.Put fails during the soft-purge operation.
+func TestSoftPurge_PutError(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	key := testkey.Key(55)
+	obj := &api.Object{
+		Key:                  key,
+		StatusCode:           200,
+		Header:               header.FromHTTP(http.Header{header.CacheControl: {"max-age=3600, stale-while-revalidate=60"}, header.ETag: {`"v1"`}}),
+		Body:                 []byte("body"),
+		BodySize:             4,
+		StoredAt:             time.Now(),
+		TTL:                  3600 * time.Second,
+		StaleWhileRevalidate: 60 * time.Second,
+		ETag:                 `"v1"`,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	errStore := &errorOnPutStore{Store: store, putErr: errors.New("disk full")}
+	h := NewHandler(HandlerConfig{
+		Upstream: origin200("x"),
+		Store:    errStore,
+		Logger:   slog.Default(),
+	})
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.Error(t, err, "should return Put error")
+	require.True(t, owned, "should still report owned=true since the key was found")
+}
+
+// TestSoftPurge_RefreshRegistryUnregistered verifies that when SoftPurge
+// falls back to hard delete (no SWR/SIE), the refresh registry is also
+// unregistered, preventing background refresh from resurrecting the key.
+func TestSoftPurge_RefreshRegistryUnregistered(t *testing.T) {
+	t.Parallel()
+
+	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=3600")
+		w.Header().Set(header.ETag, `"v1"`)
+		_, _ = w.Write([]byte("no-swr"))
+	})
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
+	h := NewHandler(HandlerConfig{
+		Upstream:            orig,
+		Store:               store,
+		Logger:              slog.Default(),
+		RefreshBeforeExpiry: true,
+		RefreshMargin:       30 * time.Second,
+	})
+
+	req := httptest.NewRequest("GET", "http://example.com/refresh-reg", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	key := h.buildKey(req)
+	require.NotNil(t, h.refreshRegistry)
+	require.Equal(t, 1, h.refreshRegistry.Len(), "object should be registered for refresh")
+
+	owned, err := h.SoftPurge(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, owned)
+
+	require.Equal(t, 0, h.refreshRegistry.Len(), "refresh registry should be cleared after soft purge with hard delete")
+}

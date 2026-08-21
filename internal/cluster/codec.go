@@ -18,8 +18,9 @@ const (
 )
 
 const (
-	msgTypePurge byte = 1
-	msgTypeBan   byte = 2
+	msgTypePurge   byte = 1
+	msgTypeBan     byte = 2
+	msgTypeRefresh byte = 3
 )
 
 var (
@@ -295,6 +296,103 @@ func DecodeBanHTTP(buf []byte) (api.BanEvent, error) {
 		return api.BanEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
 	}
 	return decodeBanPayload(buf, binaryHdrLen)
+}
+
+func refreshPayloadLen(evt api.RefreshEvent) int {
+	return 16 + 2 + len(evt.Issuer) + 8 + 8
+}
+
+func putRefreshPayload(buf []byte, off int, evt api.RefreshEvent) (int, error) {
+	copy(buf[off:off+16], evt.Key[:])
+	off += 16
+	var err error
+	off, err = putString(buf, off, evt.Issuer)
+	if err != nil {
+		return off, err
+	}
+	binary.LittleEndian.PutUint64(buf[off:], uint64(encodeTime(evt.IssuedAt))) //nolint:gosec // wire format: int64 cast
+	off += 8
+	binary.LittleEndian.PutUint64(buf[off:], evt.Seq)
+	return off + 8, nil
+}
+
+func decodeRefreshPayload(buf []byte, off int) (api.RefreshEvent, error) {
+	var evt api.RefreshEvent
+	if off+16 > len(buf) {
+		return evt, errShortFrame
+	}
+	copy(evt.Key[:], buf[off:off+16])
+	off += 16
+	var err error
+	evt.Issuer, off, err = readString(buf, off)
+	if err != nil {
+		return evt, err
+	}
+	if off+16 > len(buf) {
+		return evt, errShortFrame
+	}
+	evt.IssuedAt = decodeTime(int64(binary.LittleEndian.Uint64(buf[off:]))) //nolint:gosec // wire format: uint64→int64 round-trip
+	off += 8
+	evt.Seq = binary.LittleEndian.Uint64(buf[off:])
+	return evt, nil
+}
+
+// EncodeRefreshGossip serializes a RefreshEvent as a gossip frame.
+func EncodeRefreshGossip(evt api.RefreshEvent) ([]byte, error) {
+	total := gossipHdrLen + refreshPayloadLen(evt)
+	buf := make([]byte, total)
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	buf[2] = msgTypeRefresh
+	off, err := putRefreshPayload(buf, gossipHdrLen, evt)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:off], nil
+}
+
+// EncodeRefreshHTTP serializes a RefreshEvent for the HTTP peer-refresh endpoint.
+func EncodeRefreshHTTP(evt api.RefreshEvent) ([]byte, error) {
+	total := binaryHdrLen + refreshPayloadLen(evt)
+	buf := make([]byte, total)
+	buf[0] = binaryMagic
+	buf[1] = binaryVersion
+	off, err := putRefreshPayload(buf, binaryHdrLen, evt)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:off], nil
+}
+
+// DecodeRefreshGossip decodes a RefreshEvent from a gossip frame.
+func DecodeRefreshGossip(buf []byte) (api.RefreshEvent, error) {
+	if len(buf) < gossipHdrLen {
+		return api.RefreshEvent{}, errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return api.RefreshEvent{}, errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return api.RefreshEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	if buf[2] != msgTypeRefresh {
+		return api.RefreshEvent{}, fmt.Errorf("cluster: wrong msgType %d for refresh", buf[2])
+	}
+	return decodeRefreshPayload(buf, gossipHdrLen)
+}
+
+// DecodeRefreshHTTP decodes a RefreshEvent from an HTTP peer-refresh body.
+func DecodeRefreshHTTP(buf []byte) (api.RefreshEvent, error) {
+	if len(buf) < binaryHdrLen {
+		return api.RefreshEvent{}, errShortFrame
+	}
+	if buf[0] != binaryMagic {
+		return api.RefreshEvent{}, errBadMagic
+	}
+	if buf[1] != binaryVersion {
+		return api.RefreshEvent{}, fmt.Errorf("%w: got %d", errUnsupportedVer, buf[1])
+	}
+	return decodeRefreshPayload(buf, binaryHdrLen)
 }
 
 // IsBinaryFrame reports whether msg starts with the binary magic byte.

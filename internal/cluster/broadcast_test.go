@@ -393,3 +393,127 @@ func TestBroadcaster_SendsAuthToken(t *testing.T) {
 		})
 	}
 }
+
+func TestBroadcaster_BroadcastRefresh(t *testing.T) {
+	t.Parallel()
+	var received []api.RefreshEvent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/peer/refresh" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		evt, err := DecodeRefreshHTTP(body)
+		if err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		received = append(received, evt)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastRefresh(context.Background(), testkey.Key(42))
+
+	require.Len(t, received, 1)
+	assert.Equal(t, testkey.Key(42), received[0].Key)
+	assert.Equal(t, "node-0", received[0].Issuer)
+}
+
+func TestBroadcastRefresh_Eventual_NoHTTPFanout(t *testing.T) {
+	t.Parallel()
+	called := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "eventual"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastRefresh(context.Background(), testkey.Key(1))
+
+	require.Equal(t, 0, called, "eventual mode should not use HTTP fan-out")
+}
+
+func TestBroadcastRefresh_Strong_DoesHTTPFanout(t *testing.T) {
+	t.Parallel()
+	called := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.cfg.Mode = "strong"
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastRefresh(context.Background(), testkey.Key(1))
+
+	require.Equal(t, 1, called, "strong mode should use HTTP fan-out")
+}
+
+func TestBroadcastRefresh_SkipsSelf(t *testing.T) {
+	t.Parallel()
+	called := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.peers["node-0"] = &Member{Info: api.PeerInfo{
+		Name:      "node-0",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+	b.BroadcastRefresh(context.Background(), testkey.Key(1))
+
+	require.Equal(t, 1, called, "should skip self, only contact node-1")
+}
+
+func TestBroadcastRefresh_NotCancelledByParentContext(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := minimalCluster(t, "node-0")
+	c.peers["node-1"] = &Member{Info: api.PeerInfo{
+		Name:      "node-1",
+		AdminAddr: srv.Listener.Addr().String(),
+	}}
+
+	b := NewBroadcaster(c, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled — broadcast must still reach peers
+
+	b.BroadcastRefresh(ctx, testkey.Key(1))
+	require.Equal(t, int32(1), hits.Load(), "refresh broadcast must not be cancelled by parent context")
+}

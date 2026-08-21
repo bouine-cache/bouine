@@ -79,6 +79,23 @@ type BanEvent struct {
 	Seq uint64 `json:"seq"`
 }
 
+// RefreshEvent is broadcast when a key is soft-purged (marked stale for
+// background revalidation). Unlike PurgeEvent, the object is not deleted
+// — it enters the stale-while-revalidate window so the next request
+// serves the stale body and triggers a conditional revalidation.
+//
+// Stable.
+type RefreshEvent struct {
+	// Key is the primary cache key to soft-purge.
+	Key Key `json:"key"`
+	// Issuer is the node name that originated the refresh.
+	Issuer string `json:"issuer"`
+	// IssuedAt is the wall-clock time of the refresh.
+	IssuedAt time.Time `json:"issued_at"`
+	// Seq is the monotonic sequence number from the issuer.
+	Seq uint64 `json:"seq"`
+}
+
 // PeerFetchRequest is the HTTP request body for a peer cache lookup.
 //
 // Stable.

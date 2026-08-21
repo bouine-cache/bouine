@@ -200,6 +200,63 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 	)
 }
 
+// BroadcastRefresh sends a soft-purge (refresh) event for key to all
+// live peers. In strong mode it posts to each peer's admin API and also
+// enqueues via gossip for redundant delivery. In eventual mode it sends
+// via gossip only.
+func (b *Broadcaster) BroadcastRefresh(ctx context.Context, key api.Key) {
+	fanoutCtx := context.WithoutCancel(ctx)
+
+	evt := api.RefreshEvent{
+		Key:      key,
+		Issuer:   b.cluster.cfg.NodeName,
+		IssuedAt: time.Now(),
+		Seq:      b.seq.Add(1),
+	}
+
+	if b.mode == config.ClusterModeStrong {
+		peers := b.cluster.Members()
+		var wg sync.WaitGroup
+		for _, p := range peers {
+			if p.Name == b.cluster.cfg.NodeName {
+				continue
+			}
+			wg.Add(1)
+			go func(peer api.PeerInfo) {
+				defer wg.Done()
+				defer func() {
+					if v := recover(); v != nil {
+						b.logger.Error("refresh broadcast panicked",
+							"peer", peer.Name,
+							"panic", v)
+					}
+				}()
+				if err := b.sendRefresh(fanoutCtx, peer, evt); err != nil {
+					b.logger.Warn("refresh broadcast failed",
+						"peer", peer.Name,
+						"key", evt.Key,
+						"error", err)
+					b.metrics.IncBroadcastFailure("refresh", broadcastFailureReason(err))
+				} else {
+					b.metrics.IncHTTPInvalidation("refresh")
+				}
+			}(p)
+		}
+		wg.Wait()
+	}
+
+	if body, err := EncodeRefreshGossip(evt); err == nil {
+		b.cluster.QueueBroadcast(body)
+	}
+	peerCount := countPeers(b.cluster.Members())
+	b.logger.Info("gossiped refresh to peers",
+		"key", evt.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+		"peers", peerCount,
+	)
+}
+
 func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.PurgeEvent) error {
 	body, err := EncodePurgeHTTP(evt)
 	if err != nil {
@@ -214,6 +271,14 @@ func (b *Broadcaster) sendBan(ctx context.Context, peer api.PeerInfo, evt api.Ba
 		return fmt.Errorf("broadcast ban encode: %w", err)
 	}
 	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/ban", body)
+}
+
+func (b *Broadcaster) sendRefresh(ctx context.Context, peer api.PeerInfo, evt api.RefreshEvent) error {
+	body, err := EncodeRefreshHTTP(evt)
+	if err != nil {
+		return fmt.Errorf("broadcast refresh encode: %w", err)
+	}
+	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/refresh", body)
 }
 
 // broadcastFailureReason maps a broadcast HTTP error to a short label

@@ -193,6 +193,35 @@ func TestPeerBanHandler_ReadError(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestPeerRefreshHandler_FnError(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerRefreshHandler(func(api.RefreshEvent) error {
+		return errors.New("refresh failed")
+	})
+
+	evt := api.RefreshEvent{Key: testkey.Key(1), Issuer: "node-0"}
+	body, _ := EncodeRefreshHTTP(evt)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/refresh", bytesReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestPeerRefreshHandler_ReadError(t *testing.T) {
+	t.Parallel()
+	handler := NewPeerRefreshHandler(func(api.RefreshEvent) error {
+		return nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer/refresh", errReader{})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
 func TestNotifyUpdate_DelegatesToNotifyJoin(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "notify-test", "127.0.0.1:0")

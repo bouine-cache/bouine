@@ -524,7 +524,77 @@ func (h *Handler) Purge(ctx context.Context, primaryKey api.Key) (bool, error) {
 	return true, nil
 }
 
-// lookupForRefresh returns the live object for key, or nil if the
+// SoftPurge marks a cached object as stale without deleting it, so the
+// next request serves the stale body via stale-while-revalidate (SWR)
+// or triggers a conditional revalidation via stale-if-error (SIE),
+// depending on which grace window the object has. This is a "refresh"
+// or "soft purge" in Varnish terminology. It is distinct from Purge,
+// which hard-deletes the object and forces a synchronous origin fetch
+// on the next request.
+//
+// The object's TTL is reduced to zero, making it immediately stale. If
+// the object has a non-zero StaleWhileRevalidate window, it remains
+// servable while a conditional revalidation fetch refreshes it in the
+// background. If the object has only a StaleIfError window, the next
+// request attempts a synchronous conditional fetch and falls back to
+// the stale body only if the origin errors. If the object has neither
+// SWR nor SIE, SoftPurge falls back to a hard delete (equivalent to
+// Purge) — there is no graceful degraded mode without a grace window.
+//
+// Returns (true, nil) when the key was found and soft-purged,
+// (false, nil) when the key was not in the store, and (true, err) when
+// the store operation failed.
+func (h *Handler) SoftPurge(ctx context.Context, primaryKey api.Key) (bool, error) {
+	// Collect variant keys for the primary key.
+	h.variantMu.Lock()
+	set := h.variantSets[primaryKey]
+	h.variantMu.Unlock()
+
+	keys := make([]api.Key, 0, len(set)+1)
+	keys = append(keys, primaryKey)
+	for vk := range set {
+		keys = append(keys, vk)
+	}
+
+	owned := false
+	for _, key := range keys {
+		obj, _, err := h.store.Get(ctx, key)
+		if err != nil || obj == nil {
+			continue
+		}
+		owned = true
+
+		// If the object has no SWR or SIE window, a soft purge is
+		// meaningless — the stale body would never be servable. Fall
+		// back to a hard delete so the next request fetches from origin.
+		if obj.StaleWhileRevalidate == 0 && obj.StaleIfError == 0 {
+			_ = h.store.Delete(ctx, key)
+			if h.refreshRegistry != nil {
+				h.refreshRegistry.Unregister(key)
+			}
+			continue
+		}
+
+		// Reduce TTL to zero and set StoredAt one second in the past so
+		// Fresh(now) is guaranteed false (now is always after StoredAt).
+		// The SWR window (StoredAt + 0 + SWR) is measured from the
+		// soft-purge time, giving the object a fresh SWR window for the
+		// background revalidation to complete.
+		softPurged := obj.CloneForRefresh()
+		softPurged.StoredAt = time.Now().Add(-1 * time.Second)
+		softPurged.TTL = 0
+		softPurged.Hits = 0
+		if err := h.store.Put(ctx, key, softPurged); err != nil {
+			return owned, err
+		}
+	}
+
+	if !owned && !h.store.Has(primaryKey) {
+		return false, nil
+	}
+	return owned, nil
+}
+
 // key is gone or stale. Used by the scheduler's compaction pass.
 func (h *Handler) lookupForRefresh(key api.Key) *api.Object {
 	ctx, cancel := context.WithTimeout(context.Background(), refreshGetTimeout)
@@ -789,7 +859,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ServeRange(w, r, disp.Object, disp.Decision == StaleHit, src) {
 			return
 		}
-		h.serveObject(w, r, disp.Object, now, cacheHit, src)
+		cacheRes := cacheHit
+		if disp.Decision == StaleHit {
+			cacheRes = cacheStale
+		}
+		h.serveObject(w, r, disp.Object, now, cacheRes, src)
 		// In strong mode, only the owner triggers background revalidation.
 		// A non-owner may hold a stale copy from before the owner-gated
 		// storage deploy (migration window); it serves the stale object
@@ -833,7 +907,11 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 			if peerObj, err := h.peerFetch(r.Context(), owner, lookupKey); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-					h.serveObject(w, r, peerObj, now, cacheHit, api.SourcePeer)
+					cacheRes := cacheHit
+					if d2.Decision == StaleHit {
+						cacheRes = cacheStale
+					}
+					h.serveObject(w, r, peerObj, now, cacheRes, api.SourcePeer)
 					// Do not store or revalidate: the object came from the
 					// owner. Caching it on a non-owner would make the fleet
 					// cache redundant (issue #509). Revalidation is the

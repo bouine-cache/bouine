@@ -16,6 +16,7 @@ import (
 
 func BenchmarkGate_HotStore_Get_Hit(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 	k := testkey.Hash([]byte("bench-hit"))
 	_ = s.Put(context.Background(), k, obj(k, 1024))
 
@@ -28,6 +29,7 @@ func BenchmarkGate_HotStore_Get_Hit(b *testing.B) {
 
 func BenchmarkHotStore_Get_Miss(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -38,6 +40,7 @@ func BenchmarkHotStore_Get_Miss(b *testing.B) {
 
 func BenchmarkHotStore_Put(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 	hdr := header.FromHTTP(http.Header{header.ContentType: {"text/plain"}})
 
 	b.ResetTimer()
@@ -59,6 +62,7 @@ func BenchmarkHotStore_Put(b *testing.B) {
 func BenchmarkHotStore_Put_Eviction(b *testing.B) {
 	// Tight budget forces eviction on every put after warmup.
 	s := NewHotStore(HotConfig{MaxBytes: 8192, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
 	// Fill up.
 	for i := range 100 {
 		k := testkey.Key(uint64(i))
@@ -76,6 +80,7 @@ func BenchmarkHotStore_Put_Eviction(b *testing.B) {
 func BenchmarkGate_SIEVE_Access(b *testing.B) {
 	// Benchmark the SIEVE access path in isolation.
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 1})
+	defer func() { _ = s.Close(context.Background()) }()
 	k := testkey.Hash([]byte("sieve-bench"))
 	_ = s.Put(context.Background(), k, obj(k, 64))
 
@@ -97,6 +102,7 @@ func BenchmarkGate_Cachaner_Access(b *testing.B) {
 		NumShards:            1,
 		HotEvictionAlgorithm: "cachaner",
 	})
+	defer func() { _ = s.Close(context.Background()) }()
 	k := testkey.Hash([]byte("cachaner-bench"))
 	_ = s.Put(context.Background(), k, obj(k, 64))
 	// Prime visited bit so subsequent Gets take the fast path.
@@ -116,6 +122,7 @@ func BenchmarkGate_Cachaner_Access(b *testing.B) {
 func BenchmarkHotGet_NoBans_Parallel(b *testing.B) {
 	const keys = 1024
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 	ks := make([]api.Key, keys)
 	for i := range ks {
 		ks[i] = testkey.Key(uint64(i + 1))
@@ -147,6 +154,7 @@ func BenchmarkHotGet_NoBans_Parallel(b *testing.B) {
 func BenchmarkHotGet_WithBan_Parallel(b *testing.B) {
 	const keys = 1024
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 	ks := make([]api.Key, keys)
 	for i := range ks {
 		ks[i] = testkey.Key(uint64(i + 1))
@@ -187,6 +195,7 @@ func BenchmarkHotPut_Overflow(b *testing.B) {
 		budgetBytes = 4 << 20 // 4 MiB
 	)
 	s := NewHotStore(HotConfig{MaxBytes: budgetBytes, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 	// Pre-fill to the budget so we start in steady-state eviction.
 	prefill := (budgetBytes / (bodySize + 256))
 	for i := range prefill {
@@ -215,6 +224,7 @@ func BenchmarkHotMixed_80_20(b *testing.B) {
 		working     = 6000 // ~1.4x the ~4100 objects the budget holds
 	)
 	s := NewHotStore(HotConfig{MaxBytes: budgetBytes, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
 	for i := range working {
 		k := testkey.Key(uint64(i))
 		_ = s.Put(context.Background(), k, obj(k, bodySize))
@@ -284,6 +294,7 @@ func (a *atomicAppender) append(dst *[]time.Duration, src []time.Duration) {
 func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 	const shards = 64
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: shards})
+	defer func() { _ = s.Close(context.Background()) }()
 	ks := make([]api.Key, shards)
 	for i := range ks {
 		ks[i] = testkey.Key(uint64(i + 1))

@@ -57,6 +57,9 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	peerAddr := srv.Listener.Addr().String()
 
 	rings := observability.NewRings("self")
+	// Record two local requests. RecordRequest's third arg is duration in ms,
+	// not count — each call records exactly one request.
+	rings.Request.RecordRequest("HIT", 200, 2)
 	rings.Request.RecordRequest("HIT", 200, 2)
 	rings.Request.Flush(time.Now())
 
@@ -78,9 +81,10 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	for _, b := range merged.RequestSnap {
 		totalReq += b.Requests
 	}
-	// The local node always contributes 2 requests. The peer contributes 50
-	// if the HTTP fetch completes within the 200ms timeout. Under CI load,
-	// the peer fetch may time out, leaving only the local contribution.
+	// The local node contributes 2 requests (two RecordRequest calls above).
+	// The peer contributes 50 if the HTTP fetch completes within the 200ms
+	// timeout. Under CI load, the peer fetch may time out, leaving only the
+	// local contribution.
 	if totalReq < 2 || totalReq > 52 {
 		t.Errorf("unexpected total requests %d (expected 2-52)", totalReq)
 	}

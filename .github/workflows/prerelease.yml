@@ -1,0 +1,174 @@
+name: Pre-release
+
+# Manual-only workflow for building and pushing a pre-release Docker image
+# and Helm chart package from any branch, without merging to main or cutting
+# a release tag. Restricted to @bouine-cache/maintainers via the "maintainers"
+# GitHub environment (required reviewer). Nothing here ever tags "latest" or
+# publishes to the official chart repository — those are reserved for release.yml
+# and chart-release.yml respectively.
+#
+# Usage:
+#   gh workflow run prerelease.yml \
+#     -r <branch> \
+#     -f tag=pr-42-abc123 \
+#     -f skip_trivy=false
+#
+# Then update k8s/bouine-values.yaml in bouine-infra:
+#   image:
+#     tag: "pr-42-abc123"
+# and run `make deploy-helm`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Docker Hub tag (e.g. pr-42-abc123, test-0.4.3-rc1)"
+        required: true
+        type: string
+      skip_trivy:
+        description: "Skip Trivy vulnerability scan (useful when the scan blocks a needed image)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  GO_VERSION: "1.27.0"
+  DOCKER_IMAGE: bouinecache/bouine
+
+jobs:
+  docker:
+    name: Docker image (pre-release)
+    runs-on: [self-hosted, ci]
+    environment: maintainers
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate tag
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            echo "::error::Tag is required"
+            exit 1
+          fi
+          # Reject anything that could be mistaken for a release or latest tag.
+          case "$tag" in
+            latest|nightly)        echo "::error::Tag '$tag' is reserved"; exit 1 ;;
+            v[0-9]*)               echo "::error::Tag '$tag' looks like a release version (v*.*.*). Use a pre-release tag like pr-42-abc123."; exit 1 ;;
+          esac
+          echo "Using pre-release tag: $tag"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=raw,value=${{ inputs.tag }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            VERSION=pre-${{ inputs.tag }}
+            COMMIT=${{ github.sha }}
+            DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan pre-release image (Trivy)
+        if: ${{ !inputs.skip_trivy }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign Docker image
+        run: |
+          cosign sign --yes \
+            "${{ env.DOCKER_IMAGE }}@${{ steps.build.outputs.digest }}"
+
+      - name: Summary
+        run: |
+          echo "## Pre-release image published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pull: \`${{ env.DOCKER_IMAGE }}:${{ inputs.tag }}@${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To deploy, update \`image.tag\` in \`k8s/bouine-values.yaml\` (bouine-infra) to \`${{ inputs.tag }}\` and run \`make deploy-helm\`." >> "$GITHUB_STEP_SUMMARY"
+
+  helm-chart:
+    name: Helm chart (pre-release)
+    runs-on: [self-hosted, ci]
+    environment: maintainers
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Package chart with pre-release version
+        run: |
+          set -euo pipefail
+          # Bump Chart.yaml version + appVersion to the pre-release tag so
+          # `helm upgrade --install` picks it up. The official chart-release.yml
+          # workflow is unaffected — this package is only a CI artifact.
+          sed -i \
+            -e "s/^version:.*/version: ${{ inputs.tag }}/" \
+            -e "s/^appVersion:.*/appVersion: \"${{ inputs.tag }}\"/" \
+            deploy/helm/bouine/Chart.yaml
+          mkdir -p .cr-release-packages
+          helm package deploy/helm/bouine \
+            --destination .cr-release-packages \
+            --version ${{ inputs.tag }}
+          echo "## Helm chart packaged" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Chart version: \`${{ inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download the .tgz from the workflow artifacts, then:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
+          echo "helm upgrade --install bouine ./bouine-${{ inputs.tag }}.tgz \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --namespace thylong-innerspace \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --values k8s/bouine-values.yaml" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload chart artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bouine-chart-${{ inputs.tag }}
+          path: .cr-release-packages/*.tgz
+          retention-days: 14

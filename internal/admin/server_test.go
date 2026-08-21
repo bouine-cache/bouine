@@ -213,6 +213,26 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 	require.Equal(t, "{}", body)
 }
 
+// TestPeerPutHandler_Mounted verifies that POST /v1/peer/put is mounted
+// and auth-exempt when PeerPutHandler is configured (same as peer fetch).
+func TestPeerPutHandler_Mounted(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerPutHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	})
+
+	// POST without token should succeed because /v1/peer/put is in
+	// the auth-exempt map (same rationale as peer fetch/purge/ban).
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/peer/put", nil)
+	s.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
 func TestDrain_NoDrainFn(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })

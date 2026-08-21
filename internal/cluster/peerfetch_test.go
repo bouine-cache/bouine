@@ -23,14 +23,19 @@ import (
 )
 
 type stubStore struct {
+	mu      sync.Mutex
 	objects map[api.Key]*api.Object
 }
 
 func (s *stubStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.objects[key], "", nil
 }
 
 func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.objects == nil {
 		s.objects = make(map[api.Key]*api.Object)
 	}
@@ -261,6 +266,157 @@ func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	assert.Equal(t, obj.Body, stored.Body)
+}
+
+func TestPeerFetcher_PutAsync_RoundTrip(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	srv := httptest.NewServer(NewPeerPutHandler(store, nil))
+	defer srv.Close()
+	f := NewPeerFetcher(nil, nil, 0)
+	obj := &api.Object{
+		Key:        testkey.Key(9),
+		StatusCode: 200,
+		Body:       []byte("async-payload"),
+		BodySize:   13,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	peer := api.PeerInfo{Addr: srv.Listener.Addr().String()}
+	req := httptest.NewRequest("GET", "http://example.com/async", nil)
+	f.PutAsync(context.Background(), peer, obj, req)
+
+	// PutAsync is fire-and-forget; poll for the object to appear.
+	require.Eventually(t, func() bool {
+		stored, _, err := store.Get(context.Background(), obj.Key)
+		return err == nil && stored != nil
+	}, 2*time.Second, 10*time.Millisecond, "PutAsync must eventually store the object")
+}
+
+func TestPeerFetcher_PutAsync_NilObj(t *testing.T) {
+	t.Parallel()
+	f := NewPeerFetcher(nil, nil, 0)
+	// Must not panic on nil obj.
+	f.PutAsync(context.Background(), api.PeerInfo{}, nil, nil)
+}
+
+func TestPeerFetcher_PutAsync_SemFull(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	srv := httptest.NewServer(NewPeerPutHandler(store, nil))
+	defer srv.Close()
+	// Create a fetcher with putSem capacity 4 (default). Fill the sem
+	// manually so PutAsync's non-blocking acquire fails and the RPC is
+	// dropped.
+	f := NewPeerFetcher(nil, nil, 0)
+	for i := 0; i < defaultPeerFetchConcurrency; i++ {
+		f.putSem <- struct{}{}
+	}
+	obj := &api.Object{
+		Key:        testkey.Key(99),
+		StatusCode: 200,
+		Body:       []byte("dropped"),
+		BodySize:   7,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	peer := api.PeerInfo{Addr: srv.Listener.Addr().String()}
+	req := httptest.NewRequest("GET", "http://example.com/dropped", nil)
+	f.PutAsync(context.Background(), peer, obj, req)
+
+	// The object must NOT appear — the sem was full and the RPC dropped.
+	time.Sleep(50 * time.Millisecond) // give the goroutine a chance to not run
+	stored, _, _ := store.Get(context.Background(), obj.Key)
+	assert.Nil(t, stored, "PutAsync must drop the RPC when putSem is full")
+}
+
+func TestPeerPutHandler_StoresWithoutOnStore(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	h := NewPeerPutHandler(store, nil) // no onStore callback
+	obj := &api.Object{
+		Key:        testkey.Key(55),
+		StatusCode: 200,
+		Body:       []byte("no-callback"),
+		BodySize:   11,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	req := httptest.NewRequest("GET", "http://example.com/no-cb", nil)
+	payload := encodePeerPutPayload(obj, req)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(payload))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, http.StatusOK, rr.Code)
+	stored, _, err := store.Get(context.Background(), obj.Key)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, obj.Body, stored.Body)
+}
+
+func TestPeerPutHandler_DecodesHeaders(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	var gotReq *http.Request
+	h := NewPeerPutHandler(store, nil)
+	h.SetOnStore(func(_ context.Context, _ *api.Object, req *http.Request) {
+		gotReq = req
+	})
+	obj := &api.Object{
+		Key:        testkey.Key(77),
+		StatusCode: 200,
+		Body:       []byte("vary-body"),
+		BodySize:   8,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	// Build a request with Vary-relevant headers.
+	forwardReq := httptest.NewRequest("GET", "http://example.com/vary-test", nil)
+	forwardReq.Header.Set("Accept-Encoding", "gzip")
+	forwardReq.Header.Set("Accept-Language", "en-US")
+	payload := encodePeerPutPayload(obj, forwardReq)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(payload))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NotNil(t, gotReq)
+	assert.Equal(t, "http://example.com/vary-test", gotReq.URL.String())
+	assert.Equal(t, "gzip", gotReq.Header.Get("Accept-Encoding"))
+	assert.Equal(t, "en-US", gotReq.Header.Get("Accept-Language"))
+}
+
+func TestPeerPutHandler_EmptyBody(t *testing.T) {
+	t.Parallel()
+	h := NewPeerPutHandler(&stubStore{}, nil)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(nil))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestPeerPutHandler_MissingKey(t *testing.T) {
+	t.Parallel()
+	store := &stubStore{}
+	h := NewPeerPutHandler(store, nil)
+	// Encode an object with a zero key.
+	obj := &api.Object{
+		Key:        api.Key{},
+		StatusCode: 200,
+		Body:       []byte("no-key"),
+		BodySize:   6,
+		TTL:        60 * time.Second,
+		StoredAt:   time.Now(),
+	}
+	req := httptest.NewRequest("GET", "http://example.com/no-key", nil)
+	payload := encodePeerPutPayload(obj, req)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(payload))
+	r.Header.Set(header.ContentType, "application/octet-stream")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {

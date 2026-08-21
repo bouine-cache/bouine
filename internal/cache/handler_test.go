@@ -3053,6 +3053,54 @@ func TestStoreFromPeer_EndToEnd(t *testing.T) {
 		"refresh entry must carry the original Vary-relevant request headers")
 }
 
+// TestStoreFromPeer_NilGuards pins the defensive guards in StoreFromPeer:
+// nil object and zero key are no-ops, not panics or stores.
+func TestStoreFromPeer_NilGuards(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	h := NewHandler(HandlerConfig{
+		Upstream:            http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}),
+		Store:               store,
+		RefreshBeforeExpiry: true,
+		RefreshMinHits:      0,
+	})
+	req := httptest.NewRequest("GET", "http://example.com/guard", nil)
+	// Nil object — no-op.
+	h.StoreFromPeer(context.Background(), nil, req)
+	// Zero key — no-op.
+	h.StoreFromPeer(context.Background(), &api.Object{Key: api.Key{}, Body: []byte("x")}, req)
+	// Nothing should be in the store.
+	obj, _, _ := store.Get(context.Background(), api.Key{})
+	assert.Nil(t, obj)
+}
+
+// TestIsOwnerOrUnmanaged_NoOwnerFn pins the single-node/eventual mode
+// path where ownerFn is nil — everything is "owned" (unmanaged).
+func TestIsOwnerOrUnmanaged_NoOwnerFn(t *testing.T) {
+	t.Parallel()
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}),
+		Store:    storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+	})
+	assert.True(t, h.isOwnerOrUnmanaged(api.Key{}), "nil ownerFn means unmanaged (always owner)")
+}
+
+// TestIsOwnerOrUnmanaged_NonOwner pins the strong-mode path where
+// ownerFn reports the key is owned by a remote peer. This exercises
+// the ownerFn(key) → isLocal=false branch used by ServeHTTP to gate
+// revalidation and SWR triggers on non-owners.
+func TestIsOwnerOrUnmanaged_NonOwner(t *testing.T) {
+	t.Parallel()
+	h := NewHandler(HandlerConfig{
+		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}),
+		Store:    storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2}),
+		OwnerFn: func(_ api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "remote:8080"}, false
+		},
+	})
+	assert.False(t, h.isOwnerOrUnmanaged(api.Key{}), "non-owner must report false")
+}
+
 func TestLookup_VaryVariantMiss(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

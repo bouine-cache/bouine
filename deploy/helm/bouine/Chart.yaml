@@ -2,8 +2,8 @@ apiVersion: v2
 name: bouine
 description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit path, gossip clustering, no external K/V store.
 type: application
-version: 0.4.2
-appVersion: "0.4.2"
+version: 0.4.3
+appVersion: "0.4.3"
 icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/docs/assets/logo_font.png
 keywords:
   - cache

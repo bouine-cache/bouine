@@ -5,6 +5,9 @@
 #   bench/run.sh gate    # run only BenchmarkGate_* and enforce alloc budgets
 #   bench/run.sh all     # run every benchmark in cache/storage/h1parser (no gates)
 #
+# Tests are skipped via `-run='^$'` in both modes; unit tests run in their
+# own CI gate (`make test`, `prek run --all-files`).
+#
 # Benchmark naming convention:
 #   BenchmarkGate_*    Hot-path, alloc-budgeted, time-driven. Enforced in gate mode.
 #   BenchmarkSingle_*  Single-shot, skips under time-driven benchtime. Never gated.
@@ -69,8 +72,9 @@ declare -A BUDGETS=(
 run_bench() {
     local bench_pattern="$1"
     local count="$2"
-    echo ">>> Running benchmarks (count=${count}, pattern=${bench_pattern})..."
-    go test -bench="${bench_pattern}" -benchmem -count="${count}" -timeout=120s \
+    local timeout="$3"
+    echo ">>> Running benchmarks (count=${count}, pattern=${bench_pattern}, timeout=${timeout})..."
+    go test -run='^$' -bench="${bench_pattern}" -benchmem -count="${count}" -timeout="${timeout}" \
         "${PACKAGES[@]}" \
         | tee "$OUTFILE"
     echo ""
@@ -155,12 +159,12 @@ run_diff() {
 
 case "$MODE" in
     gate)
-        run_bench "$GATE_BENCH" 5
+        run_bench "$GATE_BENCH" 5 120s
         run_gates
         run_diff
         ;;
     all)
-        run_bench "." 3
+        run_bench "." 3 600s
         run_diff
         ;;
     *)

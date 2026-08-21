@@ -217,6 +217,49 @@ func TestClusterHandoffQueueDepth_AtUpperBoundAccepted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestClusterGossipQueueDepth_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{GossipQueueDepth: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "gossip_queue_depth")
+}
+
+func TestClusterGossipQueueDepth_ZeroAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{GossipQueueDepth: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterGossipQueueDepth_ExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{GossipQueueDepth: maxGossipQueueDepth + 1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "gossip_queue_depth")
+	require.Contains(t, err.Error(), "must be <=")
+}
+
+func TestClusterGossipQueueDepth_AtUpperBoundAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{GossipQueueDepth: maxGossipQueueDepth},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
 func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}

@@ -221,6 +221,7 @@ No data migration needed — each node starts with an empty cache.
 | Low hit rate | `eventual` | Uneven node fill | Check per-node hit rates, consider `strong` |
 | Node join fails | all | DNS not resolving | `kubectl get endpoints`, verify `publishNotReadyAddresses` |
 | Gossip drops increasing | all | Handoff queue overflow | `bouine_cluster_gossip_drops_total`, see [Gossip drops](#gossip-drops) |
+| Gossip queue drops increasing | all | Local gossip queue overflow | `bouine_cluster_gossip_queue_dropped_total`, see [Gossip queue drops](#gossip-queue-drops) |
 
 ---
 
@@ -268,3 +269,40 @@ staleness, but sustained drops indicate a capacity problem.
     summary: "Memberlist handoff queue overflow — invalidation messages being dropped"
     description: "Increase cluster.handoff_queue_depth or investigate slow NotifyMsg handler."
 ```
+
+---
+
+## Gossip queue drops
+
+`bouine_cluster_gossip_queue_dropped_total` counts messages dropped from
+the local gossip broadcast queue because it was full (drop-newest policy).
+`bouine_cluster_gossip_queue_depth` is a gauge showing the current number
+of pending messages in the queue. Both are node-local.
+
+### When to expect zero
+
+On a healthy cluster with a tuned `gossip_queue_depth`, the dropped counter
+should stay at zero. Non-zero values mean the local gossip queue is
+overflowing — invalidation messages are being produced faster than
+memberlist's `GetBroadcasts` drain can send them. A few drops during a
+purge storm may not cause visible staleness (anti-entropy repairs missed
+gossip, and in strong mode HTTP fan-out is the primary delivery path),
+but sustained drops indicate a capacity problem.
+
+### What to do when non-zero
+
+1. **Check the rate.** `rate(bouine_cluster_gossip_queue_dropped_total[5m])`
+   — a brief spike during an invalidation burst is expected. Sustained
+   non-zero rate requires intervention.
+2. **Check the queue depth gauge.** `bouine_cluster_gossip_queue_depth`
+   — if it's pegged at the configured `gossip_queue_depth`, the queue is
+   consistently full.
+3. **Increase `gossip_queue_depth`.** Default is 4096. Increase in powers
+   of 2 (8192, 16384) and re-check the metric. Each slot is a slice
+   header (24 bytes); 4096 × 24 B = 96 KiB.
+4. **Check memberlist gossip interval.** If `GetBroadcasts` is called
+   infrequently (e.g. high `push_pull_interval` or network issues), the
+   queue backs up locally even though peers are healthy.
+5. **Reduce invalidation burst size.** If bans fan out as individual
+   gossip broadcasts, consider batching or throttling at the application
+   layer.

@@ -397,6 +397,8 @@ func TestIncGossipDrop_NilMetricsSafe(t *testing.T) {
 	t.Parallel()
 	var m *Metrics
 	m.IncGossipDrop()
+	m.IncGossipQueueDropped()
+	m.SetGossipQueueDepth(42)
 }
 
 // TestGossipDrop_EndToEndWiring exercises the full chain: a real
@@ -455,4 +457,172 @@ func TestGossipDrop_BeforeSetMetricsNoPanic(t *testing.T) {
 	_, err = c.adapter.Write([]byte(
 		"2026/07/03 23:15:00 [WARN] memberlist: handler queue full, dropping message 8\n"))
 	require.NoError(t, err, "Write")
+}
+
+// TestQueueBroadcast_CapsGossipQueue verifies that QueueBroadcast drops
+// new messages when the gossip queue is full (drop-newest policy) and
+// increments the gossip_queue_dropped counter. Without the cap, the
+// queue grows unboundedly under purge storms (issue #297).
+func TestQueueBroadcast_CapsGossipQueue(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipQueueDepth = 4
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	c.SetMetrics(m)
+
+	msg := []byte("x")
+	for range 10 {
+		c.QueueBroadcast(msg)
+	}
+
+	require.Equal(t, 4, len(c.gossipQueue), "queue should be capped at GossipQueueDepth")
+
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_queue_dropped_total" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1, "dropped counter should exist")
+		require.Equal(t, 6.0, f.GetMetric()[0].GetCounter().GetValue(),
+			"6 messages should have been dropped (10 enqueued, cap 4)")
+		return
+	}
+	t.Fatal("bouine_cluster_gossip_queue_dropped_total not registered")
+}
+
+// TestQueueBroadcast_DefaultGossipQueueDepth verifies that the default
+// gossip queue depth is applied when GossipQueueDepth is zero.
+func TestQueueBroadcast_DefaultGossipQueueDepth(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	require.Equal(t, defaultGossipQueueDepth, c.cfg.GossipQueueDepth)
+}
+
+// TestQueueBroadcast_EventualModeSendsBestEffort verifies that in
+// eventual mode, QueueBroadcast fires SendBestEffort to peers even when
+// the queue is full — the direct send is the primary delivery path and
+// must not be skipped on overflow.
+func TestQueueBroadcast_EventualModeSendsBestEffort(t *testing.T) {
+	t.Parallel()
+	cfg1 := defaultConfig(t, "node1", "127.0.0.1:17930")
+	cfg1.Mode = "eventual"
+	cfg1.GossipQueueDepth = 2
+	c1, err := New(cfg1)
+	require.NoError(t, err, "c1")
+	defer func() { _ = c1.Leave(t.Context()) }()
+
+	cfg2 := defaultConfig(t, "node2", "127.0.0.1:17931")
+	cfg2.Mode = "eventual"
+	c2, err := New(cfg2)
+	require.NoError(t, err, "c2")
+	defer func() { _ = c2.Leave(t.Context()) }()
+
+	_, err = c2.Join([]string{"127.0.0.1:17930"})
+	require.NoError(t, err, "join")
+
+	// Wait for both nodes to see each other.
+	for range 50 {
+		if len(c1.ml.Members()) == 2 && len(c2.ml.Members()) == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.Len(t, c1.ml.Members(), 2, "nodes should discover each other")
+
+	var received atomic.Int32
+	c2.SetInvalidator(Invalidator{
+		PurgeFn: func(_ context.Context, _ api.PurgeEvent) error {
+			received.Add(1)
+			return nil
+		},
+	})
+
+	// Enqueue more than the cap — all should still be delivered via
+	// SendBestEffort even though the gossip queue drops the excess.
+	evt := api.PurgeEvent{Key: testkey.Key(1), Issuer: "node1", Seq: 1}
+	msg, err := EncodePurgeGossip(evt)
+	require.NoError(t, err, "encode")
+	for range 5 {
+		c1.QueueBroadcast(msg)
+	}
+
+	// Wait for delivery via SendBestEffort.
+	require.Eventually(t, func() bool {
+		return received.Load() > 0
+	}, 2*time.Second, 10*time.Millisecond, "purge should be delivered via SendBestEffort")
+
+	// Queue should be capped.
+	c1.gossipMu.Lock()
+	require.Equal(t, 2, len(c1.gossipQueue), "queue should be capped at GossipQueueDepth")
+	c1.gossipMu.Unlock()
+}
+
+// TestGetBroadcasts_UpdatesDepthGauge verifies that GetBroadcasts
+// updates the gossip_queue_depth gauge to reflect the remaining queue
+// depth after draining.
+func TestGetBroadcasts_UpdatesDepthGauge(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipQueueDepth = 8
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	reg := prometheus.NewRegistry()
+	m := RegisterMetrics(reg)
+	c.SetMetrics(m)
+
+	msg := []byte("hello")
+	for range 5 {
+		c.QueueBroadcast(msg)
+	}
+	// Drain 3 messages (each is 5 bytes + overhead).
+	out := c.GetBroadcasts(0, 15)
+	require.Len(t, out, 3, "should drain 3 messages")
+
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, f := range families {
+		if f.GetName() != "bouine_cluster_gossip_queue_depth" {
+			continue
+		}
+		require.Len(t, f.GetMetric(), 1, "depth gauge should exist")
+		require.Equal(t, 2.0, f.GetMetric()[0].GetGauge().GetValue(),
+			"depth gauge should show 2 remaining after draining 3 of 5")
+		return
+	}
+	t.Fatal("bouine_cluster_gossip_queue_depth not registered")
+}
+
+// TestNew_NegativeGossipQueueDepthRejected verifies that a negative
+// GossipQueueDepth is rejected at construction time.
+func TestNew_NegativeGossipQueueDepthRejected(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipQueueDepth = -1
+	_, err := New(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "GossipQueueDepth")
+}
+
+// TestNew_GossipQueueDepthExceedsUpperBoundRejected verifies that
+// GossipQueueDepth above MaxGossipQueueDepth is rejected.
+func TestNew_GossipQueueDepthExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	cfg.GossipQueueDepth = MaxGossipQueueDepth + 1
+	_, err := New(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "GossipQueueDepth")
+	require.Contains(t, err.Error(), "must be <=")
 }

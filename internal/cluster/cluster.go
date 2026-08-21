@@ -29,6 +29,18 @@ const defaultHandoffQueueDepth = 4096
 // mirrors this value for YAML validation.
 const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
 
+// defaultGossipQueueDepth is the cap on pending gossip broadcasts
+// waiting for memberlist's GetBroadcasts drain. Without it, a purge
+// storm or a slow drain causes unbounded slice growth and OOM (issue
+// #297). 4096 matches the handoff queue depth so the local queue can
+// absorb the same burst the per-peer queue can.
+const defaultGossipQueueDepth = 4096
+
+// MaxGossipQueueDepth is the upper bound for GossipQueueDepth. Each
+// slot is a slice header (24 bytes); 1<<20 × 24 B = 24 MiB worst case.
+// config.maxGossipQueueDepth mirrors this value for YAML validation.
+const MaxGossipQueueDepth = 1 << 20 // 1,048,576
+
 // Config controls the cluster membership layer.
 //
 // Stable.
@@ -73,6 +85,14 @@ type Config struct {
 	// upstream default of 1024 to absorb production bursts of cache
 	// invalidations. See issue #201.
 	HandoffQueueDepth int
+	// GossipQueueDepth caps the number of pending broadcast messages
+	// waiting for memberlist's GetBroadcasts drain. When the cap is
+	// reached, new messages are dropped (drop-newest) and the
+	// bouine_cluster_gossip_queue_dropped_total counter is incremented.
+	// Without this cap, a purge storm or a slow drain causes unbounded
+	// slice growth and OOM (issue #297). The default (0 = use
+	// defaultGossipQueueDepth = 4096) matches the handoff queue depth.
+	GossipQueueDepth int
 }
 
 // Invalidator holds callbacks for applying purge and ban events received
@@ -101,7 +121,10 @@ type Cluster struct {
 	local  api.PeerInfo
 	logger observability.Logger
 	// gossipQueue holds pending broadcast messages to be delivered via
-	// memberlist's compound-message gossip protocol.
+	// memberlist's compound-message gossip protocol. It is capped at
+	// cfg.GossipQueueDepth; when full, new messages are dropped
+	// (drop-newest) and the gossip_queue_dropped counter is incremented
+	// (issue #297).
 	gossipMu    sync.Mutex
 	gossipQueue []gossipBroadcast
 	inv         Invalidator
@@ -130,6 +153,16 @@ func New(cfg Config) (*Cluster, error) {
 	if cfg.HandoffQueueDepth > MaxHandoffQueueDepth {
 		return nil, fmt.Errorf("cluster: HandoffQueueDepth must be <= %d, got %d (each slot costs a pointer + message header per peer)",
 			MaxHandoffQueueDepth, cfg.HandoffQueueDepth)
+	}
+	if cfg.GossipQueueDepth == 0 {
+		cfg.GossipQueueDepth = defaultGossipQueueDepth
+	}
+	if cfg.GossipQueueDepth < 0 {
+		return nil, fmt.Errorf("cluster: GossipQueueDepth must be >= 0, got %d", cfg.GossipQueueDepth)
+	}
+	if cfg.GossipQueueDepth > MaxGossipQueueDepth {
+		return nil, fmt.Errorf("cluster: GossipQueueDepth must be <= %d, got %d (each slot is a slice header, 24 bytes)",
+			MaxGossipQueueDepth, cfg.GossipQueueDepth)
 	}
 
 	c := &Cluster{
@@ -340,17 +373,35 @@ func (c *Cluster) handleJSONGossip(msg []byte) {
 // normal heartbeat traffic, providing a reliable secondary delivery path
 // for purge/ban events even if a peer's admin HTTP port is temporarily
 // unreachable.
+//
+// When the gossip queue is full (capped at GossipQueueDepth), the
+// incoming message is dropped (drop-newest) and the
+// bouine_cluster_gossip_queue_dropped_total counter is incremented.
+// Drop-newest is chosen over drop-oldest because the queued messages are
+// already in the gossip pipeline; discarding the newcomer is O(1) and
+// preserves the messages most likely to not yet have been delivered by
+// a gossip round. Anti-entropy repairs dropped gossip. See issue #297.
 func (c *Cluster) QueueBroadcast(msg []byte) {
+	dropped := false
 	c.gossipMu.Lock()
-	c.gossipQueue = append(c.gossipQueue, gossipBroadcast{data: msg})
+	if len(c.gossipQueue) >= c.cfg.GossipQueueDepth {
+		dropped = true
+	} else {
+		c.gossipQueue = append(c.gossipQueue, gossipBroadcast{data: msg})
+	}
 	c.gossipMu.Unlock()
+	if dropped {
+		c.metrics.IncGossipQueueDropped()
+	}
 	// In strong mode, HTTP fan-out is the primary invalidation delivery
 	// path. The direct SendBestEffort is redundant — memberlist's gossip
 	// protocol will propagate the message as a fallback. Skipping it
 	// halves invalidation network traffic in strong mode.
 	//
 	// In eventual mode, there is no HTTP fan-out, so the direct
-	// SendBestEffort remains the primary delivery path.
+	// SendBestEffort remains the primary delivery path. Even when the
+	// gossip queue is full, we still send directly so the invalidation
+	// reaches peers without relying on the compound-message protocol.
 	if c.ml != nil && c.cfg.Mode != "strong" {
 		for _, n := range c.ml.Members() {
 			_ = c.ml.SendBestEffort(n, msg)
@@ -359,11 +410,14 @@ func (c *Cluster) QueueBroadcast(msg []byte) {
 }
 
 // GetBroadcasts returns pending broadcast messages up to the byte limit.
-// memberlist calls this on every gossip round; we drain the queue.
+// memberlist calls this on every gossip round; we drain the queue. After
+// draining, the bouine_cluster_gossip_queue_depth gauge is updated to
+// reflect the remaining queue depth.
 func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
 	c.gossipMu.Lock()
 	defer c.gossipMu.Unlock()
 	if len(c.gossipQueue) == 0 {
+		c.metrics.SetGossipQueueDepth(0)
 		return nil
 	}
 	var out [][]byte
@@ -378,6 +432,7 @@ func (c *Cluster) GetBroadcasts(overhead, limit int) [][]byte {
 		used += overhead + len(b.data)
 	}
 	c.gossipQueue = remaining
+	c.metrics.SetGossipQueueDepth(len(c.gossipQueue))
 	return out
 }
 

@@ -478,6 +478,14 @@ func (c *Config) validateCluster() error {
 		return fmt.Errorf("config: cluster.handoff_queue_depth must be <= %d, got %d (each slot costs a pointer + message header per peer)",
 			maxHandoffQueueDepth, c.Cluster.HandoffQueueDepth)
 	}
+	if c.Cluster.GossipQueueDepth < 0 {
+		return fmt.Errorf("config: cluster.gossip_queue_depth must be >= 0 (0 = default), got %d",
+			c.Cluster.GossipQueueDepth)
+	}
+	if c.Cluster.GossipQueueDepth > maxGossipQueueDepth {
+		return fmt.Errorf("config: cluster.gossip_queue_depth must be <= %d, got %d (each slot is a slice header, 24 bytes)",
+			maxGossipQueueDepth, c.Cluster.GossipQueueDepth)
+	}
 	if c.Storage.WarmSyncInterval < -1 {
 		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
 	}

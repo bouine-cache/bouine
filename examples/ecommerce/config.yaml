@@ -19,6 +19,7 @@ storage:
 cluster:
   hop_limit: 2
   # handoff_queue_depth: 4096  # default; uncomment and tune if bouine_cluster_gossip_drops_total > 0
+  # gossip_queue_depth: 4096   # default; uncomment and tune if bouine_cluster_gossip_queue_dropped_total > 0
 
 upstream_pools:
   - name: storefront

@@ -236,6 +236,10 @@ const (
 // Keep in sync with cluster.MaxHandoffQueueDepth.
 const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 
+// maxGossipQueueDepth is the upper bound for cluster.gossip_queue_depth.
+// Keep in sync with cluster.MaxGossipQueueDepth.
+const maxGossipQueueDepth = 1 << 20 // 1,048,576
+
 // Cluster controls peer membership and fan-out. The cluster is enabled
 // when Listen.Cluster is non-empty; there is no separate enabled flag.
 type Cluster struct {
@@ -264,6 +268,15 @@ type Cluster struct {
 	// drops; 4096 absorbs typical production bursts. Negative values
 	// are rejected.
 	HandoffQueueDepth int `yaml:"handoff_queue_depth,omitempty" json:"handoff_queue_depth,omitempty"`
+	// GossipQueueDepth caps the number of pending broadcast messages
+	// in the local gossip queue waiting for memberlist's GetBroadcasts
+	// drain. When the cap is reached, new messages are dropped
+	// (drop-newest) and the
+	// bouine_cluster_gossip_queue_dropped_total counter is incremented.
+	// Without this cap, a purge storm or a slow drain causes unbounded
+	// slice growth and OOM (issue #297). The default (0) uses
+	// bouine's default of 4096. Negative values are rejected.
+	GossipQueueDepth int `yaml:"gossip_queue_depth,omitempty" json:"gossip_queue_depth,omitempty"`
 	// TLS configures mTLS for peer-to-peer cluster communication.
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).

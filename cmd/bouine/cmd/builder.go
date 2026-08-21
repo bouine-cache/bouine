@@ -132,6 +132,7 @@ func (e *engine) buildCluster(ctx context.Context) (*cluster.Cluster, error) {
 		Logger:            e.logger,
 		Mode:              e.cfg.Cluster.Mode,
 		HandoffQueueDepth: e.cfg.Cluster.HandoffQueueDepth,
+		GossipQueueDepth:  e.cfg.Cluster.GossipQueueDepth,
 	})
 }
 

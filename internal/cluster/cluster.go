@@ -224,11 +224,19 @@ func (c *Cluster) Members() []api.PeerInfo {
 
 // Owner returns the PeerInfo of the node that owns the given cache
 // key according to the consistent-hash ring. Returns the local node
-// info if the cluster has only one member.
+// info if the cluster has only one member. Returns a zero PeerInfo
+// when the ring is empty (all peers removed); the caller must treat
+// this as "unknown owner" and fall back to origin.
 func (c *Cluster) Owner(key api.Key) api.PeerInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	name := c.ring.get(key)
+	if name == "" {
+		c.metrics.IncRingEmpty()
+		c.logger.Warn("cluster: ring empty, cannot determine owner",
+			"key", key, "peers", len(c.peers))
+		return api.PeerInfo{}
+	}
 	if m, ok := c.peers[name]; ok {
 		return m.Info
 	}
@@ -422,7 +430,10 @@ func (c *Cluster) LocalState(_ bool) []byte {
 // MergeRemoteState reconciles a remote node's ring digest with the
 // local peer table. If the remote node reports peers this node doesn't
 // know about it re-parses their NodeMeta as PeerInfo and adds them to
-// the ring so ownership stays consistent across restarts.
+// the ring so ownership stays consistent across restarts. It also prunes
+// peers present locally but absent from memberlist's live member set —
+// dead peers evicted during partition recovery would otherwise stay in
+// the ring forever, routing keys to dead nodes (issue #305).
 func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	if len(buf) == 0 {
 		return
@@ -439,16 +450,28 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	c.logger.Debug("cluster: ring digest mismatch, re-syncing",
 		"local", local.Hash, "remote", remote.Hash,
 		"join", join)
-	// Re-synchronise by re-processing all live memberlist nodes so any
-	// peer that was missed during network partitions or rolling restarts
-	// is added to the ring.
-	for _, n := range c.ml.Members() {
+	liveMembers := c.ml.Members()
+	liveSet := make(map[string]struct{}, len(liveMembers))
+	for _, n := range liveMembers {
+		liveSet[n.Name] = struct{}{}
 		c.mu.RLock()
 		_, ok := c.peers[n.Name]
 		c.mu.RUnlock()
 		if !ok {
 			c.NotifyJoin(n)
 		}
+	}
+	c.mu.RLock()
+	stale := make([]string, 0, len(c.peers))
+	for name := range c.peers {
+		if _, ok := liveSet[name]; !ok {
+			stale = append(stale, name)
+		}
+	}
+	c.mu.RUnlock()
+	for _, name := range stale {
+		c.removePeer(name)
+		c.logger.Info("cluster: pruned stale peer during state merge", "name", name)
 	}
 }
 
@@ -466,8 +489,15 @@ func (c *Cluster) NotifyJoin(n *memberlist.Node) {
 	c.logger.Info("cluster peer joined", "name", n.Name, "addr", info.Addr)
 }
 
-// NotifyLeave is called when a node leaves or fails.
+// NotifyLeave is called when a node leaves or fails. The local node
+// is never removed from its own ring — memberlist calls NotifyLeave
+// for self during graceful Leave(), and removing self would empty the
+// ring and cause Owner to fail open to single-node ownership (issue #305).
 func (c *Cluster) NotifyLeave(n *memberlist.Node) {
+	if n.Name == c.cfg.NodeName {
+		c.logger.Debug("cluster: ignoring self-leave notification")
+		return
+	}
 	c.removePeer(n.Name)
 	c.logger.Info("cluster peer left", "name", n.Name)
 }

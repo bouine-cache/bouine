@@ -662,7 +662,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 
 	if res.StatusCode == http.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res)
+		refreshed := h.refreshFrom304(stale, res, time.Now())
 		h.storeObject(ctx, key, refreshed, req, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
@@ -677,7 +677,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, req, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -1184,7 +1184,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 	}
 
 	if res.StatusCode == http.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res)
+		refreshed := h.refreshFrom304(stale, res, now)
 		h.storeObject(r.Context(), lookupKey, refreshed, r, false, 0)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
 		return
@@ -1202,10 +1202,10 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 // stale.Header is cloned before mutation: it is shared with any other
 // goroutine that looked up the same object, and MergeHeaders304's writes would
 // race with their reads. Do not remove the Clone.
-func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult) *api.Object {
+func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Time) *api.Object {
 	refreshed := stale.CloneForRefresh()
 	refreshed.Header = stale.Header.Clone()
-	refreshed.StoredAt = time.Now()
+	refreshed.StoredAt = now
 	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
 	// eviction signal; the per-window popularity gate uses windowHits
 	// from the store, not Object.Hits.
@@ -1286,7 +1286,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	}
 
 	if res.StatusCode == http.StatusNotModified {
-		refreshed := h.refreshFrom304(stale, res)
+		refreshed := h.refreshFrom304(stale, res, time.Now())
 		h.storeObject(ctx, key, refreshed, r, true, staleHits)
 		return
 	}
@@ -1303,7 +1303,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, key, obj, r, true, staleHits)
 	}
 }
@@ -1356,7 +1356,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -1542,7 +1542,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 		Header:     rec.header.Clone(),
 		Body:       bodyCopy,
 	}
-	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
+	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 	h.storeObject(r.Context(), key, obj, getReq, false, 0)
 	// Forward to owner if this is a non-owner (issue #509).
 	h.forwardToOwnerIfRemote(r.Context(), obj)
@@ -1757,8 +1757,7 @@ func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy) *api.Object {
-	now := time.Now()
+func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.

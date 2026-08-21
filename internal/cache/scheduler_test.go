@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -35,28 +36,25 @@ func TestRefreshHeapOrdering(t *testing.T) {
 }
 
 func TestSchedulerScheduleAndStop(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		popped := make(chan api.Key, 1)
+		onPop := func(key api.Key) {
+			popped <- key
+		}
+		alive := func(key api.Key) *api.Object {
+			return &api.Object{Key: key, TTL: 10 * time.Second}
+		}
 
-	popped := make(chan api.Key, 1)
-	onPop := func(key api.Key) {
-		popped <- key
-	}
-	alive := func(key api.Key) *api.Object {
-		return &api.Object{Key: key, TTL: 10 * time.Second}
-	}
+		s := NewRefreshScheduler(onPop, alive)
+		s.Start()
+		defer s.Stop()
 
-	s := NewRefreshScheduler(onPop, alive)
-	s.Start()
-	defer s.Stop()
+		s.Schedule(testkey.Key(42), time.Now().Add(50*time.Millisecond))
 
-	s.Schedule(testkey.Key(42), time.Now().Add(50*time.Millisecond))
-
-	select {
-	case got := <-popped:
+		synctest.Sleep(100 * time.Millisecond)
+		got := <-popped
 		require.Equal(t, testkey.Key(42), got)
-	case <-time.After(time.Second):
-		t.Fatal("drainer did not pop within 1s")
-	}
+	})
 }
 
 func TestSchedulerStopTerminatesDrainer(t *testing.T) {
@@ -82,68 +80,62 @@ func TestSchedulerStopTerminatesDrainer(t *testing.T) {
 }
 
 func TestSchedulerWakesOnEarlierTop(t *testing.T) {
-	t.Parallel()
-
-	var mu sync.Mutex
-	popped := make([]api.Key, 0)
-	done := make(chan struct{})
-	onPop := func(key api.Key) {
-		mu.Lock()
-		popped = append(popped, key)
-		mu.Unlock()
-		if len(popped) == 1 {
-			close(done)
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		popped := make([]api.Key, 0)
+		done := make(chan struct{})
+		onPop := func(key api.Key) {
+			mu.Lock()
+			popped = append(popped, key)
+			mu.Unlock()
+			if len(popped) == 1 {
+				close(done)
+			}
 		}
-	}
-	alive := func(key api.Key) *api.Object { return nil }
+		alive := func(key api.Key) *api.Object { return nil }
 
-	s := NewRefreshScheduler(onPop, alive)
-	s.Start()
-	defer s.Stop()
+		s := NewRefreshScheduler(onPop, alive)
+		s.Start()
+		defer s.Stop()
 
-	// Schedule far in the future.
-	s.Schedule(testkey.Key(1), time.Now().Add(10*time.Second))
-	// Schedule a nearer entry — should wake the drainer.
-	s.Schedule(testkey.Key(2), time.Now().Add(50*time.Millisecond))
+		// Schedule far in the future.
+		s.Schedule(testkey.Key(1), time.Now().Add(10*time.Second))
+		// Schedule a nearer entry — should wake the drainer.
+		s.Schedule(testkey.Key(2), time.Now().Add(50*time.Millisecond))
 
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("drainer did not pop key 2 within 1s")
-	}
+		synctest.Sleep(100 * time.Millisecond)
+		<-done
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(popped) != 1 || popped[0] != testkey.Key(2) {
-		t.Fatalf("popped = %v, want [2]", popped)
-	}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(popped) != 1 || popped[0] != testkey.Key(2) {
+			t.Fatalf("popped = %v, want [2]", popped)
+		}
+	})
 }
 
 func TestSchedulerUpdateExistingKey(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		popped := make(chan api.Key, 1)
+		onPop := func(key api.Key) {
+			popped <- key
+		}
+		alive := func(key api.Key) *api.Object { return nil }
 
-	popped := make(chan api.Key, 1)
-	onPop := func(key api.Key) {
-		popped <- key
-	}
-	alive := func(key api.Key) *api.Object { return nil }
+		s := NewRefreshScheduler(onPop, alive)
+		s.Start()
+		defer s.Stop()
 
-	s := NewRefreshScheduler(onPop, alive)
-	s.Start()
-	defer s.Stop()
+		// Schedule key 1 far in the future.
+		s.Schedule(testkey.Key(1), time.Now().Add(10*time.Second))
+		// Update key 1 to fire soon.
+		s.Schedule(testkey.Key(1), time.Now().Add(50*time.Millisecond))
 
-	// Schedule key 1 far in the future.
-	s.Schedule(testkey.Key(1), time.Now().Add(10*time.Second))
-	// Update key 1 to fire soon.
-	s.Schedule(testkey.Key(1), time.Now().Add(50*time.Millisecond))
-
-	select {
-	case got := <-popped:
+		synctest.Sleep(100 * time.Millisecond)
+		got := <-popped
 		require.Equal(t, testkey.Key(1), got)
-	case <-time.After(time.Second):
-		t.Fatal("drainer did not pop within 1s")
-	}
-	require.Equal(t, 0, s.Len())
+		require.Equal(t, 0, s.Len())
+	})
 }
 
 func TestSchedulerCompactionRemovesDeadEntries(t *testing.T) {

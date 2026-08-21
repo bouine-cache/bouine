@@ -380,3 +380,34 @@ release: ## Create a GitHub release. Requires TAG=v0.X.Y and a git tag on main.
 	gh release create $(TAG) --target main \
 		--title "$(TAG)" \
 		--notes "$$NOTES"
+
+.PHONY: prerelease
+prerelease: ## Build and push a pre-release Docker image from a PR branch. Requires PR=<number>.
+## Triggers the prerelease.yml workflow_dispatch from main (where the
+## workflow file lives), passing the PR's head SHA as the ref to build.
+## The image is tagged as pr-<number>-<short-sha>. The workflow is
+## restricted to @bouine-cache/maintainers via the "maintainers" environment.
+## Usage:
+##   make prerelease PR=42
+##   make prerelease PR=42 SKIP_TRIVY=true
+	@test -n "$(PR)" || { echo "usage: make prerelease PR=42 [SKIP_TRIVY=true]"; exit 1; }
+	@command -v gh >/dev/null || { echo "gh CLI is required: https://cli.github.com"; exit 1; }
+	@set -euo pipefail; \
+	BRANCH=$$(gh pr view $(PR) --json headRefName -q .headRefName 2>/dev/null) || { \
+		echo "ERROR: Could not fetch PR #$(PR). Check the number and your gh auth."; exit 1; \
+	}; \
+	if [ -z "$$BRANCH" ]; then \
+		echo "ERROR: PR #$(PR) head branch was deleted (already merged?). Use the branch name directly with:"; \
+		echo "  gh workflow run prerelease.yml -f tag=pr-$(PR)-manual -f ref=<branch>"; \
+		exit 1; \
+	fi; \
+	SHA=$$(gh pr view $(PR) --json headRefOid -q .headRefOid 2>/dev/null); \
+	SHORT_SHA=$$(echo "$$SHA" | cut -c1-12); \
+	TAG="pr-$(PR)-$$SHORT_SHA"; \
+	echo ">>> PR #$(PR)  branch: $$BRANCH  sha: $$SHA"; \
+	echo ">>> Docker tag: $$TAG"; \
+	ARGS="-f tag=$$TAG -f ref=$$BRANCH"; \
+	if [ "$(SKIP_TRIVY)" = "true" ]; then ARGS="$$ARGS -f skip_trivy=true"; fi; \
+	gh workflow run prerelease.yml $$ARGS; \
+	echo ">>> Workflow triggered. Watch:"; \
+	echo "    gh run list --workflow prerelease.yml --limit 1 --json url --jq '.[0].url'"

@@ -7,11 +7,14 @@ name: Pre-release
 # publishes to the official chart repository — those are reserved for release.yml
 # and chart-release.yml respectively.
 #
-# Usage:
+# Usage (from main, where this workflow file exists):
 #   gh workflow run prerelease.yml \
-#     -r <branch> \
 #     -f tag=pr-42-abc123 \
+#     -f ref=<branch-or-sha> \
 #     -f skip_trivy=false
+#
+# Or via make:
+#   make prerelease PR=42
 #
 # Then update k8s/bouine-values.yaml in bouine-infra:
 #   image:
@@ -25,6 +28,11 @@ on:
         description: "Docker Hub tag (e.g. pr-42-abc123, test-0.4.3-rc1)"
         required: true
         type: string
+      ref:
+        description: "Git ref (branch, tag, or SHA) to build from. Defaults to the workflow's ref (main)."
+        required: false
+        type: string
+        default: ""
       skip_trivy:
         description: "Skip Trivy vulnerability scan (useful when the scan blocks a needed image)"
         required: false
@@ -54,6 +62,8 @@ jobs:
       TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Validate tag
         run: |
@@ -152,6 +162,8 @@ jobs:
       TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Helm
         uses: azure/setup-helm@v5

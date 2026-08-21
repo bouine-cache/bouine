@@ -265,6 +265,20 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
 			}
+			// Write-to-owner RPC: a non-owner that fetches from origin
+			// forwards the object to the owner so subsequent peer-fetches
+			// hit (issue #509). Fire-and-forget in a bounded goroutine so
+			// the response path is never blocked on the RPC.
+			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
+				go func() {
+					putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
+					defer cancel()
+					if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
+						e.logger.Debug("peer put error (non-fatal)",
+							"owner", owner.Name, "key", obj.Key, "error", err)
+					}
+				}()
+			}
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
@@ -330,6 +344,20 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			}
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
 				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			}
+			// Write-to-owner RPC: a non-owner that fetches from origin
+			// forwards the object to the owner so subsequent peer-fetches
+			// hit (issue #509). Fire-and-forget in a bounded goroutine so
+			// the response path is never blocked on the RPC.
+			cfg.PeerPut = func(ctx context.Context, owner api.PeerInfo, obj *api.Object) {
+				go func() {
+					putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cluster.PeerFetchTimeout)
+					defer cancel()
+					if err := rs.peerFetcher.Put(putCtx, owner, obj); err != nil {
+						e.logger.Debug("peer put error (non-fatal)",
+							"owner", owner.Name, "key", obj.Key, "error", err)
+					}
+				}()
 			}
 		}
 		cached := cache.NewHandler(cfg)

@@ -250,6 +250,10 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	// peerPut forwards a freshly origin-fetched object to the owner
+	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
+	// Nil in single-node and eventual modes.
+	peerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
 }
 
 // HandlerConfig configures a cache Handler.
@@ -326,6 +330,13 @@ type HandlerConfig struct {
 	// the key is owned by a remote peer. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	// PeerPut, if non-nil, forwards a freshly origin-fetched object to
+	// the key's owner node via a write-to-owner RPC. Used in strong
+	// cluster mode so a non-owner that misses both locally and at the
+	// owner still delivers the object to the owner for future
+	// peer-fetches. Best-effort, fire-and-forget. Nil in single-node
+	// and eventual modes.
+	PeerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
 
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin.
@@ -384,6 +395,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		VaryCapHits:          cfg.VaryCapHits,
 		ownerFn:              cfg.OwnerFn,
 		peerFetch:            cfg.PeerFetch,
+		peerPut:              cfg.PeerPut,
 		allowSetCookie:       cfg.AllowSetCookie,
 		maxObjectSize:        cfg.MaxObjectSize,
 		maxResponseBytes:     cfg.MaxResponseBytes,
@@ -718,6 +730,23 @@ func (h *Handler) RefreshEnabled() bool {
 	return h.refreshBeforeExpiry
 }
 
+// StoreFromPeer stores an object received via the write-to-owner RPC and
+// schedules refresh-before-expiry. Called by the PeerPutHandler on the
+// owner when a non-owner forwards a freshly origin-fetched object (issue #509).
+// The object's Key, headers, and TTL are authoritative — the owner does not
+// re-evaluate cache headers. A synthetic request is built from the object's
+// own headers so the refresh registry has enough context (Vary, conditional
+// headers) for future revalidations.
+func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
+	if obj == nil || obj.Key == (api.Key{}) {
+		return
+	}
+	hdr := make(http.Header, obj.Header.Len())
+	obj.Header.WriteTo(hdr)
+	req := &http.Request{Method: http.MethodGet, Header: hdr}
+	h.storeObject(ctx, obj.Key, obj, req, false, 0)
+}
+
 // buildKey constructs the cache key, applying the route's KeyPolicy
 // when configured. Inlined to avoid overhead on the hit path when no
 // policy is configured (zero added allocs).
@@ -761,12 +790,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveObject(w, r, disp.Object, now, cacheHit, src)
-		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 {
+		// In strong mode, only the owner triggers background revalidation.
+		// A non-owner may hold a stale copy from before the owner-gated
+		// storage deploy (migration window); it serves the stale object
+		// (RFC 5861) but must not fire an origin fetch for a key it does
+		// not own — the owner is authoritative (issue #509).
+		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
 			h.triggerBgRevalidate(r, key, disp.Object)
 		}
 	case Miss:
 		h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
 	case Revalidate:
+		// A non-owner with a stale object requiring revalidation must not
+		// revalidate locally (origin fetch for a key it does not own).
+		// Fall through to handleCacheMiss, which peer-fetches from the
+		// owner. The stale local copy is left to natural eviction.
+		if !h.isOwnerOrUnmanaged(key) {
+			h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
+			return
+		}
 		h.revalidate(w, r, primaryKey, key, disp.Object, now, src)
 	case Bypass:
 		h.handleBypass(w, r)
@@ -777,8 +819,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
 // Cluster peer-fetch: if this node does not own the key, ask the owner before
 // going to origin. The owner has a much higher hit rate for keys it owns
-// (consistent hashing concentrates fills there). On a peer hit the object is
-// stored locally for future requests on this node (L0 promotion).
+// (consistent hashing concentrates fills there). On a peer hit the object
+// is served to the client but NOT stored locally — in strong mode only
+// the owner caches keys it owns, so the fleet cache is partitioned (3×
+// distinct keyspace) rather than redundant (3× same keys). The owner
+// refreshes stale objects; non-owners must not trigger revalidations for
+// keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
 func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source) {
@@ -788,11 +834,10 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 				// Re-evaluate: the peer may have returned a stale object.
 				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					h.serveObject(w, r, peerObj, now, cacheHit, api.SourcePeer)
-					// Promote to local hot tier (best-effort; ignore error).
-					_ = h.store.Put(r.Context(), lookupKey, peerObj)
-					if d2.Decision == StaleHit && peerObj.StaleWhileRevalidate > 0 {
-						h.triggerBgRevalidate(r, lookupKey, peerObj)
-					}
+					// Do not store or revalidate: the object came from the
+					// owner. Caching it on a non-owner would make the fleet
+					// cache redundant (issue #509). Revalidation is the
+					// owner's responsibility.
 					return
 				}
 			} else if err != nil {
@@ -837,6 +882,36 @@ func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, lookupKey api.Key
 		return primaryKey, vk, vobj, vsrc
 	}
 	return primaryKey, vk, nil, ""
+}
+
+// isOwnerOrUnmanaged reports whether this node owns key, or whether the
+// handler is in single-node / eventual mode (ownerFn is nil). In strong
+// mode only the owner revalidates and stores; non-owners defer to the
+// owner via peer-fetch (issue #509).
+func (h *Handler) isOwnerOrUnmanaged(key api.Key) bool {
+	if h.ownerFn == nil {
+		return true
+	}
+	_, isLocal := h.ownerFn(key)
+	return isLocal
+}
+
+// forwardToOwnerIfRemote forwards obj to its owner via the write-to-owner
+// RPC when this node is a non-owner. Used in strong mode so a non-owner
+// that fetches from origin (after a peer-fetch miss) delivers the object
+// to the owner for future peer-fetches (issue #509). Best-effort,
+// fire-and-forget — the caller's response is never blocked on the RPC.
+// No-op in single-node / eventual mode (peerPut or ownerFn is nil) and
+// when this node is the owner.
+func (h *Handler) forwardToOwnerIfRemote(ctx context.Context, obj *api.Object) {
+	if h.peerPut == nil || h.ownerFn == nil {
+		return
+	}
+	owner, isLocal := h.ownerFn(obj.Key)
+	if isLocal {
+		return
+	}
+	h.peerPut(ctx, owner, obj)
 }
 
 // tryConditional304 returns true and writes a 304 if the client's
@@ -1283,6 +1358,11 @@ func (h *Handler) writeAndMaybeStore(
 		}
 		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
+		// In strong mode, storeObject is a no-op for non-owners. Forward
+		// the freshly fetched object to the owner so subsequent peer-fetches
+		// from this or other non-owners hit instead of going to origin
+		// (issue #509). The owner resolves from obj.Key (storeKey).
+		h.forwardToOwnerIfRemote(r.Context(), obj)
 		if storeKey != primaryKey {
 			// Shallow-copy the object and change only the Key. This avoids
 			// a second full buildObject call (~5 allocs: api.Object,
@@ -1299,6 +1379,9 @@ func (h *Handler) writeAndMaybeStore(
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
 			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)
+			// Forward the primary (Vary-resolver) entry to its owner too —
+			// the primary key may hash to a different owner than the variant.
+			h.forwardToOwnerIfRemote(r.Context(), primaryObj)
 		}
 	}
 }
@@ -1461,6 +1544,8 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy)
 	h.storeObject(r.Context(), key, obj, getReq, false, 0)
+	// Forward to owner if this is a non-owner (issue #509).
+	h.forwardToOwnerIfRemote(r.Context(), obj)
 }
 
 func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
@@ -1513,15 +1598,22 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 // method, read before the refresh store. For non-refresh stores
 // (isRefresh=false), staleHits is 0 and unused.
 func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool, staleHits int64) {
+	// In strong cluster mode, only the owner stores. A non-owner that
+	// fetches from origin (after a peer-fetch miss) serves the response
+	// to the client but does not cache it locally — the object is
+	// forwarded to the owner via the write-to-owner RPC (peerPut) so
+	// subsequent peer-fetches hit. Without this gate every pod caches
+	// the same hot keys, the consistent-hash ring is decorative, and
+	// peer fetch has 0% hit rate (issue #509).
+	if h.ownerFn != nil {
+		if _, isLocal := h.ownerFn(key); !isLocal {
+			return
+		}
+	}
 	_ = h.store.Put(ctx, key, obj)
 	if h.refreshBeforeExpiry && obj.TTL >= minRefreshTTL {
 		if IsNegativeCacheable(obj.StatusCode) {
 			return
-		}
-		if h.ownerFn != nil {
-			if _, isLocal := h.ownerFn(key); !isLocal {
-				return
-			}
 		}
 		if !isRefresh && h.refreshReactiveFirst {
 			return

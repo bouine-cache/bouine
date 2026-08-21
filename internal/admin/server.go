@@ -93,6 +93,10 @@ type Config struct {
 	// required — callers are trusted cluster peers on the internal
 	// network; protected by network policy / mTLS in production).
 	PeerFetchHandler http.Handler
+	// PeerPutHandler, if non-nil, handles write-to-owner RPCs from
+	// non-owner cluster nodes. Mounted at POST /v1/peer/put (auth-exempt;
+	// same rationale as peer fetch).
+	PeerPutHandler http.Handler
 	// PeerMetricsHandler, if non-nil, is mounted at GET /v1/peer/metrics
 	// (auth-exempt; callers are trusted cluster peers on the internal
 	// network, same rationale as peer fetch/purge/ban).
@@ -329,6 +333,9 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.PeerFetchHandler != nil {
 		mux.Handle("POST /v1/peer/fetch", cfg.PeerFetchHandler)
+	}
+	if cfg.PeerPutHandler != nil {
+		mux.Handle("POST /v1/peer/put", cfg.PeerPutHandler)
 	}
 	if cfg.PeerMetricsHandler != nil {
 		mux.Handle("GET /v1/peer/metrics", cfg.PeerMetricsHandler)
@@ -683,6 +690,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// access in production. Must remain auth-exempt so peers without a
 		// shared token can still perform lookups.
 		"/v1/peer/fetch": true,
+		// Peer-to-peer write-to-owner RPC: same rationale as peer fetch.
+		// Non-owners forward origin-fetched objects to the owner (issue #509).
+		"/v1/peer/put": true,
 		// Peer-to-peer invalidation RPCs: same rationale as peer fetch.
 		// Peers forward purge/ban events via HTTP fan-out in strong mode.
 		"/v1/peer/purge": true,

@@ -48,6 +48,10 @@ const maxPeerFetchBinaryBody = 512
 const (
 	// PeerFetchPath is the HTTP path for peer cache lookups.
 	PeerFetchPath = "/v1/peer/fetch"
+	// PeerPutPath is the HTTP path for write-to-owner RPCs: a non-owner
+	// that fetched from origin forwards the object to the owner so
+	// subsequent peer-fetches hit (issue #509).
+	PeerPutPath = "/v1/peer/put"
 	// MaxHops is the default maximum number of peers a single request
 	// may traverse before going to origin (threat T36).
 	MaxHops = 2
@@ -62,8 +66,10 @@ const (
 	// cluster fails detectably on version-mismatch instead of
 	// silently producing codec decode errors.
 	ClusterProtocolVersion = "3"
-	// peerFetchTimeout is the maximum time for a peer-fetch RPC.
-	peerFetchTimeout = 500 * time.Millisecond
+	// PeerFetchTimeout is the maximum time for a peer-fetch or peer-put RPC.
+	// Exported so the engine wiring can reuse the same budget for the
+	// write-to-owner goroutine (issue #509).
+	PeerFetchTimeout = 500 * time.Millisecond
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
@@ -89,7 +95,10 @@ type PeerFetcher struct {
 	hopLimitHits atomic.Int64
 	maxBodyBytes int64
 	fetchSem     chan struct{}
-	logger       observability.Logger
+	// putSem bounds concurrent write-to-owner RPCs to prevent memory
+	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
+	putSem chan struct{}
+	logger observability.Logger
 	// Prometheus counters — registered if a non-nil registry is passed.
 	pHits     prometheus.Counter
 	pMisses   prometheus.Counter
@@ -149,12 +158,13 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 	f := &PeerFetcher{
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   peerFetchTimeout,
+			Timeout:   PeerFetchTimeout,
 		},
 		useTLS:       tlsCfg != nil,
 		hopLimit:     hopLimit,
 		maxBodyBytes: maxPeerFetchBytes,
 		fetchSem:     make(chan struct{}, defaultPeerFetchConcurrency),
+		putSem:       make(chan struct{}, defaultPeerFetchConcurrency),
 		logger:       observability.ResolveLogger(logger),
 	}
 	if reg != nil {
@@ -404,4 +414,119 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		*bufp = encoded[:0]
 		peerFetchEncodePool.Put(bufp)
 	}
+}
+
+// Put forwards obj to the owner peer via the write-to-owner RPC. Used in
+// strong mode so a non-owner that fetched from origin delivers the object
+// to the owner for future peer-fetches (issue #509). Best-effort: errors
+// are logged and returned but do not block the caller's response. The
+// caller is responsible for running this off the response path.
+// Bounded by putSem to prevent unbounded goroutine fan-out during miss
+// storms; if the semaphore is full, the RPC is skipped (best-effort).
+func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Object) error {
+	if obj == nil {
+		return nil
+	}
+	select {
+	case f.putSem <- struct{}{}:
+		defer func() { <-f.putSem }()
+	case <-ctx.Done():
+		return fmt.Errorf("peer put %s: %w", peer.Addr, ctx.Err())
+	}
+	fetchAddr := peer.AdminAddr
+	if fetchAddr == "" {
+		fetchAddr = peer.Addr
+	}
+	scheme := "http"
+	if f.useTLS {
+		scheme = "https"
+	}
+	url := scheme + "://" + fetchAddr + PeerPutPath
+
+	body := storage.EncodeObject(obj)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("peer put request: %w", err)
+	}
+	httpReq.Header.Set(header.ContentType, "application/octet-stream")
+	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
+
+	resp, err := f.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer put %s: status %d", peer.Addr, resp.StatusCode)
+	}
+	f.logger.Debug("peer put ok", "key", obj.Key, "peer", peer.Addr)
+	return nil
+}
+
+// PeerPutHandler receives write-to-owner RPCs and stores the forwarded
+// object in the local store. Mounted on PeerPutPath. The owner node is
+// the destination for non-owner origin-fetches (issue #509).
+type PeerPutHandler struct {
+	store  PeerPutStore
+	logger observability.Logger
+	// onStore, if non-nil, is called after the object is stored. The cache
+	// handler wires this to its storeObject so refresh-before-expiry is
+	// scheduled for forwarded objects (which bypass the normal miss path
+	// on the owner). The request is a synthetic GET built from the
+	// forwarded object's headers; it carries enough context (Vary,
+	// conditional headers) for the refresh registry.
+	onStore func(ctx context.Context, obj *api.Object)
+}
+
+// PeerPutStore is the minimal storage interface needed by peer put.
+// It is satisfied by storage.Store.
+type PeerPutStore interface {
+	Put(ctx context.Context, key api.Key, obj *api.Object) error
+}
+
+// NewPeerPutHandler creates a peer-put handler backed by store.
+func NewPeerPutHandler(store PeerPutStore, logger observability.Logger) *PeerPutHandler {
+	return &PeerPutHandler{store: store, logger: observability.ResolveLogger(logger)}
+}
+
+// SetOnStore sets a callback invoked after a successful store. Used by the
+// engine to wire refresh scheduling (storeObject) for forwarded objects.
+func (h *PeerPutHandler) SetOnStore(fn func(ctx context.Context, obj *api.Object)) {
+	h.onStore = fn
+}
+
+// ServeHTTP handles peer put requests: decode the forwarded object and
+// store it locally. The owner is the authoritative store for this key.
+func (h *PeerPutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPeerFetchBytes))
+	if err != nil || len(body) == 0 {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	obj, err := storage.DecodeObject(body)
+	if err != nil {
+		h.logger.Warn("peer put decode failed", "error", err)
+		http.Error(w, "decode error", http.StatusBadRequest)
+		return
+	}
+	if obj == nil || obj.Key == (api.Key{}) {
+		http.Error(w, "missing key", http.StatusBadRequest)
+		return
+	}
+	if err := h.store.Put(r.Context(), obj.Key, obj); err != nil {
+		h.logger.Warn("peer put store failed", "key", obj.Key, "error", err)
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	// Fire the onStore callback so the cache handler can schedule
+	// refresh-before-expiry for forwarded objects (issue #509).
+	if h.onStore != nil {
+		h.onStore(r.Context(), obj)
+	}
+	h.logger.Debug("served peer put", "key", obj.Key)
+	w.WriteHeader(http.StatusOK)
 }

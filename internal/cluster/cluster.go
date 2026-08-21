@@ -75,11 +75,13 @@ type Config struct {
 	HandoffQueueDepth int
 }
 
-// Invalidator holds callbacks for applying purge and ban events received
-// via gossip. Set via SetInvalidator after cluster creation.
+// Invalidator holds callbacks for applying purge, ban, and refresh
+// events received via gossip. Set via SetInvalidator after cluster
+// creation.
 type Invalidator struct {
-	PurgeFn func(ctx context.Context, evt api.PurgeEvent) error
-	BanFn   func(ctx context.Context, evt api.BanEvent) error
+	PurgeFn   func(ctx context.Context, evt api.PurgeEvent) error
+	BanFn     func(ctx context.Context, evt api.BanEvent) error
+	RefreshFn func(ctx context.Context, evt api.RefreshEvent) error
 }
 
 // Member holds runtime state about a peer node in the cluster.
@@ -316,6 +318,27 @@ func (c *Cluster) handleBinaryGossip(msg []byte) {
 		}
 		c.metrics.IncGossipInvalidation("ban")
 		c.logger.Info("received ban from peer",
+			"issuer", evt.Issuer,
+			"seq", evt.Seq,
+		)
+	case msgTypeRefresh:
+		if c.inv.RefreshFn == nil {
+			return
+		}
+		evt, err := DecodeRefreshGossip(msg)
+		if err != nil {
+			c.logger.Warn("cluster: gossip refresh decode failed", "error", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		defer cancel()
+		if err := c.inv.RefreshFn(ctx, evt); err != nil {
+			c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
+			return
+		}
+		c.metrics.IncGossipInvalidation("refresh")
+		c.logger.Info("received refresh from peer",
+			"key", evt.Key,
 			"issuer", evt.Issuer,
 			"seq", evt.Seq,
 		)

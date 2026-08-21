@@ -130,3 +130,79 @@ func TestIsBinaryFrame(t *testing.T) {
 	require.True(t, IsBinaryFrame(buf))
 	require.Equal(t, msgTypePurge, GossipMsgType(buf))
 }
+
+func TestEncodeDecodeRefresh_RoundTrip(t *testing.T) {
+	t.Parallel()
+	evt := api.RefreshEvent{
+		Key:      testkey.Key(0xCAFEBABE),
+		Issuer:   "node-refresh",
+		IssuedAt: time.Unix(0, 1234567890),
+		Seq:      99,
+	}
+	// gossip
+	buf, err := EncodeRefreshGossip(evt)
+	require.NoError(t, err, "encode gossip")
+	got, err := DecodeRefreshGossip(buf)
+	require.NoError(t, err, "decode gossip")
+	got.IssuedAt = got.IssuedAt.UTC()
+	evt.IssuedAt = evt.IssuedAt.UTC()
+	require.Equal(t, evt, got)
+	// HTTP
+	hbuf, err := EncodeRefreshHTTP(evt)
+	require.NoError(t, err, "encode http")
+	got2, err := DecodeRefreshHTTP(hbuf)
+	require.NoError(t, err, "decode http")
+	got2.IssuedAt = got2.IssuedAt.UTC()
+	evt.IssuedAt = evt.IssuedAt.UTC()
+	require.Equal(t, evt, got2)
+}
+
+func TestEncodeDecodeRefresh_EmptyStrings(t *testing.T) {
+	t.Parallel()
+	evt := api.RefreshEvent{
+		Key:      testkey.Key(1),
+		Issuer:   "",
+		IssuedAt: time.Unix(0, 1),
+		Seq:      0,
+	}
+	buf, err := EncodeRefreshGossip(evt)
+	require.NoError(t, err, "encode")
+	got, err := DecodeRefreshGossip(buf)
+	require.NoError(t, err, "decode")
+	got.IssuedAt = got.IssuedAt.UTC()
+	evt.IssuedAt = evt.IssuedAt.UTC()
+	require.Equal(t, evt, got)
+}
+
+func TestDecodeRefresh_ShortFrame(t *testing.T) {
+	t.Parallel()
+	_, err := DecodeRefreshGossip([]byte{binaryMagic, binaryVersion, msgTypeRefresh})
+	require.Equal(t, errShortFrame, err)
+}
+
+func TestDecodeRefresh_WrongMsgType(t *testing.T) {
+	t.Parallel()
+	evt := api.PurgeEvent{Key: testkey.Key(1)}
+	buf, _ := EncodePurgeGossip(evt)
+	_, err := DecodeRefreshGossip(buf)
+	require.Error(t, err)
+}
+
+func TestDecodeRefreshHTTP_BadMagic(t *testing.T) {
+	t.Parallel()
+	_, err := DecodeRefreshHTTP([]byte{0x00, binaryVersion})
+	require.Equal(t, errBadMagic, err)
+}
+
+func TestDecodeRefreshHTTP_UnsupportedVersion(t *testing.T) {
+	t.Parallel()
+	_, err := DecodeRefreshHTTP([]byte{binaryMagic, 0xFF})
+	require.Error(t, err)
+}
+
+func TestGossipMsgType_Refresh(t *testing.T) {
+	t.Parallel()
+	buf, _ := EncodeRefreshGossip(api.RefreshEvent{Key: testkey.Key(1)})
+	require.True(t, IsBinaryFrame(buf))
+	require.Equal(t, msgTypeRefresh, GossipMsgType(buf))
+}

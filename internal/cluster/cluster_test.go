@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,6 +171,63 @@ func TestNotifyMsg_BanEvent(t *testing.T) {
 
 	got := called.Load()
 	require.Equal(t, int32(1), got)
+}
+
+func TestNotifyMsg_RefreshEvent(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var called atomic.Int32
+	var receivedKey api.Key
+	c.SetInvalidator(Invalidator{
+		RefreshFn: func(_ context.Context, evt api.RefreshEvent) error {
+			called.Add(1)
+			receivedKey = evt.Key
+			return nil
+		},
+	})
+
+	evt := api.RefreshEvent{Key: testkey.Key(77), Issuer: "local"}
+	msg, _ := EncodeRefreshGossip(evt)
+	c.NotifyMsg(msg)
+
+	require.Equal(t, int32(1), called.Load())
+	require.Equal(t, testkey.Key(77), receivedKey)
+}
+
+func TestNotifyMsg_RefreshEvent_NoCallback(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	// No RefreshFn set — should not panic.
+	evt := api.RefreshEvent{Key: testkey.Key(1), Issuer: "local"}
+	msg, _ := EncodeRefreshGossip(evt)
+	c.NotifyMsg(msg)
+}
+
+func TestNotifyMsg_RefreshEvent_ApplyError(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig(t, "local", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err, "New")
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	c.SetInvalidator(Invalidator{
+		RefreshFn: func(_ context.Context, _ api.RefreshEvent) error {
+			return errors.New("apply failed")
+		},
+	})
+
+	// Should not panic on apply error.
+	evt := api.RefreshEvent{Key: testkey.Key(1), Issuer: "local"}
+	msg, _ := EncodeRefreshGossip(evt)
+	c.NotifyMsg(msg)
 }
 
 func TestNotifyMsg_MalformedPayload(t *testing.T) {

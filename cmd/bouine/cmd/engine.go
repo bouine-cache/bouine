@@ -319,6 +319,9 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 				_, err := store.Ban(ctx, evt.Predicate)
 				return err
 			},
+			RefreshFn: func(ctx context.Context, evt api.RefreshEvent) error {
+				return rs.softPurgeKey(ctx, evt.Key)
+			},
 		})
 	}
 	return rs, shutdownTracer, nil
@@ -590,6 +593,24 @@ func (rs *runState) purgeKey(ctx context.Context, key api.Key) error {
 	return nil
 }
 
+// softPurgeKey marks the cached object for key as stale across all
+// handlers, triggering background revalidation via stale-while-revalidate
+// instead of hard-deleting it. This is the correct "refresh" / "soft
+// purge" semantic: the object stays servable while a conditional fetch
+// refreshes it in the background.
+func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) error {
+	for _, h := range rs.handlers {
+		owned, err := h.SoftPurge(ctx, key)
+		if err != nil {
+			return err
+		}
+		if owned {
+			return nil
+		}
+	}
+	return nil
+}
+
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
 // The broadcaster internally detaches from the engine's root context so
 // peer fan-out survives shutdown; local store operations use dCtx.
@@ -619,8 +640,12 @@ func (e *engine) buildInvalidationOps(ctx context.Context, rs *runState) invalid
 			return n, nil
 		},
 		RefreshFn: func(dCtx context.Context, urlStr string) error {
-			if err := rs.purgeKey(dCtx, cache.BuildKeyFromURL(urlStr, nil)); err != nil {
+			key := cache.BuildKeyFromURL(urlStr, nil)
+			if err := rs.softPurgeKey(dCtx, key); err != nil {
 				return err
+			}
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastRefresh(ctx, key)
 			}
 			rs.cfProp.PropagateForRefresh(dCtx, urlStr)
 			return nil
@@ -688,7 +713,13 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			return n, nil
 		},
 		RefreshFn: func(key api.Key) error {
-			return rs.purgeKey(ctx, key)
+			if err := rs.softPurgeKey(ctx, key); err != nil {
+				return err
+			}
+			if rs.broadcaster != nil {
+				rs.broadcaster.BroadcastRefresh(ctx, key)
+			}
+			return nil
 		},
 		PeerPurgeHandler: cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
 			return rs.purgeKey(ctx, evt.Key)
@@ -696,6 +727,9 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerBanHandler: cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
 			_, err := rs.store.Ban(ctx, evt.Predicate)
 			return err
+		}),
+		PeerRefreshHandler: cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
+			return rs.softPurgeKey(ctx, evt.Key)
 		}),
 		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit),
 		PeerPutHandler:     e.buildPeerPutHandler(rs),

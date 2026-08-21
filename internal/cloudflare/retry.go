@@ -18,6 +18,12 @@ const (
 	defaultRetryDelay = 250 * time.Millisecond
 	maxRetries        = 2
 	jitterRatio       = 0.25
+	// maxRetryAfter caps the delay parsed from a Retry-After header.
+	// Cloudflare's real Retry-After is typically < 60 s; a malicious or
+	// buggy response with Retry-After: 999999999 would otherwise park
+	// the propagator goroutine for ~31 years. The cap prevents this DoS
+	// while still honouring legitimate rate-limit backoff.
+	maxRetryAfter = 60 * time.Second
 )
 
 // httpStatusCoder is implemented by *cfsdk.Error and also by test fakes.
@@ -112,11 +118,19 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	if v == "" {
 		return 0
 	}
+	var d time.Duration
 	if secs, err := strconv.Atoi(v); err == nil {
-		return time.Duration(secs) * time.Second
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = time.Until(t)
+	} else {
+		return 0
 	}
-	if t, err := http.ParseTime(v); err == nil {
-		return time.Until(t)
+	if d > maxRetryAfter {
+		return maxRetryAfter
 	}
-	return 0
+	if d < 0 {
+		return 0
+	}
+	return d
 }

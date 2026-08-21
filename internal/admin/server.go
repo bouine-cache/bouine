@@ -71,6 +71,10 @@ type Config struct {
 	// PeerBanHandler, if non-nil, handles incoming ban broadcasts from
 	// peers. Mounted at POST /v1/peer/ban (auth-exempt; same rationale).
 	PeerBanHandler http.Handler
+	// PeerRefreshHandler, if non-nil, handles incoming refresh (soft-purge)
+	// broadcasts from peers. Mounted at POST /v1/peer/refresh (auth-exempt;
+	// same rationale).
+	PeerRefreshHandler http.Handler
 	// CFStatusFn, if non-nil, returns a snapshot of the Cloudflare
 	// integration state for GET /v1/cloudflare/status.
 	CFStatusFn func() CloudflareStatus
@@ -315,6 +319,9 @@ func (s *Server) mountOptionalRoutes(mux *http.ServeMux, cfg Config) {
 	}
 	if cfg.PeerBanHandler != nil {
 		mux.Handle("POST /v1/peer/ban", cfg.PeerBanHandler)
+	}
+	if cfg.PeerRefreshHandler != nil {
+		mux.Handle("POST /v1/peer/refresh", cfg.PeerRefreshHandler)
 	}
 	if cfg.CFStatusFn != nil {
 		mux.HandleFunc("GET /v1/cloudflare/status", s.cloudflareStatus)
@@ -694,9 +701,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Non-owners forward origin-fetched objects to the owner (issue #509).
 		"/v1/peer/put": true,
 		// Peer-to-peer invalidation RPCs: same rationale as peer fetch.
-		// Peers forward purge/ban events via HTTP fan-out in strong mode.
-		"/v1/peer/purge": true,
-		"/v1/peer/ban":   true,
+		// Peers forward purge/ban/refresh events via HTTP fan-out in
+		// strong mode.
+		"/v1/peer/purge":   true,
+		"/v1/peer/ban":     true,
+		"/v1/peer/refresh": true,
 		// Peer-to-peer metrics RPC: same rationale as peer fetch. The
 		// aggregator fans out to cluster peers to collect ring summaries.
 		"/v1/peer/metrics": true,

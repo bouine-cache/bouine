@@ -53,6 +53,28 @@ func NewPeerBanHandler(fn func(api.BanEvent) error) http.Handler {
 	})
 }
 
+// NewPeerRefreshHandler returns an http.Handler that decodes binary
+// RefreshEvent frames and delegates to fn. Mounted at POST /v1/peer/refresh.
+func NewPeerRefreshHandler(fn func(api.RefreshEvent) error) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		evt, err := DecodeRefreshHTTP(body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if err := fn(evt); err != nil {
+			writePeerError(w, err)
+			return
+		}
+		writePeerOK(w, "refreshed")
+	})
+}
+
 func writePeerError(w http.ResponseWriter, err error) {
 	w.Header().Set(header.ContentType, "application/json")
 	w.WriteHeader(http.StatusInternalServerError)

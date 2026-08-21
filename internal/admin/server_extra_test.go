@@ -478,3 +478,31 @@ func TestServe_ErrServerClosed(t *testing.T) {
 	require.NoError(t, s.inner.Close())
 	_ = ctx
 }
+
+func TestPeerRefreshHandler_RouteMounted(t *testing.T) {
+	t.Parallel()
+	var called bool
+	s := New(Config{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerRefreshHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}),
+	})
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/peer/refresh", nil)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	assert.True(t, called, "PeerRefreshHandler should be mounted at POST /v1/peer/refresh")
+	assert.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestPeerRefreshHandler_NotMountedWhenNil(t *testing.T) {
+	t.Parallel()
+	s := New(Config{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/peer/refresh", nil)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code, "route should not be mounted when PeerRefreshHandler is nil")
+}

@@ -260,6 +260,9 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
 				owner := rs.clusterNode.Owner(key)
+				if owner.Name == "" {
+					return api.PeerInfo{}, true
+				}
 				return owner, rs.clusterNode.IsLocal(key)
 			}
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
@@ -340,6 +343,9 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
 			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
 				owner := rs.clusterNode.Owner(key)
+				if owner.Name == "" {
+					return api.PeerInfo{}, true
+				}
 				return owner, rs.clusterNode.IsLocal(key)
 			}
 			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {

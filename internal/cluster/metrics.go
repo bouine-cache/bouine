@@ -31,6 +31,11 @@ type Metrics struct {
 	// overflowed. Non-zero indicates the HandoffQueueDepth may need
 	// tuning or invalidation bursts need throttling. See issue #201.
 	GossipDrops prometheus.Counter
+	// RingEmpty counts the number of times Owner was called while the
+	// consistent-hash ring had zero vnodes. Non-zero indicates a
+	// correctness regression: the node is failing open to single-node
+	// ownership. See issue #305.
+	RingEmpty prometheus.Counter
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -70,6 +75,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_gossip_drops_total",
 			Help:      "Memberlist handler queue full warnings — messages dropped because the receiving node's handoff queue overflowed.",
 		}),
+		RingEmpty: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_ring_empty_total",
+			Help:      "Number of times Owner was called with an empty consistent-hash ring. Non-zero indicates a silent correctness regression.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -77,6 +87,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.InvalidationsHTTP,
 		m.BroadcastFailures,
 		m.GossipDrops,
+		m.RingEmpty,
 	)
 	return m
 }
@@ -132,6 +143,15 @@ func (m *Metrics) IncGossipDrop() {
 		return
 	}
 	m.GossipDrops.Inc()
+}
+
+// IncRingEmpty increments the ring-empty counter. Called when Owner
+// is called with a zero-member ring.
+func (m *Metrics) IncRingEmpty() {
+	if m == nil || m.RingEmpty == nil {
+		return
+	}
+	m.RingEmpty.Inc()
 }
 
 // BroadcastFailuresCount returns the total number of broadcast failures

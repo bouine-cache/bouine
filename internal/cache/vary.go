@@ -1,9 +1,10 @@
 package cache
 
 import (
-	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/bouine-cache/xxhash/v3"
 
@@ -47,7 +48,7 @@ func varyContainsStar(vary string) bool {
 // pathological inputs.
 //
 //nolint:gocyclo // 17: Vary header parsing is inherently branchy
-func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
+func VariantKey(primary api.Key, vary string, reqHeader header.Map, policy *KeyPolicy) api.Key {
 	if vary == "" {
 		return primary
 	}
@@ -113,7 +114,7 @@ func VariantKey(primary api.Key, vary string, reqHeader http.Header, policy *Key
 
 // variantKeySlow is the fallback allocation path for Vary headers that
 // exceed the stack buffer limits (too many fields or too much data).
-func variantKeySlow(primary api.Key, vary string, reqHeader http.Header, policy *KeyPolicy) api.Key {
+func variantKeySlow(primary api.Key, vary string, reqHeader header.Map, policy *KeyPolicy) api.Key {
 	fields := strings.Split(strings.ToLower(vary), ",")
 	for i, f := range fields {
 		fields[i] = strings.TrimSpace(f)

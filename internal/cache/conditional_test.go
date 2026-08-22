@@ -20,35 +20,35 @@ func TestClientConditionalMatch(t *testing.T) {
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(header.IfNoneMatch, `"abc"`)
 		obj := &api.Object{ETag: `"abc"`}
-		require.True(t, ClientConditionalMatch(r, obj))
+		require.True(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("if_none_match_mismatch", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(header.IfNoneMatch, `"xyz"`)
 		obj := &api.Object{ETag: `"abc"`}
-		require.False(t, ClientConditionalMatch(r, obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("if_none_match_no_etag", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(header.IfNoneMatch, `"abc"`)
 		obj := &api.Object{}
-		require.False(t, ClientConditionalMatch(r, obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("if_modified_since_last_modified_before", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2024 00:00:00 GMT")
 		obj := &api.Object{LastModified: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
-		require.True(t, ClientConditionalMatch(r, obj))
+		require.True(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("if_modified_since_last_modified_after", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2023 00:00:00 GMT")
 		obj := &api.Object{LastModified: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
-		require.False(t, ClientConditionalMatch(r, obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("if_modified_since_date_fallback", func(t *testing.T) {
 		t.Parallel()
@@ -57,20 +57,20 @@ func TestClientConditionalMatch(t *testing.T) {
 		obj := &api.Object{
 			Header: header.FromHTTP(http.Header{header.Date: {"Mon, 01 Jan 2023 00:00:00 GMT"}}),
 		}
-		require.True(t, ClientConditionalMatch(r, obj))
+		require.True(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("if_modified_since_invalid_date", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("GET", "/", nil)
 		r.Header.Set(header.IfModifiedSince, "garbage")
 		obj := &api.Object{LastModified: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
-		require.False(t, ClientConditionalMatch(r, obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 	t.Run("no_conditional_headers", func(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("GET", "/", nil)
 		obj := &api.Object{ETag: `"abc"`}
-		require.False(t, ClientConditionalMatch(r, obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
 	})
 }
 
@@ -116,7 +116,7 @@ func TestMergeHeaders304(t *testing.T) {
 			header.TransferEncoding: {"chunked"},
 			header.ETag:             {`"v2"`},
 		}
-		MergeHeaders304(stored, resp304)
+		MergeHeaders304(stored, header.FromHTTP(resp304))
 		// Content-specific headers must NOT be overwritten.
 		assert.Equal(t, "100", stored.Header.Get(header.ContentLength))
 		// ContentType is NOT in the skip list, so it IS updated.
@@ -135,7 +135,7 @@ func TestMergeHeaders304(t *testing.T) {
 			header.CacheControl: {"max-age=120"},
 			header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"},
 		}
-		MergeHeaders304(stored, resp304)
+		MergeHeaders304(stored, header.FromHTTP(resp304))
 		assert.Equal(t, "max-age=120", stored.Header.Get(header.CacheControl))
 		assert.Equal(t, "Mon, 01 Jan 2024 00:00:00 GMT", stored.Header.Get(header.LastModified))
 	})

@@ -34,9 +34,9 @@ func TestIsCacheableWithDefault_NoFreshness(t *testing.T) {
 	req := http.Header{}
 	resp := http.Header{} // no Cache-Control, Expires, or Last-Modified
 
-	require.False(t, IsCacheable(200, req, resp))
-	assert.True(t, IsCacheableWithDefault(200, req, resp, 0, 5*time.Second))
-	assert.False(t, IsCacheableWithDefault(200, req, resp, 0, 0))
+	require.False(t, IsCacheable(200, header.FromHTTP(req), header.FromHTTP(resp)))
+	assert.True(t, IsCacheableWithDefault(200, header.FromHTTP(req), header.FromHTTP(resp), 0, 5*time.Second))
+	assert.False(t, IsCacheableWithDefault(200, header.FromHTTP(req), header.FromHTTP(resp), 0, 0))
 }
 
 // TestIsCacheableWithDefault_HonoursBlocks verifies blocking directives still
@@ -63,7 +63,7 @@ func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := IsCacheableWithDefault(tc.status, tc.req, tc.resp, 0, def)
+			got := IsCacheableWithDefault(tc.status, header.FromHTTP(tc.req), header.FromHTTP(tc.resp), 0, def)
 			if got != tc.want {
 				t.Errorf("IsCacheableWithDefault(%d) = %v, want %v", tc.status, got, tc.want)
 			}

@@ -153,7 +153,7 @@ func TestSetCookie_DefaultBlocksEvenWithExplicitFreshness(t *testing.T) {
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
 	// Verify the object was NOT stored.
-	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)
 	require.Nil(t, obj)
 }

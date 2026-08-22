@@ -19,8 +19,8 @@ func TestBuildKey_StripQueryParams(t *testing.T) {
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=email&b=2", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
 
-	k1 := BuildKey(r1, policy)
-	k2 := BuildKey(r2, nil)
+	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
+	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -32,8 +32,8 @@ func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page", nil)
 
-	k1 := BuildKey(r1, policy)
-	k2 := BuildKey(r2, nil)
+	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
+	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -41,8 +41,8 @@ func TestBuildKey_StripQueryParams_AllStripped(t *testing.T) {
 func TestBuildKey_StripQueryParams_NilNoEffect(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2", nil)
-	k1 := BuildKey(r, nil)
-	k2 := BuildKey(r, nil)
+	k1 := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+	k2 := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -54,8 +54,8 @@ func TestBuildKey_StripQueryParams_StripsSingleParam(t *testing.T) {
 	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=x", nil)
 	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1", nil)
 
-	k1 := BuildKey(r1, policy)
-	k2 := BuildKey(r2, nil)
+	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
+	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil)
 
 	assert.Equal(t, k2, k1)
 }

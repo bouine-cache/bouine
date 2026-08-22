@@ -47,7 +47,7 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 	require.Equal(t, 200, rr.Code)
 
 	// Retrieve the stored object and assert TTL = override (±jitter; jitter=0 here).
-	key := BuildKey(req, nil)
+	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, err := h.store.Get(req.Context(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
@@ -99,7 +99,7 @@ func TestOverrideTTL_ZeroDisabled(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
-	key := BuildKey(req, nil)
+	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, err := h.store.Get(req.Context(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("object not stored: %v", err)
@@ -167,7 +167,7 @@ func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/short", nil)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	key := BuildKey(req, nil)
+	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, _ := h.store.Get(req.Context(), key)
 	require.NotNil(t, obj)
 	assert.Equal(t, 5*time.Second, obj.TTL)
@@ -195,7 +195,7 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/jitter", nil)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	key := BuildKey(req, nil)
+	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, _ := h.store.Get(req.Context(), key)
 	require.NotNil(t, obj)
 	// With 10 % jitter on 1 h, TTL must be in [54 min, 66 min].
@@ -246,7 +246,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 
 	// Manually set StoredAt far in the past so Evaluate sees the object as
 	// expired (past override TTL) and triggers revalidation.
-	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 	expired := obj.CloneForRefresh()

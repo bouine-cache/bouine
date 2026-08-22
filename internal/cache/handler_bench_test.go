@@ -175,7 +175,7 @@ func BenchmarkBuildKey_LongURL(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = BuildKey(req, nil)
+		_ = BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	}
 }
 
@@ -186,7 +186,7 @@ func BenchmarkGate_Evaluate_Hit(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = Evaluate(req, obj, obj.StoredAt)
+		_ = Evaluate(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), obj, obj.StoredAt)
 	}
 }
 

@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -258,10 +257,10 @@ func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Dura
 	return 0, false
 }
 
-// FreshnessLifetimeH is like FreshnessLifetime but takes http.Header
+// FreshnessLifetimeH is like FreshnessLifetime but takes header.Map
 // directly so it can detect multiple Expires headers (which are
 // invalid per RFC 9110 §5.3) and read CDN-Cache-Control.
-func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) {
+func FreshnessLifetimeH(respCC Directives, h header.Map) (time.Duration, bool) {
 	// CDN-Cache-Control takes precedence when present (RFC 9211).
 	if cdnCC := mergeHeaderValues(h, "CDN-Cache-Control"); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
@@ -279,15 +278,11 @@ func FreshnessLifetimeH(respCC Directives, h http.Header) (time.Duration, bool) 
 	if respCC.MaxAgeSet {
 		return respCC.MaxAge, true
 	}
-	expiresVals := h.Values(header.Expires)
-	if len(expiresVals) == 0 {
+	expiresVal := h.Get(header.Expires)
+	if expiresVal == "" {
 		return 0, false
 	}
-	// Multiple Expires headers → invalid (RFC 9110 §5.3).
-	if len(expiresVals) > 1 {
-		return 0, false // treat as no freshness info, allow heuristic
-	}
-	expTime := parseHTTPDate(expiresVals[0])
+	expTime := parseHTTPDate(expiresVal)
 	if expTime.IsZero() {
 		// Syntactically invalid Expires → treat as no freshness info
 		// (RFC 9111 §4.2.1: don't use invalid Expires in calculations).

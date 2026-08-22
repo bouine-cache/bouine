@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bouine-cache/bouine/pkg/header"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -26,7 +28,7 @@ func TestRefreshRegistryRegisterLookup(t *testing.T) {
 	}
 
 	key := testkey.Key(42)
-	r.Register(key, req, "", 0)
+	r.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
@@ -55,7 +57,7 @@ func TestRefreshRegistryVaryHeaders(t *testing.T) {
 	}
 
 	key := testkey.Key(99)
-	r.Register(key, req, "Accept, Accept-Language", 0)
+	r.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "Accept, Accept-Language", 0)
 
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
@@ -80,7 +82,7 @@ func TestRefreshRegistryUnregister(t *testing.T) {
 	}
 
 	key := testkey.Key(1)
-	r.Register(key, req, "", 0)
+	r.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 	require.Equal(t, 1, r.Len())
 
 	r.Unregister(key)
@@ -103,7 +105,7 @@ func TestRefreshRegistryHeaderIsSnapshot(t *testing.T) {
 	}
 
 	key := testkey.Key(77)
-	r.Register(key, req, "", 0)
+	r.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 
 	// Mutate the original request header after registration.
 	req.Header.Set("Accept-Encoding", "br")
@@ -126,7 +128,7 @@ func TestRefreshRegistryLen(t *testing.T) {
 	}
 
 	for i := range 5 {
-		r.Register(testkey.Key(uint64(i)), req, "", 0)
+		r.Register(testkey.Key(uint64(i)), requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 	}
 	require.Equal(t, 5, r.Len())
 }
@@ -150,14 +152,14 @@ func TestDecrementPersist(t *testing.T) {
 	t.Run("persist_zero", func(t *testing.T) {
 		t.Parallel()
 		r2 := newRefreshRegistry()
-		r2.Register(key, req, "", 0)
+		r2.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 		require.False(t, r2.DecrementPersist(key))
 	})
 
 	t.Run("persist_positive", func(t *testing.T) {
 		t.Parallel()
 		r3 := newRefreshRegistry()
-		r3.Register(key, req, "", 3)
+		r3.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 3)
 		require.True(t, r3.DecrementPersist(key))
 		entry := r3.Lookup(key)
 		require.NotNil(t, entry)
@@ -180,7 +182,7 @@ func TestRefreshRegistry_VaryStar(t *testing.T) {
 		},
 	}
 	key := testkey.Key(55)
-	r.Register(key, req, "*", 0)
+	r.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "*", 0)
 	entry := r.Lookup(key)
 	require.NotNil(t, entry)
 	// Vary:* clones all headers.
@@ -202,7 +204,7 @@ func TestRefreshRegistry_Concurrent(t *testing.T) {
 		go func(n uint64) {
 			defer wg.Done()
 			k := testkey.Key(n)
-			r.Register(k, req, "", 0)
+			r.Register(k, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 			_ = r.Lookup(k)
 			if n%2 == 0 {
 				r.Unregister(k)

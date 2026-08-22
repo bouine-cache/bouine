@@ -3,6 +3,8 @@ package cache
 import (
 	"net/http/httptest"
 	"testing"
+
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func BenchmarkBuildKey_NoPolicy(b *testing.B) {
@@ -10,7 +12,7 @@ func BenchmarkBuildKey_NoPolicy(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, nil)
+		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
 	}
 }
 
@@ -20,7 +22,7 @@ func BenchmarkBuildKey_KeepParams(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
 	}
 }
 
@@ -30,7 +32,7 @@ func BenchmarkBuildKey_StripPrefix(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
 	}
 }
 
@@ -40,7 +42,7 @@ func BenchmarkBuildKey_StripEmpty(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
 	}
 }
 
@@ -50,7 +52,7 @@ func BenchmarkBuildKey_Dedup(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
 	}
 }
 
@@ -66,6 +68,6 @@ func BenchmarkBuildKey_AllPolicies(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(r, policy)
+		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
 	}
 }

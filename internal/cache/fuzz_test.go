@@ -54,8 +54,8 @@ func FuzzBuildKey(f *testing.F) {
 			Host:   host,
 		}
 
-		k1 := BuildKey(r, nil)
-		k2 := BuildKey(r, nil)
+		k1 := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+		k2 := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
 		if k1 != k2 {
 			t.Fatalf("BuildKey not deterministic: %v != %v", k1, k2)
 		}
@@ -120,8 +120,8 @@ func FuzzVariantKey(f *testing.F) {
 
 		primary := api.Key{}
 
-		k1 := VariantKey(primary, vary, hdrs, nil)
-		k2 := VariantKey(primary, vary, hdrs, nil)
+		k1 := VariantKey(primary, vary, header.FromHTTP(hdrs), nil)
+		k2 := VariantKey(primary, vary, header.FromHTTP(hdrs), nil)
 		if k1 != k2 {
 			t.Fatalf("VariantKey not deterministic for vary=%q headers=%q", vary, headerJSON)
 		}
@@ -136,7 +136,7 @@ func FuzzVariantKey(f *testing.F) {
 					fields[i], fields[j] = fields[j], fields[i]
 				}
 				reversed := strings.Join(fields, ",")
-				kRev := VariantKey(primary, reversed, hdrs, nil)
+				kRev := VariantKey(primary, reversed, header.FromHTTP(hdrs), nil)
 				if k1 != kRev {
 					t.Fatalf("VariantKey not commutative: %q vs %q -> %v != %v",
 						vary, reversed, k1, kRev)
@@ -222,8 +222,8 @@ func FuzzEvaluate(f *testing.F) {
 			}
 		}
 
-		d1 := Evaluate(req, obj, now)
-		d2 := Evaluate(req, obj, now)
+		d1 := Evaluate(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), obj, now)
+		d2 := Evaluate(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), obj, now)
 		if d1.Decision != d2.Decision {
 			t.Fatalf("Evaluate not deterministic: %d != %d for method=%q reqCC=%q respCC=%q ttl=%d age=%d elapsed=%d nilObj=%v hasValidator=%v",
 				d1.Decision, d2.Decision, method, reqCC, respCC, ttlSec, ageSec, elapsedSec, nilObj, hasValidator)

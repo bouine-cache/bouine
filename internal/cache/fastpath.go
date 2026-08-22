@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -123,7 +122,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 // before attempting a cache lookup. This avoids the store.Get call
 // entirely for requests that can never be served from cache.
 func qualifiesForFastPath(req *api.RawRequest) bool {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+	if req.Method != "GET" && req.Method != "HEAD" {
 		return false
 	}
 	// Reject requests with conditional or range headers.
@@ -250,7 +249,7 @@ func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time
 	if obj.Header.Get(header.Date) == "" {
 		hbuf = append(hbuf, header.Date...)
 		hbuf = append(hbuf, ": "...)
-		hbuf = now.UTC().AppendFormat(hbuf, http.TimeFormat)
+		hbuf = now.UTC().AppendFormat(hbuf, httpTimeFormat)
 		hbuf = append(hbuf, '\r', '\n')
 	}
 
@@ -297,7 +296,7 @@ func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *ap
 	headerBlock := hbuf[statusEnd:]
 
 	body := obj.Body
-	if req.Method == http.MethodHead {
+	if req.Method == "HEAD" {
 		body = nil
 	}
 
@@ -354,7 +353,7 @@ func appendStatusLine(buf []byte, statusCode int) []byte {
 	buf = append(buf, "HTTP/1.1 "...)
 	buf = strconv.AppendInt(buf, int64(statusCode), 10)
 	buf = append(buf, ' ')
-	buf = append(buf, http.StatusText(statusCode)...)
+	buf = append(buf, statusMessage(statusCode)...)
 	buf = append(buf, '\r', '\n')
 	return buf
 }
@@ -415,7 +414,7 @@ func parseNoCacheFieldNames(ccHeader string) map[string]bool {
 	m := make(map[string]bool, len(fields))
 	for _, f := range fields {
 		if f != "" {
-			m[http.CanonicalHeaderKey(f)] = true
+			m[header.InternKey(f)] = true
 		}
 	}
 	return m
@@ -452,8 +451,8 @@ func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
 
 	// Method (HEAD→GET).
 	method := req.Method
-	if method == http.MethodHead {
-		method = http.MethodGet
+	if method == "HEAD" {
+		method = "GET"
 	}
 	n += copyOverflow(buf[:], n, method)
 

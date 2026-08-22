@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"strings"
 	"sync"
 
@@ -16,10 +15,10 @@ import (
 // negotiation). This reduces per-entry memory from ~1.3 KB (all
 // headers) to ~200–450 B (0–3 headers).
 type refreshEntry struct {
-	url           string      // compact: "https://host/path?query"
-	method        string      // GET or HEAD
-	header        http.Header // snapshot of Vary-relevant request headers only
-	persistCycles int         // remaining grace refresh cycles when the popularity gate would block
+	url           string     // compact: "https://host/path?query"
+	method        string     // GET or HEAD
+	header        header.Map // snapshot of Vary-relevant request headers only
+	persistCycles int        // remaining grace refresh cycles when the popularity gate would block
 }
 
 // refreshRegistry maps cache keys to the request info needed to
@@ -42,11 +41,11 @@ func newRefreshRegistry() *refreshRegistry {
 // (from the response's Vary header, plus Accept-Encoding) are kept.
 // The header map is cloned — storing a reference to r.Header would
 // race with the HTTP server's request pooling.
-func (r *refreshRegistry) Register(key api.Key, req *http.Request, varyHeader string, persistCycles int) {
-	saved := http.Header{}
+func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader string, persistCycles int) {
+	saved := header.Map{}
 
 	// Always store Accept-Encoding for content negotiation.
-	if ae := req.Header.Get(header.AcceptEncoding); ae != "" {
+	if ae := ri.Header.Get(header.AcceptEncoding); ae != "" {
 		saved.Set(header.AcceptEncoding, ae)
 	}
 
@@ -59,22 +58,20 @@ func (r *refreshRegistry) Register(key api.Key, req *http.Request, varyHeader st
 				// request — store all headers. This is rare but
 				// correct.
 				if h == "*" {
-					saved = req.Header.Clone()
+					saved = ri.Header.Clone()
 				}
 				continue
 			}
-			if vals, ok := req.Header[http.CanonicalHeaderKey(h)]; ok {
-				for _, v := range vals {
-					saved.Add(h, v)
-				}
+			if v := ri.Header.Get(h); v != "" {
+				saved.Set(h, v)
 			}
 		}
 	}
 
 	r.mu.Lock()
 	r.entries[key] = &refreshEntry{
-		url:           req.URL.String(),
-		method:        req.Method,
+		url:           ri.URI,
+		method:        ri.Method,
 		header:        saved,
 		persistCycles: persistCycles,
 	}

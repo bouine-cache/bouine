@@ -1,13 +1,15 @@
 package cache
 
 import (
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
+
+// httpTimeFormat is the RFC 1123 date format used in HTTP headers.
+const httpTimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 
 // httpdate.go provides HTTP date parsing, age computation, heuristic
 // TTL calculation, and header-value normalization utilities.
@@ -16,7 +18,7 @@ import (
 // Last-Modified per RFC 9111 §4.2.2. The heuristic is 10% of
 // the interval between the Date header (or now as fallback) and
 // Last-Modified. Returns 0 if not applicable.
-func HeuristicTTL(h http.Header, now time.Time) time.Duration {
+func HeuristicTTL(h header.Map, now time.Time) time.Duration {
 	lm := h.Get(header.LastModified)
 	if lm == "" {
 		return 0
@@ -85,14 +87,10 @@ func parseOriginAge[H headerGetter](h H) time.Duration {
 // comma-separated string. HTTP allows multiple headers with the same
 // name; Cache-Control especially may appear as multiple lines.
 //
-// This is for http.Header only — header.Map joins multi-values at store
+// This is for header.Map only — header.Map joins multi-values at store
 // time, so callers with a header.Map should use Get directly.
-func mergeHeaderValues(h http.Header, name string) string {
-	vals := h.Values(name)
-	if len(vals) <= 1 {
-		return h.Get(name)
-	}
-	return strings.Join(vals, ", ")
+func mergeHeaderValues(h header.Map, name string) string {
+	return h.Get(name)
 }
 
 // parseHTTPDate tries multiple date formats used in HTTP headers
@@ -118,7 +116,7 @@ func parseHTTPDate(s string) time.Time {
 	s = normalizeTZ(s)
 
 	formats := []string{
-		http.TimeFormat,                 // RFC 1123
+		httpTimeFormat,                  // RFC 1123
 		time.RFC850,                     // "Monday, 02-Jan-06 15:04:05 MST"
 		"Mon Jan  2 15:04:05 2006",      // ANSI C asctime
 		"Mon, 2 Jan 2006 15:04:05 GMT",  // single-digit day
@@ -159,4 +157,59 @@ func normalizeTZ(s string) string {
 		}
 	}
 	return s
+}
+
+// statusMessage returns the standard HTTP status text for a status code.
+// statusMessage returns the standard HTTP status text for a status code.
+//
+//nolint:gocyclo // switch-case is inherently branchy
+func statusMessage(code int) string {
+	switch code {
+	case 200:
+		return "OK"
+	case 201:
+		return "Created"
+	case 204:
+		return "No Content"
+	case 206:
+		return "Partial Content"
+	case 301:
+		return "Moved Permanently"
+	case 302:
+		return "Found"
+	case 304:
+		return "Not Modified"
+	case 307:
+		return "Temporary Redirect"
+	case 308:
+		return "Permanent Redirect"
+	case 400:
+		return "Bad Request"
+	case 401:
+		return "Unauthorized"
+	case 403:
+		return "Forbidden"
+	case 404:
+		return "Not Found"
+	case 405:
+		return "Method Not Allowed"
+	case 406:
+		return "Not Acceptable"
+	case 413:
+		return "Request Entity Too Large"
+	case 416:
+		return "Range Not Satisfiable"
+	case 429:
+		return "Too Many Requests"
+	case 500:
+		return "Internal Server Error"
+	case 502:
+		return "Bad Gateway"
+	case 503:
+		return "Service Unavailable"
+	case 504:
+		return "Gateway Timeout"
+	default:
+		return "Unknown"
+	}
 }

@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -30,7 +29,7 @@ func hasMeaningfulCDNCCDirective(d Directives) bool {
 // If the CDN-CC value contains unknown or invalid token types (per
 // RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
 // list of tokens"), the header is treated as absent.
-func cdnCacheControl(respHeader http.Header) (Directives, bool) {
+func cdnCacheControl(respHeader header.Map) (Directives, bool) {
 	v := mergeHeaderValues(respHeader, "CDN-Cache-Control")
 	if v == "" {
 		return Directives{}, false
@@ -61,7 +60,7 @@ func cdnCacheControl(respHeader http.Header) (Directives, bool) {
 // IsCacheable determines whether an origin response should be stored.
 // negativeTTL enables negative caching for error statuses (404, 405,
 // 410, 501) when > 0.
-func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...time.Duration) bool {
+func IsCacheable(status int, reqHeader, respHeader header.Map, negativeTTL ...time.Duration) bool {
 	// CDN-Cache-Control overrides Cache-Control for shared-cache
 	// decisions (RFC 9211). Use it when present.
 	var respCC Directives
@@ -133,7 +132,7 @@ func IsCacheable(status int, reqHeader, respHeader http.Header, negativeTTL ...t
 // Pragma: no-cache, Vary: *, Set-Cookie (without explicit freshness), and
 // Authorization (without public/must-revalidate/s-maxage) all prevent
 // storage regardless of defaultTTL.
-func IsCacheableWithDefault(status int, reqHeader, respHeader http.Header, negativeTTL, defaultTTL time.Duration) bool {
+func IsCacheableWithDefault(status int, reqHeader, respHeader header.Map, negativeTTL, defaultTTL time.Duration) bool {
 	if IsCacheable(status, reqHeader, respHeader, negativeTTL) {
 		return true
 	}
@@ -165,13 +164,13 @@ type parsedResponse struct {
 	status     int
 	respCC     Directives
 	hasCDN     bool
-	reqHeader  http.Header
-	respHeader http.Header
+	reqHeader  header.Map
+	respHeader header.Map
 }
 
 // newParsedResponse constructs a parsedResponse from the response and
 // request headers, parsing Cache-Control/CDN-Cache-Control exactly once.
-func newParsedResponse(status int, reqHeader, respHeader http.Header) parsedResponse {
+func newParsedResponse(status int, reqHeader, respHeader header.Map) parsedResponse {
 	p := parsedResponse{
 		status:     status,
 		reqHeader:  reqHeader,
@@ -228,7 +227,7 @@ func (p *parsedResponse) isCacheableWithDefault(negativeTTL, defaultTTL time.Dur
 	return isHeuristicStatus(p.status)
 }
 
-func isCacheBlocked(status int, respCC Directives, hasCDN bool, reqHeader, respHeader http.Header) bool {
+func isCacheBlocked(status int, respCC Directives, hasCDN bool, reqHeader, respHeader header.Map) bool {
 	// RFC 9111 §5.2.2.3: must-understand means the cache MAY store even when
 	// no-store is present, but ONLY if the cache understands the status code.
 	// Unknown status codes (e.g. 599) do NOT satisfy must-understand.
@@ -267,7 +266,7 @@ func isCacheBlocked(status int, respCC Directives, hasCDN bool, reqHeader, respH
 	return false
 }
 
-func isBlockedByPragma(respCC Directives, h http.Header) bool {
+func isBlockedByPragma(respCC Directives, h header.Map) bool {
 	// RFC 9111 §5.4: Pragma: no-cache in a response blocks caching only when
 	// there is no explicit freshness information. If Last-Modified or Expires
 	// is present, heuristic or explicit freshness overrides Pragma.
@@ -277,16 +276,11 @@ func isBlockedByPragma(respCC Directives, h http.Header) bool {
 		h.Get(header.LastModified) == ""
 }
 
-func hasVaryStar(h http.Header) bool {
-	for _, v := range h.Values(header.Vary) {
-		if varyContainsStar(v) {
-			return true
-		}
-	}
-	return false
+func hasVaryStar(h header.Map) bool {
+	return varyContainsStar(h.Get(header.Vary))
 }
 
-func isBlockedBySetCookie(respCC Directives, h http.Header) bool {
+func isBlockedBySetCookie(respCC Directives, h header.Map) bool {
 	if h.Get(header.SetCookie) == "" {
 		return false
 	}

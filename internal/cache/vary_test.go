@@ -19,7 +19,7 @@ import (
 func TestVariantKey_NoVary(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	got := VariantKey(primary, "", nil, nil)
+	got := VariantKey(primary, "", header.Map{}, nil)
 	require.Equal(t, primary, got)
 }
 
@@ -28,8 +28,8 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 	primary := testkey.Key(100)
 	h1 := http.Header{header.AcceptEncoding: {"gzip"}}
 	h2 := http.Header{header.AcceptEncoding: {"br"}}
-	k1 := VariantKey(primary, "Accept-Encoding", h1, nil)
-	k2 := VariantKey(primary, "Accept-Encoding", h2, nil)
+	k1 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h1), nil)
+	k2 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h2), nil)
 	require.NotEqual(t, k2, k1)
 	if k1 == primary || k2 == primary {
 		t.Fatal("variant key should differ from primary")
@@ -40,8 +40,8 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
 	h := http.Header{header.AcceptEncoding: {"gzip"}}
-	k1 := VariantKey(primary, "Accept-Encoding", h, nil)
-	k2 := VariantKey(primary, "Accept-Encoding", h, nil)
+	k1 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h), nil)
+	k2 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h), nil)
 	require.Equal(t, k2, k1)
 }
 
@@ -54,8 +54,8 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	primary := testkey.Key(100)
 	h1 := http.Header{header.Accept: {"text/html"}}
 	h2 := http.Header{header.Accept: {"application/json"}}
-	require.Equal(t, primary, VariantKey(primary, "*", h1, nil))
-	require.Equal(t, primary, VariantKey(primary, "*", h2, nil))
+	require.Equal(t, primary, VariantKey(primary, "*", header.FromHTTP(h1), nil))
+	require.Equal(t, primary, VariantKey(primary, "*", header.FromHTTP(h2), nil))
 
 	// Fast path must match.
 	raw := &api.RawRequest{NHeaders: 1}
@@ -63,11 +63,11 @@ func TestVariantKey_VaryStar(t *testing.T) {
 	require.Equal(t, primary, variantKeyFromRaw(primary, "*", raw, nil))
 
 	// Nil header must not panic.
-	require.Equal(t, primary, VariantKey(primary, "*", nil, nil))
+	require.Equal(t, primary, VariantKey(primary, "*", header.Map{}, nil))
 
 	// Policy exclusions don't change the result — still primary.
 	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false)
-	require.Equal(t, primary, VariantKey(primary, "*", h1, policy))
+	require.Equal(t, primary, VariantKey(primary, "*", header.FromHTTP(h1), policy))
 }
 
 func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
@@ -79,15 +79,15 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
 	h1 := http.Header{"X-Request-ID": {"abc"}}
 	h2 := http.Header{"X-Request-ID": {"xyz"}}
-	k1 := VariantKey(primary, "X-Request-ID", h1, excludePolicy)
-	k2 := VariantKey(primary, "X-Request-ID", h2, excludePolicy)
+	k1 := VariantKey(primary, "X-Request-ID", header.FromHTTP(h1), excludePolicy)
+	k2 := VariantKey(primary, "X-Request-ID", header.FromHTTP(h2), excludePolicy)
 	require.Equal(t, k2, k1)
 	require.Equal(t, primary, k1)
 
 	// Partial exclude: non-excluded Vary field must still produce a
 	// variant key distinct from primary.
 	hGzip := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-ID": {"abc"}}
-	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", hGzip, excludePolicy)
+	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", header.FromHTTP(hGzip), excludePolicy)
 	require.NotEqual(t, primary, kPartial)
 }
 
@@ -165,7 +165,7 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	url := "http://example.com/stale-range"
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
-	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 	stale := obj.CloneForRefresh()
@@ -247,7 +247,7 @@ func TestVariantKeySlow_TooManyFields(t *testing.T) {
 		h.Set("X-H"+string(rune('0'+i)), "val")
 	}
 	// Should produce a non-primary key (variantKeySlow processes all fields).
-	result := VariantKey(primary, vary, h, nil)
+	result := VariantKey(primary, vary, header.FromHTTP(h), nil)
 	assert.NotEqual(t, primary, result)
 }
 
@@ -257,7 +257,7 @@ func TestVariantKeySlow_LongValue(t *testing.T) {
 	h := http.Header{}
 	// A single Vary field with a very long value that exceeds the 256-byte buffer.
 	h.Set("Accept-Encoding", string(make([]byte, 300)))
-	result := VariantKey(primary, "Accept-Encoding", h, nil)
+	result := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h), nil)
 	// Should NOT return primary (it should hash the long value).
 	assert.NotEqual(t, primary, result)
 }

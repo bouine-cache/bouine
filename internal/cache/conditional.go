@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"strings"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -15,16 +14,16 @@ import (
 // ClientConditionalMatch checks if a cached object satisfies the
 // client's conditional headers (If-None-Match / If-Modified-Since).
 // If it matches, the handler should return 304 instead of 200.
-func ClientConditionalMatch(r *http.Request, obj *api.Object) bool {
+func ClientConditionalMatch(ri RequestInfo, obj *api.Object) bool {
 	// If-None-Match takes precedence (RFC 9110 §13.1.2).
-	if inm := r.Header.Get(header.IfNoneMatch); inm != "" {
+	if inm := ri.Header.Get(header.IfNoneMatch); inm != "" {
 		if obj.ETag != "" && etagMatch(inm, obj.ETag) {
 			return true
 		}
 		return false
 	}
 	// If-Modified-Since (RFC 9110 §13.1.3).
-	if ims := r.Header.Get(header.IfModifiedSince); ims != "" {
+	if ims := ri.Header.Get(header.IfModifiedSince); ims != "" {
 		imsTime := parseHTTPDate(ims)
 		if imsTime.IsZero() {
 			return false
@@ -71,32 +70,33 @@ func etagMatch(list, needle string) bool {
 // MergeHeaders304 merges headers from a 304 response into the stored
 // object per RFC 9111 §3.2. The 304 response's headers update the
 // stored response, except for content-specific headers.
-func MergeHeaders304(stored *api.Object, resp304Header http.Header) {
+func MergeHeaders304(stored *api.Object, resp304Header header.Map) {
 	// Skipped headers are content-specific (RFC 9111 §3.2) and must not
 	// be updated from a 304. Set-Cookie is excluded because SetValues
 	// joins multi-values with ", " which is non-conformant per RFC 9110
 	// §5.2 and serving stale cookies is a security risk.
-	for k, vals := range resp304Header {
+	resp304Header.Range(func(k, v string) bool {
 		switch k {
 		case header.ContentLength, header.ContentEncoding,
 			header.TransferEncoding, header.SetCookie:
-			continue
+			return true
 		}
-		stored.Header.SetValues(k, vals)
-	}
+		stored.Header.Set(k, v)
+		return true
+	})
 }
 
 // ConditionalHeaders sets If-None-Match and If-Modified-Since on a
 // revalidation request from the stored object's validators.
-func ConditionalHeaders(req *http.Request, obj *api.Object) {
+func setConditionalHeaders(set func(key, value string), obj *api.Object) {
 	if obj.ETag != "" {
 		// Ensure the ETag is properly quoted (RFC 9110 §8.8.3).
 		etag := quoteETag(obj.ETag)
-		req.Header.Set(header.IfNoneMatch, etag)
+		set(header.IfNoneMatch, etag)
 	}
 	if !obj.LastModified.IsZero() {
-		req.Header.Set(header.IfModifiedSince,
-			obj.LastModified.UTC().Format(http.TimeFormat))
+		set(header.IfModifiedSince,
+			obj.LastModified.UTC().Format(httpTimeFormat))
 	}
 }
 

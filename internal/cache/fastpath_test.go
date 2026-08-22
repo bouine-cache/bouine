@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -769,7 +768,7 @@ func TestNewFastPathHandler(t *testing.T) {
 	fp := NewFastPathHandler(h)
 	require.NotNil(t, fp)
 	// Verify it shares the same store.
-	key := BuildKey(httptest.NewRequest("GET", "http://example.com/test", nil), nil)
+	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/test", "example.com", "/test", false, header.Map{}), nil)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,

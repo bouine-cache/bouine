@@ -104,7 +104,7 @@ func TestMaxObjectSize_ExactBoundaryCached(t *testing.T) {
 	url := "http://example.com/exact"
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
 
-	key := BuildKey(httptest.NewRequest("GET", url, nil), nil)
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)
 	require.NotNil(t, obj)
 }

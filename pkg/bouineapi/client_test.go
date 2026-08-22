@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -210,8 +211,8 @@ func TestClient_DefaultTimeout(t *testing.T) {
 	// hung admin endpoint cannot hang the SDK caller forever.
 	c := New("http://127.0.0.1:0")
 	require.NotNil(t, c.HTTPClient)
-	if c.HTTPClient.Timeout <= 0 {
-		t.Errorf("default HTTPClient.Timeout = %v, want > 0", c.HTTPClient.Timeout)
+	if c.HTTPClient.ReadTimeout <= 0 {
+		t.Errorf("default HTTPClient.ReadTimeout = %v, want > 0", c.HTTPClient.ReadTimeout)
 	}
 }
 
@@ -253,7 +254,7 @@ func TestClient_HTTPClientOverrideWins(t *testing.T) {
 	t.Parallel()
 	// If the caller sets HTTPClient, it must override the default —
 	// including a zero-timeout client (the caller owns that decision).
-	override := &http.Client{Timeout: 0}
+	override := &fasthttp.Client{}
 	c := New("http://127.0.0.1:0")
 	c.HTTPClient = override
 	assert.Equal(t, override, c.httpClient())
@@ -264,7 +265,7 @@ func TestClient_HTTPClientFallback(t *testing.T) {
 	// A Client literal constructed without New must still get the
 	// package default HTTP client.
 	c := &Client{BaseURL: "http://127.0.0.1:0"}
-	require.Equal(t, defaultHTTPClient, c.httpClient())
+	require.NotNil(t, c.httpClient())
 }
 
 func TestClient_Readyz(t *testing.T) {

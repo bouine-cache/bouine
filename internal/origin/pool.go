@@ -221,7 +221,6 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 			MaxIdleConnsPerHost:   64,
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
-			ForceAttemptHTTP2:     true,
 		}
 	}
 	p.transport = transport

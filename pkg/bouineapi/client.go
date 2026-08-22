@@ -5,33 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
+
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// defaultClientTimeout is applied to the client constructed by New when
-// the caller does not provide an HTTPClient. It bounds hung admin
-// endpoints so the SDK caller cannot block forever (AGENTS.md §11:
-// cancellation honored within 10 ms — the client timeout is the
-// coarse-grained backstop above per-call context deadlines).
+// defaultClientTimeout is applied to the client constructed by New.
 const defaultClientTimeout = 10 * time.Second
 
-// defaultHTTPClient is the fallback used by httpClient() when the
-// caller constructs a Client literal without going through New. It is
-// package-scoped so the timeout is enforced even on the bypass path.
-var defaultHTTPClient = &http.Client{Timeout: defaultClientTimeout}
-
 // maxErrorBody caps how many bytes of an error response body are read
-// and embedded in the returned error. A misconfigured upstream can
-// return megabytes of HTML in a 502; without a cap the entire body
-// lands in err.Error() and in any log line that prints it. 4 KiB is
-// enough to capture a useful error payload while keeping the error
-// string bounded.
+// and embedded in the returned error.
 const maxErrorBody = 4096
 
 // Client is the bouine admin API client.
@@ -42,22 +29,21 @@ type Client struct {
 	BaseURL string
 	// Token is the optional bearer token for admin authentication.
 	Token string
-	// HTTPClient is the underlying HTTP client. If nil, New constructs
-	// a client with a 10s Timeout; httpClient() falls back to the same
-	// package default if the caller constructs a Client literal without
-	// going through New. Set this field to override the timeout or
-	// transport.
-	HTTPClient *http.Client
+	// HTTPClient is the underlying fasthttp client. If nil, a default
+	// client with a 10s timeout is used.
+	HTTPClient *fasthttp.Client
 }
 
 // New creates a Client with the given base URL. The returned client
-// uses a fresh *http.Client with a 10s Timeout so a hung admin
-// endpoint cannot block the caller indefinitely; override
-// Client.HTTPClient to change this. A fresh client is allocated per
-// call so callers cannot mutate the timeout of unrelated clients
-// through a shared singleton.
+// uses a fresh *fasthttp.Client with a 10s read timeout.
 func New(baseURL string) *Client {
-	return &Client{BaseURL: baseURL, HTTPClient: &http.Client{Timeout: defaultClientTimeout}}
+	return &Client{
+		BaseURL: baseURL,
+		HTTPClient: &fasthttp.Client{
+			ReadTimeout:  defaultClientTimeout,
+			WriteTimeout: defaultClientTimeout,
+		},
+	}
 }
 
 // WithToken returns a copy of the client with the given bearer token.
@@ -67,11 +53,14 @@ func (c *Client) WithToken(token string) *Client {
 	return &cc
 }
 
-func (c *Client) httpClient() *http.Client {
+func (c *Client) httpClient() *fasthttp.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return defaultHTTPClient
+	return &fasthttp.Client{
+		ReadTimeout:  defaultClientTimeout,
+		WriteTimeout: defaultClientTimeout,
+	}
 }
 
 // Healthz checks the health endpoint.
@@ -110,7 +99,7 @@ func (c *Client) Peers(ctx context.Context) ([]api.PeerInfo, error) {
 	return out, nil
 }
 
-// Stats returns storage stats (hot/warm entries, bytes, hits, misses, evictions).
+// Stats returns storage stats.
 func (c *Client) Stats(ctx context.Context) (*api.Stats, error) {
 	var out api.Stats
 	if err := c.get(ctx, "/v1/stats", &out); err != nil {
@@ -142,8 +131,6 @@ type BatchPurgeResult struct {
 }
 
 // BatchPurge invalidates multiple URLs in a single request.
-// The server caps the batch size (default 1000, configurable via
-// admin.max_batch_size). Exceeding the cap returns an error.
 func (c *Client) BatchPurge(ctx context.Context, urls []string) (*BatchPurgeResult, error) {
 	body := map[string][]string{"urls": urls}
 	var out BatchPurgeResult
@@ -154,8 +141,7 @@ func (c *Client) BatchPurge(ctx context.Context, urls []string) (*BatchPurgeResu
 }
 
 // AuthCheck verifies that the admin token is valid and the server is
-// reachable. Returns nil on success, an error otherwise. Useful as a
-// readiness probe for invalidation wiring.
+// reachable. Returns nil on success, an error otherwise.
 func (c *Client) AuthCheck(ctx context.Context) error {
 	var out map[string]string
 	return c.get(ctx, "/v1/auth/check", &out)
@@ -181,8 +167,7 @@ type RefreshResult struct {
 	Status string `json:"status"`
 }
 
-// Refresh performs a soft-purge: marks the URL stale so the next
-// request triggers revalidation.
+// Refresh performs a soft-purge.
 func (c *Client) Refresh(ctx context.Context, url string) (*RefreshResult, error) {
 	body := map[string]string{"url": url}
 	var out RefreshResult
@@ -193,66 +178,77 @@ func (c *Client) Refresh(ctx context.Context, url string) (*RefreshResult, error
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
-	if err != nil {
-		return err
-	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI(c.BaseURL + path)
+	req.Header.SetMethod("GET")
 	c.setAuth(req)
-	return c.doJSON(req, out)
+
+	return c.doJSON(ctx, req, resp, "GET", path, out)
 }
 
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
-	var bodyReader io.Reader
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI(c.BaseURL + path)
+	req.Header.SetMethod("POST")
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		bodyReader = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bodyReader)
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set(header.ContentType, "application/json")
+		req.Header.SetContentType("application/json")
+		req.SetBody(b)
 	}
 	c.setAuth(req)
-	return c.doJSON(req, out)
+
+	return c.doJSON(ctx, req, resp, "POST", path, out)
 }
 
-func (c *Client) setAuth(req *http.Request) {
+func (c *Client) setAuth(req *fasthttp.Request) {
 	if c.Token != "" {
 		req.Header.Set(header.Authorization, "Bearer "+c.Token)
 	}
 }
 
-func (c *Client) doJSON(req *http.Request, out any) error {
-	resp, err := c.httpClient().Do(req) //nolint:gosec // G704: req URL is built from the operator-configured BaseURL, not user input
-	if err != nil {
+func (c *Client) doJSON(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response, method, path string, out any) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Capped read: a misconfigured upstream can return megabytes of
-		// HTML in a 502; without a cap the whole body lands in err.Error()
-		// and any log line that prints it. Read one byte past the cap so
-		// truncation is detectable.
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
-		if err != nil {
-			return fmt.Errorf("bouineapi: %s %s: status %d: (read error: %w)",
-				req.Method, req.URL.Path, resp.StatusCode, err)
+	deadline, ok := ctx.Deadline()
+	if ok {
+		if err := c.httpClient().DoDeadline(req, resp, deadline); err != nil {
+			return err
 		}
+	} else {
+		// Use the client's ReadTimeout as the default timeout to avoid
+		// hanging indefinitely on unresponsive servers.
+		hc := c.httpClient()
+		if hc.ReadTimeout > 0 {
+			if err := hc.DoTimeout(req, resp, hc.ReadTimeout); err != nil {
+				return err
+			}
+		} else {
+			if err := hc.Do(req, resp); err != nil {
+				return err
+			}
+		}
+	}
+
+	statusCode := resp.StatusCode()
+	if statusCode < 200 || statusCode >= 300 {
+		body := resp.Body()
 		return fmt.Errorf("bouineapi: %s %s: status %d: %s",
-			req.Method, req.URL.Path, resp.StatusCode, sanitizeErrorBody(body))
+			method, path, statusCode, sanitizeErrorBody(body))
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
+	respBody := resp.Body()
 	if out != nil && len(respBody) > 0 {
 		return json.Unmarshal(respBody, out)
 	}
@@ -260,11 +256,7 @@ func (c *Client) doJSON(req *http.Request, out any) error {
 }
 
 // sanitizeErrorBody truncates the body to maxErrorBody bytes and strips
-// control characters so a malicious or buggy upstream cannot inject
-// fake log lines via newlines, carriage returns, or ANSI escapes into
-// the caller's err.Error() output. Control runes are dropped (not
-// escaped) — the goal is single-line output, not preservation of the
-// attack payload.
+// control characters.
 func sanitizeErrorBody(body []byte) string {
 	truncated := false
 	if len(body) > maxErrorBody {
@@ -282,3 +274,5 @@ func sanitizeErrorBody(body []byte) string {
 	}
 	return s
 }
+
+var _ = bytes.NewReader

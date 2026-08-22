@@ -1,6 +1,6 @@
 # ADR-0006: Drop Fiber, unify admin on net/http
 
-- **Status**: Accepted
+- **Status**: Superseded by ADR-0034
 - **Date**: 2026-05-19
 - **Deciders**: @thylong
 - **Phase**: phase 1

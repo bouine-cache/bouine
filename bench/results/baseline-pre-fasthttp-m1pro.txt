@@ -1,0 +1,87 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/bouine-cache/bouine/internal/cache
+cpu: Apple M1 Pro
+BenchmarkGate_FastPath_Hit-10                       	 3640335	       313.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_Hit-10                       	 3824168	       312.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_Hit-10                       	 3819744	       312.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_Hit-10                       	 3831140	       313.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_Hit-10                       	 3830678	       312.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_HitWithWrite-10              	 3627819	       329.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_HitWithWrite-10              	 3634185	       328.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_HitWithWrite-10              	 3656421	       329.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_HitWithWrite-10              	 3643164	       329.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_FastPath_HitWithWrite-10              	 3429597	       329.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Handler_CacheHit_ReusableWriter-10    	 2405625	       498.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Handler_CacheHit_ReusableWriter-10    	 2397224	       500.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Handler_CacheHit_ReusableWriter-10    	 2391740	       501.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Handler_CacheHit_ReusableWriter-10    	 2391248	       500.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Handler_CacheHit_ReusableWriter-10    	 2402155	       499.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Handler_CacheMiss_Cacheable-10        	  148570	      7863 ns/op	   10393 B/op	      57 allocs/op
+BenchmarkGate_Handler_CacheMiss_Cacheable-10        	  171276	      8109 ns/op	   10385 B/op	      57 allocs/op
+BenchmarkGate_Handler_CacheMiss_Cacheable-10        	  168369	      8249 ns/op	   10390 B/op	      57 allocs/op
+BenchmarkGate_Handler_CacheMiss_Cacheable-10        	  163488	      8205 ns/op	   10393 B/op	      57 allocs/op
+BenchmarkGate_Handler_CacheMiss_Cacheable-10        	  171490	      7841 ns/op	   10395 B/op	      57 allocs/op
+BenchmarkGate_Evaluate_Hit-10                       	22011684	        54.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Evaluate_Hit-10                       	22040911	        54.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Evaluate_Hit-10                       	22022590	        54.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Evaluate_Hit-10                       	22112308	        54.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Evaluate_Hit-10                       	21896011	        54.50 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/bouine-cache/bouine/internal/cache	35.306s
+goos: darwin
+goarch: arm64
+pkg: github.com/bouine-cache/bouine/internal/storage
+cpu: Apple M1 Pro
+BenchmarkGate_HotStore_Get_Hit-10    	65944356	        17.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_HotStore_Get_Hit-10    	67818162	        17.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_HotStore_Get_Hit-10    	66538210	        17.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_HotStore_Get_Hit-10    	65958375	        17.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_HotStore_Get_Hit-10    	66476008	        17.81 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_SIEVE_Access-10        	66790819	        17.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_SIEVE_Access-10        	67771564	        17.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_SIEVE_Access-10        	67719612	        17.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_SIEVE_Access-10        	67990112	        17.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_SIEVE_Access-10        	65352058	        17.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_Access-10     	67770603	        17.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_Access-10     	67884180	        17.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_Access-10     	67108778	        17.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_Access-10     	68458471	        17.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_Access-10     	67719134	        17.75 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/bouine-cache/bouine/internal/storage	18.339s
+goos: darwin
+goarch: arm64
+pkg: github.com/bouine-cache/bouine/internal/storage/cachaner
+cpu: Apple M1 Pro
+BenchmarkGate_Cachaner_EvictBounded-10      	70259089	        16.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_EvictBounded-10      	72389271	        16.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_EvictBounded-10      	73074745	        16.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_EvictBounded-10      	72908810	        16.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_EvictBounded-10      	73395056	        16.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_AccessSlowPath-10    	553709535	         2.164 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_AccessSlowPath-10    	556446792	         2.162 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_AccessSlowPath-10    	553134842	         2.164 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_AccessSlowPath-10    	554449648	         2.164 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_Cachaner_AccessSlowPath-10    	553258953	         2.167 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/bouine-cache/bouine/internal/storage/cachaner	12.338s
+PASS
+ok  	github.com/bouine-cache/bouine/internal/storage/evictor	0.333s
+PASS
+ok  	github.com/bouine-cache/bouine/internal/storage/sieve	0.320s
+PASS
+ok  	github.com/bouine-cache/bouine/internal/storage/wal	0.311s
+PASS
+ok  	github.com/bouine-cache/bouine/internal/storage/warm	0.365s
+goos: darwin
+goarch: arm64
+pkg: github.com/bouine-cache/bouine/internal/server/h1parser
+cpu: Apple M1 Pro
+BenchmarkGate_H1Parse_Get-10    	 5018251	       222.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_H1Parse_Get-10    	 5560688	       216.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_H1Parse_Get-10    	 5553994	       215.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_H1Parse_Get-10    	 5528797	       216.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_H1Parse_Get-10    	 5543779	       216.7 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/bouine-cache/bouine/internal/server/h1parser	6.261s

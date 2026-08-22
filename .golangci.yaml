@@ -164,6 +164,7 @@ linters:
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/bouine-cache/xxhash/v3
             - github.com/prometheus/client_golang
+            - github.com/valyala/fasthttp
         cluster-L5:
           list-mode: strict
           files: ["**/internal/cluster/**"]
@@ -197,6 +198,8 @@ linters:
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/prometheus/client_golang
+            - github.com/valyala/fasthttp
+            - github.com/valyala/fasthttp/fasthttpadaptor
         observability-L7:
           list-mode: strict
           files: ["**/internal/observability/**"]

@@ -2,7 +2,6 @@ package cloudflare
 
 import (
 	"errors"
-	"net/http"
 	"time"
 
 	cfsdk "github.com/cloudflare/cloudflare-go/v4"
@@ -49,7 +48,7 @@ func ErrorType(err error) string {
 	}
 	var cfErr *cfsdk.Error
 	if errors.As(err, &cfErr) {
-		if cfErr.StatusCode >= http.StatusInternalServerError {
+		if cfErr.StatusCode >= 500 {
 			return ErrTypeServerError
 		}
 		return ErrTypeClientError

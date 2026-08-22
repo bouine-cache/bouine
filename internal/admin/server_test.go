@@ -2,14 +2,12 @@ package admin
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -20,6 +18,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func newTestServer(t *testing.T, ready func() bool) *Server {
@@ -32,10 +32,9 @@ func newTestServer(t *testing.T, ready func() bool) *Server {
 
 func get(t *testing.T, s *Server, path string) (int, []byte) {
 	t.Helper()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, req)
-	return rr.Code, rr.Body.Bytes()
+	ctx := testCtx("GET", path)
+	s.Handler()(ctx)
+	return ctx.Response.StatusCode(), ctx.Response.Body()
 }
 
 func TestHealthz(t *testing.T) {
@@ -151,30 +150,19 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	})
 
 	// Write without token → 401.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 
 	// Write with wrong token → 401.
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer wrong")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx = testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "wrong")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 
 	// Write with correct token → 200.
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx = testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "secret")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestAuth_ReadEndpointsExempt(t *testing.T) {
@@ -184,11 +172,10 @@ func TestAuth_ReadEndpointsExempt(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 
-	for _, path := range []string{"/healthz", "/readyz", "/version", "/drain"} {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
-		s.Handler().ServeHTTP(rr, req)
-		assert.NotEqual(t, http.StatusUnauthorized, rr.Code)
+	for _, p := range []string{"/healthz", "/readyz", "/version", "/drain"} {
+		ctx := testCtx("GET", p)
+		s.Handler()(ctx)
+		assert.NotEqual(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 	}
 }
 
@@ -197,19 +184,18 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 	s := New(Config{
 		Token:  "secret",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PeerMetricsHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("{}"))
-		}),
+		PeerMetricsHandler: func(ctx *fasthttp.RequestCtx) {
+			ctx.SetStatusCode(fasthttp.StatusOK)
+			_, _ = ctx.Write([]byte("{}"))
+		},
 	})
 
 	// GET without token should succeed because /v1/peer/metrics is in
 	// the auth-exempt map (same as peer fetch/purge/ban RPCs).
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/peer/metrics", nil)
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
-	body := rr.Body.String()
+	ctx := testCtx("GET", "/v1/peer/metrics")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	body := respBody(ctx)
 	require.Equal(t, "{}", body)
 }
 
@@ -264,7 +250,7 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	defer ln.Close()
 
 	go s.inner.Serve(ln)
-	defer s.inner.Close()
+	defer s.inner.Shutdown()
 
 	resp, err := http.Get("http://" + ln.Addr().String() + "/drain")
 	require.NoError(t, err, "drain request failed (write timeout killed connection)")
@@ -289,13 +275,9 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 
 func postWithToken(t *testing.T, s *Server, path, body string) (int, []byte) {
 	t.Helper()
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", path,
-		bytes.NewBufferString(body))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	return rr.Code, rr.Body.Bytes()
+	ctx := testCtxWithBodyAuth("POST", path, []byte(body), "secret")
+	s.Handler()(ctx)
+	return ctx.Response.StatusCode(), ctx.Response.Body()
 }
 
 func TestPurge_EmptyURL(t *testing.T) {
@@ -484,11 +466,9 @@ func TestAuthCheck_WithToken(t *testing.T) {
 	status, _ := get(t, s, "/v1/auth/check")
 	require.Equal(t, http.StatusUnauthorized, status)
 	// With token → 200.
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/auth/check", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithAuth("GET", "/v1/auth/check", "secret")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestRateLimit_PostRejected(t *testing.T) {
@@ -519,11 +499,9 @@ func TestPprof_DisabledByDefault(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	// With auth, the route is not registered → mux returns 404.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/debug/pprof/heap", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusNotFound, rr.Code)
+	ctx := testCtxWithAuth("GET", "/debug/pprof/heap", "secret")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusNotFound, ctx.Response.StatusCode())
 }
 
 func TestPprof_Enabled_HeapDebug(t *testing.T) {
@@ -583,10 +561,8 @@ func TestPprof_AuthStillEnforcedOnOtherEndpoints(t *testing.T) {
 		PprofEnabled: true,
 	})
 	// POST /v1/purge without token → must still get 401, not 200.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://a.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx := testCtx("POST", "/v1/purge")
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 }

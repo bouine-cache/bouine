@@ -1,13 +1,11 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,11 +18,9 @@ import (
 
 func getAuth(t *testing.T, s *Server, path string) (int, []byte) {
 	t.Helper()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
-	req.Header.Set(header.Authorization, "Bearer test")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, req)
-	return rr.Code, rr.Body.Bytes()
+	ctx := testCtxWithAuth("GET", path, "test")
+	s.Handler()(ctx)
+	return ctx.Response.StatusCode(), ctx.Response.Body()
 }
 
 // TestPurge_CallsOnPurged verifies that a successful purge calls the
@@ -40,13 +36,9 @@ func TestPurge_CallsOnPurged(t *testing.T) {
 			gotURL = url
 		},
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/products/123"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer test")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/products/123"}`), "test")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 	require.Equal(t, "https://example.com/products/123", gotURL)
 }
 
@@ -63,13 +55,9 @@ func TestRefresh_CallsOnRefreshed(t *testing.T) {
 			gotURL = url
 		},
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/refresh",
-		bytes.NewBufferString(`{"url":"https://example.com/img/logo.png"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer test")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/refresh", []byte(`{"url":"https://example.com/img/logo.png"}`), "test")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 	require.Equal(t, "https://example.com/img/logo.png", gotURL)
 }
 
@@ -86,13 +74,9 @@ func TestBan_CallsOnBanned(t *testing.T) {
 			gotExpr = expr
 		},
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/ban",
-		bytes.NewBufferString(`{"host_regex":"cdn.example.com","path_regex":"/api/v2/.*"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer test")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"host_regex":"cdn.example.com","path_regex":"/api/v2/.*"}`), "test")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 	require.Equal(t, "cdn.example.com", gotExpr.HostRegex)
 	require.Equal(t, "/api/v2/.*", gotExpr.PathRegex)
 }
@@ -150,14 +134,11 @@ func TestPurge_OnPurgedNotCalledOnError(t *testing.T) {
 			called.Store(true)
 		},
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer test")
-	s.Handler().ServeHTTP(rr, req)
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "test")
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	s.Handler()(ctx)
 	// Purge failed, so the handler still returns 500 and OnPurged should not fire.
-	_ = rr.Code // status is 500 but we only care that OnPurged was not called
+	_ = ctx.Response.StatusCode() // status is 500 but we only care that OnPurged was not called
 	time.Sleep(10 * time.Millisecond)
 	require.False(t, called.Load())
 }

@@ -1,12 +1,11 @@
 package dashboard
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -34,11 +33,12 @@ func TestHandler_ClusterWithStoreData(t *testing.T) {
 		agg:  NewAggregator(rings, nil, "self:9999", nil),
 	}
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/cluster", nil)
-	h.cluster(w, r)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/cluster")
+	h.cluster(ctx)
 
-	body := w.Body.String()
+	body := string(ctx.Response.Body())
 	assert.Contains(t, body, "total cached")
 	assert.Contains(t, body, "total objects")
 	assert.Contains(t, body, "tier-bar-fill warm")
@@ -58,11 +58,12 @@ func TestHandler_ClusterWithoutStoreData(t *testing.T) {
 		agg:  NewAggregator(rings, nil, "self:9999", nil),
 	}
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/cluster", nil)
-	h.cluster(w, r)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/cluster")
+	h.cluster(ctx)
 
-	body := w.Body.String()
+	body := string(ctx.Response.Body())
 	assert.False(t, strings.Contains(body, "c-cache-bytes"))
 	assert.False(t, strings.Contains(body, "total cached"))
 }

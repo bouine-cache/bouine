@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
@@ -25,6 +27,8 @@ type Aggregator struct {
 	timeout  time.Duration
 	logger   observability.Logger
 
+	client *transport.Client
+
 	mu        sync.Mutex
 	lastKnown map[string]observability.MetricsSummary // peer name → last successful summary
 }
@@ -37,6 +41,7 @@ func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, se
 		selfAddr:  selfAddr,
 		timeout:   200 * time.Millisecond,
 		logger:    logger,
+		client:    transport.NewClient(nil),
 		lastKnown: make(map[string]observability.MetricsSummary),
 	}
 }
@@ -60,23 +65,20 @@ func (a *Aggregator) Collect(ctx context.Context) (observability.MetricsSummary,
 		peers = a.peersFn()
 	}
 
-	// Members() includes self, so we separate self from remote peers.
-	// We always fan-out to non-self peers and inject the local rings
-	// summary directly (no network call for self).
 	nonSelf := 0
 	for _, p := range peers {
 		if p.AdminAddr != a.selfAddr && p.Name != a.rings.NodeName {
 			nonSelf++
 		}
 	}
-	total := nonSelf + 1 // non-self peers + local rings
+	total := nonSelf + 1
 
 	ch := make(chan fetchResult, total)
 	ch <- fetchResult{summary: a.rings.Summary()}
 
 	for _, p := range peers {
 		if p.AdminAddr == a.selfAddr || p.Name == a.rings.NodeName {
-			continue // handled via local rings above
+			continue
 		}
 		go func(peer api.PeerInfo) {
 			sum, err := a.fetchPeer(ctx, peer)
@@ -133,8 +135,6 @@ type fetchResult struct {
 }
 
 // resolveResult returns the summary to use and whether the peer is stale.
-// On error it falls back to the last-known cached summary.
-// On success it updates the last-known cache.
 func (a *Aggregator) resolveResult(r fetchResult) (observability.MetricsSummary, bool) {
 	if r.err == nil {
 		if r.peer.Name != "" {
@@ -160,38 +160,39 @@ func (a *Aggregator) fetchPeer(ctx context.Context, peer api.PeerInfo) (observab
 	defer cancel()
 
 	url := fmt.Sprintf("http://%s/v1/peer/metrics", peer.AdminAddr)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return observability.MetricsSummary{NodeName: peer.Name}, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return observability.MetricsSummary{NodeName: peer.Name}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.SetRequestURI(url)
+	req.Header.SetMethod("GET")
+
+	if err := a.client.Do(ctx, req, resp); err != nil {
+		return observability.MetricsSummary{NodeName: peer.Name}, err
+	}
+
+	if resp.StatusCode() != fasthttp.StatusOK {
 		return observability.MetricsSummary{NodeName: peer.Name},
-			fmt.Errorf("peer %s: status %d", peer.Name, resp.StatusCode)
+			fmt.Errorf("peer %s: status %d", peer.Name, resp.StatusCode())
 	}
 
 	var sum observability.MetricsSummary
-	if err := json.NewDecoder(resp.Body).Decode(&sum); err != nil {
+	if err := json.Unmarshal(resp.Body(), &sum); err != nil {
 		return observability.MetricsSummary{NodeName: peer.Name}, err
 	}
 	return sum, nil
 }
 
 // PeerMetricsHandler returns the local ring summary as JSON.
-// Mounted at GET /v1/peer/metrics on the admin server (auth-exempt;
-// callers are trusted cluster peers on the internal network, same
-// rationale as /v1/peer/fetch, /v1/peer/purge, /v1/peer/ban).
-func PeerMetricsHandler(rings *observability.Rings) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// Mounted at GET /v1/peer/metrics on the admin server (auth-exempt).
+func PeerMetricsHandler(rings *observability.Rings) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
 		sum := rings.Summary()
-		w.Header().Set(header.ContentType, "application/json")
-		_ = json.NewEncoder(w).Encode(sum)
-	})
+		ctx.Response.Header.Set(header.ContentType, "application/json")
+		_ = json.NewEncoder(ctx).Encode(sum)
+	}
 }
 
 // EncodeJSON is a helper used by tests.

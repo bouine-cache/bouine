@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -17,7 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/api"
-	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestNewMinimal(t *testing.T) {
@@ -40,12 +39,11 @@ func TestSwapHandler(t *testing.T) {
 	newMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	s.SwapHandler(newMux)
+	s.SwapHandler(func(ctx *fasthttp.RequestCtx) { ctx.Error("ok", fasthttp.StatusOK) })
 	// Verify the new handler is served.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/healthz", nil)
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtx("GET", "/")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestSwapHandler_NilSwap(t *testing.T) {
@@ -54,7 +52,7 @@ func TestSwapHandler_NilSwap(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	// New creates a server without swapHandler; SwapHandler should be a no-op.
-	s.SwapHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	s.SwapHandler(func(ctx *fasthttp.RequestCtx) {})
 }
 
 func TestServe(t *testing.T) {
@@ -103,7 +101,7 @@ func TestNew_DefaultAddr(t *testing.T) {
 	s := New(Config{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
-	assert.Equal(t, ":9000", s.inner.Addr)
+	assert.Equal(t, ":9000", s.addr)
 }
 
 func TestNew_WithPprof(t *testing.T) {
@@ -117,29 +115,22 @@ func TestNew_WithPprof(t *testing.T) {
 
 func TestNew_WithDashboard(t *testing.T) {
 	t.Parallel()
-	dashHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	dashHandler := func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(fasthttp.StatusOK) }
 	s := New(Config{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DashboardHandler: dashHandler,
 	})
 	require.NotNil(t, s)
 	// Root should redirect to dashboard.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusFound, rr.Code)
+	ctx := testCtx("GET", "/")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusFound, ctx.Response.StatusCode())
 }
 
 func TestNew_WithDashboardAndFavicon(t *testing.T) {
 	t.Parallel()
-	dashHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	favHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	dashHandler := func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(fasthttp.StatusOK) }
+	favHandler := func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(fasthttp.StatusOK) }
 	s := New(Config{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DashboardHandler: dashHandler,
@@ -147,40 +138,39 @@ func TestNew_WithDashboardAndFavicon(t *testing.T) {
 	})
 	require.NotNil(t, s)
 
-	// Favicon redirect.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/favicon.ico", nil)
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusMovedPermanently, rr.Code)
+	// Root redirects to /dashboard/ (302 Found).
+	ctx := testCtx("GET", "/")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusFound, ctx.Response.StatusCode())
+
+	// Favicon redirect (301 Moved Permanently).
+	ctx2 := testCtx("GET", "/favicon.ico")
+	s.Handler()(ctx2)
+	assert.Equal(t, http.StatusMovedPermanently, ctx2.Response.StatusCode())
 
 	// Apple touch icon redirect.
-	rr2 := httptest.NewRecorder()
-	req2 := httptest.NewRequestWithContext(context.Background(), "GET", "/apple-touch-icon.png", nil)
-	s.Handler().ServeHTTP(rr2, req2)
-	assert.Equal(t, http.StatusMovedPermanently, rr2.Code)
+	ctx3 := testCtx("GET", "/apple-touch-icon.png")
+	s.Handler()(ctx3)
+	assert.Equal(t, http.StatusMovedPermanently, ctx3.Response.StatusCode())
 
 	// Manifest redirect.
-	rr3 := httptest.NewRecorder()
-	req3 := httptest.NewRequestWithContext(context.Background(), "GET", "/site.webmanifest", nil)
-	s.Handler().ServeHTTP(rr3, req3)
-	assert.Equal(t, http.StatusMovedPermanently, rr3.Code)
+	ctx4 := testCtx("GET", "/site.webmanifest")
+	s.Handler()(ctx4)
+	assert.Equal(t, http.StatusMovedPermanently, ctx4.Response.StatusCode())
 }
 
 func TestNew_WithDashboard_NonRootPath(t *testing.T) {
 	t.Parallel()
-	dashHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	dashHandler := func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(fasthttp.StatusOK) }
 	s := New(Config{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Token:            "secret",
 		DashboardHandler: dashHandler,
 	})
-	// Non-root path with no auth should get 401 from the inner handler.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/purge", nil)
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+	// Non-dashboard path with no auth should get 401 from the inner handler.
+	ctx := testCtx("GET", "/v1/purge")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 func TestClusterPeers(t *testing.T) {
@@ -189,12 +179,11 @@ func TestClusterPeers(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PeersFn: func() []api.PeerInfo { return []api.PeerInfo{{Name: "node1", DataAddr: "1.1.1.1:80"}} },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/cluster/peers", nil)
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtx("GET", "/v1/cluster/peers")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 	var peers []api.PeerInfo
-	err := json.Unmarshal(rr.Body.Bytes(), &peers)
+	err := json.Unmarshal(ctx.Response.Body(), &peers)
 	require.NoError(t, err)
 	assert.Equal(t, "node1", peers[0].Name)
 }
@@ -206,13 +195,9 @@ func TestPurge_PurgeFnError(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return errors.New("storage error") },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestRefresh_RefreshFnError(t *testing.T) {
@@ -222,13 +207,9 @@ func TestRefresh_RefreshFnError(t *testing.T) {
 		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		RefreshFn: func(_ api.Key) error { return errors.New("refresh error") },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/refresh",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/refresh", []byte(`{"url":"https://example.com/"}`), "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestBan_BanFnError(t *testing.T) {
@@ -238,13 +219,9 @@ func TestBan_BanFnError(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, errors.New("ban error") },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/ban",
-		bytes.NewBufferString(`{"path_regex":"^/api/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"path_regex":"^/reviews/"}`), "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestBan_InvalidHostRegex(t *testing.T) {
@@ -254,13 +231,9 @@ func TestBan_InvalidHostRegex(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/ban",
-		bytes.NewBufferString(`{"host_regex":"[invalid"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"host_regex":"["}`), "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestBan_InvalidPathRegex(t *testing.T) {
@@ -270,13 +243,9 @@ func TestBan_InvalidPathRegex(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/ban",
-		bytes.NewBufferString(`{"path_regex":"[invalid"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"path_regex":"(?P<name"}`), "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestPurgeBatch_EmptyEntries(t *testing.T) {
@@ -286,13 +255,9 @@ func TestPurgeBatch_EmptyEntries(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge/batch",
-		bytes.NewBufferString(`{"urls":["https://a.com/",""]}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge/batch", []byte(`{"urls":[""]}`), "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestStats(t *testing.T) {
@@ -302,13 +267,11 @@ func TestStats(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		StatsFn: func() api.Stats { return api.Stats{HotBytes: 100, HotEntries: 5} },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/stats", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithAuth("GET", "/v1/stats", "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 	var stats api.Stats
-	err := json.Unmarshal(rr.Body.Bytes(), &stats)
+	err := json.Unmarshal(ctx.Response.Body(), &stats)
 	require.NoError(t, err)
 	assert.Equal(t, int64(100), stats.HotBytes)
 }
@@ -320,11 +283,9 @@ func TestConfigHandler(t *testing.T) {
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		ConfigFn: func() any { return map[string]string{"key": "value"} },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/config", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithAuth("GET", "/v1/config", "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestCacheCheck(t *testing.T) {
@@ -336,11 +297,9 @@ func TestCacheCheck(t *testing.T) {
 			return CacheCheckResult{URL: rawURL, CacheResult: "HIT"}
 		},
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/debug/cachecheck?url=https://example.com/", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtxWithAuth("GET", "/v1/debug/cachecheck?url=https://example.com/", "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestCacheCheck_MissingURL(t *testing.T) {
@@ -352,11 +311,9 @@ func TestCacheCheck_MissingURL(t *testing.T) {
 			return CacheCheckResult{}
 		},
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/debug/cachecheck", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	ctx := testCtxWithAuth("GET", "/v1/debug/cachecheck", "secret")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestAuthMiddleware_PanicRecovery(t *testing.T) {
@@ -365,16 +322,15 @@ func TestAuthMiddleware_PanicRecovery(t *testing.T) {
 		Token:  "secret",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
-	// Create a handler that panics.
-	panicHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// Create a handler that panics. The path must be auth-exempt so
+	// the panic happens before auth checks.
+	panicHandler := func(ctx *fasthttp.RequestCtx) {
 		panic("test panic")
-	})
+	}
 	wrapped := s.authMiddleware(panicHandler)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/v1/purge", nil)
-	req.Header.Set(header.Authorization, "Bearer secret")
-	wrapped.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	ctx := testCtx("GET", "/healthz")
+	wrapped(ctx)
+	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestBodyLimitMiddleware_GetNotLimited(t *testing.T) {
@@ -385,10 +341,9 @@ func TestBodyLimitMiddleware_GetNotLimited(t *testing.T) {
 		MaxBodyBytes: 10,
 	})
 	// GET should not be limited.
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/healthz", nil)
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	ctx := testCtx("GET", "/healthz")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestReadyz_Detail_NoConditionsFn_NotReady(t *testing.T) {
@@ -451,13 +406,12 @@ func TestAddr_AfterServe(t *testing.T) {
 func TestSwapHandler_ServeHTTP(t *testing.T) {
 	t.Parallel()
 	sh := &swapHandler{}
-	sh.Store(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/", nil)
-	sh.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	sh.Store(func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
+	ctx := testCtx("GET", "/")
+	sh.ServeRequest(ctx)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestServe_ErrServerClosed(t *testing.T) {
@@ -475,7 +429,7 @@ func TestServe_ErrServerClosed(t *testing.T) {
 
 	go func() { s.inner.Serve(ln) }()
 	// Close the server immediately to trigger ErrServerClosed.
-	require.NoError(t, s.inner.Close())
+	require.NoError(t, s.inner.Shutdown())
 	_ = ctx
 }
 
@@ -489,11 +443,10 @@ func TestPeerRefreshHandler_RouteMounted(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		}),
 	})
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/peer/refresh", nil)
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, req)
+	ctx := testCtx("POST", "/v1/peer/refresh")
+	s.Handler()(ctx)
 	assert.True(t, called, "PeerRefreshHandler should be mounted at POST /v1/peer/refresh")
-	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestPeerRefreshHandler_NotMountedWhenNil(t *testing.T) {
@@ -501,8 +454,7 @@ func TestPeerRefreshHandler_NotMountedWhenNil(t *testing.T) {
 	s := New(Config{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/peer/refresh", nil)
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusNotFound, rr.Code, "route should not be mounted when PeerRefreshHandler is nil")
+	ctx := testCtx("POST", "/v1/peer/refresh")
+	s.Handler()(ctx)
+	assert.Equal(t, http.StatusNotFound, ctx.Response.StatusCode(), "route should not be mounted when PeerRefreshHandler is nil")
 }

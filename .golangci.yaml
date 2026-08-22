@@ -109,7 +109,7 @@ linters:
             - github.com/bouine-cache/bouine/internal/platform
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
-            - golang.org/x/net
+            - github.com/valyala/fasthttp
             - golang.org/x/sync
             - golang.org/x/sys
         storage-L2:
@@ -139,6 +139,7 @@ linters:
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/bouine-cache/xxhash/v3
+            - github.com/valyala/fasthttp
             - golang.org/x/sync
         origin-L4:
           list-mode: strict
@@ -150,6 +151,8 @@ linters:
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/prometheus/client_golang
+            - github.com/valyala/fasthttp
+            - github.com/bouine-cache/bouine/internal/transport
             - golang.org/x/sync
         staticfile-L4:
           list-mode: strict
@@ -176,6 +179,8 @@ linters:
             - github.com/hashicorp/memberlist
             - github.com/bouine-cache/xxhash/v3
             - github.com/prometheus/client_golang
+            - github.com/valyala/fasthttp
+            - github.com/bouine-cache/bouine/internal/transport
             - golang.org/x/sync
         admin-L6:
           list-mode: strict

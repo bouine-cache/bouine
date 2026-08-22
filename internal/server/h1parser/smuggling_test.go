@@ -69,12 +69,12 @@ func TestSmugglingDetected_OnlyCL(t *testing.T) {
 
 func TestParseHeaders_ObsFold(t *testing.T) {
 	// obs-fold: a continuation line starting with SP (RFC 9110 §5.5).
-	// The parser must return ErrFallThrough.
+	// The parser must return an error.
 	raw := []byte("GET / HTTP/1.1\r\nX-Custom: value\r\n continuation\r\n\r\n")
 	req := &api.RawRequest{}
 	err := parseHeaders(raw, req)
-	if err != ErrFallThrough {
-		t.Errorf("parseHeaders with obs-fold should return ErrFallThrough, got %v", err)
+	if err == nil {
+		t.Errorf("parseHeaders with obs-fold should return an error")
 	}
 }
 
@@ -87,8 +87,8 @@ func TestParseHeaders_TooManyHeaders(t *testing.T) {
 	raw = append(raw, []byte("\r\n")...)
 	req := &api.RawRequest{}
 	err := parseHeaders(raw, req)
-	if err != ErrFallThrough {
-		t.Errorf("parseHeaders with too many headers should return ErrFallThrough, got %v", err)
+	if err == nil {
+		t.Errorf("parseHeaders with too many headers should return an error")
 	}
 }
 

@@ -1,11 +1,12 @@
 package server
 
 import (
-	"net/http"
 	"strings"
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // Router is the data-plane HTTP handler. It matches an incoming request
@@ -23,8 +24,8 @@ type routeEntry struct {
 	pathPrefix string
 	methods    map[string]bool // nil = match all methods
 	label      string
-	labelVal   []string
-	handler    http.Handler
+	labelVal   string
+	handler    fasthttp.RequestHandler
 }
 
 // RouterMetrics are the data-plane counters exposed by the router.
@@ -54,7 +55,7 @@ func NewRouter(cfg RouterConfig) *Router {
 
 // AddRoute registers a route entry. When methods is non-empty, only
 // requests whose HTTP method is in the set match this route.
-func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, handler http.Handler) {
+func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, handler fasthttp.RequestHandler) {
 	if label == "" {
 		switch {
 		case host != "":
@@ -77,13 +78,13 @@ func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, han
 		pathPrefix: pathPrefix,
 		methods:    mset,
 		label:      label,
-		labelVal:   []string{label},
+		labelVal:   label,
 		handler:    handler,
 	})
 }
 
 // MatchByHostPath returns the label of the first route matching
-// host:path, or "" if none. Uses the same matching logic as ServeHTTP
+// host:path, or "" if none. Uses the same matching logic as ServeRequest
 // (host case-insensitive + pathPrefix HasPrefix) but skips method
 // matching. Used by admin BuildKeyForURL to find the route's policy.
 func (rt *Router) MatchByHostPath(host, path string) string {
@@ -103,35 +104,37 @@ func (rt *Router) MatchByHostPath(host, path string) string {
 	return ""
 }
 
-// ServeHTTP implements http.Handler.
-func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// ServeRequest implements fasthttp.RequestHandler. It matches the
+// incoming request to a route and dispatches to the route's handler.
+func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if rt.metrics.RequestsTotal != nil {
 		rt.metrics.RequestsTotal.Inc()
 	}
 
-	host := r.Host
+	host := string(ctx.Host())
 	if idx := strings.LastIndex(host, ":"); idx > 0 {
 		host = host[:idx]
 	}
+	path := string(ctx.Path())
 
 	for i := range rt.routes {
 		re := &rt.routes[i]
 		if re.host != "" && !strings.EqualFold(re.host, host) {
 			continue
 		}
-		if re.pathPrefix != "" && !strings.HasPrefix(r.URL.Path, re.pathPrefix) {
+		if re.pathPrefix != "" && !strings.HasPrefix(path, re.pathPrefix) {
 			continue
 		}
-		if re.methods != nil && !re.methods[r.Method] {
+		if re.methods != nil && !re.methods[string(ctx.Method())] { //nolint:staticcheck // SA6001: method is used once per iteration, not worth inlining
 			continue
 		}
-		r.Header[header.XBouineRoute] = re.labelVal
-		re.handler.ServeHTTP(w, r)
+		ctx.Request.Header.Set(header.XBouineRoute, re.labelVal)
+		re.handler(ctx)
 		return
 	}
 
 	if rt.metrics.NoRouteTotal != nil {
 		rt.metrics.NoRouteTotal.Inc()
 	}
-	http.Error(w, "no matching route", http.StatusNotFound)
+	ctx.Error("no matching route", fasthttp.StatusNotFound)
 }

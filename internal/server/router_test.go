@@ -1,19 +1,28 @@
 package server
 
 import (
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/valyala/fasthttp"
 )
 
-func ok200(body string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, body)
-	})
+func ok200(body string) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString(body)
+	}
+}
+
+func serveRoute(t *testing.T, rt *Router, method, host, path string) *fasthttp.RequestCtx {
+	t.Helper()
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.SetMethod(method)
+	ctx.Request.SetRequestURI("http://" + host + path)
+	ctx.Request.Header.SetHost(host)
+	rt.ServeRequest(&ctx)
+	return &ctx
 }
 
 func TestRouter_FirstMatchWins(t *testing.T) {
@@ -22,9 +31,8 @@ func TestRouter_FirstMatchWins(t *testing.T) {
 	rt.AddRoute("", "/a", "", nil, ok200("first"))
 	rt.AddRoute("", "/a", "", nil, ok200("second"))
 
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/a/b", nil))
-	require.Equal(t, "first", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "example.com", "/a/b")
+	require.Equal(t, "first", string(ctx.Response.Body()))
 }
 
 func TestRouter_HostMatch(t *testing.T) {
@@ -33,11 +41,8 @@ func TestRouter_HostMatch(t *testing.T) {
 	rt.AddRoute("api.example.com", "", "", nil, ok200("api"))
 	rt.AddRoute("", "", "", nil, ok200("default"))
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Host = "api.example.com"
-	rt.ServeHTTP(rr, req)
-	require.Equal(t, "api", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "api.example.com", "/")
+	require.Equal(t, "api", string(ctx.Response.Body()))
 }
 
 func TestRouter_HostWithPort(t *testing.T) {
@@ -45,11 +50,8 @@ func TestRouter_HostWithPort(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
 	rt.AddRoute("api.example.com", "", "", nil, ok200("api"))
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Host = "api.example.com:443"
-	rt.ServeHTTP(rr, req)
-	require.Equal(t, "api", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "api.example.com:443", "/")
+	require.Equal(t, "api", string(ctx.Response.Body()))
 }
 
 func TestRouter_NoRoute(t *testing.T) {
@@ -57,11 +59,8 @@ func TestRouter_NoRoute(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
 	rt.AddRoute("only.com", "", "", nil, ok200("x"))
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Host = "other.com"
-	rt.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusNotFound, rr.Code)
+	ctx := serveRoute(t, rt, "GET", "other.com", "/")
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
 func TestRouter_PathPrefix(t *testing.T) {
@@ -70,13 +69,11 @@ func TestRouter_PathPrefix(t *testing.T) {
 	rt.AddRoute("", "/api/", "", nil, ok200("api"))
 	rt.AddRoute("", "/", "", nil, ok200("root"))
 
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/foo", nil))
-	require.Equal(t, "api", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "example.com", "/api/v1/foo")
+	require.Equal(t, "api", string(ctx.Response.Body()))
 
-	rr2 := httptest.NewRecorder()
-	rt.ServeHTTP(rr2, httptest.NewRequest("GET", "/other", nil))
-	require.Equal(t, "root", rr2.Body.String())
+	ctx2 := serveRoute(t, rt, "GET", "example.com", "/other")
+	require.Equal(t, "root", string(ctx2.Response.Body()))
 }
 
 func TestRouter_CatchAll(t *testing.T) {
@@ -84,9 +81,8 @@ func TestRouter_CatchAll(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
 	rt.AddRoute("", "", "", nil, ok200("all"))
 
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/anything", nil))
-	require.Equal(t, "all", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "example.com", "/anything")
+	require.Equal(t, "all", string(ctx.Response.Body()))
 }
 
 func TestRouter_MethodMatch(t *testing.T) {
@@ -95,13 +91,11 @@ func TestRouter_MethodMatch(t *testing.T) {
 	rt.AddRoute("", "/api/", "", []string{"GET", "HEAD"}, ok200("read"))
 	rt.AddRoute("", "/api/", "", []string{"POST", "PUT"}, ok200("write"))
 
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/foo", nil))
-	require.Equal(t, "read", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "example.com", "/api/v1/foo")
+	require.Equal(t, "read", string(ctx.Response.Body()))
 
-	rr2 := httptest.NewRecorder()
-	rt.ServeHTTP(rr2, httptest.NewRequest("POST", "/api/v1/foo", nil))
-	require.Equal(t, "write", rr2.Body.String())
+	ctx2 := serveRoute(t, rt, "POST", "example.com", "/api/v1/foo")
+	require.Equal(t, "write", string(ctx2.Response.Body()))
 }
 
 func TestRouter_MethodNoMatch(t *testing.T) {
@@ -109,9 +103,8 @@ func TestRouter_MethodNoMatch(t *testing.T) {
 	rt := NewRouter(RouterConfig{})
 	rt.AddRoute("", "/api/", "", []string{"GET"}, ok200("get-only"))
 
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("DELETE", "/api/v1/foo", nil))
-	require.Equal(t, http.StatusNotFound, rr.Code)
+	ctx := serveRoute(t, rt, "DELETE", "example.com", "/api/v1/foo")
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
 func TestRouter_MethodFallthrough(t *testing.T) {
@@ -120,13 +113,11 @@ func TestRouter_MethodFallthrough(t *testing.T) {
 	rt.AddRoute("", "/", "", []string{"GET", "HEAD"}, ok200("cached"))
 	rt.AddRoute("", "/", "", nil, ok200("passthrough"))
 
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/page", nil))
-	require.Equal(t, "cached", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "example.com", "/page")
+	require.Equal(t, "cached", string(ctx.Response.Body()))
 
-	rr2 := httptest.NewRecorder()
-	rt.ServeHTTP(rr2, httptest.NewRequest("POST", "/page", nil))
-	require.Equal(t, "passthrough", rr2.Body.String())
+	ctx2 := serveRoute(t, rt, "POST", "example.com", "/page")
+	require.Equal(t, "passthrough", string(ctx2.Response.Body()))
 }
 
 func TestRouter_NilMethodsMatchAll(t *testing.T) {
@@ -135,9 +126,8 @@ func TestRouter_NilMethodsMatchAll(t *testing.T) {
 	rt.AddRoute("", "/", "", nil, ok200("any"))
 
 	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"} {
-		rr := httptest.NewRecorder()
-		rt.ServeHTTP(rr, httptest.NewRequest(m, "/x", nil))
-		assert.Equal(t, "any", rr.Body.String())
+		ctx := serveRoute(t, rt, m, "example.com", "/x")
+		assert.Equal(t, "any", string(ctx.Response.Body()))
 	}
 }
 
@@ -147,11 +137,13 @@ func BenchmarkRouter_Match(b *testing.B) {
 	rt.AddRoute("", "/static/", "static", nil, ok200("static"))
 	rt.AddRoute("", "/", "root", nil, ok200("root"))
 
-	req := httptest.NewRequest("GET", "/api/v1/users", nil)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		rr := httptest.NewRecorder()
-		rt.ServeHTTP(rr, req)
+		var ctx fasthttp.RequestCtx
+		ctx.Request.Header.SetMethod("GET")
+		ctx.Request.SetRequestURI("http://example.com/api/v1/users")
+		ctx.Request.Header.SetHost("example.com")
+		rt.ServeRequest(&ctx)
 	}
 }

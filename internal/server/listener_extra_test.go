@@ -52,81 +52,23 @@ func TestServeSingle_HTTPSWithMaxConnections(t *testing.T) {
 
 // TestPeekConn_PeekErrorAndRead verifies peek with error then read.
 func TestPeekConn_PeekErrorThenRead(t *testing.T) {
-	t.Parallel()
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	pk := newPeekConn(server)
-	// Close the client to trigger EOF on read.
-	_ = client.Close()
-	// Peek should return error with 0 bytes.
-	peeked, err := pk.Peek(10)
-	if len(peeked) == 0 {
-		require.Error(t, err)
-	}
+	t.Skip("peekConn removed — h2c detection dropped")
 }
 
 // TestPeekConn_PeekExactThenReadMore verifies peek returns exactly n bytes
 // when already buffered.
 func TestPeekConn_PeekExactThenReadMore(t *testing.T) {
-	t.Parallel()
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	pk := newPeekConn(server)
-	go func() { _, _ = client.Write([]byte("hello world")) }()
-	peeked, err := pk.Peek(5)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", string(peeked))
-	// Peek again - should return from buffer without reading more.
-	peeked2, err := pk.Peek(5)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", string(peeked2))
-	// Read should return peeked bytes first.
-	buf := make([]byte, 5)
-	n, err := pk.Read(buf)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", string(buf[:n]))
+	t.Skip("peekConn removed — h2c detection dropped")
 }
 
-// TestServeConnWithHTTP_ValidRequest tests serveConnWithHTTP with a real HTTP request.
+// TestServeConnWithHTTP_ValidRequest — removed (serveConnWithHTTP deleted).
 func TestServeConnWithHTTP_ValidRequest(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:    "127.0.0.1:0",
-		Handler: echo200(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	errCh := make(chan error, 2)
-	go func() {
-		_, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
-		time.Sleep(100 * time.Millisecond)
-	}()
-
-	go srv.serveConnWithHTTP(server, errCh)
-
-	buf := make([]byte, 1024)
-	client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, _ := client.Read(buf)
-	assert.Contains(t, string(buf[:n]), "200")
-	_ = server.Close()
+	t.Skip("serveConnWithHTTP removed — HTTP/2 support dropped")
 }
 
-// TestHandleCleartextFastPath_PeekError tests handleCleartextFastPath with a closed conn.
+// TestHandleCleartextFastPath_PeekError — removed (handleCleartextFastPath deleted).
 func TestHandleCleartextFastPath_PeekError(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:        "127.0.0.1:0",
-		Handler:     echo200(),
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		FastPath:    &mockFastPathHandler{},
-		FastMetrics: &mockFastPathMetrics{},
-	})
-	_, server := net.Pipe()
-	_ = server.Close()
-	errCh := make(chan error, 2)
-	srv.handleCleartextFastPath(server, nil, errCh)
+	t.Skip("handleCleartextFastPath removed — h2c detection dropped")
 }
 
 // TestServeFastPath_AcceptError tests serveFastPath with a closed listener.
@@ -263,27 +205,7 @@ func TestServe_HTTP_WithScheme(t *testing.T) {
 }
 
 // TestServeConnWithHTTP_InvalidRequest tests serveConnWithHTTP with invalid HTTP data.
+// TestServeConnWithHTTP_InvalidRequest — removed (serveConnWithHTTP deleted).
 func TestServeConnWithHTTP_InvalidRequest(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:    "127.0.0.1:0",
-		Handler: echo200(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	errCh := make(chan error, 2)
-	go func() {
-		_, _ = client.Write([]byte("GARBAGE\r\n\r\n"))
-		time.Sleep(100 * time.Millisecond)
-	}()
-
-	go srv.serveConnWithHTTP(server, errCh)
-
-	// Read response (might be an error response or nothing).
-	buf := make([]byte, 1024)
-	client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _ = client.Read(buf)
-	_ = server.Close()
+	t.Skip("serveConnWithHTTP removed — HTTP/2 support dropped")
 }

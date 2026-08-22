@@ -5,20 +5,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/server/h1parser"
 )
 
-// h2cPreface is the HTTP/2 cleartext connection preface (RFC 9113 §3.4).
-const h2cPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-
-// serveFastPath accepts connections and routes them to the h1parser or
-// net/http based on the protocol. HTTP/2 connections (ALPN h2 or h2c
-// upgrade preface) go to net/http. HTTP/1.1 connections go to the
-// custom h1parser for zero-alloc cache-hit serving.
+// serveFastPath accepts connections and routes them to the h1parser
+// for zero-alloc cache-hit serving. On miss, the h1parser calls the
+// fallback handler (fasthttp.RequestHandler) directly — no byte
+// reconstruction or net/http handoff needed.
 func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	scheme := s.scheme
 	if scheme == "" {
@@ -34,7 +30,6 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
 		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),
-		h1parser.WithFallbackServer(s.inner),
 	)
 
 	var wg sync.WaitGroup
@@ -43,14 +38,6 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
-		// Shut down the inner http.Server to close any active HTTP/2
-		// connections that serveConnWithHTTP handed off to net/http.
-		// Without this, h2c connections keep the WaitGroup blocked
-		// because http.Server.Serve does not observe listener closure.
-		shutCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		_ = s.inner.Shutdown(shutCtx)
 	}()
 
 	for {
@@ -79,89 +66,35 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	return nil
 }
 
-// handleFastPathConn routes a single accepted connection to the h1parser
-// or net/http. For TLS connections, ALPN determines the protocol. For
-// cleartext, the first bytes are peeked to detect the h2c preface.
+// handleFastPathConn routes a single accepted connection to the h1parser.
+// For TLS connections, the handshake is performed first. All connections
+// go to the h1parser — HTTP/2 is not supported.
 func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, errCh chan<- error) {
 	defer func() { _ = conn.Close() }()
 
+	if parser == nil {
+		return
+	}
+
 	if tlsConn, ok := conn.(*tls.Conn); ok {
-		s.handleTLSFastPath(tlsConn, parser, errCh)
-		return
+		if err := tlsConn.HandshakeContext(context.Background()); err != nil {
+			return
+		}
 	}
 
-	s.handleCleartextFastPath(conn, parser, errCh)
-}
-
-// handleTLSFastPath routes a TLS connection to the h1parser or net/http
-// based on the ALPN negotiation result.
-func (s *Listener) handleTLSFastPath(conn *tls.Conn, parser *h1parser.Parser, errCh chan<- error) {
-	if err := conn.HandshakeContext(context.Background()); err != nil {
-		return
-	}
-	if state := conn.ConnectionState(); state.NegotiatedProtocol == "h2" {
-		s.serveConnWithHTTP(conn, errCh)
-		return
-	}
 	if err := parser.Serve(conn); err != nil { //nolint:contextcheck // parser manages its own deadlines
 		reportFastPathError(err, errCh)
 	}
 }
 
-// handleCleartextFastPath routes a cleartext connection to the h1parser
-// or net/http by peeking for the h2c preface.
-func (s *Listener) handleCleartextFastPath(conn net.Conn, parser *h1parser.Parser, errCh chan<- error) {
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	peeker := newPeekConn(conn)
-	preface, err := peeker.Peek(len(h2cPreface))
-	if err != nil && len(preface) == 0 {
-		return
-	}
-	if len(preface) >= len(h2cPreface) && string(preface[:len(h2cPreface)]) == h2cPreface {
-		s.serveConnWithHTTP(peeker, errCh)
-		return
-	}
-	if err := parser.Serve(peeker); err != nil { //nolint:contextcheck // parser manages its own deadlines
-		reportFastPathError(err, errCh)
-	}
-}
-
 // reportFastPathError handles errors from parser.Serve. All errors from
-// the parser are per-connection: EOF, closed, fall-through, malformed
-// request, timeout, smuggling detection, write failure. None are
-// listener-level failures. Dropping them prevents masking real listener
-// errors (e.g. Accept loop failures).
+// the parser are per-connection: EOF, closed, malformed request, timeout,
+// smuggling detection, write failure. None are listener-level failures.
 func reportFastPathError(_ error, _ chan<- error) {}
-
-// serveConnWithHTTP hands a single connection to net/http via a
-// one-shot listener. The closeNotifyConn ensures Serve does not return
-// until the handler goroutine finishes, preventing the caller's defer
-// from closing the connection mid-response.
-func (s *Listener) serveConnWithHTTP(conn net.Conn, errCh chan<- error) {
-	notifyConn := newCloseNotifyConn(conn)
-	cl := &singleConnListener{conn: notifyConn, ready: notifyConn.done}
-	s.serveListenerWithHTTP(cl, errCh)
-}
-
-// serveListenerWithHTTP calls s.inner.Serve on the given one-shot listener
-// and surfaces any non-filtered error to errCh. Filtered errors are
-// http.ErrServerClosed and net.ErrClosed, both expected during normal
-// connection lifecycle.
-func (s *Listener) serveListenerWithHTTP(cl net.Listener, errCh chan<- error) {
-	if err := s.inner.Serve(cl); err != nil &&
-		!errors.Is(err, http.ErrServerClosed) &&
-		!errors.Is(err, net.ErrClosed) {
-		errCh <- err
-	}
-}
 
 // serveMultiFastPath runs the fast-path accept loop across multiple
 // SO_REUSEPORT listeners. Called from serveMulti when the fast path is enabled.
 func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Listener) error {
-	// Derive a cancellable context so the error path can trigger the
-	// same cleanup as ctx.Done: each serveFastPath goroutine has its
-	// own ctx.Done watcher that closes the listener and calls
-	// s.inner.Shutdown. Cancelling here fires all of those watchers.
 	multiCtx, multiCancel := context.WithCancel(ctx)
 	defer multiCancel()
 
@@ -180,11 +113,7 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 	var firstErr error
 	select {
 	case <-ctx.Done():
-		// External cancellation — serveFastPath goroutines handle
-		// listener close and inner shutdown via their ctx.Done watcher.
 	case firstErr = <-errCh:
-		// One listener failed. Cancel multiCtx to trigger cleanup
-		// in all other serveFastPath goroutines.
 		multiCancel()
 	}
 
@@ -196,89 +125,4 @@ func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Liste
 		}
 	}
 	return firstErr
-}
-
-// closeNotifyConn wraps a net.Conn and closes a channel when Close is
-// called, so the singleConnListener can block until the handler goroutine
-// is done with the connection. Duplicated from h1parser to avoid a
-// circular dependency; keep both copies in sync.
-type closeNotifyConn struct {
-	net.Conn
-	done chan struct{}
-	once sync.Once
-}
-
-func newCloseNotifyConn(c net.Conn) *closeNotifyConn {
-	return &closeNotifyConn{Conn: c, done: make(chan struct{})}
-}
-
-func (c *closeNotifyConn) Close() error {
-	c.once.Do(func() { close(c.done) })
-	return c.Conn.Close()
-}
-
-// singleConnListener returns one pre-accepted connection, then blocks
-// until that connection is closed before returning ErrClosed on the
-// next Accept. This ensures http.Server.Serve does not return until the
-// handler goroutine has finished, preventing the caller from closing the
-// connection mid-response. Duplicated from h1parser to avoid a circular
-// dependency; keep both copies in sync.
-type singleConnListener struct {
-	conn  net.Conn
-	ready <-chan struct{}
-	done  bool
-}
-
-func (l *singleConnListener) Accept() (net.Conn, error) {
-	if l.done {
-		<-l.ready
-		return nil, net.ErrClosed
-	}
-	l.done = true
-	return l.conn, nil
-}
-
-func (l *singleConnListener) Close() error   { return nil }
-func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
-
-// peekConn wraps a net.Conn and allows peeking bytes before reading.
-// Peeked bytes are buffered and returned on subsequent Read calls.
-type peekConn struct {
-	net.Conn
-	peekBuf []byte
-}
-
-func newPeekConn(c net.Conn) *peekConn {
-	return &peekConn{Conn: c}
-}
-
-// Peek reads up to n bytes from the connection without consuming them.
-// The peeked bytes are buffered and returned by subsequent Read calls.
-func (p *peekConn) Peek(n int) ([]byte, error) {
-	if len(p.peekBuf) >= n {
-		return p.peekBuf[:n], nil
-	}
-	needed := n - len(p.peekBuf)
-	buf := make([]byte, needed)
-	nr, err := p.Conn.Read(buf)
-	if nr > 0 {
-		p.peekBuf = append(p.peekBuf, buf[:nr]...)
-	}
-	if err != nil && len(p.peekBuf) == 0 {
-		return nil, err
-	}
-	if len(p.peekBuf) > n {
-		return p.peekBuf[:n], err
-	}
-	return p.peekBuf, err
-}
-
-// Read returns buffered peek bytes first, then reads from the connection.
-func (p *peekConn) Read(b []byte) (int, error) {
-	if len(p.peekBuf) > 0 {
-		n := copy(b, p.peekBuf)
-		p.peekBuf = p.peekBuf[n:]
-		return n, nil
-	}
-	return p.Conn.Read(b)
 }

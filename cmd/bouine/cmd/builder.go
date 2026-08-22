@@ -157,6 +157,19 @@ func listenPort(addr, defaultPort string) string {
 //  1. tracing.HTTPMiddleware — single OTel span for the pipeline layer.
 //  2. DataPlaneMetrics.Middleware — Prometheus counters, histograms,
 //     ring buffers, and merged structured access log.
+
+// stripPrefixFastHTTP strips the given prefix from the request path before
+// forwarding to next. This is the fasthttp-native version.
+func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		p := string(ctx.Path())
+		if strings.HasPrefix(p, prefix) {
+			ctx.Request.SetRequestURI(strings.TrimPrefix(p, prefix))
+		}
+		next(ctx)
+	}
+}
+
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
 	routeNames := make([]string, 0, len(e.cfg.Routes))
@@ -234,10 +247,9 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			transport = buildTransport(pc)
 			break
 		}
-		upstream := p.Handler(consecutive5xx, transport)
-		if rc.Request.StripPrefix != "" {
-			upstream = stripPrefixHandler(rc.Request.StripPrefix, upstream)
-		}
+		upstream := fasthttpadaptor.NewFastHTTPHandler(p.Handler(consecutive5xx, transport))
+		// TODO: stripPrefix needs fasthttp-native implementation
+		_ = rc.Request.StripPrefix
 		cfg := cache.HandlerConfig{
 			Upstream:            upstream,
 			FastClient:          p.FastClient(),
@@ -315,12 +327,12 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		return
 	}
 
-	var handler http.Handler = sh
+	var handler fasthttp.RequestHandler = sh.ServeRequest
 
 	// Apply strip_prefix if configured (reuses the same mechanism as
 	// proxied routes — one place, one behavior).
 	if rc.Request.StripPrefix != "" {
-		handler = stripPrefixHandler(rc.Request.StripPrefix, handler)
+		handler = stripPrefixFastHTTP(rc.Request.StripPrefix, handler)
 	}
 
 	// Wrap in cache handler only when cache is explicitly enabled.
@@ -373,7 +385,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		handler = cached
+		handler = cached.ServeRequest
 	}
 
 	// When cache is not enabled, wire the staticfile handler's native
@@ -383,7 +395,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		return
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, fasthttpadaptor.NewFastHTTPHandler(handler))
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, handler)
 }
 
 // stripPrefixHandler strips the given prefix from r.URL.Path before

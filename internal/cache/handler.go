@@ -18,15 +18,9 @@
 package cache
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
-	"io"
 	"math/rand/v2"
-	"net"
-	"net/http" //nolint:depguard // shim: handler.go still uses *http.Request; full migration is follow-up
 	"net/url"
 	"slices"
 	"strconv"
@@ -37,7 +31,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/bouine-cache/bouine/internal/observability"
-	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -46,20 +39,44 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-type headerMapWriter struct {
-	w http.ResponseWriter
+// headerFromCtx extracts request headers as header.Map from a fasthttp RequestCtx.
+func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
+	hm := header.NewMap(ctx.Request.Header.Len())
+	ctx.Request.Header.VisitAll(func(k, v []byte) {
+		hm.AppendEntry(string(k), string(v))
+	})
+	hm.SortEntries()
+	return hm
 }
 
-func (h *headerMapWriter) SetHeader(key, value string) {
-	h.w.Header().Set(key, value)
+// requestInfoFromCtx constructs a RequestInfo from a fasthttp RequestCtx.
+func requestInfoFromCtx(ctx *fasthttp.RequestCtx) RequestInfo {
+	return RequestInfo{
+		Method:     string(ctx.Method()),
+		URI:        string(ctx.RequestURI()),
+		Host:       string(ctx.Host()),
+		Path:       string(ctx.Path()),
+		RemoteAddr: ctx.RemoteAddr().String(),
+		TLS:        ctx.IsTLS(),
+		Header:     headerFromCtx(ctx),
+	}
 }
 
-func (h *headerMapWriter) WriteHeader(code int) {
-	h.w.WriteHeader(code)
+// ctxResponseWriter adapts *fasthttp.RequestCtx to the rangeWriter interface.
+type ctxResponseWriter struct {
+	ctx *fasthttp.RequestCtx
 }
 
-func (h *headerMapWriter) Write(b []byte) (int, error) {
-	return h.w.Write(b)
+func (ctx *ctxResponseWriter) SetHeader(key, value string) {
+	ctx.ctx.Response.Header.Set(key, value)
+}
+
+func (ctx *ctxResponseWriter) WriteHeader(code int) {
+	ctx.ctx.SetStatusCode(code)
+}
+
+func (ctx *ctxResponseWriter) Write(b []byte) (int, error) {
+	return ctx.ctx.Write(b)
 }
 
 // defaultRefreshConcurrency bounds concurrent background refresh fetches
@@ -110,58 +127,9 @@ const defaultFetchTimeout = 60 * time.Second
 // re-trigger if still stale.
 const defaultRevalConcurrency = 256
 
-// Pre-allocated header values to avoid per-request slice literals.
-var (
-	headerHIT         = []string{"HIT"}
-	headerMISS        = []string{"MISS"}
-	headerSTALE       = []string{"STALE"}
-	headerBYPASS      = []string{"BYPASS"}
-	headerREVALIDATED = []string{"REVALIDATED"}
-
-	// Pre-allocated X-Cache-Source header values (zero-alloc hit path).
-	sourceHot    = []string{string(api.SourceHot)}
-	sourceWarm   = []string{string(api.SourceWarm)}
-	sourcePeer   = []string{string(api.SourcePeer)}
-	sourceOrigin = []string{string(api.SourceOrigin)}
-)
-
-// sourceSlice returns the pre-allocated []string for a given Source,
-// avoiding per-request slice allocation on the hit path. Returns nil
-// (no header) for the empty source.
-func sourceSlice(src api.Source) []string {
-	switch src {
-	case api.SourceHot:
-		return sourceHot
-	case api.SourceWarm:
-		return sourceWarm
-	case api.SourcePeer:
-		return sourcePeer
-	case api.SourceOrigin:
-		return sourceOrigin
-	default:
-		return nil
-	}
-}
-
-// ageHeaderCache is a pre-allocated table of Age header values for
-// 0–599 seconds. Covers fresh objects with TTLs up to 10 minutes and
-// avoids strconv.Itoa + []string allocation on every cache hit.
-var ageHeaderCache [600][]string
-
-func init() {
-	for i := range ageHeaderCache {
-		ageHeaderCache[i] = []string{strconv.Itoa(i)}
-	}
-}
-
-// ageHeader returns a pre-allocated []string for use as an Age header
-// value. Falls back to a fresh allocation only for ages ≥ 600s.
-func ageHeader(d time.Duration) []string {
-	secs := int(d.Seconds())
-	if secs >= 0 && secs < len(ageHeaderCache) {
-		return ageHeaderCache[secs]
-	}
-	return []string{strconv.Itoa(secs)}
+// ageHeader returns the Age header value string for a duration.
+func ageHeader(d time.Duration) string {
+	return strconv.Itoa(int(d.Seconds()))
 }
 
 // fetchResult is the outcome of an origin fetch, shared across collapsed requests.
@@ -180,45 +148,10 @@ type fetchResult struct {
 // maxRecorderCap bounds the backing array retained by the recorder pool.
 // Recorders that grew past this on a large response are discarded so the
 // pool never pins a transiently oversized buffer across GC cycles.
-const maxRecorderCap = 1 << 20 // 1 MiB
-
-// recorderPool reuses responseRecorder instances on the miss and
-// invalidation paths. The miss path transfers ownership of the
-// recorder's header map to the fetchResult (the body is copied via
-// make+copy so the recorder's buffer is preserved for pool reuse).
-// The hit path never allocates a recorder.
-var recorderPool = sync.Pool{
-	New: func() any {
-		return &responseRecorder{
-			header: make(http.Header, 8),
-			body:   &bytes.Buffer{},
-		}
-	},
-}
-
-func acquireRecorder(maxBytes int64) *responseRecorder {
-	rec := recorderPool.Get().(*responseRecorder)
-	rec.statusCode = 0
-	rec.truncated = false
-	rec.maxBytes = maxBytes
-	rec.body.Reset()
-	for k := range rec.header {
-		delete(rec.header, k)
-	}
-	return rec
-}
-
-func releaseRecorder(rec *responseRecorder) {
-	if rec.body.Cap() > maxRecorderCap {
-		return
-	}
-	recorderPool.Put(rec)
-}
-
 // Handler is the caching HTTP handler. It wraps an upstream
-// http.Handler (the origin pool) and a storage.Store.
+// fasthttp.RequestHandler (the origin pool) and a storage.Store.
 type Handler struct {
-	upstream         http.Handler
+	upstream         fasthttp.RequestHandler
 	fastClient       FastClient
 	store            storage.Store
 	flight           singleflight.Group
@@ -282,7 +215,7 @@ type Handler struct {
 
 // HandlerConfig configures a cache Handler.
 type HandlerConfig struct {
-	Upstream http.Handler
+	Upstream fasthttp.RequestHandler
 	Store    storage.Store
 	Logger   observability.Logger
 	// NegativeTTL enables caching of 404/405/410/501 responses.
@@ -401,16 +334,16 @@ type HandlerConfig struct {
 	RefreshMetrics *observability.RefreshMetrics
 	// FastClient, when non-nil, is used by doFetch to fetch from the
 	// origin via fasthttp instead of httputil.ReverseProxy. This
-	// eliminates the responseRecorder (http.Header map + bytes.Buffer)
+	// eliminates the struct{} (header.Map map + bytes.Buffer)
 	// and the make+copy body clone. When nil, doFetch falls back to
-	// the legacy Upstream http.Handler path.
+	// the legacy Upstream fasthttp.RequestHandler path.
 	FastClient FastClient
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a
 // pooled *fasthttp.Response. The caller is responsible for releasing
 // the response via fasthttp.ReleaseResponse. The request is a
-// fasthttp.Request (pooled) with method, URI, and headers set by
+// fasthttp.RequestCtx (pooled) with method, URI, and headers set by
 // the caller. The context is used for timeout/cancellation.
 type FastClient interface {
 	Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error
@@ -740,16 +673,26 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		return
 	}
 
-	req := &http.Request{
+	ri := RequestInfo{
 		Method: entry.method,
-		URL:    u,
-		Header: func() http.Header { h := make(http.Header, entry.header.Len()); entry.header.WriteTo(h); return h }(),
+		URI:    entry.url,
 		Host:   u.Host,
+		Path:   u.Path,
+		TLS:    u.Scheme == "https",
+		Header: entry.header.Clone(),
 	}
-	req = req.WithContext(ctx)
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(ri.Method)
+	req.SetRequestURI(ri.URI)
+	req.Header.SetHost(ri.Host)
+	ri.Header.Range(func(k, v string) bool {
+		req.Header.Set(k, v)
+		return true
+	})
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
-	res := h.collapsedFetch(req, key)
+	res := h.collapsedFetchBg(req, key)
 	if res.Err != nil {
 		h.refreshMetrics.IncTotal("error")
 		h.refreshMetrics.IncErrors(errorType(res.Err))
@@ -773,12 +716,12 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, time.Now())
-		h.storeObject(ctx, key, refreshed, req, true, staleHits)
+		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
 
-	if IsCacheableWithDefault(res.StatusCode, header.FromHTTP(req.Header), res.Header.ToMap(), h.negativeTTL, h.defaultTTL) {
+	if IsCacheableWithDefault(res.StatusCode, ri.Header, res.Header.ToMap(), h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
@@ -787,9 +730,9 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, req, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		obj.Hits = 0
-		h.storeObject(ctx, key, obj, req, true, staleHits)
+		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
 		return
 	}
@@ -851,232 +794,64 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 	if obj == nil || obj.Key == (api.Key{}) {
 		return
 	}
-	hdr := make(http.Header, obj.Header.Len())
-	obj.Header.WriteTo(hdr)
-	req := &http.Request{Method: "GET", Header: hdr}
-	h.storeObject(ctx, obj.Key, obj, req, false, 0)
+	ri := RequestInfo{Method: "GET", Header: obj.Header.Clone()}
+	h.storeObject(ctx, obj.Key, obj, ri, false, 0)
 }
 
 // buildKey constructs the cache key, applying the route's KeyPolicy
 // when configured. Inlined to avoid overhead on the hit path when no
 // policy is configured (zero added allocs).
-func (h *Handler) buildKey(r *http.Request) api.Key {
-	ri := requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header))
-	return BuildKey(ri, h.policy)
+func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
+	return BuildKey(requestInfoFromCtx(ctx), h.policy)
 }
 
 // ServeRequest implements fasthttp.RequestHandler. It creates a
-// synchronous shim *http.Request and http.ResponseWriter from the
+// synchronous shim *fasthttp.RequestCtx and *fasthttp.RequestCtx from the
 // *fasthttp.RequestCtx and delegates to ServeHTTP. This eliminates the
-// fasthttpadaptor goroutine race (the adaptor runs http.Handler in a
+// fasthttpadaptor goroutine race (the adaptor runs fasthttp.RequestHandler in a
 // goroutine for Flush/Hijack; reading ctx.Response afterward races).
 //
 // The shim is synchronous — no goroutine, no race. The internal methods
 // (ServeHTTP, handleCacheMiss, serveObject, etc.) remain unchanged and
 // will be migrated to fasthttp types incrementally.
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
-	// Build an *http.Request from the fasthttp request.
-	// Copy body bytes — ctx.Request.Body() references RequestCtx
-	// memory that fasthttp resets after ServeRequest returns. The
-	// ReverseProxy's http.Transport goroutine may outlive the handler.
-	bodyCopy := make([]byte, len(ctx.Request.Body()))
-	copy(bodyCopy, ctx.Request.Body())
-	r := &http.Request{
-		Method: string(ctx.Method()),
-		Proto:  "HTTP/1.1",
-		Header: make(http.Header),
-		Body:   io.NopCloser(bytes.NewReader(bodyCopy)),
-	}
-	r.URL, _ = url.Parse(string(ctx.RequestURI()))
-	r.Host = string(ctx.Host())
-	r.RemoteAddr = ctx.RemoteAddr().String()
-	if ctx.IsTLS() {
-		r.TLS = &tls.ConnectionState{}
-	}
-	for k, v := range ctx.Request.Header.All() {
-		r.Header.Add(string(k), string(v))
-	}
-	// Retrieve the OTel span context from the tracing middleware.
-	// Use context.Background() as the base — NOT the RequestCtx,
-	// which fasthttp resets after ServeRequest returns. The
-	// ReverseProxy's http.Transport goroutine may outlive the handler
-	// and access r.Context(), which must not reference RequestCtx.
-	baseCtx := context.Background()
-	if v := ctx.UserValue("otel.ctx"); v != nil {
-		if sc, ok := v.(context.Context); ok {
-			baseCtx = sc
-		}
-	}
-	r = r.WithContext(baseCtx)
-
-	// Create a buffering http.ResponseWriter. The cache handler and
-	// httputil.ReverseProxy may spawn goroutines (via http.Transport)
-	// that outlive ServeHTTP. If we wrote directly to ctx.Response,
-	// fasthttp's RequestCtx reset would race with those goroutines.
-	// Instead, buffer the full response and write to ctx.Response
-	// synchronously after ServeHTTP returns.
-	w := &fasthttpResponseWriter{}
-
-	// Store the cache key on the ctx for the metrics middleware.
-	w.onKeySet = func(key api.Key) {
-		ctx.SetUserValue("cacheKey", key)
-	}
-
-	h.ServeHTTP(w, r)
-
-	// Flush buffered response to ctx.Response synchronously.
-	if w.status != 0 {
-		ctx.SetStatusCode(w.status)
-	} else {
-		ctx.SetStatusCode(200)
-	}
-	// Strip hop-by-hop headers (RFC 9110 §7.6.1) and copy the rest.
-	// Also strip Date — fasthttp auto-sets it to the current time
-	// (matching net/http behavior), but only if Date is not already
-	// present. If we forward the cached object's Date, fasthttp won't
-	// overwrite it, causing conformance test failures (date-update
-	// tests expect the current Date, not the stored origin Date).
-	//
-	// Also strip headers listed in the Connection header (RFC 9110
-	// §7.6.1: "Connection" header lists per-hop headers to remove).
-	connectionHdrs := []string{}
-	if connVals := w.hdr[header.Connection]; len(connVals) > 0 {
-		for _, cv := range connVals {
-			for _, h := range strings.Split(cv, ",") {
-				connectionHdrs = append(connectionHdrs, strings.TrimSpace(h))
-			}
-		}
-	}
-	connStrip := make(map[string]bool, len(connectionHdrs))
-	for _, h := range connectionHdrs {
-		connStrip[header.InternKey(h)] = true
-	}
-	for k, vals := range w.hdr {
-		switch k {
-		case header.Connection, header.KeepAlive, header.TE, header.Trailer,
-			header.TransferEncoding, header.Upgrade, "Proxy-Connection",
-			header.Date:
-			continue
-		}
-		if connStrip[k] {
-			continue
-		}
-		for _, v := range vals {
-			ctx.Response.Header.Add(k, v)
-		}
-	}
-	_, _ = ctx.Response.BodyWriter().Write(w.body)
-}
-
-// fasthttpResponseWriter is a buffering http.ResponseWriter. It buffers
-// the full response (status, headers, body) in memory. The caller
-// flushes the buffer to *fasthttp.RequestCtx synchronously after
-// ServeHTTP returns, avoiding races with fasthttp's RequestCtx reset
-// and with httputil.ReverseProxy's internal goroutines.
-type fasthttpResponseWriter struct {
-	hdr      http.Header
-	status   int
-	body     []byte
-	written  bool
-	onKeySet func(api.Key)
-}
-
-func (w *fasthttpResponseWriter) Header() http.Header {
-	if w.hdr == nil {
-		w.hdr = make(http.Header)
-	}
-	return w.hdr
-}
-
-func (w *fasthttpResponseWriter) WriteHeader(code int) {
-	if w.written {
-		return
-	}
-	w.written = true
-	w.status = code
-}
-
-func (w *fasthttpResponseWriter) Write(b []byte) (int, error) {
-	if !w.written {
-		w.WriteHeader(200)
-	}
-	w.body = append(w.body, b...)
-	return len(b), nil
-}
-
-func (w *fasthttpResponseWriter) Flush() {
-	// No-op — the response is flushed to ctx.Response after ServeHTTP.
-}
-
-// SetCacheKey stores the cache key for the metrics middleware.
-func (w *fasthttpResponseWriter) SetCacheKey(key api.Key) {
-	if w.onKeySet != nil {
-		w.onKeySet(key)
-	}
-}
-
-// ServeHTTP implements http.Handler.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if isInvalidating(r.Method) {
-		h.invalidateAndProxy(w, r)
+	if isInvalidating(string(ctx.Method())) {
+		h.invalidateAndProxy(ctx)
 		return
 	}
 
-	// The bouine.pipeline span (created in builder.go) covers the full
-	// request lifecycle including the cache engine. A separate bouine.cache
-	// child span was removed — it covered ~200ns of work on hits and added
-	// a span creation + r.WithContext allocation per request with no
-	// additional tracing insight.
-
-	// Take a single timestamp; thread it through Evaluate and serve
-	// functions to avoid a second time.Now() syscall per hit.
-	// time.Now() is required (not CoarseNow) because Fresh() compares
-	// against StoredAt which was set with nanosecond precision via
-	// time.Now() at store time. CoarseNow (1ms resolution, truncated)
-	// can produce now < StoredAt when both are in the same millisecond,
-	// causing a stale object to appear fresh.
 	now := time.Now()
-	primaryKey, key, obj, src := h.lookup(r)
-	if rw, ok := w.(*responsewriter.ResponseWriter); ok {
-		rw.SetCacheKey(key)
-	}
-	disp := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, now)
+	primaryKey, key, obj, src := h.lookup(ctx)
+	ctx.SetUserValue("cacheKey", key)
+	ri := requestInfoFromCtx(ctx)
+	disp := Evaluate(ri, obj, now)
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if h.tryConditional304(w, r, disp.Object, src) {
+		if h.tryConditional304(ctx, disp.Object, src) {
 			return
 		}
-		if ServeRange(&headerMapWriter{w: w}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), disp.Object, disp.Decision == StaleHit, src) {
+		if ServeRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, src) {
 			return
 		}
 		cacheRes := cacheHit
 		if disp.Decision == StaleHit {
 			cacheRes = cacheStale
 		}
-		h.serveObject(w, r, disp.Object, now, cacheRes, src)
-		// In strong mode, only the owner triggers background revalidation.
-		// A non-owner may hold a stale copy from before the owner-gated
-		// storage deploy (migration window); it serves the stale object
-		// (RFC 5861) but must not fire an origin fetch for a key it does
-		// not own — the owner is authoritative (issue #509).
+		h.serveObject(ctx, disp.Object, now, cacheRes, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
-			h.triggerBgRevalidate(r, key, disp.Object)
+			h.triggerBgRevalidate(ctx, key, disp.Object)
 		}
 	case Miss:
-		h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
+		h.handleCacheMiss(ctx, primaryKey, key, obj, now, src)
 	case Revalidate:
-		// A non-owner with a stale object requiring revalidation must not
-		// revalidate locally (origin fetch for a key it does not own).
-		// Fall through to handleCacheMiss, which peer-fetches from the
-		// owner. The stale local copy is left to natural eviction.
 		if !h.isOwnerOrUnmanaged(key) {
-			h.handleCacheMiss(w, r, primaryKey, key, obj, now, src)
+			h.handleCacheMiss(ctx, primaryKey, key, obj, now, src)
 			return
 		}
-		h.revalidate(w, r, primaryKey, key, disp.Object, now, src)
+		h.revalidate(ctx, primaryKey, key, disp.Object, now, src)
 	case Bypass:
-		h.handleBypass(w, r)
+		h.handleBypass(ctx)
 	}
 }
 
@@ -1092,17 +867,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
-func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source) {
+func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source) {
 	if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(r.Context(), owner, lookupKey); err == nil && peerObj != nil {
+			if peerObj, err := h.peerFetch(ctx, owner, lookupKey); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
-				if d2 := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
+				if d2 := Evaluate(requestInfoFromCtx(ctx), peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					cacheRes := cacheHit
 					if d2.Decision == StaleHit {
 						cacheRes = cacheStale
 					}
-					h.serveObject(w, r, peerObj, now, cacheRes, api.SourcePeer)
+					h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
 					// Do not store or revalidate: the object came from the
 					// owner. Caching it on a non-owner would make the fleet
 					// cache redundant (issue #509). Revalidation is the
@@ -1124,29 +899,29 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 	// objects without an explicit SIE window still get stale-on-error
 	// fallback, matching the revalidate path's behaviour.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(w, r, lookupKey, primaryKey, obj, now, src)
+		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src)
 	} else {
-		h.fetchAndStore(w, r, lookupKey, primaryKey)
+		h.fetchAndStore(ctx, lookupKey, primaryKey)
 	}
 }
 
 // lookup resolves the cache key and stored object for r, accounting
 // for Vary-based secondary keys. Returns the source (hot/warm) from
 // the storage tier that served the object.
-func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, lookupKey api.Key, obj *api.Object, src api.Source) {
-	primaryKey = h.buildKey(r)
-	obj, src, err := h.store.Get(r.Context(), primaryKey)
+func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKey api.Key, obj *api.Object, src api.Source) {
+	primaryKey = h.buildKey(ctx)
+	obj, src, err := h.store.Get(ctx, primaryKey)
 	if err != nil {
 		h.logger.Warn("cache lookup error", "key", primaryKey, "error", err)
 	}
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
 		return primaryKey, primaryKey, obj, src
 	}
-	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), header.FromHTTP(r.Header), h.policy)
+	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), headerFromCtx(ctx), h.policy)
 	if vk == primaryKey {
 		return primaryKey, primaryKey, obj, src
 	}
-	vobj, vsrc, verr := h.store.Get(r.Context(), vk)
+	vobj, vsrc, verr := h.store.Get(ctx, vk)
 	if verr == nil && vobj != nil {
 		return primaryKey, vk, vobj, vsrc
 	}
@@ -1186,109 +961,43 @@ func (h *Handler) forwardToOwnerIfRemote(ctx context.Context, obj *api.Object) {
 // tryConditional304 returns true and writes a 304 if the client's
 // conditional headers match the cached object. Used for both hit and
 // revalidate paths. src is the storage-tier source (hot/warm).
-func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj *api.Object, src api.Source) bool {
-	if !ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj) {
+func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source) bool {
+	if !ClientConditionalMatch(requestInfoFromCtx(ctx), obj) {
 		return false
 	}
 	if obj.ETag != "" {
-		w.Header()[header.ETag] = []string{obj.ETag}
+		ctx.Response.Header.Set(header.ETag, obj.ETag)
 	}
 	// Direct map assignment avoids http.CanonicalMIMEHeaderKey alloc
 	// from .Set() on the hit path.
-	w.Header()[header.XCache] = headerHIT
-	w.Header()[header.XCacheSource] = sourceSlice(src)
-	w.WriteHeader(fasthttp.StatusNotModified)
+	ctx.Response.Header.Set(header.XCache, "HIT")
+	ctx.Response.Header.Set(header.XCacheSource, string(src))
+	ctx.SetStatusCode(fasthttp.StatusNotModified)
 	return true
 }
 
-// headerGuard wraps an http.ResponseWriter for the BYPASS path, where
+// headerGuard wraps an *fasthttp.RequestCtx for the BYPASS path, where
 // the upstream handler writes directly to the client. It overwrites
 // bouine's attribution headers (X-Cache, X-Cache-Source) at WriteHeader
 // time so an origin-supplied value cannot spoof the source metric label
 // or the X-Cache result. All optional interfaces (Flusher, Hijacker,
 // ReaderFrom) are delegated to preserve streaming and zero-copy paths.
-type headerGuard struct {
-	http.ResponseWriter
-	cache   []string // X-Cache value (always set)
-	written bool
-}
-
-func (g *headerGuard) WriteHeader(code int) {
-	if g.written {
-		return
-	}
-	g.written = true
-	h := g.Header()
-	delete(h, header.XCache)
-	delete(h, header.XCacheSource)
-	h[header.XCache] = g.cache
-	g.ResponseWriter.WriteHeader(code)
-}
-
-func (g *headerGuard) Write(b []byte) (int, error) {
-	if !g.written {
-		g.WriteHeader(http.StatusOK)
-	}
-	return g.ResponseWriter.Write(b)
-}
-
-func (g *headerGuard) Flush() {
-	if !g.written {
-		g.WriteHeader(http.StatusOK)
-	}
-	if f, ok := g.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-func (g *headerGuard) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	h, ok := g.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, responsewriter.ErrNotSupported
-	}
-	return h.Hijack()
-}
-
-func (g *headerGuard) ReadFrom(src io.Reader) (int64, error) {
-	if !g.written {
-		g.WriteHeader(http.StatusOK)
-	}
-	if rf, ok := g.ResponseWriter.(io.ReaderFrom); ok {
-		return rf.ReadFrom(src)
-	}
-	return io.Copy(struct{ io.Writer }{g}, src)
-}
-
-func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
-	// only-if-cached with no cached response → 504 Gateway Timeout
-	// (RFC 9111 §5.2.1.7). Source is empty — origin was not contacted.
-	reqCC := ParseCacheControl(header.FromHTTP(r.Header).Get(header.CacheControl))
-	if reqCC.OnlyIfCached {
-		w.Header()[header.XCache] = headerMISS
-		http.Error(w, "Gateway Timeout", fasthttp.StatusGatewayTimeout)
-		return
-	}
-	// Fast path: use FastClient when available, bypassing
-	// httputil.ReverseProxy and headerGuard.
-	if h.fastClient != nil {
-		h.handleBypassFast(w, r)
-		return
-	}
-	// Legacy path: wrap the writer so the upstream cannot clobber
-	// bouine's X-Cache (BYPASS) or inject an X-Cache-Source.
-	guard := &headerGuard{
-		ResponseWriter: w,
-		cache:          headerBYPASS,
-	}
-	h.upstream.ServeHTTP(guard, r)
-}
-
 // handleBypassFast handles the BYPASS path using FastClient, bypassing
 // httputil.ReverseProxy and headerGuard. The response is fetched via
-// fasthttp and written directly to the http.ResponseWriter with
+// fasthttp and written directly to the *fasthttp.RequestCtx with
 // bouine's attribution headers set after the origin response.
-func (h *Handler) handleBypassFast(w http.ResponseWriter, r *http.Request) {
-	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
+func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
+	reqCC := ParseCacheControl(string(ctx.Request.Header.Peek(header.CacheControl)))
+	if reqCC.OnlyIfCached {
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Error("Gateway Timeout", fasthttp.StatusGatewayTimeout)
+		return
+	}
+	h.handleBypassFast(ctx)
+}
+
+func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
+	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
 
 	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
@@ -1299,25 +1008,23 @@ func (h *Handler) handleBypassFast(w http.ResponseWriter, r *http.Request) {
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.SetMethod(r.Method)
-	req.SetRequestURI(r.URL.String())
-	req.Header.SetHost(r.Host)
-	for k, vals := range r.Header {
-		for _, v := range vals {
-			req.Header.Add(k, v)
-		}
-	}
+	req.Header.SetMethod(string(ctx.Method()))
+	req.SetRequestURI(string(ctx.RequestURI()))
+	req.Header.SetHost(string(ctx.Host()))
+	ctx.Request.Header.VisitAll(func(k, v []byte) {
+		req.Header.AddBytesKV(k, v)
+	})
 	tracing.InjectFastHTTP(fetchCtx, req)
 
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
-		w.Header()[header.XCache] = headerBYPASS
-		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
+		ctx.Response.Header.Set(header.XCache, "BYPASS")
+		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 
 	// Copy origin response headers, then overwrite bouine's attribution.
-	dst := w.Header()
+	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
 		ks := string(k)
 		if ks == header.XCache || ks == header.XCacheSource {
@@ -1325,10 +1032,10 @@ func (h *Handler) handleBypassFast(w http.ResponseWriter, r *http.Request) {
 		}
 		dst.Add(ks, string(v))
 	}
-	dst[header.XCache] = headerBYPASS
-	w.WriteHeader(resp.StatusCode())
-	if r.Method != "HEAD" {
-		_, _ = w.Write(resp.Body())
+	dst.Set(header.XCache, "BYPASS")
+	ctx.SetStatusCode(resp.StatusCode())
+	if string(ctx.Method()) != "HEAD" {
+		_, _ = ctx.Write(resp.Body())
 	}
 }
 
@@ -1336,7 +1043,7 @@ func (h *Handler) handleBypassFast(w http.ResponseWriter, r *http.Request) {
 // from dst before writing it to the client. Per RFC 9111 §5.2.2.4 a cache
 // MUST NOT forward these fields without successful revalidation.
 // ccHeader is the merged Cache-Control string for the stored response.
-func stripNoCacheFields(dst http.Header, ccHeader string) {
+func stripNoCacheFields(dst *fasthttp.ResponseHeader, ccHeader string) {
 	if ccHeader == "" {
 		return
 	}
@@ -1349,7 +1056,7 @@ func stripNoCacheFields(dst http.Header, ccHeader string) {
 	}) {
 		if field != "" {
 			del := header.InternKey(field)
-			delete(dst, del)
+			dst.Del(del)
 		}
 	}
 }
@@ -1367,34 +1074,34 @@ const (
 // X-Cache header and Age. Stale responses also get Warning: 110 per
 // RFC 7234 §5.5.3. src is the storage-tier source (hot/warm/peer),
 // set as X-Cache-Source via direct map assignment (zero alloc).
-func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
-	dst := w.Header()
-	obj.Header.WriteTo(dst)
+func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
+	dst := &ctx.Response.Header
+	obj.Header.WriteToFastHTTP(dst)
 	// Strip internal headers used for ban matching — never forwarded to clients.
 	dst.Del(header.XBouinePath)
 	dst.Del(header.XBouineHost)
-	dst[header.Age] = ageHeader(ComputeAge(obj, now))
-	dst[header.XCacheSource] = sourceSlice(src)
+	dst.Set(header.Age, ageHeader(ComputeAge(obj, now)))
+	dst.Set(header.XCacheSource, string(src))
 	switch result {
 	case cacheHit:
-		dst[header.XCache] = headerHIT
+		dst.Set(header.XCache, "HIT")
 	case cacheStale:
-		dst[header.XCache] = headerSTALE
-		dst[header.Warning] = []string{`110 - "Response is Stale"`}
+		dst.Set(header.XCache, "STALE")
+		dst.Set(header.Warning, `110 - "Response is Stale"`)
 	case cacheRevalidated:
-		dst[header.XCache] = headerREVALIDATED
+		dst.Set(header.XCache, "REVALIDATED")
 	}
 	stripNoCacheFields(dst, obj.CacheControl)
-	w.WriteHeader(obj.StatusCode)
-	if r.Method != "HEAD" {
-		_, _ = w.Write(obj.Body) // #nosec G705 -- obj.Body is a cached origin response, not user input
+	ctx.SetStatusCode(obj.StatusCode)
+	if string(ctx.Method()) != "HEAD" {
+		_, _ = ctx.Write(obj.Body) // #nosec G705 -- obj.Body is a cached origin response, not user input
 	}
 }
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
-func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
+func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchResult {
 	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
-		res := h.doFetch(r)
+		res := h.doFetch(ctx)
 		return res, nil
 	})
 	return v.(fetchResult)
@@ -1405,13 +1112,71 @@ func (h *Handler) collapsedFetch(r *http.Request, key api.Key) fetchResult {
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
-func (h *Handler) collapsedRevalidate(r *http.Request, key api.Key) fetchResult {
+func (h *Handler) collapsedRevalidate(ctx *fasthttp.RequestCtx, key api.Key) fetchResult {
 	sfKey := key.SingleFlightKey(revalKeySuffix)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
-		res := h.doFetch(r)
+		res := h.doFetch(ctx)
 		return res, nil
 	})
 	return v.(fetchResult)
+}
+
+func (h *Handler) collapsedFetchBg(req *fasthttp.Request, key api.Key) fetchResult {
+	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
+		res := h.doFetchBg(req)
+		return res, nil
+	})
+	return v.(fetchResult)
+}
+
+func (h *Handler) collapsedRevalidateBg(req *fasthttp.Request, key api.Key) fetchResult {
+	sfKey := key.SingleFlightKey(revalKeySuffix)
+	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
+		res := h.doFetchBg(req)
+		return res, nil
+	})
+	return v.(fetchResult)
+}
+
+func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
+	ctx := context.Background()
+	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
+	defer span.End()
+
+	select {
+	case h.fetchSem <- struct{}{}:
+		defer func() { <-h.fetchSem }()
+	default:
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	defer cancel()
+
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
+		fasthttp.ReleaseResponse(resp)
+		tracing.RecordError(span, err)
+		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
+	}
+
+	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
+		fasthttp.ReleaseResponse(resp)
+		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
+	}
+
+	detachedHdr := &fasthttp.ResponseHeader{}
+	for k, v := range resp.Header.All() {
+		detachedHdr.SetBytesKV(k, v)
+	}
+
+	return fetchResult{
+		StatusCode: resp.StatusCode(),
+		Header:     fromFastHeader(detachedHdr),
+		Body:       resp.Body(),
+		fastResp:   resp,
+	}
 }
 
 // releaseFetchResult releases the pooled fasthttp.Response if present.
@@ -1422,16 +1187,16 @@ func releaseFetchResult(res fetchResult) {
 	}
 }
 
-func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key) {
-	res := h.collapsedFetch(r, lookupKey)
+func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key) {
+	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)
 	if res.Err != nil {
-		w.Header()[header.XCache] = headerMISS
-		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res, primaryKey)
+	h.writeAndMaybeStore(ctx, res, primaryKey)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -1443,22 +1208,22 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKe
 // Vary variants do not collapse into a single fetch.
 // primaryKey is the canonical key used for Vary variant storage in
 // writeAndMaybeStore.
-func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Request, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source) {
-	res := h.collapsedFetch(r, lookupKey)
+func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source) {
+	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)
 	if res.Err != nil {
 		h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
 			"error", res.Err, "key", lookupKey)
-		h.serveObject(w, r, stale, now, cacheStale, src)
+		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
 	if res.StatusCode >= 500 {
 		h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
 			"status", res.StatusCode, "key", lookupKey)
-		h.serveObject(w, r, stale, now, cacheStale, src)
+		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(w, r, res, primaryKey)
+	h.writeAndMaybeStore(ctx, res, primaryKey)
 }
 
 // revalidate sends a conditional request to the origin and refreshes the
@@ -1466,8 +1231,15 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 // (may be a Vary variant key); it is used for singleflight dedup and for
 // storing the 304-refreshed object. primaryKey is the canonical key used for
 // Vary variant storage in writeAndMaybeStore.
-func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source) {
-	revalReq := r.Clone(r.Context())
+func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source) {
+	revalReq := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(revalReq)
+	revalReq.Header.SetMethod(string(ctx.Method()))
+	revalReq.SetRequestURI(string(ctx.RequestURI()))
+	revalReq.Header.SetHost(string(ctx.Host()))
+	ctx.Request.Header.VisitAll(func(k, v []byte) {
+		revalReq.Header.AddBytesKV(k, v)
+	})
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// Collapse concurrent revalidations for the same key. Each concurrent
@@ -1475,7 +1247,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	res := h.collapsedRevalidate(revalReq, lookupKey)
+	res := h.collapsedRevalidateBg(revalReq, lookupKey)
 	defer releaseFetchResult(res)
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
@@ -1496,34 +1268,34 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 			h.logger.Info("stayin-alive: upstream 5xx, serving stale indefinitely",
 				"status", res.StatusCode, "key", stale.Key)
 		}
-		h.serveObject(w, r, stale, now, cacheStale, src)
+		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
 	if res.Err != nil {
 		if staleFallbackAllowed(stale) {
-			h.serveObject(w, r, stale, now, cacheStale, src)
+			h.serveObject(ctx, stale, now, cacheStale, src)
 			return
 		}
-		w.Header()[header.XCache] = headerMISS
-		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 	if res.StatusCode >= 500 {
 		if staleFallbackAllowed(stale) {
-			h.serveObject(w, r, stale, now, cacheStale, src)
+			h.serveObject(ctx, stale, now, cacheStale, src)
 			return
 		}
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, now)
-		h.storeObject(r.Context(), lookupKey, refreshed, r, false, 0)
-		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
+		h.storeObject(ctx, lookupKey, refreshed, requestInfoFromCtx(ctx), false, 0)
+		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}
 
-	h.writeAndMaybeStore(w, r, res, primaryKey)
+	h.writeAndMaybeStore(ctx, res, primaryKey)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1566,7 +1338,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 // stale-while-revalidate response. revalSem prevents goroutine explosion.
 // The goroutine is tracked by revalWg so Close can drain it before
 // store.Close, preventing use-after-close panics.
-func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.Object) {
+func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, key api.Key, stale *api.Object) {
 	// Bail out early if the handler is already shutting down.
 	select {
 	case <-h.done:
@@ -1582,8 +1354,8 @@ func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.O
 	// Detach from the client's context so the background fetch is not
 	// cancelled when the response is sent, but wrap it in a cancellable
 	// context so Close can signal shutdown.
-	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(r.Context()))
-	bgReq := r.Clone(bgCtx)
+	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(ctx))
+	bgReq := requestInfoFromCtx(ctx)
 	h.revalWg.Add(1)
 	go func() {
 		defer func() {
@@ -1607,27 +1379,35 @@ func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.O
 // doBackgroundRevalidate fetches a fresh copy of stale and stores it.
 // Uses the collapse group to deduplicate concurrent SWR triggers for
 // the same key.
-func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, key api.Key, stale *api.Object) {
-	revalReq := r.Clone(ctx)
+func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, key api.Key, stale *api.Object) {
+	revalReq := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(revalReq)
+	revalReq.Header.SetMethod(ri.Method)
+	revalReq.SetRequestURI(ri.URI)
+	revalReq.Header.SetHost(ri.Host)
+	ri.Header.Range(func(k, v string) bool {
+		revalReq.Header.Set(k, v)
+		return true
+	})
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	staleHits := h.store.WindowHits(key)
 
-	res := h.collapsedFetch(revalReq, key)
+	res := h.collapsedFetchBg(revalReq, key)
 	if res.Err != nil {
 		return
 	}
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, time.Now())
-		h.storeObject(ctx, key, refreshed, r, true, staleHits)
+		h.storeObject(ctx, key, refreshed, ri, true, staleHits)
 		return
 	}
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	bgParsed := newParsedResponse(res.StatusCode, header.FromHTTP(r.Header), res.Header.ToMap())
+	bgParsed := newParsedResponse(res.StatusCode, ri.Header, res.Header.ToMap())
 
 	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1636,37 +1416,36 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
-		h.storeObject(ctx, key, obj, r, true, staleHits)
+		obj := buildObject(key, ri, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
 
 func (h *Handler) writeAndMaybeStore(
-	w http.ResponseWriter,
-	r *http.Request,
+	ctx *fasthttp.RequestCtx,
 	res fetchResult,
 	primaryKey api.Key,
 ) {
-	dst := w.Header()
+	dst := &ctx.Response.Header
 	res.Header.VisitAll(func(k, v string) {
 		dst.Add(k, v)
 	})
-	dst[header.XCache] = headerMISS
-	dst[header.XCacheSource] = sourceOrigin
+	dst.Set(header.XCache, "MISS")
+	dst.Set(header.XCacheSource, string(api.SourceOrigin))
 	// A proxy SHOULD add an Age header to responses it forwards,
 	// even on first fetch (Age: 0 + any origin Age).
 	if res.Header.Get(header.Age) == "" {
-		dst[header.Age] = []string{"0"}
+		dst.Set(header.Age, "0")
 	}
-	w.WriteHeader(res.StatusCode)
-	if r.Method != "HEAD" {
-		_, _ = w.Write(res.Body)
+	ctx.SetStatusCode(res.StatusCode)
+	if string(ctx.Method()) != "HEAD" {
+		_, _ = ctx.Write(res.Body)
 	}
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	parsed := newParsedResponse(res.StatusCode, header.FromHTTP(r.Header), res.Header.ToMap())
+	parsed := newParsedResponse(res.StatusCode, headerFromCtx(ctx), res.Header.ToMap())
 
 	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1679,23 +1458,23 @@ func (h *Handler) writeAndMaybeStore(
 		// buildKey call on the same request.
 		storeKey := primaryKey
 		if vary := res.Header.Get(header.Vary); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, header.FromHTTP(r.Header), h.policy)
+			storeKey = VariantKey(primaryKey, vary, headerFromCtx(ctx), h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
 		// variants are a DoS vector.
 		if storeKey != primaryKey {
-			if !h.reserveVariantSlot(r.Context(), primaryKey, storeKey) {
+			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
 				return
 			}
 		}
-		obj := buildObject(storeKey, r, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
-		h.storeObject(r.Context(), storeKey, obj, r, false, 0)
+		obj := buildObject(storeKey, requestInfoFromCtx(ctx), res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		h.storeObject(ctx, storeKey, obj, requestInfoFromCtx(ctx), false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
 		// from this or other non-owners hit instead of going to origin
 		// (issue #509). The owner resolves from obj.Key (storeKey).
-		h.forwardToOwnerIfRemote(r.Context(), obj)
+		h.forwardToOwnerIfRemote(ctx, obj)
 		if storeKey != primaryKey {
 			// Shallow-copy the object and change only the Key. This avoids
 			// a second full buildObject call (~5 allocs: api.Object,
@@ -1711,10 +1490,10 @@ func (h *Handler) writeAndMaybeStore(
 			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
-			h.storeObject(r.Context(), primaryKey, primaryObj, r, false, 0)
+			h.storeObject(ctx, primaryKey, primaryObj, requestInfoFromCtx(ctx), false, 0)
 			// Forward the primary (Vary-resolver) entry to its owner too —
 			// the primary key may hash to a different owner than the variant.
-			h.forwardToOwnerIfRemote(r.Context(), primaryObj)
+			h.forwardToOwnerIfRemote(ctx, primaryObj)
 		}
 	}
 }
@@ -1797,19 +1576,10 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	return false
 }
 
-func (h *Handler) invalidateAndProxy(w http.ResponseWriter, r *http.Request) {
-	// Fast path: use FastClient when available.
-	if h.fastClient != nil {
-		h.invalidateAndProxyFast(w, r)
-		return
-	}
-	h.invalidateAndProxyLegacy(w, r)
-}
-
 // invalidateAndProxyFast handles POST/PUT/DELETE using FastClient,
-// bypassing responseRecorder and httputil.ReverseProxy.
-func (h *Handler) invalidateAndProxyFast(w http.ResponseWriter, r *http.Request) {
-	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
+// bypassing struct{} and httputil.ReverseProxy.
+func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
+	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
 
 	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
@@ -1820,39 +1590,37 @@ func (h *Handler) invalidateAndProxyFast(w http.ResponseWriter, r *http.Request)
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.SetMethod(r.Method)
-	req.SetRequestURI(r.URL.String())
-	req.Header.SetHost(r.Host)
-	for k, vals := range r.Header {
-		for _, v := range vals {
-			req.Header.Add(k, v)
-		}
-	}
-	if r.Body != nil {
-		body, _ := io.ReadAll(r.Body)
+	req.Header.SetMethod(string(ctx.Method()))
+	req.SetRequestURI(string(ctx.RequestURI()))
+	req.Header.SetHost(string(ctx.Host()))
+	ctx.Request.Header.VisitAll(func(k, v []byte) {
+		req.Header.AddBytesKV(k, v)
+	})
+	if ctx.Request.Body() != nil {
+		body := ctx.Request.Body()
 		req.SetBodyRaw(body)
 	}
 	tracing.InjectFastHTTP(fetchCtx, req)
 
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
-		w.Header()[header.XCache] = headerMISS
-		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 
 	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
 		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
-			"key", h.buildKey(r), "limit", h.maxResponseBytes)
-		w.Header()[header.XCache] = headerMISS
-		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream response too large", fasthttp.StatusBadGateway)
+			"key", h.buildKey(ctx), "limit", h.maxResponseBytes)
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Error("upstream response too large", fasthttp.StatusBadGateway)
 		return
 	}
 
 	// Write the captured response to the client.
-	dst := w.Header()
+	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
 		ks := string(k)
 		if ks == header.XCache || ks == header.XCacheSource {
@@ -1860,45 +1628,45 @@ func (h *Handler) invalidateAndProxyFast(w http.ResponseWriter, r *http.Request)
 		}
 		dst.Add(ks, string(v))
 	}
-	dst[header.XCache] = headerMISS
-	dst[header.XCacheSource] = sourceOrigin
-	w.WriteHeader(resp.StatusCode())
-	_, _ = w.Write(resp.Body())
+	dst.Set(header.XCache, "MISS")
+	dst.Set(header.XCacheSource, string(api.SourceOrigin))
+	ctx.SetStatusCode(resp.StatusCode())
+	_, _ = ctx.Write(resp.Body())
 
 	// Only invalidate on 2xx/3xx success.
 	statusCode := resp.StatusCode()
 	if statusCode >= 200 && statusCode < 400 {
-		h.invalidateAfterProxyFast(r, resp)
+		h.invalidateAfterProxyFast(ctx, resp)
 	}
 }
 
 // invalidateAfterProxyFast handles cache invalidation and optional
 // POST-response storage after a successful fasthttp origin fetch.
-func (h *Handler) invalidateAfterProxyFast(r *http.Request, resp *fasthttp.Response) {
-	getReq := r.Clone(r.Context())
-	getReq.Method = "GET"
-	key := h.buildKey(getReq)
-	_, _ = h.Purge(r.Context(), key)
+func (h *Handler) invalidateAfterProxyFast(ctx *fasthttp.RequestCtx, resp *fasthttp.Response) {
+	getRI := requestInfoFromCtx(ctx)
+	getRI.Method = "GET"
+	key := BuildKey(getRI, h.policy)
+	_, _ = h.Purge(ctx, key)
 
 	// Evict Content-Location and Location URLs (RFC 9111 §4.4).
 	for _, hdr := range []string{header.ContentLocation, header.Location} {
 		if loc := string(resp.Header.Peek(hdr)); loc != "" {
-			locKey := h.buildLocationKey(r, loc)
+			locKey := h.buildLocationKey(ctx, loc)
 			if !locKey.IsZero() {
-				_, _ = h.Purge(r.Context(), locKey)
+				_, _ = h.Purge(ctx, locKey)
 			}
 		}
 	}
 
 	// RFC 9111 §4.3.1: store POST response if it has explicit
 	// freshness and Content-Location matching the request URI.
-	h.maybeStorePostResponseFast(r, getReq, key, resp)
+	h.maybeStorePostResponseFast(ctx, getRI, key, resp)
 }
 
 // maybeStorePostResponseFast stores a successful POST response under
 // the GET key when it has explicit freshness and a matching
 // Content-Location (RFC 9111 §4.3.1).
-func (h *Handler) maybeStorePostResponseFast(r *http.Request, getReq *http.Request, key api.Key, resp *fasthttp.Response) {
+func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI RequestInfo, key api.Key, resp *fasthttp.Response) {
 	// Check for Set-Cookie — responses with Set-Cookie are not stored.
 	if resp.Header.Peek(header.SetCookie) != nil {
 		return
@@ -1911,118 +1679,31 @@ func (h *Handler) maybeStorePostResponseFast(r *http.Request, getReq *http.Reque
 	// Build fetchResult from the fasthttp response for buildObject.
 	body := make([]byte, len(resp.Body()))
 	copy(body, resp.Body())
-	hdr := make(http.Header, 8)
-	for k, v := range resp.Header.All() {
-		hdr.Add(string(k), string(v))
-	}
+	hdr := header.FromFastHTTP(&resp.Header)
 	res := fetchResult{
 		StatusCode: resp.StatusCode(),
-		Header:     fromHeaderMap(header.FromHTTP(hdr)),
+		Header:     fromHeaderMap(hdr),
 		Body:       body,
 	}
 	now := time.Now()
-	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL,
+	obj := buildObject(key, getRI, res, h.negativeTTL, h.defaultTTL, h.overrideTTL,
 		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
 	if obj == nil {
 		return
 	}
-	h.storeObject(r.Context(), key, obj, getReq, false, 0)
+	h.storeObject(ctx, key, obj, getRI, false, 0)
 }
 
-// invalidateAndProxyLegacy is the original responseRecorder-based path.
-func (h *Handler) invalidateAndProxyLegacy(w http.ResponseWriter, r *http.Request) {
-	// Capture the upstream response first — only invalidate on success
-	// (RFC 9111 §4.4: invalidation MUST NOT happen if the response
-	// indicates a server error).
-	rec := acquireRecorder(h.maxResponseBytes)
-	defer releaseRecorder(rec)
-	h.upstream.ServeHTTP(rec, r)
-
-	if rec.truncated {
-		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
-			"key", h.buildKey(r), "limit", h.maxResponseBytes)
-		w.Header()[header.XCache] = headerMISS
-		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream response too large", fasthttp.StatusBadGateway)
-		return
-	}
-
-	// Write the captured response to the client. Overwrite bouine's
-	// attribution headers AFTER the copy so an origin-supplied
-	// X-Cache-Source cannot spoof the source metric label.
-	dst := w.Header()
-	for k, vals := range rec.header {
-		dst[k] = vals
-	}
-	dst[header.XCache] = headerMISS
-	dst[header.XCacheSource] = sourceOrigin
-	w.WriteHeader(rec.statusCode)
-	_, _ = w.Write(rec.body.Bytes())
-
-	// Only invalidate on 2xx/3xx success.
-	if rec.statusCode >= 200 && rec.statusCode < 400 {
-		getReq := r.Clone(r.Context())
-		getReq.Method = "GET"
-		key := h.buildKey(getReq)
-		_, _ = h.Purge(r.Context(), key)
-
-		// Also evict Content-Location and Location URLs (RFC 9111
-		// §4.4). These are URI references (RFC 9110 §8.7) and may be
-		// absolute, relative, or same-origin bare paths. Use Purge so
-		// any Vary variants stored under those URLs are also deleted.
-		for _, hdr := range []string{header.ContentLocation, header.Location} {
-			if loc := rec.header.Get(hdr); loc != "" {
-				locKey := h.buildLocationKey(r, loc)
-				if !locKey.IsZero() {
-					_, _ = h.Purge(r.Context(), locKey)
-				}
-			}
-		}
-
-		// RFC 9111 §4.3.1: if the POST response has explicit freshness
-		// and a Content-Location matching the request URI, store the
-		// response under the GET key so subsequent GETs can reuse it.
-		h.maybeStorePostResponse(r, getReq, key, rec)
-	}
-}
-
-// maybeStorePostResponse stores a successful POST response under the GET
-// key when it is cacheable, per RFC 9111 §4.3.1.
-func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, key api.Key, rec *responseRecorder) {
-	if r.Method != "POST" || rec.statusCode < 200 || rec.statusCode >= 300 {
-		return
-	}
-	if !IsCacheable(rec.statusCode, header.FromHTTP(r.Header), header.FromHTTP(rec.header)) {
-		return
-	}
-	if !h.allowSetCookie && rec.header.Get(header.SetCookie) != "" {
-		return
-	}
-	if h.maxObjectSize > 0 && int64(rec.body.Len()) > h.maxObjectSize {
-		return
-	}
-	bodyCopy := make([]byte, rec.body.Len())
-	copy(bodyCopy, rec.body.Bytes())
-	res := fetchResult{
-		StatusCode: rec.statusCode,
-		Header:     fromHeaderMap(header.FromHTTP(rec.header.Clone())),
-		Body:       bodyCopy,
-	}
-	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
-	h.storeObject(r.Context(), key, obj, getReq, false, 0)
-	// Forward to owner if this is a non-owner (issue #509).
-	h.forwardToOwnerIfRemote(r.Context(), obj)
-}
-
-func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
+func (h *Handler) buildLocationKey(ctx *fasthttp.RequestCtx, loc string) api.Key {
+	baseURL, _ := url.Parse(string(ctx.RequestURI()))
 	ref, err := url.Parse(loc)
 	if err != nil {
 		return api.Key{}
 	}
-	resolved := r.URL.ResolveReference(ref)
+	resolved := baseURL.ResolveReference(ref)
 	scheme := resolved.Scheme
 	if scheme == "" {
-		if r.TLS != nil {
+		if ctx.IsTLS() {
 			scheme = "https"
 		} else {
 			scheme = "http"
@@ -2030,19 +1711,12 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 	}
 	host := resolved.Host
 	if host == "" {
-		host = r.Host
+		host = string(ctx.Host())
 	}
-	var tlsState *tls.ConnectionState
-	if scheme == "https" {
-		tlsState = &tls.ConnectionState{}
-	}
-	locReq := &http.Request{
-		Method: "GET",
-		URL:    resolved,
-		Host:   host,
-		TLS:    tlsState,
-	}
-	return h.buildKey(locReq)
+	ri := requestInfoFromURL("GET", resolved.String())
+	ri.Host = host
+	ri.TLS = scheme == "https"
+	return BuildKey(ri, h.policy)
 }
 
 // storeObject stores obj under key. When refresh-before-expiry
@@ -2063,7 +1737,7 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 // staleHits is the per-window hit count from the store's WindowHits
 // method, read before the refresh store. For non-refresh stores
 // (isRefresh=false), staleHits is 0 and unused.
-func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, r *http.Request, isRefresh bool, staleHits int64) {
+func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object, ri RequestInfo, isRefresh bool, staleHits int64) {
 	// In strong cluster mode, only the owner stores. A non-owner that
 	// fetches from origin (after a peer-fetch miss) serves the response
 	// to the client but does not cache it locally — the object is
@@ -2100,7 +1774,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		if obj.Header.Len() > 0 {
 			varyHeader = obj.Header.Get(header.Vary)
 		}
-		h.refreshRegistry.Register(key, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), varyHeader, h.refreshPersistCycles)
+		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 	}
 }
@@ -2118,25 +1792,22 @@ func (h *Handler) shouldRefresh(staleHits int64, obj *api.Object) bool {
 	return true
 }
 
-func (h *Handler) doFetch(r *http.Request) (res fetchResult) {
+func (h *Handler) doFetch(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Fast path: use fasthttp.HostClient when available, bypassing
-	// responseRecorder + httputil.ReverseProxy. Eliminates:
-	// - http.Header map allocation (2 allocs)
+	// struct{} + httputil.ReverseProxy. Eliminates:
+	// - header.Map map allocation (2 allocs)
 	// - bytes.Buffer intermediate copy (1 alloc)
 	// - make+copy body clone (1 alloc)
 	// - context.WithValue for target selection (1 alloc)
-	if h.fastClient != nil {
-		return h.doFetchFast(r)
-	}
-	return h.doFetchLegacy(r)
+	return h.doFetchFast(ctx)
 }
 
 // doFetchFast performs an origin fetch using the fasthttp client,
-// bypassing responseRecorder and httputil.ReverseProxy. The response
-// is captured directly in a pooled *fasthttp.Response — no http.Header
+// bypassing struct{} and httputil.ReverseProxy. The response
+// is captured directly in a pooled *fasthttp.Response — no header.Map
 // map, no bytes.Buffer, no make+copy body clone.
-func (h *Handler) doFetchFast(r *http.Request) (res fetchResult) {
-	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
+func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
+	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
 
 	select {
@@ -2157,15 +1828,13 @@ func (h *Handler) doFetchFast(r *http.Request) (res fetchResult) {
 	// The caller (collapsedFetch) releases it after all singleflight
 	// waiters have finished.
 
-	// Populate the request from *http.Request.
-	req.Header.SetMethod(r.Method)
-	req.SetRequestURI(r.URL.String())
-	req.Header.SetHost(r.Host)
-	for k, vals := range r.Header {
-		for _, v := range vals {
-			req.Header.Add(k, v)
-		}
-	}
+	// Populate the request from *fasthttp.RequestCtx.
+	req.Header.SetMethod(string(ctx.Method()))
+	req.SetRequestURI(string(ctx.RequestURI()))
+	req.Header.SetHost(string(ctx.Host()))
+	ctx.Request.Header.VisitAll(func(k, v []byte) {
+		req.Header.AddBytesKV(k, v)
+	})
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 
@@ -2203,116 +1872,12 @@ func (h *Handler) doFetchFast(r *http.Request) (res fetchResult) {
 	}
 }
 
-func (h *Handler) doFetchLegacy(r *http.Request) (res fetchResult) {
-	// L5 span: upstream origin pool layer.
-	ctx, span := tracing.StartSpan(r.Context(), "bouine.origin")
-	defer span.End()
-
-	// Recover http.ErrAbortHandler from httputil.ReverseProxy (fires when
-	// the origin connection drops mid-stream or the client disconnects).
-	// singleflight wraps all panics in *panicError and re-panics, which
-	// breaks http.Server's built-in ErrAbortHandler recovery. Convert it
-	// to a normal error so singleflight sees a clean return. Real panics
-	// (nil dereference, etc.) are re-panicked so bugs remain visible.
-	// The partial response captured by the recorder (if any) is
-	// intentionally discarded — serving a half-fetched response would
-	// corrupt the cache.
-	defer func() {
-		if rv := recover(); rv != nil {
-			if rv == http.ErrAbortHandler {
-				err := fmt.Errorf("upstream connection aborted: %w", http.ErrAbortHandler)
-				tracing.RecordError(span, err)
-				res = fetchResult{Err: err}
-				return
-			}
-			//nolint:forbidigo // re-panic is intentional: real bugs must crash
-			panic(rv)
-		}
-	}()
-
-	select {
-	case h.fetchSem <- struct{}{}:
-		defer func() { <-h.fetchSem }()
-	case <-ctx.Done():
-		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", ctx.Err())}
-	}
-	// Bound the total origin fetch time. This replaces the blanket
-	// WriteTimeout on the data plane with a per-fetch deadline that
-	// covers both headers and body without affecting cache hits. The
-	// timeout starts after the semaphore acquire so queueing time does
-	// not eat into the origin fetch budget.
-	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
-	defer cancel()
-	// Propagate W3C TraceContext into the upstream request so the origin
-	// can participate in the distributed trace.
-	outReq := r.WithContext(fetchCtx)
-	tracing.InjectHTTP(fetchCtx, outReq)
-	rec := acquireRecorder(h.maxResponseBytes)
-	defer releaseRecorder(rec)
-	h.upstream.ServeHTTP(rec, outReq)
-
-	// Check the fetch context after ServeHTTP returns. On timeout
-	// (DeadlineExceeded), discard whatever the recorder captured — the
-	// fetch exceeded its budget, and the recorder may contain an empty
-	// response or a synthetic 502 from the ReverseProxy's ErrorHandler.
-	// On client disconnect (Canceled), discard only if the recorder is
-	// empty (statusCode == 0). If the origin returned a complete response
-	// before the cancellation propagated, keep it — the next client
-	// should benefit from the cached object.
-	if err := fetchCtx.Err(); err != nil {
-		if err == context.DeadlineExceeded || rec.statusCode == 0 {
-			tracing.RecordError(span, err)
-			return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
-		}
-	}
-
-	if rec.truncated {
-		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
-	}
-
-	// Transfer ownership of the recorder's header map to the fetchResult,
-	// then give the recorder a fresh header map before it is returned to
-	// the pool. This eliminates the header.Clone() that the previous
-	// defensive copy required (Clone allocates 1 map + N value slices).
-	// Savings scale with response header count; measured on a 6-header
-	// benchmark: 1 full-path alloc saved.
-	//
-	// The body is copied (make+copy) rather than transferred because
-	// bytes.Buffer doubles its backing array, so the buffer's cap can be
-	// up to 2x the content length. Transferring the slice directly (even
-	// with slices.Clip) would retain the oversized backing array for the
-	// lifetime of the cached object — up to 2x memory waste on large
-	// responses. The make+copy allocates exactly len(body) bytes.
-	//
-	// The body buffer itself is NOT replaced — the pool reuses its
-	// capacity across fetches. acquireRecorder calls rec.body.Reset()
-	// which preserves cap, so subsequent upstream writes reuse the
-	// existing backing array without re-growing. Replacing the buffer
-	// here would force a new backing-array allocation on every fetch,
-	// defeating the pool.
-	//
-	// Safety: all singleflight waiters read res.Header and res.Body without
-	// mutating. The recorder gets a fresh header map so the pool reuse is
-	// safe. The body buffer is Reset()ed on next acquire, clearing stale
-	// content while preserving capacity.
-	body := make([]byte, rec.body.Len())
-	copy(body, rec.body.Bytes())
-	hdr := rec.header
-	rec.header = make(http.Header, 8)
-
-	return fetchResult{
-		StatusCode: rec.statusCode,
-		Header:     fromHeaderMap(header.FromHTTP(hdr)),
-		Body:       body,
-	}
-}
-
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
+func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
-	ccHeader := mergeHeaderValues(res.Header.ToMap(), header.CacheControl)
+	ccHeader := res.Header.Get(header.CacheControl)
 	var respCC Directives
 	if cdnCC, hasCDN := cdnCacheControl(res.Header.ToMap()); hasCDN {
 		respCC = cdnCC
@@ -2362,8 +1927,8 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).
-	obj.Header.Set(header.XBouinePath, r.URL.Path)
-	obj.Header.Set(header.XBouineHost, r.Host)
+	obj.Header.Set(header.XBouinePath, ri.Path)
+	obj.Header.Set(header.XBouineHost, ri.Host)
 	// Set-Cookie is always stripped from cached objects: joining multiple
 	// Set-Cookie values with ", " is non-conformant per RFC 9110 §5.2,
 	// and serving stale cookies to a different client is a security risk.
@@ -2394,7 +1959,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), header.FromHTTP(r.Header), policy)
+	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), ri.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(res.Header.ToMap())
 
@@ -2508,51 +2073,3 @@ func isInvalidating(method string) bool {
 		method != "HEAD" &&
 		method != "OPTIONS"
 }
-
-// responseRecorder captures the upstream response in memory so we can
-// both serve it to the client and store it in the cache. For bodies
-// larger than 64 KiB, streaming (phase 5+) will replace this.
-type responseRecorder struct {
-	header     http.Header
-	body       *bytes.Buffer
-	statusCode int
-	maxBytes   int64
-	truncated  bool
-}
-
-func (r *responseRecorder) Header() http.Header { return r.header }
-
-func (r *responseRecorder) WriteHeader(code int) {
-	r.statusCode = code
-	// Pre-size the buffer when Content-Length is known, avoiding
-	// bytes.Buffer doubling over-allocation that causes transient heap
-	// spikes under concurrent miss traffic (issue #141). Only grows
-	// if the pooled buffer is too small.
-	if r.maxBytes > 0 {
-		if cl := r.header.Get("Content-Length"); cl != "" {
-			if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n > 0 && n <= r.maxBytes {
-				if int64(r.body.Cap()) < n {
-					r.body.Grow(int(n))
-				}
-			}
-		}
-	}
-}
-
-func (r *responseRecorder) Write(b []byte) (int, error) {
-	if r.statusCode == 0 {
-		r.statusCode = 200
-	}
-	if r.maxBytes > 0 && int64(r.body.Len())+int64(len(b)) > r.maxBytes {
-		r.truncated = true
-		return 0, fmt.Errorf("response body exceeds %d bytes", r.maxBytes)
-	}
-	return r.body.Write(b)
-}
-
-// Flush implements http.Flusher for streaming compatibility.
-func (r *responseRecorder) Flush() {}
-
-// ensure interface compliance.
-var _ http.ResponseWriter = (*responseRecorder)(nil)
-var _ http.Flusher = (*responseRecorder)(nil)

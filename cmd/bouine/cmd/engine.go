@@ -35,6 +35,8 @@ import (
 	webdash "github.com/bouine-cache/bouine/web/dashboard"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/valyala/fasthttp"
 )
 
 type engine struct {
@@ -458,7 +460,7 @@ func (e *engine) initCloudflare(dpMetrics *observability.DataPlaneMetrics, close
 }
 
 // buildDataPlane assembles the data-plane handler chain.
-func (e *engine) buildDataPlane(rs *runState) http.Handler {
+func (e *engine) buildDataPlane(rs *runState) fasthttp.RequestHandler {
 	return e.buildHandler(rs)
 }
 
@@ -860,7 +862,7 @@ func insightsHeaderAudit(rs *runState) func() map[string]observability.HeaderAud
 	}
 }
 
-func (e *engine) startListeners(g *supervised.Group, handler http.Handler, rs *runState) {
+func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHandler, rs *runState) {
 	tcpFastOpen := boolDefault(e.cfg.Listen.TCPFastOpen, true)
 	tcpDeferAccept := boolDefault(e.cfg.Listen.TCPDeferAccept, true)
 	reusePort := boolDefault(e.cfg.Listen.ReusePort, platform.ReusePortSupported)

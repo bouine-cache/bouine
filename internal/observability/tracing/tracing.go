@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -54,6 +55,44 @@ func HTTPMiddleware(spanName string, next http.Handler) http.Handler {
 		defer span.End()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// FastHTTPMiddleware wraps a fasthttp.RequestHandler with an OTel span
+// named spanName. The span inherits trace context from the incoming
+// request headers via W3C TraceContext (fasthttpHeaderCarrier).
+//
+// Not wired into the handler chain yet — the cache handler still uses
+// http.Handler via fasthttpadaptor, and reading ctx.Response after the
+// adaptor returns causes a race. This will be wired when the cache
+// handler is migrated to fasthttp.RequestHandler.
+func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	t := Tracer()
+	return func(ctx *fasthttp.RequestCtx) {
+		scheme := "http"
+		if ctx.IsTLS() {
+			scheme = "https"
+		}
+		// Use context.Background() as the extraction base — NOT ctx,
+		// which is *fasthttp.RequestCtx. The RequestCtx implements
+		// context.Context but gets reset by fasthttp after the handler
+		// returns. If it's in the span context's parent chain, the
+		// ReverseProxy's http.Transport goroutine (which outlives the
+		// handler) will access freed RequestCtx memory via
+		// context.parentCancelCtx.
+		extractedCtx := ExtractFastHTTP(context.Background(), &ctx.Request.Header)
+		spanCtx, span := t.Start(extractedCtx, spanName,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("http.method", string(ctx.Method())),
+				attribute.String("http.scheme", scheme),
+				attribute.String("http.host", string(ctx.Host())),
+				attribute.String("http.path", string(ctx.Path())),
+			),
+		)
+		defer span.End()
+		ctx.SetUserValue("otel.ctx", spanCtx)
+		next(ctx)
+	}
 }
 
 // StartSpan is a thin helper that starts a child span in ctx and

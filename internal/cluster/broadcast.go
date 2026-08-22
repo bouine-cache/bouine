@@ -1,20 +1,21 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // broadcastTimeout is the per-call timeout for HTTP fan-out. Enforced
@@ -39,7 +40,7 @@ func countPeers(members []api.PeerInfo) int {
 type Broadcaster struct {
 	cluster *Cluster
 	fetcher *PeerFetcher
-	client  *http.Client // shared across all postBinary calls for connection reuse
+	client  *transport.Client // shared across all postBinary calls for connection reuse
 	seq     atomic.Uint64
 	logger  observability.Logger
 	token   string
@@ -55,16 +56,23 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 	if len(token) > 0 {
 		tok = token[0]
 	}
-	// Share the fetcher's transport when available so broadcast HTTP
+	// Share the fetcher's client when available so broadcast HTTP
 	// fan-out reuses the same connection pool. When no fetcher exists
-	// (eventual-only mode, tests), create a standalone tuned transport.
-	var client *http.Client
+	// (eventual-only mode, tests), create a standalone tuned client.
+	var client *transport.Client
 	if fetcher != nil && fetcher.client != nil {
-		// Reuse the transport but not the Timeout — broadcast needs its
-		// own per-call timeout via context, not a global client timeout.
-		client = &http.Client{Transport: fetcher.client.Transport}
+		client = fetcher.client
 	} else {
-		client = &http.Client{Transport: newClusterTransport(nil)}
+		fc := &fasthttp.Client{
+			MaxConnsPerHost:     256,
+			MaxIdleConnDuration: 90 * time.Second,
+			ReadTimeout:         broadcastTimeout,
+			WriteTimeout:        5 * time.Minute,
+			Dial: func(addr string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).Dial("tcp", addr)
+			},
+		}
+		client = transport.NewClient(fc)
 	}
 	return &Broadcaster{
 		cluster: c,
@@ -281,14 +289,16 @@ func (b *Broadcaster) sendRefresh(ctx context.Context, peer api.PeerInfo, evt ap
 	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/refresh", body)
 }
 
-// broadcastFailureReason maps a broadcast HTTP error to a short label
+// broadcastFailureReason maps a broadcast error to a short label
 // for use as a Prometheus dimension.
 func broadcastFailureReason(err error) string {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		if urlErr.Timeout() {
-			return "timeout"
-		}
+	// fasthttp errors are plain errors (not *url.Error), so check
+	// for common patterns in the error message.
+	errStr := err.Error()
+	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") {
+		return "timeout"
+	}
+	if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "dial") || strings.Contains(errStr, "no such host") {
 		return "dial"
 	}
 	return "5xx"
@@ -302,24 +312,26 @@ func (b *Broadcaster) postBinary(ctx context.Context, addr, path string, body []
 	if b.fetcher != nil && b.fetcher.useTLS {
 		scheme = "https"
 	}
-	url := scheme + "://" + addr + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url,
-		bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("broadcast request: %w", err)
-	}
+	uri := scheme + "://" + addr + path
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.SetRequestURI(uri)
+	req.SetBodyRaw(body)
 	req.Header.Set(header.ContentType, "application/octet-stream")
 	if b.token != "" {
 		req.Header.Set(header.Authorization, "Bearer "+b.token)
 	}
 
-	resp, err := b.client.Do(req)
-	if err != nil {
+	if err := b.client.Do(ctx, req, resp); err != nil {
 		return fmt.Errorf("broadcast %s%s: %w", addr, path, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("broadcast %s%s: status %d", addr, path, resp.StatusCode)
+	if resp.StatusCode() >= 500 {
+		return fmt.Errorf("broadcast %s%s: status %d", addr, path, resp.StatusCode())
 	}
 	return nil
 }

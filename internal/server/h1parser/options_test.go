@@ -3,7 +3,6 @@ package h1parser
 import (
 	"io"
 	"net"
-	"net/http"
 	"testing"
 	"time"
 
@@ -11,38 +10,35 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
 )
+
+func noopHandler(_ *fasthttp.RequestCtx) {}
 
 func TestWithIdleReadTimeout(t *testing.T) {
 	t.Parallel()
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), WithIdleReadTimeout(5*time.Second))
+	p := New(nil, noopHandler, WithIdleReadTimeout(5*time.Second))
 	assert.Equal(t, 5*time.Second, p.idleRead)
 }
 
 func TestWithWriteTimeout(t *testing.T) {
 	t.Parallel()
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), WithWriteTimeout(30*time.Second))
+	p := New(nil, noopHandler, WithWriteTimeout(30*time.Second))
 	assert.Equal(t, 30*time.Second, p.writeTime)
 }
 
 func TestWithScheme(t *testing.T) {
 	t.Parallel()
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), WithScheme("https"))
+	p := New(nil, noopHandler, WithScheme("https"))
 	assert.Equal(t, "https", p.scheme)
-}
-
-func TestWithFallbackServer(t *testing.T) {
-	t.Parallel()
-	srv := &http.Server{}
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), WithFallbackServer(srv))
-	assert.Equal(t, srv, p.fallbackServer)
 }
 
 func TestWithMetricsHook(t *testing.T) {
 	t.Parallel()
 	var called bool
 	fn := func(_, _, _, _ string, _, _ int, _ time.Duration) { called = true }
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), WithMetricsHook(fn))
+	p := New(nil, noopHandler, WithMetricsHook(fn))
 	require.NotNil(t, p.metricsHook)
 	p.metricsHook("GET", "/", "HIT", "hot", 200, 100, 5*time.Millisecond)
 	assert.True(t, called)
@@ -50,7 +46,7 @@ func TestWithMetricsHook(t *testing.T) {
 
 func TestParser_Serve_ClosedConn(t *testing.T) {
 	t.Parallel()
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	p := New(nil, noopHandler)
 	_, server := net.Pipe()
 	_ = server.Close()
 	err := p.Serve(server)
@@ -59,9 +55,9 @@ func TestParser_Serve_ClosedConn(t *testing.T) {
 
 func TestParser_Serve_H1Request(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "hello")
-	})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("hello")
+	}
 	p := New(nil, handler)
 
 	client, server := net.Pipe()
@@ -76,29 +72,11 @@ func TestParser_Serve_H1Request(t *testing.T) {
 	_ = p.Serve(server)
 }
 
-func TestParser_Serve_H2CPreface(t *testing.T) {
-	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
-
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-
-	go func() {
-		_, _ = client.Write([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
-		time.Sleep(50 * time.Millisecond)
-		_ = server.Close()
-	}()
-
-	err := p.Serve(server)
-	_ = err
-}
-
 func TestParser_Serve_WithFastPathMiss(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "hello")
-	})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("hello")
+	}
 	fp := &mockFastPathHandler{}
 	p := New(fp, handler)
 
@@ -122,7 +100,6 @@ func (m *mockFastPathHandler) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastP
 
 func (m *mockFastPathHandler) Release(_ *api.FastPathResponse) {}
 
-// mockFastPathHit returns a hit with a simple response.
 type mockFastPathHit struct{}
 
 func (m *mockFastPathHit) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
@@ -141,9 +118,8 @@ func (m *mockFastPathHit) Release(_ *api.FastPathResponse) {}
 
 func TestParser_Serve_FastPathHit(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	fp := &mockFastPathHit{}
-	p := New(fp, handler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
+	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -159,20 +135,10 @@ func TestParser_Serve_FastPathHit(t *testing.T) {
 
 func TestParser_Serve_NilFallback(t *testing.T) {
 	t.Parallel()
-	p := New(nil, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	p := New(nil, noopHandler)
 	_, server := net.Pipe()
 	_ = server.Close()
 	_ = p.Serve(server)
-}
-
-func TestSingleConnListener_Addr(t *testing.T) {
-	t.Parallel()
-	_, server := net.Pipe()
-	defer func() { _ = server.Close() }()
-	cn := newCloseNotifyConn(server)
-	cl := &singleConnListener{conn: cn, ready: cn.done}
-	addr := cl.Addr()
-	require.NotNil(t, addr)
 }
 
 func TestBytesToString(t *testing.T) {
@@ -191,8 +157,7 @@ func TestBytesToString_Empty(t *testing.T) {
 
 func TestParser_Serve_MalformedRequest(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
+	p := New(nil, noopHandler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -208,16 +173,15 @@ func TestParser_Serve_MalformedRequest(t *testing.T) {
 
 func TestParser_Serve_LargeHeaders(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("ok")
+	}
 	p := New(nil, handler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 
 	go func() {
-		// Send a request with many headers to exercise appendHeader.
 		req := "GET / HTTP/1.1\r\nHost: localhost\r\n"
 		for i := 0; i < 20; i++ {
 			req += "X-Custom-" + string(rune('A'+i)) + ": value\r\n"
@@ -233,9 +197,8 @@ func TestParser_Serve_LargeHeaders(t *testing.T) {
 
 func TestParser_Serve_KeepAliveAfterHit(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	fp := &mockFastPathHit{}
-	p := New(fp, handler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
+	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -251,9 +214,8 @@ func TestParser_Serve_KeepAliveAfterHit(t *testing.T) {
 
 func TestParser_Serve_HitThenCloseConn(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	fp := &mockFastPathHit{}
-	p := New(fp, handler)
+	p := New(fp, noopHandler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -269,8 +231,7 @@ func TestParser_Serve_HitThenCloseConn(t *testing.T) {
 
 func TestParser_Serve_SetReadDeadlineError(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
+	p := New(nil, noopHandler)
 
 	_, server := net.Pipe()
 	_ = server.Close()
@@ -280,14 +241,12 @@ func TestParser_Serve_SetReadDeadlineError(t *testing.T) {
 func TestParser_Serve_SmugglingDetection(t *testing.T) {
 	t.Parallel()
 	var hookCalled bool
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler, WithSmugglingHook(func() { hookCalled = true }))
+	p := New(nil, noopHandler, WithSmugglingHook(func() { hookCalled = true }))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 
 	go func() {
-		// CL+TE conflict (smuggling attempt).
 		_, _ = client.Write([]byte("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"))
 		time.Sleep(50 * time.Millisecond)
 		_ = server.Close()
@@ -299,9 +258,9 @@ func TestParser_Serve_SmugglingDetection(t *testing.T) {
 
 func TestParser_Serve_PostWithBody(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "ok")
-	})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("ok")
+	}
 	p := New(nil, handler)
 
 	client, server := net.Pipe()
@@ -318,14 +277,12 @@ func TestParser_Serve_PostWithBody(t *testing.T) {
 
 func TestParser_Serve_OversizedHeaders(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
+	p := New(nil, noopHandler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 
 	go func() {
-		// Send headers that exceed readBufferSize (16KB) to trigger fallthrough.
 		req := "GET / HTTP/1.1\r\nHost: localhost\r\nX-Big: " + string(make([]byte, 20000)) + "\r\n\r\n"
 		_, _ = client.Write([]byte(req))
 		time.Sleep(50 * time.Millisecond)
@@ -337,8 +294,7 @@ func TestParser_Serve_OversizedHeaders(t *testing.T) {
 
 func TestParser_Serve_MalformedRequestLine(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
+	p := New(nil, noopHandler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -354,8 +310,7 @@ func TestParser_Serve_MalformedRequestLine(t *testing.T) {
 
 func TestParser_Serve_EOFWithPartialData(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
+	p := New(nil, noopHandler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -370,8 +325,7 @@ func TestParser_Serve_EOFWithPartialData(t *testing.T) {
 
 func TestParser_Serve_EmptyConn(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	p := New(nil, handler)
+	p := New(nil, noopHandler)
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -385,9 +339,9 @@ func TestParser_Serve_EmptyConn(t *testing.T) {
 
 func TestParser_Serve_HEADRequest(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, "hello")
-	})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("hello")
+	}
 	p := New(nil, handler)
 
 	client, server := net.Pipe()
@@ -432,13 +386,11 @@ func TestParseRequestLine_Errors(t *testing.T) {
 
 func TestParser_Serve_HitWriteError(t *testing.T) {
 	t.Parallel()
-	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	fp := &mockFastPathHit{}
-	p := New(fp, handler)
+	p := New(fp, noopHandler)
 
 	_, server := net.Pipe()
 	_ = server.Close()
-	// serveHit should fail because the conn is closed.
 	_ = p.Serve(server)
 }
 
@@ -462,3 +414,5 @@ func TestAppendHeader_MaxHeaders(t *testing.T) {
 	}
 	assert.Equal(t, api.MaxRawHeaders-1, req.NHeaders)
 }
+
+var _ = io.ReadAll

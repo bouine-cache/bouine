@@ -19,6 +19,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/valyala/fasthttp"
 )
 
 // TestShutdown_OrderedDrainBeforeStoreClose verifies the fix for issue #76:
@@ -99,11 +101,11 @@ routes:
 func TestListenerShutdown_DrainsInflight(t *testing.T) {
 	var inflightDone atomic.Bool
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := func(ctx *fasthttp.RequestCtx) {
 		time.Sleep(200 * time.Millisecond)
 		inflightDone.Store(true)
-		_, _ = io.WriteString(w, "ok")
-	})
+		ctx.SetBodyString("ok")
+	}
 
 	ln := server.NewHTTP(server.ListenerConfig{
 		Addr:    "127.0.0.1:0",
@@ -164,11 +166,11 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 	var requestCompletedAt atomic.Int64
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := func(ctx *fasthttp.RequestCtx) {
 		time.Sleep(200 * time.Millisecond)
 		requestCompletedAt.Store(time.Now().UnixNano())
-		_, _ = io.WriteString(w, "ok")
-	})
+		ctx.SetBodyString("ok")
+	}
 
 	ln := server.NewHTTP(server.ListenerConfig{
 		Addr:    "127.0.0.1:0",

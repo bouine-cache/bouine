@@ -12,13 +12,16 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func newMaxResponseBytesHandler(t *testing.T, upstream http.Handler, maxBytes int64) *Handler {
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
-		Upstream:         upstream,
+		Upstream:         wrapUpstream(upstream),
+		FastClient:       &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
 		Store:            store,
 		MaxResponseBytes: maxBytes,
 	})
@@ -36,15 +39,15 @@ func TestMaxResponseBytes_OverLimitReturns502(t *testing.T) {
 	})
 	h := newMaxResponseBytesHandler(t, upstream, 1024)
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/too-big", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/too-big", nil))
 
-	require.Equal(t, http.StatusBadGateway, rr.Code)
+	require.Equal(t, fasthttp.StatusBadGateway, rr.Code)
 	assert.Equal(t, 1, calls)
 
 	// Second request should also miss (nothing cached).
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/too-big", nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/too-big", nil))
 	assert.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
 	assert.Equal(t, 2, calls)
 }
@@ -61,15 +64,15 @@ func TestMaxResponseBytes_UnderLimitSucceeds(t *testing.T) {
 	})
 	h := newMaxResponseBytesHandler(t, upstream, 1024)
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/ok", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/ok", nil))
 	if rr.Code != 200 || rr.Body.String() != body {
 		t.Fatalf("response under limit should pass through: status=%d body=%q", rr.Code, rr.Body.String())
 	}
 
 	// Should be cached.
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/ok", nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/ok", nil))
 	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
 	assert.Equal(t, 1, calls)
 }
@@ -84,8 +87,8 @@ func TestMaxResponseBytes_ExactBoundarySucceeds(t *testing.T) {
 	})
 	h := newMaxResponseBytesHandler(t, upstream, 512)
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/exact", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/exact", nil))
 	if rr.Code != 200 || rr.Body.String() != body {
 		t.Fatalf("response at exact boundary should pass through: status=%d body=%q", rr.Code, rr.Body.String())
 	}
@@ -95,7 +98,7 @@ func TestMaxResponseBytes_DefaultAppliedWhenZero(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
-		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(header.CacheControl, "max-age=60")
 			w.WriteHeader(200)
 			_, _ = io.WriteString(w, "small")
@@ -119,8 +122,8 @@ func TestMaxResponseBytes_InvalidateAndProxyOverLimit(t *testing.T) {
 	})
 	h := newMaxResponseBytesHandler(t, upstream, 1024)
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/post", strings.NewReader("")))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("POST", "http://example.com/post", strings.NewReader("")))
 
-	require.Equal(t, http.StatusBadGateway, rr.Code)
+	require.Equal(t, fasthttp.StatusBadGateway, rr.Code)
 }

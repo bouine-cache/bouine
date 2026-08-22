@@ -21,7 +21,8 @@ func newOverrideHandler(t *testing.T, upstream http.Handler, override time.Durat
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
-		Upstream:    upstream,
+		Upstream:    wrapUpstream(upstream),
+		FastClient:  &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=30"}}},
 		Store:       store,
 		OverrideTTL: override,
 	})
@@ -42,8 +43,8 @@ func TestOverrideTTL_WinsOverMaxAge(t *testing.T) {
 	h := newOverrideHandler(t, upstream, routeOverride)
 
 	req := httptest.NewRequest("GET", "http://example.com/r", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 	require.Equal(t, 200, rr.Code)
 
 	// Retrieve the stored object and assert TTL = override (±jitter; jitter=0 here).
@@ -70,15 +71,15 @@ func TestOverrideTTL_ForwardsOriginalCacheControlHeader(t *testing.T) {
 	h := newOverrideHandler(t, upstream, 90*time.Minute)
 
 	req := httptest.NewRequest("GET", "http://example.com/fwd", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	got := rr.Header().Get(header.CacheControl)
 	assert.Equal(t, upstreamCC, got)
 
 	// Second request hits cache — header is served from the stored object.
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/fwd", nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/fwd", nil))
 	assert.Equal(t, upstreamCC, rr2.Header().Get(header.CacheControl))
 }
 
@@ -96,8 +97,8 @@ func TestOverrideTTL_ZeroDisabled(t *testing.T) {
 	h := newOverrideHandler(t, upstream, 0) // override disabled
 
 	req := httptest.NewRequest("GET", "http://example.com/nodis", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, err := h.store.Get(req.Context(), key)
@@ -123,12 +124,13 @@ func TestOverrideTTL_HitBeforeExpiry(t *testing.T) {
 	h := newOverrideHandler(t, upstream, 24*time.Hour)
 
 	url := "http://example.com/longttl"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	// Second request: must be a HIT (origin not called again), even though
 	// upstream's max-age=1 has logically not elapsed yet (test runs < 1 s).
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+	rr = newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
 	assert.Equal(t, 1, calls)
 }
@@ -148,7 +150,8 @@ func TestOverrideTTL_NoStoreNotCached(t *testing.T) {
 
 	url := "http://example.com/nostore"
 	for i := 0; i < 3; i++ {
-		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+		rr := newRR()
+		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 	}
 	assert.Equal(t, 3, calls)
 }
@@ -165,7 +168,7 @@ func TestOverrideTTL_ShortensUpstreamTTL(t *testing.T) {
 	h := newOverrideHandler(t, upstream, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "http://example.com/short", nil)
-	h.ServeHTTP(httptest.NewRecorder(), req)
+	h.ServeHTTPCompat(httptest.NewRecorder(), req)
 
 	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, _ := h.store.Get(req.Context(), key)
@@ -186,14 +189,15 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 		_, _ = io.WriteString(w, "body")
 	})
 	h := NewHandler(HandlerConfig{
-		Upstream:      upstream,
+		Upstream:      wrapUpstream(upstream),
+		FastClient:    &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
 		Store:         store,
 		OverrideTTL:   time.Hour,
 		JitterPercent: 10,
 	})
 
 	req := httptest.NewRequest("GET", "http://example.com/jitter", nil)
-	h.ServeHTTP(httptest.NewRecorder(), req)
+	h.ServeHTTPCompat(httptest.NewRecorder(), req)
 
 	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, _ := h.store.Get(req.Context(), key)
@@ -237,12 +241,13 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	const override = 90 * time.Minute
-	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store, OverrideTTL: override})
+	h := NewHandler(HandlerConfig{Upstream: wrapUpstream(upstream), Store: store, OverrideTTL: override})
 
 	url := "http://example.com/reval"
 
 	// Phase 0: initial MISS — store with override TTL.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	// Manually set StoredAt far in the past so Evaluate sees the object as
 	// expired (past override TTL) and triggers revalidation.
@@ -255,7 +260,8 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 
 	// Phase 1: 304 revalidation.
 	phase = 1
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	rr = newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	// After the 304, the object must still carry the override TTL.
 	after, _, _ := h.store.Get(context.Background(), key)

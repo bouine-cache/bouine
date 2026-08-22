@@ -12,7 +12,7 @@ import (
 )
 
 func BenchmarkGate_Handler_CacheHit_ReusableWriter(b *testing.B) {
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)
 		w.WriteHeader(200)
@@ -24,8 +24,8 @@ func BenchmarkGate_Handler_CacheHit_ReusableWriter(b *testing.B) {
 	})
 	h := NewHandler(HandlerConfig{Upstream: upstream, Store: store})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://bench.local/hit", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://bench.local/hit", nil))
 	if rr.Header().Get(header.XCache) != "MISS" {
 		b.Fatal("warmup should be MISS")
 	}
@@ -37,7 +37,8 @@ func BenchmarkGate_Handler_CacheHit_ReusableWriter(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		w.Reset()
-		h.ServeHTTP(w, req)
+		rr := newRR()
+		h.ServeHTTPCompat(rr, req)
 	}
 }
 
@@ -69,7 +70,7 @@ func (w *benchResponseWriter) Reset() {
 }
 
 func BenchmarkHandler_CacheMiss(b *testing.B) {
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "no-store")
 		w.WriteHeader(200)
 		_, _ = w.Write(make([]byte, 1024))
@@ -84,8 +85,8 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
+		rr := newRR()
+		h.ServeHTTPCompat(rr, req)
 	}
 }
 
@@ -97,8 +98,9 @@ func BenchmarkHandler_CacheMiss(b *testing.B) {
 //
 // The upstream returns 6 headers — a realistic subset that exercises
 // item 1.1's ownership transfer (savings scale with header count).
+
 func BenchmarkGate_Handler_CacheMiss_Cacheable(b *testing.B) {
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)
 		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
@@ -126,7 +128,8 @@ func BenchmarkGate_Handler_CacheMiss_Cacheable(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		w.Reset()
 		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
-		h.ServeHTTP(w, req)
+		rr := newRR()
+		h.ServeHTTPCompat(rr, req)
 	}
 }
 
@@ -135,8 +138,9 @@ func BenchmarkGate_Handler_CacheMiss_Cacheable(b *testing.B) {
 // writeAndMaybeStore. When the upstream sets Vary, the handler stores the
 // response under both a variant key and the primary key — the shallow copy
 // avoids a second full buildObject call (~5 allocs).
+
 func BenchmarkHandler_CacheMiss_Vary(b *testing.B) {
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=3600")
 		w.Header().Set(header.ETag, `"bench"`)
 		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
@@ -162,7 +166,8 @@ func BenchmarkHandler_CacheMiss_Vary(b *testing.B) {
 		w.Reset()
 		req := httptest.NewRequest("GET", base+strconv.Itoa(i), nil)
 		req.Header.Set("Accept-Encoding", "gzip")
-		h.ServeHTTP(w, req)
+		rr := newRR()
+		h.ServeHTTPCompat(rr, req)
 	}
 }
 

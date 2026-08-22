@@ -3,7 +3,6 @@ package cloudflare
 import (
 	"context"
 	"errors"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +10,8 @@ import (
 	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/cache"
 	"github.com/cloudflare/cloudflare-go/v4/option"
+
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // TokenPool manages a pool of Cloudflare API tokens for rate limit
@@ -166,8 +167,11 @@ func (m *multiTokenPurger) Purge(
 
 	// Check if this was a rate limit error — if so, mark the token.
 	var apiErr *cloudflare.Error
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests {
-		retryAfter := parseRetryAfter(apiErr.Response)
+	if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
+		var retryAfter time.Duration
+		if apiErr.Response != nil {
+			retryAfter = parseRetryAfterValue(apiErr.Response.Header.Get(header.RetryAfter))
+		}
 		m.pool.MarkRateLimited(tokenIdx, retryAfter)
 	}
 

@@ -1,13 +1,11 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,12 +29,10 @@ func TestAdversarial_TokenEmptyHeader(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_TokenWrongScheme verifies that a token sent with the
@@ -48,13 +44,11 @@ func TestAdversarial_TokenWrongScheme(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Basic secret")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	ctx.Request.Header.Set(header.Authorization, "Basic secret")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_TokenTrailingWhitespace verifies that a token with
@@ -67,13 +61,11 @@ func TestAdversarial_TokenTrailingWhitespace(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret ")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	ctx.Request.Header.Set(header.Authorization, "Bearer secret ")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_TokenCaseSensitive verifies that the "Bearer " prefix
@@ -85,13 +77,11 @@ func TestAdversarial_TokenCaseSensitive(t *testing.T) {
 		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(`{"url":"https://example.com/"}`))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	ctx.Request.Header.Set(header.Authorization, "bearer secret")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // --- adversarial malformed JSON tests ---
@@ -175,13 +165,10 @@ func TestAdversarial_OversizedBody(t *testing.T) {
 	body := `{"url":"` + bigURL + `"}`
 	require.Greater(t, len(body), 256)
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-		bytes.NewBufferString(body))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(body), "secret")
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusRequestEntityTooLarge, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_OversizedBody_Batch verifies that batch purge also
@@ -200,13 +187,10 @@ func TestAdversarial_OversizedBody_Batch(t *testing.T) {
 	sb.WriteString(`https://example.com/path/"]}`)
 	require.Greater(t, sb.Len(), 128)
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge/batch",
-		bytes.NewBufferString(sb.String()))
-	req.Header.Set(header.ContentType, "application/json")
-	req.Header.Set(header.Authorization, "Bearer secret")
-	s.Handler().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge/batch", []byte(sb.String()), "secret")
+	ctx.Request.Header.Set(header.ContentType, "application/json")
+	s.Handler()(ctx)
+	require.Equal(t, http.StatusRequestEntityTooLarge, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_BodyWithinLimit verifies that a body just under the
@@ -252,13 +236,10 @@ func TestAdversarial_ConcurrentPurgeBan(t *testing.T) {
 			defer wg.Done()
 			for j := range opsPerG {
 				body := fmt.Sprintf(`{"url":"https://example.com/%d/%d"}`, n, j)
-				rr := httptest.NewRecorder()
-				req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/purge",
-					bytes.NewBufferString(body))
-				req.Header.Set(header.ContentType, "application/json")
-				req.Header.Set(header.Authorization, "Bearer secret")
-				s.Handler().ServeHTTP(rr, req)
-				if rr.Code == http.StatusOK {
+				ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(body), "secret")
+				ctx.Request.Header.Set(header.ContentType, "application/json")
+				s.Handler()(ctx)
+				if ctx.Response.StatusCode() == http.StatusOK {
 					successCount.Add(1)
 				}
 			}
@@ -269,13 +250,10 @@ func TestAdversarial_ConcurrentPurgeBan(t *testing.T) {
 			defer wg.Done()
 			for j := range opsPerG {
 				body := fmt.Sprintf(`{"path_regex":"^/section/%d/%d/"}`, n, j)
-				rr := httptest.NewRecorder()
-				req := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/ban",
-					bytes.NewBufferString(body))
-				req.Header.Set(header.ContentType, "application/json")
-				req.Header.Set(header.Authorization, "Bearer secret")
-				s.Handler().ServeHTTP(rr, req)
-				if rr.Code == http.StatusOK {
+				ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(body), "secret")
+				ctx.Request.Header.Set(header.ContentType, "application/json")
+				s.Handler()(ctx)
+				if ctx.Response.StatusCode() == http.StatusOK {
 					successCount.Add(1)
 				}
 			}
@@ -496,11 +474,9 @@ func TestAdversarial_WrongMethod(t *testing.T) {
 	for _, path := range []string{"/v1/purge", "/v1/purge/batch", "/v1/ban", "/v1/refresh"} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequestWithContext(context.Background(), "GET", path, nil)
-			req.Header.Set(header.Authorization, "Bearer secret")
-			rr := httptest.NewRecorder()
-			s.Handler().ServeHTTP(rr, req)
-			require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+			ctx := testCtxWithAuth("GET", path, "secret")
+			s.Handler()(ctx)
+			require.Equal(t, http.StatusMethodNotAllowed, ctx.Response.StatusCode())
 		})
 	}
 }

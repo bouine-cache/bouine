@@ -2,14 +2,11 @@ package dashboard
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -30,30 +27,32 @@ func newTestHandler(t *testing.T) *Handler {
 func TestAPIError_EscapesHTML(t *testing.T) {
 	t.Parallel()
 	h := newTestHandler(t)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/ban", nil)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
 
-	h.apiError(w, r, `<img src=x onerror=alert("xss")>`)
+	h.apiError(ctx, `<img src=x onerror=alert("xss")>`)
 
-	body := w.Body.String()
+	body := string(ctx.Response.Body())
 	assert.Contains(t, body, `&lt;img src=x onerror=alert(&#34;xss&#34;)&gt;`)
 	assert.NotContains(t, body, `<img src=x onerror=`)
-	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get(header.ContentType))
+	assert.Equal(t, "text/html; charset=utf-8", string(ctx.Response.Header.Peek(header.ContentType)))
 }
 
 func TestAPIOk_EscapesHTML(t *testing.T) {
 	t.Parallel()
 	h := newTestHandler(t)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/purge", nil)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/purge")
 
-	h.apiOK(w, r, `purged <script>alert(1)</script>`)
+	h.apiOK(ctx, `purged <script>alert(1)</script>`)
 
-	body := w.Body.String()
+	body := string(ctx.Response.Body())
 	assert.Contains(t, body, `&lt;script&gt;alert(1)&lt;/script&gt;`)
 	assert.NotContains(t, body, `<script>`)
 	// The htmx trigger that tells the client to refresh the ops log is preserved.
-	assert.Equal(t, "refreshOpsLog", w.Header().Get(header.HXTrigger))
+	assert.Equal(t, "refreshOpsLog", string(ctx.Response.Header.Peek(header.HXTrigger)))
 }
 
 // TestAPIBan_InvalidRegexEscaped reproduces the reflected-XSS vector from
@@ -70,15 +69,15 @@ func TestAPIBan_InvalidRegexEscaped(t *testing.T) {
 		},
 	}
 
-	body := url.Values{"host_regex": {`<img src=x onerror=alert(1>`}}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/ban",
-		strings.NewReader(body.Encode()))
-	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("host_regex", `<img src=x onerror=alert(1>`)
 
-	h.apiBan(w, r)
+	h.apiBan(ctx)
 
-	resp := w.Body.String()
+	resp := string(ctx.Response.Body())
 	// The raw attacker payload must never appear as live markup.
 	assert.NotContains(t, resp, `<img src=x onerror=`)
 	// It must appear HTML-escaped inside the flash-err pill.
@@ -89,12 +88,13 @@ func TestAPIBan_InvalidRegexEscaped(t *testing.T) {
 func TestLoginHandler_RendersForm(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("tok")
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
-	sa.LoginHandler(w, r)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/login")
+	sa.LoginHandler(ctx)
 
-	require.Equal(t, http.StatusOK, w.Code)
-	body := w.Body.String()
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	body := string(ctx.Response.Body())
 	assert.Contains(t, body, `<title>bouine · login</title>`)
 	assert.Contains(t, body, `name="token"`)
 	assert.Contains(t, body, `type="password"`)

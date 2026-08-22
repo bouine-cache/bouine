@@ -1,12 +1,14 @@
 package dashboard
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"net/http"
 	"time"
+
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/dashboard/templates"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -24,7 +26,6 @@ type sessionAuth struct {
 }
 
 func newSessionAuth(adminToken string) *sessionAuth {
-	// Derive HMAC key from the admin token.
 	h := sha256.Sum256([]byte("bouine-session-v1:" + adminToken))
 	return &sessionAuth{
 		token:   adminToken,
@@ -61,55 +62,57 @@ func (sa *sessionAuth) valid(cookie string) bool {
 }
 
 // LoginHandler renders the login form (GET) and processes it (POST).
-func (sa *sessionAuth) LoginHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
-		submitted := r.FormValue("token")
+func (sa *sessionAuth) LoginHandler(ctx *fasthttp.RequestCtx) {
+	if string(ctx.Method()) == "POST" {
+		if len(ctx.PostBody()) > maxAdminFormBytes {
+			ctx.Error("request body too large", fasthttp.StatusRequestEntityTooLarge)
+			return
+		}
+		args := ctx.PostArgs()
+		submitted := string(args.Peek("token"))
 		if !hmac.Equal([]byte(submitted), []byte(sa.token)) {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+			ctx.Error("invalid token", fasthttp.StatusUnauthorized)
 			return
 		}
 		sessionToken, err := sa.makeToken()
 		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			ctx.Error("internal error", fasthttp.StatusInternalServerError)
 			return
 		}
-		http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure omitted: admin port may be HTTP in dev; operators add TLS terminator
-			Name:     sessionCookieName,
-			Value:    sessionToken,
-			MaxAge:   sessionMaxAge,
-			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
-			Path:     "/dashboard",
-		})
-		http.Redirect(w, r, "/dashboard/", http.StatusSeeOther)
+		var c fasthttp.Cookie
+		c.SetKey(sessionCookieName)
+		c.SetValue(sessionToken)
+		c.SetMaxAge(sessionMaxAge)
+		c.SetHTTPOnly(true)
+		c.SetSameSite(fasthttp.CookieSameSiteStrictMode)
+		c.SetPath("/dashboard")
+		ctx.Response.Header.SetCookie(&c)
+		ctx.Redirect("/dashboard/", fasthttp.StatusSeeOther)
 		return
 	}
-	// GET — render login form.
-	w.Header().Set(header.ContentType, "text/html; charset=utf-8")
-	if err := templates.Login().Render(r.Context(), w); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	ctx.Response.Header.Set(header.ContentType, "text/html; charset=utf-8")
+	if err := templates.Login().Render(context.Background(), ctx); err != nil {
+		ctx.Error("internal error", fasthttp.StatusInternalServerError)
 	}
 }
 
 // Middleware protects dashboard routes with the session cookie.
-func (sa *sessionAuth) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie(sessionCookieName)
-		if err != nil || !sa.valid(c.Value) {
-			http.Redirect(w, r, "/dashboard/login", http.StatusFound)
+func (sa *sessionAuth) Middleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		c := ctx.Request.Header.Cookie(sessionCookieName)
+		if len(c) == 0 || !sa.valid(string(c)) {
+			ctx.Redirect("/dashboard/login", fasthttp.StatusFound)
 			return
 		}
-		// Slide the cookie expiry on each request.
-		http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure omitted: admin port may be HTTP in dev; operators add TLS terminator
-			Name:     sessionCookieName,
-			Value:    c.Value,
-			MaxAge:   sessionMaxAge,
-			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
-			Path:     "/dashboard",
-			Expires:  time.Now().Add(24 * time.Hour),
-		})
-		next.ServeHTTP(w, r)
-	})
+		var cookie fasthttp.Cookie
+		cookie.SetKey(sessionCookieName)
+		cookie.SetValue(string(c))
+		cookie.SetMaxAge(sessionMaxAge)
+		cookie.SetHTTPOnly(true)
+		cookie.SetSameSite(fasthttp.CookieSameSiteStrictMode)
+		cookie.SetPath("/dashboard")
+		cookie.SetExpire(time.Now().Add(24 * time.Hour))
+		ctx.Response.Header.SetCookie(&cookie)
+		next(ctx)
+	}
 }

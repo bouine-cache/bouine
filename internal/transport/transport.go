@@ -19,6 +19,9 @@ type Client struct {
 // The caller is responsible for configuring TLS, connection pool
 // limits, and timeouts on the fasthttp.Client before wrapping it.
 func NewClient(fc *fasthttp.Client) *Client {
+	if fc == nil {
+		fc = &fasthttp.Client{}
+	}
 	return &Client{Client: fc}
 }
 

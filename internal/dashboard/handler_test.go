@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -246,10 +245,9 @@ func TestToPeerResultsEnriched_NilPeersFn(t *testing.T) {
 
 func TestNew_CreatesHandler(t *testing.T) {
 	t.Parallel()
-	mux := http.NewServeMux()
-	h := New(Config{
+	_, h := New(Config{
 		Token: "test-token",
-	}, mux)
+	})
 	require.NotNil(t, h)
 	require.NotNil(t, h.auth)
 }

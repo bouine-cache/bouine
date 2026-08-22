@@ -716,7 +716,7 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 		method := string(ctx.Method())
 		m.recordFastHTTPMetrics(method, statusCode, status, route, cacheResult, source, dur, bytesOut)
 
-		m.recordRings(xCache, statusCode, route, string(ctx.Path()), elapsed, nil)
+		m.recordFastHTTPRings(xCache, statusCode, route, string(ctx.Path()), elapsed, &ctx.Response.Header)
 
 		if m.accessLog != nil {
 			msg := accessLogMessage(xCache, statusCode)
@@ -853,6 +853,23 @@ func (m *DataPlaneMetrics) recordRings(xCache string, status int, route, path st
 	m.Rings.URL.RecordURL(path, route, xCache)
 	if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
 		m.Rings.HeaderRing.Sample(route, hdr, status)
+	}
+}
+
+// recordFastHTTPRings updates the dashboard ring buffers for non-HIT
+// requests from the fasthttp middleware path.
+func (m *DataPlaneMetrics) recordFastHTTPRings(xCache string, status int, route, path string, elapsed time.Duration, hdr *fasthttp.ResponseHeader) {
+	if m.Rings == nil || xCache == "HIT" {
+		return
+	}
+	durMs := elapsed.Milliseconds()
+	m.Rings.Request.RecordRequest(xCache, status, durMs)
+	if route != "_default" {
+		m.Rings.Route.RecordRoute(route, xCache, status, durMs)
+	}
+	m.Rings.URL.RecordURL(path, route, xCache)
+	if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
+		m.Rings.HeaderRing.SampleFastHTTP(route, hdr, status)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 const originHeaderRingCap = 1000
@@ -62,6 +64,32 @@ func (r *OriginHeaderRing) Sample(pool string, h http.Header, statusCode int) {
 		HasSurrogateKey: h.Get(header.SurrogateKey) != "",
 		StatusCode:      statusCode,
 		CacheControlVal: truncate(h.Get(header.CacheControl), 256),
+	}
+
+	r.mu.Lock()
+	r.samples[r.head] = s
+	r.head = (r.head + 1) % originHeaderRingCap
+	if r.count < originHeaderRingCap {
+		r.count++
+	}
+	r.mu.Unlock()
+}
+
+// SampleFastHTTP records a single origin response header audit from a
+// fasthttp.ResponseHeader. Called from the fasthttp data-plane middleware.
+func (r *OriginHeaderRing) SampleFastHTTP(pool string, h *fasthttp.ResponseHeader, statusCode int) {
+	if h == nil {
+		return
+	}
+
+	s := HeaderSample{
+		Pool:            pool,
+		HasCacheControl: len(h.Peek(header.CacheControl)) > 0,
+		HasETag:         len(h.Peek(header.ETag)) > 0,
+		HasLastModified: len(h.Peek(header.LastModified)) > 0,
+		HasSurrogateKey: len(h.Peek(header.SurrogateKey)) > 0,
+		StatusCode:      statusCode,
+		CacheControlVal: truncate(string(h.Peek(header.CacheControl)), 256),
 	}
 
 	r.mu.Lock()

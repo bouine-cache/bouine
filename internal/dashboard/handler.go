@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/a-h/templ"
+	"github.com/valyala/fasthttp"
 	"gopkg.in/yaml.v3"
 
 	"github.com/bouine-cache/bouine/internal/config"
@@ -76,8 +76,8 @@ type Handler struct {
 	prevStoreStats   api.Stats
 }
 
-// New creates and registers dashboard routes on mux.
-func New(cfg Config, mux *http.ServeMux) *Handler {
+// New creates and returns a fasthttp.RequestHandler for the dashboard.
+func New(cfg Config) (fasthttp.RequestHandler, *Handler) {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.StartTime.IsZero() {
 		cfg.StartTime = time.Now()
@@ -89,23 +89,49 @@ func New(cfg Config, mux *http.ServeMux) *Handler {
 		insightEngine: insights.New(),
 	}
 
-	mux.HandleFunc("GET /dashboard/login", h.auth.LoginHandler)
-	mux.HandleFunc("POST /dashboard/login", h.auth.LoginHandler)
+	authed := h.auth.Middleware(h.protectedHandler)
 
-	protected := http.NewServeMux()
-	protected.HandleFunc("GET /dashboard/", h.overview)
-	protected.HandleFunc("GET /dashboard/performance", h.performance)
-	protected.HandleFunc("GET /dashboard/routes", h.routes)
-	protected.HandleFunc("GET /dashboard/cluster", h.cluster)
-	protected.HandleFunc("GET /dashboard/invalidation", h.invalidation)
-	protected.HandleFunc("GET /dashboard/config", h.config)
-	protected.HandleFunc("GET /dashboard/insights", h.insights)
-	protected.HandleFunc("POST /dashboard/api/purge", h.apiPurge)
-	protected.HandleFunc("POST /dashboard/api/ban", h.apiBan)
-	protected.HandleFunc("POST /dashboard/api/refresh", h.apiRefresh)
+	return func(ctx *fasthttp.RequestCtx) {
+		p := string(ctx.Path())
+		if p == "/dashboard/login" {
+			h.auth.LoginHandler(ctx)
+			return
+		}
+		authed(ctx)
+	}, h
+}
 
-	mux.Handle("/dashboard/", h.auth.Middleware(protected))
-	return h
+func (h *Handler) protectedHandler(ctx *fasthttp.RequestCtx) {
+	switch string(ctx.Path()) {
+	case "/dashboard/":
+		h.overview(ctx)
+	case "/dashboard/performance":
+		h.performance(ctx)
+	case "/dashboard/routes":
+		h.routes(ctx)
+	case "/dashboard/cluster":
+		h.cluster(ctx)
+	case "/dashboard/invalidation":
+		h.invalidation(ctx)
+	case "/dashboard/config":
+		h.config(ctx)
+	case "/dashboard/insights":
+		h.insights(ctx)
+	case "/dashboard/api/purge":
+		if string(ctx.Method()) == "POST" {
+			h.apiPurge(ctx)
+		}
+	case "/dashboard/api/ban":
+		if string(ctx.Method()) == "POST" {
+			h.apiBan(ctx)
+		}
+	case "/dashboard/api/refresh":
+		if string(ctx.Method()) == "POST" {
+			h.apiRefresh(ctx)
+		}
+	default:
+		ctx.Error("not found", fasthttp.StatusNotFound)
+	}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -117,9 +143,9 @@ func (h *Handler) nodeName() string {
 	return "unknown"
 }
 
-func (h *Handler) render(w http.ResponseWriter, r *http.Request, c templ.Component) {
-	w.Header().Set(header.ContentType, "text/html; charset=utf-8")
-	if err := c.Render(r.Context(), w); err != nil {
+func (h *Handler) render(ctx *fasthttp.RequestCtx, c templ.Component) {
+	ctx.Response.Header.Set(header.ContentType, "text/html; charset=utf-8")
+	if err := c.Render(context.Background(), ctx); err != nil {
 		h.cfg.Logger.Error("dashboard render error", "error", err)
 	}
 }
@@ -285,10 +311,10 @@ func latHistToInts(h observability.LatencyHistogram) []int64 {
 	return out
 }
 
-func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
-	merged, peers := h.agg.Collect(r.Context())
+func (h *Handler) overview(ctx *fasthttp.RequestCtx) {
+	merged, peers := h.agg.Collect(context.Background())
 
-	chartBuckets, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+	chartBuckets, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 	snap := merged.RequestSnap
 	n := len(snap)
 	start := max(0, n-chartBuckets)
@@ -335,7 +361,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lprops := h.layoutProps("overview", "Overview", timeRange)
-	h.render(w, r, templates.Overview(templates.OverviewData{
+	h.render(ctx, templates.Overview(templates.OverviewData{
 		LayoutProps: lprops,
 		ReqPerSec:   st.reqPerSec,
 		HitPct:      st.hitPct,
@@ -365,9 +391,9 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 // performance renders the latency-focused performance page.
-func (h *Handler) performance(w http.ResponseWriter, r *http.Request) {
-	merged, _ := h.agg.Collect(r.Context())
-	chartBuckets, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+func (h *Handler) performance(ctx *fasthttp.RequestCtx) {
+	merged, _ := h.agg.Collect(context.Background())
+	chartBuckets, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 	snap := merged.RequestSnap
 	n := len(snap)
 
@@ -419,7 +445,7 @@ func (h *Handler) performance(w http.ResponseWriter, r *http.Request) {
 	}
 	p99 := hist.Percentile(0.99)
 
-	h.render(w, r, templates.Performance(templates.PerformanceData{
+	h.render(ctx, templates.Performance(templates.PerformanceData{
 		LayoutProps:    h.layoutProps("performance", "Performance", timeRange),
 		P50MS:          hist.Percentile(0.50),
 		P90MS:          hist.Percentile(0.90),
@@ -515,9 +541,9 @@ func toPeerResultsEnriched(in []PeerResult, peersFn func() []api.PeerInfo) []tem
 	return out
 }
 
-func (h *Handler) routes(w http.ResponseWriter, r *http.Request) {
-	merged, _ := h.agg.Collect(r.Context())
-	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+func (h *Handler) routes(ctx *fasthttp.RequestCtx) {
+	merged, _ := h.agg.Collect(context.Background())
+	_, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 
 	var routeRows []templates.RouteRow
 	routeCount := 0
@@ -535,7 +561,7 @@ func (h *Handler) routes(w http.ResponseWriter, r *http.Request) {
 		routeCount = len(routeRows)
 	}
 
-	h.render(w, r, templates.Routes(templates.RoutesData{
+	h.render(ctx, templates.Routes(templates.RoutesData{
 		LayoutProps: h.layoutProps("routes", "Routes", timeRange),
 		RouteCount:  routeCount,
 		RouteRows:   routeRows,
@@ -543,9 +569,9 @@ func (h *Handler) routes(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
-func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
-	_, peers := h.agg.Collect(r.Context())
-	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+func (h *Handler) cluster(ctx *fasthttp.RequestCtx) {
+	_, peers := h.agg.Collect(context.Background())
+	_, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 
 	var peerHealth map[string]float64
 	if h.cfg.Rings != nil {
@@ -564,7 +590,7 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 
 	hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, evictions := h.storeStats()
 
-	h.render(w, r, templates.Cluster(templates.ClusterData{
+	h.render(ctx, templates.Cluster(templates.ClusterData{
 		LayoutProps:  h.layoutProps("cluster", "Cluster", timeRange),
 		PeerResults:  toPeerResultsEnriched(peers, h.cfg.PeersFn),
 		PeerHealth:   peerHealth,
@@ -581,21 +607,21 @@ func (h *Handler) cluster(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
-func (h *Handler) invalidation(w http.ResponseWriter, r *http.Request) {
-	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+func (h *Handler) invalidation(ctx *fasthttp.RequestCtx) {
+	_, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 	var opsLog []observability.OpsLogEntry
 	if h.cfg.Rings != nil {
 		opsLog = h.cfg.Rings.OpsLog.Snapshot(20)
 	}
-	h.render(w, r, templates.Invalidation(templates.InvalidationData{
+	h.render(ctx, templates.Invalidation(templates.InvalidationData{
 		LayoutProps: h.layoutProps("invalidation", "Invalidation", timeRange),
 		OpsLog:      opsLog,
 		CFStatus:    h.cfStatusCard(),
 	}))
 }
 
-func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
-	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
+func (h *Handler) config(ctx *fasthttp.RequestCtx) {
+	_, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
 	var rawJSON string
 	var rawYAML string
 	if h.cfg.Config != nil {
@@ -607,7 +633,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	hotBytes, hotEntries, hotMax, warmBytes, warmEntries, warmMax, _ := h.storeStats()
-	h.render(w, r, templates.Config(templates.ConfigData{
+	h.render(ctx, templates.Config(templates.ConfigData{
 		LayoutProps:  h.layoutProps("config", "Config", timeRange),
 		ConfigPath:   h.cfg.ConfigPath,
 		Sections:     templates.BuildConfigSections(h.cfg.Config),
@@ -624,109 +650,118 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request) {
 
 // ── Proxy handlers ────────────────────────────────────────────────────
 
-func (h *Handler) apiPurge(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) apiPurge(ctx *fasthttp.RequestCtx) {
 	if h.cfg.PurgeFn == nil {
-		h.apiError(w, r, "purge not configured")
+		h.apiError(ctx, "purge not configured")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
-	_ = r.ParseForm()
-	rawURL := r.FormValue("url")
+	if len(ctx.PostBody()) > maxAdminFormBytes {
+		ctx.Error("request body too large", fasthttp.StatusRequestEntityTooLarge)
+		return
+	}
+
+	rawURL := string(ctx.PostArgs().Peek("url"))
 	if rawURL == "" {
 		var req struct {
 			URL string `json:"url"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.Unmarshal(ctx.PostBody(), &req)
 		rawURL = req.URL
 	}
 	if msg := validateCacheURL(rawURL); msg != "" {
-		h.apiError(w, r, msg)
+		h.apiError(ctx, msg)
 		return
 	}
-	if err := h.cfg.PurgeFn(r.Context(), rawURL); err != nil {
+	if err := h.cfg.PurgeFn(context.Background(), rawURL); err != nil {
 		h.cfg.Rings.OpsLog.Record("purge", rawURL, err.Error())
-		h.apiError(w, r, err.Error())
+		h.apiError(ctx, err.Error())
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("purge", rawURL, "ok")
-	h.apiOK(w, r, "purged")
+	h.apiOK(ctx, "purged")
 }
 
-func (h *Handler) apiBan(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) apiBan(ctx *fasthttp.RequestCtx) {
 	if h.cfg.BanFn == nil {
-		h.apiError(w, r, "ban not configured")
+		h.apiError(ctx, "ban not configured")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
-	_ = r.ParseForm()
-	hostRegex := r.FormValue("host_regex")
-	pathRegex := r.FormValue("path_regex")
+	if len(ctx.PostBody()) > maxAdminFormBytes {
+		ctx.Error("request body too large", fasthttp.StatusRequestEntityTooLarge)
+		return
+	}
+
+	hostRegex := string(ctx.PostArgs().Peek("host_regex"))
+	pathRegex := string(ctx.PostArgs().Peek("path_regex"))
 	if hostRegex == "" && pathRegex == "" {
 		var req struct {
 			HostRegex string `json:"host_regex"`
 			PathRegex string `json:"path_regex"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.Unmarshal(ctx.PostBody(), &req)
 		hostRegex, pathRegex = req.HostRegex, req.PathRegex
 	}
 	if hostRegex == "" && pathRegex == "" {
-		h.apiError(w, r, "provide at least one of host regex or path regex")
+		h.apiError(ctx, "provide at least one of host regex or path regex")
 		return
 	}
 	if msg := validateRegex("host regex", hostRegex); msg != "" {
-		h.apiError(w, r, msg)
+		h.apiError(ctx, msg)
 		return
 	}
 	if msg := validateRegex("path regex", pathRegex); msg != "" {
-		h.apiError(w, r, msg)
+		h.apiError(ctx, msg)
 		return
 	}
-	n, err := h.cfg.BanFn(r.Context(), hostRegex, pathRegex)
+	n, err := h.cfg.BanFn(context.Background(), hostRegex, pathRegex)
 	arg := hostRegex + " " + pathRegex
 	if err != nil {
 		h.cfg.Rings.OpsLog.Record("ban", arg, err.Error())
-		h.apiError(w, r, err.Error())
+		h.apiError(ctx, err.Error())
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("ban", arg, fmt.Sprintf("ok, %d evicted", n))
-	h.apiOK(w, r, fmt.Sprintf("banned, %d entries evicted", n))
+	h.apiOK(ctx, fmt.Sprintf("banned, %d entries evicted", n))
 }
 
-func (h *Handler) apiRefresh(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) apiRefresh(ctx *fasthttp.RequestCtx) {
 	if h.cfg.RefreshFn == nil {
-		h.apiError(w, r, "refresh not configured")
+		h.apiError(ctx, "refresh not configured")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxAdminFormBytes)
-	_ = r.ParseForm()
-	rawURL := r.FormValue("url")
+	if len(ctx.PostBody()) > maxAdminFormBytes {
+		ctx.Error("request body too large", fasthttp.StatusRequestEntityTooLarge)
+		return
+	}
+
+	rawURL := string(ctx.PostArgs().Peek("url"))
 	if rawURL == "" {
 		var req struct {
 			URL string `json:"url"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.Unmarshal(ctx.PostBody(), &req)
 		rawURL = req.URL
 	}
 	if msg := validateCacheURL(rawURL); msg != "" {
-		h.apiError(w, r, msg)
+		h.apiError(ctx, msg)
 		return
 	}
-	if err := h.cfg.RefreshFn(r.Context(), rawURL); err != nil {
+	if err := h.cfg.RefreshFn(context.Background(), rawURL); err != nil {
 		h.cfg.Rings.OpsLog.Record("refresh", rawURL, err.Error())
-		h.apiError(w, r, err.Error())
+		h.apiError(ctx, err.Error())
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("refresh", rawURL, "ok")
-	h.apiOK(w, r, "refreshed")
+	h.apiOK(ctx, "refreshed")
 }
 
-func (h *Handler) apiOK(w http.ResponseWriter, r *http.Request, msg string) {
-	w.Header().Set(header.HXTrigger, "refreshOpsLog")
-	h.render(w, r, templates.Flash(templates.FlashOK, msg))
+func (h *Handler) apiOK(ctx *fasthttp.RequestCtx, msg string) {
+	ctx.Response.Header.Set(header.HXTrigger, "refreshOpsLog")
+	h.render(ctx, templates.Flash(templates.FlashOK, msg))
 }
 
-func (h *Handler) apiError(w http.ResponseWriter, r *http.Request, msg string) {
-	h.render(w, r, templates.Flash(templates.FlashError, msg))
+func (h *Handler) apiError(ctx *fasthttp.RequestCtx, msg string) {
+	h.render(ctx, templates.Flash(templates.FlashError, msg))
 }
 
 // ── Input validation ──────────────────────────────────────────────────
@@ -760,21 +795,21 @@ func validateRegex(fieldName, s string) string {
 
 // ── Insights ──────────────────────────────────────────────────────────
 
-func (h *Handler) insights(w http.ResponseWriter, r *http.Request) {
-	_, timeRange := parseTimeRange(r.URL.Query().Get("range"))
-	merged, peers := h.agg.Collect(r.Context())
+func (h *Handler) insights(ctx *fasthttp.RequestCtx) {
+	_, timeRange := parseTimeRange(string(ctx.QueryArgs().Peek("range")))
+	merged, peers := h.agg.Collect(context.Background())
 
 	data := h.collectInsightData(merged, peers)
 	h.prevStoreStatsMu.Lock()
 	data.PrevStoreStats = h.prevStoreStats
 	h.prevStoreStats = data.StoreStats
 	h.prevStoreStatsMu.Unlock()
-	rawInsights := h.insightEngine.Evaluate(r.Context(), data)
+	rawInsights := h.insightEngine.Evaluate(context.Background(), data)
 	routeToPool := h.buildRouteToPool()
 	cards, highCount, medCount, lowCount := convertInsightCards(rawInsights, routeToPool)
 	nodes := h.buildArchNodes(data.PoolHealth, h.cfStatusCard(), data.StoreStats, peers)
 
-	h.render(w, r, templates.Insights(templates.InsightsData{
+	h.render(ctx, templates.Insights(templates.InsightsData{
 		LayoutProps: h.layoutProps("insights", "Insights", timeRange),
 		Nodes:       nodes,
 		Insights:    cards,

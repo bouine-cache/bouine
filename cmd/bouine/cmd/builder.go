@@ -25,6 +25,9 @@ import (
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 // buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is
@@ -154,10 +157,8 @@ func listenPort(addr, defaultPort string) string {
 //  1. tracing.HTTPMiddleware — single OTel span for the pipeline layer.
 //  2. DataPlaneMetrics.Middleware — Prometheus counters, histograms,
 //     ring buffers, and merged structured access log.
-func (e *engine) buildHandler(rs *runState) http.Handler {
+func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
-	// Pre-resolve Prometheus label tuples for each route to eliminate
-	// per-request WithLabelValues hash lookups on the hit path.
 	routeNames := make([]string, 0, len(e.cfg.Routes))
 	for _, rc := range e.cfg.Routes {
 		if rc.Name != "" {
@@ -165,11 +166,50 @@ func (e *engine) buildHandler(rs *runState) http.Handler {
 		}
 	}
 	rs.dpMetrics.PreResolveRoutes(routeNames)
-	// Inject CoarseNow on Linux (~2-4ns vs ~25-40ns for time.Now).
-	// On non-Linux, CoarseNow falls back to time.Now, so always inject.
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
-	metricsWrapped := rs.dpMetrics.Middleware(router)
-	return tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
+
+	// The observability middleware (DataPlaneMetrics.Middleware) and
+	// tracing.HTTPMiddleware still operate on http.Handler. Wrap the
+	// fasthttp-native router in an http.Handler adapter so it can
+	// pass through the existing middleware chain. The final result
+	// is wrapped back to fasthttp.RequestHandler via NewFastHTTPHandler.
+	//
+	// This is a transitional bridge — the middleware will be migrated
+	// to fasthttp.RequestHandler in a subsequent commit, eliminating
+	// the double adaptation.
+	routerAsHTTP := httpHandlerFromFasthttp(router.ServeRequest)
+	metricsWrapped := rs.dpMetrics.Middleware(routerAsHTTP)
+	httpChain := tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
+	return fasthttpadaptor.NewFastHTTPHandler(httpChain)
+}
+
+// httpHandlerFromFasthttp wraps a fasthttp.RequestHandler in an
+// http.Handler. This is the reverse of fasthttpadaptor.NewFastHTTPHandler.
+// It is a transitional adapter used during the fasthttp migration —
+// the observability middleware still expects http.Handler. Once the
+// middleware is migrated to fasthttp.RequestHandler, this adapter
+// will be removed.
+func httpHandlerFromFasthttp(h fasthttp.RequestHandler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Init2(nil, nil, false)
+		ctx.Request.Header.SetMethod(r.Method)
+		ctx.Request.SetRequestURI(r.RequestURI)
+		ctx.Request.Header.SetHost(r.Host)
+		for k, vals := range r.Header {
+			for _, v := range vals {
+				ctx.Request.Header.Add(k, v)
+			}
+		}
+		h(ctx)
+		// Copy response headers from fasthttp.Response to http.ResponseWriter.
+		dst := w.Header()
+		for k, v := range ctx.Response.Header.All() {
+			dst.Add(string(k), string(v))
+		}
+		w.WriteHeader(ctx.Response.StatusCode())
+		_, _ = w.Write(ctx.Response.Body())
+	})
 }
 
 // buildPools constructs one origin.Pool per upstream_pools entry in the config.
@@ -285,7 +325,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, fasthttpadaptor.NewFastHTTPHandler(cached))
 	}
 	return router
 }
@@ -371,7 +411,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		handler = cached
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, handler)
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, fasthttpadaptor.NewFastHTTPHandler(handler))
 }
 
 // stripPrefixHandler strips the given prefix from r.URL.Path before

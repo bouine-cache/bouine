@@ -78,17 +78,16 @@ linters:
 
     depguard:
       rules:
-        # Fiber was dropped in ADR-0006. Deny it everywhere so it
-        # cannot be reintroduced.
+        # Fiber was dropped in ADR-0006 (superseded by ADR-0034).
+        # fasthttp is now the sole HTTP stack (ADR-0034). Deny Fiber
+        # but allow fasthttp in all packages.
         no-fiber:
           list-mode: lax
           deny:
             - pkg: "github.com/gofiber/fiber/v3"
-              desc: "Fiber dropped (ADR-0006). Use net/http."
+              desc: "Fiber dropped (ADR-0006). Use fasthttp (ADR-0034)."
             - pkg: "github.com/gofiber/fiber/v2"
-              desc: "Fiber dropped (ADR-0006). Use net/http."
-            - pkg: "github.com/valyala/fasthttp"
-              desc: "fasthttp dropped with Fiber (ADR-0006)."
+              desc: "Fiber dropped (ADR-0006). Use fasthttp (ADR-0034)."
         no-banned-log-libs:
           list-mode: lax
           deny:
@@ -110,7 +109,7 @@ linters:
             - github.com/bouine-cache/bouine/internal/platform
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
-            - golang.org/x/net
+            - github.com/valyala/fasthttp
             - golang.org/x/sync
             - golang.org/x/sys
         storage-L2:
@@ -199,11 +198,13 @@ linters:
           allow:
             - $gostd
             - github.com/bouine-cache/bouine/internal/observability
+            - github.com/bouine-cache/bouine/internal/transport
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/header
             - github.com/prometheus/client_golang
             - github.com/prometheus/client_model/go
             - go.opentelemetry.io/otel
+            - github.com/valyala/fasthttp
         ai-L8:
           list-mode: strict
           files: ["**/internal/ai/**"]
@@ -224,6 +225,14 @@ linters:
             - github.com/bouine-cache/bouine/pkg/api
             - github.com/bouine-cache/bouine/pkg/bouineapi
             - github.com/bouine-cache/bouine/pkg/header
+            - github.com/valyala/fasthttp
+        transport:
+          list-mode: strict
+          files: ["**/internal/transport/**"]
+          allow:
+            - $gostd
+            - github.com/bouine-cache/bouine/internal/transport
+            - github.com/valyala/fasthttp
         config-leaf:
           list-mode: strict
           files: ["**/internal/config/**"]

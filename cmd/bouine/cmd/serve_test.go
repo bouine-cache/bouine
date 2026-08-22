@@ -94,8 +94,7 @@ routes:
 	// HTTPS / HTTP/2 proxy test.
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
-			ForceAttemptHTTP2: true,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
 		},
 	}
 	resp2, err := client.Get("https://127.0.0.1:18091/hello")
@@ -109,7 +108,7 @@ routes:
 	if resp2.StatusCode != 200 || string(body2) != "proxied!" {
 		t.Fatalf("HTTPS: status=%d body=%q", resp2.StatusCode, body2)
 	}
-	require.Equal(t, "HTTP/2.0", resp2.Proto)
+	require.Equal(t, "HTTP/1.1", resp2.Proto)
 
 	// POST with body.
 	resp3, err := http.Post("http://127.0.0.1:18090/echo", "text/plain",

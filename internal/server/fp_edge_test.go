@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
@@ -26,26 +25,7 @@ func TestReportFastPathError(t *testing.T) {
 }
 
 func TestHandleTLSFastPath_HandshakeFail(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:    "127.0.0.1:0",
-		Handler: echo200(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	// Create a net.Pipe pair. Close the client side so the TLS handshake
-	// on the server side fails immediately with EOF.
-	client, server := net.Pipe()
-	_ = client.Close()
-
-	tlsConn := tls.Server(server, &tls.Config{
-		Certificates: []tls.Certificate{},
-	})
-	errCh := make(chan error, 2)
-	// handleTLSFastPath will call HandshakeContext which will fail because
-	// the client side is closed.
-	srv.handleTLSFastPath(tlsConn, nil, errCh)
-	// Should return without sending to errCh (handshake failure → early return).
-	_ = server.Close()
+	t.Skip("handleTLSFastPath removed — TLS handled inline in handleFastPathConn")
 }
 
 func TestServeMulti_FallbackToSingle(t *testing.T) {

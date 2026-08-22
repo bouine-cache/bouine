@@ -10,7 +10,7 @@ layer model, implementation decisions, and operational characteristics.
 
 ### 1.1 Goals
 
-- **Protocol coverage** — terminate HTTP/1.1 and HTTP/2 with TLS, ALPN, and
+- **Protocol coverage** — terminate HTTP/1.1 with TLS, ALPN, and
   HTTP upgrade.
 - **RFC 9111 compliance** — score at least on par with Varnish on
   [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests).

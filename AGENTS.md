@@ -66,9 +66,11 @@ These rules override autonomy. Break them and the change must be reverted.
 1. **Never violate the layer boundaries** defined in `docs/architecture.md §2`. A package
    may only depend on packages in lower layers, through declared interfaces.
    A reverse import (e.g. `storage` importing `cache`) is a build error.
-2. **One HTTP stack only: `net/http`.** The admin
-   surface uses `net/http.ServeMux` — never a third-party HTTP
-   framework. The data plane uses `net/http` (H1+H2). See ADR-0006.
+2. **One HTTP stack only: `fasthttp`.** The admin
+   surface uses `fasthttp.Server` with `fasthttpadaptor` for
+   `net/http/pprof` and `promhttp.Handler()`. The data plane uses
+   `fasthttp.Server` (H1 only). HTTP/2 and HTTP/3 are not supported.
+   See ADR-0034.
 3. **Never add a global variable** for mutable state. The daemon is a single
    `Engine` struct. Configuration, clocks, randomness, and metrics are
    injected.
@@ -170,12 +172,13 @@ L1 → L7, /pkg/api
 - Vendor required? No — `go mod` only, but `go.sum` is sacred. CI runs
   `go mod tidy && git diff --exit-code`.
 - Banned by default: ORMs, runtime DI containers, log libraries that aren't
-  `slog`-compatible, HTTP servers other than `net/http`,
-  any LGPL / AGPL code.
+  `slog`-compatible, HTTP servers other than `fasthttp`
+  (ADR-0034), any LGPL / AGPL code.
 - Pre-approved core:
   `hashicorp/memberlist`, `cespare/xxhash/v2`, `klauspost/compress`,
   `prometheus/client_golang`, `go.opentelemetry.io/otel`, `spf13/cobra`,
-  `stretchr/testify` (tests only), `golang.org/x/{net,sync,sys}`.
+  `stretchr/testify` (tests only), `golang.org/x/{sync,sys}`,
+  `github.com/valyala/fasthttp` (ADR-0034).
 - `govulncheck` runs in CI and gates merge.
 
 ---

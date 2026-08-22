@@ -406,7 +406,7 @@ prerelease: ## Build and push a pre-release Docker image from a PR branch. Requi
 	TAG="pr-$(PR)-$$SHORT_SHA"; \
 	echo ">>> PR #$(PR)  branch: $$BRANCH  sha: $$SHA"; \
 	echo ">>> Docker tag: $$TAG"; \
-	ARGS="-f tag=$$TAG -f ref=$$BRANCH"; \
+	ARGS="-f tag=$$TAG -f ref=$$SHA"; \
 	if [ "$(SKIP_TRIVY)" = "true" ]; then ARGS="$$ARGS -f skip_trivy=true"; fi; \
 	gh workflow run prerelease.yml $$ARGS; \
 	echo ">>> Workflow triggered. Watch:"; \

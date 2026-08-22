@@ -15,6 +15,8 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
+
+	"github.com/valyala/fasthttp"
 )
 
 func waitForAddr(t *testing.T, l *Listener) {
@@ -33,11 +35,11 @@ func waitForAddr(t *testing.T, l *Listener) {
 	})
 }
 
-func echo200() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Proto", r.Proto)
-		_, _ = io.WriteString(w, "hello")
-	})
+func echo200() fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("X-Proto", "HTTP/1.1")
+		ctx.SetBodyString("hello")
+	}
 }
 
 func TestHTTP_ListenAndServe(t *testing.T) {
@@ -75,7 +77,7 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 	require.NoError(t, err, "serve")
 }
 
-func TestHTTPS_ListenAndServe_H2(t *testing.T) {
+func TestHTTPS_ListenAndServe(t *testing.T) {
 	t.Parallel()
 	tlsCfg := tlsutil.ServerConfig(t)
 
@@ -97,8 +99,7 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	}
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig:   clientTLS,
-			ForceAttemptHTTP2: true,
+			TLSClientConfig: clientTLS,
 		},
 	}
 
@@ -120,7 +121,7 @@ func TestHTTPS_ListenAndServe_H2(t *testing.T) {
 	}
 
 	proto := resp.Header.Get("X-Proto")
-	require.Equal(t, "HTTP/2.0", proto)
+	require.Equal(t, "HTTP/1.1", proto)
 
 	cancel()
 	err = <-errCh

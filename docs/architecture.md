@@ -71,21 +71,26 @@ to the wire.
 ├──────────────────────────────────────────────────────────────────────┤
 │ L2  Storage                hot (RAM) · warm (mmap) · eviction · WAL  │
 ├──────────────────────────────────────────────────────────────────────┤
-│ L1  Server                 HTTP/1.1 · HTTP/2 · TLS · route            │
+│ L1  Server                 HTTP/1.1 · TLS · route (fasthttp)          │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.1 HTTP stack
 
-The daemon runs on a **single** HTTP implementation (ADR-0006): `net/http`
-for both the data plane (proxy/cache) and the control plane (admin API,
-metrics, pprof). Plaintext HTTP/2 (h2c) is available via
-`golang.org/x/net/http2/h2c` for in-mesh traffic. The control plane uses
-`net/http.ServeMux` (Go 1.22+ pattern routing) on its own port.
+The daemon runs on a **single** HTTP implementation (ADR-0034):
+`github.com/valyala/fasthttp` for both the data plane (proxy/cache)
+and the control plane (admin API, metrics, pprof). HTTP/1.1 only —
+HTTP/2 and HTTP/3 are not supported. The control plane uses
+`fasthttp.Server` with `fasthttpadaptor` for `net/http/pprof` and
+`promhttp.Handler()` on its own port.
 
-Fiber was used initially but dropped in phase 1 (ADR-0006) because it added a
-third HTTP stack (`valyala/fasthttp`) and 7 transitive dependencies for a
-surface that serves ≤ 10 RPS.
+ADR-0006 originally dropped Fiber (which wrapped `fasthttp`) and
+unified on `net/http`. ADR-0034 reverses that decision: the miss-path
+allocation cost of `net/http` (37 allocs/op, 740K allocs/s at 100K
+RPS) drove GC frequency to every 3-5 seconds and dominated hit-path
+p99. fasthttp's pooled `RequestCtx`, byte-slice headers, and zero-copy
+body transfer reduce miss-path allocations by 60-73%. See issue #521
+for the full migration plan and performance analysis.
 
 ### 2.2 Module layout
 
@@ -284,10 +289,12 @@ Loads"). 256 virtual nodes per real node; weight is configurable.
 
 ### 5.3 Peer fetch protocol
 
-Internal HTTP/2 over mTLS (port `:8443` by default). On miss: owner first,
+Internal HTTP/1.1 over mTLS (port `:8443` by default, ADR-0035). On miss: owner first,
 two-hop fallback, then origin. Cuckoo-filter-based digests gossiped every 5s
 to short-circuit fetches for keys known absent from peers. `Bouine-Hop` header
-bounds traversal depth (default 2).
+bounds traversal depth (default 2). HTTP/1.1 pipelining is enabled for peer
+fetch (8 connections per peer, pipeline depth 16) to replace HTTP/2
+multiplexing.
 
 ### 5.4 Consistency
 
@@ -330,7 +337,7 @@ rolling-deploy compatibility.
 
 Configurable per pool: `tls.enabled`, `tls.server_name` (SNI override),
 `tls.ca_bundle`, `tls.client_cert` / `tls.client_key` (mTLS to origin),
-`tls.min_version` (default `1.2`), `tls.alpn` (default `[h2, http/1.1]`),
+`tls.min_version` (default `1.2`), `tls.alpn` (default `[http/1.1]`),
 `tls.pinned_spki_sha256`. `tls.insecure_skip_verify` is accepted in config
 but refused at startup in release builds.
 
@@ -525,7 +532,7 @@ fraction of `terminationGracePeriodSeconds` (default 30s):
 
 1. **t+0s** — `/readyz` returns 503; service stops sending new connections.
 2. **t+0s** — stop accepting new data-plane connections. HTTP/1.1: close
-   listener + `Connection: close`. HTTP/2: send `GOAWAY`, refuse new streams.
+   listener + `Connection: close`.
 3. **t+~1s** — gossip `Leaving` membership update; peers stop routing to us.
 4. **t+~1s** — drain in-flight requests (bounded by per-request deadline).
 5. **t+~Ns** — flush hinted-handoff queue (best-effort).
@@ -569,7 +576,9 @@ These decisions are locked in for v1.0. See also
    endpoint. Cobra subcommands are thin wrappers over the SDK.
 2. **No encryption-at-rest in bouine** — warm tier writes plaintext segments.
    Operators back `warm_dir` with an encrypted cloud volume.
-3. **HTTP/3 deferred** — post-v1.0 pending demand.
+3. **HTTP/2 and HTTP/3 dropped** — fasthttp does not support either
+   protocol (ADR-0034). HTTP/2 was used for data-plane ALPN and peer fetch;
+   both migrated to HTTP/1.1 with pipelining. HTTP/3 was never implemented.
 4. **VCL-compatible shim deferred** — `/internal/vcl` reserved; design
    documented in [`docs/migration/varnish.md`](migration/varnish.md).
    Supported surface: `sub vcl_recv/hash/backend_response/deliver/hit/miss/

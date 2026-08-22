@@ -14,100 +14,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
 )
 
-func TestReconstructRawRequest(t *testing.T) {
-	req := &api.RawRequest{
-		Method:      "POST",
-		Path:        "/api/v1/users",
-		Query:       "active=true",
-		HTTPVersion: "HTTP/1.1",
-		Host:        "example.com",
-		Headers: [api.MaxRawHeaders]api.RawHeader{
-			{Key: "Host", Value: "example.com"},
-			{Key: "Content-Type", Value: "application/json"},
-			{Key: "Content-Length", Value: "18"},
-		},
-		NHeaders: 3,
-	}
-
-	raw := reconstructRawRequest(req)
-	want := "POST /api/v1/users?active=true HTTP/1.1\r\n" +
-		"Host: example.com\r\n" +
-		"Content-Type: application/json\r\n" +
-		"Content-Length: 18\r\n" +
-		"\r\n"
-	assert.Equal(t, want, string(raw))
-}
-
-func TestReconstructRawRequest_NoQuery(t *testing.T) {
-	req := &api.RawRequest{
-		Method:      "GET",
-		Path:        "/healthz",
-		HTTPVersion: "HTTP/1.0",
-		Headers: [api.MaxRawHeaders]api.RawHeader{
-			{Key: "Host", Value: "localhost:8080"},
-		},
-		NHeaders: 1,
-	}
-
-	raw := reconstructRawRequest(req)
-	want := "GET /healthz HTTP/1.0\r\nHost: localhost:8080\r\n\r\n"
-	assert.Equal(t, want, string(raw))
-}
-
-func TestPrefixedConn_Read(t *testing.T) {
-	prefix := []byte("PREFIX_DATA")
-	backend := &bytes.Buffer{}
-	backend.WriteString("_BACKEND")
-
-	conn := &mockConn{r: backend}
-	pc := &prefixedConn{Conn: conn, prefix: prefix}
-
-	buf := make([]byte, 32)
-	n, err := pc.Read(buf)
-	require.NoError(t, err, "first Read")
-	require.Len(t, prefix, n)
-	assert.Equal(t, "PREFIX_DATA", string(buf[:n]))
-
-	n, err = pc.Read(buf)
-	require.NoError(t, err, "second Read")
-	assert.Equal(t, "_BACKEND", string(buf[:n]))
-}
-
-// dialTCPPair creates a real TCP connection pair for testing.
-func dialTCPPair(t *testing.T) (client, server net.Conn) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "Listen")
-	t.Cleanup(func() { ln.Close() })
-
-	type acceptResult struct {
-		conn net.Conn
-		err  error
-	}
-	ch := make(chan acceptResult, 1)
-	go func() {
-		c, err := ln.Accept()
-		ch <- acceptResult{c, err}
-	}()
-
-	c, err := net.Dial("tcp", ln.Addr().String())
-	require.NoError(t, err, "Dial")
-
-	res := <-ch
-	require.Nil(t, res.err)
-
-	return c, res.conn
-}
-
-func TestHandleFallThrough_ServesResponseBeforeClose(t *testing.T) {
+func TestHandleFallThrough_ServesResponse(t *testing.T) {
 	responseBody := []byte("Hello from origin")
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write(responseBody)
-	})
+	handler := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBody(responseBody)
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
 
 	parser := New(nil, handler, WithNowFunc(time.Now))
 
@@ -134,32 +51,33 @@ func TestHandleFallThrough_ServesResponseBeforeClose(t *testing.T) {
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "GET"})
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
 	require.NoError(t, err, "ReadResponse")
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 200, resp.StatusCode)
 	assert.True(t, bytes.Equal(body, responseBody))
 
 	select {
 	case err := <-done:
 		assert.Nil(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("handleFallThrough did not return within 5s — closeNotifyConn race fix not working")
+		t.Fatal("handleFallThrough did not return within 5s")
 	}
 }
 
 func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
-	var gotHeaders http.Header
+	var gotAccept, gotCustom string
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeaders = r.Header.Clone()
+	handler := func(ctx *fasthttp.RequestCtx) {
+		gotAccept = string(ctx.Request.Header.Peek("Accept"))
+		gotCustom = string(ctx.Request.Header.Peek("X-Custom"))
 		wg.Done()
-		w.WriteHeader(http.StatusOK)
-	})
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
 
 	parser := New(nil, handler, WithNowFunc(time.Now))
 
@@ -188,7 +106,7 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "GET"})
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
 	require.NoError(t, err, "ReadResponse")
 	resp.Body.Close()
 
@@ -200,10 +118,8 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 	}
 
 	wg.Wait()
-	got := gotHeaders.Get("Accept")
-	assert.Equal(t, "text/html", got)
-	got = gotHeaders.Get("X-Custom")
-	assert.Equal(t, "custom-value", got)
+	assert.Equal(t, "text/html", gotAccept)
+	assert.Equal(t, "custom-value", gotCustom)
 }
 
 func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
@@ -211,11 +127,11 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotBody, _ = io.ReadAll(r.Body)
+	handler := func(ctx *fasthttp.RequestCtx) {
+		gotBody = append(gotBody[:0], ctx.Request.Body()...)
 		wg.Done()
-		w.WriteHeader(http.StatusOK)
-	})
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	}
 
 	parser := New(nil, handler, WithNowFunc(time.Now))
 
@@ -246,7 +162,7 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), &http.Request{Method: "POST"})
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
 	require.NoError(t, err, "ReadResponse")
 	resp.Body.Close()
 
@@ -261,26 +177,29 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 	assert.True(t, bytes.Equal(gotBody, excess))
 }
 
-func TestCloseNotifyConn_CloseSignalsOnce(t *testing.T) {
-	c := newCloseNotifyConn(&mockConn{})
+func dialTCPPair(t *testing.T) (client, server net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Listen")
+	t.Cleanup(func() { ln.Close() })
 
-	select {
-	case <-c.done:
-		t.Fatal("done channel should not be closed before Close")
-	default:
+	type acceptResult struct {
+		conn net.Conn
+		err  error
 	}
+	ch := make(chan acceptResult, 1)
+	go func() {
+		c, err := ln.Accept()
+		ch <- acceptResult{c, err}
+	}()
 
-	err := c.Close()
-	require.NoError(t, err, "Close")
+	c, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err, "Dial")
 
-	select {
-	case <-c.done:
-	case <-time.After(1 * time.Second):
-		t.Fatal("done channel not closed after Close")
-	}
+	res := <-ch
+	require.Nil(t, res.err)
 
-	err = c.Close()
-	require.NoError(t, err, "second Close")
+	return c, res.conn
 }
 
 type mockConn struct {

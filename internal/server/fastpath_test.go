@@ -2,19 +2,17 @@ package server
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestSetSocketOptions_NoPanic(t *testing.T) {
@@ -119,15 +117,7 @@ func TestConnLimitConn_Close(t *testing.T) {
 
 func TestServeConnWithHTTP_Error(t *testing.T) {
 	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:    "127.0.0.1:0",
-		Handler: echo200(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	client, server := net.Pipe()
-	errCh := make(chan error, 2)
-	srv.serveConnWithHTTP(server, errCh)
-	_ = client.Close()
+	t.Skip("serveConnWithHTTP removed — HTTP/2 support dropped")
 }
 
 func TestServeHTTPS_WithFastPath_TLS(t *testing.T) {
@@ -199,9 +189,8 @@ func TestLogReusePortStart_WithFastPath(t *testing.T) {
 func TestRouter_NoRouteMetrics(t *testing.T) {
 	t.Parallel()
 	rt := NewRouter(RouterConfig{})
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/nope", nil))
-	assert.Equal(t, http.StatusNotFound, rr.Code)
+	ctx := serveRoute(t, rt, "GET", "example.com", "/nope")
+	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
 func TestRouter_WithMetrics(t *testing.T) {
@@ -214,9 +203,8 @@ func TestRouter_WithMetrics(t *testing.T) {
 		},
 	})
 	rt.AddRoute("", "/api", "api", nil, ok200("api"))
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1", nil))
-	assert.Equal(t, "api", rr.Body.String())
+	ctx := serveRoute(t, rt, "GET", "example.com", "/api/v1")
+	assert.Equal(t, "api", string(ctx.Response.Body()))
 	assert.Equal(t, 1, reqCount)
 	assert.Equal(t, 0, noRoute)
 }
@@ -277,111 +265,19 @@ func TestServeMulti_ReusePortWithFastPath(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestServeConnWithHTTP_FiltersClosedError verifies that serveConnWithHTTP
-// does NOT send net.ErrClosed or http.ErrServerClosed to the error channel.
+// TestServeConnWithHTTP_FiltersClosedError — removed (serveConnWithHTTP deleted, HTTP/2 dropped).
 func TestServeConnWithHTTP_FiltersClosedError(t *testing.T) {
 	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:        "127.0.0.1:0",
-		Handler:     echo200(),
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		FastPath:    &mockFastPathHandler{},
-		FastMetrics: &mockFastPathMetrics{},
-	})
-
-	// A normal pipe connection: h2c preface then close.
-	// http.Server.Serve will get the connection, process it, then get
-	// net.ErrClosed on the second Accept and return ErrServerClosed.
-	// serveConnWithHTTP should filter both and NOT send to errCh.
-	clientConn, serverConn := net.Pipe()
-	go func() {
-		_, _ = clientConn.Write([]byte(h2cPreface))
-		_, _ = clientConn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0})
-		_ = clientConn.Close()
-	}()
-
-	errCh := make(chan error, 1)
-	// Call serveConnWithHTTP directly — it creates its own
-	// singleConnListener internally.
-	go srv.serveConnWithHTTP(serverConn, errCh)
-
-	select {
-	case err := <-errCh:
-		t.Fatalf("serveConnWithHTTP should not have sent error, got: %v", err)
-	case <-time.After(3 * time.Second):
-		// Expected: no error sent (filtered).
-	}
+	t.Skip("serveConnWithHTTP removed — HTTP/2 support dropped")
 }
 
-// TestServeListenerWithHTTP_SurfacesError verifies that
-// serveListenerWithHTTP sends non-filtered errors from
-// http.Server.Serve to the error channel.
+// TestServeListenerWithHTTP_SurfacesError — removed (serveListenerWithHTTP deleted, HTTP/2 dropped).
 func TestServeListenerWithHTTP_SurfacesError(t *testing.T) {
 	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:        "127.0.0.1:0",
-		Handler:     echo200(),
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		FastPath:    &mockFastPathHandler{},
-		FastMetrics: &mockFastPathMetrics{},
-	})
-
-	// Create a pipe connection that sends the h2c preface.
-	clientConn, serverConn := net.Pipe()
-	go func() {
-		_, _ = clientConn.Write([]byte(h2cPreface))
-		_, _ = clientConn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0})
-		_ = clientConn.Close()
-	}()
-
-	// Wrap in closeNotifyConn + errorOnSecondAcceptListener so
-	// http.Server.Serve gets errAcceptFailed on the second Accept.
-	notifyConn := newCloseNotifyConn(serverConn)
-	wrappedLn := &errorOnSecondAcceptListener{
-		inner: &singleConnListener{conn: notifyConn, ready: notifyConn.done},
-	}
-
-	errCh := make(chan error, 1)
-	go srv.serveListenerWithHTTP(wrappedLn, errCh)
-
-	select {
-	case err := <-errCh:
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "accept failed")
-	case <-time.After(5 * time.Second):
-		t.Fatal("serveListenerWithHTTP did not surface error within 5s")
-	}
+	t.Skip("serveListenerWithHTTP removed — HTTP/2 support dropped")
 }
 
-// errorOnSecondAcceptListener wraps a singleConnListener so the second
-// Accept returns a non-closed error.
-type errorOnSecondAcceptListener struct {
-	inner  *singleConnListener
-	closed bool
-	mu     sync.Mutex
-}
-
-func (l *errorOnSecondAcceptListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		return nil, net.ErrClosed
-	}
-	l.mu.Unlock()
-	if l.inner.done {
-		return nil, errAcceptFailed
-	}
-	return l.inner.Accept()
-}
-func (l *errorOnSecondAcceptListener) Close() error {
-	l.mu.Lock()
-	l.closed = true
-	l.mu.Unlock()
-	return l.inner.Close()
-}
-func (l *errorOnSecondAcceptListener) Addr() net.Addr { return l.inner.Addr() }
-
-var errAcceptFailed = errors.New("accept failed")
+// errorOnSecondAcceptListener — removed (singleConnListener deleted).
 
 // TestServeMultiFastPath_CtxCancellation verifies the normal shutdown
 // path: ctx cancellation triggers cleanup in all serveFastPath goroutines.

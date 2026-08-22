@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,140 +17,22 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// --- peekConn tests ---
+// --- peekConn tests --- (removed: peekConn deleted with h2c detection)
 
-func TestPeekConn_PeekAndRead(t *testing.T) {
-	t.Parallel()
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
-
-	pk := newPeekConn(server)
-	// Write data to the client side in a goroutine (net.Pipe is synchronous).
-	go func() { _, _ = client.Write([]byte("hello")) }()
-
-	// Peek first 5 bytes.
-	peeked, err := pk.Peek(5)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", string(peeked))
-
-	// Read should return peeked bytes first.
-	buf := make([]byte, 5)
-	n, err := pk.Read(buf)
-	require.NoError(t, err)
-	assert.Equal(t, "hello", string(buf[:n]))
+func TestPeekConn_Removed(t *testing.T) {
+	t.Skip("peekConn removed — h2c detection dropped with HTTP/2")
 }
 
-func TestPeekConn_PeekMoreThanAvailable(t *testing.T) {
-	t.Parallel()
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
+// --- closeNotifyConn tests --- (removed: closeNotifyConn deleted with net/http fallback)
 
-	pk := newPeekConn(server)
-	// Write only 3 bytes.
-	go func() { _, _ = client.Write([]byte("abc")) }()
-
-	// Peek 10 bytes — should return what's available.
-	peeked, _ := pk.Peek(10)
-	assert.GreaterOrEqual(t, len(peeked), 0)
-	// Error may be nil if some bytes were read.
-	if len(peeked) >= 3 {
-		assert.Equal(t, "abc", string(peeked[:3]))
-	}
+func TestCloseNotifyConn_Removed(t *testing.T) {
+	t.Skip("closeNotifyConn removed — net/http fallback dropped")
 }
 
-func TestPeekConn_ReadAfterPeek(t *testing.T) {
-	t.Parallel()
-	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
+// --- singleConnListener tests --- (removed: singleConnListener deleted with net/http fallback)
 
-	pk := newPeekConn(server)
-	go func() { _, _ = client.Write([]byte("test data")) }()
-
-	// Peek 4 bytes.
-	peeked, err := pk.Peek(4)
-	require.NoError(t, err)
-	assert.Equal(t, "test", string(peeked))
-
-	// Read should return peeked bytes.
-	buf := make([]byte, 4)
-	n, err := pk.Read(buf)
-	require.NoError(t, err)
-	assert.Equal(t, "test", string(buf[:n]))
-}
-
-// --- closeNotifyConn tests ---
-
-func TestCloseNotifyConn_CloseNotifies(t *testing.T) {
-	t.Parallel()
-	_, server := net.Pipe()
-	cn := newCloseNotifyConn(server)
-	select {
-	case <-cn.done:
-		t.Fatal("done channel should not be closed before Close")
-	default:
-	}
-	_ = cn.Close()
-	select {
-	case <-cn.done:
-		// Good — channel is closed.
-	case <-time.After(time.Second):
-		t.Fatal("done channel not closed after Close")
-	}
-}
-
-func TestCloseNotifyConn_DoubleClose(t *testing.T) {
-	t.Parallel()
-	_, server := net.Pipe()
-	cn := newCloseNotifyConn(server)
-	_ = cn.Close()
-	_ = cn.Close() // must not panic (sync.Once)
-}
-
-// --- singleConnListener tests ---
-
-func TestSingleConnListener_AcceptAndClose(t *testing.T) {
-	t.Parallel()
-	_, server := net.Pipe()
-	cn := newCloseNotifyConn(server)
-	cl := &singleConnListener{conn: cn, ready: cn.done}
-
-	// First Accept returns the connection.
-	conn, err := cl.Accept()
-	require.NoError(t, err)
-	assert.NotNil(t, conn)
-
-	// Close the connection so the listener can proceed.
-	_ = conn.Close()
-
-	// Second Accept should return ErrClosed after the connection is closed.
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		_ = cl.Close()
-	}()
-
-	_, err = cl.Accept()
-	assert.Error(t, err)
-}
-
-func TestSingleConnListener_Addr(t *testing.T) {
-	t.Parallel()
-	_, server := net.Pipe()
-	defer func() { _ = server.Close() }()
-	cn := newCloseNotifyConn(server)
-	cl := &singleConnListener{conn: cn, ready: cn.done}
-	assert.NotNil(t, cl.Addr())
-}
-
-func TestSingleConnListener_Close(t *testing.T) {
-	t.Parallel()
-	_, server := net.Pipe()
-	defer func() { _ = server.Close() }()
-	cn := newCloseNotifyConn(server)
-	cl := &singleConnListener{conn: cn, ready: cn.done}
-	assert.NoError(t, cl.Close())
+func TestSingleConnListener_Removed(t *testing.T) {
+	t.Skip("singleConnListener removed — net/http fallback dropped")
 }
 
 // --- Listener Name/Addr/Shutdown tests ---
@@ -248,16 +129,16 @@ func TestRouter_MetricsIncrement(t *testing.T) {
 	rt.AddRoute("", "/api", "api", nil, ok200("api"))
 
 	// Matching route should increment RequestsTotal.
-	rr := httptest.NewRecorder()
-	rt.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1", nil))
+	ctx1 := serveRoute(t, rt, "GET", "example.com", "/api/v1")
 	assert.Equal(t, 1, reqCount)
 	assert.Equal(t, 0, noRoute)
+	_ = ctx1
 
 	// Non-matching route should increment both.
-	rr2 := httptest.NewRecorder()
-	rt.ServeHTTP(rr2, httptest.NewRequest("GET", "/nope", nil))
+	ctx2 := serveRoute(t, rt, "GET", "example.com", "/nope")
 	assert.Equal(t, 2, reqCount)
 	assert.Equal(t, 1, noRoute)
+	_ = ctx2
 }
 
 // --- maxConnsError test ---
@@ -370,42 +251,9 @@ func TestServeFastPath_H1Request(t *testing.T) {
 	<-errCh
 }
 
-// TestServeFastPath_H2CPreface verifies that serveFastPath detects the
-// h2c preface and routes the connection to net/http via serveConnWithHTTP.
+// TestServeFastPath_H2CPreface — removed (h2c detection dropped with HTTP/2).
 func TestServeFastPath_H2CPreface(t *testing.T) {
-	t.Parallel()
-	srv := NewHTTP(ListenerConfig{
-		Addr:        "127.0.0.1:0",
-		Handler:     echo200(),
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		FastPath:    &mockFastPathHandler{},
-		FastMetrics: &mockFastPathMetrics{},
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ctx) }()
-	waitForAddr(t, srv)
-
-	addr := srv.Addr()
-	conn, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	// Send h2c preface.
-	_, err = conn.Write([]byte(h2cPreface))
-	require.NoError(t, err)
-	// Send a minimal HTTP/2 SETTINGS frame.
-	_, err = conn.Write([]byte{0, 0, 0, 4, 0, 0, 0, 0, 0})
-	require.NoError(t, err)
-	// Read the server's response (settings frame or error).
-	buf := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	_, _ = conn.Read(buf) // may get HTTP/2 settings frame
-	// Close the client connection so the server's h2c goroutine unblocks
-	// and the WaitGroup drains. Without this, cancel() alone cannot stop
-	// the in-flight HTTP/2 connection handler.
-	_ = conn.Close()
-	cancel()
-	<-errCh
+	t.Skip("h2c preface detection removed — HTTP/2 support dropped")
 }
 
 // TestServeFastPath_EmptyConnection verifies that serveFastPath handles

@@ -14,6 +14,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // HeaderVal returns the first value for key from h via direct map access,
@@ -670,6 +672,107 @@ func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
 			}
 		}
 	})
+}
+
+// FastHTTPMiddleware wraps a fasthttp.RequestHandler and records RED
+// metrics + structured access log for every request. This is the
+// fasthttp-native version of Middleware.
+//
+// Not wired into the handler chain yet — the cache handler still uses
+// http.Handler via fasthttpadaptor, and reading ctx.Response after the
+// adaptor returns causes a race (the adaptor's Flush/Hijack goroutine
+// may still be writing). This will be wired when the cache handler is
+// migrated to fasthttp.RequestHandler.
+func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	nowFunc := m.nowFunc
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
+	return func(ctx *fasthttp.RequestCtx) {
+		ctx.Request.Header.Del(header.XBouineRoute)
+
+		start := nowFunc()
+		next(ctx)
+
+		statusCode := ctx.Response.StatusCode()
+		if statusCode == 0 {
+			statusCode = 200
+		}
+		status := statusString(statusCode)
+		route := "_default"
+		if rv := ctx.UserValue(header.XBouineRoute); rv != nil {
+			if rs, ok := rv.(string); ok && rs != "" {
+				route = rs
+			}
+		}
+		xCache := string(ctx.Response.Header.Peek(header.XCache))
+		cacheResult := normaliseCacheResult(xCache)
+		source := normaliseSource(string(ctx.Response.Header.Peek(header.XCacheSource)))
+
+		elapsed := time.Since(start)
+		dur := elapsed.Seconds()
+		bytesOut := float64(len(ctx.Response.Body()))
+
+		method := string(ctx.Method())
+		m.recordFastHTTPMetrics(method, statusCode, status, route, cacheResult, source, dur, bytesOut)
+
+		m.recordRings(xCache, statusCode, route, string(ctx.Path()), elapsed, nil)
+
+		if m.accessLog != nil {
+			msg := accessLogMessage(xCache, statusCode)
+			if statusCode != http.StatusOK {
+				attrs := m.buildFastHTTPAccessLogAttrs(ctx, xCache, elapsed, statusCode)
+				m.accessLog.Warn(msg, attrs...)
+			} else {
+				keyVal := ctx.UserValue("cacheKey")
+				var key api.Key
+				if k, ok := keyVal.(api.Key); ok {
+					key = k
+				}
+				if m.shouldLogAccess(key) {
+					attrs := m.buildFastHTTPAccessLogAttrs(ctx, xCache, elapsed, statusCode)
+					m.accessLog.Info(msg, attrs...)
+				}
+			}
+		}
+	}
+}
+
+// recordFastHTTPMetrics increments the RED counters.
+func (m *DataPlaneMetrics) recordFastHTTPMetrics(method string, code int, status, route, cacheResult, source string, dur, bytesOut float64) {
+	if rm, ok := m.lookupRouteMetrics(route); ok {
+		mi := methodIndex(method)
+		si := statusIndex(code)
+		ri := cacheResultIndex(cacheResult)
+		src := sourceIndex(source)
+		if si >= 0 && ri >= 0 && src >= 0 {
+			rm.requestsTotal[mi][si][ri][src].Inc()
+			rm.requestDuration[mi][si][ri][src].Observe(dur)
+			rm.responseBytes[mi][ri][src].Add(bytesOut)
+			return
+		}
+		m.fallbackCount.Add(1)
+	}
+	m.RequestsTotal.WithLabelValues(method, status, cacheResult, source, route).Inc()
+	m.RequestDuration.WithLabelValues(method, status, cacheResult, source, route).Observe(dur)
+	m.ResponseBytesOut.WithLabelValues(method, cacheResult, source, route).Add(bytesOut)
+}
+
+// buildFastHTTPAccessLogAttrs constructs the structured-log attribute
+// slice for a fasthttp access log entry.
+func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx, cacheResult string, elapsed time.Duration, status int) []any {
+	attrs := []any{
+		"method", string(ctx.Method()),
+		"host", string(ctx.Host()),
+		"path", string(ctx.Path()),
+		"proto", "HTTP/1.1",
+		"status", status,
+		"bytes_out", len(ctx.Response.Body()),
+		"dur_ms", elapsed.Milliseconds(),
+		"remote", ctx.RemoteAddr().String(),
+		"cache_status", cacheResult,
+	}
+	return attrs
 }
 
 // recordMetrics increments the RED counters using pre-resolved labels when

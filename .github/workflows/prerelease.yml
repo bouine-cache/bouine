@@ -171,6 +171,10 @@ jobs:
       - name: Package chart with pre-release version
         run: |
           set -euo pipefail
+          # Helm requires semver-compatible chart versions. Convert the
+          # Docker tag (e.g. pr-449-4c0d287d05a8) to a valid semver
+          # pre-release (e.g. 0.0.0-pr.449.4c0d287d05a8).
+          CHART_VER="0.0.0-$(echo "$TAG" | tr '-' '.' | tr '_' '.')"
           # Set appVersion to the pre-release tag so helm can correlate the
           # chart with the image. The --version flag sets the chart package
           # version; we only need to patch appVersion in Chart.yaml.
@@ -178,14 +182,14 @@ jobs:
           mkdir -p .cr-release-packages
           helm package deploy/helm/bouine \
             --destination .cr-release-packages \
-            --version "$TAG"
+            --version "$CHART_VER"
           echo "## Helm chart packaged" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Chart version: \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Chart version: \`$CHART_VER\` (appVersion: \`$TAG\`)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Download the .tgz from the workflow artifacts, then:" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
-          echo "helm upgrade --install bouine ./bouine-$TAG.tgz \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "helm upgrade --install bouine ./bouine-$CHART_VER.tgz \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  --namespace thylong-innerspace \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  --values k8s/bouine-values.yaml" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

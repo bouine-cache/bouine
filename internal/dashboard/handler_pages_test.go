@@ -3,13 +3,11 @@ package dashboard
 import (
 	"context"
 	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/dashboard/templates"
@@ -40,11 +38,12 @@ func newTestHandlerWithRings() *Handler {
 func TestHandler_Overview(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/?range=1h", nil)
-	h.overview(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "overview")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/?range=1h")
+	h.overview(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Contains(t, string(ctx.Response.Body()), "overview")
 }
 
 func TestHandler_Overview_WithConfig(t *testing.T) {
@@ -63,28 +62,31 @@ func TestHandler_Overview_WithConfig(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
-	h.overview(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/")
+	h.overview(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Performance(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/performance?range=24h", nil)
-	h.performance(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/performance?range=24h")
+	h.performance(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Routes(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/routes", nil)
-	h.routes(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/routes")
+	h.routes(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Routes_WithConfig(t *testing.T) {
@@ -102,19 +104,21 @@ func TestHandler_Routes_WithConfig(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/routes", nil)
-	h.routes(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/routes")
+	h.routes(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Invalidation(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/invalidation", nil)
-	h.invalidation(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/invalidation")
+	h.invalidation(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Config(t *testing.T) {
@@ -131,19 +135,21 @@ func TestHandler_Config(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/config", nil)
-	h.config(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/config")
+	h.config(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Config_NilConfig(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/config", nil)
-	h.config(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/config")
+	h.config(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Insights(t *testing.T) {
@@ -159,10 +165,11 @@ func TestHandler_Insights(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/insights", nil)
-	h.insights(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/insights")
+	h.insights(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_Insights_WithAllClosures(t *testing.T) {
@@ -192,19 +199,21 @@ func TestHandler_Insights_WithAllClosures(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/insights", nil)
-	h.insights(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/insights")
+	h.insights(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestHandler_APIPurge_NotConfigured(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/purge", nil)
-	h.apiPurge(w, r)
-	assert.Contains(t, w.Body.String(), "purge not configured")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/purge")
+	h.apiPurge(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "purge not configured")
 }
 
 func TestHandler_APIPurge_Valid(t *testing.T) {
@@ -220,12 +229,13 @@ func TestHandler_APIPurge_Valid(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	body := "url=https%3A%2F%2Fexample.com%2Fpath"
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/purge", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.apiPurge(w, r)
-	assert.Contains(t, w.Body.String(), "purged")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/purge")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("url", "https://example.com/path")
+	h.apiPurge(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "purged")
 }
 
 func TestHandler_APIPurge_Error(t *testing.T) {
@@ -241,12 +251,13 @@ func TestHandler_APIPurge_Error(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	body := "url=https%3A%2F%2Fexample.com%2Fpath"
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/purge", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.apiPurge(w, r)
-	assert.Contains(t, w.Body.String(), "fetch failed")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/purge")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("url", "https://example.com/path")
+	h.apiPurge(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "fetch failed")
 }
 
 func TestHandler_APIPurge_JSONBody(t *testing.T) {
@@ -262,11 +273,13 @@ func TestHandler_APIPurge_JSONBody(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/purge", strings.NewReader(`{"url":"https://example.com/path"}`))
-	r.Header.Set("Content-Type", "application/json")
-	h.apiPurge(w, r)
-	assert.Contains(t, w.Body.String(), "purged")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/purge")
+	ctx.Request.Header.SetContentType("application/json")
+	ctx.Request.SetBody([]byte(`{"url":"https://example.com/path"}`))
+	h.apiPurge(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "purged")
 }
 
 func TestHandler_APIPurge_InvalidURL(t *testing.T) {
@@ -282,20 +295,21 @@ func TestHandler_APIPurge_InvalidURL(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/purge", strings.NewReader(`{"url":""}`))
-	r.Header.Set("Content-Type", "application/json")
-	h.apiPurge(w, r)
-	assert.Contains(t, w.Body.String(), "URL is required")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/purge")
+	h.apiPurge(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "URL is required")
 }
 
 func TestHandler_APIBan_NotConfigured(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/ban", nil)
-	h.apiBan(w, r)
-	assert.Contains(t, w.Body.String(), "ban not configured")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	h.apiBan(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "ban not configured")
 }
 
 func TestHandler_APIBan_Valid(t *testing.T) {
@@ -311,12 +325,14 @@ func TestHandler_APIBan_Valid(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	body := "host_regex=example.com&path_regex=%5E%2Fapi%2F"
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/ban", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.apiBan(w, r)
-	assert.Contains(t, w.Body.String(), "banned")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("host_regex", "example.com")
+	ctx.PostArgs().Set("path_regex", "^/api/")
+	h.apiBan(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "banned")
 }
 
 func TestHandler_APIBan_BothEmpty(t *testing.T) {
@@ -332,10 +348,11 @@ func TestHandler_APIBan_BothEmpty(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/ban", nil)
-	h.apiBan(w, r)
-	assert.Contains(t, w.Body.String(), "provide at least one")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	h.apiBan(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "provide at least one")
 }
 
 func TestHandler_APIBan_Error(t *testing.T) {
@@ -351,21 +368,23 @@ func TestHandler_APIBan_Error(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	body := "host_regex=example.com"
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/ban", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.apiBan(w, r)
-	assert.Contains(t, w.Body.String(), "ban failed")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("host_regex", "example.com")
+	h.apiBan(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "ban failed")
 }
 
 func TestHandler_APIRefresh_NotConfigured(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/refresh", nil)
-	h.apiRefresh(w, r)
-	assert.Contains(t, w.Body.String(), "refresh not configured")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/refresh")
+	h.apiRefresh(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "refresh not configured")
 }
 
 func TestHandler_APIRefresh_Valid(t *testing.T) {
@@ -381,12 +400,13 @@ func TestHandler_APIRefresh_Valid(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	body := "url=https%3A%2F%2Fexample.com%2Fpath"
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/refresh", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.apiRefresh(w, r)
-	assert.Contains(t, w.Body.String(), "refreshed")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/refresh")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("url", "https://example.com/path")
+	h.apiRefresh(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "refreshed")
 }
 
 func TestHandler_APIRefresh_Error(t *testing.T) {
@@ -402,12 +422,13 @@ func TestHandler_APIRefresh_Error(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	body := "url=https%3A%2F%2Fexample.com%2Fpath"
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/refresh", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h.apiRefresh(w, r)
-	assert.Contains(t, w.Body.String(), "refresh failed")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/refresh")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("url", "https://example.com/path")
+	h.apiRefresh(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "refresh failed")
 }
 
 func TestHandler_APIRefresh_JSONBody(t *testing.T) {
@@ -423,20 +444,23 @@ func TestHandler_APIRefresh_JSONBody(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/api/refresh", strings.NewReader(`{"url":"https://example.com/path"}`))
-	r.Header.Set("Content-Type", "application/json")
-	h.apiRefresh(w, r)
-	assert.Contains(t, w.Body.String(), "refreshed")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/refresh")
+	ctx.Request.Header.SetContentType("application/json")
+	ctx.Request.SetBody([]byte(`{"url":"https://example.com/path"}`))
+	h.apiRefresh(ctx)
+	assert.Contains(t, string(ctx.Response.Body()), "refreshed")
 }
 
 func TestHandler_Render_Error(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
-	h.render(w, r, errorComponent{})
-	_ = w.Body.String()
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/")
+	h.render(ctx, errorComponent{})
+	_ = string(ctx.Response.Body())
 }
 
 func TestHandler_CFStatusCard_WithFn(t *testing.T) {
@@ -550,10 +574,11 @@ func TestHandler_Cluster_WithRingFn(t *testing.T) {
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
 	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/cluster", nil)
-	h.cluster(w, r)
-	require.Equal(t, http.StatusOK, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/cluster")
+	h.cluster(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 // errorComponent is a templ.Component that always returns an error on Render.

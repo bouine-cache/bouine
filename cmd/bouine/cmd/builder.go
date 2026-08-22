@@ -376,6 +376,13 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		handler = cached
 	}
 
+	// When cache is not enabled, wire the staticfile handler's native
+	// fasthttp ServeRequest method directly — no adaptor needed.
+	if !cacheEnabled {
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, sh.ServeRequest)
+		return
+	}
+
 	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, fasthttpadaptor.NewFastHTTPHandler(handler))
 }
 

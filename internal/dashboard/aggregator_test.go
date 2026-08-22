@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -179,13 +180,14 @@ func TestPeerMetricsHandler(t *testing.T) {
 	rings.Request.Flush(time.Now())
 
 	h := PeerMetricsHandler(rings)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/peer/metrics", nil)
-	h.ServeHTTP(w, r)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/v1/peer/metrics")
+	h(ctx)
 
-	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	var sum observability.MetricsSummary
-	err := json.NewDecoder(w.Body).Decode(&sum)
+	err := json.Unmarshal(ctx.Response.Body(), &sum)
 	require.NoError(t, err, "decode")
 	assert.Equal(t, "node-x", sum.NodeName)
 	var total int64

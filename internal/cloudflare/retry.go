@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -25,6 +24,10 @@ const (
 	// while still honouring legitimate rate-limit backoff.
 	maxRetryAfter = 60 * time.Second
 )
+
+// httpTimeFormat is the HTTP-date format used in Retry-After headers,
+// equivalent to net/http.TimeFormat.
+const httpTimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 
 // httpStatusCoder is implemented by *cfsdk.Error and also by test fakes.
 type httpStatusCoder interface {
@@ -51,7 +54,9 @@ func (d tryDecision) next(err error) tryDecision {
 	var apiErr *cfsdk.Error
 	if errors.As(err, &apiErr) {
 		statusCode = apiErr.StatusCode
-		retryAfter = parseRetryAfter(apiErr.Response)
+		if apiErr.Response != nil {
+			retryAfter = parseRetryAfterValue(apiErr.Response.Header.Get(header.RetryAfter))
+		}
 	} else {
 		var sc httpStatusCoder
 		if errors.As(err, &sc) {
@@ -71,7 +76,7 @@ func (d tryDecision) next(err error) tryDecision {
 		}
 	}
 
-	if statusCode == http.StatusTooManyRequests {
+	if statusCode == 429 {
 		if d.attempt < maxRetries {
 			delay := retryAfter
 			if delay <= 0 {
@@ -110,18 +115,17 @@ func cryptoFloat64() float64 {
 	return float64(binary.LittleEndian.Uint64(b[:])&((1<<53)-1)) / (1 << 53)
 }
 
-func parseRetryAfter(resp *http.Response) time.Duration {
-	if resp == nil {
-		return 0
-	}
-	v := resp.Header.Get(header.RetryAfter)
+// parseRetryAfterValue parses a Retry-After header value (either
+// delta-seconds or HTTP-date) and returns the remaining duration,
+// capped at maxRetryAfter.
+func parseRetryAfterValue(v string) time.Duration {
 	if v == "" {
 		return 0
 	}
 	var d time.Duration
 	if secs, err := strconv.Atoi(v); err == nil {
 		d = time.Duration(secs) * time.Second
-	} else if t, err := http.ParseTime(v); err == nil {
+	} else if t, err := time.Parse(httpTimeFormat, v); err == nil {
 		d = time.Until(t)
 	} else {
 		return 0

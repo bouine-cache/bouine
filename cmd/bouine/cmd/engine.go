@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -758,10 +757,8 @@ func (e *engine) buildPeerPutHandler(rs *runState) *cluster.PeerPutHandler {
 	return h
 }
 
-// buildDashboard wires and returns the dashboard ServeMux.
-func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) *http.ServeMux {
-	dashMux := http.NewServeMux()
-
+// buildDashboard wires and returns the dashboard fasthttp handler.
+func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) fasthttp.RequestHandler {
 	var ringFn func() []api.RingSegment
 	if rs.clusterNode != nil {
 		ringFn = rs.clusterNode.RingSegments
@@ -769,7 +766,7 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 
 	clusterMeta := e.buildClusterMeta(rs)
 
-	_ = dashboard.New(dashboard.Config{
+	dashHandler, _ := dashboard.New(dashboard.Config{
 		Rings:        rs.rings,
 		Version:      buildinfo.Version,
 		PeersFn:      rs.peersFn,
@@ -812,8 +809,8 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		VaryCapHitsFn:       func() int64 { return rs.dpMetrics.VaryCapHitsCount() },
 		BroadcastFailuresFn: func() int64 { return rs.clusterMetrics.BroadcastFailuresCount() },
 		CFPurgeSkippedFn:    func() int64 { return rs.dpMetrics.CFPurgeSkippedCount() },
-	}, dashMux)
-	return dashMux
+	})
+	return dashHandler
 }
 
 // buildClusterMeta constructs the cluster metadata card for the dashboard.

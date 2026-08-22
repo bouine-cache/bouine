@@ -1,16 +1,11 @@
 package dashboard
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/bouine-cache/bouine/pkg/header"
+	"github.com/valyala/fasthttp"
 )
 
 func TestSessionAuth_SignAndValidate(t *testing.T) {
@@ -33,7 +28,6 @@ func TestSessionAuth_ValidRejectsTamperedSig(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("secret-token")
 	tok, _ := sa.makeToken()
-	// Flip last character.
 	tampered := tok[:len(tok)-1] + "X"
 	assert.False(t, sa.valid(tampered))
 }
@@ -49,49 +43,49 @@ func TestSessionAuth_DifferentKeyRejects(t *testing.T) {
 func TestSessionAuth_LoginGet(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("my-token")
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
-	sa.LoginHandler(w, r)
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "bouine")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/login")
+	sa.LoginHandler(ctx)
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Contains(t, string(ctx.Response.Body()), "bouine")
 }
 
 func TestSessionAuth_LoginPostWrongToken(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("correct-token")
-	body := url.Values{"token": {"wrong"}}.Encode()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/login",
-		strings.NewReader(body))
-	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
-	sa.LoginHandler(w, r)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/login")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("token", "wrong")
+	sa.LoginHandler(ctx)
+	assert.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 func TestSessionAuth_LoginPostCorrectToken(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("correct-token")
-	body := url.Values{"token": {"correct-token"}}.Encode()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/dashboard/login",
-		strings.NewReader(body))
-	r.Header.Set(header.ContentType, "application/x-www-form-urlencoded")
-	sa.LoginHandler(w, r)
-	assert.Equal(t, http.StatusSeeOther, w.Code)
-	cookie := w.Header().Get(header.SetCookie)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/login")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("token", "correct-token")
+	sa.LoginHandler(ctx)
+	assert.Equal(t, fasthttp.StatusSeeOther, ctx.Response.StatusCode())
+	cookie := string(ctx.Response.Header.Peek("Set-Cookie"))
 	assert.Contains(t, cookie, sessionCookieName)
 }
 
 func TestSessionAuth_MiddlewareRedirectsWithoutCookie(t *testing.T) {
 	t.Parallel()
 	sa := newSessionAuth("tok")
-	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
-	sa.Middleware(next).ServeHTTP(w, r)
-	assert.Equal(t, http.StatusFound, w.Code)
+	next := func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(fasthttp.StatusOK) }
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/")
+	sa.Middleware(next)(ctx)
+	assert.Equal(t, fasthttp.StatusFound, ctx.Response.StatusCode())
 }
 
 func TestSessionAuth_MiddlewarePassesValidCookie(t *testing.T) {
@@ -100,12 +94,11 @@ func TestSessionAuth_MiddlewarePassesValidCookie(t *testing.T) {
 	tok, err := sa.makeToken()
 	require.NoError(t, err, "makeToken")
 
-	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/dashboard/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: tok})
-	sa.Middleware(next).ServeHTTP(w, r)
-	assert.Equal(t, http.StatusOK, w.Code)
+	next := func(ctx *fasthttp.RequestCtx) { ctx.SetStatusCode(fasthttp.StatusOK) }
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/")
+	ctx.Request.Header.SetCookie(sessionCookieName, tok)
+	sa.Middleware(next)(ctx)
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }

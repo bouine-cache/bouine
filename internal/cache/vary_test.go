@@ -14,6 +14,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestVariantKey_NoVary(t *testing.T) {
@@ -106,22 +108,22 @@ func TestHandler_VaryAwareStorage(t *testing.T) {
 	// gzip request.
 	r1 := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	r1.Header.Set(header.AcceptEncoding, "gzip")
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, r1)
+	rr1 := newRR()
+	h.ServeHTTPCompat(rr1, r1)
 	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
 
 	// br request — different variant, should MISS.
 	r2 := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	r2.Header.Set(header.AcceptEncoding, "br")
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, r2)
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, r2)
 	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
 
 	// gzip again — should HIT.
 	r3 := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	r3.Header.Set(header.AcceptEncoding, "gzip")
 	rr3 := httptest.NewRecorder()
-	h.ServeHTTP(rr3, r3)
+	h.ServeHTTPCompat(rr3, r3)
 	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
 	require.Equal(t, "body-gzip", rr3.Body.String())
 }
@@ -137,16 +139,16 @@ func TestHandler_RangeOnCachedObject(t *testing.T) {
 	h := testHandler(t, upstream)
 
 	// Populate cache with full body.
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/range", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/range", nil))
 	require.Equal(t, 200, rr.Code)
 
 	// Range request on cached object.
 	rangeReq := httptest.NewRequest("GET", "http://example.com/range", nil)
 	rangeReq.Header.Set(header.Range, "bytes=0-4")
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, rangeReq)
-	require.Equal(t, http.StatusPartialContent, rr2.Code)
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, rangeReq)
+	require.Equal(t, fasthttp.StatusPartialContent, rr2.Code)
 	require.Equal(t, "Hello", rr2.Body.String())
 	xc := rr2.Header().Get(header.XCache)
 	require.Equal(t, "HIT", xc)
@@ -163,7 +165,8 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	h := testHandler(t, upstream)
 
 	url := "http://example.com/stale-range"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
@@ -174,10 +177,10 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 
 	rangeReq := httptest.NewRequest("GET", url, nil)
 	rangeReq.Header.Set(header.Range, "bytes=0-4")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, rangeReq)
+	rr = newRR()
+	h.ServeHTTPCompat(rr, rangeReq)
 
-	require.Equal(t, http.StatusPartialContent, rr.Code)
+	require.Equal(t, fasthttp.StatusPartialContent, rr.Code)
 	require.Equal(t, "Hello", rr.Body.String())
 	xc := rr.Header().Get(header.XCache)
 	require.Equal(t, "STALE", xc)

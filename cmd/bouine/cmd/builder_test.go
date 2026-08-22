@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -573,7 +575,7 @@ func TestClusterPeersCmd_Exec(t *testing.T) {
 func TestClusterPeersCmd_ServerError(t *testing.T) {
 	t.Parallel()
 	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(fasthttp.StatusInternalServerError)
 	}))
 	defer originSrv.Close()
 
@@ -1033,7 +1035,7 @@ func TestPurgeKey_WithHandler(t *testing.T) {
 	store, err := e.buildStore(nil)
 	require.NoError(t, err)
 	handler := cache.NewHandler(cache.HandlerConfig{
-		Upstream: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Upstream: fasthttpadaptor.NewFastHTTPHandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		Store:    store,
 		Logger:   newTestLogger(),
 	})
@@ -1202,7 +1204,7 @@ func TestBuildRouter_WithMissingPool(t *testing.T) {
 func TestBuildRouter_WithRoute(t *testing.T) {
 	t.Parallel()
 	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(fasthttp.StatusOK)
 	}))
 	defer originSrv.Close()
 
@@ -1621,7 +1623,7 @@ func TestPurgeKey_WithMatchingHandler(t *testing.T) {
 	}
 	require.NoError(t, store.Put(context.Background(), key, obj))
 	handler := cache.NewHandler(cache.HandlerConfig{
-		Upstream: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Upstream: fasthttpadaptor.NewFastHTTPHandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		Store:    store,
 		Logger:   newTestLogger(),
 	})

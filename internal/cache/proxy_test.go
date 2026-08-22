@@ -28,8 +28,8 @@ func TestHandler_PUTProxiesBodyCorrectly(t *testing.T) {
 	body := `{"response_headers":[[header.CacheControl,"max-age=60"]]}`
 	req := httptest.NewRequest("PUT", "http://example.com/config/test-uuid", strings.NewReader(body))
 	req.Header.Set(header.ContentType, "application/json")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	require.Equal(t, 201, rr.Code)
 	require.Equal(t, "PUT", gotMethod)
@@ -64,14 +64,14 @@ func TestHandler_GETAfterPUTConfigSetup(t *testing.T) {
 		strings.NewReader(`{"test":"data"}`))
 	putReq.Header.Set(header.ContentType, "application/json")
 	putRR := httptest.NewRecorder()
-	h.ServeHTTP(putRR, putReq)
+	h.ServeHTTPCompat(putRR, putReq)
 
 	require.Equal(t, 201, putRR.Code)
 	require.Equal(t, `{"test":"data"}`, configuredBody)
 
 	// Step 2: GET test (should be a MISS, fetched from origin).
 	getRR := httptest.NewRecorder()
-	h.ServeHTTP(getRR, httptest.NewRequest("GET", "http://example.com/test/abc123", nil))
+	h.ServeHTTPCompat(getRR, httptest.NewRequest("GET", "http://example.com/test/abc123", nil))
 
 	require.Equal(t, 200, getRR.Code)
 	require.Equal(t, "test-response", getRR.Body.String())

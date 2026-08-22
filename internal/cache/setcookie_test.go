@@ -17,7 +17,8 @@ func newSetCookieHandler(t *testing.T, upstream http.Handler, allow bool) *Handl
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
-		Upstream:       upstream,
+		Upstream:       wrapUpstream(upstream),
+		FastClient:     &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
 		Store:          store,
 		AllowSetCookie: allow,
 	})
@@ -52,14 +53,14 @@ func TestSetCookie_DefaultBlocksCaching(t *testing.T) {
 	h := newSetCookieHandler(t, upstream, false)
 
 	url := "http://example.com/login"
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	rr1 := newRR()
+	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
 
 	require.Equal(t, 200, rr1.Code)
 	assert.Equal(t, "session=abc123; Path=/", rr1.Header().Get(header.SetCookie))
 
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", url, nil))
 
 	assert.Equal(t, 2, calls)
 	assert.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
@@ -85,14 +86,14 @@ func TestSetCookie_AllowTrueStoresWithoutCookie(t *testing.T) {
 	url := "http://example.com/page"
 
 	// First request: MISS — client gets Set-Cookie from the origin.
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	rr1 := newRR()
+	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
 	require.Equal(t, 200, rr1.Code)
 	assert.NotEqual(t, "", rr1.Header().Get(header.SetCookie))
 
 	// Second request: HIT — must NOT have Set-Cookie.
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", url, nil))
 	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
 	assert.Equal(t, "", rr2.Header().Get(header.SetCookie))
 	assert.Equal(t, 1, calls)
@@ -114,7 +115,9 @@ func TestSetCookie_NoStoreStillBlocks(t *testing.T) {
 
 	url := "http://example.com/auth"
 	for range 3 {
-		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+		rr := newRR()
+		rr = newRR()
+		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 	}
 	assert.Equal(t, 3, calls)
 }
@@ -133,9 +136,10 @@ func TestSetCookie_NoSetCookieHeaderUnaffected(t *testing.T) {
 	h := newSetCookieHandler(t, upstream, false) // default (false)
 
 	url := "http://example.com/public"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", url, nil))
 
 	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
 	assert.Equal(t, 1, calls)
@@ -150,7 +154,8 @@ func TestSetCookie_DefaultBlocksEvenWithExplicitFreshness(t *testing.T) {
 	h := newSetCookieHandler(t, upstream, false)
 
 	url := "http://example.com/important"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	// Verify the object was NOT stored.
 	key := BuildKey(requestInfoFromURL("GET", url), nil)

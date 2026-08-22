@@ -46,6 +46,22 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+type headerMapWriter struct {
+	w http.ResponseWriter
+}
+
+func (h *headerMapWriter) SetHeader(key, value string) {
+	h.w.Header().Set(key, value)
+}
+
+func (h *headerMapWriter) WriteHeader(code int) {
+	h.w.WriteHeader(code)
+}
+
+func (h *headerMapWriter) Write(b []byte) (int, error) {
+	return h.w.Write(b)
+}
+
 // defaultRefreshConcurrency bounds concurrent background refresh fetches
 // per route. Distinct from revalSem (256, per-handler SWR) and fetchSem
 // (32, per-handler foreground). Refresh fetches are typically 304s (no
@@ -727,11 +743,11 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	req := &http.Request{
 		Method: entry.method,
 		URL:    u,
-		Header: entry.header.Clone(),
+		Header: func() http.Header { h := make(http.Header, entry.header.Len()); entry.header.WriteTo(h); return h }(),
 		Host:   u.Host,
 	}
 	req = req.WithContext(ctx)
-	ConditionalHeaders(req, stale)
+	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
 	res := h.collapsedFetch(req, key)
 	if res.Err != nil {
@@ -755,14 +771,14 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		return
 	}
 
-	if res.StatusCode == http.StatusNotModified {
+	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, time.Now())
 		h.storeObject(ctx, key, refreshed, req, true, staleHits)
 		h.refreshMetrics.IncTotal("304")
 		return
 	}
 
-	if IsCacheableWithDefault(res.StatusCode, req.Header, res.Header.ToHTTP(), h.negativeTTL, h.defaultTTL) {
+	if IsCacheableWithDefault(res.StatusCode, header.FromHTTP(req.Header), res.Header.ToMap(), h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
@@ -837,7 +853,7 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 	}
 	hdr := make(http.Header, obj.Header.Len())
 	obj.Header.WriteTo(hdr)
-	req := &http.Request{Method: http.MethodGet, Header: hdr}
+	req := &http.Request{Method: "GET", Header: hdr}
 	h.storeObject(ctx, obj.Key, obj, req, false, 0)
 }
 
@@ -845,7 +861,8 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 // when configured. Inlined to avoid overhead on the hit path when no
 // policy is configured (zero added allocs).
 func (h *Handler) buildKey(r *http.Request) api.Key {
-	return BuildKey(r, h.policy)
+	ri := requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header))
+	return BuildKey(ri, h.policy)
 }
 
 // ServeRequest implements fasthttp.RequestHandler. It creates a
@@ -932,7 +949,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	}
 	connStrip := make(map[string]bool, len(connectionHdrs))
 	for _, h := range connectionHdrs {
-		connStrip[http.CanonicalHeaderKey(h)] = true
+		connStrip[header.InternKey(h)] = true
 	}
 	for k, vals := range w.hdr {
 		switch k {
@@ -1023,14 +1040,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rw, ok := w.(*responsewriter.ResponseWriter); ok {
 		rw.SetCacheKey(key)
 	}
-	disp := Evaluate(r, obj, now)
+	disp := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, now)
 
 	switch disp.Decision {
 	case Hit, StaleHit:
 		if h.tryConditional304(w, r, disp.Object, src) {
 			return
 		}
-		if ServeRange(w, r, disp.Object, disp.Decision == StaleHit, src) {
+		if ServeRange(&headerMapWriter{w: w}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), disp.Object, disp.Decision == StaleHit, src) {
 			return
 		}
 		cacheRes := cacheHit
@@ -1080,7 +1097,7 @@ func (h *Handler) handleCacheMiss(w http.ResponseWriter, r *http.Request, primar
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			if peerObj, err := h.peerFetch(r.Context(), owner, lookupKey); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
-				if d2 := Evaluate(r, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
+				if d2 := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					cacheRes := cacheHit
 					if d2.Decision == StaleHit {
 						cacheRes = cacheStale
@@ -1125,7 +1142,7 @@ func (h *Handler) lookup(r *http.Request) (primaryKey api.Key, lookupKey api.Key
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
 		return primaryKey, primaryKey, obj, src
 	}
-	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), r.Header, h.policy)
+	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), header.FromHTTP(r.Header), h.policy)
 	if vk == primaryKey {
 		return primaryKey, primaryKey, obj, src
 	}
@@ -1170,7 +1187,7 @@ func (h *Handler) forwardToOwnerIfRemote(ctx context.Context, obj *api.Object) {
 // conditional headers match the cached object. Used for both hit and
 // revalidate paths. src is the storage-tier source (hot/warm).
 func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj *api.Object, src api.Source) bool {
-	if !ClientConditionalMatch(r, obj) {
+	if !ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj) {
 		return false
 	}
 	if obj.ETag != "" {
@@ -1180,7 +1197,7 @@ func (h *Handler) tryConditional304(w http.ResponseWriter, r *http.Request, obj 
 	// from .Set() on the hit path.
 	w.Header()[header.XCache] = headerHIT
 	w.Header()[header.XCacheSource] = sourceSlice(src)
-	w.WriteHeader(http.StatusNotModified)
+	w.WriteHeader(fasthttp.StatusNotModified)
 	return true
 }
 
@@ -1245,10 +1262,10 @@ func (g *headerGuard) ReadFrom(src io.Reader) (int64, error) {
 func (h *Handler) handleBypass(w http.ResponseWriter, r *http.Request) {
 	// only-if-cached with no cached response → 504 Gateway Timeout
 	// (RFC 9111 §5.2.1.7). Source is empty — origin was not contacted.
-	reqCC := ParseCacheControl(mergeHeaderValues(r.Header, header.CacheControl))
+	reqCC := ParseCacheControl(header.FromHTTP(r.Header).Get(header.CacheControl))
 	if reqCC.OnlyIfCached {
 		w.Header()[header.XCache] = headerMISS
-		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+		http.Error(w, "Gateway Timeout", fasthttp.StatusGatewayTimeout)
 		return
 	}
 	// Fast path: use FastClient when available, bypassing
@@ -1295,7 +1312,7 @@ func (h *Handler) handleBypassFast(w http.ResponseWriter, r *http.Request) {
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
 		w.Header()[header.XCache] = headerBYPASS
-		http.Error(w, "upstream error", http.StatusBadGateway)
+		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 
@@ -1310,7 +1327,7 @@ func (h *Handler) handleBypassFast(w http.ResponseWriter, r *http.Request) {
 	}
 	dst[header.XCache] = headerBYPASS
 	w.WriteHeader(resp.StatusCode())
-	if r.Method != http.MethodHead {
+	if r.Method != "HEAD" {
 		_, _ = w.Write(resp.Body())
 	}
 }
@@ -1331,7 +1348,7 @@ func stripNoCacheFields(dst http.Header, ccHeader string) {
 		return r == ',' || r == ' '
 	}) {
 		if field != "" {
-			del := http.CanonicalHeaderKey(field)
+			del := header.InternKey(field)
 			delete(dst, del)
 		}
 	}
@@ -1369,7 +1386,7 @@ func (h *Handler) serveObject(w http.ResponseWriter, r *http.Request, obj *api.O
 	}
 	stripNoCacheFields(dst, obj.CacheControl)
 	w.WriteHeader(obj.StatusCode)
-	if r.Method != http.MethodHead {
+	if r.Method != "HEAD" {
 		_, _ = w.Write(obj.Body) // #nosec G705 -- obj.Body is a cached origin response, not user input
 	}
 }
@@ -1411,7 +1428,7 @@ func (h *Handler) fetchAndStore(w http.ResponseWriter, r *http.Request, lookupKe
 	if res.Err != nil {
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream error", http.StatusBadGateway)
+		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 	h.writeAndMaybeStore(w, r, res, primaryKey)
@@ -1451,7 +1468,7 @@ func (h *Handler) fetchAndStoreStayinAlive(w http.ResponseWriter, r *http.Reques
 // Vary variant storage in writeAndMaybeStore.
 func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source) {
 	revalReq := r.Clone(r.Context())
-	ConditionalHeaders(revalReq, stale)
+	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// Collapse concurrent revalidations for the same key. Each concurrent
 	// request that finds the same stale object would otherwise fire its
@@ -1489,7 +1506,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 		}
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream error", http.StatusBadGateway)
+		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 	if res.StatusCode >= 500 {
@@ -1499,7 +1516,7 @@ func (h *Handler) revalidate(w http.ResponseWriter, r *http.Request, primaryKey 
 		}
 	}
 
-	if res.StatusCode == http.StatusNotModified {
+	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, now)
 		h.storeObject(r.Context(), lookupKey, refreshed, r, false, 0)
 		h.serveObject(w, r, refreshed, now, cacheRevalidated, src)
@@ -1526,7 +1543,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	// eviction signal; the per-window popularity gate uses windowHits
 	// from the store, not Object.Hits.
 	refreshed.Hits = 0
-	MergeHeaders304(refreshed, res.Header.ToHTTP())
+	MergeHeaders304(refreshed, res.Header.ToMap())
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
@@ -1592,7 +1609,7 @@ func (h *Handler) triggerBgRevalidate(r *http.Request, key api.Key, stale *api.O
 // the same key.
 func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, key api.Key, stale *api.Object) {
 	revalReq := r.Clone(ctx)
-	ConditionalHeaders(revalReq, stale)
+	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	staleHits := h.store.WindowHits(key)
 
@@ -1601,7 +1618,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 		return
 	}
 
-	if res.StatusCode == http.StatusNotModified {
+	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, time.Now())
 		h.storeObject(ctx, key, refreshed, r, true, staleHits)
 		return
@@ -1610,7 +1627,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, r *http.Request, k
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	bgParsed := newParsedResponse(res.StatusCode, r.Header, res.Header.ToHTTP())
+	bgParsed := newParsedResponse(res.StatusCode, header.FromHTTP(r.Header), res.Header.ToMap())
 
 	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1642,14 +1659,14 @@ func (h *Handler) writeAndMaybeStore(
 		dst[header.Age] = []string{"0"}
 	}
 	w.WriteHeader(res.StatusCode)
-	if r.Method != http.MethodHead {
+	if r.Method != "HEAD" {
 		_, _ = w.Write(res.Body)
 	}
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	parsed := newParsedResponse(res.StatusCode, r.Header, res.Header.ToHTTP())
+	parsed := newParsedResponse(res.StatusCode, header.FromHTTP(r.Header), res.Header.ToMap())
 
 	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1662,7 +1679,7 @@ func (h *Handler) writeAndMaybeStore(
 		// buildKey call on the same request.
 		storeKey := primaryKey
 		if vary := res.Header.Get(header.Vary); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, r.Header, h.policy)
+			storeKey = VariantKey(primaryKey, vary, header.FromHTTP(r.Header), h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
@@ -1821,7 +1838,7 @@ func (h *Handler) invalidateAndProxyFast(w http.ResponseWriter, r *http.Request)
 		tracing.RecordError(span, err)
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream error", http.StatusBadGateway)
+		http.Error(w, "upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 
@@ -1830,7 +1847,7 @@ func (h *Handler) invalidateAndProxyFast(w http.ResponseWriter, r *http.Request)
 			"key", h.buildKey(r), "limit", h.maxResponseBytes)
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream response too large", http.StatusBadGateway)
+		http.Error(w, "upstream response too large", fasthttp.StatusBadGateway)
 		return
 	}
 
@@ -1859,7 +1876,7 @@ func (h *Handler) invalidateAndProxyFast(w http.ResponseWriter, r *http.Request)
 // POST-response storage after a successful fasthttp origin fetch.
 func (h *Handler) invalidateAfterProxyFast(r *http.Request, resp *fasthttp.Response) {
 	getReq := r.Clone(r.Context())
-	getReq.Method = http.MethodGet
+	getReq.Method = "GET"
 	key := h.buildKey(getReq)
 	_, _ = h.Purge(r.Context(), key)
 
@@ -1900,7 +1917,7 @@ func (h *Handler) maybeStorePostResponseFast(r *http.Request, getReq *http.Reque
 	}
 	res := fetchResult{
 		StatusCode: resp.StatusCode(),
-		Header:     fromHTTPHeader(hdr),
+		Header:     fromHeaderMap(header.FromHTTP(hdr)),
 		Body:       body,
 	}
 	now := time.Now()
@@ -1926,7 +1943,7 @@ func (h *Handler) invalidateAndProxyLegacy(w http.ResponseWriter, r *http.Reques
 			"key", h.buildKey(r), "limit", h.maxResponseBytes)
 		w.Header()[header.XCache] = headerMISS
 		w.Header()[header.XCacheSource] = sourceOrigin
-		http.Error(w, "upstream response too large", http.StatusBadGateway)
+		http.Error(w, "upstream response too large", fasthttp.StatusBadGateway)
 		return
 	}
 
@@ -1945,7 +1962,7 @@ func (h *Handler) invalidateAndProxyLegacy(w http.ResponseWriter, r *http.Reques
 	// Only invalidate on 2xx/3xx success.
 	if rec.statusCode >= 200 && rec.statusCode < 400 {
 		getReq := r.Clone(r.Context())
-		getReq.Method = http.MethodGet
+		getReq.Method = "GET"
 		key := h.buildKey(getReq)
 		_, _ = h.Purge(r.Context(), key)
 
@@ -1972,10 +1989,10 @@ func (h *Handler) invalidateAndProxyLegacy(w http.ResponseWriter, r *http.Reques
 // maybeStorePostResponse stores a successful POST response under the GET
 // key when it is cacheable, per RFC 9111 §4.3.1.
 func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, key api.Key, rec *responseRecorder) {
-	if r.Method != http.MethodPost || rec.statusCode < 200 || rec.statusCode >= 300 {
+	if r.Method != "POST" || rec.statusCode < 200 || rec.statusCode >= 300 {
 		return
 	}
-	if !IsCacheable(rec.statusCode, r.Header, rec.header) {
+	if !IsCacheable(rec.statusCode, header.FromHTTP(r.Header), header.FromHTTP(rec.header)) {
 		return
 	}
 	if !h.allowSetCookie && rec.header.Get(header.SetCookie) != "" {
@@ -1988,7 +2005,7 @@ func (h *Handler) maybeStorePostResponse(r *http.Request, getReq *http.Request, 
 	copy(bodyCopy, rec.body.Bytes())
 	res := fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     fromHTTPHeader(rec.header.Clone()),
+		Header:     fromHeaderMap(header.FromHTTP(rec.header.Clone())),
 		Body:       bodyCopy,
 	}
 	obj := buildObject(key, getReq, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
@@ -2020,7 +2037,7 @@ func (h *Handler) buildLocationKey(r *http.Request, loc string) api.Key {
 		tlsState = &tls.ConnectionState{}
 	}
 	locReq := &http.Request{
-		Method: http.MethodGet,
+		Method: "GET",
 		URL:    resolved,
 		Host:   host,
 		TLS:    tlsState,
@@ -2083,7 +2100,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		if obj.Header.Len() > 0 {
 			varyHeader = obj.Header.Get(header.Vary)
 		}
-		h.refreshRegistry.Register(key, r, varyHeader, h.refreshPersistCycles)
+		h.refreshRegistry.Register(key, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), varyHeader, h.refreshPersistCycles)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
 	}
 }
@@ -2285,7 +2302,7 @@ func (h *Handler) doFetchLegacy(r *http.Request) (res fetchResult) {
 
 	return fetchResult{
 		StatusCode: rec.statusCode,
-		Header:     fromHTTPHeader(hdr),
+		Header:     fromHeaderMap(header.FromHTTP(hdr)),
 		Body:       body,
 	}
 }
@@ -2295,13 +2312,13 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
-	ccHeader := mergeHeaderValues(res.Header.ToHTTP(), header.CacheControl)
+	ccHeader := mergeHeaderValues(res.Header.ToMap(), header.CacheControl)
 	var respCC Directives
-	if cdnCC, hasCDN := cdnCacheControl(res.Header.ToHTTP()); hasCDN {
+	if cdnCC, hasCDN := cdnCacheControl(res.Header.ToMap()); hasCDN {
 		respCC = cdnCC
 		// Store CDN-Cache-Control string as the object's pre-parsed CC so
 		// Evaluate reads the CDN directives on every hit path.
-		ccHeader = mergeHeaderValues(res.Header.ToHTTP(), "CDN-Cache-Control")
+		ccHeader = mergeHeaderValues(res.Header.ToMap(), "CDN-Cache-Control")
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
@@ -2316,7 +2333,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 		}
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
-	ttl := computeTTL(res.Header.ToHTTP(), res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
+	ttl := computeTTL(res.Header.ToMap(), res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
 	// Route-level override wins over the upstream's freshness directives.
 	// Applied after computeTTL so jitter is seeded from the override value,
 	// not the origin's max-age. The stored object retains the unaltered
@@ -2334,7 +2351,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	obj := &api.Object{
 		Key:          key,
 		StatusCode:   res.StatusCode,
-		Header:       header.FromHTTP(res.Header.ToHTTP()),
+		Header:       res.Header.ToMap(),
 		Body:         bodyCopy,
 		BodySize:     int64(len(bodyCopy)),
 		StoredAt:     now,
@@ -2359,7 +2376,7 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 	// Content-Length on the stored response. Varnish computes this from
 	// the body; we do the same at store time.
 	if obj.Header.Get(header.ContentLength) == "" && obj.BodySize > 0 &&
-		obj.StatusCode != http.StatusNotModified {
+		obj.StatusCode != fasthttp.StatusNotModified {
 		obj.Header.Set(header.ContentLength, strconv.FormatInt(obj.BodySize, 10))
 	}
 	if respCC.StaleWhileRevalidSet {
@@ -2373,13 +2390,13 @@ func buildObject(key api.Key, r *http.Request, res fetchResult, negativeTTL, def
 		obj.StaleIfError = defaultSIE
 	}
 	if lm := res.Header.Get(header.LastModified); lm != "" {
-		if t, err := time.Parse(http.TimeFormat, lm); err == nil {
+		if t, err := time.Parse(httpTimeFormat, lm); err == nil {
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), r.Header, policy)
+	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), header.FromHTTP(r.Header), policy)
 
-	obj.SurrogateKeys = parseSurrogateKeys(res.Header.ToHTTP())
+	obj.SurrogateKeys = parseSurrogateKeys(res.Header.ToMap())
 
 	// SerializedHead is not computed here — it is lazily computed on
 	// the first fast-path cache hit by getOrComputeSerializedHead.
@@ -2416,12 +2433,12 @@ func serializeHead(obj *api.Object) []byte {
 // computeTTL derives the freshness lifetime for a response, applying
 // explicit freshness, heuristic TTL, operator defaults, jitter, and
 // the origin Age adjustment.
-func computeTTL(header http.Header, status int, respCC Directives,
+func computeTTL(hdr header.Map, status int, respCC Directives,
 	negativeTTL, defaultTTL time.Duration, jitterPct int,
 	originAge time.Duration, now time.Time) time.Duration {
-	ttl, explicit := FreshnessLifetimeH(respCC, header)
+	ttl, explicit := FreshnessLifetimeH(respCC, hdr)
 	if !explicit {
-		ttl = HeuristicTTL(header, now)
+		ttl = HeuristicTTL(hdr, now)
 	}
 	if !explicit && ttl == 0 && defaultTTL > 0 {
 		ttl = defaultTTL
@@ -2440,7 +2457,7 @@ func computeTTL(header http.Header, status int, respCC Directives,
 // dialect response headers (Fastly: Surrogate-Key, Cloudflare: Cache-Tag,
 // Varnish: X-Cache-Tags). The first non-empty header wins; tokens are
 // whitespace/comma-separated and de-duplicated.
-func parseSurrogateKeys(h http.Header) []string {
+func parseSurrogateKeys(h header.Map) []string {
 	for _, hdr := range header.SurrogateKeyHeaders {
 		v := h.Get(hdr)
 		if v == "" {
@@ -2487,8 +2504,8 @@ func staleFallbackAllowed(obj *api.Object) bool {
 // isInvalidating returns true for unsafe methods that should trigger
 // cache invalidation (RFC 9111 §4.4). GET, HEAD, and OPTIONS are safe.
 func isInvalidating(method string) bool {
-	return method != http.MethodGet &&
-		method != http.MethodHead &&
+	return method != "GET" &&
+		method != "HEAD" &&
 		method != "OPTIONS"
 }
 

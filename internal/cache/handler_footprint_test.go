@@ -48,7 +48,7 @@ func TestFetchStoresRightSizedBody(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
 
-	key := BuildKey(req, nil)
+	key := BuildKey(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), nil)
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("stored object not found: obj=%v err=%v", obj, err)

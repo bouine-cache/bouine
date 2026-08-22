@@ -13,6 +13,10 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
+func ConditionalHeaders(req *http.Request, obj *api.Object) {
+	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, obj)
+}
+
 func freshObj(ttl time.Duration) *api.Object {
 	return &api.Object{
 		StatusCode:   200,
@@ -30,14 +34,14 @@ func TestEvaluate_Hit(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	obj := freshObj(time.Minute)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Hit, d.Decision)
 }
 
 func TestEvaluate_Miss(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
-	d := Evaluate(r, nil, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil, time.Now())
 	require.Equal(t, Miss, d.Decision)
 }
 
@@ -46,7 +50,7 @@ func TestEvaluate_BypassOnPost(t *testing.T) {
 	// POST goes through isInvalidating path in ServeHTTP, not Evaluate.
 	// Evaluate returns Bypass for all non-GET/HEAD methods.
 	r := httptest.NewRequest("POST", "/", nil)
-	d := Evaluate(r, nil, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil, time.Now())
 	require.Equal(t, Bypass, d.Decision)
 }
 
@@ -54,7 +58,7 @@ func TestEvaluate_BypassOnRequestNoStore(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.CacheControl, "no-store")
-	d := Evaluate(r, freshObj(time.Minute), time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), freshObj(time.Minute), time.Now())
 	require.Equal(t, Bypass, d.Decision)
 }
 
@@ -64,7 +68,7 @@ func TestEvaluate_RevalidateOnResponseNoCache(t *testing.T) {
 	obj := freshObj(time.Minute)
 	obj.Header.Set(header.CacheControl, "no-cache")
 	obj.CacheControl = "no-cache"
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Revalidate, d.Decision)
 }
 
@@ -73,7 +77,7 @@ func TestEvaluate_RevalidateOnRequestNoCache(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.CacheControl, "no-cache")
 	obj := freshObj(time.Minute)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Revalidate, d.Decision)
 }
 
@@ -83,7 +87,7 @@ func TestEvaluate_StaleWithSWR(t *testing.T) {
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // 1s past TTL
 	obj.StaleWhileRevalidate = 30 * time.Second
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, StaleHit, d.Decision)
 }
 
@@ -94,7 +98,7 @@ func TestEvaluate_StaleWithSIE(t *testing.T) {
 	obj.StoredAt = time.Now().Add(-2 * time.Second)
 	obj.StaleIfError = 5 * time.Minute
 	obj.ETag = `"abc"` // must have validator for Revalidate path
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	// RFC 5861 §4: stale-if-error requires the cache to attempt
 	// revalidation first; only serve stale if origin returns an error.
 	// Unlike SWR, SIE must NOT short-circuit to StaleHit.
@@ -107,7 +111,7 @@ func TestEvaluate_StaleWithMaxStale(t *testing.T) {
 	r.Header.Set(header.CacheControl, "max-stale=60")
 	obj := freshObj(time.Second)
 	obj.StoredAt = time.Now().Add(-10 * time.Second) // 9s past TTL
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, StaleHit, d.Decision)
 }
 
@@ -118,7 +122,7 @@ func TestEvaluate_MustRevalidate(t *testing.T) {
 	obj.StoredAt = time.Now().Add(-2 * time.Second) // stale
 	obj.Header.Set(header.CacheControl, "max-age=1, must-revalidate")
 	obj.CacheControl = "max-age=1, must-revalidate"
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Revalidate, d.Decision)
 }
 
@@ -127,7 +131,7 @@ func TestEvaluate_RequestMaxAge(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.CacheControl, "max-age=0")
 	obj := freshObj(time.Minute)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	// max-age=0 from request means the object is considered stale.
 	require.NotEqual(t, Hit, d.Decision)
 }
@@ -141,7 +145,7 @@ func TestEvaluate_OriginAgeNotDoubleCounted(t *testing.T) {
 	obj := freshObj(30 * time.Second)
 	obj.OriginAge = 20 * time.Second
 	obj.StoredAt = time.Now().Add(-10 * time.Second)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Hit, d.Decision)
 }
 
@@ -154,7 +158,7 @@ func TestEvaluate_MinFresh_OriginAge(t *testing.T) {
 	obj := freshObj(30 * time.Second)
 	obj.OriginAge = 20 * time.Second
 	obj.StoredAt = time.Now().Add(-10 * time.Second)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Hit, d.Decision)
 }
 
@@ -162,7 +166,7 @@ func TestEvaluate_OnlyIfCached_Miss(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.CacheControl, "only-if-cached")
-	d := Evaluate(r, nil, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil, time.Now())
 	require.Equal(t, Bypass, d.Decision)
 }
 
@@ -185,7 +189,7 @@ func TestEvaluate_ProxyRevalidate(t *testing.T) {
 	obj.StoredAt = time.Now().Add(-2 * time.Second)
 	obj.Header.Set(header.CacheControl, "max-age=1, proxy-revalidate")
 	obj.CacheControl = "max-age=1, proxy-revalidate"
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Revalidate, d.Decision)
 }
 
@@ -200,7 +204,7 @@ func TestEvaluate_HeuristicFreshnessStaleHit(t *testing.T) {
 		TTL:        time.Second, // stale
 		ETag:       `"abc"`,
 	}
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	// No max-age/s-maxage/Expires → heuristic freshness → StaleHit.
 	require.Equal(t, StaleHit, d.Decision)
 }
@@ -214,7 +218,7 @@ func TestEvaluate_EvalNoCache_NoValidator(t *testing.T) {
 	obj.LastModified = time.Time{}
 	obj.Header.Del(header.ETag)
 	obj.Header.Del(header.LastModified)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Miss, d.Decision)
 }
 
@@ -223,7 +227,7 @@ func TestEvaluate_PragmaNoCache(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Pragma, "no-cache")
 	obj := freshObj(time.Minute)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.Equal(t, Revalidate, d.Decision)
 }
 
@@ -233,7 +237,7 @@ func TestEvaluate_MultipleCacheControlHeaders(t *testing.T) {
 	r.Header.Add(header.CacheControl, "max-age=0")
 	r.Header.Add(header.CacheControl, "public")
 	obj := freshObj(time.Minute)
-	d := Evaluate(r, obj, time.Now())
+	d := Evaluate(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, time.Now())
 	require.NotEqual(t, Hit, d.Decision)
 }
 

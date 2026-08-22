@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -14,7 +13,7 @@ import (
 // revalidateOrMiss) live here. All other logic is in the sibling files.
 
 // headerGetter is the minimal read interface for HTTP headers. Both
-// http.Header and header.Map satisfy it, so parseOriginAge can accept
+// header.Map and header.Map satisfy it, so parseOriginAge can accept
 // either type without conversion.
 // Used as a generic type constraint, not a runtime interface, to avoid
 // boxing allocations when header.Map (48 bytes) is passed by value.
@@ -45,8 +44,8 @@ type Disposition struct {
 }
 
 // Evaluate runs the RFC 9111 state machine.
-func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+func Evaluate(ri RequestInfo, obj *api.Object, now time.Time) Disposition {
+	if ri.Method != "GET" && ri.Method != "HEAD" {
 		return Disposition{Decision: Bypass}
 	}
 
@@ -56,17 +55,17 @@ func Evaluate(r *http.Request, obj *api.Object, now time.Time) Disposition {
 	// "absent" (false / zero), which is the correct interpretation of a
 	// missing Cache-Control header per RFC 9111 §5.2.
 	var reqCC Directives
-	if rawCC, hasCCReq := r.Header[header.CacheControl]; hasCCReq {
-		reqCC = ParseCacheControl(rawCC[0])
-		if len(rawCC) > 1 {
+	if rawCC := ri.Header.Get(header.CacheControl); rawCC != "" {
+		reqCC = ParseCacheControl(rawCC)
+		if false {
 			// Rare: multiple Cache-Control headers. Re-parse merged value.
-			reqCC = ParseCacheControl(mergeHeaderValues(r.Header, header.CacheControl))
+			reqCC = ParseCacheControl(ri.Header.Get(header.CacheControl))
 		}
 	}
 
 	// Pragma: no-cache is equivalent to Cache-Control: no-cache
 	// for HTTP/1.0 compatibility (RFC 9111 §5.4).
-	if !reqCC.NoCache && r.Header.Get(header.Pragma) == "no-cache" {
+	if !reqCC.NoCache && ri.Header.Get(header.Pragma) == "no-cache" {
 		reqCC.NoCache = true
 	}
 

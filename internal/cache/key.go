@@ -1,11 +1,12 @@
 package cache
 
 import (
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/bouine-cache/xxhash/v3"
 
@@ -33,12 +34,9 @@ func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if err != nil {
 		return api.Key{}
 	}
-	r := &http.Request{
-		Method: http.MethodGet,
-		URL:    u,
-		Host:   u.Host,
-	}
-	return BuildKey(r, policy)
+	_ = u // URL parsed for BuildKeyFromURL
+	ri := RequestInfo{Method: "GET", URI: rawURL, Host: u.Host, Path: u.Path, TLS: u.Scheme == "https"}
+	return BuildKey(ri, policy)
 }
 
 // BuildKey constructs the canonical primary cache key from a request.
@@ -47,34 +45,34 @@ func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 // Zero-alloc on the hot path: uses a 512-byte stack buffer. If the
 // canonical key exceeds 512 bytes (rare — the project caps URLs at 8 KiB),
 // it falls back to a heap buffer via buildKeyHeap.
-func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
+func BuildKey(ri RequestInfo, policy *KeyPolicy) api.Key {
 	var buf [512]byte
 	n := 0
 
 	// Scheme.
-	if r.TLS != nil {
+	if ri.TLS {
 		n += copyOverflow(buf[:], n, "https|")
 	} else {
 		n += copyOverflow(buf[:], n, "http|")
 	}
 
 	// Host (canonical).
-	n = appendCanonicalHost(buf[:], n, r.Host)
+	n = appendCanonicalHost(buf[:], n, ri.Host)
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
-	n = appendCanonicalPath(buf[:], n, r.URL)
+	n = appendCanonicalPathString(buf[:], n, ri.Path)
 	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	n = appendCanonicalQuery(buf[:], n, r.URL, policy)
+	n = appendCanonicalQueryString(buf[:], n, extractRawQuery(ri.URI), policy)
 	n = appendByte(buf[:], n, '|')
 
 	// Method (HEAD→GET).
-	if r.Method == http.MethodHead {
-		n += copyOverflow(buf[:], n, http.MethodGet)
+	if ri.Method == "HEAD" {
+		n += copyOverflow(buf[:], n, "GET")
 	} else {
-		n += copyOverflow(buf[:], n, r.Method)
+		n += copyOverflow(buf[:], n, ri.Method)
 	}
 
 	if n <= len(buf) {
@@ -82,34 +80,34 @@ func BuildKey(r *http.Request, policy *KeyPolicy) api.Key {
 	}
 
 	// Overflow: redo with a heap buffer sized to fit.
-	return buildKeyHeap(r, policy, n)
+	return buildKeyHeap(ri, policy, n)
 }
 
 // buildKeyHeap handles the rare case where the canonical key exceeds the
 // 512-byte stack buffer. It allocates a heap buffer and rebuilds the key.
-func buildKeyHeap(r *http.Request, policy *KeyPolicy, n int) api.Key {
+func buildKeyHeap(ri RequestInfo, policy *KeyPolicy, n int) api.Key {
 	heap := make([]byte, n)
 	n = 0
 
-	if r.TLS != nil {
+	if ri.TLS {
 		n += copyOverflow(heap, n, "https|")
 	} else {
 		n += copyOverflow(heap, n, "http|")
 	}
 
-	n = appendCanonicalHost(heap, n, r.Host)
+	n = appendCanonicalHost(heap, n, ri.Host)
 	n = appendByte(heap, n, '|')
 
-	n = appendCanonicalPath(heap, n, r.URL)
+	n = appendCanonicalPathString(heap, n, ri.Path)
 	n = appendByte(heap, n, '|')
 
-	n = appendCanonicalQuery(heap, n, r.URL, policy)
+	n = appendCanonicalQueryString(heap, n, extractRawQuery(ri.URI), policy)
 	n = appendByte(heap, n, '|')
 
-	if r.Method == http.MethodHead {
-		n += copyOverflow(heap, n, http.MethodGet)
+	if ri.Method == "HEAD" {
+		n += copyOverflow(heap, n, "GET")
 	} else {
-		n += copyOverflow(heap, n, r.Method)
+		n += copyOverflow(heap, n, ri.Method)
 	}
 
 	return NewKey(heap[:n])
@@ -422,7 +420,7 @@ func appendCanonicalQuerySlow(buf []byte, n int, u *url.URL, p *KeyPolicy) int {
 // List-valued headers (Accept-Language, Accept-Encoding, Accept) are
 // normalised by sorting their comma-separated tokens so that
 // "en, fr" and "fr, en" produce the same cache key.
-func BuildVaryKey(vary string, reqHeader http.Header, policy *KeyPolicy) string {
+func BuildVaryKey(vary string, reqHeader header.Map, policy *KeyPolicy) string {
 	if vary == "" || vary == "*" {
 		return vary
 	}
@@ -443,7 +441,7 @@ func BuildVaryKey(vary string, reqHeader http.Header, policy *KeyPolicy) string 
 // buildVaryKeyInto writes the canonical Vary key bytes into dst and
 // returns the total canonical length. If the key exceeds len(dst), the
 // content is truncated but the returned length reflects the full size.
-func buildVaryKeyInto(dst []byte, fields []string, reqHeader http.Header, policy *KeyPolicy) int {
+func buildVaryKeyInto(dst []byte, fields []string, reqHeader header.Map, policy *KeyPolicy) int {
 	n := 0
 	for _, f := range fields {
 		f = strings.TrimSpace(strings.ToLower(f))

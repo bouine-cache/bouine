@@ -47,12 +47,12 @@ func TestHeuristicTTL(t *testing.T) {
 	t.Run("no_last_modified", func(t *testing.T) {
 		t.Parallel()
 		h := http.Header{}
-		require.Equal(t, time.Duration(0), HeuristicTTL(h, time.Now()))
+		require.Equal(t, time.Duration(0), HeuristicTTL(header.FromHTTP(h), time.Now()))
 	})
 	t.Run("invalid_last_modified", func(t *testing.T) {
 		t.Parallel()
 		h := http.Header{header.LastModified: {"garbage"}}
-		require.Equal(t, time.Duration(0), HeuristicTTL(h, time.Now()))
+		require.Equal(t, time.Duration(0), HeuristicTTL(header.FromHTTP(h), time.Now()))
 	})
 	t.Run("with_date_header", func(t *testing.T) {
 		t.Parallel()
@@ -60,7 +60,7 @@ func TestHeuristicTTL(t *testing.T) {
 			header.Date:         {"Mon, 01 Jan 2024 00:00:00 GMT"},
 			header.LastModified: {"Mon, 01 Jan 2023 00:00:00 GMT"},
 		}
-		got := HeuristicTTL(h, time.Now())
+		got := HeuristicTTL(header.FromHTTP(h), time.Now())
 		// 365 days / 10 = 36.5 days = 876h
 		require.Equal(t, 876*time.Hour, got)
 	})
@@ -68,7 +68,7 @@ func TestHeuristicTTL(t *testing.T) {
 		t.Parallel()
 		now := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
 		h := http.Header{header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"}}
-		got := HeuristicTTL(h, now)
+		got := HeuristicTTL(header.FromHTTP(h), now)
 		// ~152 days / 10
 		require.Greater(t, got, time.Duration(0))
 		require.Less(t, got, 365*24*time.Hour)
@@ -79,7 +79,7 @@ func TestHeuristicTTL(t *testing.T) {
 			header.Date:         {"Mon, 01 Jan 2023 00:00:00 GMT"},
 			header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"},
 		}
-		require.Equal(t, time.Duration(0), HeuristicTTL(h, time.Now()))
+		require.Equal(t, time.Duration(0), HeuristicTTL(header.FromHTTP(h), time.Now()))
 	})
 }
 
@@ -112,17 +112,17 @@ func TestMergeHeaderValues(t *testing.T) {
 	t.Run("single_value", func(t *testing.T) {
 		t.Parallel()
 		h := http.Header{header.CacheControl: {"max-age=60"}}
-		assert.Equal(t, "max-age=60", mergeHeaderValues(h, header.CacheControl))
+		assert.Equal(t, "max-age=60", mergeHeaderValues(header.FromHTTP(h), header.CacheControl))
 	})
 	t.Run("multiple_values", func(t *testing.T) {
 		t.Parallel()
 		h := http.Header{header.CacheControl: {"max-age=60", "public"}}
-		assert.Equal(t, "max-age=60, public", mergeHeaderValues(h, header.CacheControl))
+		assert.Equal(t, "max-age=60, public", mergeHeaderValues(header.FromHTTP(h), header.CacheControl))
 	})
 	t.Run("absent", func(t *testing.T) {
 		t.Parallel()
 		h := http.Header{}
-		assert.Equal(t, "", mergeHeaderValues(h, header.CacheControl))
+		assert.Equal(t, "", mergeHeaderValues(header.FromHTTP(h), header.CacheControl))
 	})
 }
 

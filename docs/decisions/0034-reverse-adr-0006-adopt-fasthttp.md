@@ -3,7 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-08-22
 - **Deciders**: @thylong
-- **Phase**: post-phase-3
+- **Phase**: phase 0
 - **Supersedes**: ADR-0006
 
 ## Context

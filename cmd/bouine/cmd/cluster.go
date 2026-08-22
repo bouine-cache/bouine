@@ -3,9 +3,10 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"github.com/spf13/cobra"
+
+	"github.com/bouine-cache/bouine/pkg/bouineapi"
 )
 
 func newClusterCmd() *cobra.Command {
@@ -25,25 +26,11 @@ func newClusterPeersCmd() *cobra.Command {
 		Short: "List live cluster peers",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			url := "http://" + server + "/v1/cluster/peers"
-			req, err := http.NewRequestWithContext(cmd.Context(), "GET", url, nil)
-			if err != nil {
-				return err
-			}
-			if token != "" {
-				req.Header.Set("Authorization", "Bearer "+token)
-			}
-			resp, err := http.DefaultClient.Do(req)
+			baseURL := "http://" + server
+			client := bouineapi.New(baseURL).WithToken(token)
+			peers, err := client.Peers(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("cluster peers: %w", err)
-			}
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("cluster peers: status %d", resp.StatusCode)
-			}
-			var peers any
-			if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
-				return err
 			}
 			out, _ := json.MarshalIndent(peers, "", "  ")
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(out))

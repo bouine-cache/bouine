@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/transport"
+
+	"github.com/valyala/fasthttp"
 )
 
 // Pool is a named set of upstream targets with round-robin selection
@@ -284,6 +287,50 @@ func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Han
 		// far cheaper than the previous per-request ReverseProxy + 3 closures.
 		proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), targetKey{}, t)))
 	})
+}
+
+// FastClient returns a cache.FastClient that fetches from this pool
+// using fasthttp instead of httputil.ReverseProxy. Each Do() call
+// selects a healthy target via round-robin, rewrites the request URI,
+// and sends via a pooled fasthttp.Client. When no healthy target is
+// available, returns an error.
+func (p *Pool) FastClient() *PoolFastClient {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return &PoolFastClient{
+		pool: p,
+		client: &fasthttp.Client{
+			MaxConnsPerHost:     64,
+			MaxIdleConnDuration: 90 * time.Second,
+			ReadTimeout:         DefaultResponseHeaderTimeout,
+			WriteTimeout:        5 * time.Minute,
+			Dial: func(addr string) (net.Conn, error) {
+				return dialer.Dial("tcp", addr)
+			},
+		},
+	}
+}
+
+// PoolFastClient implements cache.FastClient by selecting a target
+// from the pool and fetching via fasthttp.Client.
+type PoolFastClient struct {
+	pool   *Pool
+	client *fasthttp.Client
+}
+
+// Do performs an origin fetch via fasthttp.
+func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
+	t := c.pool.pick()
+	if t == nil {
+		return fmt.Errorf("no healthy upstream")
+	}
+	// Rewrite the request URI to the selected target.
+	scheme := t.url.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
+	tc := transport.NewClient(c.client)
+	return tc.Do(ctx, req, resp)
 }
 
 // Healthy returns the list of currently healthy target addresses.

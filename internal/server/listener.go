@@ -1,5 +1,5 @@
-// Package server is the data-plane front door. It owns HTTP/1.1 +
-// HTTP/2 listeners (TLS and cleartext) and the route-matching router
+// Package server is the data-plane front door. It owns HTTP/1.1
+// listeners (TLS and cleartext) and the route-matching router
 // that dispatches requests to cache handlers.
 package server
 
@@ -8,7 +8,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
-	"net/http"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -18,6 +17,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
 )
 
 // safetyNetWriteTimeout is a generous write deadline that acts as a
@@ -79,7 +80,7 @@ func setSocketOptions(log observability.Logger, fastOpen, deferAccept, reusePort
 // under slowloris or connection-flood attacks.
 type ListenerConfig struct {
 	Addr           string
-	Handler        http.Handler
+	Handler        fasthttp.RequestHandler
 	Logger         observability.Logger
 	TLSConfig      *tls.Config
 	MaxConnections int
@@ -91,12 +92,13 @@ type ListenerConfig struct {
 	Scheme         string
 }
 
-// Listener wraps a net/http Server with lifecycle methods matching the
-// supervised-group contract. Each protocol has its own instance.
+// Listener wraps a fasthttp.Server with lifecycle methods matching
+// the supervised-group contract. Each protocol has its own instance.
 //
 // Stable.
 type Listener struct {
-	inner          *http.Server
+	inner          *fasthttp.Server
+	addr           string
 	name           string
 	logger         observability.Logger
 	resolved       atomic.Value // stores string
@@ -109,32 +111,38 @@ type Listener struct {
 	scheme         string
 }
 
-// NewHTTP creates a plaintext HTTP/1.1 + HTTP/2 cleartext (h2c) listener.
+// NewHTTP creates a plaintext HTTP/1.1 listener.
 //
 // Stable.
 func NewHTTP(cfg ListenerConfig) *Listener {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 
-	var protos http.Protocols
-	protos.SetHTTP1(true)
-	protos.SetUnencryptedHTTP2(true)
-
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           cfg.Handler,
-		Protocols:         &protos,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      safetyNetWriteTimeout, // safety net — primary timeouts are fetch_timeout and response_header_timeout
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    64 << 10,
+	srv := &fasthttp.Server{
+		Handler:               cfg.Handler,
+		ReadTimeout:           30 * time.Second,
+		WriteTimeout:          safetyNetWriteTimeout,
+		IdleTimeout:           120 * time.Second,
+		ReadBufferSize:        64 << 10,
+		NoDefaultServerHeader: true,
+		NoDefaultContentType:  true,
+		CloseOnShutdown:       true,
 	}
-	return &Listener{inner: srv, name: "http", logger: cfg.Logger, maxConns: cfg.MaxConnections,
-		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort,
-		fastPath: cfg.FastPath, fastMetrics: cfg.FastMetrics, scheme: cfg.Scheme}
+	return &Listener{
+		inner:          srv,
+		addr:           cfg.Addr,
+		name:           "http",
+		logger:         cfg.Logger,
+		maxConns:       cfg.MaxConnections,
+		tcpFastOpen:    cfg.TCPFastOpen,
+		tcpDeferAccept: cfg.TCPDeferAccept,
+		reusePort:      cfg.ReusePort,
+		fastPath:       cfg.FastPath,
+		fastMetrics:    cfg.FastMetrics,
+		scheme:         cfg.Scheme,
+	}
 }
 
-// NewHTTPS creates an HTTP/1.1 + HTTP/2 TLS listener.
+// NewHTTPS creates an HTTP/1.1 TLS listener.
 //
 // Stable.
 func NewHTTPS(cfg ListenerConfig) *Listener {
@@ -142,26 +150,32 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 	if cfg.TLSConfig == nil {
 		cfg.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
-	cfg.TLSConfig.NextProtos = append(cfg.TLSConfig.NextProtos, "h2", "http/1.1")
+	cfg.TLSConfig.NextProtos = append(cfg.TLSConfig.NextProtos, "http/1.1")
 
-	var protos http.Protocols
-	protos.SetHTTP1(true)
-	protos.SetHTTP2(true)
-
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           cfg.Handler,
-		TLSConfig:         cfg.TLSConfig,
-		Protocols:         &protos,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      safetyNetWriteTimeout, // safety net — primary timeouts are fetch_timeout and response_header_timeout
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    64 << 10,
+	srv := &fasthttp.Server{
+		Handler:               cfg.Handler,
+		ReadTimeout:           30 * time.Second,
+		WriteTimeout:          safetyNetWriteTimeout,
+		IdleTimeout:           120 * time.Second,
+		ReadBufferSize:        64 << 10,
+		NoDefaultServerHeader: true,
+		NoDefaultContentType:  true,
+		CloseOnShutdown:       true,
+		TLSConfig:             cfg.TLSConfig,
 	}
-	return &Listener{inner: srv, name: "https", logger: cfg.Logger, maxConns: cfg.MaxConnections,
-		tcpFastOpen: cfg.TCPFastOpen, tcpDeferAccept: cfg.TCPDeferAccept, reusePort: cfg.ReusePort,
-		fastPath: cfg.FastPath, fastMetrics: cfg.FastMetrics, scheme: cfg.Scheme}
+	return &Listener{
+		inner:          srv,
+		addr:           cfg.Addr,
+		name:           "https",
+		logger:         cfg.Logger,
+		maxConns:       cfg.MaxConnections,
+		tcpFastOpen:    cfg.TCPFastOpen,
+		tcpDeferAccept: cfg.TCPDeferAccept,
+		reusePort:      cfg.ReusePort,
+		fastPath:       cfg.FastPath,
+		fastMetrics:    cfg.FastMetrics,
+		scheme:         cfg.Scheme,
+	}
 }
 
 // Serve starts the listener and blocks until ctx is cancelled. When
@@ -198,7 +212,7 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 	lc := net.ListenConfig{
 		Control: setSocketOptions(s.logger, s.tcpFastOpen, s.tcpDeferAccept, false),
 	}
-	ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
+	ln, err := lc.Listen(ctx, "tcp", s.addr)
 	if err != nil {
 		return err
 	}
@@ -212,7 +226,7 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 		"name", s.name,
 		"addr", s.resolved.Load().(string))
 
-	if s.inner.TLSConfig != nil {
+	if s.name == "https" {
 		ln = tls.NewListener(ln, s.inner.TLSConfig)
 	}
 
@@ -228,15 +242,14 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		return s.inner.Shutdown(shutCtx)
+		_ = ln.Close()
+		_ = s.inner.Shutdown()
+		return nil
 	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if err != nil && !errors.Is(err, fasthttp.ErrConnectionClosed) {
+			return err
 		}
-		return err
+		return nil
 	}
 }
 
@@ -260,7 +273,7 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 	var firstAddr string
 
 	for range n {
-		ln, err := lc.Listen(ctx, "tcp", s.inner.Addr)
+		ln, err := lc.Listen(ctx, "tcp", s.addr)
 		if err != nil {
 			for _, l := range listeners {
 				_ = l.Close()
@@ -280,7 +293,7 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 		if s.maxConns > 0 {
 			ln = newConnLimitListenerWithSem(ln, sem, s.logger)
 		}
-		if s.inner.TLSConfig != nil {
+		if s.name == "https" {
 			ln = tls.NewListener(ln, s.inner.TLSConfig)
 		}
 		listeners = append(listeners, ln)
@@ -296,7 +309,7 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 	errCh := make(chan error, len(listeners))
 	for _, ln := range listeners {
 		go func(l net.Listener) {
-			if err := s.inner.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := s.inner.Serve(l); err != nil && !errors.Is(err, fasthttp.ErrConnectionClosed) {
 				errCh <- err
 			}
 		}(ln)
@@ -304,24 +317,24 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		return s.inner.Shutdown(shutCtx)
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+		_ = s.inner.Shutdown()
+		return nil
 	case err := <-errCh:
-		shutCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		_ = s.inner.Shutdown(shutCtx)
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+		_ = s.inner.Shutdown()
 		return err
 	}
 }
 
 // Shutdown gracefully stops the listener, waiting for in-flight
-// requests to complete or ctx to expire. Safe to call concurrently
-// with Serve; the inner http.Server.Shutdown is idempotent.
-func (s *Listener) Shutdown(ctx context.Context) error {
-	return s.inner.Shutdown(ctx)
+// requests to complete. Safe to call concurrently with Serve.
+func (s *Listener) Shutdown(_ context.Context) error {
+	return s.inner.Shutdown()
 }
 
 // Name returns the protocol label ("http", "https").
@@ -332,7 +345,7 @@ func (s *Listener) Addr() string {
 	if v := s.resolved.Load(); v != nil {
 		return v.(string)
 	}
-	return s.inner.Addr
+	return s.addr
 }
 
 // connLimitListener wraps a net.Listener with a semaphore that caps
@@ -347,9 +360,8 @@ type connLimitListener struct {
 }
 
 // errMaxConns is returned by Accept when the connection limit is reached.
-// It implements net.Error with Temporary()=true so that http.Server.Serve()
-// retries the accept instead of exiting the serve loop (a plain error
-// would be treated as fatal and kill the listener).
+// It implements net.Error with Temporary()=true so that fasthttp.Server
+// retries the accept instead of exiting the serve loop.
 var errMaxConns = maxConnsError{}
 
 type maxConnsError struct{}

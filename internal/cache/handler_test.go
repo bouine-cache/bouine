@@ -1883,7 +1883,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	// 304 adds no-cache="X-Sensitive" — serializeHead must now skip X-Sensitive.
 	res := fetchResult{
 		StatusCode: 304,
-		Header:     http.Header{header.CacheControl: {"max-age=3600, no-cache=\"X-Sensitive\""}, header.ETag: {`"v2"`}},
+		Header:     fromHTTPHeader(http.Header{header.CacheControl: {"max-age=3600, no-cache=\"X-Sensitive\""}, header.ETag: {`"v2"`}}),
 	}
 
 	refreshed := h.refreshFrom304(stale, res, time.Now())
@@ -2247,7 +2247,7 @@ func TestBuildObject_CDNCacheControl(t *testing.T) {
 	resHeader.Set(header.ContentType, "text/html")
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     resHeader,
+		Header:     fromHTTPHeader(resHeader),
 		Body:       []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2261,9 +2261,9 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: http.Header{
+		Header: fromHTTPHeader(http.Header{
 			header.CacheControl: {"max-age=60"},
-		},
+		}),
 		Body: []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2276,7 +2276,7 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     http.Header{header.CacheControl: {"max-age=60"}},
+		Header:     fromHTTPHeader(http.Header{header.CacheControl: {"max-age=60"}}),
 		Body:       []byte("hello world"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2290,11 +2290,11 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 	now := time.Now()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: http.Header{
+		Header: fromHTTPHeader(http.Header{
 			header.CacheControl: {"max-age=60"},
 			header.Date:         {now.Add(-10 * time.Second).Format(http.TimeFormat)},
 			header.Age:          {"5"},
-		},
+		}),
 		Body: []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2308,10 +2308,10 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: http.Header{
+		Header: fromHTTPHeader(http.Header{
 			header.CacheControl: {"max-age=60"},
 			header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"},
-		},
+		}),
 		Body: []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2324,7 +2324,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     http.Header{header.CacheControl: {"max-age=60"}},
+		Header:     fromHTTPHeader(http.Header{header.CacheControl: {"max-age=60"}}),
 		Body:       []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2337,7 +2337,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     http.Header{header.CacheControl: {"max-age=60"}},
+		Header:     fromHTTPHeader(http.Header{header.CacheControl: {"max-age=60"}}),
 		Body:       []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
@@ -2350,10 +2350,10 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: http.Header{
+		Header: fromHTTPHeader(http.Header{
 			header.CacheControl: {"max-age=60"},
 			header.Vary:         {"Accept-Encoding"},
-		},
+		}),
 		Body: []byte("hello"),
 	}
 	r := httptest.NewRequest("GET", "http://example.com/", nil)

@@ -25,6 +25,9 @@ import (
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 // buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is
@@ -154,10 +157,8 @@ func listenPort(addr, defaultPort string) string {
 //  1. tracing.HTTPMiddleware — single OTel span for the pipeline layer.
 //  2. DataPlaneMetrics.Middleware — Prometheus counters, histograms,
 //     ring buffers, and merged structured access log.
-func (e *engine) buildHandler(rs *runState) http.Handler {
+func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
-	// Pre-resolve Prometheus label tuples for each route to eliminate
-	// per-request WithLabelValues hash lookups on the hit path.
 	routeNames := make([]string, 0, len(e.cfg.Routes))
 	for _, rc := range e.cfg.Routes {
 		if rc.Name != "" {
@@ -165,11 +166,14 @@ func (e *engine) buildHandler(rs *runState) http.Handler {
 		}
 	}
 	rs.dpMetrics.PreResolveRoutes(routeNames)
-	// Inject CoarseNow on Linux (~2-4ns vs ~25-40ns for time.Now).
-	// On non-Linux, CoarseNow falls back to time.Now, so always inject.
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
-	metricsWrapped := rs.dpMetrics.Middleware(router)
-	return tracing.HTTPMiddleware("bouine.pipeline", metricsWrapped)
+
+	// Native fasthttp middleware chain: tracing → metrics → router.
+	// The cache handler's ServeRequest is synchronous (no adaptor
+	// goroutine), so reading ctx.Response in the metrics middleware
+	// after the handler returns is race-free.
+	metricsWrapped := rs.dpMetrics.FastHTTPMiddleware(router.ServeRequest)
+	return tracing.FastHTTPMiddleware("bouine.pipeline", metricsWrapped)
 }
 
 // buildPools constructs one origin.Pool per upstream_pools entry in the config.
@@ -236,6 +240,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cfg := cache.HandlerConfig{
 			Upstream:            upstream,
+			FastClient:          p.FastClient(),
 			Store:               rs.store,
 			Logger:              e.logger,
 			NegativeTTL:         rc.Cache.NegativeTTL,
@@ -285,7 +290,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached.ServeRequest)
 	}
 	return router
 }
@@ -371,7 +376,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 		handler = cached
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, handler)
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, fasthttpadaptor.NewFastHTTPHandler(handler))
 }
 
 // stripPrefixHandler strips the given prefix from r.URL.Path before

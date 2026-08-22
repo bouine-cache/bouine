@@ -17,8 +17,11 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // peerFetchBufPool reuses bytes.Buffer instances across peer-fetch calls
@@ -85,7 +88,7 @@ const maxPeerFetchBytes int64 = 64 << 20
 //
 // Stable.
 type PeerFetcher struct {
-	client       *http.Client
+	client       *transport.Client
 	useTLS       bool
 	hopLimit     int
 	hits         atomic.Int64
@@ -114,9 +117,7 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // Close drains idle cluster connections. Should be called during shutdown
 // so that rolling restarts don't leave TIME_WAIT sockets on peers.
 func (f *PeerFetcher) Close(_ context.Context) error {
-	if t, ok := f.client.Transport.(*http.Transport); ok {
-		t.CloseIdleConnections()
-	}
+	f.client.CloseIdleConnections()
 	return nil
 }
 
@@ -128,38 +129,26 @@ func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer, hopLimit int)
 	return NewPeerFetcherWithLogger(tlsCfg, reg, nil, hopLimit)
 }
 
-// newClusterTransport builds a tuned *http.Transport for cluster-internal
-// RPCs (peer fetch, broadcast). The defaults leave MaxIdleConnsPerHost at
-// Go's default of 2, which causes TLS handshake storms under bursty miss
-// traffic. Setting it to 64 matches the origin pool and keeps idle
-// connections warm for reuse. MaxConnsPerHost caps concurrent connections
-// per peer to prevent FD exhaustion during purge storms in strong mode.
-func newClusterTransport(tlsCfg *tls.Config) *http.Transport {
-	return &http.Transport{
-		ForceAttemptHTTP2:   true,
-		TLSClientConfig:     tlsCfg,
-		MaxIdleConns:        512,
-		MaxIdleConnsPerHost: 64,
-		MaxConnsPerHost:     256,
-		IdleConnTimeout:     90 * time.Second,
-		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-	}
-}
-
 // NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
 func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger, hopLimit int) *PeerFetcher {
-	transport := newClusterTransport(tlsCfg)
 	if hopLimit <= 0 {
 		hopLimit = MaxHops
 	}
-	f := &PeerFetcher{
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   PeerFetchTimeout,
+	fc := &fasthttp.Client{
+		MaxConnsPerHost:     256,
+		MaxIdleConnDuration: 90 * time.Second,
+		ReadTimeout:         PeerFetchTimeout,
+		WriteTimeout:        5 * time.Minute,
+		TLSConfig:           tlsCfg,
+		Dial: func(addr string) (net.Conn, error) {
+			return (&net.Dialer{
+				Timeout:   2 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).Dial("tcp", addr)
 		},
+	}
+	f := &PeerFetcher{
+		client:       transport.NewClient(fc),
 		useTLS:       tlsCfg != nil,
 		hopLimit:     hopLimit,
 		maxBodyBytes: maxPeerFetchBytes,
@@ -191,12 +180,8 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 	return f
 }
 
-// buildPeerRequest constructs the HTTP request for a peer-fetch RPC.
-// Extracted from Fetch to keep complexity under gocyclo/funlen limits.
-// The request body is JSON by design: 3 fields (key, vary_key, hops),
-// trivially small. Only the response carries a full Object and needs
-// the binary codec.
-func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) (*http.Request, error) {
+// buildPeerRequest constructs a fasthttp.Request for a peer-fetch RPC.
+func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) *fasthttp.Request {
 	fetchAddr := peer.AdminAddr
 	if fetchAddr == "" {
 		fetchAddr = peer.Addr
@@ -205,26 +190,22 @@ func buildPeerRequest(ctx context.Context, peer api.PeerInfo, req api.PeerFetchR
 	if useTLS {
 		scheme = "https"
 	}
-	url := scheme + "://" + fetchAddr + PeerFetchPath
+	uri := scheme + "://" + fetchAddr + PeerFetchPath
 
-	// Binary request: 1 byte version + 16 bytes key + 1 byte vary-key
-	// length + vary-key string. ~10x faster than json.Marshal for a
-	// 2-field struct and eliminates the io.ReadAll allocation on the
-	// server side.
 	body := make([]byte, 0, 18+len(req.VaryKey))
 	body = append(body, peerFetchBinaryVersion)
 	body = append(body, req.Key[:]...)
 	body = append(body, byte(len(req.VaryKey))) //nolint:gosec // VaryKey is a short variant key, always < 256 bytes
 	body = append(body, req.VaryKey...)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("peer fetch request: %w", err)
-	}
+	httpReq := fasthttp.AcquireRequest()
+	httpReq.Header.SetMethod(fasthttp.MethodPost)
+	httpReq.SetRequestURI(uri)
+	httpReq.SetBodyRaw(body)
 	httpReq.Header.Set(header.ContentType, "application/octet-stream")
 	httpReq.Header.Set(BouineHopHeader, fmt.Sprintf("%d", req.Hops))
 	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
-	return httpReq, nil
+	return httpReq
 }
 
 // Fetch asks a peer for a cached object. Returns nil, nil on a cache
@@ -241,10 +222,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	}
 	req.Hops++
 
-	httpReq, err := buildPeerRequest(ctx, peer, req, f.useTLS)
-	if err != nil {
-		return nil, err
-	}
+	httpReq := buildPeerRequest(peer, req, f.useTLS)
+	defer fasthttp.ReleaseRequest(httpReq)
 
 	select {
 	case f.fetchSem <- struct{}{}:
@@ -253,14 +232,15 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ctx.Err())
 	}
 
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
 	start := time.Now()
-	resp, err := f.client.Do(httpReq)
-	if err != nil {
+	if err := f.client.Do(ctx, httpReq, resp); err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusNotFound {
+	if resp.StatusCode() == fasthttp.StatusNotFound {
 		f.misses.Add(1)
 		if f.pMisses != nil {
 			f.pMisses.Inc()
@@ -269,36 +249,23 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
 		return nil, nil // peer miss
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("peer fetch %s: status %d", peer.Addr, resp.StatusCode)
+	if resp.StatusCode() != fasthttp.StatusOK {
+		return nil, fmt.Errorf("peer fetch %s: status %d", peer.Addr, resp.StatusCode())
 	}
 
 	// Binary object codec — no JSON, no base64, no reflection (issue #187).
-	// Read into a pooled bytes.Buffer that grows incrementally instead of
-	// io.ReadAll which allocates a single contiguous buffer up to
-	// maxPeerFetchBytes. With 4 concurrent fetches, the pooled approach
-	// reduces peak transient allocation from 256 MiB to ~64 MiB.
-	buf := peerFetchBufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	putBufBack := true
-	defer func() {
-		if putBufBack && buf.Cap() <= int(maxPeerFetchBytes) {
-			peerFetchBufPool.Put(buf)
-		}
-	}()
-	if _, err := io.Copy(buf, io.LimitReader(resp.Body, f.maxBodyBytes)); err != nil {
-		return nil, fmt.Errorf("peer fetch read: %w", err)
+	respBody := resp.Body()
+	if int64(len(respBody)) > f.maxBodyBytes {
+		return nil, fmt.Errorf("peer fetch %s: response too large", peer.Addr)
 	}
-	respBody := buf.Bytes()
 	obj, err := storage.DecodeObject(respBody)
 	if err != nil {
 		return nil, fmt.Errorf("peer fetch decode: %w", err)
 	}
-	// DecodeObject returns an Object whose Body aliases respBody (buf.Bytes()).
-	// We must NOT return buf to the pool — the caller retains obj.Body which
-	// points into buf's backing array. Returning buf would allow a concurrent
-	// Fetch to overwrite obj.Body (use-after-free, race detector finds it).
-	putBufBack = false
+	// DecodeObject returns an Object whose Body aliases respBody.
+	// We must copy the body — resp is released after this function
+	// returns, which would invalidate obj.Body.
+	obj.Body = append([]byte(nil), obj.Body...)
 
 	f.hits.Add(1)
 	if f.pHits != nil {
@@ -318,6 +285,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 
 // PeerFetchHandler returns an http.Handler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
+//
+// Server-side handlers remain on http.Handler because the admin server
+// (internal/admin) still uses net/http.ServeMux. They will be migrated
+// to fasthttp.RequestHandler when the admin server is migrated (Phase 7).
 type PeerFetchHandler struct {
 	store    PeerStore
 	hopLimit int
@@ -371,7 +342,7 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req api.PeerFetchRequest
 	switch body[0] {
 	case peerFetchBinaryVersion:
-		// Binary format: 1 byte version + 8 bytes key + 1 byte
+		// Binary format: 1 byte version + 16 bytes key + 1 byte
 		// vary-key length + vary-key string.
 		if len(body) < 18 {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -383,7 +354,7 @@ func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.VaryKey = string(body[10 : 10+varyLen])
+		req.VaryKey = string(body[18 : 18+varyLen])
 	case '{':
 		// Legacy JSON format for backward compatibility during
 		// rolling upgrades. JSON always starts with '{' (0x7B).
@@ -441,23 +412,25 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	if f.useTLS {
 		scheme = "https"
 	}
-	url := scheme + "://" + fetchAddr + PeerPutPath
+	uri := scheme + "://" + fetchAddr + PeerPutPath
 
 	body := storage.EncodeObject(obj)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("peer put request: %w", err)
-	}
-	httpReq.Header.Set(header.ContentType, "application/octet-stream")
-	httpReq.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.SetRequestURI(uri)
+	req.SetBodyRaw(body)
+	req.Header.Set(header.ContentType, "application/octet-stream")
+	req.Header.Set(ClusterVersionHeader, ClusterProtocolVersion)
 
-	resp, err := f.client.Do(httpReq)
-	if err != nil {
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	if err := f.client.Do(ctx, req, resp); err != nil {
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("peer put %s: status %d", peer.Addr, resp.StatusCode)
+	if resp.StatusCode() != fasthttp.StatusOK {
+		return fmt.Errorf("peer put %s: status %d", peer.Addr, resp.StatusCode())
 	}
 	f.logger.Debug("peer put ok", "key", obj.Key, "peer", peer.Addr)
 	return nil

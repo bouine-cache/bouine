@@ -26,7 +26,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
-	"net/http"
+	"net/http" //nolint:depguard // shim: handler.go still uses *http.Request; full migration is follow-up
 	"net/url"
 	"slices"
 	"strconv"

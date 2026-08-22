@@ -3,6 +3,8 @@ package api
 import (
 	"net"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 // RawRequest is a parsed HTTP/1.1 request. It is populated by the h1parser
@@ -72,6 +74,23 @@ func (r *RawRequest) HasHeader(key string) bool {
 // Unstable.
 type FastPathHandler interface {
 	TryHit(req *RawRequest, now time.Time) (*FastPathResponse, bool)
+	Release(resp *FastPathResponse)
+}
+
+// FastPathHandlerCtx is the fasthttp-native version of FastPathHandler.
+// It receives a *fasthttp.RequestCtx (populated by the rewritten
+// h1parser) instead of *RawRequest. The response is written directly
+// to net.Conn via FastPathResponse.Buffers — ctx is only used for
+// reading the request, not for writing the response.
+//
+// This interface will replace FastPathHandler after the h1parser
+// rewrite (Phase 1 of the fasthttp migration, issue #521). It exists
+// now so that Phase 0 can land the interface change without breaking
+// the existing h1parser, which still uses *RawRequest.
+//
+// Unstable.
+type FastPathHandlerCtx interface {
+	TryHit(ctx *fasthttp.RequestCtx, now time.Time) (*FastPathResponse, bool)
 	Release(resp *FastPathResponse)
 }
 

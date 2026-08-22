@@ -14,7 +14,7 @@ A dependency must justify itself on at least one of:
 
 Banned by default: ORMs, runtime DI containers, log libraries that
 aren't `slog`-compatible, HTTP servers other than
-`net/http`/`fiber`/`quic-go`, any LGPL / AGPL code.
+`fasthttp` (ADR-0034), any LGPL / AGPL code.
 
 ## Allow-list
 
@@ -32,6 +32,8 @@ aren't `slog`-compatible, HTTP servers other than
 | `github.com/hashicorp/golang-lru`               | MPL-2.0    | (transitive)             | memberlist internal LRU. |
 | `github.com/miekg/dns`                          | BSD-3      | (transitive)             | memberlist DNS lookup. |
 | `github.com/sean-/seed`                         | MIT        | (transitive)             | memberlist RNG seed. |
+| `github.com/valyala/fasthttp`                   | MIT        | `internal/transport`, all layers | HTTP/1.1 server/client (ADR-0034). Pre-approved in `AGENTS.md §5`. Sole HTTP stack; replaces `net/http`. |
+| `github.com/andybalholm/brotli`                 | MIT        | (transitive)             | fasthttp dependency. |
 | `github.com/quic-go/quic-go`                    | MIT        | `internal/listener`      | HTTP/3 listener (ADR-0002). |
 | `github.com/prometheus/client_golang`           | Apache-2.0 | `internal/observability` | Prometheus metrics + handler. Pre-approved in `AGENTS.md §5`. |
 | `github.com/prometheus/client_model`            | Apache-2.0 | (transitive)             | client_golang dependency. |

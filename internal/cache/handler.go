@@ -997,10 +997,15 @@ func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
+	if h.fastClient == nil {
+		ctx.Response.Header.Set(header.XCache, "BYPASS")
+		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		return
+	}
 	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
 
-	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
 	defer cancel()
 
 	req := fasthttp.AcquireRequest()
@@ -1139,6 +1144,9 @@ func (h *Handler) collapsedRevalidateBg(req *fasthttp.Request, key api.Key) fetc
 }
 
 func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
+	if h.fastClient == nil {
+		return fetchResult{Err: fmt.Errorf("no fast client configured")}
+	}
 	ctx := context.Background()
 	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
@@ -1149,7 +1157,7 @@ func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
 	default:
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
 	defer cancel()
 
 	resp := fasthttp.AcquireResponse()
@@ -1579,10 +1587,17 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 // invalidateAndProxyFast handles POST/PUT/DELETE using FastClient,
 // bypassing struct{} and httputil.ReverseProxy.
 func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
-	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
+	if h.fastClient == nil {
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		return
+	}
+	bgCtx := context.Background()
+	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
 	defer span.End()
 
-	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
 	defer cancel()
 
 	req := fasthttp.AcquireRequest()
@@ -1807,17 +1822,23 @@ func (h *Handler) doFetch(ctx *fasthttp.RequestCtx) (res fetchResult) {
 // is captured directly in a pooled *fasthttp.Response — no header.Map
 // map, no bytes.Buffer, no make+copy body clone.
 func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
-	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
+	if h.fastClient == nil {
+		return fetchResult{Err: fmt.Errorf("no fast client configured")}
+	}
+	// Use context.Background() as the base because *fasthttp.RequestCtx.Done()
+	// panics when the ctx was created manually (not by a real fasthttp server).
+	bgCtx := context.Background()
+	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
 	defer span.End()
 
 	select {
 	case h.fetchSem <- struct{}{}:
 		defer func() { <-h.fetchSem }()
-	case <-ctx.Done():
-		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", ctx.Err())}
+	case <-fetchCtx.Done():
+		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", fetchCtx.Err())}
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, h.fetchTimeout)
+	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
 	defer cancel()
 
 	req := fasthttp.AcquireRequest()

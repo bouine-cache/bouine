@@ -20,7 +20,8 @@ func newDefaultTTLHandler(t *testing.T, upstream http.Handler, def time.Duration
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
-		Upstream:   upstream,
+		Upstream:   wrapUpstream(upstream),
+		FastClient: &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
 		Store:      store,
 		DefaultTTL: def,
 	})
@@ -86,13 +87,13 @@ func TestDefaultTTL_CachesHeaderlessResponse(t *testing.T) {
 	h := newDefaultTTLHandler(t, upstream, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "http://example.com/r", nil)
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, req)
+	rr1 := newRR()
+	h.ServeHTTPCompat(rr1, req)
 	got := rr1.Header().Get(header.XCache)
 	require.Equal(t, "MISS", got)
 
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/r", nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/r", nil))
 	got = rr2.Header().Get(header.XCache)
 	require.Equal(t, "HIT", got)
 	assert.Equal(t, 1, hits)
@@ -109,8 +110,9 @@ func TestDefaultTTL_DisabledKeepsMISS(t *testing.T) {
 	h := newDefaultTTLHandler(t, upstream, 0)
 
 	for range 2 {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
+		var rr *httptest.ResponseRecorder
+		rr = newRR()
+		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
 		got := rr.Header().Get(header.XCache)
 		require.Equal(t, "MISS", got)
 	}
@@ -128,8 +130,9 @@ func TestDefaultTTL_NoStoreStillBypasses(t *testing.T) {
 	h := newDefaultTTLHandler(t, upstream, 5*time.Second)
 
 	for range 2 {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
+		var rr *httptest.ResponseRecorder
+		rr = newRR()
+		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
 		got := rr.Header().Get(header.XCache)
 		require.Equal(t, "MISS", got)
 	}

@@ -18,7 +18,8 @@ func newMaxSizeHandler(t *testing.T, upstream http.Handler, maxSize int64) *Hand
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
-		Upstream:      upstream,
+		Upstream:      wrapUpstream(upstream),
+		FastClient:    &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
 		Store:         store,
 		MaxObjectSize: maxSize,
 	})
@@ -36,9 +37,11 @@ func TestMaxObjectSize_SmallResponseCached(t *testing.T) {
 	h := newMaxSizeHandler(t, upstream, 1024)
 
 	url := "http://example.com/small"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	rr = newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr = newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
 	assert.Equal(t, 1, calls)
@@ -57,14 +60,14 @@ func TestMaxObjectSize_LargeResponseSkipped(t *testing.T) {
 	h := newMaxSizeHandler(t, upstream, 1024)
 
 	url := "http://example.com/large"
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest("GET", url, nil))
+	rr1 := newRR()
+	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
 	if rr1.Code != 200 || rr1.Body.String() != body {
 		t.Fatalf("first response wrong: status=%d body=%q", rr1.Code, rr1.Body.String())
 	}
 
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", url, nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", url, nil))
 
 	assert.Equal(t, 2, calls)
 	assert.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
@@ -83,9 +86,10 @@ func TestMaxObjectSize_ZeroDisabled(t *testing.T) {
 	h := newMaxSizeHandler(t, upstream, 0)
 
 	url := "http://example.com/nolimit"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr = newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
 	assert.Equal(t, 1, calls)
@@ -102,7 +106,8 @@ func TestMaxObjectSize_ExactBoundaryCached(t *testing.T) {
 	h := newMaxSizeHandler(t, upstream, 512)
 
 	url := "http://example.com/exact"
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", url, nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 
 	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(httptest.NewRequest("GET", url, nil).Context(), key)

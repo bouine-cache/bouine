@@ -11,6 +11,8 @@ import (
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // FuzzBuildKey fuzzes the cache key builder with arbitrary method, host,
@@ -210,7 +212,7 @@ func FuzzEvaluate(f *testing.F) {
 				respHeaders.Set(header.Age, strconv.Itoa(ageSec))
 			}
 			obj = &api.Object{
-				StatusCode:   http.StatusOK,
+				StatusCode:   fasthttp.StatusOK,
 				Header:       header.FromHTTP(respHeaders),
 				CacheControl: respCC,
 				StoredAt:     storedAt,

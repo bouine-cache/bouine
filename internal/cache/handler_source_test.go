@@ -20,14 +20,14 @@ func TestHandler_XCacheSource_MissThenHit(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	// MISS → origin
-	rr1 := httptest.NewRecorder()
-	h.ServeHTTP(rr1, httptest.NewRequest("GET", "http://example.com/foo", nil))
+	rr1 := newRR()
+	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", "http://example.com/foo", nil))
 	got := rr1.Header().Get(header.XCacheSource)
 	require.Equal(t, string(api.SourceOrigin), got)
 
 	// HIT → hot
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
+	rr2 := newRR()
+	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
 	got = rr2.Header().Get(header.XCacheSource)
 	require.Equal(t, string(api.SourceHot), got)
 }
@@ -39,8 +39,8 @@ func TestHandler_XCacheSource_Bypass(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "http://example.com/bypass", nil)
 	req.Header.Set(header.CacheControl, "no-store")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 	got := rr.Header().Get(header.XCache)
 	require.Equal(t, "BYPASS", got)
 	// BYPASS → source should be empty (origin was contacted but not
@@ -56,8 +56,8 @@ func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
 	// only-if-cached with no cached object → 504, source empty
 	req := httptest.NewRequest("GET", "http://example.com/missing", nil)
 	req.Header.Set(header.CacheControl, "only-if-cached")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	require.Equal(t, 504, rr.Code)
 	got := rr.Header().Get(header.XCache)
@@ -71,8 +71,8 @@ func TestHandler_XCacheSource_InvalidateAndProxy_Origin(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	// POST → invalidateAndProxy → source=origin
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data")))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data")))
 	got := rr.Header().Get(header.XCacheSource)
 	require.Equal(t, string(api.SourceOrigin), got)
 }
@@ -83,7 +83,7 @@ func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
 	// the truncation error path in doFetch (fetchResult.Err != nil), which
 	// makes fetchAndStore set X-Cache-Source: origin before the 502.
 	h := NewHandler(HandlerConfig{
-		Upstream: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(200)
 			_, _ = w.Write(make([]byte, 10<<20)) // 10 MiB > 4 MiB default
 		}),
@@ -93,8 +93,8 @@ func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
 		}),
 	})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/fail", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/fail", nil))
 
 	require.Equal(t, 502, rr.Code)
 	got := rr.Header().Get(header.XCacheSource)
@@ -106,13 +106,14 @@ func TestHandler_XCacheSource_Conditional304_Hot(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	// Populate cache.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://example.com/304", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/304", nil))
 
 	// Conditional GET → 304, source=hot
 	req := httptest.NewRequest("GET", "http://example.com/304", nil)
 	req.Header.Set(header.IfNoneMatch, `"v1"`)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr = newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	require.Equal(t, 304, rr.Code)
 	got := rr.Header().Get(header.XCache)
@@ -128,7 +129,7 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 		NumShards: 2,
 	})
 	h := NewHandler(HandlerConfig{
-		Upstream: origin200("body"),
+		Upstream: wrapUpstream(origin200("body")),
 		Store:    store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "peer:1"}, false // always remote
@@ -146,8 +147,8 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 		},
 	})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "http://example.com/peer", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/peer", nil))
 
 	got := rr.Header().Get(header.XCache)
 	require.Equal(t, "HIT", got)
@@ -165,13 +166,14 @@ func TestHandler_XCacheSource_Range_Hot(t *testing.T) {
 	}))
 
 	// Populate cache.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://example.com/range", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/range", nil))
 
 	// Range request → 206, source=hot
 	req := httptest.NewRequest("GET", "http://example.com/range", nil)
 	req.Header.Set(header.Range, "bytes=0-4")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr = newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	require.Equal(t, 206, rr.Code)
 	got := rr.Header().Get(header.XCache)
@@ -195,8 +197,8 @@ func TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
 	})
 	h := testHandler(t, spoofUpstream)
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("POST", "http://example.com/spoof", strings.NewReader("data")))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("POST", "http://example.com/spoof", strings.NewReader("data")))
 
 	got := rr.Header().Get(header.XCacheSource)
 	require.Equal(t, string(api.SourceOrigin), got)
@@ -220,8 +222,8 @@ func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "http://example.com/bypass-spoof", nil)
 	req.Header.Set(header.CacheControl, "no-store")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	got := rr.Header().Get(header.XCache)
 	require.Equal(t, "BYPASS", got)
@@ -237,13 +239,14 @@ func TestHandler_Conditional304_ETagCanonical(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	// Populate cache.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://example.com/etag304", nil))
+	rr := newRR()
+	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/etag304", nil))
 
 	// Conditional GET → 304
 	req := httptest.NewRequest("GET", "http://example.com/etag304", nil)
 	req.Header.Set(header.IfNoneMatch, `"v1"`)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr = newRR()
+	h.ServeHTTPCompat(rr, req)
 
 	require.Equal(t, 304, rr.Code)
 	// Header.Get canonicalises the key — this will fail if the header

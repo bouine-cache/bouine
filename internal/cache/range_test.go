@@ -11,6 +11,8 @@ import (
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 type testRangeWriter struct {
@@ -40,11 +42,11 @@ func TestServeRange_SingleRange(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=0-4")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
-	require.Equal(t, http.StatusPartialContent, rr.Code)
+	require.Equal(t, fasthttp.StatusPartialContent, rr.Code)
 	require.Equal(t, "Hello", rr.Body.String())
 	cr := rr.Header().Get(header.ContentRange)
 	require.Equal(t, "bytes 0-4/13", cr)
@@ -63,7 +65,7 @@ func TestServeRange_SuffixRange(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=-3")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
@@ -81,7 +83,7 @@ func TestServeRange_OpenEnded(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=3-")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
@@ -99,18 +101,18 @@ func TestServeRange_Unsatisfiable(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=5-10")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
-	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rr.Code)
+	require.Equal(t, fasthttp.StatusRequestedRangeNotSatisfiable, rr.Code)
 }
 
 func TestServeRange_NoRangeHeader(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{Body: []byte("x"), BodySize: 1}
 	r := httptest.NewRequest("GET", "/", nil)
-	rr := httptest.NewRecorder()
+	rr := newRR()
 
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.False(t, ok)
@@ -121,7 +123,7 @@ func TestServeRange_MultiRange(t *testing.T) {
 	obj := &api.Object{Body: []byte("abcde"), BodySize: 5}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=0-1, 3-4")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
@@ -142,7 +144,7 @@ func TestServeRange_StaleWarning(t *testing.T) {
 	}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=0-1")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, true, api.SourceHot)
 	require.True(t, ok)
 	assert.Equal(t, "STALE", rr.Header().Get(header.XCache))
@@ -155,7 +157,7 @@ func TestServeRange_NonBytesPrefix(t *testing.T) {
 	obj := &api.Object{Body: []byte("x"), BodySize: 1}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "items=0-1")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.False(t, ok)
 }
@@ -170,10 +172,10 @@ func TestServeRange_HEAD_SingleRange(t *testing.T) {
 	}
 	r := httptest.NewRequest("HEAD", "/", nil)
 	r.Header.Set(header.Range, "bytes=0-1")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
-	assert.Equal(t, http.StatusPartialContent, rr.Code)
+	assert.Equal(t, fasthttp.StatusPartialContent, rr.Code)
 	assert.Empty(t, rr.Body.String())
 }
 
@@ -187,10 +189,10 @@ func TestServeRange_HEAD_MultiRange(t *testing.T) {
 	}
 	r := httptest.NewRequest("HEAD", "/", nil)
 	r.Header.Set(header.Range, "bytes=0-1, 3-4")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
-	assert.Equal(t, http.StatusPartialContent, rr.Code)
+	assert.Equal(t, fasthttp.StatusPartialContent, rr.Code)
 	assert.Empty(t, rr.Body.String())
 }
 
@@ -204,7 +206,7 @@ func TestServeRange_MissingContentType(t *testing.T) {
 	}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.Range, "bytes=0-1, 3-4")
-	rr := httptest.NewRecorder()
+	rr := newRR()
 	ok := ServeRange(&testRangeWriter{w: rr}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj, false, api.SourceHot)
 	require.True(t, ok)
 	ct := rr.Header().Get(header.ContentType)

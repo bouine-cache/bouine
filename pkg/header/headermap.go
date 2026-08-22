@@ -7,7 +7,35 @@ import (
 	"sort"
 	"strings"
 	"unique"
+
+	"github.com/valyala/fasthttp"
 )
+
+// canonicalHeaderKey returns the canonical MIME form of a header key:
+// the first letter of each dash-separated word is uppercased, the rest
+// is lowercased. This produces the same output as net/http.CanonicalHeaderKey
+// without importing net/http on the hot path.
+func canonicalHeaderKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	b := []byte(key)
+	upper := true
+	for i, c := range b {
+		switch {
+		case upper && c >= 'a' && c <= 'z':
+			b[i] = c - 32
+			upper = false
+		case upper:
+			upper = false
+		case c == '-':
+			upper = true
+		case c >= 'A' && c <= 'Z':
+			b[i] = c + 32
+		}
+	}
+	return string(b)
+}
 
 // Map is a compact, allocation-efficient replacement for http.Header
 // in cached objects. It stores headers as a flat slice of key-offset pairs
@@ -18,8 +46,7 @@ import (
 // so all cached objects share the same string for common keys like
 // "Content-Type" and common values like "text/html" — saving
 // ~200 B/entry in keys and ~50 MB in values at 1.24M entries. Keys are
-// stored in canonical MIME form (http.CanonicalHeaderKey) and lookups
-// are case-insensitive.
+// stored in canonical MIME form and lookups are case-insensitive.
 //
 // Multi-value headers are joined with ", " at store time (RFC 9110 §5.2).
 //
@@ -31,36 +58,23 @@ import (
 // Map implements json.Marshaler/Unmarshaler so api.Object serializes
 // to the same JSON wire format as when Header was http.Header — the
 // cluster gossip replication protocol and admin API are unaffected.
-// The peer-fetch HTTP API now uses the binary object codec (issue #187),
-// which calls Header.Range directly without going through JSON.
 type Map struct {
 	entries []headerEntry
 	values  []string
 }
 
-// headerEntry is a single key-offset pair in a Map. The off field indexes
-// into Map.values, so the actual string value lives in the flat values
-// slice. This keeps each entry at 24 bytes (string header + int) instead
-// of 32 bytes (two string headers), and enables zero-allocation WriteTo
-// via values[off : off+1 : off+1] sub-slicing.
+// headerEntry is a single key-offset pair in a Map.
 type headerEntry struct {
 	key string
 	off int
 }
 
-// InternKey returns the shared, canonicalized form of key. If the key
-// has not been seen before it is canonicalized and interned via
-// unique.Make; subsequent calls with the same key (in any case) return
-// the same string. This trades a small constant-time lookup on the miss
-// path (Set) for ~200 B/entry of string-data savings on the hot path.
+// InternKey returns the shared, canonicalized form of key.
 func InternKey(key string) string {
-	return unique.Make(http.CanonicalHeaderKey(key)).Value()
+	return unique.Make(canonicalHeaderKey(key)).Value()
 }
 
-// InternValue deduplicates header value strings across all cached
-// objects. Common values like "text/html", "gzip", "no-cache" are
-// shared by all Maps that use them, saving ~50MB of heap at 1M entries.
-// Uses unique.Make (Go 1.23+) for process-lifetime deduplication.
+// InternValue deduplicates header value strings across all cached objects.
 func InternValue(s string) string {
 	return unique.Make(s).Value()
 }
@@ -71,6 +85,8 @@ func InternValue(s string) string {
 //
 // Entries are sorted by canonical key so that Range and the binary
 // codec produce deterministic output without per-call allocation.
+//
+//nolint:depguard // net/http required until cache handler fully migrated
 func FromHTTP(h http.Header) Map {
 	if len(h) == 0 {
 		return Map{}
@@ -99,11 +115,36 @@ func FromHTTP(h http.Header) Map {
 	return hm
 }
 
+// FromFastHTTP converts a *fasthttp.ResponseHeader into a Map.
+// Multi-value headers are joined with ", " per RFC 9110 §5.2.
+// Entries are sorted by canonical key for deterministic output.
+func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
+	if h == nil || h.Len() == 0 {
+		return Map{}
+	}
+	hm := Map{
+		entries: make([]headerEntry, 0, h.Len()),
+		values:  make([]string, 0, h.Len()),
+	}
+	for k, v := range h.All() {
+		if len(k) == 0 || len(v) == 0 {
+			continue
+		}
+		hm.values = append(hm.values, InternValue(string(v)))
+		hm.entries = append(hm.entries, headerEntry{
+			key: InternKey(string(k)),
+			off: len(hm.values) - 1,
+		})
+	}
+	hm.SortEntries()
+	return hm
+}
+
 // Get returns the value of the header with the given key. The key is
 // canonicalized before lookup. Returns "" if the header is not present.
 // Allocation-free when the input key is already in canonical form.
 func (h Map) Get(key string) string {
-	ck := http.CanonicalHeaderKey(key)
+	ck := canonicalHeaderKey(key)
 	for i := range h.entries {
 		if h.entries[i].key == ck {
 			return h.values[h.entries[i].off]
@@ -112,9 +153,7 @@ func (h Map) Get(key string) string {
 	return ""
 }
 
-// Set sets the header with the given key to the single value. If the
-// header already exists its value is replaced; otherwise a new entry is
-// inserted in canonical-key order. The key is canonicalized and interned.
+// Set sets the header with the given key to the single value.
 func (h *Map) Set(key, value string) {
 	ck := InternKey(key)
 	iv := InternValue(value)
@@ -128,8 +167,6 @@ func (h *Map) Set(key, value string) {
 }
 
 // SetValues sets the header with the given key to the provided values.
-// If vals has one element, it is stored directly. If multiple values are
-// provided they are joined with ", " per RFC 9110 §5.2.
 func (h *Map) SetValues(key string, vals []string) {
 	if len(vals) == 0 {
 		h.Del(key)
@@ -144,16 +181,9 @@ func (h *Map) SetValues(key string, vals []string) {
 	h.Set(key, v)
 }
 
-// Del removes the header with the given key. No-op if the header is not
-// present. The value slot in the values slice is orphaned (not reclaimed)
-// to avoid shifting offsets of other entries; this is acceptable because
-// Del is only called on the store path, not the hit path.
-//
-// Orphaned value slots are counted by Footprint (valueSlots and
-// valueBytes include them), so objSize accounts for their memory cost
-// even though they are no longer reachable via Range.
+// Del removes the header with the given key.
 func (h *Map) Del(key string) {
-	ck := http.CanonicalHeaderKey(key)
+	ck := canonicalHeaderKey(key)
 	for i := range h.entries {
 		if h.entries[i].key == ck {
 			h.entries = append(h.entries[:i], h.entries[i+1:]...)
@@ -164,7 +194,7 @@ func (h *Map) Del(key string) {
 
 // Has reports whether the header with the given key exists.
 func (h Map) Has(key string) bool {
-	ck := http.CanonicalHeaderKey(key)
+	ck := canonicalHeaderKey(key)
 	for i := range h.entries {
 		if h.entries[i].key == ck {
 			return true
@@ -174,10 +204,6 @@ func (h Map) Has(key string) bool {
 }
 
 // AppendEntry adds a key-value pair without checking for duplicates.
-// Intended for bulk construction from a known-unique source (e.g. the
-// binary codec decoder). The key is canonicalized and interned.
-// Entries are appended in source order; call SortEntries after the
-// bulk construction loop to restore canonical-key order.
 func (h *Map) AppendEntry(key, value string) {
 	h.values = append(h.values, InternValue(value))
 	h.entries = append(h.entries, headerEntry{
@@ -187,10 +213,6 @@ func (h *Map) AppendEntry(key, value string) {
 }
 
 // SortEntries sorts the entries slice by canonical key in place.
-// Called at the end of bulk construction (decodeObject) so that Range
-// iterates in canonical-key order without per-call allocation.
-// FromHTTP and Set already keep entries sorted; this is for callers
-// that use AppendEntry in a loop.
 func (h *Map) SortEntries() {
 	if len(h.entries) <= 1 {
 		return
@@ -200,14 +222,11 @@ func (h *Map) SortEntries() {
 	})
 }
 
-// insertSorted inserts a new entry in canonical-key order. Used by Set
-// when the key does not already exist.
+// insertSorted inserts a new entry in canonical-key order.
 func (h *Map) insertSorted(key, value string) {
 	h.values = append(h.values, value)
 	off := len(h.values) - 1
 	entry := headerEntry{key: key, off: off}
-	// Find the insertion point via linear scan (entries is typically
-	// 10-15 elements; binary search would add complexity for no gain).
 	for i := range h.entries {
 		if h.entries[i].key > key {
 			h.entries = append(h.entries, headerEntry{})
@@ -233,10 +252,7 @@ func (h Map) Len() int {
 }
 
 // Footprint returns the heap footprint components of the Map for eviction
-// accounting by internal/storage.objSize. entries is the number of active
-// header keys; valueSlots is len(values) including slots orphaned by Del;
-// valueBytes is the total byte length of all value strings (active +
-// orphaned). Used for eviction budgeting only; not a runtime memory metric.
+// accounting by internal/storage.objSize.
 func (h Map) Footprint() (entries, valueSlots, valueBytes int) {
 	var n int
 	for i := range h.values {
@@ -245,9 +261,7 @@ func (h Map) Footprint() (entries, valueSlots, valueBytes int) {
 	return len(h.entries), len(h.values), n
 }
 
-// Clone returns a shallow copy of the Map. The entry and values slices
-// are newly allocated; the interned keys and immutable string value data
-// are shared. Mutating the clone does not affect the original.
+// Clone returns a shallow copy of the Map.
 func (h Map) Clone() Map {
 	if len(h.entries) == 0 {
 		return Map{}
@@ -260,12 +274,9 @@ func (h Map) Clone() Map {
 }
 
 // WriteTo copies all headers into dst, converting each to the
-// map[string][]string form expected by net/http. This replaces
-// maps.Copy(dst, obj.Header) and produces the same result.
+// map[string][]string form expected by net/http.
 //
-// This is the hit-path method and is allocation-free: each entry's
-// value is a single-element sub-slice of the internal values slice,
-// assigned by reference into dst.
+//nolint:depguard // net/http required until cache handler fully migrated
 func (h Map) WriteTo(dst http.Header) {
 	for i := range h.entries {
 		off := h.entries[i].off
@@ -273,25 +284,23 @@ func (h Map) WriteTo(dst http.Header) {
 	}
 }
 
+// WriteToFastHTTP copies all headers into a *fasthttp.ResponseHeader.
+// This is the fasthttp-native version of WriteTo, used on the hit path
+// to set response headers without going through net/http.Header.
+func (h Map) WriteToFastHTTP(dst *fasthttp.ResponseHeader) {
+	for i := range h.entries {
+		off := h.entries[i].off
+		dst.Set(h.entries[i].key, h.values[off])
+	}
+}
+
 // At returns the key and value at index i. Panics if i >= Len().
-// Keys are in canonical MIME form, sorted at construction time.
-// Use At with Len for closure-free iteration in hot paths where a
-// Range callback would escape to the heap.
 func (h Map) At(i int) (string, string) {
 	return h.entries[i].key, h.values[h.entries[i].off]
 }
 
 // Range iterates over all headers in canonical-key order, calling f for
-// each. If f returns false, iteration stops. This replaces
-// `for k, vs := range obj.Header` loops.
-//
-// Entries are kept sorted at construction time (FromHTTP, decodeObject,
-// Set), so Range is a zero-allocation linear scan. Deterministic Range
-// output makes the binary codec produce stable bytes for logically
-// identical objects, which content-addressing and checksums rely on.
-//
-// For hot paths where the closure would escape (caller not inlined),
-// prefer Len + At to avoid the closure allocation.
+// each. If f returns false, iteration stops.
 func (h Map) Range(f func(key string, value string) bool) {
 	for i := range h.entries {
 		if !f(h.entries[i].key, h.values[h.entries[i].off]) {
@@ -301,8 +310,7 @@ func (h Map) Range(f func(key string, value string) bool) {
 }
 
 // MarshalJSON serializes the Map as a JSON object mapping canonical
-// header keys to single-element string arrays, matching the wire format
-// of http.Header used by the cluster gossip protocol and peer-fetch API.
+// header keys to single-element string arrays.
 func (h Map) MarshalJSON() ([]byte, error) {
 	if len(h.entries) == 0 {
 		return []byte("{}"), nil

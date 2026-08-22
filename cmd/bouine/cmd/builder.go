@@ -523,7 +523,6 @@ func buildTransport(pc config.UpstreamPool) http.RoundTripper {
 		MaxIdleConnsPerHost:   64,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: responseHeaderTimeout,
-		ForceAttemptHTTP2:     true,
 	}
 	if pc.Connect.MaxConnections > 0 {
 		base.MaxConnsPerHost = pc.Connect.MaxConnections

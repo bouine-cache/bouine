@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,7 +51,7 @@ func bigObj(key api.Key, bodySize int) *api.Object {
 	return &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ContentType: {"application/octet-stream"}}),
+		Header:     headerMap(header.ContentType, "application/octet-stream"),
 		Body:       make([]byte, bodySize),
 		BodySize:   int64(bodySize),
 		StoredAt:   time.Now(),
@@ -546,7 +545,7 @@ func TestTiered_EvictsCorruptBlobOnGet(t *testing.T) {
 	// mid-metadata: decodeObject will set errCorrupt.
 	corruptBlob := encodeObject(&api.Object{
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{"A": {"b"}}),
+		Header:     headerMap("A", "b"),
 		Body:       []byte("xx"),
 	})[:4]
 	_, _, err := ts.warm.Put(k, corruptBlob)

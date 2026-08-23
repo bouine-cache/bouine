@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -30,7 +29,7 @@ func obj(key api.Key, bodySize int) *api.Object {
 	return &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+		Header:     headerMap(header.ContentType, "text/plain"),
 		Body:       make([]byte, bodySize),
 		BodySize:   int64(bodySize),
 		StoredAt:   time.Now(),
@@ -123,7 +122,7 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 	fresh := &api.Object{
 		Key:        testkey.Hash([]byte("fresh")),
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+		Header:     headerMap(header.ContentType, "text/plain"),
 		Body:       make([]byte, 100),
 		BodySize:   100,
 		StoredAt:   now,
@@ -132,7 +131,7 @@ func TestHotStore_ReapExpired_RemovesDeadEntries(t *testing.T) {
 	expired := &api.Object{
 		Key:                  testkey.Hash([]byte("expired")),
 		StatusCode:           200,
-		Header:               header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+		Header:               headerMap(header.ContentType, "text/plain"),
 		Body:                 make([]byte, 100),
 		BodySize:             100,
 		StoredAt:             now.Add(-10 * time.Minute),
@@ -166,7 +165,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 	withinSWR := &api.Object{
 		Key:                  testkey.Hash([]byte("swr")),
 		StatusCode:           200,
-		Header:               header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+		Header:               headerMap(header.ContentType, "text/plain"),
 		Body:                 make([]byte, 100),
 		BodySize:             100,
 		StoredAt:             now.Add(-5 * time.Second),
@@ -176,7 +175,7 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 	withinSIE := &api.Object{
 		Key:          testkey.Hash([]byte("sie")),
 		StatusCode:   200,
-		Header:       header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+		Header:       headerMap(header.ContentType, "text/plain"),
 		Body:         make([]byte, 100),
 		BodySize:     100,
 		StoredAt:     now.Add(-5 * time.Second),
@@ -195,15 +194,15 @@ func TestHotStore_ReapExpired_KeepsSWRAndSIEEntries(t *testing.T) {
 
 func TestObjSize_AccountsForHeaders(t *testing.T) {
 	t.Parallel()
-	smallHeaders := http.Header{header.XBouinePath: {"/a"}}
-	bigHeaders := http.Header{}
+	smallHeaders := headerMap(header.XBouinePath, "/a")
+	bigHeaders := header.NewMap(0)
 	for i := range 20 {
 		bigHeaders.Set(fmt.Sprintf("X-H%d", i), strings.Repeat("v", 100))
 	}
 
 	bodyLen := int64(100)
-	objSmall := &api.Object{Body: make([]byte, bodyLen), Header: header.FromHTTP(smallHeaders)}
-	objBig := &api.Object{Body: make([]byte, bodyLen), Header: header.FromHTTP(bigHeaders)}
+	objSmall := &api.Object{Body: make([]byte, bodyLen), Header: smallHeaders}
+	objBig := &api.Object{Body: make([]byte, bodyLen), Header: bigHeaders}
 
 	sizeSmall := objSize(objSmall)
 	sizeBig := objSize(objBig)
@@ -237,11 +236,7 @@ func TestObjSize_MapOverheadConstant(t *testing.T) {
 
 func TestObjSize_OrphanedValuesCounted(t *testing.T) {
 	t.Parallel()
-	hdr := header.FromHTTP(http.Header{
-		"Content-Type": {"text/html"},
-		"Set-Cookie":   {"session=abc"},
-		"X-Custom":     {"value1"},
-	})
+	hdr := headerMap("Content-Type", "text/html", "Set-Cookie", "session=abc", "X-Custom", "value1")
 	hdr.Del("Set-Cookie")
 
 	obj := &api.Object{
@@ -251,10 +246,7 @@ func TestObjSize_OrphanedValuesCounted(t *testing.T) {
 	size := objSize(obj)
 
 	// Build a version without the orphan for comparison.
-	hdrClean := header.FromHTTP(http.Header{
-		"Content-Type": {"text/html"},
-		"X-Custom":     {"value1"},
-	})
+	hdrClean := headerMap("Content-Type", "text/html", "X-Custom", "value1")
 	objClean := &api.Object{
 		Body:   []byte("hello"),
 		Header: hdrClean,
@@ -275,10 +267,7 @@ func TestObjSize_OrphanedValuesCounted(t *testing.T) {
 
 func TestObjSize_ExactValue(t *testing.T) {
 	t.Parallel()
-	hdr := header.FromHTTP(http.Header{
-		"Content-Type": {"text/html"},
-		"X-Custom":     {"val"},
-	})
+	hdr := headerMap("Content-Type", "text/html", "X-Custom", "val")
 	obj := &api.Object{
 		Body:          []byte("hello"),
 		Header:        hdr,
@@ -310,7 +299,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 	s := NewHotStore(HotConfig{MaxBytes: budget, NumShards: 4})
 	ctx := context.Background()
 
-	hdr := http.Header{}
+	hdr := header.NewMap(0)
 	for i := range 20 {
 		hdr.Set(fmt.Sprintf("X-H%d", i), strings.Repeat("v", 200))
 	}
@@ -320,7 +309,7 @@ func TestHotStore_EvictionFiresWithLargeHeaders(t *testing.T) {
 		_ = s.Put(ctx, k, &api.Object{
 			Key:        k,
 			StatusCode: 200,
-			Header:     header.FromHTTP(hdr),
+			Header:     hdr,
 			Body:       make([]byte, 64),
 			BodySize:   64,
 			StoredAt:   time.Now(),

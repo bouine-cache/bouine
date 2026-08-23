@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"net/http"
 	"testing"
 	"time"
 
@@ -39,13 +38,10 @@ func FuzzCodecRoundTrip(f *testing.F) {
 	f.Fuzz(func(t *testing.T, statusCode int, varyKey, etag, cacheControl, body string) {
 		// Full object with all fields populated.
 		assertCodecRoundTrip(t, &api.Object{
-			Key:        testkey.Key(0xDEADBEEFCAFE),
-			VaryKey:    varyKey,
-			StatusCode: statusCode,
-			Header: header.FromHTTP(http.Header{
-				header.CacheControl: {cacheControl},
-				header.ContentType:  {"application/octet-stream"},
-			}),
+			Key:                  testkey.Key(0xDEADBEEFCAFE),
+			VaryKey:              varyKey,
+			StatusCode:           statusCode,
+			Header:               headerMap(header.ContentType, "application/octet-stream"),
 			Body:                 []byte(body),
 			BodySize:             int64(len(body)),
 			StoredAt:             fuzzFixedTime,
@@ -63,7 +59,7 @@ func FuzzCodecRoundTrip(f *testing.F) {
 		assertCodecRoundTrip(t, &api.Object{
 			Key:        testkey.Key(0),
 			StatusCode: statusCode,
-			Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+			Header:     headerMap(header.ContentType, "text/plain"),
 			Body:       []byte(body),
 			BodySize:   int64(len(body)),
 		})
@@ -84,7 +80,7 @@ func FuzzDecodeObjectArbitrary(f *testing.F) {
 
 	valid := EncodeObject(&api.Object{
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/plain"}}),
+		Header:     headerMap(header.ContentType, "text/plain"),
 		Body:       []byte("test"),
 	})
 	f.Add(valid)

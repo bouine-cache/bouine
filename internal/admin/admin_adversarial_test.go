@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
+
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +16,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 // --- adversarial token tests ---
@@ -32,7 +34,7 @@ func TestAdversarial_TokenEmptyHeader(t *testing.T) {
 	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_TokenWrongScheme verifies that a token sent with the
@@ -48,7 +50,7 @@ func TestAdversarial_TokenWrongScheme(t *testing.T) {
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	ctx.Request.Header.Set(header.Authorization, "Basic secret")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_TokenTrailingWhitespace verifies that a token with
@@ -65,7 +67,7 @@ func TestAdversarial_TokenTrailingWhitespace(t *testing.T) {
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	ctx.Request.Header.Set(header.Authorization, "Bearer secret ")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_TokenCaseSensitive verifies that the "Bearer " prefix
@@ -81,7 +83,7 @@ func TestAdversarial_TokenCaseSensitive(t *testing.T) {
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	ctx.Request.Header.Set(header.Authorization, "bearer secret")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 // --- adversarial malformed JSON tests ---
@@ -121,7 +123,7 @@ func TestAdversarial_MalformedJSON_AllEndpoints(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			code, _ := postWithToken(t, s, tc.path, tc.body)
-			require.Equal(t, http.StatusBadRequest, code, "endpoint %s with body %q", tc.path, tc.body)
+			require.Equal(t, fasthttp.StatusBadRequest, code, "endpoint %s with body %q", tc.path, tc.body)
 		})
 	}
 }
@@ -142,7 +144,7 @@ func TestAdversarial_JSONDuplicateFields(t *testing.T) {
 	})
 	body := `{"url":"https://first.com/","url":"https://second.com/"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	// Go's json decoder uses the last value for duplicate keys.
 	expectedKey := cache.BuildKeyFromURL("https://second.com/", nil)
 	require.Equal(t, expectedKey, purgedKey, "purge must use the last URL when keys are duplicated")
@@ -168,7 +170,7 @@ func TestAdversarial_OversizedBody(t *testing.T) {
 	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(body), "secret")
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusRequestEntityTooLarge, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusRequestEntityTooLarge, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_OversizedBody_Batch verifies that batch purge also
@@ -190,7 +192,7 @@ func TestAdversarial_OversizedBody_Batch(t *testing.T) {
 	ctx := testCtxWithBodyAuth("POST", "/v1/purge/batch", []byte(sb.String()), "secret")
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusRequestEntityTooLarge, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusRequestEntityTooLarge, ctx.Response.StatusCode())
 }
 
 // TestAdversarial_BodyWithinLimit verifies that a body just under the
@@ -205,7 +207,7 @@ func TestAdversarial_BodyWithinLimit(t *testing.T) {
 	})
 	body := `{"url":"https://example.com/"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 }
 
 // --- adversarial concurrent operations test ---
@@ -239,7 +241,7 @@ func TestAdversarial_ConcurrentPurgeBan(t *testing.T) {
 				ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(body), "secret")
 				ctx.Request.Header.Set(header.ContentType, "application/json")
 				s.Handler()(ctx)
-				if ctx.Response.StatusCode() == http.StatusOK {
+				if ctx.Response.StatusCode() == fasthttp.StatusOK {
 					successCount.Add(1)
 				}
 			}
@@ -253,7 +255,7 @@ func TestAdversarial_ConcurrentPurgeBan(t *testing.T) {
 				ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(body), "secret")
 				ctx.Request.Header.Set(header.ContentType, "application/json")
 				s.Handler()(ctx)
-				if ctx.Response.StatusCode() == http.StatusOK {
+				if ctx.Response.StatusCode() == fasthttp.StatusOK {
 					successCount.Add(1)
 				}
 			}
@@ -294,7 +296,7 @@ func TestAdversarial_InvalidRegex(t *testing.T) {
 				BanFn:  func(_ api.BanExpr) (int, error) { banCalled.Store(true); return 0, nil },
 			})
 			code, body := postWithToken(t, s, "/v1/ban", tc.body)
-			require.Equal(t, http.StatusBadRequest, code, "body: %s", body)
+			require.Equal(t, fasthttp.StatusBadRequest, code, "body: %s", body)
 			require.False(t, banCalled.Load(), "BanFn must not be called for invalid regex")
 		})
 	}
@@ -319,7 +321,7 @@ func TestAdversarial_ReDoSPattern(t *testing.T) {
 	// because Go's regexp uses RE2.
 	body := `{"path_regex":"(a+)+$"}`
 	code, _ := postWithToken(t, s, "/v1/ban", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.True(t, banCalled.Load(), "BanFn should be called for a valid RE2 pattern")
 }
 
@@ -341,7 +343,7 @@ func TestAdversarial_UnicodeURL(t *testing.T) {
 	})
 	body := `{"url":"https://example.com/ひらがな/路径"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.Equal(t, "https://example.com/ひらがな/路径", gotURL)
 }
 
@@ -361,7 +363,7 @@ func TestAdversarial_PercentEncodedUTF8(t *testing.T) {
 	// "/路径" percent-encoded as UTF-8.
 	body := `{"url":"https://example.com/%E8%B7%AF%E5%BE%84"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.Equal(t, "https://example.com/%E8%B7%AF%E5%BE%84", gotURL)
 }
 
@@ -380,7 +382,7 @@ func TestAdversarial_UnicodeBanRegex(t *testing.T) {
 	})
 	body := `{"host_regex":"example\\.com","path_regex":"^/商品/.*"}`
 	code, _ := postWithToken(t, s, "/v1/ban", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.Equal(t, "^/商品/.*", gotExpr.PathRegex)
 }
 
@@ -401,7 +403,7 @@ func TestAdversarial_SurrogateKeyWithRegexChars(t *testing.T) {
 	})
 	body := `{"surrogate_key":"product-.*\\.html"}`
 	code, _ := postWithToken(t, s, "/v1/ban", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.Equal(t, "product-.*\\.html", gotExpr.SurrogateKey)
 }
 
@@ -424,7 +426,7 @@ func TestAdversarial_NULByteInURL(t *testing.T) {
 	// JSON string with an embedded NUL byte (\u0000).
 	body := `{"url":"https://example.com/\u0000path"}`
 	code, _ := postWithToken(t, s, "/v1/purge", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 }
 
 // --- adversarial edge cases on empty / whitespace bodies ---
@@ -439,7 +441,7 @@ func TestAdversarial_WhitespaceOnlyBody(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge", "   \n\t  ")
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 // TestAdversarial_NullBody verifies that a JSON null literal is
@@ -453,7 +455,7 @@ func TestAdversarial_NullBody(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge", `null`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 // --- adversarial HTTP method tests ---
@@ -476,7 +478,7 @@ func TestAdversarial_WrongMethod(t *testing.T) {
 			t.Parallel()
 			ctx := testCtxWithAuth("GET", path, "secret")
 			s.Handler()(ctx)
-			require.Equal(t, http.StatusMethodNotAllowed, ctx.Response.StatusCode())
+			require.Equal(t, fasthttp.StatusMethodNotAllowed, ctx.Response.StatusCode())
 		})
 	}
 }
@@ -506,7 +508,7 @@ func TestAdversarial_DeeplyNestedJSON(t *testing.T) {
 	}
 	sb.WriteString(`}`)
 	code, _ := postWithToken(t, s, "/v1/purge", sb.String())
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 // TestAdversarial_BatchWithNullURLs verifies that a batch purge
@@ -528,6 +530,6 @@ func TestAdversarial_BatchWithNullURLs(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/",null,"https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	require.Equal(t, http.StatusBadRequest, code, "body: %s", respBody)
+	require.Equal(t, fasthttp.StatusBadRequest, code, "body: %s", respBody)
 	require.Equal(t, int64(0), purgeCalls.Load(), "no entries must be purged when the batch contains a null")
 }

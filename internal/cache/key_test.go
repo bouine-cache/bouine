@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"strings"
 	"testing"
 
@@ -67,35 +66,32 @@ func TestBuildKey_VaryKeyLongNoPanic(t *testing.T) {
 	// Regression: BuildVaryKey must not panic when Vary header values
 	// exceed the 256-byte stack buffer.
 	longVal := strings.Repeat("x", 300)
-	reqHeader := http.Header{
-		header.AcceptLanguage: []string{longVal},
-		header.AcceptEncoding: []string{longVal},
-	}
+	reqHeader := headerMap(header.AcceptLanguage, longVal, header.AcceptEncoding, longVal)
 	// Must not panic.
-	_ = BuildVaryKey("Accept-Language, Accept-Encoding", header.FromHTTP(reqHeader), nil)
+	_ = BuildVaryKey("Accept-Language, Accept-Encoding", reqHeader, nil)
 }
 
 func TestBuildVaryKey_ExcludeHeader(t *testing.T) {
 	t.Parallel()
 	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
-	h1 := http.Header{header.AcceptEncoding: []string{"gzip"}, "X-Request-Id": {"abc"}}
-	h2 := http.Header{header.AcceptEncoding: []string{"gzip"}, "X-Request-Id": {"xyz"}}
-	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", header.FromHTTP(h1), excludePolicy)
-	k2 := BuildVaryKey("Accept-Encoding, X-Request-Id", header.FromHTTP(h2), excludePolicy)
+	h1 := headerMap(header.AcceptEncoding, "gzip", "X-Request-Id", "abc")
+	h2 := headerMap(header.AcceptEncoding, "gzip", "X-Request-Id", "xyz")
+	k1 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, excludePolicy)
+	k2 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, excludePolicy)
 	require.Equal(t, k2, k1)
 	// Without exclusion, keys should differ.
-	k3 := BuildVaryKey("Accept-Encoding, X-Request-Id", header.FromHTTP(h1), nil)
-	k4 := BuildVaryKey("Accept-Encoding, X-Request-Id", header.FromHTTP(h2), nil)
+	k3 := BuildVaryKey("Accept-Encoding, X-Request-Id", h1, nil)
+	k4 := BuildVaryKey("Accept-Encoding, X-Request-Id", h2, nil)
 	require.NotEqual(t, k4, k3)
 }
 
 func TestBuildVaryKey_ExcludeAllHeaders(t *testing.T) {
 	t.Parallel()
 	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
-	h1 := http.Header{"X-Request-Id": {"abc"}}
-	h2 := http.Header{"X-Request-Id": {"xyz"}}
-	k1 := BuildVaryKey("X-Request-Id", header.FromHTTP(h1), excludePolicy)
-	k2 := BuildVaryKey("X-Request-Id", header.FromHTTP(h2), excludePolicy)
+	h1 := headerMap("X-Request-Id", "abc")
+	h2 := headerMap("X-Request-Id", "xyz")
+	k1 := BuildVaryKey("X-Request-Id", h1, excludePolicy)
+	k2 := BuildVaryKey("X-Request-Id", h2, excludePolicy)
 	require.Equal(t, k2, k1)
 }
 
@@ -128,56 +124,51 @@ func TestParseCacheControl_MaxStaleNoValue(t *testing.T) {
 
 func TestIsCacheable_BasicPositive(t *testing.T) {
 	t.Parallel()
-	resp := http.Header{header.CacheControl: []string{"max-age=60"}}
-	require.True(t, IsCacheable(200, header.FromHTTP(http.Header{}), header.FromHTTP(resp)))
+	resp := headerMap(header.CacheControl, "max-age=60")
+	require.True(t, IsCacheable(200, header.NewMap(0), resp))
 }
 
 func TestIsCacheable_NoStore(t *testing.T) {
 	t.Parallel()
-	resp := http.Header{header.CacheControl: []string{"no-store"}}
-	require.False(t, IsCacheable(200, header.FromHTTP(http.Header{}), header.FromHTTP(resp)))
+	resp := headerMap(header.CacheControl, "no-store")
+	require.False(t, IsCacheable(200, header.NewMap(0), resp))
 }
 
 func TestIsCacheable_Private(t *testing.T) {
 	t.Parallel()
-	resp := http.Header{header.CacheControl: []string{"private, max-age=60"}}
-	require.False(t, IsCacheable(200, header.FromHTTP(http.Header{}), header.FromHTTP(resp)))
+	resp := headerMap(header.CacheControl, "private, max-age=60")
+	require.False(t, IsCacheable(200, header.NewMap(0), resp))
 }
 
 func TestIsCacheable_SetCookie(t *testing.T) {
 	t.Parallel()
 	// Set-Cookie WITHOUT explicit freshness blocks caching.
-	resp := http.Header{
-		header.SetCookie: []string{"sid=abc"},
-	}
-	require.False(t, IsCacheable(200, header.FromHTTP(http.Header{}), header.FromHTTP(resp)))
+	resp := headerMap(header.SetCookie, "sid=abc")
+	require.False(t, IsCacheable(200, header.NewMap(0), resp))
 	// Set-Cookie WITH explicit max-age is cacheable (shared cache behavior).
-	resp2 := http.Header{
-		header.CacheControl: []string{"max-age=60"},
-		header.SetCookie:    []string{"sid=abc"},
-	}
-	require.True(t, IsCacheable(200, header.FromHTTP(http.Header{}), header.FromHTTP(resp2)))
+	resp2 := headerMap(header.CacheControl, "max-age=60", header.SetCookie, "sid=abc")
+	require.True(t, IsCacheable(200, header.NewMap(0), resp2))
 }
 
 func TestIsCacheable_Authorization(t *testing.T) {
 	t.Parallel()
-	req := http.Header{header.Authorization: []string{"Bearer tok"}}
-	resp := http.Header{header.CacheControl: []string{"max-age=60"}}
-	require.False(t, IsCacheable(200, header.FromHTTP(req), header.FromHTTP(resp)))
+	req := headerMap(header.Authorization, "Bearer tok")
+	resp := headerMap(header.CacheControl, "max-age=60")
+	require.False(t, IsCacheable(200, req, resp))
 
-	resp2 := http.Header{header.CacheControl: []string{"max-age=60, public"}}
-	require.True(t, IsCacheable(200, header.FromHTTP(req), header.FromHTTP(resp2)))
+	resp2 := headerMap(header.CacheControl, "max-age=60, public")
+	require.True(t, IsCacheable(200, req, resp2))
 }
 
 func TestIsCacheable_HeuristicStatus(t *testing.T) {
 	t.Parallel()
 	// 301 with Last-Modified is heuristically cacheable.
-	resp := http.Header{header.LastModified: []string{"Mon, 01 Jan 2024 00:00:00 GMT"}}
-	require.True(t, IsCacheable(301, header.FromHTTP(http.Header{}), header.FromHTTP(resp)))
+	resp := headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+	require.True(t, IsCacheable(301, header.NewMap(0), resp))
 	// 301 without Last-Modified is NOT heuristically cacheable.
-	require.False(t, IsCacheable(301, header.FromHTTP(http.Header{}), header.FromHTTP(http.Header{})))
+	require.False(t, IsCacheable(301, header.NewMap(0), header.NewMap(0)))
 	// 302 is never heuristically cacheable.
-	require.False(t, IsCacheable(302, header.FromHTTP(http.Header{}), header.FromHTTP(http.Header{header.LastModified: []string{"Mon, 01 Jan 2024 00:00:00 GMT"}})))
+	require.False(t, IsCacheable(302, header.NewMap(0), headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")))
 }
 
 func TestBuildKeyFromURL_Empty(t *testing.T) {

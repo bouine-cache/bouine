@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"net/http"
 	"testing"
 	"time"
 
@@ -16,14 +15,10 @@ import (
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	orig := &api.Object{
-		Key:        testkey.Key(0xDEADBEEFCAFE),
-		VaryKey:    "accept-encoding=gzip",
-		StatusCode: http.StatusOK,
-		Header: header.FromHTTP(http.Header{
-			header.ContentType:  {"application/json"},
-			header.CacheControl: {"public", "max-age=600"},
-			header.Vary:         {"Accept-Encoding"},
-		}),
+		Key:                  testkey.Key(0xDEADBEEFCAFE),
+		VaryKey:              "accept-encoding=gzip",
+		StatusCode:           200,
+		Header:               headerMap(header.ContentType, "application/json", header.CacheControl, "public", header.CacheControl, "max-age=600", header.Vary, "Accept-Encoding"),
 		Body:                 []byte("the quick brown fox jumps over the lazy dog"),
 		BodySize:             43,
 		StoredAt:             time.Unix(1_700_000_000, 123).UTC(),
@@ -69,8 +64,8 @@ func TestEncodeDecodeZeroAndEmpty(t *testing.T) {
 	// Zero LastModified and zero StoredAt, empty body, no surrogate keys,
 	// single header.
 	orig := &api.Object{
-		StatusCode: http.StatusNoContent,
-		Header:     header.FromHTTP(http.Header{header.XCache: {"MISS"}}),
+		StatusCode: 204,
+		Header:     headerMap(header.XCache, "MISS"),
 		// StoredAt left zero to verify the time.Time zero-value
 		// round-trip (ADR-0015 risk).
 	}
@@ -90,21 +85,21 @@ func TestEncodeIsDeterministicAcrossMapIteration(t *testing.T) {
 	// identical bytes for logically identical objects. This matters for
 	// anti-entropy checksums and any future content-addressing on the
 	// warm tier.
-	base := http.Header{
-		header.ContentType:  {"application/json"},
-		header.CacheControl: {"public, max-age=600"},
-		header.Vary:         {"Accept-Encoding"},
-		header.Age:          {"42"},
-	}
+	base := headerMap(
+		header.ContentType, "application/json",
+		header.CacheControl, "public, max-age=600",
+		header.Vary, "Accept-Encoding",
+		header.Age, "42",
+	)
 	prev := encodeObject(&api.Object{
-		StatusCode: http.StatusOK,
-		Header:     header.FromHTTP(base),
+		StatusCode: 200,
+		Header:     base,
 		Body:       []byte("deterministic payload"),
 	})
 	for range 20 {
 		blob := encodeObject(&api.Object{
-			StatusCode: http.StatusOK,
-			Header:     header.FromHTTP(base),
+			StatusCode: 200,
+			Header:     base,
 			Body:       []byte("deterministic payload"),
 		})
 		require.True(t, bytes.Equal(blob, prev))
@@ -117,7 +112,7 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 		"empty":       {},
 		"legacy json": []byte(`{"key":1,"status_code":200}`),
 		"bad version": {0xFE, 0x01, 0x02},
-		"truncated":   encodeObject(&api.Object{Header: header.FromHTTP(http.Header{"A": {"b"}}), Body: []byte("xx")})[:4],
+		"truncated":   encodeObject(&api.Object{Header: headerMap("A", "b"), Body: []byte("xx")})[:4],
 	}
 	for name, blob := range cases {
 		_, err := decodeObject(blob)

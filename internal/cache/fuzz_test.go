@@ -2,7 +2,6 @@ package cache
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -46,18 +45,12 @@ func FuzzBuildKey(f *testing.F) {
 		if query != "" {
 			rawURL += "?" + query
 		}
-		u, err := url.Parse(rawURL)
+		_, err := url.Parse(rawURL)
 		if err != nil {
 			t.Skip()
 		}
-		r := &http.Request{
-			Method: method,
-			URL:    u,
-			Host:   host,
-		}
-
-		k1 := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
-		k2 := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+		k1 := BuildKey(requestInfoFromURL(method, rawURL), nil)
+		k2 := BuildKey(requestInfoFromURL(method, rawURL), nil)
 		if k1 != k2 {
 			t.Fatalf("BuildKey not deterministic: %v != %v", k1, k2)
 		}
@@ -183,20 +176,11 @@ func FuzzEvaluate(f *testing.F) {
 	f.Add("GET", "", "must-revalidate", 600, 0, 700, false, false)
 
 	f.Fuzz(func(t *testing.T, method, reqCC, respCC string, ttlSec, ageSec, elapsedSec int, nilObj, hasValidator bool) {
-		u, err := url.Parse("http://example.com/")
-		if err != nil {
-			t.Skip()
-		}
-		req := &http.Request{
-			Method: method,
-			URL:    u,
-			Host:   "example.com",
-			Header: http.Header{},
-		}
+		req := testCtx(method, "http://example.com/")
 		if pragma, ok := strings.CutPrefix(reqCC, "pragma:"); ok {
-			req.Header.Set(header.Pragma, pragma)
+			req.Request.Header.Set(header.Pragma, pragma)
 		} else if reqCC != "" {
-			req.Header.Set(header.CacheControl, reqCC)
+			req.Request.Header.Set(header.CacheControl, reqCC)
 		}
 
 		storedAt := fuzzFixedTime
@@ -205,15 +189,13 @@ func FuzzEvaluate(f *testing.F) {
 
 		var obj *api.Object
 		if !nilObj {
-			respHeaders := http.Header{
-				header.CacheControl: {respCC},
-			}
+			respHeaders := headerMap(header.CacheControl, respCC)
 			if ageSec > 0 {
 				respHeaders.Set(header.Age, strconv.Itoa(ageSec))
 			}
 			obj = &api.Object{
 				StatusCode:   fasthttp.StatusOK,
-				Header:       header.FromHTTP(respHeaders),
+				Header:       respHeaders,
 				CacheControl: respCC,
 				StoredAt:     storedAt,
 				TTL:          ttl,
@@ -224,8 +206,8 @@ func FuzzEvaluate(f *testing.F) {
 			}
 		}
 
-		d1 := Evaluate(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), obj, now)
-		d2 := Evaluate(requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), obj, now)
+		d1 := Evaluate(requestInfoFromCtx(req), obj, now)
+		d2 := Evaluate(requestInfoFromCtx(req), obj, now)
 		if d1.Decision != d2.Decision {
 			t.Fatalf("Evaluate not deterministic: %d != %d for method=%q reqCC=%q respCC=%q ttl=%d age=%d elapsed=%d nilObj=%v hasValidator=%v",
 				d1.Decision, d2.Decision, method, reqCC, respCC, ttlSec, ageSec, elapsedSec, nilObj, hasValidator)

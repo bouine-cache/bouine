@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1895,7 +1894,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	// 304 adds no-cache="X-Sensitive" — serializeHead must now skip X-Sensitive.
 	res := fetchResult{
 		StatusCode: 304,
-		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=3600, no-cache=\"X-Sensitive\""}, header.ETag: []string{`"v2"`}})),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=3600, no-cache=\"X-Sensitive\"", header.ETag, `"v2"`)),
 	}
 
 	refreshed := h.refreshFrom304(stale, res, time.Now())
@@ -2267,10 +2266,8 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: fromHeaderMap(header.FromHTTP(http.Header{
-			header.CacheControl: []string{"max-age=60"},
-		})),
-		Body: []byte("hello"),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60")),
+		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
 	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
@@ -2282,7 +2279,7 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}})),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60")),
 		Body:       []byte("hello world"),
 	}
 	r := testCtx("GET", "http://example.com/")
@@ -2296,12 +2293,8 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 	now := time.Now()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: fromHeaderMap(header.FromHTTP(http.Header{
-			header.CacheControl: []string{"max-age=60"},
-			header.Date:         []string{now.Add(-10 * time.Second).Format(httpTimeFormat)},
-			header.Age:          []string{"5"},
-		})),
-		Body: []byte("hello"),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60", header.Age, "5")),
+		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
 	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, now)
@@ -2314,11 +2307,8 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: fromHeaderMap(header.FromHTTP(http.Header{
-			header.CacheControl: []string{"max-age=60"},
-			header.LastModified: []string{"Mon, 01 Jan 2024 00:00:00 GMT"},
-		})),
-		Body: []byte("hello"),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60", header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")),
+		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
 	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
@@ -2330,7 +2320,7 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}})),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60")),
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
@@ -2343,7 +2333,7 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}})),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60")),
 		Body:       []byte("hello"),
 	}
 	r := testCtx("GET", "http://example.com/")
@@ -2356,11 +2346,8 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 	t.Parallel()
 	res := fetchResult{
 		StatusCode: 200,
-		Header: fromHeaderMap(header.FromHTTP(http.Header{
-			header.CacheControl: []string{"max-age=60"},
-			header.Vary:         []string{"Accept-Encoding"},
-		})),
-		Body: []byte("hello"),
+		Header:     fromHeaderMap(headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Encoding")),
+		Body:       []byte("hello"),
 	}
 	r := testCtxWithHeader("GET", "http://example.com/", header.AcceptEncoding, "gzip")
 	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
@@ -2410,7 +2397,7 @@ func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2433,7 +2420,7 @@ func TestDoBackgroundRefresh_ContextCancelled(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2460,7 +2447,7 @@ func TestDoBackgroundRefresh_UncacheableSkip(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2487,7 +2474,7 @@ func TestDoBackgroundRefresh_SetCookieSkip(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2514,7 +2501,7 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2565,7 +2552,7 @@ func TestTryConditional304_Match(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2586,7 +2573,7 @@ func TestTryConditional304_NoMatch(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 	obj := &api.Object{
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.ETag, `"v1"`),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2675,7 +2662,7 @@ func TestLookupForRefresh_StaleObject(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=1"}}),
+		Header:     headerMap(header.CacheControl, "max-age=1"),
 		Body:       []byte("stale"),
 		BodySize:   5,
 		StoredAt:   time.Now().Add(-10 * time.Second),
@@ -2694,7 +2681,7 @@ func TestLookupForRefresh_FreshObject(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}}),
+		Header:     headerMap(header.CacheControl, "max-age=60"),
 		Body:       []byte("fresh"),
 		BodySize:   5,
 		StoredAt:   time.Now(),
@@ -2721,7 +2708,7 @@ func TestStoreObject_RefreshScheduling(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}}),
+		Header:     headerMap(header.CacheControl, "max-age=60"),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now(),
@@ -2742,7 +2729,7 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 404,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=30"}}),
+		Header:     headerMap(header.CacheControl, "max-age=30"),
 		Body:       []byte("not found"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
@@ -2789,7 +2776,7 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	peerObj := &api.Object{
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}}),
+		Header:     headerMap(header.CacheControl, "max-age=60"),
 		Body:       []byte("from-peer"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
@@ -2882,7 +2869,7 @@ func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
 	var peerPutCalls atomic.Int32
 	peerObj := &api.Object{
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}}),
+		Header:     headerMap(header.CacheControl, "max-age=60"),
 		Body:       []byte("from-peer"),
 		BodySize:   9,
 		StoredAt:   time.Now(),
@@ -3067,7 +3054,7 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
-			Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+			Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 			Body:       []byte("body"),
 			BodySize:   4,
 			StoredAt:   time.Now(),
@@ -3116,7 +3103,7 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
-			Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+			Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 			Body:       []byte("body"),
 			BodySize:   4,
 			StoredAt:   time.Now(),
@@ -3165,7 +3152,7 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
-			Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+			Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 			Body:       []byte("body"),
 			BodySize:   4,
 			StoredAt:   time.Now(),
@@ -3250,7 +3237,7 @@ func TestDoBackgroundRevalidate_DirectCall(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 		Body:       []byte("old"),
 		BodySize:   3,
 		StoredAt:   time.Now().Add(-10 * time.Second),
@@ -3329,7 +3316,7 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
-			Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=1"}}),
+			Header:     headerMap(header.CacheControl, "max-age=1"),
 			Body:       []byte("stale"),
 			BodySize:   5,
 			StoredAt:   time.Now().Add(-10 * time.Second),
@@ -3374,7 +3361,7 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
-			Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+			Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 			Body:       []byte("fresh"),
 			BodySize:   5,
 			StoredAt:   time.Now(),
@@ -3425,7 +3412,7 @@ func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=1, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=1, stale-while-revalidate=60", header.ETag, `"v1"`),
 		Body:       []byte("stale-body"),
 		BodySize:   9,
 		StoredAt:   time.Now().Add(-10 * time.Second),
@@ -3459,7 +3446,7 @@ func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=1, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=1, stale-while-revalidate=60", header.ETag, `"v1"`),
 		Body:       []byte("stale-body"),
 		BodySize:   9,
 		StoredAt:   time.Now().Add(-10 * time.Second),
@@ -3542,7 +3529,7 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
-			Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}}),
+			Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`),
 			Body:       []byte("body"),
 			BodySize:   4,
 			StoredAt:   time.Now(),
@@ -3817,7 +3804,7 @@ func TestSoftPurge_AlreadyStaleObject(t *testing.T) {
 	obj := &api.Object{
 		Key:                  key,
 		StatusCode:           200,
-		Header:               header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=1, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}),
+		Header:               headerMap(header.CacheControl, "max-age=1, stale-while-revalidate=60", header.ETag, `"v1"`),
 		Body:                 []byte("stale"),
 		BodySize:             5,
 		StoredAt:             time.Now().Add(-10 * time.Second),
@@ -3856,7 +3843,7 @@ func TestSoftPurge_SIEOnlyNoSWR(t *testing.T) {
 	obj := &api.Object{
 		Key:          key,
 		StatusCode:   200,
-		Header:       header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=3600, stale-if-error=60"}, header.ETag: []string{`"v1"`}}),
+		Header:       headerMap(header.CacheControl, "max-age=3600, stale-if-error=60", header.ETag, `"v1"`),
 		Body:         []byte("sie-only"),
 		BodySize:     8,
 		StoredAt:     time.Now(),
@@ -3894,7 +3881,7 @@ func TestSoftPurge_NoSWRAndNoSIE_FallsBackToDelete(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=3600"}, header.ETag: []string{`"v1"`}}),
+		Header:     headerMap(header.CacheControl, "max-age=3600", header.ETag, `"v1"`),
 		Body:       []byte("no-grace"),
 		BodySize:   8,
 		StoredAt:   time.Now(),
@@ -3937,7 +3924,7 @@ func TestSoftPurge_PutError(t *testing.T) {
 	obj := &api.Object{
 		Key:                  key,
 		StatusCode:           200,
-		Header:               header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}),
+		Header:               headerMap(header.CacheControl, "max-age=3600, stale-while-revalidate=60", header.ETag, `"v1"`),
 		Body:                 []byte("body"),
 		BodySize:             4,
 		StoredAt:             time.Now(),

@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -39,14 +38,11 @@ func TestFastPathHandler_TryHit(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"13"},
-		}),
-		Body:     []byte("Hello, World!"),
-		BodySize: 13,
-		StoredAt: time.Now(),
-		TTL:      60 * time.Second,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
 	}
 	err := store.Put(context.Background(), key, obj)
 	require.NoError(t, err, "Put failed")
@@ -130,14 +126,11 @@ func TestFastPathHandler_HEADRequest(t *testing.T) {
 	obj := &api.Object{
 		Key:        testkey.Key(1),
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"13"},
-		}),
-		Body:     []byte("Hello, World!"),
-		BodySize: 13,
-		StoredAt: time.Now(),
-		TTL:      60 * time.Second,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
 	}
 	// Build key matching "HEAD /" — HEAD is normalized to GET for key building.
 	key := buildKeyFromRaw(&api.RawRequest{
@@ -173,12 +166,9 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 
 	// Object that is stale but within SWR window.
 	obj := &api.Object{
-		Key:        testkey.Key(1),
-		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"5"},
-		}),
+		Key:                  testkey.Key(1),
+		StatusCode:           200,
+		Header:               headerMap("Content-Type", "text/html", "Content-Length", "5"),
 		Body:                 []byte("stale"),
 		BodySize:             5,
 		StoredAt:             time.Now().Add(-10 * time.Second),
@@ -215,14 +205,11 @@ func BenchmarkGate_FastPath_Hit(b *testing.B) {
 	obj := &api.Object{
 		Key:        testkey.Key(1),
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"13"},
-		}),
-		Body:     []byte("Hello, World!"),
-		BodySize: 13,
-		StoredAt: time.Now(),
-		TTL:      600 * time.Second,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
 	}
 	key := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
@@ -305,14 +292,11 @@ func BenchmarkFastPath_ParseAndHit(b *testing.B) {
 
 	obj := &api.Object{
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"13"},
-		}),
-		Body:     []byte("Hello, World!"),
-		BodySize: 13,
-		StoredAt: time.Now(),
-		TTL:      600 * time.Second,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
 	}
 	key := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
@@ -356,14 +340,11 @@ func TestFastPathHandler_WriteAndReuse(t *testing.T) {
 
 	obj := &api.Object{
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"13"},
-		}),
-		Body:     []byte("Hello, World!"),
-		BodySize: 13,
-		StoredAt: time.Now(),
-		TTL:      600 * time.Second,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
 	}
 	key := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",
@@ -423,14 +404,11 @@ func BenchmarkGate_FastPath_HitWithWrite(b *testing.B) {
 
 	obj := &api.Object{
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			"Content-Type":   []string{"text/html"},
-			"Content-Length": []string{"13"},
-		}),
-		Body:     []byte("Hello, World!"),
-		BodySize: 13,
-		StoredAt: time.Now(),
-		TTL:      600 * time.Second,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
 	}
 	key := buildKeyFromRaw(&api.RawRequest{
 		Method: "GET",

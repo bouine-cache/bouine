@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net/http"
+
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +14,8 @@ import (
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func getAuth(t *testing.T, s *Server, path string) (int, []byte) {
@@ -38,7 +40,7 @@ func TestPurge_CallsOnPurged(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/products/123"}`), "test")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	require.Equal(t, "https://example.com/products/123", gotURL)
 }
 
@@ -57,7 +59,7 @@ func TestRefresh_CallsOnRefreshed(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/refresh", []byte(`{"url":"https://example.com/img/logo.png"}`), "test")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	require.Equal(t, "https://example.com/img/logo.png", gotURL)
 }
 
@@ -76,7 +78,7 @@ func TestBan_CallsOnBanned(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"host_regex":"cdn.example.com","path_regex":"/api/v2/.*"}`), "test")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	require.Equal(t, "cdn.example.com", gotExpr.HostRegex)
 	require.Equal(t, "/api/v2/.*", gotExpr.PathRegex)
 }
@@ -99,7 +101,7 @@ func TestCloudflareStatus_Endpoint(t *testing.T) {
 		},
 	})
 	status, body := getAuth(t, s, "/v1/cloudflare/status")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	var got map[string]any
 	err := json.Unmarshal(body, &got)
 	require.NoError(t, err, "unmarshal")
@@ -118,7 +120,7 @@ func TestCloudflareStatus_Disabled(t *testing.T) {
 		// CFStatusFn is nil — CF not configured.
 	})
 	status, _ := getAuth(t, s, "/v1/cloudflare/status")
-	require.Equal(t, http.StatusNotFound, status)
+	require.Equal(t, fasthttp.StatusNotFound, status)
 }
 
 // TestPurge_OnPurgedNotCalledOnError verifies that OnPurged is NOT called

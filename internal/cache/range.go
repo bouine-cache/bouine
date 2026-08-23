@@ -65,7 +65,7 @@ func ServeRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, src 
 				strconv.FormatInt(obj.BodySize, 10))
 		w.SetHeader(header.ContentLength, strconv.FormatInt(length, 10))
 		w.WriteHeader(206)
-		if ri.Method != "HEAD" {
+		if ri.GetMethod() != "HEAD" {
 			_, _ = w.Write(obj.Body[ra.start : ra.end+1])
 		}
 		return true
@@ -74,7 +74,7 @@ func ServeRange(w rangeWriter, ri RequestInfo, obj *api.Object, stale bool, src 
 	boundary := "bouine-range-" + obj.Key.Hex()
 	w.SetHeader(header.ContentType, "multipart/byteranges; boundary="+boundary)
 	w.WriteHeader(206)
-	if ri.Method == "HEAD" {
+	if ri.GetMethod() == "HEAD" {
 		return true
 	}
 	ct := obj.Header.Get(header.ContentType)

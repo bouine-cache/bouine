@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"strings"
+
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -17,15 +19,26 @@ func fromHeaderMap(h header.Map) headerLookup {
 	return headerLookup{hdr: h}
 }
 
-func fromFastHeader(h *fasthttp.ResponseHeader) headerLookup {
-	return headerLookup{fastHdr: h}
-}
-
 func (h headerLookup) Get(key string) string {
 	if h.fastHdr != nil {
 		return string(h.fastHdr.Peek(key))
 	}
 	return h.hdr.Get(key)
+}
+
+func (h headerLookup) GetAll(key string) string {
+	if h.fastHdr != nil {
+		values := h.fastHdr.PeekAll(key)
+		if len(values) == 0 {
+			return ""
+		}
+		parts := make([]string, len(values))
+		for i, v := range values {
+			parts[i] = string(v)
+		}
+		return strings.Join(parts, ", ")
+	}
+	return h.hdr.GetAll(key)
 }
 
 func (h headerLookup) Has(key string) bool {

@@ -125,6 +125,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		ReadBufferSize:        64 << 10,
 		NoDefaultServerHeader: true,
 		NoDefaultContentType:  true,
+		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
 	}
 	return &Listener{
@@ -160,6 +161,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		ReadBufferSize:        64 << 10,
 		NoDefaultServerHeader: true,
 		NoDefaultContentType:  true,
+		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
 		TLSConfig:             cfg.TLSConfig,
 	}

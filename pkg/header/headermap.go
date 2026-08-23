@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"unique"
+	"unsafe"
 
 	"github.com/valyala/fasthttp"
 )
@@ -116,6 +117,26 @@ func (h Map) Get(key string) string {
 	return ""
 }
 
+// GetAll returns all values for the given key, joined with ", " per
+// RFC 9111 §5.2 (multiple header field lines are equivalent to a
+// comma-separated list). Returns "" if the header is not present.
+func (h Map) GetAll(key string) string {
+	ck := canonicalHeaderKey(key)
+	var parts []string
+	for i := range h.entries {
+		if h.entries[i].key == ck {
+			parts = append(parts, h.values[h.entries[i].off])
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Set sets the header with the given key to the single value.
 func (h *Map) Set(key, value string) {
 	ck := InternKey(key)
@@ -180,7 +201,7 @@ func (h *Map) SortEntries() {
 	if len(h.entries) <= 1 {
 		return
 	}
-	sort.Slice(h.entries, func(i, j int) bool {
+	sort.SliceStable(h.entries, func(i, j int) bool {
 		return h.entries[i].key < h.entries[j].key
 	})
 }
@@ -239,11 +260,45 @@ func (h Map) Clone() Map {
 // WriteToFastHTTP copies all headers into a *fasthttp.ResponseHeader.
 // This is the fasthttp-native version of WriteTo, used on the hit path
 // to set response headers without going through net/http.Header.
+// Date and Transfer-Encoding are skipped because fasthttp's Set()
+// silently drops them as "managed automatically" headers. The caller
+// must use SetDateRaw to set the Date header after calling this method.
 func (h Map) WriteToFastHTTP(dst *fasthttp.ResponseHeader) {
 	for i := range h.entries {
 		off := h.entries[i].off
-		dst.Set(h.entries[i].key, h.values[off])
+		key := h.entries[i].key
+		// Skip Date and Transfer-Encoding — fasthttp's Set() silently
+		// drops them via setSpecialHeader. Date is set separately via
+		// SetDateRaw; Transfer-Encoding is a hop-by-hop header.
+		if key == Date || key == TransferEncoding {
+			continue
+		}
+		dst.Set(key, h.values[off])
 	}
+}
+
+// httpKV mirrors fasthttp's internal argsKV struct layout.
+// It is used by SetDateRaw to bypass the setSpecialHeader check
+// that silently drops Date headers. The noValue field is required
+// for memory layout compatibility even though it's never set.
+type httpKV struct {
+	key     []byte
+	value   []byte
+	noValue bool //nolint:unused // required for argsKV layout compatibility
+}
+
+// SetDateRaw sets the Date header on a *fasthttp.ResponseHeader by
+// directly appending to its internal header map. This bypasses
+// fasthttp's setSpecialHeader, which treats Date as "managed
+// automatically" and silently discards any value passed to Set().
+// The server must have NoDefaultDate set to true to prevent fasthttp
+// from overwriting this value with its own auto-generated Date.
+func SetDateRaw(dst *fasthttp.ResponseHeader, date string) {
+	// ResponseHeader embeds header as its first field, and header's
+	// first field is h []argsKV. Since httpKV has the same memory
+	// layout as argsKV, we can safely reinterpret the slice.
+	hp := (*[]httpKV)(unsafe.Pointer(dst)) //nolint:gosec // G103: controlled unsafe for fasthttp interop
+	*hp = append(*hp, httpKV{key: []byte("Date"), value: []byte(date)})
 }
 
 // At returns the key and value at index i. Panics if i >= Len().

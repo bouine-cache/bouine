@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -27,16 +28,16 @@ import (
 // on the request headers, avoiding headerFromCtx allocation.
 func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disposition {
 	method := ctx.Method()
-	if string(method) != "GET" && string(method) != "HEAD" {
+	if !bytes.Equal(method, []byte("GET")) && !bytes.Equal(method, []byte("HEAD")) {
 		return Disposition{Decision: Bypass}
 	}
 
 	var reqCC Directives
 	if rawCC := ctx.Request.Header.Peek(header.CacheControl); len(rawCC) > 0 {
-		reqCC = ParseCacheControl(string(rawCC))
+		reqCC = ParseCacheControlBytes(rawCC)
 	}
 
-	if !reqCC.NoCache && string(ctx.Request.Header.Peek(header.Pragma)) == "no-cache" {
+	if !reqCC.NoCache && bytes.Equal(ctx.Request.Header.Peek(header.Pragma), []byte("no-cache")) {
 		reqCC.NoCache = true
 	}
 
@@ -47,19 +48,46 @@ func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disp
 		return evalMiss(reqCC)
 	}
 
+	// Use pre-computed response CC flags to avoid ParseCacheControl on every hit.
+	if obj.RespNoCache || reqCC.NoCache {
+		if obj.ETag != "" || !obj.LastModified.IsZero() {
+			return Disposition{Decision: Revalidate, Object: obj}
+		}
+		return Disposition{Decision: Miss}
+	}
+	if freshWithRequestCC(obj, reqCC, now) {
+		return Disposition{Decision: Hit, Object: obj}
+	}
+	if obj.RespMustRevalidate {
+		return revalidateOrMiss(obj)
+	}
+	// Stale checks (RFC 9111 §4.2).
+	originAge := effectiveOriginAge(obj)
+	if reqCC.MaxStaleSet {
+		age := now.Sub(obj.StoredAt) + originAge
+		staleAge := age - (obj.TTL + originAge)
+		if staleAge <= reqCC.MaxStale {
+			return Disposition{Decision: StaleHit, Object: obj}
+		}
+	}
+	if obj.StaleForSWR(now) {
+		return Disposition{Decision: StaleHit, Object: obj}
+	}
+	if obj.StaleForSIE(now) {
+		return revalidateOrMiss(obj)
+	}
+	// Heuristic freshness (RFC 9111 §4.2.2): only applicable when the
+	// response had no explicit freshness directives. Parse response CC
+	// lazily here — this is a rare edge case on the stale path.
 	ccStr := obj.CacheControl
 	if ccStr == "" {
 		ccStr = obj.Header.Get(header.CacheControl)
 	}
 	respCC := ParseCacheControl(ccStr)
-
-	if d, ok := evalNoCache(reqCC, respCC, obj); ok {
-		return d
+	if !respCC.MaxAgeSet && !respCC.SMaxAgeSet && obj.Header.Get(header.Expires) == "" {
+		return Disposition{Decision: StaleHit, Object: obj}
 	}
-	if freshWithRequestCC(obj, reqCC, now) {
-		return Disposition{Decision: Hit, Object: obj}
-	}
-	return evalStale(reqCC, respCC, obj, now)
+	return revalidateOrMiss(obj)
 }
 
 // tryConditional304Fast checks if the client's conditional headers match

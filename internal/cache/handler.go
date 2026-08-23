@@ -822,7 +822,7 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 // cache-invalidating methods (POST/PUT/DELETE) to invalidateAndProxy
 // and all others to the cache lookup pipeline.
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
-	if isInvalidating(string(ctx.Method())) {
+	if isInvalidatingBytes(ctx.Method()) {
 		h.invalidateAndProxy(ctx)
 		return
 	}
@@ -2235,4 +2235,12 @@ func isInvalidating(method string) bool {
 	return method != "GET" &&
 		method != "HEAD" &&
 		method != "OPTIONS"
+}
+
+// isInvalidatingBytes is the zero-allocation variant of isInvalidating,
+// accepting the raw []byte from fasthttp's ctx.Method() directly.
+func isInvalidatingBytes(method []byte) bool {
+	return !bytes.Equal(method, []byte("GET")) &&
+		!bytes.Equal(method, []byte("HEAD")) &&
+		!bytes.Equal(method, []byte("OPTIONS"))
 }

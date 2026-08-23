@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"testing"
 	"time"
 
@@ -56,25 +55,25 @@ func TestHTTP_ListenAndServe(t *testing.T) {
 
 	waitForAddr(t, srv)
 
-	resp, err := http.Get("http://" + srv.Addr())
-	if err != nil {
+	client := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI("http://" + srv.Addr())
+	if err := client.Do(req, resp); err != nil {
 		cancel()
 		t.Fatalf("GET: %v", err)
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			t.Errorf("close: %v", cerr)
-		}
-	}()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || string(body) != "hello" {
-		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	body := string(resp.Body())
+	if resp.StatusCode() != 200 || body != "hello" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode(), body)
 	}
 
 	cancel()
-	err = <-errCh
-	require.NoError(t, err, "serve")
+	serveErr := <-errCh
+	require.NoError(t, serveErr, "serve")
 }
 
 func TestHTTPS_ListenAndServe(t *testing.T) {
@@ -97,33 +96,30 @@ func TestHTTPS_ListenAndServe(t *testing.T) {
 	clientTLS := &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // test
 	}
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: clientTLS,
-		},
+	client := &fasthttp.Client{
+		TLSConfig: clientTLS,
 	}
 
 	url := fmt.Sprintf("https://%s/", srv.Addr())
-	resp, err := client.Get(url)
-	if err != nil {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if err := client.Do(req, resp); err != nil {
 		cancel()
 		t.Fatalf("GET: %v", err)
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			t.Errorf("close: %v", cerr)
-		}
-	}()
 
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || string(body) != "hello" {
-		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	body := string(resp.Body())
+	if resp.StatusCode() != 200 || body != "hello" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode(), body)
 	}
 
-	proto := resp.Header.Get("X-Proto")
+	proto := string(resp.Header.Peek("X-Proto"))
 	require.Equal(t, "HTTP/1.1", proto)
 
 	cancel()
-	err = <-errCh
-	require.NoError(t, err, "serve")
+	serveErr := <-errCh
+	require.NoError(t, serveErr, "serve")
 }

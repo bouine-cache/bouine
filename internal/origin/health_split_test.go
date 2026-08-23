@@ -4,29 +4,29 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
+
 	"github.com/valyala/fasthttp"
 )
 
 func TestActiveHealth_AccumulatesDespitePassiveTraffic(t *testing.T) {
 	t.Parallel()
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(500)
-	}))
+	bad := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(500)
+	})
 	defer bad.Close()
-	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
+	good := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
 	defer good.Close()
 
-	p := pool(t, bad.Listener.Addr().String(), good.Listener.Addr().String())
+	p := pool(t, bad.Addr, good.Addr)
 	h := p.FastHandler(100)
 
 	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
@@ -65,15 +65,15 @@ func TestActiveHealth_AccumulatesDespitePassiveTraffic(t *testing.T) {
 
 	healthy := p.Healthy()
 	require.Len(t, healthy, 1)
-	require.Equal(t, good.Listener.Addr().String(), healthy[0])
+	require.Equal(t, good.Addr, healthy[0])
 }
 
 func TestPassiveHealth_ErrorHandlerEjects(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
-	addr := srv.Listener.Addr().String()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	addr := srv.Addr
 	srv.Close()
 
 	p := pool(t, addr)
@@ -92,12 +92,12 @@ func TestPassiveHealth_ErrorHandlerEjects(t *testing.T) {
 
 func TestPassiveHealth_DisabledDoesNotZeroCounters(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
 	defer srv.Close()
 
-	p := pool(t, srv.Listener.Addr().String())
+	p := pool(t, srv.Addr)
 	h := p.FastHandler(0)
 
 	for range 3 {
@@ -122,7 +122,7 @@ func TestMarkHealthy_CAS(t *testing.T) {
 	bad := fivexxServer(t)
 	defer bad.Close()
 
-	p := pool(t, bad.Listener.Addr().String())
+	p := pool(t, bad.Addr)
 	h := p.FastHandler(1)
 
 	ctx := &fasthttp.RequestCtx{}
@@ -135,7 +135,7 @@ func TestMarkHealthy_CAS(t *testing.T) {
 	p.targets[0].probeErrors.Store(3)
 	p.targets[0].successes.Store(2)
 
-	p.MarkHealthy(bad.Listener.Addr().String())
+	p.MarkHealthy(bad.Addr)
 	require.Len(t, p.Healthy(), 1)
 
 	got := p.targets[0].passiveErrors.Load()
@@ -151,7 +151,7 @@ func TestConcurrent_ActiveAndPassive(t *testing.T) {
 	bad := fivexxServer(t)
 	defer bad.Close()
 
-	p := pool(t, bad.Listener.Addr().String())
+	p := pool(t, bad.Addr)
 	h := p.FastHandler(2)
 
 	hc := NewActiveHealthChecker(p, ActiveHealthConfig{

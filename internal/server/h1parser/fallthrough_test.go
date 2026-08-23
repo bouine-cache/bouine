@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"io"
 	"net"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -51,12 +50,12 @@ func TestHandleFallThrough_ServesResponse(t *testing.T) {
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
-	require.NoError(t, err, "ReadResponse")
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	resp := &fasthttp.Response{}
+	err := resp.Read(bufio.NewReader(clientConn))
+	require.NoError(t, err, "Read")
+	body := resp.Body()
 
-	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, 200, resp.StatusCode())
 	assert.True(t, bytes.Equal(body, responseBody))
 
 	select {
@@ -106,9 +105,9 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
-	require.NoError(t, err, "ReadResponse")
-	resp.Body.Close()
+	resp := &fasthttp.Response{}
+	err := resp.Read(bufio.NewReader(clientConn))
+	require.NoError(t, err, "Read")
 
 	select {
 	case err := <-done:
@@ -162,9 +161,9 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
-	require.NoError(t, err, "ReadResponse")
-	resp.Body.Close()
+	resp := &fasthttp.Response{}
+	err := resp.Read(bufio.NewReader(clientConn))
+	require.NoError(t, err, "Read")
 
 	select {
 	case err := <-done:

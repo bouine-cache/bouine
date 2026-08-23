@@ -2,11 +2,11 @@ package header
 
 import (
 	"encoding/json"
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 )
 
 func TestMap_GetSetDel(t *testing.T) {
@@ -34,28 +34,26 @@ func TestMap_GetSetDel(t *testing.T) {
 	assert.Equal(t, "", got)
 }
 
-func TestMap_FromHTTP(t *testing.T) {
-	src := http.Header{}
+func TestMap_FromFastHTTP(t *testing.T) {
+	src := &fasthttp.ResponseHeader{}
 	src.Set("Content-Type", "text/html")
 	src.Set("Cache-Control", "public, max-age=3600")
-	src.Add("X-Multi", "a")
-	src.Add("X-Multi", "b")
-	src.Add("X-Multi", "c")
+	src.Set("X-Custom", "value")
 
-	hm := FromHTTP(src)
+	hm := FromFastHTTP(src)
 
 	got := hm.Get("Content-Type")
 	assert.Equal(t, "text/html", got)
-	got = hm.Get("X-Multi")
-	assert.Equal(t, "a, b, c", got)
-	assert.Equal(t, 3, hm.Len())
+	got = hm.Get("Cache-Control")
+	assert.Equal(t, "public, max-age=3600", got)
+	assert.True(t, hm.Has("Content-Type"))
+	assert.True(t, hm.Has("Cache-Control"))
+	assert.True(t, hm.Has("X-Custom"))
 }
 
-func TestMap_FromHTTP_Nil(t *testing.T) {
-	hm := FromHTTP(nil)
+func TestMap_FromFastHTTP_Nil(t *testing.T) {
+	hm := FromFastHTTP(nil)
 	assert.Equal(t, 0, hm.Len())
-	hm2 := FromHTTP(http.Header{})
-	assert.Equal(t, 0, hm2.Len())
 }
 
 func TestMap_Clone(t *testing.T) {
@@ -74,20 +72,20 @@ func TestMap_Clone(t *testing.T) {
 	assert.Equal(t, "application/json", got)
 }
 
-func TestMap_WriteTo(t *testing.T) {
+func TestMap_WriteToFastHTTP(t *testing.T) {
 	h := Map{}
 	h.Set("Content-Type", "text/html")
 	h.Set("Cache-Control", "public, max-age=3600")
 	h.Set("X-Custom", "value")
 
-	dst := make(http.Header, 3)
-	h.WriteTo(dst)
+	dst := &fasthttp.ResponseHeader{}
+	h.WriteToFastHTTP(dst)
 
-	got := dst.Get("Content-Type")
+	got := string(dst.Peek("Content-Type"))
 	assert.Equal(t, "text/html", got)
-	got = dst.Get("Cache-Control")
+	got = string(dst.Peek("Cache-Control"))
 	assert.Equal(t, "public, max-age=3600", got)
-	got = dst.Get("X-Custom")
+	got = string(dst.Peek("X-Custom"))
 	assert.Equal(t, "value", got)
 }
 
@@ -107,17 +105,14 @@ func TestMap_Range(t *testing.T) {
 }
 
 func TestMap_Range_CanonicalKeyOrder(t *testing.T) {
-	// FromHTTP inherits Go map iteration order, which is randomized per
-	// call. Range must produce a stable, canonical-key-sorted order so that
-	// the binary codec (which encodes via Range) emits deterministic bytes
-	// for logically identical objects.
-	src := http.Header{}
-	src.Set("Vary", "Accept-Encoding")
-	src.Set("Content-Type", "text/html")
-	src.Set("Age", "0")
-	src.Set("Cache-Control", "public")
-
-	hm := FromHTTP(src)
+	// Set inserts in arbitrary order. Range must produce a stable,
+	// canonical-key-sorted order so that the binary codec (which encodes
+	// via Range) emits deterministic bytes for logically identical objects.
+	hm := Map{}
+	hm.Set("Vary", "Accept-Encoding")
+	hm.Set("Content-Type", "text/html")
+	hm.Set("Age", "0")
+	hm.Set("Cache-Control", "public")
 
 	var keys []string
 	hm.Range(func(key, value string) bool {
@@ -285,35 +280,4 @@ func TestInternValue_Deduplicates(t *testing.T) {
 	c := InternValue("application/json")
 	require.Equal(t, b, a)
 	require.NotEqual(t, c, a)
-}
-
-func TestFromHTTP_InternsValues(t *testing.T) {
-	t.Parallel()
-	h1 := http.Header{
-		"Content-Type": {"text/html"},
-		"X-Custom":     {"unique-value-123"},
-	}
-	m1 := FromHTTP(h1)
-
-	h2 := http.Header{
-		"Content-Type": {"text/html"},
-		"X-Custom":     {"unique-value-123"},
-	}
-	m2 := FromHTTP(h2)
-
-	// String equality verifies the values are correct. unique.Make
-	// guarantees pointer-level deduplication internally; we test that
-	// contract via TestInternValue_Deduplicates. Here we verify FromHTTP
-	// produces the right values and doesn't corrupt the header map.
-	v1 := m1.Get("Content-Type")
-	v2 := m2.Get("Content-Type")
-	if v1 != "text/html" || v2 != "text/html" {
-		t.Fatalf("expected text/html for both; got %q and %q", v1, v2)
-	}
-
-	custom1 := m1.Get("X-Custom")
-	custom2 := m2.Get("X-Custom")
-	if custom1 != "unique-value-123" || custom2 != "unique-value-123" {
-		t.Fatalf("expected unique-value-123 for both; got %q and %q", custom1, custom2)
-	}
 }

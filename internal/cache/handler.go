@@ -1498,7 +1498,7 @@ func (h *Handler) writeAndMaybeStore(
 		if storeKey != primaryKey {
 			// Shallow-copy the object and change only the Key. This avoids
 			// a second full buildObject call (~5 allocs: api.Object,
-			// header.FromHTTP, serializeHead, parseSurrogateKeys, etc.).
+			// header.FromFastHTTP, serializeHead, parseSurrogateKeys, etc.).
 			// The two objects share Header and Body, which are immutable
 			// after buildObject. Hits are per-pointer (HotStore.Get
 			// increments entry.obj.Hits on the specific stored pointer).

@@ -7,16 +7,48 @@ package chaos_test
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/test/integration/driver"
 )
+
+// fastGet performs a GET request and returns the status code and X-Cache header.
+// It uses a per-call fasthttp client with a short timeout.
+func fastGet(url string) (statusCode int, xCache string, err error) {
+	client := &fasthttp.Client{
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if err = client.Do(req, resp); err != nil {
+		return 0, "", err
+	}
+	return resp.StatusCode(), string(resp.Header.Peek("X-Cache")), nil
+}
+
+// fastGetWithClient performs a GET using a pre-allocated client.
+func fastGetWithClient(client *fasthttp.Client, url string) (statusCode int, xCache string, err error) {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if err = client.Do(req, resp); err != nil {
+		return 0, "", err
+	}
+	return resp.StatusCode(), string(resp.Header.Peek("X-Cache")), nil
+}
 
 // TestChaos_PeerKill kills a node mid-traffic and verifies surviving
 // nodes continue serving 200.
@@ -26,9 +58,8 @@ func TestChaos_PeerKill(t *testing.T) {
 	const n = 50
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=pk-%d", s.Nodes[0].HTTPAddr, i)
-		resp, err := http.Get(url) //nolint:noctx
+		_, _, err := fastGet(url)
 		require.NoErrorf(t, err, "populate %d", i)
-		resp.Body.Close()
 	}
 
 	s.KillNode(t, 2)
@@ -38,13 +69,12 @@ func TestChaos_PeerKill(t *testing.T) {
 	for _, node := range s.Nodes[:2] {
 		for i := range n {
 			url := fmt.Sprintf("%s/hit?x=pk-%d", node.HTTPAddr, i)
-			resp, err := http.Get(url) //nolint:noctx
+			sc, _, err := fastGet(url)
 			if err != nil {
 				failures++
 				continue
 			}
-			resp.Body.Close()
-			if resp.StatusCode != 200 {
+			if sc != 200 {
 				failures++
 			}
 		}
@@ -62,9 +92,8 @@ func TestChaos_OriginFlap(t *testing.T) {
 	const n = 20
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=flap-%d", s.Nodes[0].HTTPAddr, i)
-		resp, err := http.Get(url) //nolint:noctx
+		_, _, err := fastGet(url)
 		require.NoErrorf(t, err, "populate %d", i)
-		resp.Body.Close()
 	}
 
 	var (
@@ -77,19 +106,21 @@ func TestChaos_OriginFlap(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		client := &http.Client{Timeout: 3 * time.Second}
+		client := &fasthttp.Client{
+			ReadTimeout:  3 * time.Second,
+			WriteTimeout: 3 * time.Second,
+		}
 		for !stop.Load() {
 			for i := range n {
 				url := fmt.Sprintf("%s/hit?x=flap-%d", s.Nodes[0].HTTPAddr, i)
-				resp, err := client.Get(url)
+				sc, _, err := fastGetWithClient(client, url)
 				if err != nil {
 					continue
 				}
 				total.Add(1)
-				if resp.StatusCode >= 500 {
+				if sc >= 500 {
 					errors5xx.Add(1)
 				}
-				resp.Body.Close()
 			}
 		}
 	}()
@@ -114,19 +145,17 @@ func TestChaos_PartialPartition(t *testing.T) {
 
 	const path = "/hit?x=partition-ref"
 	for i := range s.Nodes {
-		var resp *http.Response
-		var err error
+		var lastErr error
 		for attempt := range 5 {
-			resp, err = http.Get(s.Nodes[i].HTTPAddr + path) //nolint:noctx
-			if err == nil {
-				resp.Body.Close()
+			_, _, lastErr = fastGet(s.Nodes[i].HTTPAddr + path)
+			if lastErr == nil {
 				break
 			}
 			if attempt < 4 {
 				time.Sleep(200 * time.Millisecond)
 			}
 		}
-		require.NoErrorf(t, err, "populate node %d", i)
+		require.NoErrorf(t, lastErr, "populate node %d", i)
 	}
 
 	// Purge from node 0.
@@ -151,11 +180,10 @@ func requireStatus200(t *testing.T, url, msgf string, args ...any) {
 	var lastErr error
 	var lastStatus int
 	for attempt := range 10 {
-		resp, err := http.Get(url) //nolint:noctx
+		sc, _, err := fastGet(url)
 		if err == nil {
-			lastStatus = resp.StatusCode
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
+			lastStatus = sc
+			if sc == 200 {
 				return
 			}
 		} else {
@@ -182,9 +210,9 @@ func TestChaos_SlowOrigin(t *testing.T) {
 
 	const url = "/hit?x=slow-origin"
 	start := time.Now()
-	resp, err := http.Get(s.Nodes[0].HTTPAddr + url) //nolint:noctx
+	sc, _, err := fastGet(s.Nodes[0].HTTPAddr + url)
 	require.NoError(t, err, "warm")
-	resp.Body.Close()
+	require.Equal(t, 200, sc)
 	warmDur := time.Since(start)
 	t.Logf("warm request: %v (300ms origin delay expected)", warmDur)
 
@@ -195,9 +223,9 @@ func TestChaos_SlowOrigin(t *testing.T) {
 	const hitBudgetMs = 50
 	for range 10 {
 		start = time.Now()
-		resp, err = http.Get(s.Nodes[0].HTTPAddr + url) //nolint:noctx
+		sc, _, err = fastGet(s.Nodes[0].HTTPAddr + url)
 		require.NoError(t, err, "hit")
-		resp.Body.Close()
+		require.Equal(t, 200, sc)
 		dur := time.Since(start)
 		if dur > time.Duration(hitBudgetMs)*time.Millisecond {
 			t.Errorf("hit latency %v > %dms budget", dur, hitBudgetMs)
@@ -214,9 +242,8 @@ func TestChaos_RollingRestart(t *testing.T) {
 	const n = 30
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=roll-%d", s.Nodes[0].HTTPAddr, i)
-		resp, err := http.Get(url) //nolint:noctx
+		_, _, err := fastGet(url)
 		require.NoErrorf(t, err, "populate %d", i)
-		resp.Body.Close()
 	}
 
 	var (
@@ -230,22 +257,24 @@ func TestChaos_RollingRestart(t *testing.T) {
 		wg.Add(1)
 		go func(addr string) {
 			defer wg.Done()
-			client := &http.Client{Timeout: 2 * time.Second}
+			client := &fasthttp.Client{
+				ReadTimeout:  2 * time.Second,
+				WriteTimeout: 2 * time.Second,
+			}
 			for !stop.Load() {
 				for i := range n {
 					if stop.Load() {
 						return
 					}
 					url := fmt.Sprintf("%s/hit?x=roll-%d", addr, i)
-					resp, err := client.Get(url)
+					sc, _, err := fastGetWithClient(client, url)
 					if err != nil {
 						continue
 					}
 					total.Add(1)
-					if resp.StatusCode >= 500 {
+					if sc >= 500 {
 						errors5xx.Add(1)
 					}
-					resp.Body.Close()
 				}
 			}
 		}(node.HTTPAddr)
@@ -284,9 +313,9 @@ func TestChaos_OriginDown(t *testing.T) {
 	// This ensures the cache has revalidation headers to trigger the stale
 	// fallback path when origin returns 503.
 	const path = "/stale?x=origin-down"
-	resp, err := http.Get(s.Nodes[0].HTTPAddr + path) //nolint:noctx
+	sc, _, err := fastGet(s.Nodes[0].HTTPAddr + path)
 	require.NoError(t, err, "warm")
-	resp.Body.Close()
+	require.Equal(t, 200, sc)
 
 	// Wait for max-age=1 to expire so the object becomes stale.
 	time.Sleep(2 * time.Second)
@@ -296,14 +325,12 @@ func TestChaos_OriginDown(t *testing.T) {
 	defer s.SetOriginError(false)
 
 	// Request should serve stale (SWR window is 3600s).
-	resp2, err := http.Get(s.Nodes[0].HTTPAddr + path) //nolint:noctx
+	sc, xc, err := fastGet(s.Nodes[0].HTTPAddr + path)
 	require.NoError(t, err, "stale request")
-	resp2.Body.Close()
-	if resp2.StatusCode >= 500 {
-		t.Errorf("origin down: got %d, expected stale 200", resp2.StatusCode)
+	if sc >= 500 {
+		t.Errorf("origin down: got %d, expected stale 200", sc)
 	}
-	xc := resp2.Header.Get("X-Cache")
-	t.Logf("origin down: status=%d X-Cache=%s", resp2.StatusCode, xc)
+	t.Logf("origin down: status=%d X-Cache=%s", sc, xc)
 }
 
 // TestChaos_ConcurrentPurgeUnderLoad issues concurrent purges while a
@@ -314,9 +341,8 @@ func TestChaos_ConcurrentPurgeUnderLoad(t *testing.T) {
 	const n = 50
 	for i := range n {
 		url := fmt.Sprintf("%s/hit?x=purge-load-%d", s.Nodes[0].HTTPAddr, i)
-		resp, err := http.Get(url) //nolint:noctx
+		_, _, err := fastGet(url)
 		require.NoErrorf(t, err, "populate %d", i)
-		resp.Body.Close()
 	}
 
 	var (
@@ -328,18 +354,17 @@ func TestChaos_ConcurrentPurgeUnderLoad(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		client := &http.Client{Timeout: 2 * time.Second}
+		client := &fasthttp.Client{
+			ReadTimeout:  2 * time.Second,
+			WriteTimeout: 2 * time.Second,
+		}
 		for !stop.Load() {
 			for i := range n {
 				if stop.Load() {
 					return
 				}
 				url := fmt.Sprintf("%s/hit?x=purge-load-%d", s.Nodes[0].HTTPAddr, i)
-				resp, err := client.Get(url)
-				if err != nil {
-					continue
-				}
-				resp.Body.Close()
+				_, _, _ = fastGetWithClient(client, url)
 			}
 		}
 	}()
@@ -378,10 +403,9 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 
 	// Surviving nodes should still be reachable.
 	for _, n := range []int{0, 1} {
-		resp, err := http.Get(s.Nodes[n].HTTPAddr + "/hit?x=rejoin") //nolint:noctx
+		sc, _, err := fastGet(s.Nodes[n].HTTPAddr + "/hit?x=rejoin")
 		require.NoErrorf(t, err, "node %d during partition", n)
-		resp.Body.Close()
-		assert.Equal(t, 200, resp.StatusCode)
+		assert.Equal(t, 200, sc)
 	}
 
 	// Restart node 2 (gets fresh ports).
@@ -389,8 +413,7 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 	time.Sleep(5 * time.Second)
 
 	// Node 2 must be reachable and serve requests.
-	resp, err := http.Get(s.Nodes[2].HTTPAddr + "/hit?x=rejoin-after") //nolint:noctx
+	sc, _, err := fastGet(s.Nodes[2].HTTPAddr + "/hit?x=rejoin-after")
 	require.NoError(t, err, "node 2 after rejoin")
-	resp.Body.Close()
-	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, 200, sc)
 }

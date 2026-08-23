@@ -3,8 +3,8 @@
 // surface MUST stay on its own listener; it is never bound on the
 // data-plane port (see AGENTS.md §2).
 //
-// The admin server uses fasthttp.Server. pprof and Prometheus handlers
-// are wrapped with fasthttpadaptor since they require http.Handler.
+// The admin server uses fasthttp.Server. pprof handlers are wrapped via
+// the pprofwrapper package, which isolates the net/http dependency.
 // ADR-0034 documents the decision.
 package admin
 
@@ -14,14 +14,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net"
-	"net/http"
-	"net/http/pprof"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/bouine-cache/bouine/internal/admin/pprofwrapper"
 	"github.com/bouine-cache/bouine/internal/buildinfo"
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -29,7 +28,6 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 // Config controls the admin server.
@@ -279,18 +277,8 @@ func (s *Server) buildPprofHandlers() (fasthttp.RequestHandler, map[string]fasth
 	if !s.cfg.PprofEnabled {
 		return nil, nil
 	}
-	pprofIndexHandler := fasthttpadaptor.NewFastHTTPHandlerFunc(http.HandlerFunc(pprof.Index))
-	pprofMap := map[string]fasthttp.RequestHandler{
-		"/debug/pprof/cmdline":      fasthttpadaptor.NewFastHTTPHandlerFunc(pprof.Cmdline),
-		"/debug/pprof/profile":      fasthttpadaptor.NewFastHTTPHandlerFunc(pprof.Profile),
-		"/debug/pprof/symbol":       fasthttpadaptor.NewFastHTTPHandlerFunc(pprof.Symbol),
-		"/debug/pprof/trace":        fasthttpadaptor.NewFastHTTPHandlerFunc(pprof.Trace),
-		"/debug/pprof/heap":         fasthttpadaptor.NewFastHTTPHandler(pprof.Handler("heap")),
-		"/debug/pprof/goroutine":    fasthttpadaptor.NewFastHTTPHandler(pprof.Handler("goroutine")),
-		"/debug/pprof/block":        fasthttpadaptor.NewFastHTTPHandler(pprof.Handler("block")),
-		"/debug/pprof/mutex":        fasthttpadaptor.NewFastHTTPHandler(pprof.Handler("mutex")),
-		"/debug/pprof/threadcreate": fasthttpadaptor.NewFastHTTPHandler(pprof.Handler("threadcreate")),
-	}
+	pprofIndexHandler := pprofwrapper.Index()
+	pprofMap := pprofwrapper.Map()
 	return pprofIndexHandler, pprofMap
 }
 

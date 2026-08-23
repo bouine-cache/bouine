@@ -361,11 +361,9 @@ type connLimitListener struct {
 	open int32 // atomic, for observability only
 }
 
-// errMaxConns is returned by Accept when the connection limit is reached.
-// It implements net.Error with Temporary()=true so that fasthttp.Server
-// retries the accept instead of exiting the serve loop.
-var errMaxConns = maxConnsError{}
-
+// maxConnsError represents a connection-limit-reached error. It implements
+// net.Error with Temporary()=true. Accept now loops internally instead of
+// returning this error, but the type is kept for testing.
 type maxConnsError struct{}
 
 func (maxConnsError) Error() string   { return "max_connections reached" }
@@ -385,21 +383,25 @@ func newConnLimitListenerWithSem(inner net.Listener, sem chan struct{}, log obse
 }
 
 func (l *connLimitListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	select {
-	case l.sem <- struct{}{}:
-		atomic.AddInt32(&l.open, 1)
-		return &connLimitConn{Conn: conn, sem: l.sem, open: &l.open}, nil
-	default:
-		// Limit reached — send 503 then close.
-		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		_, _ = conn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
-		_ = conn.Close()
-		l.log.Warn("connection rejected: max_connections reached")
-		return nil, errMaxConns
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.sem <- struct{}{}:
+			atomic.AddInt32(&l.open, 1)
+			return &connLimitConn{Conn: conn, sem: l.sem, open: &l.open}, nil
+		default:
+			// Limit reached — send 503 then close, and loop to accept
+			// the next connection. This avoids returning a temporary
+			// error that fasthttp.Server.Serve would treat as permanent
+			// (it only checks Timeout, not Temporary).
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_, _ = conn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			_ = conn.Close()
+			l.log.Warn("connection rejected: max_connections reached")
+		}
 	}
 }
 

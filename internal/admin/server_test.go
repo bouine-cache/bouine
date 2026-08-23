@@ -7,8 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
-
 	"testing"
 	"time"
 
@@ -253,15 +251,17 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	go s.inner.Serve(ln)
 	defer s.inner.Shutdown()
 
-	resp, err := http.Get("http://" + ln.Addr().String() + "/drain")
-	require.NoError(t, err, "drain request failed (write timeout killed connection)")
-	defer resp.Body.Close()
-	require.Equal(t, fasthttp.StatusOK, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err, "read body")
+	fc := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI("http://" + ln.Addr().String() + "/drain")
+	require.NoError(t, fc.Do(req, resp), "drain request failed (write timeout killed connection)")
+	require.Equal(t, fasthttp.StatusOK, resp.StatusCode())
 	var got map[string]string
-	err = json.Unmarshal(body, &got)
-	require.NoError(t, err, "unmarshal")
+	body := resp.Body()
+	require.NoError(t, json.Unmarshal(body, &got), "unmarshal")
 	require.Equal(t, "drained", got["status"])
 
 	// DrainFn must have been called synchronously — the response is

@@ -3,18 +3,15 @@ package cloudflare_test
 import (
 	"context"
 	"errors"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/cache"
 	"github.com/cloudflare/cloudflare-go/v4/option"
 
 	cf "github.com/bouine-cache/bouine/internal/cloudflare"
-	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 // fakePurger records calls and returns a pre-set sequence of errors.
@@ -114,25 +111,15 @@ func TestNew_MissingToken(t *testing.T) {
 	require.True(t, ok)
 }
 
-// asSDKError wraps a status code and optional response in a real
-// *cloudflare.Error so the errors.As(err, &apiErr) branch in retry.go
-// is exercised, including parseRetryAfter(apiErr.Response).
-func asSDKError(statusCode int, resp *http.Response) *cloudflare.Error {
-	return &cloudflare.Error{
-		StatusCode: statusCode,
-		Response:   resp,
-	}
-}
-
 func TestRetry_RateLimit_WithRetryAfter(t *testing.T) {
 	t.Parallel()
 	// Simulate two 429s with Retry-After header, followed by success.
-	resp429 := &http.Response{Header: http.Header{header.RetryAfter: {"0"}}}
+	resp429 := AsSDKErrorWithRetryAfter(429, "0")
 
 	purger := &fakePurger{
 		errors: []error{
-			asSDKError(429, resp429),
-			asSDKError(429, resp429),
+			resp429,
+			resp429,
 			nil, // success on third attempt
 		},
 	}
@@ -147,7 +134,7 @@ func TestRetry_500_ThenSuccess(t *testing.T) {
 	t.Parallel()
 	purger := &fakePurger{
 		errors: []error{
-			asSDKError(500, nil),
+			AsSDKError(500),
 			nil,
 		},
 	}
@@ -160,13 +147,13 @@ func TestRetry_500_ThenSuccess(t *testing.T) {
 
 func TestRetry_RateLimit_Exhausted(t *testing.T) {
 	t.Parallel()
-	resp429 := &http.Response{Header: http.Header{header.RetryAfter: {"0"}}}
+	resp429 := AsSDKErrorWithRetryAfter(429, "0")
 
 	purger := &fakePurger{
 		errors: []error{
-			asSDKError(429, resp429),
-			asSDKError(429, resp429),
-			asSDKError(429, resp429),
+			resp429,
+			resp429,
+			resp429,
 		},
 	}
 	c := cf.NewWithPurger(purger, "zone1", time.Millisecond)
@@ -180,12 +167,12 @@ func TestRetry_RateLimit_Exhausted(t *testing.T) {
 func TestRetry_HTTPDateRetryAfter(t *testing.T) {
 	t.Parallel()
 	// Retry-After as HTTP-date format (2 seconds in the future).
-	future := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
-	respRL := &http.Response{Header: http.Header{header.RetryAfter: {future}}}
+	future := FormatHTTPDate(time.Now().Add(2 * time.Second))
+	respRL := AsSDKErrorWithRetryAfter(429, future)
 
 	purger := &fakePurger{
 		errors: []error{
-			asSDKError(429, respRL),
+			respRL,
 			nil,
 		},
 	}
@@ -200,12 +187,12 @@ func TestRetry_PastHTTPDate_FallsBackToDefault(t *testing.T) {
 	t.Parallel()
 	// Retry-After as an HTTP-date in the past (clock skew scenario).
 	// Should fall back to the default jittered delay, not fire immediately.
-	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
-	respPast := &http.Response{Header: http.Header{header.RetryAfter: {past}}}
+	past := FormatHTTPDate(time.Now().Add(-time.Hour))
+	respPast := AsSDKErrorWithRetryAfter(429, past)
 
 	purger := &fakePurger{
 		errors: []error{
-			asSDKError(429, respPast),
+			respPast,
 			nil,
 		},
 	}
@@ -225,8 +212,8 @@ func TestErrorType(t *testing.T) {
 	}{
 		{"rate_limit", &cf.RateLimitError{}, cf.ErrTypeRateLimit},
 		{"zone_config", &cf.ZoneConfigError{Msg: "bad"}, cf.ErrTypeZoneConfig},
-		{"server_error", asSDKError(500, nil), cf.ErrTypeServerError},
-		{"client_error", asSDKError(404, nil), cf.ErrTypeClientError},
+		{"server_error", AsSDKError(500), cf.ErrTypeServerError},
+		{"client_error", AsSDKError(404), cf.ErrTypeClientError},
 		{"network_error", errors.New("connection refused"), cf.ErrTypeNetworkError},
 	}
 	for _, tc := range tests {

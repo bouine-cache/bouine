@@ -25,7 +25,7 @@ func NewKey(canonical []byte) api.Key {
 
 // BuildKeyFromURL computes the canonical cache key from a raw URL
 // string. Used by admin purge/refresh endpoints where no
-// *http.Request is available.
+// request context is available.
 func BuildKeyFromURL(rawURL string, policy *KeyPolicy) api.Key {
 	if rawURL == "" {
 		return api.Key{}

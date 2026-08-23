@@ -715,14 +715,14 @@ func TestSerializeResponse_HeadTooLarge(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	fp := NewFastPathHandlerFromStore(store)
 	// Create an object with many headers to exceed the max header bytes.
-	hdr := http.Header{}
+	hdr := header.Map{}
 	for i := range 200 {
 		hdr.Set("X-Huge-"+string(rune('a'+i%26))+string(rune('a'+i/26)), strings.Repeat("x", 100))
 	}
 	obj := &api.Object{
 		Key:        testkey.Key(1),
 		StatusCode: 200,
-		Header:     header.FromHTTP(hdr),
+		Header:     hdr,
 		Body:       []byte("hello"),
 		BodySize:   5,
 		StoredAt:   time.Now(),
@@ -747,7 +747,7 @@ func TestAppendResponseHeaders_Fallback(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ContentType: {"text/html"}, header.ContentLength: {"5"}}),
+		Header:     headerMap(header.ContentType, "text/html", header.ContentLength, "5"),
 		Body:       []byte("hello"),
 		BodySize:   5,
 		StoredAt:   time.Now(),
@@ -772,7 +772,7 @@ func TestNewFastPathHandler(t *testing.T) {
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.ContentLength: {"5"}}),
+		Header:     headerMap(header.ContentLength, "5"),
 		Body:       []byte("hello"),
 		BodySize:   5,
 		StoredAt:   time.Now(),
@@ -808,7 +808,7 @@ func TestFastPathHandler_VaryHit(t *testing.T) {
 	primaryObj := &api.Object{
 		Key:        primary,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding"}}),
+		Header:     headerMap(header.Vary, "Accept-Encoding"),
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -831,10 +831,8 @@ func TestFastPathHandler_VaryHit(t *testing.T) {
 	gzipObj := &api.Object{
 		Key:        varyKeyGzip,
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			header.Vary:          {"Accept-Encoding"},
-			header.ContentLength: {"10"},
-		}),
+		Header: headerMap(header.Vary, "Accept-Encoding",
+			header.ContentLength, "10"),
 		Body:     []byte("gzip-body!"),
 		BodySize: 10,
 		StoredAt: time.Now(),
@@ -888,7 +886,7 @@ func TestFastPathHandler_VaryStaleHit(t *testing.T) {
 	primaryObj := &api.Object{
 		Key:        primary,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding"}}),
+		Header:     headerMap(header.Vary, "Accept-Encoding"),
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -910,10 +908,8 @@ func TestFastPathHandler_VaryStaleHit(t *testing.T) {
 	gzipObj := &api.Object{
 		Key:        varyKeyGzip,
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			header.Vary:          {"Accept-Encoding"},
-			header.ContentLength: {"11"},
-		}),
+		Header: headerMap(header.Vary, "Accept-Encoding",
+			header.ContentLength, "11"),
 		Body:                 []byte("stale-gzip!"),
 		BodySize:             11,
 		StoredAt:             time.Now().Add(-10 * time.Second),
@@ -949,7 +945,7 @@ func TestFastPathHandler_VaryVariantMiss(t *testing.T) {
 	primaryObj := &api.Object{
 		Key:        primary,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding"}}),
+		Header:     headerMap(header.Vary, "Accept-Encoding"),
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -998,7 +994,7 @@ func TestFastPathHandler_VaryMultiField(t *testing.T) {
 	primaryObj := &api.Object{
 		Key:        primary,
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.Vary: {"Accept-Encoding, Accept-Language"}}),
+		Header:     headerMap(header.Vary, "Accept-Encoding, Accept-Language"),
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -1022,10 +1018,8 @@ func TestFastPathHandler_VaryMultiField(t *testing.T) {
 	variantObj := &api.Object{
 		Key:        varyKeyGzipEn,
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			header.Vary:          {"Accept-Encoding, Accept-Language"},
-			header.ContentLength: {"8"},
-		}),
+		Header: headerMap(header.Vary, "Accept-Encoding, Accept-Language",
+			header.ContentLength, "8"),
 		Body:     []byte("gzip-en!"),
 		BodySize: 8,
 		StoredAt: time.Now(),
@@ -1078,10 +1072,8 @@ func TestFastPathHandler_VarySameKey(t *testing.T) {
 	primaryObj := &api.Object{
 		Key:        primary,
 		StatusCode: 200,
-		Header: header.FromHTTP(http.Header{
-			header.Vary:          {"X-Trace-Id"},
-			header.ContentLength: {"4"},
-		}),
+		Header: headerMap(header.Vary, "X-Trace-Id",
+			header.ContentLength, "4"),
 		Body:     []byte("body"),
 		BodySize: 4,
 		StoredAt: time.Now(),

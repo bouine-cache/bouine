@@ -1,8 +1,6 @@
 package cache
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -17,60 +15,60 @@ func TestClientConditionalMatch(t *testing.T) {
 	t.Parallel()
 	t.Run("if_none_match_match", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfNoneMatch, `"abc"`)
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfNoneMatch, `"abc"`)
 		obj := &api.Object{ETag: `"abc"`}
-		require.True(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.True(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("if_none_match_mismatch", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfNoneMatch, `"xyz"`)
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfNoneMatch, `"xyz"`)
 		obj := &api.Object{ETag: `"abc"`}
-		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("if_none_match_no_etag", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfNoneMatch, `"abc"`)
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfNoneMatch, `"abc"`)
 		obj := &api.Object{}
-		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("if_modified_since_last_modified_before", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2024 00:00:00 GMT")
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2024 00:00:00 GMT")
 		obj := &api.Object{LastModified: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
-		require.True(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.True(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("if_modified_since_last_modified_after", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2023 00:00:00 GMT")
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2023 00:00:00 GMT")
 		obj := &api.Object{LastModified: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
-		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("if_modified_since_date_fallback", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2024 00:00:00 GMT")
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfModifiedSince, "Mon, 01 Jan 2024 00:00:00 GMT")
 		obj := &api.Object{
-			Header: header.FromHTTP(http.Header{header.Date: {"Mon, 01 Jan 2023 00:00:00 GMT"}}),
+			Header: headerMap(header.Date, "Mon, 01 Jan 2023 00:00:00 GMT"),
 		}
-		require.True(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.True(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("if_modified_since_invalid_date", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
-		r.Header.Set(header.IfModifiedSince, "garbage")
+		r := testCtx("GET", "http://example.com/")
+		r.Request.Header.Set(header.IfModifiedSince, "garbage")
 		obj := &api.Object{LastModified: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
-		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 	t.Run("no_conditional_headers", func(t *testing.T) {
 		t.Parallel()
-		r := httptest.NewRequest("GET", "/", nil)
+		r := testCtx("GET", "http://example.com/")
 		obj := &api.Object{ETag: `"abc"`}
-		require.False(t, ClientConditionalMatch(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), obj))
+		require.False(t, ClientConditionalMatch(requestInfoFromCtx(r), obj))
 	})
 }
 
@@ -103,20 +101,19 @@ func TestMergeHeaders304(t *testing.T) {
 	t.Run("skips_content_headers", func(t *testing.T) {
 		t.Parallel()
 		stored := &api.Object{
-			Header: header.FromHTTP(http.Header{
-				header.ContentLength: {"100"},
-				header.ContentType:   {"text/html"},
-			}),
+			Header: func() header.Map {
+				m := headerMap(header.ContentLength, "100")
+				m.Set(header.ContentType, "text/html")
+				return m
+			}(),
 		}
-		resp304 := http.Header{
-			header.ContentLength:    {"200"},
-			header.ContentType:      {"application/json"},
-			header.ContentEncoding:  {"gzip"},
-			header.SetCookie:        {"new=cookie"},
-			header.TransferEncoding: {"chunked"},
-			header.ETag:             {`"v2"`},
-		}
-		MergeHeaders304(stored, header.FromHTTP(resp304))
+		resp304 := headerMap(header.ContentLength, "200")
+		resp304.Set(header.ContentType, "application/json")
+		resp304.Set(header.ContentEncoding, "gzip")
+		resp304.Set(header.SetCookie, "new=cookie")
+		resp304.Set(header.TransferEncoding, "chunked")
+		resp304.Set(header.ETag, `"v2"`)
+		MergeHeaders304(stored, resp304)
 		// Content-specific headers must NOT be overwritten.
 		assert.Equal(t, "100", stored.Header.Get(header.ContentLength))
 		// ContentType is NOT in the skip list, so it IS updated.
@@ -127,15 +124,11 @@ func TestMergeHeaders304(t *testing.T) {
 	t.Run("updates_non_content_headers", func(t *testing.T) {
 		t.Parallel()
 		stored := &api.Object{
-			Header: header.FromHTTP(http.Header{
-				header.CacheControl: {"max-age=60"},
-			}),
+			Header: headerMap(header.CacheControl, "max-age=60"),
 		}
-		resp304 := http.Header{
-			header.CacheControl: {"max-age=120"},
-			header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"},
-		}
-		MergeHeaders304(stored, header.FromHTTP(resp304))
+		resp304 := headerMap(header.CacheControl, "max-age=120")
+		resp304.Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		MergeHeaders304(stored, resp304)
 		assert.Equal(t, "max-age=120", stored.Header.Get(header.CacheControl))
 		assert.Equal(t, "Mon, 01 Jan 2024 00:00:00 GMT", stored.Header.Get(header.LastModified))
 	})

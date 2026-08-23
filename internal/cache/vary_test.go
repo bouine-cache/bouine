@@ -2,8 +2,6 @@ package cache
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +26,10 @@ func TestVariantKey_NoVary(t *testing.T) {
 func TestVariantKey_DifferentHeaders(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	h1 := http.Header{header.AcceptEncoding: {"gzip"}}
-	h2 := http.Header{header.AcceptEncoding: {"br"}}
-	k1 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h1), nil)
-	k2 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h2), nil)
+	h1 := headerMap(header.AcceptEncoding, "gzip")
+	h2 := headerMap(header.AcceptEncoding, "br")
+	k1 := VariantKey(primary, "Accept-Encoding", h1, nil)
+	k2 := VariantKey(primary, "Accept-Encoding", h2, nil)
 	require.NotEqual(t, k2, k1)
 	if k1 == primary || k2 == primary {
 		t.Fatal("variant key should differ from primary")
@@ -41,9 +39,9 @@ func TestVariantKey_DifferentHeaders(t *testing.T) {
 func TestVariantKey_SameHeaders(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	h := http.Header{header.AcceptEncoding: {"gzip"}}
-	k1 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h), nil)
-	k2 := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h), nil)
+	h := headerMap(header.AcceptEncoding, "gzip")
+	k1 := VariantKey(primary, "Accept-Encoding", h, nil)
+	k2 := VariantKey(primary, "Accept-Encoding", h, nil)
 	require.Equal(t, k2, k1)
 }
 
@@ -54,10 +52,10 @@ func TestVariantKey_SameHeaders(t *testing.T) {
 func TestVariantKey_VaryStar(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	h1 := http.Header{header.Accept: {"text/html"}}
-	h2 := http.Header{header.Accept: {"application/json"}}
-	require.Equal(t, primary, VariantKey(primary, "*", header.FromHTTP(h1), nil))
-	require.Equal(t, primary, VariantKey(primary, "*", header.FromHTTP(h2), nil))
+	h1 := headerMap(header.Accept, "text/html")
+	h2 := headerMap(header.Accept, "application/json")
+	require.Equal(t, primary, VariantKey(primary, "*", h1, nil))
+	require.Equal(t, primary, VariantKey(primary, "*", h2, nil))
 
 	// Fast path must match.
 	raw := &api.RawRequest{NHeaders: 1}
@@ -69,7 +67,7 @@ func TestVariantKey_VaryStar(t *testing.T) {
 
 	// Policy exclusions don't change the result — still primary.
 	policy := NewKeyPolicy(nil, nil, map[string]bool{"accept": true}, nil, false, false)
-	require.Equal(t, primary, VariantKey(primary, "*", header.FromHTTP(h1), policy))
+	require.Equal(t, primary, VariantKey(primary, "*", h1, policy))
 }
 
 func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
@@ -79,94 +77,81 @@ func TestVariantKey_ExcludeCaseInsensitive(t *testing.T) {
 	// VariantKey lowercases Vary fields before lookup, so this should
 	// match.
 	excludePolicy := NewKeyPolicy(nil, nil, map[string]bool{"x-request-id": true}, nil, false, false)
-	h1 := http.Header{"X-Request-ID": {"abc"}}
-	h2 := http.Header{"X-Request-ID": {"xyz"}}
-	k1 := VariantKey(primary, "X-Request-ID", header.FromHTTP(h1), excludePolicy)
-	k2 := VariantKey(primary, "X-Request-ID", header.FromHTTP(h2), excludePolicy)
+	h1 := headerMap("X-Request-ID", "abc")
+	h2 := headerMap("X-Request-ID", "xyz")
+	k1 := VariantKey(primary, "X-Request-ID", h1, excludePolicy)
+	k2 := VariantKey(primary, "X-Request-ID", h2, excludePolicy)
 	require.Equal(t, k2, k1)
 	require.Equal(t, primary, k1)
 
 	// Partial exclude: non-excluded Vary field must still produce a
 	// variant key distinct from primary.
-	hGzip := http.Header{header.AcceptEncoding: {"gzip"}, "X-Request-ID": {"abc"}}
-	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", header.FromHTTP(hGzip), excludePolicy)
+	hGzip := headerMap(header.AcceptEncoding, "gzip")
+	hGzip.Set("X-Request-ID", "abc")
+	kPartial := VariantKey(primary, "Accept-Encoding, X-Request-ID", hGzip, excludePolicy)
 	require.NotEqual(t, primary, kPartial)
 }
 
 func TestHandler_VaryAwareStorage(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.Vary, "Accept-Encoding")
-		w.Header().Set(header.ContentEncoding, r.Header.Get(header.AcceptEncoding))
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("body-" + r.Header.Get(header.AcceptEncoding)))
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding")
+		ctx.Response.Header.Set(header.ContentEncoding, string(ctx.Request.Header.Peek(header.AcceptEncoding)))
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body-" + string(ctx.Request.Header.Peek(header.AcceptEncoding))))
+	}
 	h := testHandler(t, upstream)
 
-	// gzip request.
-	r1 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r1.Header.Set(header.AcceptEncoding, "gzip")
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, r1)
-	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+	r1 := testCtxWithHeader("GET", "http://example.com/vary", header.AcceptEncoding, "gzip")
+	h.ServeRequest(r1)
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
 
-	// br request — different variant, should MISS.
-	r2 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r2.Header.Set(header.AcceptEncoding, "br")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, r2)
-	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	r2 := testCtxWithHeader("GET", "http://example.com/vary", header.AcceptEncoding, "br")
+	h.ServeRequest(r2)
+	require.Equal(t, "MISS", respHeader(r2, header.XCache))
 
-	// gzip again — should HIT.
-	r3 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	r3.Header.Set(header.AcceptEncoding, "gzip")
-	rr3 := httptest.NewRecorder()
-	h.ServeHTTPCompat(rr3, r3)
-	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
-	require.Equal(t, "body-gzip", rr3.Body.String())
+	r3 := testCtxWithHeader("GET", "http://example.com/vary", header.AcceptEncoding, "gzip")
+	h.ServeRequest(r3)
+	require.Equal(t, "HIT", respHeader(r3, header.XCache))
+	require.Equal(t, "body-gzip", respBody(r3))
 }
 
 func TestHandler_RangeOnCachedObject(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"full"`)
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("Hello, Range World!"))
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"full"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("Hello, Range World!"))
+	}
 	h := testHandler(t, upstream)
 
-	// Populate cache with full body.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/range", nil))
-	require.Equal(t, 200, rr.Code)
+	rr := testCtx("GET", "http://example.com/range")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
 
-	// Range request on cached object.
-	rangeReq := httptest.NewRequest("GET", "http://example.com/range", nil)
-	rangeReq.Header.Set(header.Range, "bytes=0-4")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, rangeReq)
-	require.Equal(t, fasthttp.StatusPartialContent, rr2.Code)
-	require.Equal(t, "Hello", rr2.Body.String())
-	xc := rr2.Header().Get(header.XCache)
-	require.Equal(t, "HIT", xc)
+	rr2 := testCtxWithHeader("GET", "http://example.com/range", header.Range, "bytes=0-4")
+	h.ServeRequest(rr2)
+	require.Equal(t, fasthttp.StatusPartialContent, respCode(rr2))
+	require.Equal(t, "Hello", respBody(rr2))
+	require.Equal(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_RangeOnStaleObject(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"full"`)
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("Hello, Range World!"))
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"full"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("Hello, Range World!"))
+	}
 	h := testHandler(t, upstream)
 
 	url := "http://example.com/stale-range"
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
@@ -175,16 +160,13 @@ func TestHandler_RangeOnStaleObject(t *testing.T) {
 	stale.StoredAt = time.Now().Add(-2 * time.Second)
 	_ = h.store.Put(context.Background(), key, stale)
 
-	rangeReq := httptest.NewRequest("GET", url, nil)
-	rangeReq.Header.Set(header.Range, "bytes=0-4")
-	rr = newRR()
-	h.ServeHTTPCompat(rr, rangeReq)
+	rr = testCtxWithHeader("GET", url, header.Range, "bytes=0-4")
+	h.ServeRequest(rr)
 
-	require.Equal(t, fasthttp.StatusPartialContent, rr.Code)
-	require.Equal(t, "Hello", rr.Body.String())
-	xc := rr.Header().Get(header.XCache)
-	require.Equal(t, "STALE", xc)
-	w := rr.Header().Get(header.Warning)
+	require.Equal(t, fasthttp.StatusPartialContent, respCode(rr))
+	require.Equal(t, "Hello", respBody(rr))
+	require.Equal(t, "STALE", respHeader(rr, header.XCache))
+	w := respHeader(rr, header.Warning)
 	require.True(t, strings.HasPrefix(w, "110"))
 }
 
@@ -239,7 +221,7 @@ func TestVaryContainsStar(t *testing.T) {
 func TestVariantKeySlow_TooManyFields(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	h := http.Header{}
+	h := header.Map{}
 	// >16 Vary fields triggers variantKeySlow fallback.
 	vary := ""
 	for i := range 20 {
@@ -250,17 +232,17 @@ func TestVariantKeySlow_TooManyFields(t *testing.T) {
 		h.Set("X-H"+string(rune('0'+i)), "val")
 	}
 	// Should produce a non-primary key (variantKeySlow processes all fields).
-	result := VariantKey(primary, vary, header.FromHTTP(h), nil)
+	result := VariantKey(primary, vary, h, nil)
 	assert.NotEqual(t, primary, result)
 }
 
 func TestVariantKeySlow_LongValue(t *testing.T) {
 	t.Parallel()
 	primary := testkey.Key(100)
-	h := http.Header{}
+	h := header.Map{}
 	// A single Vary field with a very long value that exceeds the 256-byte buffer.
 	h.Set("Accept-Encoding", string(make([]byte, 300)))
-	result := VariantKey(primary, "Accept-Encoding", header.FromHTTP(h), nil)
+	result := VariantKey(primary, "Accept-Encoding", h, nil)
 	// Should NOT return primary (it should hash the long value).
 	assert.NotEqual(t, primary, result)
 }

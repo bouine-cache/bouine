@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,36 +48,36 @@ func TestCDNCacheControl(t *testing.T) {
 	t.Parallel()
 	t.Run("absent", func(t *testing.T) {
 		t.Parallel()
-		_, ok := cdnCacheControl(header.FromHTTP(http.Header{}))
+		_, ok := cdnCacheControl(header.Map{})
 		require.False(t, ok)
 	})
 	t.Run("forbidden_char", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "max-age=60&foo")
-		_, ok := cdnCacheControl(header.FromHTTP(h))
+		_, ok := cdnCacheControl(h)
 		require.False(t, ok)
 	})
 	t.Run("no_meaningful_directive", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "public")
-		_, ok := cdnCacheControl(header.FromHTTP(h))
+		_, ok := cdnCacheControl(h)
 		require.False(t, ok)
 	})
 	t.Run("valid_max_age", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "max-age=60")
-		d, ok := cdnCacheControl(header.FromHTTP(h))
+		d, ok := cdnCacheControl(h)
 		require.True(t, ok)
 		assert.True(t, d.MaxAgeSet)
 	})
 	t.Run("valid_s_maxage", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "s-maxage=30")
-		d, ok := cdnCacheControl(header.FromHTTP(h))
+		d, ok := cdnCacheControl(h)
 		require.True(t, ok)
 		assert.True(t, d.SMaxAgeSet)
 	})
@@ -109,16 +108,16 @@ func TestNewParsedResponse(t *testing.T) {
 	t.Parallel()
 	t.Run("with_cdn_cc", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "max-age=60")
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		p := newParsedResponse(200, header.Map{}, h)
 		assert.True(t, p.hasCDN)
 		assert.True(t, p.respCC.MaxAgeSet)
 	})
 	t.Run("without_cdn_cc", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"max-age=30"}}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "max-age=30")
+		p := newParsedResponse(200, header.Map{}, h)
 		assert.False(t, p.hasCDN)
 		assert.True(t, p.respCC.MaxAgeSet)
 	})
@@ -128,44 +127,44 @@ func TestParsedResponse_IsCacheable(t *testing.T) {
 	t.Parallel()
 	t.Run("no_store_blocks", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"no-store"}}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "no-store")
+		p := newParsedResponse(200, header.Map{}, h)
 		require.False(t, p.isCacheable(0))
 	})
 	t.Run("no_store_with_must_understand_understood", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"no-store, must-understand, max-age=60"}}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "no-store, must-understand, max-age=60")
+		p := newParsedResponse(200, header.Map{}, h)
 		require.True(t, p.isCacheable(0))
 	})
 	t.Run("no_store_with_must_understand_not_understood", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"no-store, must-understand, max-age=60"}}
-		p := newParsedResponse(599, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "no-store, must-understand, max-age=60")
+		p := newParsedResponse(599, header.Map{}, h)
 		require.False(t, p.isCacheable(0))
 	})
 	t.Run("private_blocks", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"private, max-age=60"}}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "private, max-age=60")
+		p := newParsedResponse(200, header.Map{}, h)
 		require.False(t, p.isCacheable(0))
 	})
 	t.Run("explicit_max_age", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"max-age=60"}}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "max-age=60")
+		p := newParsedResponse(200, header.Map{}, h)
 		require.True(t, p.isCacheable(0))
 	})
 	t.Run("heuristic_with_last_modified", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.LastModified: {"Mon, 01 Jan 2024 00:00:00 GMT"}}
-		p := newParsedResponse(301, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		p := newParsedResponse(301, header.Map{}, h)
 		require.True(t, p.isCacheable(0))
 	})
 	t.Run("negative_cacheable", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
-		p := newParsedResponse(404, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := header.Map{}
+		p := newParsedResponse(404, header.Map{}, h)
 		require.True(t, p.isCacheable(30))
 	})
 }
@@ -174,26 +173,26 @@ func TestParsedResponse_IsCacheableWithDefault(t *testing.T) {
 	t.Parallel()
 	t.Run("default_ttl_for_heuristic_status", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := header.Map{}
+		p := newParsedResponse(200, header.Map{}, h)
 		require.True(t, p.isCacheableWithDefault(0, 60))
 	})
 	t.Run("default_ttl_zero_blocks", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := header.Map{}
+		p := newParsedResponse(200, header.Map{}, h)
 		require.False(t, p.isCacheableWithDefault(0, 0))
 	})
 	t.Run("no_store_blocks_default", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.CacheControl: {"no-store"}}
-		p := newParsedResponse(200, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := headerMap(header.CacheControl, "no-store")
+		p := newParsedResponse(200, header.Map{}, h)
 		require.False(t, p.isCacheableWithDefault(0, 60))
 	})
 	t.Run("non_heuristic_status_blocks_default", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
-		p := newParsedResponse(502, header.FromHTTP(http.Header{}), header.FromHTTP(h))
+		h := header.Map{}
+		p := newParsedResponse(502, header.Map{}, h)
 		require.False(t, p.isCacheableWithDefault(0, 60))
 	})
 }

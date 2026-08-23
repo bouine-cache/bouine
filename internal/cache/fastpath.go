@@ -79,7 +79,8 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 // TryHit attempts to serve a cache hit from the parsed request. See
 // api.FastPathHandler for the full contract.
 func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
-	if !qualifiesForFastPath(req) {
+	reqCC, ok := qualifiesForFastPath(req)
+	if !ok {
 		return nil, false
 	}
 
@@ -108,7 +109,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		}
 	}
 
-	disp := evaluateFromRaw(req, obj, now)
+	disp := evaluateFromRaw(req, obj, now, reqCC)
 	switch disp.Decision {
 	case Hit:
 		resp := f.serializeResponse(req, obj, src, now, "HIT")
@@ -130,11 +131,15 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 // qualifiesForFastPath checks request-level conditions that must be met
 // before attempting a cache lookup. This avoids the store.Get call
 // entirely for requests that can never be served from cache.
-func qualifiesForFastPath(req *api.RawRequest) bool {
+// Returns the parsed request Cache-Control directives so the caller can
+// pass them to evaluateFromRaw without re-parsing.
+func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 	if req.Method != "GET" && req.Method != "HEAD" {
-		return false
+		return Directives{}, false
 	}
-	// Reject requests with conditional or range headers.
+	var reqCC Directives
+	var ccRaw string
+	var pragmaNoCache bool
 	for i := 0; i < req.NHeaders; i++ {
 		h := &req.Headers[i]
 		switch {
@@ -144,27 +149,28 @@ func qualifiesForFastPath(req *api.RawRequest) bool {
 			api.EqualFold(h.Key, "If-Range"),
 			api.EqualFold(h.Key, "If-Unmodified-Since"),
 			api.EqualFold(h.Key, "If-Match"):
-			return false
+			return Directives{}, false
 		}
-		// Reject requests with Transfer-Encoding or Content-Length.
-		// A GET/HEAD with a body or chunked encoding is not cacheable
-		// and must go through the full handler for proper validation.
 		if api.EqualFold(h.Key, header.TransferEncoding) || api.EqualFold(h.Key, header.ContentLength) {
-			return false
+			return Directives{}, false
+		}
+		if api.EqualFold(h.Key, header.CacheControl) {
+			ccRaw = h.Value
+		}
+		if api.EqualFold(h.Key, header.Pragma) && api.EqualFold(h.Value, "no-cache") {
+			pragmaNoCache = true
 		}
 	}
-	// Check Cache-Control: no-cache / no-store and Pragma: no-cache.
-	cc := req.Header(header.CacheControl)
-	if cc != "" {
-		d := ParseCacheControl(cc)
-		if d.NoCache || d.NoStore {
-			return false
+	if ccRaw != "" {
+		reqCC = ParseCacheControl(ccRaw)
+		if reqCC.NoCache || reqCC.NoStore {
+			return Directives{}, false
 		}
 	}
-	if req.Header(header.Pragma) == "no-cache" {
-		return false
+	if pragmaNoCache {
+		return Directives{}, false
 	}
-	return true
+	return reqCC, true
 }
 
 // getCachedDate returns the HTTP-formatted Date string for the current
@@ -379,7 +385,23 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 }
 
 // appendStatusLine writes the HTTP/1.1 status line into buf.
+// Fast paths the most common status codes with pre-formatted constants
+// to avoid strconv.AppendInt + statusMessage lookup (~12% of FastPath CPU).
 func appendStatusLine(buf []byte, statusCode int) []byte {
+	switch statusCode {
+	case 200:
+		return append(buf, "HTTP/1.1 200 OK\r\n"...)
+	case 301:
+		return append(buf, "HTTP/1.1 301 Moved Permanently\r\n"...)
+	case 302:
+		return append(buf, "HTTP/1.1 302 Found\r\n"...)
+	case 304:
+		return append(buf, "HTTP/1.1 304 Not Modified\r\n"...)
+	case 404:
+		return append(buf, "HTTP/1.1 404 Not Found\r\n"...)
+	case 500:
+		return append(buf, "HTTP/1.1 500 Internal Server Error\r\n"...)
+	}
 	buf = append(buf, "HTTP/1.1 "...)
 	buf = strconv.AppendInt(buf, int64(statusCode), 10)
 	buf = append(buf, ' ')
@@ -717,32 +739,17 @@ func appendCanonicalQuerySlowString(buf []byte, n int, raw string, p *KeyPolicy)
 // path. It only handles Hit and StaleHit — all other dispositions return
 // false so the caller falls through to the full handler. This avoids the full
 // Evaluate overhead for requests that can be served from cache.
-func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Disposition {
+func evaluateFromRaw(_ *api.RawRequest, obj *api.Object, now time.Time, reqCC Directives) Disposition {
 	if obj == nil {
 		return Disposition{Decision: Miss}
 	}
 
-	// Parse request Cache-Control from the raw request.
-	var reqCC Directives
-	if rawCC := req.Header(header.CacheControl); rawCC != "" {
-		reqCC = ParseCacheControl(rawCC)
-	}
-	if !reqCC.NoCache && req.Header(header.Pragma) == "no-cache" {
-		reqCC.NoCache = true
-	}
 	if reqCC.NoStore {
 		return Disposition{Decision: Bypass}
 	}
 
-	// Parse response Cache-Control.
-	ccStr := obj.CacheControl
-	if ccStr == "" {
-		ccStr = obj.Header.Get(header.CacheControl)
-	}
-	respCC := ParseCacheControl(ccStr)
-
-	// no-cache → revalidate or miss (can't serve from fast path).
-	if respCC.NoCache || reqCC.NoCache {
+	// Use pre-computed response CC flags to avoid ParseCacheControl on every hit.
+	if obj.RespNoCache || reqCC.NoCache {
 		return Disposition{Decision: Revalidate}
 	}
 
@@ -752,7 +759,7 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 	}
 
 	// Stale checks: SWR, SIE, max-stale, heuristic freshness.
-	if respCC.MustRevalidate || respCC.ProxyRevalidate {
+	if obj.RespMustRevalidate {
 		return Disposition{Decision: Revalidate}
 	}
 	if reqCC.MaxStaleSet {

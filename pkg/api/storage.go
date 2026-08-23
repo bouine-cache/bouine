@@ -103,6 +103,15 @@ type Object struct {
 	// time so the fast-path hit can skip a Map.Get scan. Empty string
 	// means no Vary header (the common case).
 	VaryValue string `json:"-"`
+
+	// RespNoCache indicates the response Cache-Control has no-cache.
+	// Pre-computed at build time so evaluateFromRaw can skip
+	// ParseCacheControl on every FastPath hit.
+	RespNoCache bool `json:"-"`
+
+	// RespMustRevalidate indicates the response Cache-Control has
+	// must-revalidate or proxy-revalidate. Pre-computed at build time.
+	RespMustRevalidate bool `json:"-"`
 }
 
 // LoadSerializedHead returns the lazily-computed serialized header block,
@@ -156,6 +165,8 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		HasNoCacheFields:     o.HasNoCacheFields,
 		HasDate:              o.HasDate,
 		VaryValue:            o.VaryValue,
+		RespNoCache:          o.RespNoCache,
+		RespMustRevalidate:   o.RespMustRevalidate,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
@@ -197,6 +208,8 @@ func (o *Object) CloneForRefresh() *Object {
 		HasNoCacheFields:     o.HasNoCacheFields,
 		HasDate:              o.HasDate,
 		VaryValue:            o.VaryValue,
+		RespNoCache:          o.RespNoCache,
+		RespMustRevalidate:   o.RespMustRevalidate,
 	}
 }
 

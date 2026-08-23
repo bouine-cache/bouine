@@ -464,7 +464,7 @@ func TestEvaluateFromRaw_NoStore(t *testing.T) {
 	req.Headers[0] = api.RawHeader{Key: header.CacheControl, Value: "no-store"}
 	req.NHeaders = 1
 	obj := &api.Object{StoredAt: time.Now(), TTL: 60 * time.Second}
-	d := evaluateFromRaw(req, obj, time.Now())
+	d := evaluateFromRaw(req, obj, time.Now(), Directives{NoStore: true})
 	assert.Equal(t, Bypass, d.Decision)
 }
 
@@ -474,19 +474,20 @@ func TestEvaluateFromRaw_NoCache(t *testing.T) {
 	req.Headers[0] = api.RawHeader{Key: header.CacheControl, Value: "no-cache"}
 	req.NHeaders = 1
 	obj := &api.Object{StoredAt: time.Now(), TTL: 60 * time.Second, ETag: `"v1"`}
-	d := evaluateFromRaw(req, obj, time.Now())
+	d := evaluateFromRaw(req, obj, time.Now(), Directives{NoCache: true})
 	assert.Equal(t, Revalidate, d.Decision)
 }
 
 func TestEvaluateFromRaw_MustRevalidate(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{
-		StoredAt:     time.Now().Add(-2 * time.Second),
-		TTL:          time.Second,
-		CacheControl: "max-age=1, must-revalidate",
+		StoredAt:           time.Now().Add(-2 * time.Second),
+		TTL:                time.Second,
+		CacheControl:       "max-age=1, must-revalidate",
+		RespMustRevalidate: true,
 	}
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	d := evaluateFromRaw(req, obj, time.Now())
+	d := evaluateFromRaw(req, obj, time.Now(), Directives{})
 	assert.Equal(t, Revalidate, d.Decision)
 }
 
@@ -499,7 +500,7 @@ func TestEvaluateFromRaw_MaxStale(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.CacheControl, Value: "max-stale=60"}
 	req.NHeaders = 1
-	d := evaluateFromRaw(req, obj, time.Now())
+	d := evaluateFromRaw(req, obj, time.Now(), Directives{MaxStaleSet: true, MaxStale: 60 * time.Second})
 	assert.Equal(t, StaleHit, d.Decision)
 }
 
@@ -507,14 +508,14 @@ func TestEvaluateFromRaw_Fresh(t *testing.T) {
 	t.Parallel()
 	obj := &api.Object{StoredAt: time.Now(), TTL: 60 * time.Second}
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	d := evaluateFromRaw(req, obj, time.Now())
+	d := evaluateFromRaw(req, obj, time.Now(), Directives{})
 	assert.Equal(t, Hit, d.Decision)
 }
 
 func TestEvaluateFromRaw_NilObj(t *testing.T) {
 	t.Parallel()
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
-	d := evaluateFromRaw(req, nil, time.Now())
+	d := evaluateFromRaw(req, nil, time.Now(), Directives{})
 	assert.Equal(t, Miss, d.Decision)
 }
 
@@ -583,7 +584,8 @@ func TestQualifiesForFastPath_IfRange(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: "If-Range", Value: `"etag"`}
 	req.NHeaders = 1
-	assert.False(t, qualifiesForFastPath(req))
+	_, ok := qualifiesForFastPath(req)
+	assert.False(t, ok)
 }
 
 func TestQualifiesForFastPath_IfMatch(t *testing.T) {
@@ -591,7 +593,8 @@ func TestQualifiesForFastPath_IfMatch(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: "If-Match", Value: `"etag"`}
 	req.NHeaders = 1
-	assert.False(t, qualifiesForFastPath(req))
+	_, ok := qualifiesForFastPath(req)
+	assert.False(t, ok)
 }
 
 func TestQualifiesForFastPath_TransferEncoding(t *testing.T) {
@@ -599,7 +602,8 @@ func TestQualifiesForFastPath_TransferEncoding(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.TransferEncoding, Value: "chunked"}
 	req.NHeaders = 1
-	assert.False(t, qualifiesForFastPath(req))
+	_, ok := qualifiesForFastPath(req)
+	assert.False(t, ok)
 }
 
 func TestQualifiesForFastPath_PragmaNoCache(t *testing.T) {
@@ -607,7 +611,8 @@ func TestQualifiesForFastPath_PragmaNoCache(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.Pragma, Value: "no-cache"}
 	req.NHeaders = 1
-	assert.False(t, qualifiesForFastPath(req))
+	_, ok := qualifiesForFastPath(req)
+	assert.False(t, ok)
 }
 
 func TestShouldSkipHeader(t *testing.T) {

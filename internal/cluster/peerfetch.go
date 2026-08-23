@@ -1,14 +1,11 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,14 +20,6 @@ import (
 
 	"github.com/valyala/fasthttp"
 )
-
-// peerFetchBufPool reuses bytes.Buffer instances across peer-fetch calls
-// to avoid allocating a new buffer per fetch. Buffers that grow past
-// maxPeerFetchBytes are discarded to prevent the pool from pinning
-// oversized buffers.
-var peerFetchBufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
-}
 
 // peerFetchEncodePool reuses []byte buffers for encoding cached objects
 // in peer-fetch responses. Buffers larger than 64 KiB are discarded to
@@ -283,12 +272,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	return obj, nil
 }
 
-// PeerFetchHandler returns an http.Handler that serves peer-fetch
+// PeerFetchHandler is a fasthttp.RequestHandler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
-//
-// Server-side handlers remain on http.Handler because the admin server
-// (internal/admin) still uses net/http.ServeMux. They will be migrated
-// to fasthttp.RequestHandler when the admin server is migrated (Phase 7).
 type PeerFetchHandler struct {
 	store    PeerStore
 	hopLimit int
@@ -316,71 +301,66 @@ func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger,
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
 }
 
-// ServeHTTP handles peer fetch requests.
-func (h *PeerFetchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+// Handle is the fasthttp.RequestHandler for peer fetch requests.
+func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
+	if string(ctx.Method()) != fasthttp.MethodPost {
+		ctx.Error("method not allowed", fasthttp.StatusMethodNotAllowed)
 		return
 	}
 
 	// Hop-limit guard (T36).
-	hopStr := r.Header.Get(BouineHopHeader)
+	hopStr := string(ctx.Request.Header.Peek(BouineHopHeader))
 	var hops int
 	if hopStr != "" {
 		if _, err := fmt.Sscanf(hopStr, "%d", &hops); err == nil && hops >= h.hopLimit {
-			http.Error(w, "hop limit", http.StatusLoopDetected)
+			ctx.Error("hop limit", fasthttp.StatusLoopDetected)
 			return
 		}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxPeerFetchBinaryBody))
-	if err != nil || len(body) == 0 {
-		http.Error(w, "read error", http.StatusBadRequest)
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		ctx.Error("read error", fasthttp.StatusBadRequest)
 		return
 	}
 
 	var req api.PeerFetchRequest
 	switch body[0] {
 	case peerFetchBinaryVersion:
-		// Binary format: 1 byte version + 16 bytes key + 1 byte
-		// vary-key length + vary-key string.
 		if len(body) < 18 {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		copy(req.Key[:], body[1:17])
 		varyLen := int(body[17])
 		if len(body) < 18+varyLen {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		req.VaryKey = string(body[18 : 18+varyLen])
 	case '{':
-		// Legacy JSON format for backward compatibility during
-		// rolling upgrades. JSON always starts with '{' (0x7B).
 		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 	default:
-		http.Error(w, "bad request", http.StatusBadRequest)
+		ctx.Error("bad request", fasthttp.StatusBadRequest)
 		return
 	}
 
-	obj, _, err := h.store.Get(r.Context(), req.Key)
+	obj, _, err := h.store.Get(ctx, req.Key)
 	if err != nil || obj == nil {
 		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
-		w.WriteHeader(http.StatusNotFound)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
 
 	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
-	w.Header().Set(header.ContentType, "application/octet-stream")
+	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
 
-	// Pool the encode buffer to avoid per-response allocation.
 	bufp := peerFetchEncodePool.Get().(*[]byte)
 	encoded := storage.EncodeObjectInto(obj, (*bufp)[:0])
-	_, _ = w.Write(encoded)
+	_, _ = ctx.Write(encoded)
 	if cap(encoded) <= 64*1024 {
 		*bufp = encoded[:0]
 		peerFetchEncodePool.Put(bufp)
@@ -398,6 +378,7 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	if obj == nil {
 		return nil
 	}
+
 	select {
 	case f.putSem <- struct{}{}:
 		defer func() { <-f.putSem }()
@@ -440,14 +421,8 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 // object in the local store. Mounted on PeerPutPath. The owner node is
 // the destination for non-owner origin-fetches (issue #509).
 type PeerPutHandler struct {
-	store  PeerPutStore
-	logger observability.Logger
-	// onStore, if non-nil, is called after the object is stored. The cache
-	// handler wires this to its storeObject so refresh-before-expiry is
-	// scheduled for forwarded objects (which bypass the normal miss path
-	// on the owner). The request is a synthetic GET built from the
-	// forwarded object's headers; it carries enough context (Vary,
-	// conditional headers) for the refresh registry.
+	store   PeerPutStore
+	logger  observability.Logger
 	onStore func(ctx context.Context, obj *api.Object)
 }
 
@@ -468,38 +443,38 @@ func (h *PeerPutHandler) SetOnStore(fn func(ctx context.Context, obj *api.Object
 	h.onStore = fn
 }
 
-// ServeHTTP handles peer put requests: decode the forwarded object and
-// store it locally. The owner is the authoritative store for this key.
-func (h *PeerPutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+// Handle is the fasthttp.RequestHandler for peer put requests.
+func (h *PeerPutHandler) Handle(ctx *fasthttp.RequestCtx) {
+	if string(ctx.Method()) != fasthttp.MethodPost {
+		ctx.Error("method not allowed", fasthttp.StatusMethodNotAllowed)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxPeerFetchBytes))
-	if err != nil || len(body) == 0 {
-		http.Error(w, "read error", http.StatusBadRequest)
+	body := ctx.PostBody()
+	if len(body) == 0 {
+		ctx.Error("read error", fasthttp.StatusBadRequest)
 		return
 	}
 	obj, err := storage.DecodeObject(body)
 	if err != nil {
 		h.logger.Warn("peer put decode failed", "error", err)
-		http.Error(w, "decode error", http.StatusBadRequest)
+		ctx.Error("decode error", fasthttp.StatusBadRequest)
 		return
 	}
 	if obj == nil || obj.Key == (api.Key{}) {
-		http.Error(w, "missing key", http.StatusBadRequest)
+		ctx.Error("missing key", fasthttp.StatusBadRequest)
 		return
 	}
-	if err := h.store.Put(r.Context(), obj.Key, obj); err != nil {
+	if err := h.store.Put(ctx, obj.Key, obj); err != nil {
 		h.logger.Warn("peer put store failed", "key", obj.Key, "error", err)
-		http.Error(w, "store error", http.StatusInternalServerError)
+		ctx.Error("store error", fasthttp.StatusInternalServerError)
 		return
 	}
-	// Fire the onStore callback so the cache handler can schedule
-	// refresh-before-expiry for forwarded objects (issue #509).
 	if h.onStore != nil {
-		h.onStore(r.Context(), obj)
+		h.onStore(ctx, obj)
 	}
 	h.logger.Debug("served peer put", "key", obj.Key)
-	w.WriteHeader(http.StatusOK)
+	ctx.SetStatusCode(fasthttp.StatusOK)
 }
+
+// Ensure unused imports are referenced for future use.
+var _ = json.Marshal

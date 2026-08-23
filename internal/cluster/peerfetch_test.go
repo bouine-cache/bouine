@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -20,6 +21,8 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 type stubStore struct {
@@ -38,6 +41,42 @@ func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	return nil
 }
 
+// fastHTTPToHTTP adapts a fasthttp.RequestHandler to an http.Handler
+// for use with httptest.NewServer.
+func fastHTTPToHTTP(h fasthttp.RequestHandler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.SetMethod(r.Method)
+		ctx.Request.SetRequestURI(r.URL.String())
+		ctx.Request.Header.SetHost(r.Host)
+		for k, vs := range r.Header {
+			for _, v := range vs {
+				ctx.Request.Header.Add(k, v)
+			}
+		}
+		if r.Body != nil {
+			body, _ := io.ReadAll(r.Body)
+			ctx.Request.SetBody(body)
+		}
+		h(ctx)
+		w.WriteHeader(ctx.Response.StatusCode())
+		for k, v := range ctx.Response.Header.All() {
+			w.Header().Add(string(k), string(v))
+		}
+		_, _ = w.Write(ctx.Response.Body())
+	})
+}
+
+// peerFetchServerAdapter wraps a PeerFetchHandler as an http.Handler
+// for httptest.NewServer compatibility.
+func peerFetchServerAdapter(h *PeerFetchHandler) http.Handler {
+	return fastHTTPToHTTP(h.Handle)
+}
+
+func peerPutServerAdapter(h *PeerPutHandler) http.Handler {
+	return fastHTTPToHTTP(h.Handle)
+}
+
 func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(req)
@@ -48,7 +87,7 @@ func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop 
 		r.Header.Set(BouineHopHeader, fmt.Sprintf("%d", hop))
 	}
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, r)
+	peerFetchServerAdapter(h).ServeHTTP(rr, r)
 	return rr
 }
 
@@ -68,11 +107,6 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 	}
 }
 
-// TestPeerFetchHandler_BinaryWireProtocol pins that the handler
-// responds with the binary object codec (application/octet-stream),
-// not JSON. This is the single biggest allocation win from issue #187:
-// the JSON path base64-encoded the body and allocated a
-// map[string][]string per header on every peer fetch.
 func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	t.Parallel()
 	key := testkey.Key(42)
@@ -102,8 +136,6 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	require.Equal(t, 1, decoded.Header.Len())
 }
 
-// TestPeerFetcher_BinaryRoundTrip verifies the full client→server
-// round-trip uses the binary codec with zero JSON on the response path.
 func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	t.Parallel()
 	key := testkey.Key(7)
@@ -115,9 +147,9 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	obj.Header = header.NewMap(1)
 	obj.Header.AppendEntry("X-Custom", "value")
 
-	srv := httptest.NewServer(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+	srv := httptest.NewServer(peerFetchServerAdapter(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
 		key: obj,
-	}}, 0))
+	}}, 0)))
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
@@ -148,11 +180,9 @@ func TestPeerFetchHandler_HopLimit(t *testing.T) {
 
 func TestPeerFetchHandler_CustomHopLimit(t *testing.T) {
 	t.Parallel()
-	// hopLimit=1: a request at hop 1 should be rejected.
 	h := NewPeerFetchHandler(&stubStore{}, 1)
 	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, 1)
 	require.Equal(t, http.StatusLoopDetected, rr.Code)
-	// hopLimit=3: a request at hop 2 should pass through (not rejected).
 	h3 := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 3)
 	rr3 := postFetch(t, h3, api.PeerFetchRequest{Key: testkey.Key(1)}, 2)
 	require.NotEqual(t, http.StatusLoopDetected, rr3.Code)
@@ -163,7 +193,7 @@ func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 	h := NewPeerFetchHandler(&stubStore{}, 0)
 	rr := httptest.NewRecorder()
 	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerFetchPath, nil)
-	h.ServeHTTP(rr, r)
+	peerFetchServerAdapter(h).ServeHTTP(rr, r)
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
@@ -183,7 +213,7 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(encoded))
 	r.Header.Set(header.ContentType, "application/octet-stream")
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, r)
+	peerPutServerAdapter(h).ServeHTTP(rr, r)
 	require.Equal(t, http.StatusOK, rr.Code)
 	stored, _, err := store.Get(context.Background(), obj.Key)
 	require.NoError(t, err)
@@ -211,7 +241,7 @@ func TestPeerPutHandler_OnStoreCallback(t *testing.T) {
 	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(encoded))
 	r.Header.Set(header.ContentType, "application/octet-stream")
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, r)
+	peerPutServerAdapter(h).ServeHTTP(rr, r)
 	require.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, int32(1), called.Load())
 }
@@ -222,7 +252,7 @@ func TestPeerPutHandler_BadBody(t *testing.T) {
 	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader([]byte{0xFF, 0x00}))
 	r.Header.Set(header.ContentType, "application/octet-stream")
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, r)
+	peerPutServerAdapter(h).ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
@@ -231,14 +261,14 @@ func TestPeerPutHandler_WrongMethod(t *testing.T) {
 	h := NewPeerPutHandler(&stubStore{}, nil)
 	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerPutPath, nil)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, r)
+	peerPutServerAdapter(h).ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
 func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 	t.Parallel()
 	store := &stubStore{}
-	srv := httptest.NewServer(NewPeerPutHandler(store, nil))
+	srv := httptest.NewServer(peerPutServerAdapter(NewPeerPutHandler(store, nil)))
 	defer srv.Close()
 	f := NewPeerFetcher(nil, nil, 0)
 	obj := &api.Object{
@@ -260,7 +290,7 @@ func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 
 func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	t.Parallel()
-	const delay = 5 * time.Millisecond // > 1ms so it survives Milliseconds() truncation
+	const delay = 5 * time.Millisecond
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(delay)
 		w.Header().Set(header.ContentType, "application/octet-stream")
@@ -280,15 +310,10 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 		t.Fatalf("hits=%d latN=%d, want 1,1", hits, latN)
 	}
 	if latSumMs <= 0 {
-		t.Fatalf("latSumMs=%d, want >0 (latency must be measured around the RPC)", latSumMs)
+		t.Fatalf("latSumMs=%d, want >0", latSumMs)
 	}
 }
 
-// TestPeerFetcher_BinaryRoundTrip_TimeFields pins that the binary codec
-// round-trips the time.Duration and time.Time fields that ADR-0015 flags
-// as a risk (the time.Time zero-value edge case). The storage codec's own
-// tests cover the codec in isolation; this test pins the wire-format
-// contract that peer-fetch depends on.
 func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	t.Parallel()
 	key := testkey.Key(9)
@@ -305,9 +330,9 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 		LastModified:         lastMod,
 	}
 
-	srv := httptest.NewServer(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+	srv := httptest.NewServer(peerFetchServerAdapter(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
 		key: obj,
-	}}, 0))
+	}}, 0)))
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
@@ -323,11 +348,6 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	require.True(t, got.LastModified.Equal(obj.LastModified))
 }
 
-// TestPeerFetcher_MissIncrementsCounter pins that a 404 response
-// increments the misses counter. The pre-#187 code had a dead increment
-// (the !fetchResp.Hit branch was unreachable because the handler always
-// sent 404 for misses); the binary cutover moved the increment into the
-// 404 branch. This test prevents regressions of that fix.
 func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -451,10 +471,6 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	wg.Wait()
 }
 
-// BenchmarkPeerFetchHandler_ServeHTTP measures the handler encode path:
-// store.Get → storage.EncodeObject → ResponseWriter.Write. This is the
-// hot path that issue #187 targeted. The body is 4 KiB with 10 headers,
-// matching the PR's throwaway benchmark setup so results are comparable.
 func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	key := testkey.Key(1)
 	obj := &api.Object{
@@ -472,6 +488,7 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	}
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
 	h := NewPeerFetchHandler(store, 0)
+	adapter := peerFetchServerAdapter(h)
 
 	reqBody, _ := json.Marshal(api.PeerFetchRequest{Key: key})
 	b.ReportAllocs()
@@ -481,17 +498,13 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 		r, _ := http.NewRequestWithContext(context.Background(),
 			http.MethodPost, PeerFetchPath, bytes.NewReader(reqBody))
 		r.Header.Set(header.ContentType, "application/json")
-		h.ServeHTTP(rr, r)
+		adapter.ServeHTTP(rr, r)
 		if rr.Code != 200 {
 			b.Fatalf("status=%d", rr.Code)
 		}
 	}
 }
 
-// BenchmarkPeerFetcher_Fetch measures the full client→server round-trip:
-// HTTP request → handler encode → HTTP transport → client read →
-// storage.DecodeObject. This is the end-to-end path that the binary
-// codec replaces the JSON tower on.
 func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 	key := testkey.Key(1)
 	obj := &api.Object{

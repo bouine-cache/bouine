@@ -732,8 +732,8 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerRefreshHandler: cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
 			return rs.softPurgeKey(ctx, evt.Key)
 		}),
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit),
-		PeerPutHandler:     e.buildPeerPutHandler(rs),
+		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit).Handle,
+		PeerPutHandler:     e.buildPeerPutHandler(rs).Handle,
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:   dashMux,
 		FaviconHandler:     webdash.FaviconHandler(),

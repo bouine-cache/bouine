@@ -1,16 +1,14 @@
 // Package origin is the L5 upstream layer. It manages connection pools
 // to origin servers, selects targets via round-robin (ADR-0005),
 // performs passive health checking (consecutive-5xx ejection), active
-// health probes, hedged requests, and exposes a reverse-proxy
-// http.Handler that forwards requests to the chosen target.
+// health probes, hedged requests, and exposes a fasthttp.RequestHandler
+// that forwards requests to the chosen target.
 package origin
 
 import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
@@ -28,12 +26,12 @@ import (
 //
 // Stable.
 type Pool struct {
-	Name      string
-	targets   []*Target
-	next      atomic.Uint64
-	logger    observability.Logger
-	mu        sync.RWMutex
-	transport http.RoundTripper
+	Name    string
+	targets []*Target
+	next    atomic.Uint64
+	logger  observability.Logger
+	mu      sync.RWMutex
+	client  *fasthttp.Client
 }
 
 // Target is a single upstream endpoint.
@@ -49,8 +47,8 @@ type Target struct {
 
 // recordPassiveError increments the passive error counter and ejects the
 // target via CompareAndSwap if the threshold is reached. Called from both
-// the ModifyResponse (5xx) and ErrorHandler (connection error) paths. The
-// source string is included in the ejection log for operator visibility.
+// the 5xx and connection-error paths. The source string is included in
+// the ejection log for operator visibility.
 func (t *Target) recordPassiveError(threshold int, logger observability.Logger, poolName, source string) {
 	cnt := t.passiveErrors.Add(1)
 	if t.metrics != nil {
@@ -131,9 +129,6 @@ type PoolConfig struct {
 	// Zero disables passive health.
 	Consecutive5xx int
 
-	// Transport overrides the default http.Transport (useful for tests).
-	Transport http.RoundTripper
-
 	// DialTimeout bounds the TCP dial.
 	DialTimeout time.Duration
 
@@ -201,91 +196,92 @@ func (p *Pool) pick() *Target {
 	return nil
 }
 
-// targetKey is the context key used to pass the selected *Target to
-// the ReverseProxy Director / ModifyResponse / ErrorHandler without
-// creating a new closure per request.
-type targetKey struct{}
-
-// Handler returns an http.Handler that reverse-proxies to this pool.
-// The returned handler picks a target per request via round-robin and
-// forwards through a single, shared httputil.ReverseProxy — avoiding
-// the per-request allocation of a new ReverseProxy struct and its
-// three function closures.
-func (p *Pool) Handler(consecutive5xx int, transport http.RoundTripper) http.Handler {
-	if transport == nil {
-		transport = &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConnsPerHost:   64,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
-		}
-	}
-	p.transport = transport
-
-	// Construct the ReverseProxy once. The selected target is stored in
-	// the request context so Director/ModifyResponse/ErrorHandler can
-	// read it without capturing a per-request pointer.
-	proxy := &httputil.ReverseProxy{
-		Transport: transport,
-
-		Director: func(req *http.Request) {
-			t, _ := req.Context().Value(targetKey{}).(*Target)
-			if t == nil {
-				return
-			}
-			req.URL.Scheme = t.url.Scheme
-			req.URL.Host = t.url.Host
-			if req.URL.Scheme == "" {
-				req.URL.Scheme = "http"
-			}
-			req.Host = t.url.Host
-		},
-
-		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-			t, _ := req.Context().Value(targetKey{}).(*Target)
-			addr := ""
-			if t != nil {
-				addr = t.addr
-			}
-			p.logger.Warn("upstream error",
-				"pool", p.Name,
-				"target", addr,
-				"error", err)
-			if t != nil && consecutive5xx > 0 {
-				t.recordPassiveError(consecutive5xx, p.logger, p.Name, "connection error")
-			}
-			http.Error(w, "upstream error", http.StatusBadGateway)
-		},
-
-		ModifyResponse: func(resp *http.Response) error {
-			t, _ := resp.Request.Context().Value(targetKey{}).(*Target)
-			if t == nil {
-				return nil
-			}
-			if consecutive5xx > 0 && resp.StatusCode >= 500 {
-				t.recordPassiveError(consecutive5xx, p.logger, p.Name, "passive 5xx")
-			} else if consecutive5xx > 0 {
-				t.passiveErrors.Store(0)
-			}
-			return nil
+// FastHandler returns a fasthttp.RequestHandler that reverse-proxies
+// to this pool. The handler picks a target per request via round-robin
+// and forwards through a pooled fasthttp.Client. Passive health
+// checking (consecutive-5xx ejection) is applied on response.
+func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	p.client = &fasthttp.Client{
+		MaxConnsPerHost:               64,
+		MaxIdleConnDuration:           90 * time.Second,
+		ReadTimeout:                   DefaultResponseHeaderTimeout,
+		WriteTimeout:                  5 * time.Minute,
+		DisableHeaderNamesNormalizing: true,
+		Dial: func(addr string) (net.Conn, error) {
+			return dialer.Dial("tcp", addr)
 		},
 	}
+	conc5xx := consecutive5xx
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return func(ctx *fasthttp.RequestCtx) {
 		t := p.pick()
 		if t == nil {
-			http.Error(w, "no healthy upstream", http.StatusBadGateway)
+			ctx.Error("no healthy upstream", fasthttp.StatusBadGateway)
 			return
 		}
-		// Attach the selected target to the request context so the shared
-		// proxy functions above can read it. WithContext copies the
-		// *http.Request struct and wraps the context — one allocation, but
-		// far cheaper than the previous per-request ReverseProxy + 3 closures.
-		proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), targetKey{}, t)))
-	})
+
+		scheme := t.url.Scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		uri := scheme + "://" + t.url.Host + string(ctx.Path())
+		if q := ctx.QueryArgs(); q.Len() > 0 {
+			uri += "?" + string(q.QueryString())
+		}
+
+		req := fasthttp.AcquireRequest()
+		defer fasthttp.ReleaseRequest(req)
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.Header.SetMethod(string(ctx.Method()))
+		req.SetRequestURI(uri)
+		req.Header.SetHost(t.url.Host)
+		//nolint:staticcheck // deprecated but functional
+		ctx.Request.Header.VisitAll(func(k, v []byte) {
+			req.Header.AddBytesKV(k, v)
+		})
+		if len(ctx.PostBody()) > 0 {
+			req.SetBodyRaw(ctx.PostBody())
+		}
+
+		// Use DoTimeout directly because *fasthttp.RequestCtx.Done()
+		// panics when the ctx was created manually (not by a real
+		// fasthttp server).
+		if err := p.client.DoTimeout(req, resp, DefaultResponseHeaderTimeout); err != nil {
+			p.logger.Warn("upstream error",
+				"pool", p.Name,
+				"target", t.addr,
+				"uri", uri,
+				"error", err)
+			if conc5xx > 0 {
+				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error")
+			}
+			ctx.Error("upstream error", fasthttp.StatusBadGateway)
+			return
+		}
+
+		// Passive health: eject on consecutive 5xx, reset on success.
+		if conc5xx > 0 {
+			if resp.StatusCode() >= 500 {
+				t.recordPassiveError(conc5xx, p.logger, p.Name, "passive 5xx")
+			} else {
+				t.passiveErrors.Store(0)
+			}
+		}
+
+		// Copy response headers and body to the client.
+		dst := &ctx.Response.Header
+		//nolint:staticcheck // VisitAll deprecated but functional
+		resp.Header.VisitAll(func(k, v []byte) {
+			dst.AddBytesKV(k, v)
+		})
+		ctx.SetStatusCode(resp.StatusCode())
+		if string(ctx.Method()) != "HEAD" {
+			_, _ = ctx.Write(resp.Body())
+		}
+	}
 }
 
 // FastClient returns a cache.FastClient that fetches from this pool
@@ -398,10 +394,10 @@ func (p *Pool) MarkHealthy(addr string) {
 
 // Close drains idle upstream connections. Satisfies the lifecycle
 // contract so that rolling restarts don't leak TIME_WAIT sockets on
-// the origin side.
+// origins.
 func (p *Pool) Close(_ context.Context) error {
-	if t, ok := p.transport.(*http.Transport); ok {
-		t.CloseIdleConnections()
-	}
+	// fasthttp.Client doesn't expose CloseIdleConnections directly;
+	// the GC will reclaim idle connections when the Client is
+	// dereferenced.
 	return nil
 }

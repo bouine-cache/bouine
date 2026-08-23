@@ -44,33 +44,21 @@ func fasthttpReqCtx(r *http.Request) *fasthttp.RequestCtx {
 	ctx.Request.Header.SetMethod(r.Method)
 	ctx.Request.SetRequestURI(r.URL.String())
 	ctx.Request.Header.SetHost(r.Host)
+	for k, vs := range r.Header {
+		for _, v := range vs {
+			ctx.Request.Header.Add(k, v)
+		}
+	}
+	if r.Body != nil {
+		body, _ := io.ReadAll(r.Body)
+		ctx.Request.SetBody(body)
+	}
 	return ctx
 }
 
 // newRR creates a fresh ResponseRecorder for tests.
 func newRR() *httptest.ResponseRecorder {
 	return httptest.NewRecorder()
-}
-
-// mockOriginClient implements FastClient for tests that need deterministic
-// responses without a real HTTP server (e.g., synctest tests).
-type mockOriginClient struct {
-	status  int
-	body    []byte
-	headers http.Header
-}
-
-func (m *mockOriginClient) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
-	resp.SetStatusCode(m.status)
-	for k, vs := range m.headers {
-		for _, v := range vs {
-			resp.Header.Set(k, v)
-		}
-	}
-	if m.body != nil {
-		resp.SetBody(m.body)
-	}
-	return nil
 }
 
 func testHandler(t *testing.T, upstream http.Handler) *Handler {
@@ -80,8 +68,9 @@ func testHandler(t *testing.T, upstream http.Handler) *Handler {
 		NumShards: 2,
 	})
 	return NewHandler(HandlerConfig{
-		Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream),
-		Store:    store,
+		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
+		FastClient: &handlerFastClient{handler: upstream},
+		Store:      store,
 	})
 }
 
@@ -139,8 +128,17 @@ func TestHandler_NoStoreNotCached(t *testing.T) {
 func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	t.Parallel()
 	// RFC 9111 §4.4: POST invalidates cached GET response.
-	// RFC 9111 §4.3.1: cacheable POST response stored under GET key.
-	h := testHandler(t, origin200("body"))
+	// RFC 9111 §4.3.1: cacheable POST response stored under GET key
+	// when Content-Location matches the request URI.
+	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.ETag, `"v1"`)
+		if r.Method == "POST" {
+			w.Header().Set(header.ContentLocation, r.URL.Path)
+		}
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body")
+	}))
 
 	// Populate cache with GET.
 	rr := newRR()
@@ -372,7 +370,7 @@ func testHandlerStayinAlive(t *testing.T, upstream http.Handler) *Handler {
 	})
 	return NewHandler(HandlerConfig{
 		Upstream:    wrapUpstream(upstream),
-		FastClient:  &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:  &handlerFastClient{handler: upstream},
 		Store:       store,
 		StayinAlive: true,
 	})
@@ -864,7 +862,7 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:    wrapUpstream(orig),
-		FastClient:  &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:  &handlerFastClient{handler: orig},
 		Store:       store,
 		Logger:      slog.Default(),
 		VaryCapHits: counterFunc(func() { hitCount++ }),
@@ -880,10 +878,9 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	require.Equal(t, 0, hitCount)
 
 	// One more should trip the cap.
-	rr := newRR()
 	req := httptest.NewRequest("GET", "http://example.com/vary", nil)
 	req.Header.Set("X-Test-Variant", "overflow")
-	rr = newRR()
+	rr := newRR()
 	h.ServeHTTPCompat(rr, req)
 	require.Equal(t, 1, hitCount)
 }
@@ -905,7 +902,7 @@ func TestMaxVariants_OverwriteDoesNotDoubleCount(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:    wrapUpstream(orig),
-		FastClient:  &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:  &handlerFastClient{handler: orig},
 		Store:       store,
 		Logger:      slog.Default(),
 		VaryCapHits: counterFunc(func() { hitCount++ }),
@@ -933,7 +930,7 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 2 << 10})
 	h := NewHandler(HandlerConfig{
 		Upstream:    wrapUpstream(orig),
-		FastClient:  &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:  &handlerFastClient{handler: orig},
 		Store:       store,
 		Logger:      slog.Default(),
 		VaryCapHits: counterFunc(func() { hitCount++ }),
@@ -965,7 +962,7 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -1040,7 +1037,7 @@ func TestHandler_PurgeDeletesVariants(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -1109,7 +1106,7 @@ func TestHandler_PurgeNoVariants(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -1160,7 +1157,7 @@ func TestHandler_PurgeVariantsUnregistersRefresh(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:            wrapUpstream(orig),
-		FastClient:          &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:          &handlerFastClient{handler: orig},
 		Store:               store,
 		Logger:              slog.Default(),
 		RefreshBeforeExpiry: true,
@@ -1203,13 +1200,13 @@ func TestHandler_PurgeNonOwningHandlerSkipsStoreDelete(t *testing.T) {
 	orig := origin200("body")
 	hA := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 	hB := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -1252,8 +1249,9 @@ func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	})
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
-		Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream),
-		Store:    store,
+		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
+		FastClient: &handlerFastClient{handler: upstream},
+		Store:      store,
 		// ownerFn and peerFetch are nil (default zero-value) —
 		// simulates eventual mode where no peer fetch occurs.
 	})
@@ -1282,7 +1280,7 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
-	h := NewHandler(HandlerConfig{Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream), Store: store})
+	h := NewHandler(HandlerConfig{Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream), FastClient: &handlerFastClient{handler: upstream}, Store: store})
 
 	// Warm the cache.
 	rr := newRR()
@@ -1318,7 +1316,7 @@ func TestHandler_BanByHostRegex(t *testing.T) {
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
-	h := NewHandler(HandlerConfig{Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream), Store: store})
+	h := NewHandler(HandlerConfig{Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream), FastClient: &handlerFastClient{handler: upstream}, Store: store})
 
 	// Warm the cache.
 	rr := newRR()
@@ -1382,7 +1380,7 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
 		Upstream:            wrapUpstream(upstream),
-		FastClient:          &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:          &handlerFastClient{handler: upstream},
 		Store:               store,
 		MaxFetchConcurrency: maxConc,
 	})
@@ -1432,7 +1430,7 @@ func testRefreshHandlerWithPersist(t *testing.T, minHits, persistCycles int) *Ha
 	})
 	h := NewHandler(HandlerConfig{
 		Upstream:             wrapUpstream(upstream),
-		FastClient:           &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:           &handlerFastClient{handler: upstream},
 		Store:                store,
 		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DefaultTTL:           60 * time.Second,
@@ -1551,7 +1549,7 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	})
 	h := NewHandler(HandlerConfig{
 		Upstream:            wrapUpstream(upstream),
-		FastClient:          &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:          &handlerFastClient{handler: upstream},
 		Store:               store,
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DefaultTTL:          60 * time.Second,
@@ -2009,8 +2007,9 @@ func TestHandler_SWR_Close_DrainsInFlightRevalidate(t *testing.T) {
 	})
 
 	h := NewHandler(HandlerConfig{
-		Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream),
-		Store:    bs,
+		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
+		FastClient: &handlerFastClient{handler: upstream},
+		Store:      bs,
 	})
 
 	// First request: populates the cache.
@@ -2090,8 +2089,9 @@ func TestHandler_SWR_Close_NoNewRevalidateAfterClose(t *testing.T) {
 	})
 
 	h := NewHandler(HandlerConfig{
-		Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream),
-		Store:    bs,
+		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
+		FastClient: &handlerFastClient{handler: upstream},
+		Store:      bs,
 	})
 
 	// Populate cache.
@@ -2168,16 +2168,15 @@ func TestParseSurrogateKeys(t *testing.T) {
 
 func TestStripNoCacheFields(t *testing.T) {
 	t.Parallel()
-	dst := http.Header{
-		header.CacheControl: []string{"max-age=60"},
-		"Set-Cookie":        {"sid=abc"},
-		"Content-Encoding":  {"gzip"},
-		"ETag":              {`"v1"`},
-	}
-	stripNoCacheFields(&fasthttp.ResponseHeader{}, `no-cache="Set-Cookie, Content-Encoding"`)
-	assert.NotContains(t, dst, "Set-Cookie")
-	assert.NotContains(t, dst, "Content-Encoding")
-	assert.Contains(t, dst, "ETag")
+	dst := &fasthttp.ResponseHeader{}
+	dst.Set(header.CacheControl, "max-age=60")
+	dst.Set("Set-Cookie", "sid=abc")
+	dst.Set("Content-Encoding", "gzip")
+	dst.Set(header.ETag, `"v1"`)
+	stripNoCacheFields(dst, `no-cache="Set-Cookie, Content-Encoding"`)
+	assert.Equal(t, "", string(dst.Peek("Set-Cookie")))
+	assert.Equal(t, "", string(dst.Peek("Content-Encoding")))
+	assert.Equal(t, `"v1"`, string(dst.Peek(header.ETag)))
 }
 
 func TestStripNoCacheFields_Empty(t *testing.T) {
@@ -2219,10 +2218,10 @@ func TestStaleFallbackAllowed(t *testing.T) {
 
 func TestSourceSlice(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, []string{"hot"}, string(api.SourceHot))
-	assert.Equal(t, []string{"warm"}, string(api.SourceWarm))
-	assert.Equal(t, []string{"peer"}, string(api.SourcePeer))
-	assert.Equal(t, []string{"origin"}, string(api.SourceOrigin))
+	assert.Equal(t, "hot", string(api.SourceHot))
+	assert.Equal(t, "warm", string(api.SourceWarm))
+	assert.Equal(t, "peer", string(api.SourcePeer))
+	assert.Equal(t, "origin", string(api.SourceOrigin))
 }
 
 func TestComputeTTL_NegativeTTL(t *testing.T) {
@@ -2445,9 +2444,11 @@ func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
 	}
 	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 	// Use an upstream that returns 502 (error response).
-	h.upstream = wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
+	errUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(502)
 	})
+	h.upstream = wrapUpstream(errUpstream)
+	h.fastClient = &handlerFastClient{handler: errUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2502,10 +2503,12 @@ func TestDoBackgroundRefresh_UncacheableSkip(t *testing.T) {
 	}
 	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
 	// Upstream returns no-store (uncacheable).
-	h.upstream = wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
+	nsUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "no-store")
 		w.WriteHeader(200)
 	})
+	h.upstream = wrapUpstream(nsUpstream)
+	h.fastClient = &handlerFastClient{handler: nsUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2531,11 +2534,13 @@ func TestDoBackgroundRefresh_SetCookieSkip(t *testing.T) {
 		Header: http.Header{},
 	}
 	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
-	h.upstream = wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
+	scUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=60")
 		w.Header().Set(header.SetCookie, "sid=abc")
 		w.WriteHeader(200)
 	})
+	h.upstream = wrapUpstream(scUpstream)
+	h.fastClient = &handlerFastClient{handler: scUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2561,11 +2566,13 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 		Header: http.Header{},
 	}
 	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
-	h.upstream = wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
+	bigUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(header.CacheControl, "max-age=60")
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "this is a very long body that exceeds the max object size")
 	})
+	h.upstream = wrapUpstream(bigUpstream)
+	h.fastClient = &handlerFastClient{handler: bigUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2583,15 +2590,17 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 func TestWriteAndMaybeStore_VariantStore(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.Header().Set(header.Vary, "Accept-Encoding")
+		w.Header().Set(header.ETag, `"v1"`)
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "body-"+r.Header.Get(header.AcceptEncoding))
+	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.Vary, "Accept-Encoding")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "body-"+r.Header.Get(header.AcceptEncoding))
-		}),
-		Store: store,
+		Upstream:   wrapUpstream(upstream),
+		FastClient: &handlerFastClient{handler: upstream},
+		Store:      store,
 	})
 	// First request — MISS, stores with Vary.
 	r1 := httptest.NewRequest("GET", "http://example.com/v", nil)
@@ -2627,12 +2636,12 @@ func TestTryConditional304_Match(t *testing.T) {
 	}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set(header.IfNoneMatch, `"v1"`)
-	ok := h.tryConditional304(fasthttpReqCtx(r), obj, api.SourceHot)
+	ctx := fasthttpReqCtx(r)
+	ok := h.tryConditional304(ctx, obj, api.SourceHot)
 	require.True(t, ok)
-	rr := newRR()
-	assert.Equal(t, fasthttp.StatusNotModified, rr.Code)
-	assert.Equal(t, `"v1"`, rr.Header().Get(header.ETag))
-	assert.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	assert.Equal(t, fasthttp.StatusNotModified, ctx.Response.StatusCode())
+	assert.Equal(t, `"v1"`, string(ctx.Response.Header.Peek(header.ETag)))
+	assert.Equal(t, "HIT", string(ctx.Response.Header.Peek(header.XCache)))
 }
 
 func TestTryConditional304_NoMatch(t *testing.T) {
@@ -2657,9 +2666,9 @@ func TestAgeHeader_Fallback(t *testing.T) {
 	t.Parallel()
 	// Age >= 600s uses the fallback allocation path.
 	got := ageHeader(600 * time.Second)
-	assert.Equal(t, "600", got[0])
+	assert.Equal(t, "600", got)
 	got = ageHeader(-1 * time.Second)
-	assert.Equal(t, "-1", got[0])
+	assert.Equal(t, "-1", got)
 }
 
 func TestShouldRefresh_ScoreGate(t *testing.T) {
@@ -2693,9 +2702,9 @@ func TestHandleBypass_OnlyIfCached_504(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 	r := httptest.NewRequest("GET", "http://example.com/nonexistent", nil)
 	r.Header.Set(header.CacheControl, "only-if-cached")
-	h.handleBypass(fasthttpReqCtx(r))
-	rr := newRR()
-	require.Equal(t, fasthttp.StatusGatewayTimeout, rr.Code)
+	ctx := fasthttpReqCtx(r)
+	h.handleBypass(ctx)
+	require.Equal(t, fasthttp.StatusGatewayTimeout, ctx.Response.StatusCode())
 }
 
 func TestBuildLocationKey_AbsoluteURL(t *testing.T) {
@@ -2885,14 +2894,16 @@ func TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch(t *testing.T) {
 	var originCalls atomic.Int32
 	var peerPutCalls atomic.Int32
 	var peerPutObj *api.Object
+	originUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originCalls.Add(1)
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "from-origin")
+	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
-			originCalls.Add(1)
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "from-origin")
-		}),
-		Store: store,
+		Upstream:   wrapUpstream(originUpstream),
+		FastClient: &handlerFastClient{handler: originUpstream},
+		Store:      store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
@@ -2983,13 +2994,15 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	var peerPutCalls atomic.Int32
+	ownerUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(header.CacheControl, "max-age=60")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "owner-body")
+	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "owner-body")
-		}),
-		Store: store,
+		Upstream:   wrapUpstream(ownerUpstream),
+		FastClient: &handlerFastClient{handler: ownerUpstream},
+		Store:      store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "self:8080"}, true // local owner
 		},
@@ -3089,21 +3102,22 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 		var calls atomic.Int32
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
+		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(header.IfNoneMatch) != "" {
+				w.Header().Set(header.CacheControl, "max-age=120")
+				w.WriteHeader(304)
+				return
+			}
+			calls.Add(1)
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("body"))
+		})
 		h := NewHandler(HandlerConfig{
-			Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get(header.IfNoneMatch) != "" {
-					w.Header().Set(header.CacheControl, "max-age=120")
-					w.WriteHeader(304)
-					return
-				}
-				calls.Add(1)
-				w.Header().Set(header.CacheControl, "max-age=60")
-				w.Header().Set(header.ETag, `"v1"`)
-				w.WriteHeader(200)
-				_, _ = w.Write([]byte("body"))
-			}),
+			Upstream:            wrapUpstream(orig304),
 			Store:               store,
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3138,19 +3152,20 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
+		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
+				w.WriteHeader(fasthttp.StatusNotModified)
+				return
+			}
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "body")
+		})
 		h := NewHandler(HandlerConfig{
-			Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-					w.WriteHeader(fasthttp.StatusNotModified)
-					return
-				}
-				w.Header().Set(header.CacheControl, "max-age=60")
-				w.Header().Set(header.ETag, `"v1"`)
-				w.WriteHeader(200)
-				_, _ = io.WriteString(w, "body")
-			}),
+			Upstream:            wrapUpstream(orig304),
 			Store:               store,
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3184,19 +3199,20 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
+		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
+				w.WriteHeader(fasthttp.StatusNotModified)
+				return
+			}
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "body")
+		})
 		h := NewHandler(HandlerConfig{
-			Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-					w.WriteHeader(fasthttp.StatusNotModified)
-					return
-				}
-				w.Header().Set(header.CacheControl, "max-age=60")
-				w.Header().Set(header.ETag, `"v1"`)
-				w.WriteHeader(200)
-				_, _ = io.WriteString(w, "body")
-			}),
+			Upstream:            wrapUpstream(orig304),
 			Store:               store,
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3315,19 +3331,20 @@ func TestTriggerBgRefresh_NotFound(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
+		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
+				w.WriteHeader(fasthttp.StatusNotModified)
+				return
+			}
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "body")
+		})
 		h := NewHandler(HandlerConfig{
-			Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-					w.WriteHeader(fasthttp.StatusNotModified)
-					return
-				}
-				w.Header().Set(header.CacheControl, "max-age=60")
-				w.Header().Set(header.ETag, `"v1"`)
-				w.WriteHeader(200)
-				_, _ = io.WriteString(w, "body")
-			}),
+			Upstream:            wrapUpstream(orig304),
 			Store:               store,
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3349,19 +3366,20 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
+		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
+				w.WriteHeader(fasthttp.StatusNotModified)
+				return
+			}
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "body")
+		})
 		h := NewHandler(HandlerConfig{
-			Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-					w.WriteHeader(fasthttp.StatusNotModified)
-					return
-				}
-				w.Header().Set(header.CacheControl, "max-age=60")
-				w.Header().Set(header.ETag, `"v1"`)
-				w.WriteHeader(200)
-				_, _ = io.WriteString(w, "body")
-			}),
+			Upstream:            wrapUpstream(orig304),
 			Store:               store,
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3393,19 +3411,20 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
+		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
+				w.WriteHeader(fasthttp.StatusNotModified)
+				return
+			}
+			w.Header().Set(header.CacheControl, "max-age=60")
+			w.Header().Set(header.ETag, `"v1"`)
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, "body")
+		})
 		h := NewHandler(HandlerConfig{
-			Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-					w.WriteHeader(fasthttp.StatusNotModified)
-					return
-				}
-				w.Header().Set(header.CacheControl, "max-age=60")
-				w.Header().Set(header.ETag, `"v1"`)
-				w.WriteHeader(200)
-				_, _ = io.WriteString(w, "body")
-			}),
+			Upstream:            wrapUpstream(orig304),
 			Store:               store,
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3456,10 +3475,12 @@ func TestResponseRecorder_Write(t *testing.T) {
 func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	orig304 := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(503)
+	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(503)
-		}),
+		Upstream:    wrapUpstream(orig304),
+		FastClient:  &handlerFastClient{handler: orig304},
 		Store:       store,
 		StayinAlive: true,
 	})
@@ -3478,20 +3499,22 @@ func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 	_ = store.Put(context.Background(), key, stale)
 	// Call fetchAndStoreStayinAlive directly.
 	r := httptest.NewRequest("GET", "http://example.com/stayin5xx", nil)
-	h.fetchAndStoreStayinAlive(fasthttpReqCtx(r), key, key, stale, time.Now(), api.SourceHot)
-	rr := newRR()
-	assert.Equal(t, "STALE", rr.Header().Get(header.XCache))
-	assert.Equal(t, "stale-body", rr.Body.String())
+	ctx := fasthttpReqCtx(r)
+	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot)
+	assert.Equal(t, "STALE", string(ctx.Response.Header.Peek(header.XCache)))
+	assert.Equal(t, "stale-body", string(ctx.Response.Body()))
 }
 
 func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Origin down: block until context cancelled (timeout).
+		<-r.Context().Done()
+	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Origin down: block until context cancelled (timeout).
-			<-r.Context().Done()
-		}),
+		Upstream:     wrapUpstream(orig304),
+		FastClient:   &handlerFastClient{handler: orig304},
 		Store:        store,
 		StayinAlive:  true,
 		FetchTimeout: 100 * time.Millisecond,
@@ -3509,9 +3532,9 @@ func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
 	}
 	_ = store.Put(context.Background(), key, stale)
 	r := httptest.NewRequest("GET", "http://example.com/stayin-err", nil)
-	h.fetchAndStoreStayinAlive(fasthttpReqCtx(r), key, key, stale, time.Now(), api.SourceHot)
-	rr := newRR()
-	assert.Equal(t, "STALE", rr.Header().Get(header.XCache))
+	ctx := fasthttpReqCtx(r)
+	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot)
+	assert.Equal(t, "STALE", string(ctx.Response.Header.Peek(header.XCache)))
 }
 
 func TestHandler_SyntheticTimeHitMiss(t *testing.T) {
@@ -3520,7 +3543,7 @@ func TestHandler_SyntheticTimeHitMiss(t *testing.T) {
 		defer store.Close(context.Background())
 		h := NewHandler(HandlerConfig{
 			Upstream:   wrapUpstream(origin200("body")),
-			FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+			FastClient: &handlerFastClient{handler: origin200("body")},
 			Store:      store,
 		})
 		// First request: MISS, stores object with max-age=60.
@@ -3566,7 +3589,7 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 		})
 		h := NewHandler(HandlerConfig{
 			Upstream:            wrapUpstream(upstream),
-			FastClient:          &mock304Client{etag: `"v1"`},
+			FastClient:          &handlerFastClient{handler: upstream},
 			Store:               store,
 			Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 			DefaultTTL:          60 * time.Second,
@@ -3626,7 +3649,7 @@ func TestSoftPurge_MarksObjectStale(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -3686,7 +3709,7 @@ func TestSoftPurge_NoSWRFallsBackToDelete(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -3723,7 +3746,7 @@ func TestSoftPurge_PreservesValidators(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -3761,7 +3784,7 @@ func TestSoftPurge_ServeStaleThenRevalidate(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -3809,7 +3832,7 @@ func TestSoftPurge_Variants(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(orig),
-		FastClient: &mockOriginClient{status: 200, body: []byte("cached-body"), headers: http.Header{header.CacheControl: []string{"max-age=3600, stale-while-revalidate=60"}, header.ETag: []string{`"v1"`}}},
+		FastClient: &handlerFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
@@ -4018,7 +4041,7 @@ func TestSoftPurge_RefreshRegistryUnregistered(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
 		Upstream:            wrapUpstream(orig),
-		FastClient:          &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:          &handlerFastClient{handler: orig},
 		Store:               store,
 		Logger:              slog.Default(),
 		RefreshBeforeExpiry: true,
@@ -4037,22 +4060,4 @@ func TestSoftPurge_RefreshRegistryUnregistered(t *testing.T) {
 	require.True(t, owned)
 
 	require.Equal(t, 0, h.refreshRegistry.Len(), "refresh registry should be cleared after soft purge with hard delete")
-}
-
-// mock304Client simulates an origin that returns 304 for conditional requests.
-type mock304Client struct {
-	etag string
-}
-
-func (m *mock304Client) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
-	if string(req.Header.Peek(header.IfNoneMatch)) != "" {
-		resp.SetStatusCode(304)
-		resp.Header.Set(header.CacheControl, "max-age=120")
-		return nil
-	}
-	resp.SetStatusCode(200)
-	resp.Header.Set(header.CacheControl, "max-age=60")
-	resp.Header.Set(header.ETag, m.etag)
-	resp.SetBody([]byte("body"))
-	return nil
 }

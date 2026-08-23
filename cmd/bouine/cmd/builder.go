@@ -27,7 +27,6 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 
 	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 // buildStore creates a TieredStore (hot + warm + WAL) when WarmDir is
@@ -238,16 +237,14 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			continue
 		}
 		consecutive5xx := 0
-		var transport http.RoundTripper
 		for _, pc := range e.cfg.UpstreamPools {
 			if pc.Name != rc.Pool {
 				continue
 			}
 			consecutive5xx = pc.Health.Passive.Consecutive5xx
-			transport = buildTransport(pc)
 			break
 		}
-		upstream := fasthttpadaptor.NewFastHTTPHandler(p.Handler(consecutive5xx, transport))
+		upstream := p.FastHandler(consecutive5xx)
 		// TODO: stripPrefix needs fasthttp-native implementation
 		_ = rc.Request.StripPrefix
 		cfg := cache.HandlerConfig{
@@ -511,36 +508,8 @@ func applyRefreshConfig(cfg *cache.HandlerConfig, rc config.RouteCache) {
 	cfg.RefreshReactiveFirst = rc.RefreshReactiveFirst
 }
 
-// buildTransport constructs the HTTP transport for an upstream pool,
-// applying dial timeout, keep-alive, response header timeout, and
-// optional hedge settings.
-func buildTransport(pc config.UpstreamPool) http.RoundTripper {
-	dialTimeout := pc.Connect.Timeout
-	if dialTimeout <= 0 {
-		dialTimeout = 10 * time.Second
-	}
-	keepAlive := pc.Connect.KeepAlive
-	if keepAlive <= 0 {
-		keepAlive = 30 * time.Second
-	}
-	responseHeaderTimeout := pc.Connect.ResponseHeaderTimeout
-	if responseHeaderTimeout <= 0 {
-		responseHeaderTimeout = origin.DefaultResponseHeaderTimeout
-	}
-	base := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   dialTimeout,
-			KeepAlive: keepAlive,
-		}).DialContext,
-		MaxIdleConnsPerHost:   64,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: responseHeaderTimeout,
-	}
-	if pc.Connect.MaxConnections > 0 {
-		base.MaxConnsPerHost = pc.Connect.MaxConnections
-	}
-	if pc.Connect.HedgeTimeout > 0 {
-		return &origin.HedgedTransport{Inner: base, Timeout: pc.Connect.HedgeTimeout}
-	}
-	return base
+// buildHedgeTimeout returns the hedge timeout from the pool config,
+// or 0 if hedging is not configured.
+func buildHedgeTimeout(pc config.UpstreamPool) time.Duration {
+	return pc.Connect.HedgeTimeout
 }

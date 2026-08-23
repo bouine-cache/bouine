@@ -18,7 +18,7 @@ func newSetCookieHandler(t *testing.T, upstream http.Handler, allow bool) *Handl
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
 		Upstream:       wrapUpstream(upstream),
-		FastClient:     &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:     &handlerFastClient{handler: upstream},
 		Store:          store,
 		AllowSetCookie: allow,
 	})
@@ -116,7 +116,6 @@ func TestSetCookie_NoStoreStillBlocks(t *testing.T) {
 	url := "http://example.com/auth"
 	for range 3 {
 		rr := newRR()
-		rr = newRR()
 		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
 	}
 	assert.Equal(t, 3, calls)

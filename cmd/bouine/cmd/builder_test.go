@@ -3,14 +3,15 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -178,45 +179,21 @@ func TestApplyRefreshConfig_WithOverride(t *testing.T) {
 	assert.True(t, cfg.RefreshReactiveFirst)
 }
 
-func TestBuildTransport_Defaults(t *testing.T) {
+func TestBuildHedgeTimeout_Defaults(t *testing.T) {
 	t.Parallel()
 	pc := config.UpstreamPool{Name: "test"}
-	rt := buildTransport(pc)
-	require.NotNil(t, rt)
+	rt := buildHedgeTimeout(pc)
+	require.Equal(t, time.Duration(0), rt)
 }
 
-func TestBuildTransport_WithMaxConnections(t *testing.T) {
-	t.Parallel()
-	pc := config.UpstreamPool{
-		Name:    "test",
-		Connect: config.ConnectPolicy{MaxConnections: 10},
-	}
-	rt := buildTransport(pc)
-	require.NotNil(t, rt)
-}
-
-func TestBuildTransport_WithHedgeTimeout(t *testing.T) {
+func TestBuildHedgeTimeout_WithHedgeTimeout(t *testing.T) {
 	t.Parallel()
 	pc := config.UpstreamPool{
 		Name:    "test",
 		Connect: config.ConnectPolicy{HedgeTimeout: 500 * time.Millisecond},
 	}
-	rt := buildTransport(pc)
-	require.NotNil(t, rt)
-}
-
-func TestBuildTransport_CustomTimeouts(t *testing.T) {
-	t.Parallel()
-	pc := config.UpstreamPool{
-		Name: "test",
-		Connect: config.ConnectPolicy{
-			Timeout:               5 * time.Second,
-			KeepAlive:             60 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
-		},
-	}
-	rt := buildTransport(pc)
-	require.NotNil(t, rt)
+	rt := buildHedgeTimeout(pc)
+	require.Equal(t, 500*time.Millisecond, rt)
 }
 
 func TestSanitizedConfig(t *testing.T) {

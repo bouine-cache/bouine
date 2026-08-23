@@ -76,13 +76,12 @@ func TestStripQueryParams_HandlerIntegration(t *testing.T) {
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(upstream),
-		FastClient: &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient: &handlerFastClient{handler: upstream},
 		Store:      store,
 		Policy:     NewKeyPolicy(map[string]bool{"utm_source": true, "fbclid": true}, nil, nil, nil, false, false),
 	})
 
 	rr := newRR()
-	rr = newRR()
 	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=email", nil))
 
 	rr = newRR()

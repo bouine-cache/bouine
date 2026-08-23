@@ -82,11 +82,13 @@ func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
 	// An upstream that returns a body larger than maxResponseBytes triggers
 	// the truncation error path in doFetch (fetchResult.Err != nil), which
 	// makes fetchAndStore set X-Cache-Source: origin before the 502.
+	bigUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(make([]byte, 10<<20)) // 10 MiB > 4 MiB default
+	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(200)
-			_, _ = w.Write(make([]byte, 10<<20)) // 10 MiB > 4 MiB default
-		}),
+		Upstream:   wrapUpstream(bigUpstream),
+		FastClient: &handlerFastClient{handler: bigUpstream},
 		Store: storage.NewHotStore(storage.HotConfig{
 			MaxBytes:  1 << 20,
 			NumShards: 2,

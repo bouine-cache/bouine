@@ -3,11 +3,13 @@ package origin
 import (
 	"context"
 	"math/rand"
-	"net/http"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+
+	"github.com/valyala/fasthttp"
 )
 
 // ActiveHealthChecker runs periodic HTTP probes against every target
@@ -18,7 +20,7 @@ type ActiveHealthChecker struct {
 	pool   *Pool
 	cfg    ActiveHealthConfig
 	logger observability.Logger
-	client *http.Client
+	client *fasthttp.Client
 }
 
 // ActiveHealthConfig controls the probe behavior.
@@ -61,15 +63,20 @@ func NewActiveHealthChecker(pool *Pool, cfg ActiveHealthConfig, logger observabi
 		pool:   pool,
 		cfg:    cfg,
 		logger: logger,
-		client: &http.Client{Timeout: cfg.Timeout},
+		client: &fasthttp.Client{
+			MaxConnsPerHost: 2,
+			ReadTimeout:     cfg.Timeout,
+			WriteTimeout:    cfg.Timeout,
+			Dial: func(addr string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: cfg.Timeout}).Dial("tcp", addr)
+			},
+		},
 	}
 }
 
 // Run starts probing in a loop until ctx is cancelled. It is designed
 // to be launched inside a supervised.Group.
 func (hc *ActiveHealthChecker) Run(ctx context.Context) error {
-	// Jitter the first probe by up to half the interval so multiple
-	// pools don't probe in lockstep.
 	jitter := time.Duration(rand.Int63n(int64(hc.cfg.Interval / 2))) //nolint:gosec // not crypto
 	select {
 	case <-ctx.Done():
@@ -109,22 +116,21 @@ func (hc *ActiveHealthChecker) probeAll(ctx context.Context) {
 
 func (hc *ActiveHealthChecker) probeOne(ctx context.Context, t *Target) {
 	url := t.url.Scheme + "://" + t.url.Host + hc.cfg.Path
-	req, err := http.NewRequestWithContext(ctx, hc.cfg.Method, url, nil)
-	if err != nil {
-		return
-	}
 
-	resp, err := hc.client.Do(req)
-	if err != nil {
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(hc.cfg.Method)
+	req.SetRequestURI(url)
+
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	if err := hc.client.DoTimeout(req, resp, hc.cfg.Timeout); err != nil {
 		hc.recordFailure(t)
 		return
 	}
-	defer func() {
-		_, _ = http.MaxBytesReader(nil, resp.Body, 4096).Read(make([]byte, 4096))
-		_ = resp.Body.Close()
-	}()
 
-	if hc.isExpectedCode(resp.StatusCode) {
+	if hc.isExpectedCode(resp.StatusCode()) {
 		hc.recordSuccess(t)
 	} else {
 		hc.recordFailure(t)
@@ -140,10 +146,6 @@ func (hc *ActiveHealthChecker) isExpectedCode(code int) bool {
 	return false
 }
 
-// recordSuccess resets the probe error counter and counts consecutive
-// probe successes toward the healthy threshold for restore. It does
-// NOT touch passiveErrors — passive and active counters are
-// independent so passive traffic cannot wipe active probe state.
 func (hc *ActiveHealthChecker) recordSuccess(t *Target) {
 	t.recordProbeSuccess(hc.cfg.HealthyThreshold, hc.logger, hc.pool.Name)
 }

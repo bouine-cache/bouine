@@ -56,8 +56,8 @@ type Config struct {
 	OnPurged           func(ctx context.Context, url string)
 	OnRefreshed        func(ctx context.Context, url string)
 	OnBanned           func(ctx context.Context, expr api.BanExpr)
-	PeerFetchHandler   http.Handler
-	PeerPutHandler     http.Handler
+	PeerFetchHandler   fasthttp.RequestHandler
+	PeerPutHandler     fasthttp.RequestHandler
 	PeerMetricsHandler fasthttp.RequestHandler
 	DashboardHandler   fasthttp.RequestHandler
 	FaviconHandler     fasthttp.RequestHandler
@@ -264,10 +264,10 @@ func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch
 		peerRefresh = fasthttpadaptor.NewFastHTTPHandler(s.cfg.PeerRefreshHandler)
 	}
 	if s.cfg.PeerFetchHandler != nil {
-		peerFetch = fasthttpadaptor.NewFastHTTPHandler(s.cfg.PeerFetchHandler)
+		peerFetch = s.cfg.PeerFetchHandler
 	}
 	if s.cfg.PeerPutHandler != nil {
-		peerPut = fasthttpadaptor.NewFastHTTPHandler(s.cfg.PeerPutHandler)
+		peerPut = s.cfg.PeerPutHandler
 	}
 	if s.cfg.PeerMetricsHandler != nil {
 		peerMetrics = s.cfg.PeerMetricsHandler

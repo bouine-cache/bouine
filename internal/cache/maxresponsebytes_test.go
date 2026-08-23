@@ -21,7 +21,7 @@ func newMaxResponseBytesHandler(t *testing.T, upstream http.Handler, maxBytes in
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
 		Upstream:         wrapUpstream(upstream),
-		FastClient:       &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:       &handlerFastClient{handler: upstream},
 		Store:            store,
 		MaxResponseBytes: maxBytes,
 	})

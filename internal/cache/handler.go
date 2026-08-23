@@ -53,7 +53,7 @@ var ErrAbortHandler = errors.New("abort handler")
 func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 	hm := header.NewMap(ctx.Request.Header.Len())
 	for k, v := range ctx.Request.Header.All() {
-		hm.AppendEntry(header.InternKeyCanonical(string(k)), string(v))
+		hm.AppendEntryCanonical(string(k), string(v))
 	}
 	hm.SortEntries()
 	return hm
@@ -62,15 +62,17 @@ func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 // requestInfoFromCtx constructs a RequestInfo from a fasthttp RequestCtx.
 // This allocates a header.Map from the request headers — use on the
 // miss/revalidate paths where the full header map is needed.
+// RemoteAddr is intentionally left empty: it is never read inside the
+// cache layer (access logging reads ctx.RemoteAddr() directly), and
+// ctx.RemoteAddr().String() allocates via net.JoinHostPort on every call.
 func requestInfoFromCtx(ctx *fasthttp.RequestCtx) RequestInfo {
 	return RequestInfo{
-		Method:     string(ctx.Method()),
-		URI:        string(ctx.RequestURI()),
-		Host:       string(ctx.Host()),
-		Path:       string(ctx.Path()),
-		RemoteAddr: ctx.RemoteAddr().String(),
-		TLS:        ctx.IsTLS(),
-		Header:     headerFromCtx(ctx),
+		Method: string(ctx.Method()),
+		URI:    string(ctx.RequestURI()),
+		Host:   string(ctx.Host()),
+		Path:   string(ctx.Path()),
+		TLS:    ctx.IsTLS(),
+		Header: headerFromCtx(ctx),
 	}
 }
 
@@ -733,7 +735,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 
 	resMap := res.Header.ToMap()
 	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.negativeTTL, h.defaultTTL) {
-		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
+		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
 		}
@@ -1473,7 +1475,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
 	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
-		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
+		if !h.allowSetCookie && bgResMap.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
@@ -1495,26 +1497,27 @@ func (h *Handler) writeAndMaybeStore(
 	// Overwrite origin-supplied attribution headers (prevent spoofing).
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	// Cache the ToMap() result — used below for header lookups (Age,
+	// Set-Cookie, Vary) and passed to buildObject. Each ToMap() call
+	// invokes FromFastHTTP which allocates a new header.Map.
+	resMap := res.Header.ToMap()
 	// A proxy SHOULD add an Age header to responses it forwards,
 	// even on first fetch (Age: 0 + any origin Age).
-	if res.Header.Get(header.Age) == "" {
+	if resMap.Get(header.Age) == "" {
 		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
 	ctx.SetStatusCode(res.StatusCode)
-	if string(ctx.Method()) != "HEAD" {
+	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	// Cache the ToMap() result — buildObject also needs it, and each
-	// ToMap() call invokes FromFastHTTP which allocates a new header.Map.
-	resMap := res.Header.ToMap()
 	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 
 	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
-		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
+		if !h.allowSetCookie && resMap.Get(header.SetCookie) != "" {
 			return
 		}
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
@@ -1523,7 +1526,7 @@ func (h *Handler) writeAndMaybeStore(
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey
-		if vary := res.Header.Get(header.Vary); vary != "" {
+		if vary := resMap.Get(header.Vary); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
@@ -1912,9 +1915,10 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// waiters have finished.
 
 	// Populate the request from *fasthttp.RequestCtx.
-	req.Header.SetMethod(string(ctx.Method()))
-	req.SetRequestURI(string(ctx.RequestURI()))
-	req.Header.SetHost(string(ctx.Host()))
+	// Use *Bytes variants to avoid string([]byte) conversions.
+	req.Header.SetMethodBytes(ctx.Method())
+	req.SetRequestURIBytes(ctx.RequestURI())
+	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
@@ -1957,7 +1961,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	//
 	// Cache the ToMap() result — it was called 5x before, each allocating a
 	// new header.Map via FromFastHTTP. Now passed in from writeAndMaybeStore.
-	ccHeader := res.Header.GetAll(header.CacheControl)
+	ccHeader := resMap.GetAll(header.CacheControl)
 	var respCC Directives
 	if cdnCC, hasCDN := cdnCacheControl(resMap); hasCDN {
 		respCC = cdnCC
@@ -1967,10 +1971,10 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
-	originAge := parseOriginAge(res.Header)
+	originAge := parseOriginAge(resMap)
 	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age, age_value).
 	// Apparent age is derived from the Date header: max(0, now - Date).
-	if dateStr := res.Header.Get(header.Date); dateStr != "" {
+	if dateStr := resMap.Get(header.Date); dateStr != "" {
 		if dt := parseHTTPDate(dateStr); !dt.IsZero() && !dt.After(now) {
 			if apparentAge := now.Sub(dt); apparentAge > originAge {
 				originAge = apparentAge
@@ -2001,7 +2005,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		BodySize:     int64(len(bodyCopy)),
 		StoredAt:     now,
 		TTL:          ttl,
-		ETag:         res.Header.Get(header.ETag),
+		ETag:         resMap.Get(header.ETag),
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 	}
@@ -2034,12 +2038,12 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	} else if defaultSIE > 0 {
 		obj.StaleIfError = defaultSIE
 	}
-	if lm := res.Header.Get(header.LastModified); lm != "" {
+	if lm := obj.Header.Get(header.LastModified); lm != "" {
 		if t, err := time.Parse(httpTimeFormat, lm); err == nil {
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), ri.Header, policy)
+	obj.VaryKey = BuildVaryKey(obj.Header.Get(header.Vary), ri.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(resMap)
 

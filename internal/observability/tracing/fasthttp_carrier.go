@@ -56,6 +56,9 @@ func (c fasthttpHeaderCarrier) Keys() []string {
 // active span, so callers do not need to guard against unconfigured
 // tracing.
 func InjectFastHTTP(ctx context.Context, req *fasthttp.Request) {
+	if !tracerEnabled.Load() {
+		return
+	}
 	otel.GetTextMapPropagator().Inject(ctx, fasthttpHeaderCarrier{h: &req.Header})
 }
 

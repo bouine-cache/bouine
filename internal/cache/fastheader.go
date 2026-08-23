@@ -62,6 +62,13 @@ func evaluateFast(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time) Disp
 		return revalidateOrMiss(obj)
 	}
 	// Stale checks (RFC 9111 §4.2).
+	return staleDisposition(obj, reqCC, now)
+}
+
+// staleDisposition evaluates stale-path directives (SWR, SIE, max-stale,
+// heuristic freshness) and returns the resulting Disposition. Extracted
+// from evaluateFast to keep cyclomatic complexity under the gocyclo limit.
+func staleDisposition(obj *api.Object, reqCC Directives, now time.Time) Disposition {
 	originAge := effectiveOriginAge(obj)
 	if reqCC.MaxStaleSet {
 		age := now.Sub(obj.StoredAt) + originAge

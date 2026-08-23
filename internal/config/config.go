@@ -276,6 +276,17 @@ type Cluster struct {
 	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
 	// certificates. Leave empty for plain HTTP (dev / single-node use).
 	TLS ClusterTLS `yaml:"tls,omitempty" json:"tls,omitempty"`
+	// PeerMaxConnsPerHost limits the number of HTTP/1.1 pipelined
+	// connections per peer. With pipelining (PipelineClient), each
+	// connection handles MaxPendingRequests concurrent in-flight
+	// requests. Default 8, which with 16 pending requests gives 128
+	// concurrent peer fetches per peer — matching the old HTTP/2
+	// capacity. Set to 1 to disable pipelining.
+	PeerMaxConnsPerHost int `yaml:"peer_max_conns_per_host,omitempty" json:"peer_max_conns_per_host,omitempty"`
+	// PeerMaxIdleConnDuration controls how long idle peer connections
+	// are kept before closing. Default 120s (longer than fasthttp's
+	// 10s default) to keep connections warm between peer fetch bursts.
+	PeerMaxIdleConnDuration time.Duration `yaml:"peer_max_idle_conn_duration,omitempty" json:"peer_max_idle_conn_duration,omitempty"`
 }
 
 // ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.

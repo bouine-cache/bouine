@@ -478,6 +478,22 @@ func (c *Config) validateCluster() error {
 		return fmt.Errorf("config: cluster.handoff_queue_depth must be <= %d, got %d (each slot costs a pointer + message header per peer)",
 			maxHandoffQueueDepth, c.Cluster.HandoffQueueDepth)
 	}
+	if err := c.validatePeerFetchConfig(); err != nil {
+		return err
+	}
+	if err := c.validateClusterStorage(); err != nil {
+		return err
+	}
+	if err := validateEvictionAlgorithm(&c.Storage); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateClusterStorage checks the cluster storage sync settings.
+// Extracted from validateCluster to keep cyclomatic complexity under
+// the gocyclo limit.
+func (c *Config) validateClusterStorage() error {
 	if c.Storage.WarmSyncInterval < -1 {
 		return fmt.Errorf("config: storage.warm_sync_interval must be >= -1 (-1 = disabled), got %v", c.Storage.WarmSyncInterval)
 	}
@@ -493,8 +509,20 @@ func (c *Config) validateCluster() error {
 	if c.Storage.TombstoneDrainInterval < -1 {
 		return fmt.Errorf("config: storage.tombstone_drain_interval must be >= -1 (-1 = disabled), got %v", c.Storage.TombstoneDrainInterval)
 	}
-	if err := validateEvictionAlgorithm(&c.Storage); err != nil {
-		return err
+	return nil
+}
+
+// validatePeerFetchConfig checks the peer fetch pipelining settings
+// (ADR-0039). Extracted from validateCluster to keep cyclomatic
+// complexity under the gocyclo limit.
+func (c *Config) validatePeerFetchConfig() error {
+	if c.Cluster.PeerMaxConnsPerHost < 0 {
+		return fmt.Errorf("config: cluster.peer_max_conns_per_host must be >= 0 (0 = default 8), got %d",
+			c.Cluster.PeerMaxConnsPerHost)
+	}
+	if c.Cluster.PeerMaxIdleConnDuration < 0 {
+		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 120s), got %v",
+			c.Cluster.PeerMaxIdleConnDuration)
 	}
 	return nil
 }

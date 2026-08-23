@@ -181,6 +181,18 @@ are an action (`HIT`, `MISS`, `REVALIDATE`, `STALE_HIT`, `BYPASS`) and a
 - Trailer headers, `Transfer-Encoding: chunked` for HTTP/1.1.
 - Method invalidation (`POST`/`PUT`/`DELETE` evict matching URLs).
 
+### 3.5 Response streaming
+
+Origin responses on the miss and bypass paths are streamed to the
+client via `fasthttp.SetBodyStreamWriter` rather than fully buffered
+(ADR-0038). Cache hits remain fully buffered (the stored object is
+already in memory). Cacheable miss responses use `io.TeeReader` to
+simultaneously stream to the client and buffer for storage; if the body
+exceeds `maxResponseBytes`, buffering stops but the client continues
+receiving the full response. Concurrent identical misses use an
+`inflightStream` with a `done` channel for singleflight deduplication —
+the leader streams, followers serve the buffered result.
+
 ### 3.2 Cache key construction
 
 The canonical cache key is deterministic and stable across nodes. The primary
@@ -293,8 +305,11 @@ Internal HTTP/1.1 over mTLS (port `:8443` by default, ADR-0035). On miss: owner 
 two-hop fallback, then origin. Cuckoo-filter-based digests gossiped every 5s
 to short-circuit fetches for keys known absent from peers. `Bouine-Hop` header
 bounds traversal depth (default 2). HTTP/1.1 pipelining is enabled for peer
-fetch (8 connections per peer, pipeline depth 16) to replace HTTP/2
-multiplexing.
+fetch via `fasthttp.PipelineClient` — 8 connections per peer with pipeline
+depth 16 (128 concurrent fetches) — replacing the previous `fasthttp.Client`
+with 256 connections per host. This reduces per-peer connection memory by
+~97% (12.8 MiB → 400 KiB). Each peer address gets its own `PipelineClient`
+cached in a `sync.Map` (ADR-0039).
 
 ### 5.4 Consistency
 

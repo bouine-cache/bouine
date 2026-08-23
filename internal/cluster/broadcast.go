@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strings"
@@ -56,24 +57,25 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 	if len(token) > 0 {
 		tok = token[0]
 	}
-	// Share the fetcher's client when available so broadcast HTTP
-	// fan-out reuses the same connection pool. When no fetcher exists
-	// (eventual-only mode, tests), create a standalone tuned client.
-	var client *transport.Client
-	if fetcher != nil && fetcher.client != nil {
-		client = fetcher.client
-	} else {
-		fc := &fasthttp.Client{
-			MaxConnsPerHost:     256,
-			MaxIdleConnDuration: 90 * time.Second,
-			ReadTimeout:         broadcastTimeout,
-			WriteTimeout:        5 * time.Minute,
-			Dial: func(addr string) (net.Conn, error) {
-				return (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).Dial("tcp", addr)
-			},
-		}
-		client = transport.NewClient(fc)
+	// Broadcast is fire-and-forget (one request per peer), so it uses
+	// a standalone non-pipelined client. The PeerFetcher's PipelineClient
+	// is per-peer-address and optimized for request collapsing, not
+	// one-shot fan-out. TLS is inherited from the fetcher when present.
+	var tlsCfg *tls.Config
+	if fetcher != nil && fetcher.useTLS {
+		tlsCfg = fetcher.tlsConfig
 	}
+	fc := &fasthttp.Client{
+		MaxConnsPerHost:     256,
+		MaxIdleConnDuration: 90 * time.Second,
+		ReadTimeout:         broadcastTimeout,
+		WriteTimeout:        5 * time.Minute,
+		TLSConfig:           tlsCfg,
+		Dial: func(addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).Dial("tcp", addr)
+		},
+	}
+	client := transport.NewClient(fc)
 	return &Broadcaster{
 		cluster: c,
 		fetcher: fetcher,

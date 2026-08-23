@@ -404,7 +404,12 @@ func (e *engine) initCluster(
 	clusterMetrics.SetMode(e.cfg.Cluster.Mode)
 	clusterNode.SetMetrics(clusterMetrics)
 
-	peerFetcher := cluster.NewPeerFetcher(clusterTLS, e.metrics.Registry, e.cfg.Cluster.HopLimit)
+	peerFetcher := cluster.NewPeerFetcherWithConfig(cluster.PeerFetcherConfig{
+		TLSConfig:           clusterTLS,
+		HopLimit:            e.cfg.Cluster.HopLimit,
+		MaxConnsPerHost:     e.cfg.Cluster.PeerMaxConnsPerHost,
+		MaxIdleConnDuration: e.cfg.Cluster.PeerMaxIdleConnDuration,
+	}, e.metrics.Registry, e.logger)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
 
 	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {

@@ -130,6 +130,7 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: key})
@@ -238,6 +239,7 @@ func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 	srv := fasthttptest.NewServer(t, NewPeerPutHandler(store, nil).Handle)
 	defer srv.Close()
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	obj := &api.Object{
 		Key:        testkey.Key(7),
 		StatusCode: 200,
@@ -266,6 +268,7 @@ func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: testkey.Key(1)})
@@ -303,6 +306,7 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	got, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: key})
@@ -323,6 +327,7 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	obj, err := f.Fetch(context.Background(),
 		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: testkey.Key(1)})
@@ -336,6 +341,7 @@ func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 func TestPeerFetcher_HopLimitReached(t *testing.T) {
 	t.Parallel()
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	obj, err := f.Fetch(context.Background(), api.PeerInfo{Addr: "unused:0"},
 		api.PeerFetchRequest{Key: testkey.Key(1), Hops: MaxHops})
 	require.NoError(t, err, "hop limit should return nil,nil")
@@ -357,6 +363,7 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	f.maxBodyBytes = int64(len(validResp) - 1)
 
 	obj, err := f.Fetch(context.Background(),
@@ -386,6 +393,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 
 	var wg sync.WaitGroup
 	for i := 0; i < defaultPeerFetchConcurrency*3; i++ {
@@ -416,6 +424,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	defer close(block)
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 
 	var wg sync.WaitGroup
 	for i := 0; i < defaultPeerFetchConcurrency; i++ {
@@ -496,6 +505,7 @@ func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
+	defer f.Close(context.Background())
 	peer := api.PeerInfo{AdminAddr: srv.Addr}
 
 	b.ReportAllocs()

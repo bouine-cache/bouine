@@ -1,11 +1,13 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -299,18 +301,21 @@ func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger,
 
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
 func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
-	if string(ctx.Method()) != fasthttp.MethodPost {
+	if !bytes.Equal(ctx.Method(), []byte(fasthttp.MethodPost)) {
 		ctx.Error("method not allowed", fasthttp.StatusMethodNotAllowed)
 		return
 	}
 
 	// Hop-limit guard (T36).
-	hopStr := string(ctx.Request.Header.Peek(BouineHopHeader))
-	var hops int
-	if hopStr != "" {
-		if _, err := fmt.Sscanf(hopStr, "%d", &hops); err == nil && hops >= h.hopLimit {
-			ctx.Error("hop limit", fasthttp.StatusLoopDetected)
-			return
+	hopBytes := ctx.Request.Header.Peek(BouineHopHeader)
+	hops := 0
+	if len(hopBytes) > 0 {
+		if parsed, err := strconv.Atoi(string(hopBytes)); err == nil {
+			hops = parsed
+			if hops >= h.hopLimit {
+				ctx.Error("hop limit", fasthttp.StatusLoopDetected)
+				return
+			}
 		}
 	}
 

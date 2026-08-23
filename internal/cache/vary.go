@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/bouine-cache/xxhash/v3"
@@ -110,6 +112,76 @@ func VariantKey(primary api.Key, vary string, reqHeader header.Map, policy *KeyP
 		return primary
 	}
 	return primary.WithVary(xxhash.Sum64(buf[:off]))
+}
+
+// VariantKeyFast computes the variant key using fasthttp.RequestHeader
+// directly, avoiding the headerFromCtx allocation (which builds a full
+// header.Map with string() for every request header). It reads Vary
+// field values via Peek (zero-alloc []byte) and converts to string
+// only for the specific fields listed in Vary (typically 1-2).
+func VariantKeyFast(primary api.Key, vary string, reqHeader *fasthttp.RequestHeader, policy *KeyPolicy) api.Key {
+	if vary == "" {
+		return primary
+	}
+	if varyContainsStar(vary) {
+		return primary
+	}
+
+	var fields [maxVaryFields]string
+	n := 0
+	for f := range strings.SplitSeq(vary, ",") {
+		if n >= maxVaryFields {
+			return variantKeySlow(primary, vary, headerFromFastHTTPReqHeader(reqHeader), policy)
+		}
+		fields[n] = strings.ToLower(strings.TrimSpace(f))
+		n++
+	}
+	if n == 0 {
+		return primary
+	}
+	for i := 1; i < n; i++ {
+		for j := i; j > 0 && fields[j-1] > fields[j]; j-- {
+			fields[j-1], fields[j] = fields[j], fields[j-1]
+		}
+	}
+
+	var buf [256]byte
+	off := 0
+	written := false
+	for i := 0; i < n; i++ {
+		f := fields[i]
+		if policy != nil && policy.ShouldExcludeHeader(f) {
+			continue
+		}
+		val := normalizeHeaderValue(string(reqHeader.Peek(f)))
+		needed := len(f) + 1 + len(val) + 1
+		if off+needed > len(buf) {
+			return variantKeySlow(primary, vary, headerFromFastHTTPReqHeader(reqHeader), policy)
+		}
+		off += copy(buf[off:], f)
+		buf[off] = '='
+		off++
+		off += copy(buf[off:], val)
+		buf[off] = ';'
+		off++
+		written = true
+	}
+	if !written {
+		return primary
+	}
+	return primary.WithVary(xxhash.Sum64(buf[:off]))
+}
+
+// headerFromFastHTTPReqHeader builds a header.Map from a fasthttp
+// request header. Used as a fallback by VariantKeyFast when the
+// stack buffer overflows.
+func headerFromFastHTTPReqHeader(h *fasthttp.RequestHeader) header.Map {
+	hm := header.NewMap(h.Len())
+	for k, v := range h.All() {
+		hm.AppendEntryCanonical(string(k), string(v))
+	}
+	hm.SortEntries()
+	return hm
 }
 
 // variantKeySlow is the fallback allocation path for Vary headers that

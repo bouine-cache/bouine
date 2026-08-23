@@ -21,7 +21,7 @@ type Server struct {
 
 // NewServer starts a fasthttp.Server on 127.0.0.1:0 with the given handler
 // and returns it. The caller must call Close when finished.
-func NewServer(t *testing.T, handler fasthttp.RequestHandler) *Server {
+func NewServer(t testing.TB, handler fasthttp.RequestHandler) *Server {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -35,7 +35,7 @@ func NewServer(t *testing.T, handler fasthttp.RequestHandler) *Server {
 
 // NewTLSServer starts a fasthttp.Server with TLS on 127.0.0.1:0.
 // The caller must call Close when finished.
-func NewTLSServer(t *testing.T, handler fasthttp.RequestHandler, tlsCfg *tls.Config) *Server {
+func NewTLSServer(t testing.TB, handler fasthttp.RequestHandler, tlsCfg *tls.Config) *Server {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")

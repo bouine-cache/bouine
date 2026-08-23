@@ -5,9 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -18,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -41,54 +39,33 @@ func (s *stubStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	return nil
 }
 
-// fastHTTPToHTTP adapts a fasthttp.RequestHandler to an http.Handler
-// for use with httptest.NewServer.
-func fastHTTPToHTTP(h fasthttp.RequestHandler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := &fasthttp.RequestCtx{}
-		ctx.Request.Header.SetMethod(r.Method)
-		ctx.Request.SetRequestURI(r.URL.String())
-		ctx.Request.Header.SetHost(r.Host)
-		for k, vs := range r.Header {
-			for _, v := range vs {
-				ctx.Request.Header.Add(k, v)
-			}
-		}
-		if r.Body != nil {
-			body, _ := io.ReadAll(r.Body)
-			ctx.Request.SetBody(body)
-		}
-		h(ctx)
-		w.WriteHeader(ctx.Response.StatusCode())
-		for k, v := range ctx.Response.Header.All() {
-			w.Header().Add(string(k), string(v))
-		}
-		_, _ = w.Write(ctx.Response.Body())
-	})
-}
-
-// peerFetchServerAdapter wraps a PeerFetchHandler as an http.Handler
-// for httptest.NewServer compatibility.
-func peerFetchServerAdapter(h *PeerFetchHandler) http.Handler {
-	return fastHTTPToHTTP(h.Handle)
-}
-
-func peerPutServerAdapter(h *PeerPutHandler) http.Handler {
-	return fastHTTPToHTTP(h.Handle)
-}
-
-func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *httptest.ResponseRecorder {
+func postFetch(t *testing.T, h *PeerFetchHandler, req api.PeerFetchRequest, hop int) *fasthttp.RequestCtx {
 	t.Helper()
 	body, err := json.Marshal(req)
 	require.NoError(t, err, "marshal")
-	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerFetchPath, bytes.NewReader(body))
-	r.Header.Set(header.ContentType, "application/json")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI(PeerFetchPath)
+	ctx.Request.SetBody(body)
+	ctx.Request.Header.Set(header.ContentType, "application/json")
 	if hop > 0 {
-		r.Header.Set(BouineHopHeader, fmt.Sprintf("%d", hop))
+		ctx.Request.Header.Set(BouineHopHeader, fmt.Sprintf("%d", hop))
 	}
-	rr := httptest.NewRecorder()
-	peerFetchServerAdapter(h).ServeHTTP(rr, r)
-	return rr
+	h.Handle(ctx)
+	return ctx
+}
+
+func postPut(t *testing.T, h *PeerPutHandler, body []byte, method string) *fasthttp.RequestCtx {
+	t.Helper()
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(method)
+	ctx.Request.SetRequestURI(PeerPutPath)
+	if body != nil {
+		ctx.Request.SetBody(body)
+		ctx.Request.Header.Set(header.ContentType, "application/octet-stream")
+	}
+	h.Handle(ctx)
+	return ctx
 }
 
 func TestPeerFetchHandler_Hit(t *testing.T) {
@@ -98,9 +75,9 @@ func TestPeerFetchHandler_Hit(t *testing.T) {
 		key: {Key: key, StatusCode: 200, Body: []byte("cached")},
 	}}
 	h := NewPeerFetchHandler(store, 0)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
-	require.Equal(t, 200, rr.Code)
-	obj, err := storage.DecodeObject(rr.Body.Bytes())
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	obj, err := storage.DecodeObject(ctx.Response.Body())
 	require.NoError(t, err, "binary decode")
 	if obj.Key != key || obj.StatusCode != 200 {
 		t.Fatalf("decoded mismatch: key=%d status=%d", obj.Key, obj.StatusCode)
@@ -120,13 +97,13 @@ func TestPeerFetchHandler_BinaryWireProtocol(t *testing.T) {
 	obj.Header.AppendEntry("Content-Type", "text/plain")
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
 	h := NewPeerFetchHandler(store, 0)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
 
-	require.Equal(t, 200, rr.Code)
-	ct := rr.Header().Get(header.ContentType)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	ct := string(ctx.Response.Header.Peek(header.ContentType))
 	require.Equal(t, "application/octet-stream", ct)
 
-	decoded, err := storage.DecodeObject(rr.Body.Bytes())
+	decoded, err := storage.DecodeObject(ctx.Response.Body())
 	require.NoError(t, err, "binary decode")
 	if decoded.Key != obj.Key || decoded.StatusCode != obj.StatusCode {
 		t.Fatalf("decoded mismatch: key=%d status=%d", decoded.Key, decoded.StatusCode)
@@ -147,14 +124,14 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 	obj.Header = header.NewMap(1)
 	obj.Header.AppendEntry("X-Custom", "value")
 
-	srv := httptest.NewServer(peerFetchServerAdapter(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+	srv := fasthttptest.NewServer(t, NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
 		key: obj,
-	}}, 0)))
+	}}, 0).Handle)
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
 	got, err := f.Fetch(context.Background(),
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: key})
 	require.NoError(t, err, "fetch")
 	require.NotNil(t, got)
@@ -167,34 +144,35 @@ func TestPeerFetcher_BinaryRoundTrip(t *testing.T) {
 func TestPeerFetchHandler_Miss(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 0)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(999)}, 0)
-	require.Equal(t, http.StatusNotFound, rr.Code)
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(999)}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, MaxHops)
-	require.Equal(t, http.StatusLoopDetected, rr.Code)
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, MaxHops)
+	require.Equal(t, fasthttp.StatusLoopDetected, ctx.Response.StatusCode())
 }
 
 func TestPeerFetchHandler_CustomHopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 1)
-	rr := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, 1)
-	require.Equal(t, http.StatusLoopDetected, rr.Code)
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: testkey.Key(1)}, 1)
+	require.Equal(t, fasthttp.StatusLoopDetected, ctx.Response.StatusCode())
 	h3 := NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{}}, 3)
-	rr3 := postFetch(t, h3, api.PeerFetchRequest{Key: testkey.Key(1)}, 2)
-	require.NotEqual(t, http.StatusLoopDetected, rr3.Code)
+	ctx3 := postFetch(t, h3, api.PeerFetchRequest{Key: testkey.Key(1)}, 2)
+	require.NotEqual(t, fasthttp.StatusLoopDetected, ctx3.Response.StatusCode())
 }
 
 func TestPeerFetchHandler_WrongMethod(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)
-	rr := httptest.NewRecorder()
-	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerFetchPath, nil)
-	peerFetchServerAdapter(h).ServeHTTP(rr, r)
-	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI(PeerFetchPath)
+	h.Handle(ctx)
+	require.Equal(t, fasthttp.StatusMethodNotAllowed, ctx.Response.StatusCode())
 }
 
 func TestPeerPutHandler_Stores(t *testing.T) {
@@ -210,11 +188,8 @@ func TestPeerPutHandler_Stores(t *testing.T) {
 		StoredAt:   time.Now(),
 	}
 	encoded := storage.EncodeObject(obj)
-	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(encoded))
-	r.Header.Set(header.ContentType, "application/octet-stream")
-	rr := httptest.NewRecorder()
-	peerPutServerAdapter(h).ServeHTTP(rr, r)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx := postPut(t, h, encoded, "POST")
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	stored, _, err := store.Get(context.Background(), obj.Key)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
@@ -238,37 +213,29 @@ func TestPeerPutHandler_OnStoreCallback(t *testing.T) {
 		TTL:        60 * time.Second,
 		StoredAt:   time.Now(),
 	})
-	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader(encoded))
-	r.Header.Set(header.ContentType, "application/octet-stream")
-	rr := httptest.NewRecorder()
-	peerPutServerAdapter(h).ServeHTTP(rr, r)
-	require.Equal(t, http.StatusOK, rr.Code)
+	ctx := postPut(t, h, encoded, "POST")
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	assert.Equal(t, int32(1), called.Load())
 }
 
 func TestPeerPutHandler_BadBody(t *testing.T) {
 	t.Parallel()
 	h := NewPeerPutHandler(&stubStore{}, nil)
-	r, _ := http.NewRequestWithContext(context.Background(), "POST", PeerPutPath, bytes.NewReader([]byte{0xFF, 0x00}))
-	r.Header.Set(header.ContentType, "application/octet-stream")
-	rr := httptest.NewRecorder()
-	peerPutServerAdapter(h).ServeHTTP(rr, r)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	ctx := postPut(t, h, []byte{0xFF, 0x00}, "POST")
+	assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestPeerPutHandler_WrongMethod(t *testing.T) {
 	t.Parallel()
 	h := NewPeerPutHandler(&stubStore{}, nil)
-	r, _ := http.NewRequestWithContext(context.Background(), "GET", PeerPutPath, nil)
-	rr := httptest.NewRecorder()
-	peerPutServerAdapter(h).ServeHTTP(rr, r)
-	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	ctx := postPut(t, h, nil, "GET")
+	assert.Equal(t, fasthttp.StatusMethodNotAllowed, ctx.Response.StatusCode())
 }
 
 func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 	t.Parallel()
 	store := &stubStore{}
-	srv := httptest.NewServer(peerPutServerAdapter(NewPeerPutHandler(store, nil)))
+	srv := fasthttptest.NewServer(t, NewPeerPutHandler(store, nil).Handle)
 	defer srv.Close()
 	f := NewPeerFetcher(nil, nil, 0)
 	obj := &api.Object{
@@ -279,7 +246,7 @@ func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 		TTL:        60 * time.Second,
 		StoredAt:   time.Now(),
 	}
-	peer := api.PeerInfo{Addr: srv.Listener.Addr().String()}
+	peer := api.PeerInfo{Addr: srv.Addr}
 	err := f.Put(context.Background(), peer, obj)
 	require.NoError(t, err)
 	stored, _, err := store.Get(context.Background(), obj.Key)
@@ -291,16 +258,16 @@ func TestPeerFetcher_Put_RoundTrip(t *testing.T) {
 func TestPeerFetcher_RecordsRoundTripLatency(t *testing.T) {
 	t.Parallel()
 	const delay = 5 * time.Millisecond
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		time.Sleep(delay)
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("cached")}))
-	}))
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("cached")}))
+	})
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(),
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: testkey.Key(1)})
 	require.NoError(t, err, "fetch")
 	require.NotNil(t, obj)
@@ -330,14 +297,14 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 		LastModified:         lastMod,
 	}
 
-	srv := httptest.NewServer(peerFetchServerAdapter(NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+	srv := fasthttptest.NewServer(t, NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
 		key: obj,
-	}}, 0)))
+	}}, 0).Handle)
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
 	got, err := f.Fetch(context.Background(),
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: key})
 	require.NoError(t, err, "fetch")
 	require.NotNil(t, got)
@@ -350,14 +317,14 @@ func TestPeerFetcher_BinaryRoundTrip_TimeFields(t *testing.T) {
 
 func TestPeerFetcher_MissIncrementsCounter(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+	})
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
 	obj, err := f.Fetch(context.Background(),
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: testkey.Key(1)})
 	require.NoError(t, err, "fetch")
 	require.Nil(t, obj)
@@ -383,17 +350,17 @@ func TestPeerFetcher_OversizedResponseReturnsError(t *testing.T) {
 		Body:       bytes.Repeat([]byte("A"), 4096),
 	})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(validResp)
-	}))
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(validResp)
+	})
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
 	f.maxBodyBytes = int64(len(validResp) - 1)
 
 	obj, err := f.Fetch(context.Background(),
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: testkey.Key(1)})
 	require.Error(t, err)
 	require.Nil(t, obj)
@@ -403,7 +370,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 	t.Parallel()
 	var inFlight, maxInFlight atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		cur := inFlight.Add(1)
 		for {
 			old := maxInFlight.Load()
@@ -413,9 +380,9 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 		inFlight.Add(-1)
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
-	}))
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
@@ -426,7 +393,7 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, _ = f.Fetch(context.Background(),
-				api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+				api.PeerInfo{AdminAddr: srv.Addr},
 				api.PeerFetchRequest{Key: testkey.Key(1)})
 		}()
 	}
@@ -440,11 +407,11 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	t.Parallel()
 	block := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		<-block
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1)}))
-	}))
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1)}))
+	})
 	defer srv.Close()
 	defer close(block)
 
@@ -456,7 +423,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, _ = f.Fetch(context.Background(),
-				api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+				api.PeerInfo{AdminAddr: srv.Addr},
 				api.PeerFetchRequest{Key: testkey.Key(1)})
 		}()
 	}
@@ -464,7 +431,7 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	_, err := f.Fetch(ctx,
-		api.PeerInfo{AdminAddr: srv.Listener.Addr().String()},
+		api.PeerInfo{AdminAddr: srv.Addr},
 		api.PeerFetchRequest{Key: testkey.Key(2)})
 	require.Error(t, err)
 
@@ -488,19 +455,19 @@ func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	}
 	store := &stubStore{objects: map[api.Key]*api.Object{key: obj}}
 	h := NewPeerFetchHandler(store, 0)
-	adapter := peerFetchServerAdapter(h)
 
 	reqBody, _ := json.Marshal(api.PeerFetchRequest{Key: key})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		rr := httptest.NewRecorder()
-		r, _ := http.NewRequestWithContext(context.Background(),
-			http.MethodPost, PeerFetchPath, bytes.NewReader(reqBody))
-		r.Header.Set(header.ContentType, "application/json")
-		adapter.ServeHTTP(rr, r)
-		if rr.Code != 200 {
-			b.Fatalf("status=%d", rr.Code)
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.Header.SetMethod("POST")
+		ctx.Request.SetRequestURI(PeerFetchPath)
+		ctx.Request.SetBody(reqBody)
+		ctx.Request.Header.Set(header.ContentType, "application/json")
+		h.Handle(ctx)
+		if ctx.Response.StatusCode() != 200 {
+			b.Fatalf("status=%d", ctx.Response.StatusCode())
 		}
 	}
 }
@@ -522,14 +489,14 @@ func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 	}
 	encoded := storage.EncodeObject(obj)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "application/octet-stream")
-		_, _ = w.Write(encoded)
-	}))
+	srv := fasthttptest.NewServer(b, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(encoded)
+	})
 	defer srv.Close()
 
 	f := NewPeerFetcher(nil, nil, 0)
-	peer := api.PeerInfo{AdminAddr: srv.Listener.Addr().String()}
+	peer := api.PeerInfo{AdminAddr: srv.Addr}
 
 	b.ReportAllocs()
 	b.ResetTimer()

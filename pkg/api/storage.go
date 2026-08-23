@@ -98,6 +98,11 @@ type Object struct {
 	// scan (and the subsequent AppendFormat for Date synthesis) when the
 	// origin already provided a Date.
 	HasDate bool `json:"-"`
+
+	// VaryValue is the stored Vary header value, pre-computed at build
+	// time so the fast-path hit can skip a Map.Get scan. Empty string
+	// means no Vary header (the common case).
+	VaryValue string `json:"-"`
 }
 
 // LoadSerializedHead returns the lazily-computed serialized header block,
@@ -150,6 +155,7 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		HasConnectionList:    o.HasConnectionList,
 		HasNoCacheFields:     o.HasNoCacheFields,
 		HasDate:              o.HasDate,
+		VaryValue:            o.VaryValue,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
@@ -190,6 +196,7 @@ func (o *Object) CloneForRefresh() *Object {
 		HasConnectionList:    o.HasConnectionList,
 		HasNoCacheFields:     o.HasNoCacheFields,
 		HasDate:              o.HasDate,
+		VaryValue:            o.VaryValue,
 	}
 }
 

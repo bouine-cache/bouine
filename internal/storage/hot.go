@@ -1067,7 +1067,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 }
 
 const (
-	objectStructSize    int64 = 296 // unsafe.Sizeof(api.Object{}) — FastHeader atomic.Value + HasConnectionList/HasNoCacheFields added. Update when fields are added.
+	objectStructSize    int64 = 312 // unsafe.Sizeof(api.Object{}) — HasDate + VaryValue added. Update when fields are added.
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
@@ -1094,6 +1094,7 @@ func objSize(obj *api.Object) int64 {
 	size += int64(len(obj.VaryKey))
 	size += int64(len(obj.ETag))
 	size += int64(len(obj.CacheControl))
+	size += int64(len(obj.VaryValue))
 	for _, sk := range obj.SurrogateKeys {
 		size += int64(len(sk))
 	}

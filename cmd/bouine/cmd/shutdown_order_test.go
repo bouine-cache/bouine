@@ -3,9 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -16,12 +13,24 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/server"
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/valyala/fasthttp"
 )
+
+func fastDo(url string) error {
+	client := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod("GET")
+	return client.Do(req, resp)
+}
 
 // TestShutdown_OrderedDrainBeforeStoreClose verifies the fix for issue #76:
 // data-plane listeners must finish draining in-flight requests before
@@ -30,10 +39,10 @@ import (
 // completes without error (i.e. no "use of closed file" or lost write
 // due to store.Close racing listener drain).
 func TestShutdown_OrderedDrainBeforeStoreClose(t *testing.T) {
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		time.Sleep(500 * time.Millisecond)
-		_, _ = io.WriteString(w, "slow")
-	}))
+		_, _ = ctx.WriteString("slow")
+	})
 	defer originSrv.Close()
 
 	dir := t.TempDir()
@@ -47,7 +56,7 @@ upstream_pools:
 routes:
   - match: {}
     pool: echo
-`, originSrv.Listener.Addr().String())
+`, originSrv.Addr)
 	cfgPath := filepath.Join(dir, "bouine.yaml")
 	err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
 	require.NoError(t, err)
@@ -66,14 +75,7 @@ routes:
 
 	reqDone := make(chan error, 1)
 	go func() {
-		resp, err := http.Get("http://127.0.0.1:18120/slow")
-		if err != nil {
-			reqDone <- err
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		reqDone <- nil
+		reqDone <- fastDo("http://127.0.0.1:18120/slow")
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -122,14 +124,7 @@ func TestListenerShutdown_DrainsInflight(t *testing.T) {
 
 	reqDone := make(chan error, 1)
 	go func() {
-		resp, err := http.Get("http://" + ln.Addr() + "/test")
-		if err != nil {
-			reqDone <- err
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		reqDone <- nil
+		reqDone <- fastDo("http://" + ln.Addr() + "/test")
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -186,11 +181,7 @@ func TestSequencer_ListenerDrainBeforeStoreClose(t *testing.T) {
 	require.NotEqual(t, "127.0.0.1:0", ln.Addr())
 
 	go func() {
-		resp, _ := http.Get("http://" + ln.Addr() + "/test")
-		if resp != nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}
+		_ = fastDo("http://" + ln.Addr() + "/test")
 	}()
 	time.Sleep(50 * time.Millisecond)
 

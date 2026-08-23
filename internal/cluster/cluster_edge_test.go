@@ -3,14 +3,13 @@ package cluster
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/hashicorp/memberlist"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -23,7 +22,6 @@ func TestRing_Segments(t *testing.T) {
 	r.add("beta", 256)
 	segs := r.segments()
 	require.Len(t, segs, 2)
-	// Fractions should sum to approximately 1.0.
 	var total float64
 	for _, s := range segs {
 		total += s.Frac
@@ -44,7 +42,6 @@ func TestCluster_RingSegments(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = c.Leave(t.Context()) }()
 
-	// With one node, RingSegments should return one segment.
 	segs := c.RingSegments()
 	require.Len(t, segs, 1)
 	assert.Equal(t, "ring-test", segs[0].NodeName)
@@ -84,7 +81,7 @@ func TestMetrics_SetMode(t *testing.T) {
 func TestMetrics_SetMode_Nil(t *testing.T) {
 	t.Parallel()
 	var m *Metrics
-	m.SetMode("strong") // nil receiver — no-op
+	m.SetMode("strong")
 }
 
 func TestMetrics_BroadcastFailuresCount(t *testing.T) {
@@ -106,19 +103,19 @@ func TestMetrics_BroadcastFailuresCount_Nil(t *testing.T) {
 func TestMetrics_IncGossipInvalidation_Nil(t *testing.T) {
 	t.Parallel()
 	var m *Metrics
-	m.IncGossipInvalidation("purge") // nil — no-op
+	m.IncGossipInvalidation("purge")
 }
 
 func TestMetrics_IncHTTPInvalidation_Nil(t *testing.T) {
 	t.Parallel()
 	var m *Metrics
-	m.IncHTTPInvalidation("ban") // nil — no-op
+	m.IncHTTPInvalidation("ban")
 }
 
 func TestMetrics_IncBroadcastFailure_Nil(t *testing.T) {
 	t.Parallel()
 	var m *Metrics
-	m.IncBroadcastFailure("purge", "dial") // nil — no-op
+	m.IncBroadcastFailure("purge", "dial")
 }
 
 func TestPeerPurgeHandler_FnError(t *testing.T) {
@@ -130,11 +127,13 @@ func TestPeerPurgeHandler_FnError(t *testing.T) {
 	evt := api.PurgeEvent{Key: testkey.Key(1), Issuer: "node-0"}
 	body, _ := EncodePurgeHTTP(evt)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/purge", bytesReader(body))
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/purge")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody(body)
+	handler(ctx)
 
-	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestPeerPurgeHandler_ReadError(t *testing.T) {
@@ -143,12 +142,13 @@ func TestPeerPurgeHandler_ReadError(t *testing.T) {
 		return nil
 	})
 
-	// A reader that always returns an error.
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/purge", errReader{})
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/purge")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody([]byte("bad"))
+	handler(ctx)
 
-	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestPeerBanHandler_BadBody(t *testing.T) {
@@ -157,11 +157,13 @@ func TestPeerBanHandler_BadBody(t *testing.T) {
 		return nil
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/ban", bytesReader([]byte("bad")))
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/ban")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody([]byte("bad"))
+	handler(ctx)
 
-	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestPeerBanHandler_FnError(t *testing.T) {
@@ -173,11 +175,13 @@ func TestPeerBanHandler_FnError(t *testing.T) {
 	evt := api.BanEvent{Issuer: "node-0"}
 	body, _ := EncodeBanHTTP(evt)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/ban", bytesReader(body))
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/ban")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody(body)
+	handler(ctx)
 
-	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestPeerBanHandler_ReadError(t *testing.T) {
@@ -186,11 +190,13 @@ func TestPeerBanHandler_ReadError(t *testing.T) {
 		return nil
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/ban", errReader{})
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/ban")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody([]byte("bad"))
+	handler(ctx)
 
-	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestPeerRefreshHandler_FnError(t *testing.T) {
@@ -202,11 +208,13 @@ func TestPeerRefreshHandler_FnError(t *testing.T) {
 	evt := api.RefreshEvent{Key: testkey.Key(1), Issuer: "node-0"}
 	body, _ := EncodeRefreshHTTP(evt)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/refresh", bytesReader(body))
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/refresh")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody(body)
+	handler(ctx)
 
-	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestPeerRefreshHandler_ReadError(t *testing.T) {
@@ -215,11 +223,13 @@ func TestPeerRefreshHandler_ReadError(t *testing.T) {
 		return nil
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/peer/refresh", errReader{})
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/v1/peer/refresh")
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetBody([]byte("bad"))
+	handler(ctx)
 
-	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestNotifyUpdate_DelegatesToNotifyJoin(t *testing.T) {
@@ -260,8 +270,3 @@ func TestNodeMeta_RoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(meta, &info))
 	assert.Equal(t, "meta-test", info.Name)
 }
-
-// errReader is a reader that always returns an error.
-type errReader struct{}
-
-func (errReader) Read([]byte) (int, error) { return 0, errors.New("read error") }

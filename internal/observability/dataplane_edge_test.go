@@ -1,16 +1,11 @@
 package observability
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
 )
 
 func TestDataPlaneMetrics_IncrementSmugglingRejected(t *testing.T) {
@@ -18,23 +13,19 @@ func TestDataPlaneMetrics_IncrementSmugglingRejected(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 	m.IncrementSmugglingRejected()
-	// Should not panic.
 }
 
 func TestDataPlaneMetrics_RecordHit_NoRouteTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	// Without PreResolveRoutes, routeTable is nil → fallback path.
 	m.RecordHit("GET", "/api", "HIT", "hot", 200, 1024, 5*time.Millisecond)
-	// Should not panic.
 }
 
 func TestDataPlaneMetrics_VaryCapHitsCount(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	// Initially zero.
 	assert.Equal(t, int64(0), m.VaryCapHitsCount())
 }
 
@@ -89,7 +80,6 @@ func TestRefreshMetricsVec(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 	m.RefreshMetricsVec()
-	// Should not panic.
 }
 
 func TestDataPlaneMetrics_LookupRouteMetrics_NilTable(t *testing.T) {
@@ -122,29 +112,11 @@ func TestDataPlaneMetrics_AccessLogMessage(t *testing.T) {
 	}
 }
 
-func TestDataPlaneMetrics_BuildAccessLogAttrs(t *testing.T) {
-	t.Parallel()
-	reg := prometheus.NewRegistry()
-	m := NewDataPlaneMetrics(reg)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/foo", nil)
-	rec := httptest.NewRecorder()
-	rw := responsewriter.Acquire(rec)
-	defer responsewriter.Release(rw)
-	rw.Status = 200
-	rw.Bytes = 42
-
-	attrs := m.buildAccessLogAttrs(req, rw, "HIT", 5*time.Millisecond)
-	require.NotEmpty(t, attrs)
-}
-
 func TestDataPlaneMetrics_LookupRouteMetrics_NotInTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	// Manually set up a routeIDs map but with no routeTable entries.
 	m.routeIDs = map[string]int{"test": 0}
-	// routeTable is still nil — id 0 >= len(nil) → false.
 	rm, ok := m.lookupRouteMetrics("test")
 	assert.False(t, ok)
 	assert.Nil(t, rm)
@@ -154,10 +126,9 @@ func TestDataPlaneMetrics_LookupRouteMetrics_Found(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	// Set up a minimal route table.
 	m.routeIDs = map[string]int{"test": 0}
 	m.routeTable = []*routeMetrics{nil}
 	rm, ok := m.lookupRouteMetrics("test")
 	assert.True(t, ok)
-	assert.Nil(t, rm) // nil entry, but found
+	assert.Nil(t, rm)
 }

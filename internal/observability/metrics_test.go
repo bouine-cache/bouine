@@ -1,8 +1,6 @@
 package observability
 
 import (
-	"context"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -12,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestNewMetrics_Defaults(t *testing.T) {
@@ -33,12 +33,13 @@ func TestMetrics_Handler_ExposesRegisteredCollector(t *testing.T) {
 	m.Registry.MustRegister(counter)
 	counter.Inc()
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
-	m.Handler().ServeHTTP(rr, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/metrics")
+	ctx.Request.Header.SetMethod("GET")
+	m.Handler()(ctx)
 
-	require.Equal(t, 200, rr.Code)
-	body := rr.Body.String()
+	require.Equal(t, 200, ctx.Response.StatusCode())
+	body := string(ctx.Response.Body())
 	require.Contains(t, body, "bouine_test_counter 1")
 }
 

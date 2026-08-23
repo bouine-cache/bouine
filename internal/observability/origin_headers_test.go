@@ -1,7 +1,6 @@
 package observability
 
 import (
-	"net/http"
 	"sync"
 	"testing"
 
@@ -9,24 +8,34 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
+
+func makeRespHeader(kvs ...string) *fasthttp.ResponseHeader {
+	h := &fasthttp.ResponseHeader{}
+	for i := 0; i < len(kvs); i += 2 {
+		h.Set(kvs[i], kvs[i+1])
+	}
+	return h
+}
 
 func TestOriginHeaderRing_SampleAndAudit(t *testing.T) {
 	t.Parallel()
 	r := NewOriginHeaderRing()
 
-	r.Sample("api-pool", http.Header{
-		header.CacheControl: []string{"max-age=60"},
-		"Etag":              []string{"\"abc\""},
-	}, 200)
-	r.Sample("api-pool", http.Header{
-		"Etag": []string{"\"def\""},
-	}, 200)
-	r.Sample("static-pool", http.Header{
-		header.CacheControl: []string{"max-age=3600"},
-		header.LastModified: []string{"Mon, 01 Jan 2024 00:00:00 GMT"},
-		header.SurrogateKey: []string{"product-42"},
-	}, 200)
+	r.SampleFastHTTP("api-pool", makeRespHeader(
+		header.CacheControl, "max-age=60",
+		header.ETag, `"abc"`,
+	), 200)
+	r.SampleFastHTTP("api-pool", makeRespHeader(
+		header.ETag, `"def"`,
+	), 200)
+	r.SampleFastHTTP("static-pool", makeRespHeader(
+		header.CacheControl, "max-age=3600",
+		header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT",
+		header.SurrogateKey, "product-42",
+	), 200)
 
 	audit := r.HeaderAudit()
 	require.Len(t, audit, 2)
@@ -45,7 +54,7 @@ func TestOriginHeaderRing_SampleAndAudit(t *testing.T) {
 func TestOriginHeaderRing_NilHeader(t *testing.T) {
 	t.Parallel()
 	r := NewOriginHeaderRing()
-	r.Sample("p", nil, 200)
+	r.SampleFastHTTP("p", nil, 200)
 	audit := r.HeaderAudit()
 	require.Len(t, audit, 0)
 }
@@ -53,9 +62,8 @@ func TestOriginHeaderRing_NilHeader(t *testing.T) {
 func TestOriginHeaderRing_Wraparound(t *testing.T) {
 	t.Parallel()
 	r := NewOriginHeaderRing()
-	// Fill past capacity to verify circular buffer wraparound.
 	for range originHeaderRingCap + 50 {
-		r.Sample("p", http.Header{header.CacheControl: []string{"x"}}, 200)
+		r.SampleFastHTTP("p", makeRespHeader(header.CacheControl, "x"), 200)
 	}
 	audit := r.HeaderAudit()
 	s := audit["p"]
@@ -72,7 +80,7 @@ func TestOriginHeaderRing_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 100 {
-				r.Sample("p", http.Header{header.CacheControl: []string{"x"}}, 200)
+				r.SampleFastHTTP("p", makeRespHeader(header.CacheControl, "x"), 200)
 			}
 		}()
 	}

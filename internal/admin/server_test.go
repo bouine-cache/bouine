@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestHealthz(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/healthz")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	var got map[string]string
 	err := json.Unmarshal(body, &got)
 	require.NoError(t, err, "unmarshal")
@@ -52,14 +53,14 @@ func TestReadyz_Ready(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, _ := get(t, s, "/readyz")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 }
 
 func TestReadyz_NotReady(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return false })
 	status, _ := get(t, s, "/readyz")
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.Equal(t, fasthttp.StatusServiceUnavailable, status)
 }
 
 func TestReadyz_Detail_NotReady(t *testing.T) {
@@ -75,7 +76,7 @@ func TestReadyz_Detail_NotReady(t *testing.T) {
 		},
 	})
 	status, body := get(t, s, "/readyz?detail=1")
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.Equal(t, fasthttp.StatusServiceUnavailable, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err, "unmarshal")
@@ -98,7 +99,7 @@ func TestReadyz_Detail_Ready(t *testing.T) {
 		},
 	})
 	status, body := get(t, s, "/readyz?detail=1")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err, "unmarshal")
@@ -112,7 +113,7 @@ func TestReadyz_Detail_NoConditionsFn(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, body := get(t, s, "/readyz?detail=1")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err, "unmarshal")
@@ -125,7 +126,7 @@ func TestVersion(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, nil)
 	status, body := get(t, s, "/version")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	require.True(t, bytes.Contains(body, []byte("version")))
 }
 
@@ -137,7 +138,7 @@ func TestMetrics_Mounted(t *testing.T) {
 		Metrics: m,
 	})
 	status, body := get(t, s, "/metrics")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	require.True(t, bytes.Contains(body, []byte("go_info")))
 }
 
@@ -152,17 +153,17 @@ func TestAuth_WriteRequiresToken(t *testing.T) {
 	// Write without token → 401.
 	ctx := testCtxWithBody("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`))
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 
 	// Write with wrong token → 401.
 	ctx = testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "wrong")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 
 	// Write with correct token → 200.
 	ctx = testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "secret")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestAuth_ReadEndpointsExempt(t *testing.T) {
@@ -175,7 +176,7 @@ func TestAuth_ReadEndpointsExempt(t *testing.T) {
 	for _, p := range []string{"/healthz", "/readyz", "/version", "/drain"} {
 		ctx := testCtx("GET", p)
 		s.Handler()(ctx)
-		assert.NotEqual(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+		assert.NotEqual(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 	}
 }
 
@@ -194,7 +195,7 @@ func TestAuth_PeerMetricsExempt(t *testing.T) {
 	// the auth-exempt map (same as peer fetch/purge/ban RPCs).
 	ctx := testCtx("GET", "/v1/peer/metrics")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	body := respBody(ctx)
 	require.Equal(t, "{}", body)
 }
@@ -203,7 +204,7 @@ func TestDrain_NoDrainFn(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return true })
 	status, body := get(t, s, "/drain")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	var got map[string]string
 	err := json.Unmarshal(body, &got)
 	require.NoError(t, err, "unmarshal")
@@ -219,7 +220,7 @@ func TestDrain_CallsDrainFn(t *testing.T) {
 		DrainFn: func() { called = true },
 	})
 	status, _ := get(t, s, "/drain")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 	require.True(t, called)
 }
 
@@ -255,7 +256,7 @@ func TestDrain_LongDrainFnSurvivesWriteTimeout(t *testing.T) {
 	resp, err := http.Get("http://" + ln.Addr().String() + "/drain")
 	require.NoError(t, err, "drain request failed (write timeout killed connection)")
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, fasthttp.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err, "read body")
 	var got map[string]string
@@ -288,7 +289,7 @@ func TestPurge_EmptyURL(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, body := postWithToken(t, s, "/v1/purge", `{}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 	require.True(t, bytes.Contains(body, []byte("url field is required")))
 }
 
@@ -300,7 +301,7 @@ func TestPurge_UnknownField(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge", `{"patdddh_regex":"^/reviews/"}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 func TestPurge_MalformedJSON(t *testing.T) {
@@ -311,7 +312,7 @@ func TestPurge_MalformedJSON(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge", `{not json`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 func TestPurge_Valid(t *testing.T) {
@@ -322,7 +323,7 @@ func TestPurge_Valid(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge", `{"url":"https://example.com/reviews/1"}`)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 }
 
 func TestRefresh_EmptyURL(t *testing.T) {
@@ -333,7 +334,7 @@ func TestRefresh_EmptyURL(t *testing.T) {
 		RefreshFn: func(_ api.Key) error { return nil },
 	})
 	code, body := postWithToken(t, s, "/v1/refresh", `{}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 	require.True(t, bytes.Contains(body, []byte("url field is required")))
 }
 
@@ -345,7 +346,7 @@ func TestRefresh_UnknownField(t *testing.T) {
 		RefreshFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/refresh", `{"patdddh_regex":"^/reviews/"}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 func TestRefresh_Valid(t *testing.T) {
@@ -356,7 +357,7 @@ func TestRefresh_Valid(t *testing.T) {
 		RefreshFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/refresh", `{"url":"https://example.com/reviews/1"}`)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 }
 
 func TestBan_EmptyExpr(t *testing.T) {
@@ -367,7 +368,7 @@ func TestBan_EmptyExpr(t *testing.T) {
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
 	})
 	code, body := postWithToken(t, s, "/v1/ban", `{}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 	require.True(t, bytes.Contains(body, []byte("at least one of")))
 }
 
@@ -379,7 +380,7 @@ func TestBan_UnknownField(t *testing.T) {
 		BanFn:  func(_ api.BanExpr) (int, error) { return 0, nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/ban", `{"patdddh_regex":"^/reviews/"}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 func TestBan_Valid(t *testing.T) {
@@ -390,7 +391,7 @@ func TestBan_Valid(t *testing.T) {
 		BanFn:  func(_ api.BanExpr) (int, error) { return 42, nil },
 	})
 	code, body := postWithToken(t, s, "/v1/ban", `{"path_regex":"^/reviews/"}`)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.True(t, bytes.Contains(body, []byte("42")))
 }
 
@@ -407,7 +408,7 @@ func TestPurgeBatch_Success(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.Len(t, purgedKeys, 3)
 	require.True(t, bytes.Contains(respBody, []byte(`"count":3`)))
 	require.True(t, bytes.Contains(respBody, []byte(`"failed":0`)))
@@ -427,7 +428,7 @@ func TestPurgeBatch_PartialFailure(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
 	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.True(t, bytes.Contains(respBody, []byte(`"count":2`)))
 	require.True(t, bytes.Contains(respBody, []byte(`"failed":1`)))
 }
@@ -440,7 +441,7 @@ func TestPurgeBatch_Empty(t *testing.T) {
 		PurgeFn: func(_ api.Key) error { return nil },
 	})
 	code, _ := postWithToken(t, s, "/v1/purge/batch", `{"urls":[]}`)
-	require.Equal(t, http.StatusBadRequest, code)
+	require.Equal(t, fasthttp.StatusBadRequest, code)
 }
 
 func TestPurgeBatch_ExceedsMax(t *testing.T) {
@@ -453,7 +454,7 @@ func TestPurgeBatch_ExceedsMax(t *testing.T) {
 	})
 	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
 	code, _ := postWithToken(t, s, "/v1/purge/batch", body)
-	require.Equal(t, http.StatusRequestEntityTooLarge, code)
+	require.Equal(t, fasthttp.StatusRequestEntityTooLarge, code)
 }
 
 func TestAuthCheck_WithToken(t *testing.T) {
@@ -464,11 +465,11 @@ func TestAuthCheck_WithToken(t *testing.T) {
 	})
 	// Without token → 401.
 	status, _ := get(t, s, "/v1/auth/check")
-	require.Equal(t, http.StatusUnauthorized, status)
+	require.Equal(t, fasthttp.StatusUnauthorized, status)
 	// With token → 200.
 	ctx := testCtxWithAuth("GET", "/v1/auth/check", "secret")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestRateLimit_PostRejected(t *testing.T) {
@@ -481,13 +482,13 @@ func TestRateLimit_PostRejected(t *testing.T) {
 	})
 	// First POST succeeds (consumes the single token).
 	code, _ := postWithToken(t, s, "/v1/purge", `{"url":"https://a.com/"}`)
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	// Second POST immediately → 429 (bucket empty, refill not yet).
 	code, _ = postWithToken(t, s, "/v1/purge", `{"url":"https://b.com/"}`)
-	require.Equal(t, http.StatusTooManyRequests, code)
+	require.Equal(t, fasthttp.StatusTooManyRequests, code)
 	// GET still works (rate limiter skips GET).
 	status, _ := get(t, s, "/healthz")
-	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, fasthttp.StatusOK, status)
 }
 
 // --- pprof tests ---
@@ -501,7 +502,7 @@ func TestPprof_DisabledByDefault(t *testing.T) {
 	// With auth, the route is not registered → mux returns 404.
 	ctx := testCtxWithAuth("GET", "/debug/pprof/heap", "secret")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusNotFound, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
 func TestPprof_Enabled_HeapDebug(t *testing.T) {
@@ -511,7 +512,7 @@ func TestPprof_Enabled_HeapDebug(t *testing.T) {
 		PprofEnabled: true,
 	})
 	code, body := get(t, s, "/debug/pprof/heap?debug=1")
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.True(t, bytes.Contains(body, []byte("heap")))
 }
 
@@ -524,7 +525,7 @@ func TestPprof_NoAuthRequired(t *testing.T) {
 	})
 	// No Authorization header — pprof must still be reachable.
 	code, _ := get(t, s, "/debug/pprof/heap?debug=1")
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 }
 
 func TestPprof_GoroutineDebug(t *testing.T) {
@@ -534,7 +535,7 @@ func TestPprof_GoroutineDebug(t *testing.T) {
 		PprofEnabled: true,
 	})
 	code, body := get(t, s, "/debug/pprof/goroutine?debug=1")
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.True(t, bytes.Contains(body, []byte("goroutine")))
 }
 
@@ -545,7 +546,7 @@ func TestPprof_Index(t *testing.T) {
 		PprofEnabled: true,
 	})
 	code, body := get(t, s, "/debug/pprof/")
-	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.True(t, bytes.Contains(body, []byte("pprof")))
 }
 
@@ -564,5 +565,5 @@ func TestPprof_AuthStillEnforcedOnOtherEndpoints(t *testing.T) {
 	ctx := testCtx("POST", "/v1/purge")
 	ctx.Request.Header.Set(header.ContentType, "application/json")
 	s.Handler()(ctx)
-	require.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }

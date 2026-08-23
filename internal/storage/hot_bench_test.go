@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"net/http"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -41,7 +40,7 @@ func BenchmarkHotStore_Get_Miss(b *testing.B) {
 func BenchmarkHotStore_Put(b *testing.B) {
 	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
 	defer func() { _ = s.Close(context.Background()) }()
-	hdr := header.FromHTTP(http.Header{header.ContentType: {"text/plain"}})
+	hdr := headerMap(header.ContentType, "text/plain")
 
 	b.ResetTimer()
 	b.ReportAllocs()

@@ -73,15 +73,21 @@ func BenchmarkGate_Handler_CacheMiss_Cacheable(b *testing.B) {
 		MaxBytes:  256 << 20,
 		NumShards: 16,
 	})
-	h := NewHandler(HandlerConfig{Upstream: upstream, FastClient: &testFastClient{handler: upstream}, Store: store})
+	h := NewHandler(HandlerConfig{Upstream: upstream, FastClient: &benchFastClient{handler: upstream}, Store: store})
 
 	base := "http://bench.local/miss/"
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
-		ctx := testCtx("GET", base+strconv.Itoa(i))
+		ctx := rctxPool.Get().(*fasthttp.RequestCtx)
+		ctx.Request.Header.SetMethod("GET")
+		ctx.Request.SetRequestURI(base + strconv.Itoa(i))
 		h.ServeRequest(ctx)
+		ctx.Request.Reset()
+		ctx.Response.Reset()
+		ctx.ResetUserValues()
+		rctxPool.Put(ctx)
 	}
 }
 

@@ -787,6 +787,7 @@ func TestFastPathHandler_VaryHit(t *testing.T) {
 		Key:        primary,
 		StatusCode: 200,
 		Header:     headerMap(header.Vary, "Accept-Encoding"),
+		VaryValue:  "Accept-Encoding",
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -811,10 +812,11 @@ func TestFastPathHandler_VaryHit(t *testing.T) {
 		StatusCode: 200,
 		Header: headerMap(header.Vary, "Accept-Encoding",
 			header.ContentLength, "10"),
-		Body:     []byte("gzip-body!"),
-		BodySize: 10,
-		StoredAt: time.Now(),
-		TTL:      60 * time.Second,
+		VaryValue: "Accept-Encoding",
+		Body:      []byte("gzip-body!"),
+		BodySize:  10,
+		StoredAt:  time.Now(),
+		TTL:       60 * time.Second,
 	}
 	require.NoError(t, store.Put(context.Background(), varyKeyGzip, gzipObj))
 
@@ -865,6 +867,7 @@ func TestFastPathHandler_VaryStaleHit(t *testing.T) {
 		Key:        primary,
 		StatusCode: 200,
 		Header:     headerMap(header.Vary, "Accept-Encoding"),
+		VaryValue:  "Accept-Encoding",
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -888,6 +891,7 @@ func TestFastPathHandler_VaryStaleHit(t *testing.T) {
 		StatusCode: 200,
 		Header: headerMap(header.Vary, "Accept-Encoding",
 			header.ContentLength, "11"),
+		VaryValue:            "Accept-Encoding",
 		Body:                 []byte("stale-gzip!"),
 		BodySize:             11,
 		StoredAt:             time.Now().Add(-10 * time.Second),
@@ -924,6 +928,7 @@ func TestFastPathHandler_VaryVariantMiss(t *testing.T) {
 		Key:        primary,
 		StatusCode: 200,
 		Header:     headerMap(header.Vary, "Accept-Encoding"),
+		VaryValue:  "Accept-Encoding",
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -973,6 +978,7 @@ func TestFastPathHandler_VaryMultiField(t *testing.T) {
 		Key:        primary,
 		StatusCode: 200,
 		Header:     headerMap(header.Vary, "Accept-Encoding, Accept-Language"),
+		VaryValue:  "Accept-Encoding, Accept-Language",
 		Body:       []byte("primary"),
 		BodySize:   7,
 		StoredAt:   time.Now(),
@@ -998,10 +1004,11 @@ func TestFastPathHandler_VaryMultiField(t *testing.T) {
 		StatusCode: 200,
 		Header: headerMap(header.Vary, "Accept-Encoding, Accept-Language",
 			header.ContentLength, "8"),
-		Body:     []byte("gzip-en!"),
-		BodySize: 8,
-		StoredAt: time.Now(),
-		TTL:      60 * time.Second,
+		VaryValue: "Accept-Encoding, Accept-Language",
+		Body:      []byte("gzip-en!"),
+		BodySize:  8,
+		StoredAt:  time.Now(),
+		TTL:       60 * time.Second,
 	}
 	require.NoError(t, store.Put(context.Background(), varyKeyGzipEn, variantObj))
 
@@ -1052,10 +1059,11 @@ func TestFastPathHandler_VarySameKey(t *testing.T) {
 		StatusCode: 200,
 		Header: headerMap(header.Vary, "X-Trace-Id",
 			header.ContentLength, "4"),
-		Body:     []byte("body"),
-		BodySize: 4,
-		StoredAt: time.Now(),
-		TTL:      60 * time.Second,
+		VaryValue: "X-Trace-Id",
+		Body:      []byte("body"),
+		BodySize:  4,
+		StoredAt:  time.Now(),
+		TTL:       60 * time.Second,
 	}
 	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
 

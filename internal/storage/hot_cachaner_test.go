@@ -38,9 +38,9 @@ func TestCachanerHot_PutGet(t *testing.T) {
 
 func TestCachanerHot_Eviction(t *testing.T) {
 	t.Parallel()
-	// 3 KiB budget. Each 1 KiB body object is ~1280 bytes (body + overhead),
+	// 4 KiB budget. Each 1 KiB body object is ~1537 bytes (body + overhead),
 	// so the budget holds 2 entries; the 3rd Put forces eviction.
-	s := cachanerHotStore(t, 3<<10)
+	s := cachanerHotStore(t, 4<<10)
 	defer func() { _ = s.Close(context.Background()) }()
 	ctx := context.Background()
 

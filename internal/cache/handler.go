@@ -939,10 +939,10 @@ func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKe
 	if err != nil {
 		h.logger.Warn("cache lookup error", "key", primaryKey, "error", err)
 	}
-	if obj == nil || obj.Header.Get(header.Vary) == "" {
+	if obj == nil || obj.VaryValue == "" {
 		return primaryKey, primaryKey, obj, src
 	}
-	vk := VariantKeyFast(primaryKey, obj.Header.Get(header.Vary), &ctx.Request.Header, h.policy)
+	vk := VariantKeyFast(primaryKey, obj.VaryValue, &ctx.Request.Header, h.policy)
 	if vk == primaryKey {
 		return primaryKey, primaryKey, obj, src
 	}
@@ -1426,6 +1426,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	MergeHeaders304(refreshed, res.Header.ToMap())
 	// Recompute HasDate in case the 304 response added or changed Date.
 	refreshed.HasDate = refreshed.Header.Has(header.Date)
+	refreshed.VaryValue = refreshed.Header.Get(header.Vary)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
@@ -1900,7 +1901,7 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		}
 		var varyHeader string
 		if obj.Header.Len() > 0 {
-			varyHeader = obj.Header.Get(header.Vary)
+			varyHeader = obj.VaryValue
 		}
 		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
@@ -2069,6 +2070,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
 		HasDate:      hasDate,
+		VaryValue:    resMap.Get(header.Vary),
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).

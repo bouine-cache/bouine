@@ -59,10 +59,10 @@ func TestEvictionLogging_BackedSkipped(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	var buf bytes.Buffer
-	// Each object with 100-byte body costs ~510 bytes (struct overhead).
+	// Each object with 100-byte body costs ~564 bytes (struct overhead).
 	// Budget fits 2 objects; the 3rd triggers inline eviction.
 	h := NewHotStore(HotConfig{
-		MaxBytes:       1100,
+		MaxBytes:       1200,
 		NumShards:      1,
 		ReaperInterval: -1,
 		Logger:         newCaptureLogger(&mu, &buf),
@@ -98,7 +98,7 @@ func TestEvictionLogging_NoBackup(t *testing.T) {
 	var mu sync.Mutex
 	var buf bytes.Buffer
 	h := NewHotStore(HotConfig{
-		MaxBytes:       1100,
+		MaxBytes:       1200,
 		NumShards:      1,
 		ReaperInterval: -1,
 		Logger:         newCaptureLogger(&mu, &buf),

@@ -279,14 +279,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 296, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
+	// objectStructSize: 312, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 296 + 32 + 40 + 32 +
+	want := int64(5) + 312 + 32 + 40 + 32 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
@@ -461,7 +461,7 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	//
 	// No Get() calls between evictions — Get marks visited and would
 	// contaminate the state under test.
-	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
+	s := NewHotStore(HotConfig{MaxBytes: 4 << 10, NumShards: 1})
 	ctx := context.Background()
 
 	k1 := testkey.Hash([]byte("hot"))
@@ -514,7 +514,7 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 
 func TestHotStore_EvictFallbackNoBacked(t *testing.T) {
 	t.Parallel()
-	s := NewHotStore(HotConfig{MaxBytes: 3 << 10, NumShards: 1})
+	s := NewHotStore(HotConfig{MaxBytes: 4 << 10, NumShards: 1})
 	ctx := context.Background()
 
 	k1 := testkey.Hash([]byte("x"))

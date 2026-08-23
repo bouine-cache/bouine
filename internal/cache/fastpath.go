@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/xxhash/v3"
@@ -45,6 +46,14 @@ type FastPathHandler struct {
 	store     storage.Store
 	routeName string
 	policy    *KeyPolicy // nil = no query/header policy
+
+	// cachedDate caches the HTTP-formatted Date string for the current
+	// second. Updated lock-free: the unix second is stored in
+	// cachedDateUnix, the formatted string in cachedDate. If now.Unix()
+	// matches cachedDateUnix, the cached string is reused, avoiding the
+	// expensive time.Time.AppendFormat call (~40% of FastPath CPU).
+	cachedDateUnix atomic.Int64
+	cachedDate     atomic.Pointer[string]
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's config.
@@ -87,7 +96,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	}
 
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
-	if vary := obj.Header.Get(header.Vary); vary != "" {
+	if vary := obj.VaryValue; vary != "" {
 		vk := variantKeyFromRaw(key, vary, req, f.policy)
 		if vk != key {
 			vobj, vsrc, verr := f.store.Get(ctx, vk)
@@ -158,6 +167,26 @@ func qualifiesForFastPath(req *api.RawRequest) bool {
 	return true
 }
 
+// getCachedDate returns the HTTP-formatted Date string for the current
+// second, using a lock-free cache to avoid the expensive
+// time.Time.AppendFormat call on every FastPath hit. The cache is
+// per-FastPathHandler and valid for one second; concurrent goroutines
+// may compute the same string simultaneously (benign race — the result
+// is deterministic for a given unix second).
+func (f *FastPathHandler) getCachedDate(now time.Time) string {
+	unix := now.Unix()
+	if unix == f.cachedDateUnix.Load() {
+		if p := f.cachedDate.Load(); p != nil {
+			return *p
+		}
+	}
+	ds := now.UTC().AppendFormat(nil, httpTimeFormat)
+	s := string(ds)
+	f.cachedDateUnix.Store(unix)
+	f.cachedDate.Store(&s)
+	return s
+}
+
 // serializeResponse builds a FastPathResponse from a cached object.
 // It writes the status line + pre-serialized static headers + dynamic
 // headers (Age, X-Cache, X-Cache-Source, Warning, Date) into a pooled
@@ -176,12 +205,13 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 	} else {
 		// Fallback: serialize headers on-the-fly (serialization failed
 		// or headers exceed maxFastPathHeaderBytes).
-		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult)
+		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now))
 		return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
 	}
 
 	// Append dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date).
-	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult)
+	dateStr := f.getCachedDate(now)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr)
 
 	if cap(hbuf) > maxFastPathHeaderBytes {
 		*bufPtr = hbuf
@@ -217,7 +247,7 @@ func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
 // into hbuf, then appends dynamic headers via appendDynamicHeaders.
 // Used as a fallback when SerializedHead is not available (warm-tier
 // objects loaded from disk without pre-serialization).
-func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
+func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string) []byte {
 	var noCacheFields map[string]bool
 	if obj.CacheControl != "" {
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
@@ -234,7 +264,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 		hbuf = append(hbuf, '\r', '\n')
 	}
 
-	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr)
 	return hbuf
 }
 
@@ -242,14 +272,14 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 // X-Cache, X-Cache-Source, Warning, Connection) plus the trailing \r\n
 // that terminates the HTTP header block. Called after either the
 // pre-serialized static headers or the fallback header iteration.
-func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string) []byte {
+func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string) []byte {
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served
 	// it). Only synthesize a Date when the stored object has none.
 	if !obj.HasDate {
 		hbuf = append(hbuf, header.Date...)
 		hbuf = append(hbuf, ": "...)
-		hbuf = now.UTC().AppendFormat(hbuf, httpTimeFormat)
+		hbuf = append(hbuf, dateStr...)
 		hbuf = append(hbuf, '\r', '\n')
 	}
 

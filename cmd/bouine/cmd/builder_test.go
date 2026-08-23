@@ -3,15 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,6 +21,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/runtime/shutdown"
 	"github.com/bouine-cache/bouine/internal/runtime/supervised"
 	"github.com/bouine-cache/bouine/internal/server"
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 	"github.com/bouine-cache/bouine/pkg/api"
 )
@@ -390,14 +388,14 @@ func TestNewServeCmd(t *testing.T) {
 
 func TestPurgeCmd_Exec(t *testing.T) {
 	t.Parallel()
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/purge", r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		assert.Equal(t, "/v1/purge", string(ctx.Path()))
+		ctx.Response.Header.Set("Content-Type", "application/json")
+		_, _ = ctx.Write([]byte(`{"status":"ok"}`))
+	})
 	defer originSrv.Close()
 
-	addr := originSrv.Listener.Addr().String()
+	addr := originSrv.Addr
 	root := Root()
 	root.SetArgs([]string{"purge", "http://example.com/page", "--server", addr})
 	var stdout bytes.Buffer
@@ -409,14 +407,14 @@ func TestPurgeCmd_Exec(t *testing.T) {
 
 func TestBanCmd_Exec(t *testing.T) {
 	t.Parallel()
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/ban", r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","count":3}`))
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		assert.Equal(t, "/v1/ban", string(ctx.Path()))
+		ctx.Response.Header.Set("Content-Type", "application/json")
+		_, _ = ctx.Write([]byte(`{"status":"ok","count":3}`))
+	})
 	defer originSrv.Close()
 
-	addr := originSrv.Listener.Addr().String()
+	addr := originSrv.Addr
 	root := Root()
 	root.SetArgs([]string{"ban", "host_regex=example.com", "--server", addr})
 	var stdout bytes.Buffer
@@ -445,14 +443,14 @@ func TestBanCmd_UnknownKey(t *testing.T) {
 
 func TestRefreshCmd_Exec(t *testing.T) {
 	t.Parallel()
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/refresh", r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		assert.Equal(t, "/v1/refresh", string(ctx.Path()))
+		ctx.Response.Header.Set("Content-Type", "application/json")
+		_, _ = ctx.Write([]byte(`{"status":"ok"}`))
+	})
 	defer originSrv.Close()
 
-	addr := originSrv.Listener.Addr().String()
+	addr := originSrv.Addr
 	root := Root()
 	root.SetArgs([]string{"refresh", "http://example.com/page", "--server", addr})
 	var stdout bytes.Buffer
@@ -532,14 +530,14 @@ func TestCompletionCmd_Fish(t *testing.T) {
 
 func TestClusterPeersCmd_Exec(t *testing.T) {
 	t.Parallel()
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/cluster/peers", r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"name":"node1","addr":"10.0.0.1:7946"}]`))
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		assert.Equal(t, "/v1/cluster/peers", string(ctx.Path()))
+		ctx.Response.Header.Set("Content-Type", "application/json")
+		_, _ = ctx.Write([]byte(`[{"name":"node1","addr":"10.0.0.1:7946"}]`))
+	})
 	defer originSrv.Close()
 
-	addr := originSrv.Listener.Addr().String()
+	addr := originSrv.Addr
 	root := Root()
 	root.SetArgs([]string{"cluster", "peers", "--server", addr})
 	var stdout bytes.Buffer
@@ -551,12 +549,12 @@ func TestClusterPeersCmd_Exec(t *testing.T) {
 
 func TestClusterPeersCmd_ServerError(t *testing.T) {
 	t.Parallel()
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(fasthttp.StatusInternalServerError)
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+	})
 	defer originSrv.Close()
 
-	addr := originSrv.Listener.Addr().String()
+	addr := originSrv.Addr
 	root := Root()
 	root.SetArgs([]string{"cluster", "peers", "--server", addr})
 	err := root.Execute()
@@ -1012,7 +1010,7 @@ func TestPurgeKey_WithHandler(t *testing.T) {
 	store, err := e.buildStore(nil)
 	require.NoError(t, err)
 	handler := cache.NewHandler(cache.HandlerConfig{
-		Upstream: fasthttpadaptor.NewFastHTTPHandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Upstream: func(ctx *fasthttp.RequestCtx) {},
 		Store:    store,
 		Logger:   newTestLogger(),
 	})
@@ -1180,15 +1178,15 @@ func TestBuildRouter_WithMissingPool(t *testing.T) {
 
 func TestBuildRouter_WithRoute(t *testing.T) {
 	t.Parallel()
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(fasthttp.StatusOK)
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer originSrv.Close()
 
 	e := &engine{
 		cfg: &config.Config{
 			UpstreamPools: []config.UpstreamPool{
-				{Name: "echo", Targets: []string{originSrv.Listener.Addr().String()}},
+				{Name: "echo", Targets: []string{originSrv.Addr}},
 			},
 			Routes: []config.Route{
 				{Name: "api", Pool: "echo"},
@@ -1600,7 +1598,7 @@ func TestPurgeKey_WithMatchingHandler(t *testing.T) {
 	}
 	require.NoError(t, store.Put(context.Background(), key, obj))
 	handler := cache.NewHandler(cache.HandlerConfig{
-		Upstream: fasthttpadaptor.NewFastHTTPHandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Upstream: func(ctx *fasthttp.RequestCtx) {},
 		Store:    store,
 		Logger:   newTestLogger(),
 	})

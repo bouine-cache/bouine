@@ -1,24 +1,22 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
+
+	"github.com/valyala/fasthttp"
 )
 
 // waitForPort polls until addr accepts TCP connections or the 3s timeout expires.
@@ -34,12 +32,63 @@ func waitForPort(t *testing.T, addr string) {
 	})
 }
 
+func fastGet(t *testing.T, url string) (*fasthttp.Response, error) {
+	t.Helper()
+	client := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.SetRequestURI(url)
+	req.Header.SetMethod("GET")
+	if err := client.Do(req, resp); err != nil {
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(resp)
+		return nil, err
+	}
+	fasthttp.ReleaseRequest(req)
+	return resp, nil
+}
+
+func fastGetTLS(t *testing.T, url string) (*fasthttp.Response, error) {
+	t.Helper()
+	client := &fasthttp.Client{
+		TLSConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
+	}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.SetRequestURI(url)
+	req.Header.SetMethod("GET")
+	if err := client.Do(req, resp); err != nil {
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(resp)
+		return nil, err
+	}
+	fasthttp.ReleaseRequest(req)
+	return resp, nil
+}
+
+func fastPost(t *testing.T, url, contentType, body string) (*fasthttp.Response, error) {
+	t.Helper()
+	client := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	req.SetRequestURI(url)
+	req.Header.SetMethod("POST")
+	req.Header.SetContentType(contentType)
+	req.SetBody([]byte(body))
+	if err := client.Do(req, resp); err != nil {
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(resp)
+		return nil, err
+	}
+	fasthttp.ReleaseRequest(req)
+	return resp, nil
+}
+
 func TestProxyEndToEnd(t *testing.T) {
-	// Full in-process e2e: origin + pipeline + listener.
-	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Origin", "yes")
-		_, _ = io.WriteString(w, "proxied!")
-	}))
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("X-Origin", "yes")
+		_, _ = ctx.WriteString("proxied!")
+	})
 	defer originSrv.Close()
 
 	dir := t.TempDir()
@@ -59,7 +108,7 @@ upstream_pools:
 routes:
   - match: {}
     pool: echo
-`, certPath, keyPath, originSrv.Listener.Addr().String())
+`, certPath, keyPath, originSrv.Addr)
 	cfgPath := filepath.Join(dir, "bouine.yaml")
 	err := os.WriteFile(cfgPath, []byte(cfg), 0o600)
 	require.NoError(t, err)
@@ -78,49 +127,38 @@ routes:
 	waitForPort(t, "127.0.0.1:18092")
 
 	// HTTP/1.1 proxy test.
-	resp, err := http.Get("http://127.0.0.1:18090/hello")
+	resp, err := fastGet(t, "http://127.0.0.1:18090/hello")
 	if err != nil {
 		cancel()
 		t.Fatalf("HTTP GET: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	cerr := resp.Body.Close()
-	assert.Nil(t, cerr)
-	if resp.StatusCode != 200 || string(body) != "proxied!" {
-		t.Fatalf("HTTP: status=%d body=%q", resp.StatusCode, body)
+	body := string(resp.Body())
+	if resp.StatusCode() != 200 || body != "proxied!" {
+		t.Fatalf("HTTP: status=%d body=%q", resp.StatusCode(), body)
 	}
-	require.Equal(t, "yes", resp.Header.Get("X-Origin"))
+	require.Equal(t, "yes", string(resp.Header.Peek("X-Origin")))
+	fasthttp.ReleaseResponse(resp)
 
-	// HTTPS / HTTP/2 proxy test.
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
-		},
-	}
-	resp2, err := client.Get("https://127.0.0.1:18091/hello")
+	// HTTPS proxy test.
+	resp2, err := fastGetTLS(t, "https://127.0.0.1:18091/hello")
 	if err != nil {
 		cancel()
 		t.Fatalf("HTTPS GET: %v", err)
 	}
-	body2, _ := io.ReadAll(resp2.Body)
-	cerr = resp2.Body.Close()
-	assert.Nil(t, cerr)
-	if resp2.StatusCode != 200 || string(body2) != "proxied!" {
-		t.Fatalf("HTTPS: status=%d body=%q", resp2.StatusCode, body2)
+	body2 := string(resp2.Body())
+	if resp2.StatusCode() != 200 || body2 != "proxied!" {
+		t.Fatalf("HTTPS: status=%d body=%q", resp2.StatusCode(), body2)
 	}
-	require.Equal(t, "HTTP/1.1", resp2.Proto)
+	fasthttp.ReleaseResponse(resp2)
 
 	// POST with body.
-	resp3, err := http.Post("http://127.0.0.1:18090/echo", "text/plain",
-		bytes.NewBufferString("ping"))
+	resp3, err := fastPost(t, "http://127.0.0.1:18090/echo", "text/plain", "ping")
 	if err != nil {
 		cancel()
 		t.Fatalf("POST: %v", err)
 	}
-	_, _ = io.ReadAll(resp3.Body)
-	cerr = resp3.Body.Close()
-	assert.Nil(t, cerr)
-	require.Equal(t, 200, resp3.StatusCode)
+	require.Equal(t, 200, resp3.StatusCode())
+	fasthttp.ReleaseResponse(resp3)
 
 	cancel()
 	select {

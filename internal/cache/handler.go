@@ -150,6 +150,7 @@ type fetchResult struct {
 	Header     headerLookup
 	Body       []byte
 	Err        error
+	fastResp   *fasthttp.Response // non-nil when the response is kept alive for CopyTo
 }
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -1239,11 +1240,12 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	}
 }
 
-// releaseFetchResult is now a no-op — the pooled response is released
-// immediately in doFetch/doFetchBg after copying the body. Kept for
-// backward compatibility with callers that defer it.
+// releaseFetchResult releases the pooled fasthttp.Response if it was
+// kept alive in fetchResult.fastResp for CopyTo-based header copying.
 func releaseFetchResult(res fetchResult) {
-	// fastResp is always nil now — the response is released in doFetch.
+	if res.fastResp != nil {
+		fasthttp.ReleaseResponse(res.fastResp)
+	}
 }
 
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, ri RequestInfo) {
@@ -1488,6 +1490,7 @@ func (h *Handler) writeAndMaybeStore(
 ) {
 	dst := &ctx.Response.Header
 	res.Header.CopyToFastHTTP(dst)
+	// Overwrite origin-supplied attribution headers (prevent spoofing).
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	// A proxy SHOULD add an Age header to responses it forwards,
@@ -1497,7 +1500,7 @@ func (h *Handler) writeAndMaybeStore(
 	}
 	ctx.SetStatusCode(res.StatusCode)
 	if string(ctx.Method()) != "HEAD" {
-		_, _ = ctx.Write(res.Body)
+		ctx.Response.SetBodyRaw(res.Body)
 	}
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
@@ -1925,25 +1928,19 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy response headers into a header.Map before releasing the
-	// pooled response. We must use FromFastHTTP (which reads from
-	// h.All() including Date in h.h) rather than copying to a new
-	// ResponseHeader via SetBytesKV, because fasthttp's Set silently
-	// drops Date as a "managed automatically" header.
-	hdrMap := header.FromFastHTTP(&resp.Header)
-
 	// Copy the body to an independent slice. The pooled response is
-	// released immediately to avoid data races when singleflight
-	// waiters read Body from different goroutines.
+	// kept alive in fetchResult.fastResp so writeAndMaybeStore can use
+	// CopyTo for zero-normalization header copying. It is released by
+	// releaseFetchResult after all singleflight waiters have finished.
 	statusCode := resp.StatusCode()
 	bodyCopy := make([]byte, len(resp.Body()))
 	copy(bodyCopy, resp.Body())
-	fasthttp.ReleaseResponse(resp)
 
 	return fetchResult{
 		StatusCode: statusCode,
-		Header:     fromHeaderMap(hdrMap),
+		Header:     fromFastHTTPHeader(&resp.Header),
 		Body:       bodyCopy,
+		fastResp:   resp,
 	}
 }
 

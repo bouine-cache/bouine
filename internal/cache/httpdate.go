@@ -90,7 +90,7 @@ func parseOriginAge[H headerGetter](h H) time.Duration {
 // This is for header.Map only — header.Map joins multi-values at store
 // time, so callers with a header.Map should use Get directly.
 func mergeHeaderValues(h header.Map, name string) string {
-	return h.Get(name)
+	return h.GetAll(name)
 }
 
 // parseHTTPDate tries multiple date formats used in HTTP headers

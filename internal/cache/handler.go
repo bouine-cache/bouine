@@ -1067,6 +1067,24 @@ func stripNoCacheFields(dst *fasthttp.ResponseHeader, ccHeader string) {
 	}
 }
 
+// stripConnectionListedHeaders removes headers listed in the stored
+// response's Connection header (RFC 9110 §7.6.1). The Connection header
+// lists per-connection headers that must not be forwarded by proxies.
+func stripConnectionListedHeaders(dst *fasthttp.ResponseHeader, stored header.Map) {
+	conn := stored.Get(header.Connection)
+	if conn == "" {
+		return
+	}
+	for _, field := range strings.FieldsFunc(conn, func(r rune) bool {
+		return r == ',' || r == ' '
+	}) {
+		if field != "" {
+			del := header.InternKey(field)
+			dst.Del(del)
+		}
+	}
+}
+
 // cacheResult selects the X-Cache header and optional Warning for served objects.
 type cacheResult int
 
@@ -1083,9 +1101,24 @@ const (
 func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
 	dst := &ctx.Response.Header
 	obj.Header.WriteToFastHTTP(dst)
+	// Set the Date header from the stored object. fasthttp's Set()
+	// silently drops Date as "managed automatically", so we use
+	// SetDateRaw which bypasses the special header check. The server
+	// has NoDefaultDate=true to prevent auto-Date overwriting this.
+	if dateVal := obj.Header.Get(header.Date); dateVal != "" {
+		header.SetDateRaw(dst, dateVal)
+	}
 	// Strip internal headers used for ban matching — never forwarded to clients.
 	dst.Del(header.XBouinePath)
 	dst.Del(header.XBouineHost)
+	// Strip hop-by-hop headers (RFC 9110 §7.6.1).
+	dst.Del(header.Connection)
+	dst.Del(header.KeepAlive)
+	dst.Del(header.TE)
+	dst.Del(header.Trailer)
+	dst.Del(header.Upgrade)
+	// Strip headers listed in the stored Connection header (RFC 9110 §7.6.1).
+	stripConnectionListedHeaders(dst, obj.Header)
 	dst.Set(header.Age, ageHeader(ComputeAge(obj, now)))
 	dst.Set(header.XCacheSource, string(src))
 	switch result {
@@ -1183,10 +1216,7 @@ func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	detachedHdr := &fasthttp.ResponseHeader{}
-	for k, v := range resp.Header.All() {
-		detachedHdr.SetBytesKV(k, v)
-	}
+	hdrMap := header.FromFastHTTP(&resp.Header)
 
 	statusCode := resp.StatusCode()
 	bodyCopy := make([]byte, len(resp.Body()))
@@ -1195,7 +1225,7 @@ func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
 
 	return fetchResult{
 		StatusCode: statusCode,
-		Header:     fromFastHeader(detachedHdr),
+		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
 	}
 }
@@ -1888,15 +1918,12 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy response headers into a detached fasthttp.ResponseHeader.
-	// resp.Header references the pooled response's internal buffer,
-	// which is reused after ReleaseResponse. We need the headers to
-	// survive beyond the pool release (they're read by buildObject,
-	// writeAndMaybeStore, etc. via headerLookup).
-	detachedHdr := &fasthttp.ResponseHeader{}
-	for k, v := range resp.Header.All() {
-		detachedHdr.SetBytesKV(k, v)
-	}
+	// Copy response headers into a header.Map before releasing the
+	// pooled response. We must use FromFastHTTP (which reads from
+	// h.All() including Date in h.h) rather than copying to a new
+	// ResponseHeader via SetBytesKV, because fasthttp's Set silently
+	// drops Date as a "managed automatically" header.
+	hdrMap := header.FromFastHTTP(&resp.Header)
 
 	// Copy the body to an independent slice. The pooled response is
 	// released immediately to avoid data races when singleflight
@@ -1908,7 +1935,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 
 	return fetchResult{
 		StatusCode: statusCode,
-		Header:     fromFastHeader(detachedHdr),
+		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
 	}
 }
@@ -1918,7 +1945,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defa
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
-	ccHeader := res.Header.Get(header.CacheControl)
+	ccHeader := res.Header.GetAll(header.CacheControl)
 	var respCC Directives
 	if cdnCC, hasCDN := cdnCacheControl(res.Header.ToMap()); hasCDN {
 		respCC = cdnCC

@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"net/http"
 	"testing"
 	"time"
 
@@ -114,45 +113,47 @@ func TestFreshnessLifetimeH(t *testing.T) {
 	t.Parallel()
 	t.Run("cdn_cc_max_age", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "max-age=120")
-		d, ok := FreshnessLifetimeH(Directives{}, header.FromHTTP(h))
+		d, ok := FreshnessLifetimeH(Directives{}, h)
 		require.True(t, ok)
 		assert.Equal(t, 120*time.Second, d)
 	})
 	t.Run("cdn_cc_no_store", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("CDN-Cache-Control", "no-store")
-		d, ok := FreshnessLifetimeH(Directives{}, header.FromHTTP(h))
+		d, ok := FreshnessLifetimeH(Directives{}, h)
 		require.True(t, ok)
 		assert.Equal(t, time.Duration(0), d)
 	})
 	t.Run("s_maxage", func(t *testing.T) {
 		t.Parallel()
 		respCC := Directives{SMaxAgeSet: true, SMaxAge: 30 * time.Second}
-		d, ok := FreshnessLifetimeH(respCC, header.FromHTTP(http.Header{}))
+		d, ok := FreshnessLifetimeH(respCC, header.Map{})
 		require.True(t, ok)
 		assert.Equal(t, 30*time.Second, d)
 	})
 	t.Run("multiple_expires_rejected", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.Expires: {"Mon, 01 Jan 2024 01:00:00 GMT", "Mon, 01 Jan 2024 02:00:00 GMT"}}
-		_, ok := FreshnessLifetimeH(Directives{}, header.FromHTTP(h))
+		h := header.Map{}
+		h.SetValues(header.Expires, []string{"Mon, 01 Jan 2024 01:00:00 GMT", "Mon, 01 Jan 2024 02:00:00 GMT"})
+		_, ok := FreshnessLifetimeH(Directives{}, h)
 		require.False(t, ok)
 	})
 	t.Run("missing_date_uses_now", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.Expires: {"Mon, 01 Jan 2024 00:00:00 GMT"}}
-		d, ok := FreshnessLifetimeH(Directives{}, header.FromHTTP(h))
+		h := headerMap(header.Expires, "Mon, 01 Jan 2024 00:00:00 GMT")
+		d, ok := FreshnessLifetimeH(Directives{}, h)
 		require.True(t, ok)
 		// Should be negative since Expires is in the past relative to now.
 		assert.True(t, d < 0 || d == 0)
 	})
 	t.Run("invalid_expires", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{header.Expires: {"garbage"}, header.Date: {"Mon, 01 Jan 2024 00:00:00 GMT"}}
-		_, ok := FreshnessLifetimeH(Directives{}, header.FromHTTP(h))
+		h := headerMap(header.Expires, "garbage")
+		h.Set(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT")
+		_, ok := FreshnessLifetimeH(Directives{}, h)
 		require.False(t, ok)
 	})
 }

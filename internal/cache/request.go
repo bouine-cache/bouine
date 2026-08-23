@@ -8,8 +8,8 @@ import (
 )
 
 // RequestInfo is a lightweight snapshot of request fields needed by
-// cache functions that previously took *http.Request. It avoids
-// importing net/http in the cache package's leaf files.
+// cache functions. It keeps the cache package's leaf files free
+// of HTTP server dependencies.
 type RequestInfo struct {
 	Method     string
 	URI        string
@@ -20,8 +20,8 @@ type RequestInfo struct {
 	Header     header.Map
 }
 
-// requestInfoFromHTTP builds a RequestInfo from an *http.Request.
-// Used by handler.go (which still imports net/http for the shim).
+// requestInfoFromHTTP builds a RequestInfo from individual request
+// fields. Used by test helpers that work with net/http request fixtures.
 func requestInfoFromHTTP(method, uri, host, path string, tls bool, hdr header.Map) RequestInfo {
 	return RequestInfo{
 		Method: method,

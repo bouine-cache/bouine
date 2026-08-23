@@ -35,12 +35,12 @@ var fastPathRespPool = sync.Pool{
 }
 
 // maxFastPathHeaderBytes caps the serialized header block. Responses
-// exceeding this fall through to net/http.
+// exceeding this fall through to the full handler.
 const maxFastPathHeaderBytes = 8 * 1024
 
 // FastPathHandler implements api.FastPathHandler for the cache layer.
 // It holds a reference to the storage store and cache config, and attempts
-// to serve cache hits without constructing an *http.Request.
+// to serve cache hits without constructing a full RequestInfo.
 type FastPathHandler struct {
 	store     storage.Store
 	routeName string
@@ -139,7 +139,7 @@ func qualifiesForFastPath(req *api.RawRequest) bool {
 		}
 		// Reject requests with Transfer-Encoding or Content-Length.
 		// A GET/HEAD with a body or chunked encoding is not cacheable
-		// and must go through net/http for proper validation.
+		// and must go through the full handler for proper validation.
 		if api.EqualFold(h.Key, header.TransferEncoding) || api.EqualFold(h.Key, header.ContentLength) {
 			return false
 		}
@@ -422,7 +422,7 @@ func parseNoCacheFieldNames(ccHeader string) map[string]bool {
 
 // buildKeyFromRaw computes the canonical cache key from a RawRequest.
 // It mirrors BuildKey but reads from RawRequest fields instead of
-// *http.Request, avoiding the allocation of *http.Request + *url.URL.
+// RawRequest, avoiding the allocation of a full request struct.
 //
 // Zero-alloc on the hot path: uses a 512-byte stack buffer.
 func buildKeyFromRaw(req *api.RawRequest, policy *KeyPolicy) api.Key {
@@ -685,7 +685,7 @@ func appendCanonicalQuerySlowString(buf []byte, n int, raw string, p *KeyPolicy)
 
 // evaluateFromRaw runs a simplified RFC 9111 state machine for the fast
 // path. It only handles Hit and StaleHit — all other dispositions return
-// false so the caller falls through to net/http. This avoids the full
+// false so the caller falls through to the full handler. This avoids the full
 // Evaluate overhead for requests that can be served from cache.
 func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Disposition {
 	if obj == nil {
@@ -742,7 +742,7 @@ func evaluateFromRaw(req *api.RawRequest, obj *api.Object, now time.Time) Dispos
 
 // variantKeyFromRaw computes the variant key from a RawRequest.
 // It mirrors VariantKey but reads header values from RawRequest
-// instead of http.Header. Vary:* returns primary (RFC 9111 §4.1;
+// instead of a header.Map from RequestInfo. Vary:* returns primary (RFC 9111 §4.1;
 // isCacheBlocked prevents such objects from being stored).
 func variantKeyFromRaw(primary api.Key, vary string, req *api.RawRequest, policy *KeyPolicy) api.Key {
 	if vary == "" {

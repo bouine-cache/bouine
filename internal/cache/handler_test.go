@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
@@ -26,50 +25,28 @@ import (
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
-func origin200(body string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, body)
-	})
-}
+var errAbortHandler = ErrAbortHandler
 
-// fasthttpReqCtx creates a *fasthttp.RequestCtx from an *http.Request for tests.
-func fasthttpReqCtx(r *http.Request) *fasthttp.RequestCtx {
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.Header.SetMethod(r.Method)
-	ctx.Request.SetRequestURI(r.URL.String())
-	ctx.Request.Header.SetHost(r.Host)
-	for k, vs := range r.Header {
-		for _, v := range vs {
-			ctx.Request.Header.Add(k, v)
-		}
+func origin200(body string) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte(body))
 	}
-	if r.Body != nil {
-		body, _ := io.ReadAll(r.Body)
-		ctx.Request.SetBody(body)
-	}
-	return ctx
 }
 
-// newRR creates a fresh ResponseRecorder for tests.
-func newRR() *httptest.ResponseRecorder {
-	return httptest.NewRecorder()
-}
-
-func testHandler(t *testing.T, upstream http.Handler) *Handler {
+func testHandler(t *testing.T, upstream fasthttp.RequestHandler) *Handler {
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
 	return NewHandler(HandlerConfig{
-		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
-		FastClient: &handlerFastClient{handler: upstream},
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
 	})
 }
@@ -77,31 +54,31 @@ func testHandler(t *testing.T, upstream http.Handler) *Handler {
 func TestHandler_MissThenHit(t *testing.T) {
 	t.Parallel()
 	var originCalls int
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		originCalls++
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "cached-body")
-	})
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("cached-body"))
+	}
 	h := testHandler(t, upstream)
 
 	// First request — MISS, fetches from origin.
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	require.Equal(t, 200, rr1.Code)
-	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
-	require.Equal(t, "cached-body", rr1.Body.String())
+	rr1 := testCtx("GET", "http://example.com/foo")
+	h.ServeRequest(rr1)
+	require.Equal(t, 200, respCode(rr1))
+	require.Equal(t, "MISS", respHeader(rr1, header.XCache))
+	require.Equal(t, "cached-body", respBody(rr1))
 
 	// Second request — HIT, served from cache.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	require.Equal(t, 200, rr2.Code)
-	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
-	require.Equal(t, "cached-body", rr2.Body.String())
+	rr2 := testCtx("GET", "http://example.com/foo")
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2))
+	require.Equal(t, "HIT", respHeader(rr2, header.XCache))
+	require.Equal(t, "cached-body", respBody(rr2))
 
 	// Age header should be present.
-	require.NotEqual(t, "", rr2.Header().Get(header.Age))
+	require.NotEqual(t, "", respHeader(rr2, header.Age))
 
 	// Origin should have been called only once.
 	require.Equal(t, 1, originCalls)
@@ -110,17 +87,17 @@ func TestHandler_MissThenHit(t *testing.T) {
 func TestHandler_NoStoreNotCached(t *testing.T) {
 	t.Parallel()
 	var calls int
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
 		calls++
-		w.Header().Set(header.CacheControl, "no-store")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "private")
-	}))
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("private"))
+	})
 
 	for range 3 {
-		rr := newRR()
-		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/x", nil))
-		require.Equal(t, 200, rr.Code)
+		rr := testCtx("GET", "http://example.com/x")
+		h.ServeRequest(rr)
+		require.Equal(t, 200, respCode(rr))
 	}
 	require.Equal(t, 3, calls)
 }
@@ -130,169 +107,163 @@ func TestHandler_PostInvalidatesAndStores(t *testing.T) {
 	// RFC 9111 §4.4: POST invalidates cached GET response.
 	// RFC 9111 §4.3.1: cacheable POST response stored under GET key
 	// when Content-Location matches the request URI.
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		if r.Method == "POST" {
-			w.Header().Set(header.ContentLocation, r.URL.Path)
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		if string(ctx.Method()) == "POST" {
+			ctx.Response.Header.Set(header.ContentLocation, string(ctx.Path()))
 		}
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 
 	// Populate cache with GET.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/res", nil))
-	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/res")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 
 	// POST invalidates cache AND stores the cacheable response under GET key.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data")))
+	rr2 := testCtx("POST", "http://example.com/res")
+	h.ServeRequest(rr2)
 
 	// GET — should be HIT (POST response stored after invalidation).
-	rr3 := httptest.NewRecorder()
-	h.ServeHTTPCompat(rr3, httptest.NewRequest("GET", "http://example.com/res", nil))
-	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
+	rr3 := testCtx("GET", "http://example.com/res")
+	h.ServeRequest(rr3)
+	require.Equal(t, "HIT", respHeader(rr3, header.XCache))
 }
 
 func TestHandler_InvalidateLocation_BarePath(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ContentLocation, "/other")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ContentLocation, "/other")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
+	rr := testCtx("GET", "http://example.com/other")
+	h.ServeRequest(rr)
 
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
-	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	rr = testCtx("GET", "http://example.com/other")
+	h.ServeRequest(rr)
+	require.Equal(t, "HIT", respHeader(rr, header.XCache))
 
-	h.ServeHTTPCompat(httptest.NewRecorder(),
-		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
+	h.ServeRequest(testCtx("POST", "http://example.com/submit"))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/other", nil))
-	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/other")
+	h.ServeRequest(rr2)
+	require.NotEqual(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_InvalidateLocation_BarePathWithQueryOnPost(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ContentLocation, "/other")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ContentLocation, "/other")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
+	rr := testCtx("GET", "http://example.com/other")
+	h.ServeRequest(rr)
 
-	h.ServeHTTPCompat(httptest.NewRecorder(),
-		httptest.NewRequest("POST", "http://example.com/submit?ref=1", strings.NewReader("data")))
+	h.ServeRequest(testCtx("POST", "http://example.com/submit?ref=1"))
 
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/other", nil))
-	require.NotEqual(t, "HIT", rr.Header().Get(header.XCache))
+	rr = testCtx("GET", "http://example.com/other")
+	h.ServeRequest(rr)
+	require.NotEqual(t, "HIT", respHeader(rr, header.XCache))
 }
 
 func TestHandler_InvalidateLocation_AbsoluteURL(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ContentLocation, "http://example.com:80/cdn/v2.json?x=1")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ContentLocation, "http://example.com:80/cdn/v2.json?x=1")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
+	rr := testCtx("GET", "http://example.com/cdn/v2.json?x=1")
+	h.ServeRequest(rr)
 
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
-	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	rr = testCtx("GET", "http://example.com/cdn/v2.json?x=1")
+	h.ServeRequest(rr)
+	require.Equal(t, "HIT", respHeader(rr, header.XCache))
 
-	h.ServeHTTPCompat(httptest.NewRecorder(),
-		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
+	h.ServeRequest(testCtx("POST", "http://example.com/submit"))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/cdn/v2.json?x=1", nil))
-	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/cdn/v2.json?x=1")
+	h.ServeRequest(rr2)
+	require.NotEqual(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_InvalidateLocation_RelativePath(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ContentLocation, "../v2.json")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ContentLocation, "../v2.json")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
+	rr := testCtx("GET", "http://example.com/api/v2.json")
+	h.ServeRequest(rr)
 
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
-	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	rr = testCtx("GET", "http://example.com/api/v2.json")
+	h.ServeRequest(rr)
+	require.Equal(t, "HIT", respHeader(rr, header.XCache))
 
-	h.ServeHTTPCompat(httptest.NewRecorder(),
-		httptest.NewRequest("POST", "http://example.com/api/sub/submit", strings.NewReader("data")))
+	h.ServeRequest(testCtx("POST", "http://example.com/api/sub/submit"))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/api/v2.json", nil))
-	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/api/v2.json")
+	h.ServeRequest(rr2)
+	require.NotEqual(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_InvalidateLocation_DifferentHost(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ContentLocation, "http://other.example.com/resource")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ContentLocation, "http://other.example.com/resource")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
+	rr := testCtx("GET", "http://other.example.com/resource")
+	h.ServeRequest(rr)
 
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
-	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	rr = testCtx("GET", "http://other.example.com/resource")
+	h.ServeRequest(rr)
+	require.Equal(t, "HIT", respHeader(rr, header.XCache))
 
-	h.ServeHTTPCompat(httptest.NewRecorder(),
-		httptest.NewRequest("POST", "http://example.com/submit", strings.NewReader("data")))
+	h.ServeRequest(testCtx("POST", "http://example.com/submit"))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://other.example.com/resource", nil))
-	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://other.example.com/resource")
+	h.ServeRequest(rr2)
+	require.NotEqual(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_InvalidateLocation_LocationHeader(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.Location, "/redirect-target")
-		w.WriteHeader(201)
-		_, _ = io.WriteString(w, "created")
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Location, "/redirect-target")
+		ctx.SetStatusCode(201)
+		_, _ = ctx.Write([]byte("created"))
+	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
+	rr := testCtx("GET", "http://example.com/redirect-target")
+	h.ServeRequest(rr)
 
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
-	require.Equal(t, "HIT", rr.Header().Get(header.XCache))
+	rr = testCtx("GET", "http://example.com/redirect-target")
+	h.ServeRequest(rr)
+	require.Equal(t, "HIT", respHeader(rr, header.XCache))
 
-	h.ServeHTTPCompat(httptest.NewRecorder(),
-		httptest.NewRequest("POST", "http://example.com/create", strings.NewReader("data")))
+	h.ServeRequest(testCtx("POST", "http://example.com/create"))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/redirect-target", nil))
-	require.NotEqual(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/redirect-target")
+	h.ServeRequest(rr2)
+	require.NotEqual(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_BypassOnRequestNoStore(t *testing.T) {
@@ -300,15 +271,15 @@ func TestHandler_BypassOnRequestNoStore(t *testing.T) {
 	h := testHandler(t, origin200("body"))
 
 	// Populate cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/bp", nil))
+	rr := testCtx("GET", "http://example.com/bp")
+	h.ServeRequest(rr)
 
 	// Request with no-store bypasses cache — goes directly to upstream.
-	req := httptest.NewRequest("GET", "http://example.com/bp", nil)
-	req.Header.Set(header.CacheControl, "no-store")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, req)
-	require.Equal(t, 200, rr2.Code)
+	req := testCtx("GET", "http://example.com/bp")
+	req.Request.Header.Set(header.CacheControl, "no-store")
+	rr2 := req
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2))
 }
 
 func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
@@ -323,21 +294,21 @@ func TestHandler_BypassOnRequestNoStoreWithOtherDirectives(t *testing.T) {
 		t.Run(cc, func(t *testing.T) {
 			t.Parallel()
 			var originCalls atomic.Int32
-			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstream := func(ctx *fasthttp.RequestCtx) {
 				originCalls.Add(1)
-				origin200("body").ServeHTTP(w, r)
-			})
+				origin200("body")(ctx)
+			}
 			h := testHandler(t, upstream)
 
-			rr := newRR()
-			h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/ns", nil))
+			rr := testCtx("GET", "http://example.com/ns")
+			h.ServeRequest(rr)
 
-			req := httptest.NewRequest("GET", "http://example.com/ns", nil)
-			req.Header.Set(header.CacheControl, cc)
-			rr = newRR()
-			h.ServeHTTPCompat(rr, req)
-			if rr.Code != 200 {
-				t.Fatalf("bypass status = %d", rr.Code)
+			req := testCtx("GET", "http://example.com/ns")
+			req.Request.Header.Set(header.CacheControl, cc)
+			rr = req
+			h.ServeRequest(rr)
+			if respCode(rr) != 200 {
+				t.Fatalf("bypass status = %d", respCode(rr))
 			}
 			if got := originCalls.Load(); got != 2 {
 				t.Fatalf("origin called %d times, want 2 (no-store must bypass)", got)
@@ -351,26 +322,26 @@ func TestHandler_HeadServedFromCache(t *testing.T) {
 	h := testHandler(t, origin200("full-body"))
 
 	// Populate with GET.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/hd", nil))
+	rr := testCtx("GET", "http://example.com/hd")
+	h.ServeRequest(rr)
 
 	// HEAD should hit cache but not return body.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("HEAD", "http://example.com/hd", nil))
-	require.Equal(t, 200, rr2.Code)
-	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
-	require.Equal(t, 0, rr2.Body.Len())
+	rr2 := testCtx("HEAD", "http://example.com/hd")
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2))
+	require.Equal(t, "HIT", respHeader(rr2, header.XCache))
+	require.Equal(t, 0, len(rr2.Response.Body()))
 }
 
-func testHandlerStayinAlive(t *testing.T, upstream http.Handler) *Handler {
+func testHandlerStayinAlive(t *testing.T, upstream fasthttp.RequestHandler) *Handler {
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
 	return NewHandler(HandlerConfig{
-		Upstream:    wrapUpstream(upstream),
-		FastClient:  &handlerFastClient{handler: upstream},
+		Upstream:    upstream,
+		FastClient:  &testFastClient{handler: upstream},
 		Store:       store,
 		StayinAlive: true,
 	})
@@ -390,34 +361,34 @@ func TestHandler_StayinAlive_ServesStaleon5xx(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstream := func(ctx *fasthttp.RequestCtx) {
 				calls++
 				if calls == 1 {
-					w.Header().Set(header.CacheControl, "max-age=1")
-					w.WriteHeader(200)
-					_, _ = io.WriteString(w, tc.cachedBody)
+					ctx.Response.Header.Set(header.CacheControl, "max-age=1")
+					ctx.SetStatusCode(200)
+					_, _ = ctx.Write([]byte(tc.cachedBody))
 					return
 				}
-				w.WriteHeader(tc.errorStatus)
-			})
+				ctx.SetStatusCode(tc.errorStatus)
+			}
 
 			h := testHandlerStayinAlive(t, upstream)
 
-			rr1 := newRR()
-			h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", "http://example.com/sa", nil))
-			if rr1.Code != 200 {
-				t.Fatalf("populate: status = %d", rr1.Code)
+			rr1 := testCtx("GET", "http://example.com/sa")
+			h.ServeRequest(rr1)
+			if respCode(rr1) != 200 {
+				t.Fatalf("populate: status = %d", respCode(rr1))
 			}
 
-			req2 := httptest.NewRequest("GET", "http://example.com/sa", nil)
-			req2.Header.Set(header.CacheControl, "no-cache")
-			rr2 := newRR()
-			h.ServeHTTPCompat(rr2, req2)
-			if rr2.Code != 200 {
-				t.Fatalf("stayin-alive: status = %d, want 200 (stale served)", rr2.Code)
+			req2 := testCtx("GET", "http://example.com/sa")
+			req2.Request.Header.Set(header.CacheControl, "no-cache")
+			rr2 := req2
+			h.ServeRequest(rr2)
+			if respCode(rr2) != 200 {
+				t.Fatalf("stayin-alive: status = %d, want 200 (stale served)", respCode(rr2))
 			}
-			if !strings.Contains(rr2.Body.String(), tc.cachedBody) {
-				t.Fatalf("stayin-alive: body = %q, want cached body", rr2.Body.String())
+			if !strings.Contains(respBody(rr2), tc.cachedBody) {
+				t.Fatalf("stayin-alive: body = %q, want cached body", respBody(rr2))
 			}
 		})
 	}
@@ -450,43 +421,43 @@ func TestHandler_Revalidate_5xx_StaleFallbackGateConsistency(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstream := func(ctx *fasthttp.RequestCtx) {
 				calls++
 				if calls == 1 {
-					w.Header().Set(header.CacheControl, tc.cacheCtrl)
-					w.Header().Set(header.ETag, `"v1"`)
-					w.WriteHeader(200)
-					_, _ = io.WriteString(w, "fresh-body")
+					ctx.Response.Header.Set(header.CacheControl, tc.cacheCtrl)
+					ctx.Response.Header.Set(header.ETag, `"v1"`)
+					ctx.SetStatusCode(200)
+					_, _ = ctx.Write([]byte("fresh-body"))
 					return
 				}
 				// Revalidation: upstream returns 5xx.
-				w.WriteHeader(503)
-			})
+				ctx.SetStatusCode(503)
+			}
 
 			h := testHandler(t, upstream)
 
 			// Seed cache.
-			seed := httptest.NewRecorder()
-			h.ServeHTTPCompat(seed, httptest.NewRequest("GET", "http://example.com/gate", nil))
-			if seed.Code != 200 {
-				t.Fatalf("seed: status = %d", seed.Code)
+			seed := testCtx("GET", "http://example.com/gate")
+			h.ServeRequest(seed)
+			if respCode(seed) != 200 {
+				t.Fatalf("seed: status = %d", respCode(seed))
 			}
 
 			// Second request triggers revalidation; upstream returns 5xx.
-			req := httptest.NewRequest("GET", "http://example.com/gate", nil)
-			rr := newRR()
-			h.ServeHTTPCompat(rr, req)
+			req := testCtx("GET", "http://example.com/gate")
+			rr := req
+			h.ServeRequest(rr)
 
 			// staleFallbackAllowed returns false for no-cache / s-maxage,
 			// so the 5xx must be forwarded to the client — not served stale.
-			if rr.Code != 503 {
+			if respCode(rr) != 503 {
 				t.Fatalf("revalidate 5xx: status = %d, want 503 (stale must NOT be served for %s)",
-					rr.Code, tc.cacheCtrl)
+					respCode(rr), tc.cacheCtrl)
 			}
-			if rr.Header().Get(header.XCache) != "MISS" {
-				t.Fatalf("revalidate 5xx: X-Cache = %q, want MISS", rr.Header().Get(header.XCache))
+			if respHeader(rr, header.XCache) != "MISS" {
+				t.Fatalf("revalidate 5xx: X-Cache = %q, want MISS", respHeader(rr, header.XCache))
 			}
-			if strings.Contains(rr.Body.String(), "fresh-body") {
+			if strings.Contains(respBody(rr), "fresh-body") {
 				t.Fatalf("revalidate 5xx: stale body served for %s, should be forwarded 5xx",
 					tc.cacheCtrl)
 			}
@@ -502,23 +473,23 @@ func TestHandler_Revalidate_5xx_StaleFallbackGateConsistency(t *testing.T) {
 func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "fresh-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("fresh-body"))
 			return
 		}
-		w.WriteHeader(503)
-	})
+		ctx.SetStatusCode(503)
+	}
 
 	h := testHandler(t, upstream)
 
-	seed := httptest.NewRecorder()
-	h.ServeHTTPCompat(seed, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
-	require.Equal(t, 200, seed.Code)
+	seed := testCtx("GET", "http://example.com/no-sie")
+	h.ServeRequest(seed)
+	require.Equal(t, 200, respCode(seed))
 
 	// Wait for the object to expire (max-age=1, no stale-if-error).
 	time.Sleep(1500 * time.Millisecond)
@@ -526,10 +497,10 @@ func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 	// Second request triggers revalidation; upstream returns 5xx.
 	// Without a stale-if-error window, stale is still served because
 	// staleFallbackAllowed returns true (no must-revalidate etc.).
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/no-sie", nil))
-	require.Equal(t, 200, rr.Code)
-	require.Equal(t, "STALE", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/no-sie")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	require.Equal(t, "STALE", respHeader(rr, header.XCache))
 }
 
 // TestHandler_Revalidate_5xx_MustRevalidateWithSIE verifies that an object
@@ -539,29 +510,29 @@ func TestHandler_Revalidate_5xx_NoSIEWindow(t *testing.T) {
 func TestHandler_Revalidate_5xx_MustRevalidateWithSIE(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1, must-revalidate, stale-if-error=600")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "fresh-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1, must-revalidate, stale-if-error=600")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("fresh-body"))
 			return
 		}
-		w.WriteHeader(503)
-	})
+		ctx.SetStatusCode(503)
+	}
 
 	h := testHandler(t, upstream)
 
-	seed := httptest.NewRecorder()
-	h.ServeHTTPCompat(seed, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
-	require.Equal(t, 200, seed.Code)
+	seed := testCtx("GET", "http://example.com/must-revalidate")
+	h.ServeRequest(seed)
+	require.Equal(t, 200, respCode(seed))
 
 	time.Sleep(1500 * time.Millisecond)
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate", nil))
-	require.Equal(t, 503, rr.Code)
+	rr := testCtx("GET", "http://example.com/must-revalidate")
+	h.ServeRequest(rr)
+	require.Equal(t, 503, respCode(rr))
 }
 
 // TestHandler_Revalidate_ConnError_MustRevalidate verifies that a
@@ -572,32 +543,32 @@ func TestHandler_Revalidate_5xx_MustRevalidateWithSIE(t *testing.T) {
 func TestHandler_Revalidate_ConnError_MustRevalidate(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1, must-revalidate")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "fresh-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1, must-revalidate")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("fresh-body"))
 			return
 		}
 		// Simulate a connection drop: ErrAbortHandler is caught by doFetch
 		// and converted to fetchResult{Err: ...}.
-		panic(http.ErrAbortHandler)
-	})
+		panic(errAbortHandler)
+	}
 
 	h := testHandler(t, upstream)
 
-	seed := httptest.NewRecorder()
-	h.ServeHTTPCompat(seed, httptest.NewRequest("GET", "http://example.com/must-revalidate-err", nil))
-	require.Equal(t, 200, seed.Code)
+	seed := testCtx("GET", "http://example.com/must-revalidate-err")
+	h.ServeRequest(seed)
+	require.Equal(t, 200, respCode(seed))
 
 	time.Sleep(1500 * time.Millisecond)
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/must-revalidate-err", nil))
-	require.Equal(t, 502, rr.Code)
-	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/must-revalidate-err")
+	h.ServeRequest(rr)
+	require.Equal(t, 502, respCode(rr))
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 }
 
 // TestHandler_Revalidate_ConnError_NoDirective verifies that an object
@@ -606,30 +577,30 @@ func TestHandler_Revalidate_ConnError_MustRevalidate(t *testing.T) {
 func TestHandler_Revalidate_ConnError_NoDirective(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "fresh-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("fresh-body"))
 			return
 		}
-		panic(http.ErrAbortHandler)
-	})
+		panic(errAbortHandler)
+	}
 
 	h := testHandler(t, upstream)
 
-	seed := httptest.NewRecorder()
-	h.ServeHTTPCompat(seed, httptest.NewRequest("GET", "http://example.com/no-dir-err", nil))
-	require.Equal(t, 200, seed.Code)
+	seed := testCtx("GET", "http://example.com/no-dir-err")
+	h.ServeRequest(seed)
+	require.Equal(t, 200, respCode(seed))
 
 	time.Sleep(1500 * time.Millisecond)
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/no-dir-err", nil))
-	require.Equal(t, 200, rr.Code)
-	require.Equal(t, "STALE", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/no-dir-err")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	require.Equal(t, "STALE", respHeader(rr, header.XCache))
 }
 
 // TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency verifies that when
@@ -643,23 +614,23 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	const upstreamDelay = 500 * time.Millisecond
 	const staleAge = 700 * time.Millisecond
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "age-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("age-body"))
 			return
 		}
 		time.Sleep(upstreamDelay)
-		w.WriteHeader(503)
-	})
+		ctx.SetStatusCode(503)
+	}
 
 	h := testHandlerStayinAlive(t, upstream)
 	url := "http://example.com/age-test"
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
@@ -669,14 +640,14 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 	_ = h.store.Put(context.Background(), key, stale)
 
 	reqStart := time.Now()
-	req := httptest.NewRequest("GET", url, nil)
-	req.Header.Set(header.CacheControl, "no-cache")
-	rr = newRR()
-	h.ServeHTTPCompat(rr, req)
+	req := testCtx("GET", url)
+	req.Request.Header.Set(header.CacheControl, "no-cache")
+	rr = req
+	h.ServeRequest(rr)
 
-	require.Equal(t, 200, rr.Code)
+	require.Equal(t, 200, respCode(rr))
 
-	ageStr := rr.Header().Get(header.Age)
+	ageStr := respHeader(rr, header.Age)
 	ageSecs, err := strconv.Atoi(ageStr)
 	require.NoErrorf(t, err, "Age header = %q, not an integer", ageStr)
 
@@ -699,24 +670,24 @@ func TestHandler_StayinAlive_AgeNotInflatedByUpstreamLatency(t *testing.T) {
 func TestHandler_StayinAlive_FetchAndStore_ServesStaleOn5xx(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "fresh-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("fresh-body"))
 			return
 		}
-		w.WriteHeader(503)
-	})
+		ctx.SetStatusCode(503)
+	}
 
 	h := testHandlerStayinAlive(t, upstream)
 	url := "http://example.com/sa-miss-5xx"
 
 	// Populate cache.
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
-	require.Equal(t, 200, rr1.Code)
+	rr1 := testCtx("GET", url)
+	h.ServeRequest(rr1)
+	require.Equal(t, 200, respCode(rr1))
 
 	// Manually expire the stored object past TTL + SWR + SIE so Evaluate
 	// returns Miss (not StaleHit or Revalidate).
@@ -730,35 +701,35 @@ func TestHandler_StayinAlive_FetchAndStore_ServesStaleOn5xx(t *testing.T) {
 	require.NoError(t, h.store.Put(context.Background(), key, stale))
 
 	// Second request without no-cache → Miss → fetchAndStoreStayinAlive.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", url, nil))
-	require.Equal(t, 200, rr2.Code, "stale served on 5xx")
-	require.Contains(t, rr2.Body.String(), "fresh-body")
+	rr2 := testCtx("GET", url)
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2), "stale served on 5xx")
+	require.Contains(t, respBody(rr2), "fresh-body")
 }
 
 // TestHandler_StayinAlive_FetchAndStore_ServesStaleOnErr exercises the
 // fetchAndStoreStayinAlive path with a connection error (upstream aborts
-// via http.ErrAbortHandler). This covers the res.Err != nil branch.
+// via errAbortHandler). This covers the res.Err != nil branch.
 func TestHandler_StayinAlive_FetchAndStore_ServesStaleOnErr(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "err-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("err-body"))
 			return
 		}
-		panic(http.ErrAbortHandler)
-	})
+		panic(errAbortHandler)
+	}
 
 	h := testHandlerStayinAlive(t, upstream)
 	url := "http://example.com/sa-miss-err"
 
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
-	require.Equal(t, 200, rr1.Code)
+	rr1 := testCtx("GET", url)
+	h.ServeRequest(rr1)
+	require.Equal(t, 200, respCode(rr1))
 
 	key := BuildKey(requestInfoFromURL("GET", url), nil)
 	obj, _, _ := h.store.Get(context.Background(), key)
@@ -769,10 +740,10 @@ func TestHandler_StayinAlive_FetchAndStore_ServesStaleOnErr(t *testing.T) {
 	stale.StaleIfError = 0
 	require.NoError(t, h.store.Put(context.Background(), key, stale))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", url, nil))
-	require.Equal(t, 200, rr2.Code, "stale served on upstream error")
-	require.Contains(t, rr2.Body.String(), "err-body")
+	rr2 := testCtx("GET", url)
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2), "stale served on upstream error")
+	require.Contains(t, respBody(rr2), "err-body")
 }
 
 // TestHandler_StayinAlive_Revalidate_ServesStaleOnErr exercises the
@@ -783,32 +754,32 @@ func TestHandler_StayinAlive_FetchAndStore_ServesStaleOnErr(t *testing.T) {
 func TestHandler_StayinAlive_Revalidate_ServesStaleOnErr(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "reval-err-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("reval-err-body"))
 			return
 		}
-		panic(http.ErrAbortHandler)
-	})
+		panic(errAbortHandler)
+	}
 
 	h := testHandlerStayinAlive(t, upstream)
 	url := "http://example.com/sa-reval-err"
 
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
-	require.Equal(t, 200, rr1.Code)
+	rr1 := testCtx("GET", url)
+	h.ServeRequest(rr1)
+	require.Equal(t, 200, respCode(rr1))
 
 	// no-cache + ETag forces the Revalidate dispatch → revalidate path.
-	req2 := httptest.NewRequest("GET", url, nil)
-	req2.Header.Set(header.CacheControl, "no-cache")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, req2)
-	require.Equal(t, 200, rr2.Code, "stale served on revalidation error")
-	require.Contains(t, rr2.Body.String(), "reval-err-body")
+	req2 := testCtx("GET", url)
+	req2.Request.Header.Set(header.CacheControl, "no-cache")
+	rr2 := req2
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2), "stale served on revalidation error")
+	require.Contains(t, respBody(rr2), "reval-err-body")
 }
 
 // TestHandler_StayinAlive_Revalidate_ServesStaleOn5xx exercises the
@@ -819,31 +790,31 @@ func TestHandler_StayinAlive_Revalidate_ServesStaleOnErr(t *testing.T) {
 func TestHandler_StayinAlive_Revalidate_ServesStaleOn5xx(t *testing.T) {
 	t.Parallel()
 	calls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		calls++
 		if calls == 1 {
-			w.Header().Set(header.CacheControl, "max-age=1")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "reval-5xx-body")
+			ctx.Response.Header.Set(header.CacheControl, "max-age=1")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("reval-5xx-body"))
 			return
 		}
-		w.WriteHeader(503)
-	})
+		ctx.SetStatusCode(503)
+	}
 
 	h := testHandlerStayinAlive(t, upstream)
 	url := "http://example.com/sa-reval-5xx"
 
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", url, nil))
-	require.Equal(t, 200, rr1.Code)
+	rr1 := testCtx("GET", url)
+	h.ServeRequest(rr1)
+	require.Equal(t, 200, respCode(rr1))
 
-	req2 := httptest.NewRequest("GET", url, nil)
-	req2.Header.Set(header.CacheControl, "no-cache")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, req2)
-	require.Equal(t, 200, rr2.Code, "stale served on revalidation 5xx")
-	require.Contains(t, rr2.Body.String(), "reval-5xx-body")
+	req2 := testCtx("GET", url)
+	req2.Request.Header.Set(header.CacheControl, "no-cache")
+	rr2 := req2
+	h.ServeRequest(rr2)
+	require.Equal(t, 200, respCode(rr2), "stale served on revalidation 5xx")
+	require.Contains(t, respBody(rr2), "reval-5xx-body")
 }
 
 // TestMaxVariants_CapIsEnforced verifies that once MaxVariants distinct
@@ -853,16 +824,16 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 	t.Parallel()
 	hitCount := 0
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte("body"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:    wrapUpstream(orig),
-		FastClient:  &handlerFastClient{handler: orig},
+		Upstream:    orig,
+		FastClient:  &testFastClient{handler: orig},
 		Store:       store,
 		Logger:      slog.Default(),
 		VaryCapHits: counterFunc(func() { hitCount++ }),
@@ -870,18 +841,18 @@ func TestMaxVariants_CapIsEnforced(t *testing.T) {
 
 	// Fill exactly MaxVariants distinct variants.
 	for i := range MaxVariants {
-		req := httptest.NewRequest("GET", "http://example.com/vary", nil)
-		req.Header.Set("X-Test-Variant", strconv.Itoa(i))
-		rr := newRR()
-		h.ServeHTTPCompat(rr, req)
+		req := testCtx("GET", "http://example.com/vary")
+		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
+		rr := req
+		h.ServeRequest(rr)
 	}
 	require.Equal(t, 0, hitCount)
 
 	// One more should trip the cap.
-	req := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	req.Header.Set("X-Test-Variant", "overflow")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, req)
+	req := testCtx("GET", "http://example.com/vary")
+	req.Request.Header.Set("X-Test-Variant", "overflow")
+	rr := req
+	h.ServeRequest(rr)
 	require.Equal(t, 1, hitCount)
 }
 
@@ -893,26 +864,26 @@ func TestMaxVariants_OverwriteDoesNotDoubleCount(t *testing.T) {
 	t.Parallel()
 	hitCount := 0
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte("body"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:    wrapUpstream(orig),
-		FastClient:  &handlerFastClient{handler: orig},
+		Upstream:    orig,
+		FastClient:  &testFastClient{handler: orig},
 		Store:       store,
 		Logger:      slog.Default(),
 		VaryCapHits: counterFunc(func() { hitCount++ }),
 	})
 
 	for range 100 {
-		req := httptest.NewRequest("GET", "http://example.com/vary", nil)
-		req.Header.Set("X-Test-Variant", "same")
-		rr := newRR()
-		h.ServeHTTPCompat(rr, req)
+		req := testCtx("GET", "http://example.com/vary")
+		req.Request.Header.Set("X-Test-Variant", "same")
+		rr := req
+		h.ServeRequest(rr)
 	}
 	require.Equal(t, 0, hitCount)
 }
@@ -921,26 +892,26 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 	t.Parallel()
 	hitCount := 0
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte("body"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 2 << 10})
 	h := NewHandler(HandlerConfig{
-		Upstream:    wrapUpstream(orig),
-		FastClient:  &handlerFastClient{handler: orig},
+		Upstream:    orig,
+		FastClient:  &testFastClient{handler: orig},
 		Store:       store,
 		Logger:      slog.Default(),
 		VaryCapHits: counterFunc(func() { hitCount++ }),
 	})
 
 	for i := range MaxVariants + 10 {
-		req := httptest.NewRequest("GET", "http://example.com/vary", nil)
-		req.Header.Set("X-Test-Variant", strconv.Itoa(i))
-		rr := newRR()
-		h.ServeHTTPCompat(rr, req)
+		req := testCtx("GET", "http://example.com/vary")
+		req.Request.Header.Set("X-Test-Variant", strconv.Itoa(i))
+		rr := req
+		h.ServeRequest(rr)
 	}
 	if hitCount > 0 {
 		t.Fatalf("expected 0 cap hits after eviction reconcile, got %d", hitCount)
@@ -950,29 +921,29 @@ func TestMaxVariants_CapRecoversAfterEviction(t *testing.T) {
 func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte("body"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:       4 << 20,
 		ReaperInterval: -1,
 	})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req1 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	req1.Header.Set("X-Test-Variant", "a")
-	h.ServeHTTPCompat(httptest.NewRecorder(), req1)
+	req1 := testCtx("GET", "http://example.com/vary")
+	req1.Request.Header.Set("X-Test-Variant", "a")
+	h.ServeRequest(req1)
 
-	primaryKey := h.buildKey(fasthttpReqCtx(req1))
-	storeKey := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(req1.Header), nil)
+	primaryKey := h.buildKey(req1)
+	storeKey := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(req1), nil)
 
 	h.variantMu.Lock()
 	set := h.variantSets[primaryKey]
@@ -997,11 +968,11 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 
 	// Request a new variant. The handler should detect the evicted
 	// primary key and reset the stale variant set.
-	req2 := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	req2.Header.Set("X-Test-Variant", "b")
-	h.ServeHTTPCompat(httptest.NewRecorder(), req2)
+	req2 := testCtx("GET", "http://example.com/vary")
+	req2.Request.Header.Set("X-Test-Variant", "b")
+	h.ServeRequest(req2)
 
-	newStoreKey := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(req2.Header), nil)
+	newStoreKey := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(req2), nil)
 
 	h.variantMu.Lock()
 	set = h.variantSets[primaryKey]
@@ -1028,32 +999,32 @@ func TestMaxVariants_PrimaryKeyEvictionResetsSet(t *testing.T) {
 func TestHandler_PurgeDeletesVariants(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte(r.Header.Get("X-Test-Variant")))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte(string(ctx.Request.Header.Peek("X-Test-Variant"))))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
 	// Populate two distinct variants under composite keys.
-	reqA := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	reqA.Header.Set("X-Test-Variant", "a")
-	h.ServeHTTPCompat(httptest.NewRecorder(), reqA)
+	reqA := testCtx("GET", "http://example.com/vary")
+	reqA.Request.Header.Set("X-Test-Variant", "a")
+	h.ServeRequest(reqA)
 
-	reqB := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	reqB.Header.Set("X-Test-Variant", "b")
-	h.ServeHTTPCompat(httptest.NewRecorder(), reqB)
+	reqB := testCtx("GET", "http://example.com/vary")
+	reqB.Request.Header.Set("X-Test-Variant", "b")
+	h.ServeRequest(reqB)
 
-	primaryKey := h.buildKey(fasthttpReqCtx(reqA))
-	keyA := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(reqA.Header), nil)
-	keyB := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(reqB.Header), nil)
+	primaryKey := h.buildKey(reqA)
+	keyA := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
+	keyB := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqB), nil)
 	require.NotEqual(t, primaryKey, keyA)
 	require.NotEqual(t, primaryKey, keyB)
 
@@ -1090,10 +1061,11 @@ func TestHandler_PurgeDeletesVariants(t *testing.T) {
 	}
 
 	// Subsequent requests must miss and re-fetch from origin (no stale hits).
-	rrA := httptest.NewRecorder()
-	h.ServeHTTPCompat(rrA, reqA)
-	require.Equal(t, "MISS", rrA.Header().Get(header.XCache))
-	require.Equal(t, "a", rrA.Body.String())
+	rrA := testCtx("GET", "http://example.com/vary")
+	rrA.Request.Header.Set("X-Test-Variant", "a")
+	h.ServeRequest(rrA)
+	require.Equal(t, "MISS", respHeader(rrA, header.XCache))
+	require.Equal(t, "a", respBody(rrA))
 }
 
 // TestHandler_PurgeNoVariants verifies Purge works when the primary key has
@@ -1105,16 +1077,16 @@ func TestHandler_PurgeNoVariants(t *testing.T) {
 	orig := origin200("body")
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/plain", nil)
-	h.ServeHTTPCompat(httptest.NewRecorder(), req)
+	req := testCtx("GET", "http://example.com/plain")
+	h.ServeRequest(req)
 
-	key := h.buildKey(fasthttpReqCtx(req))
+	key := h.buildKey(req)
 	obj, _, _ := store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 
@@ -1133,7 +1105,7 @@ func TestHandler_PurgeUnknownKey(t *testing.T) {
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("body")),
+		Upstream: origin200("body"),
 		Store:    store,
 		Logger:   slog.Default(),
 	})
@@ -1148,28 +1120,28 @@ func TestHandler_PurgeUnknownKey(t *testing.T) {
 func TestHandler_PurgeVariantsUnregistersRefresh(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte(r.Header.Get("X-Test-Variant")))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte(string(ctx.Request.Header.Peek("X-Test-Variant"))))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:            wrapUpstream(orig),
-		FastClient:          &handlerFastClient{handler: orig},
+		Upstream:            orig,
+		FastClient:          &testFastClient{handler: orig},
 		Store:               store,
 		Logger:              slog.Default(),
 		RefreshBeforeExpiry: true,
 		RefreshMinHits:      0,
 	})
 
-	reqA := httptest.NewRequest("GET", "http://example.com/vary", nil)
-	reqA.Header.Set("X-Test-Variant", "a")
-	h.ServeHTTPCompat(httptest.NewRecorder(), reqA)
+	reqA := testCtx("GET", "http://example.com/vary")
+	reqA.Request.Header.Set("X-Test-Variant", "a")
+	h.ServeRequest(reqA)
 
-	primaryKey := h.buildKey(fasthttpReqCtx(reqA))
-	keyA := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(reqA.Header), nil)
+	primaryKey := h.buildKey(reqA)
+	keyA := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
 
 	// Both the primary and the variant should be in the refresh registry.
 	require.NotNil(t, h.refreshRegistry.Lookup(primaryKey))
@@ -1199,21 +1171,21 @@ func TestHandler_PurgeNonOwningHandlerSkipsStoreDelete(t *testing.T) {
 	// caches anything.
 	orig := origin200("body")
 	hA := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 	hB := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/owned-by-a", nil)
-	hA.ServeHTTPCompat(httptest.NewRecorder(), req)
-	key := hA.buildKey(fasthttpReqCtx(req))
+	req := testCtx("GET", "http://example.com/owned-by-a")
+	hA.ServeRequest(req)
+	key := hA.buildKey(req)
 
 	// Confirm the key is in the store.
 	obj, _, _ := store.Get(context.Background(), key)
@@ -1241,56 +1213,56 @@ func TestHandler_EventualNoPeerFetch(t *testing.T) {
 	// In eventual mode, ownerFn and peerFetch are nil. A miss goes
 	// straight to origin without attempting peer fetch.
 	originCalls := 0
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		originCalls++
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "eventual-body")
-	})
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("eventual-body"))
+	}
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
-		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
-		FastClient: &handlerFastClient{handler: upstream},
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
 		// ownerFn and peerFetch are nil (default zero-value) —
 		// simulates eventual mode where no peer fetch occurs.
 	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/e", nil))
-	require.Equal(t, 200, rr.Code)
+	rr := testCtx("GET", "http://example.com/e")
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
 	require.Equal(t, 1, originCalls)
-	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 
 	// Second request should be a HIT — served from local cache.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/e", nil))
-	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/e")
+	h.ServeRequest(rr2)
+	require.Equal(t, "HIT", respHeader(rr2, header.XCache))
 }
 func TestHandler_BanByPathRegex(t *testing.T) {
 	t.Parallel()
 	var originCalls atomic.Int64
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		originCalls.Add(1)
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "cached-body")
-	})
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("cached-body"))
+	}
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
-	h := NewHandler(HandlerConfig{Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream), FastClient: &handlerFastClient{handler: upstream}, Store: store})
+	h := NewHandler(HandlerConfig{Upstream: upstream, FastClient: &testFastClient{handler: upstream}, Store: store})
 
 	// Warm the cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/ban-me")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 
 	// Second request — HIT.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/ban-me")
+	h.ServeRequest(rr2)
+	require.Equal(t, "HIT", respHeader(rr2, header.XCache))
 
 	// Ban by path regex.
 	count, err := store.Ban(context.Background(), api.BanExpr{
@@ -1300,28 +1272,28 @@ func TestHandler_BanByPathRegex(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	// After ban — should be MISS (re-fetch from origin).
-	rr3 := httptest.NewRecorder()
-	h.ServeHTTPCompat(rr3, httptest.NewRequest("GET", "http://example.com/ban-me", nil))
-	require.Equal(t, "MISS", rr3.Header().Get(header.XCache))
+	rr3 := testCtx("GET", "http://example.com/ban-me")
+	h.ServeRequest(rr3)
+	require.Equal(t, "MISS", respHeader(rr3, header.XCache))
 }
 
 func TestHandler_BanByHostRegex(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "cached-body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("cached-body"))
+	}
 	store := storage.NewHotStore(storage.HotConfig{
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
-	h := NewHandler(HandlerConfig{Upstream: fasthttpadaptor.NewFastHTTPHandler(upstream), FastClient: &handlerFastClient{handler: upstream}, Store: store})
+	h := NewHandler(HandlerConfig{Upstream: upstream, FastClient: &testFastClient{handler: upstream}, Store: store})
 
 	// Warm the cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	require.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/foo")
+	h.ServeRequest(rr)
+	require.Equal(t, "MISS", respHeader(rr, header.XCache))
 
 	// Ban by host regex.
 	count, err := store.Ban(context.Background(), api.BanExpr{
@@ -1331,28 +1303,28 @@ func TestHandler_BanByHostRegex(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	// After ban — should be MISS.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/foo")
+	h.ServeRequest(rr2)
+	require.Equal(t, "MISS", respHeader(rr2, header.XCache))
 }
 
 func TestHandler_ServeObjectStripsInternalHeaders(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "cached-body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("cached-body"))
+	}
 	h := testHandler(t, upstream)
 
 	// Warm and serve from cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/foo", nil))
+	rr := testCtx("GET", "http://example.com/foo")
+	h.ServeRequest(rr)
 
 	// Internal headers must not leak to the client.
-	v := rr.Header().Get(header.XBouinePath)
+	v := respHeader(rr, header.XBouinePath)
 	require.Equal(t, "", v)
-	v = rr.Header().Get(header.XBouineHost)
+	v = respHeader(rr, header.XBouineHost)
 	require.Equal(t, "", v)
 }
 func TestReleaseRecorder_DiscardsOversizedBuffer(t *testing.T) {
@@ -1363,7 +1335,7 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 	t.Parallel()
 	const maxConc = 2
 	var inFlight, maxInFlight atomic.Int32
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		cur := inFlight.Add(1)
 		for {
 			old := maxInFlight.Load()
@@ -1373,14 +1345,14 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 		inFlight.Add(-1)
-		w.Header().Set("Cache-Control", "max-age=0")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+		ctx.Response.Header.Set("Cache-Control", "max-age=0")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	h := NewHandler(HandlerConfig{
-		Upstream:            wrapUpstream(upstream),
-		FastClient:          &handlerFastClient{handler: upstream},
+		Upstream:            upstream,
+		FastClient:          &testFastClient{handler: upstream},
 		Store:               store,
 		MaxFetchConcurrency: maxConc,
 	})
@@ -1391,8 +1363,8 @@ func TestHandler_FetchSemaphoreBoundsConcurrentFetches(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			url := "http://example.com/sem-test-" + strconv.Itoa(i)
-			rr := newRR()
-			h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+			rr := testCtx("GET", url)
+			h.ServeRequest(rr)
 		}(i)
 	}
 	wg.Wait()
@@ -1418,19 +1390,19 @@ func testRefreshHandlerWithPersist(t *testing.T, minHits, persistCycles int) *Ha
 		MaxBytes:  1 << 20,
 		NumShards: 2,
 	})
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if etag := r.Header.Get("If-None-Match"); etag == `"v1"` {
-			w.WriteHeader(fasthttp.StatusNotModified)
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		if etag := string(ctx.Request.Header.Peek("If-None-Match")); etag == `"v1"` {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
 			return
 		}
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:             wrapUpstream(upstream),
-		FastClient:           &handlerFastClient{handler: upstream},
+		Upstream:             upstream,
+		FastClient:           &testFastClient{handler: upstream},
 		Store:                store,
 		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DefaultTTL:           60 * time.Second,
@@ -1452,8 +1424,8 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 
 	// Store an object via foreground path (isRefresh=false → always
 	// schedules regardless of min-hits).
-	req := httptest.NewRequest("GET", "http://example.com/page", nil)
-	h.ServeHTTPCompat(httptest.NewRecorder(), req)
+	req := testCtx("GET", "http://example.com/page")
+	h.ServeRequest(req)
 
 	// The initial store scheduled 1 entry. Stop the scheduler to clear
 	// it, then create a fresh one so we can detect whether the refresh
@@ -1463,7 +1435,7 @@ func TestRefreshMinHits_UnpopularObjectNotRescheduled(t *testing.T) {
 	h.scheduler.Start()
 
 	ctx := context.Background()
-	key := h.buildKey(fasthttpReqCtx(httptest.NewRequest("GET", "http://example.com/page", nil)))
+	key := h.buildKey(testCtx("GET", "http://example.com/page"))
 	obj, _, err := h.store.Get(ctx, key)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
@@ -1491,17 +1463,17 @@ func TestRefreshMinHits_PopularObjectRescheduled(t *testing.T) {
 	// obj.Hits=0. The per-window WindowHits counter is incremented
 	// on both fast and slow paths and is what the refresh gate uses.
 	url := "http://example.com/popular"
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
+	rr = testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	// Clear the initial scheduler entry to detect re-scheduling.
 	h.scheduler.Stop()
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(fasthttpReqCtx(httptest.NewRequest("GET", url, nil)))
+	key := h.buildKey(testCtx("GET", url))
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
@@ -1526,8 +1498,8 @@ func TestRefreshMinHits_InitialStoreAlwaysSchedules(t *testing.T) {
 
 	// A foreground store (isRefresh=false) must schedule even though
 	// Hits == 0 < refreshMinHits (10). Every object gets one chance.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/first-chance", nil))
+	rr := testCtx("GET", "http://example.com/first-chance")
+	h.ServeRequest(rr)
 
 	scheduled := h.scheduler.Len()
 	require.Equal(t, 1, scheduled)
@@ -1541,15 +1513,15 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	})
 	// Upstream always returns 200 (never 304), so the 200 refresh
 	// path is exercised.
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:            wrapUpstream(upstream),
-		FastClient:          &handlerFastClient{handler: upstream},
+		Upstream:            upstream,
+		FastClient:          &testFastClient{handler: upstream},
 		Store:               store,
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DefaultTTL:          60 * time.Second,
@@ -1567,12 +1539,12 @@ func TestRefresh_HitCountResetOn200Refresh(t *testing.T) {
 	// per-window WindowHits counter is 1 and is what the refresh
 	// gate uses.
 	url := "http://example.com/hits"
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
+	rr = testCtx("GET", url)
+	h.ServeRequest(rr)
 
-	key := h.buildKey(fasthttpReqCtx(httptest.NewRequest("GET", url, nil)))
+	key := h.buildKey(testCtx("GET", url))
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
@@ -1603,15 +1575,15 @@ func TestRefreshPersistCycles_UnpopularObjectPersistsThenExpires(t *testing.T) {
 	defer h.Close(context.Background())
 
 	url := "http://example.com/persist"
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	// Clear initial scheduler entry.
 	h.scheduler.Stop()
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(fasthttpReqCtx(httptest.NewRequest("GET", url, nil)))
+	key := h.buildKey(testCtx("GET", url))
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
@@ -1666,15 +1638,15 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 	url := "http://example.com/reset"
 	// MISS → stores with visited=true (#484). Registered with persist=2.
 	// Object.Hits stays 0 (fast path); WindowHits=1 after the test's Get.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	// Clear scheduler.
 	h.scheduler.Stop()
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(fasthttpReqCtx(httptest.NewRequest("GET", url, nil)))
+	key := h.buildKey(testCtx("GET", url))
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
@@ -1694,10 +1666,10 @@ func TestRefreshPersistCycles_PopularRefreshResetsCounter(t *testing.T) {
 
 	// Client HITs → windowHits incremented. After refresh reset,
 	// two HITs are needed to pass the minHits=2 gate.
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
-	rr = newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr = testCtx("GET", url)
+	h.ServeRequest(rr)
+	rr = testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	// Re-read obj to get updated Hits.
 	obj, _, err = h.store.Get(context.Background(), key)
@@ -1731,14 +1703,14 @@ func TestRefreshPersistCycles_ZeroPersistBlocksImmediately(t *testing.T) {
 	defer h.Close(context.Background())
 
 	url := "http://example.com/no-persist"
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", url, nil))
+	rr := testCtx("GET", url)
+	h.ServeRequest(rr)
 
 	h.scheduler.Stop()
 	h.scheduler = NewRefreshScheduler(h.triggerBgRefresh, h.lookupForRefresh)
 	h.scheduler.Start()
 
-	key := h.buildKey(fasthttpReqCtx(httptest.NewRequest("GET", url, nil)))
+	key := h.buildKey(testCtx("GET", url))
 	obj, _, err := h.store.Get(context.Background(), key)
 	if err != nil || obj == nil {
 		t.Fatalf("store.Get: obj=%v err=%v", obj, err)
@@ -1761,8 +1733,8 @@ func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 	// Key not registered → DecrementPersist returns false.
 	require.False(t, r.DecrementPersist(key))
 
-	req := httptest.NewRequest("GET", "http://example.com/test", nil)
-	r.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 2)
+	req := testCtx("GET", "http://example.com/test")
+	r.Register(key, requestInfoFromCtx(req), "", 2)
 
 	// persist=2 → decrement to 1.
 	require.True(t, r.DecrementPersist(key))
@@ -1774,27 +1746,27 @@ func TestRefreshPersistCycles_DecrementPersistOnMissingKey(t *testing.T) {
 
 func TestDoFetchErrAbortHandler(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		panic(http.ErrAbortHandler)
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
-	res := h.doFetch(fasthttpReqCtx(req))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		panic(errAbortHandler)
+	})
+	req := testCtx("GET", "http://example.com/")
+	res := h.doFetch(req)
 	require.NotNil(t, res.Err)
-	require.True(t, errors.Is(res.Err, http.ErrAbortHandler))
+	require.True(t, errors.Is(res.Err, errAbortHandler))
 }
 
 func TestDoFetchRealPanicPropagates(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
 		panic("real bug")
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
+	})
+	req := testCtx("GET", "http://example.com/")
 	defer func() {
 		if rv := recover(); rv == nil {
 			t.Fatal("expected real panic to propagate, got nothing")
 		}
 	}()
-	h.doFetch(fasthttpReqCtx(req))
+	h.doFetch(req)
 }
 
 func TestDoFetchSemaphoreReleasedAfterAbort(t *testing.T) {
@@ -1802,12 +1774,12 @@ func TestDoFetchSemaphoreReleasedAfterAbort(t *testing.T) {
 	// Use a cap-1 semaphore so doFetch's acquire is the only slot.
 	// After doFetch returns, the channel must be empty — if the defer
 	// failed to release, the slot would still be held.
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		panic(http.ErrAbortHandler)
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		panic(errAbortHandler)
+	})
 	h.fetchSem = make(chan struct{}, 1)
-	req := httptest.NewRequest("GET", "/", nil)
-	_ = h.doFetch(fasthttpReqCtx(req))
+	req := testCtx("GET", "http://example.com/")
+	_ = h.doFetch(req)
 	select {
 	case <-h.fetchSem:
 		t.Fatal("fetch semaphore leaked — slot still held after ErrAbortHandler")
@@ -1822,13 +1794,13 @@ func TestCollapsedFetchErrAbortHandler(t *testing.T) {
 	// error through the singleflight path. singleflight wraps panics in
 	// *panicError and re-panics — if doFetch didn't recover, this test
 	// would panic instead of returning an error.
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		panic(http.ErrAbortHandler)
-	}))
-	req := httptest.NewRequest("GET", "/", nil)
-	res := h.collapsedFetch(fasthttpReqCtx(req), api.Key{})
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		panic(errAbortHandler)
+	})
+	req := testCtx("GET", "http://example.com/")
+	res := h.collapsedFetch(req, api.Key{})
 	require.NotNil(t, res.Err)
-	require.True(t, errors.Is(res.Err, http.ErrAbortHandler))
+	require.True(t, errors.Is(res.Err, errAbortHandler))
 }
 
 func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
@@ -1838,17 +1810,17 @@ func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
 	// The handler respects the request context so the timeout actually
 	// interrupts the upstream call (a real ReverseProxy would do this
 	// automatically via its Transport).
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
 		select {
 		case <-time.After(2 * time.Second):
-			w.WriteHeader(200)
-		case <-r.Context().Done():
+			ctx.SetStatusCode(200)
+		case <-context.Background().Done():
 			return
 		}
-	}))
+	})
 	h.fetchTimeout = 100 * time.Millisecond
-	req := httptest.NewRequest("GET", "/", nil)
-	res := h.doFetch(fasthttpReqCtx(req))
+	req := testCtx("GET", "http://example.com/")
+	res := h.doFetch(req)
 	require.NotNil(t, res.Err)
 }
 
@@ -1861,19 +1833,19 @@ func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
 	// the fetch would fail immediately with a deadline error. Since it
 	// starts after, the fetch proceeds normally once the slot is freed.
 	done := make(chan struct{})
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
 		close(done)
-		w.WriteHeader(200)
-	}))
+		ctx.SetStatusCode(200)
+	})
 	h.fetchSem = make(chan struct{}, 1)
 	h.fetchSem <- struct{}{} // pre-fill the only slot
 	h.fetchTimeout = 50 * time.Millisecond
-	req := httptest.NewRequest("GET", "/", nil)
+	req := testCtx("GET", "http://example.com/")
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		<-h.fetchSem // release the slot after 100ms > fetchTimeout
 	}()
-	res := h.doFetch(fasthttpReqCtx(req))
+	res := h.doFetch(req)
 	select {
 	case <-done:
 		// good — the origin was reached, proving the timeout didn't
@@ -1890,16 +1862,15 @@ func TestDoFetchCanceledContextKeepsValidResponse(t *testing.T) {
 	// returned a complete response, doFetch must still return the
 	// response for caching — not discard it. Only timeout
 	// (DeadlineExceeded) or an empty recorder should produce an error.
-	ctx, cancel := context.WithCancel(context.Background())
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "cached-body")
+	_, cancel := context.WithCancel(context.Background())
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("cached-body"))
 		cancel() // simulate client disconnect after origin responded
-	}))
+	})
 	h.fetchTimeout = 5 * time.Second
-	req := httptest.NewRequest("GET", "/", nil)
-	req = req.WithContext(ctx)
-	res := h.doFetch(fasthttpReqCtx(req))
+	req := testCtx("GET", "http://example.com/")
+	res := h.doFetch(req)
 	require.Nil(t, res.Err)
 	require.Equal(t, 200, res.StatusCode)
 	require.Equal(t, "cached-body", string(res.Body))
@@ -1912,7 +1883,7 @@ func TestRefreshFrom304_HeadersUpdatedForLazySerialization(t *testing.T) {
 	stale := &api.Object{
 		Key:        BuildKeyFromURL("http://example.com/test", nil),
 		StatusCode: 200,
-		Header:     header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}, header.ETag: []string{`"v1"`}, "X-Sensitive": {"secret"}}),
+		Header:     headerMap(header.CacheControl, "max-age=60", header.ETag, `"v1"`, "X-Sensitive", "secret"),
 		Body:       []byte("body"),
 		BodySize:   4,
 		StoredAt:   time.Now().Add(-time.Minute),
@@ -1999,24 +1970,23 @@ func TestHandler_SWR_Close_DrainsInFlightRevalidate(t *testing.T) {
 	bs := newBlockingStore(innerStore)
 
 	// Origin returns a cacheable response with SWR.
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	h := NewHandler(HandlerConfig{
-		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
-		FastClient: &handlerFastClient{handler: upstream},
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
 		Store:      bs,
 	})
 
 	// First request: populates the cache.
-	r1 := httptest.NewRequest("GET", "http://example.com/swr", nil)
-	w1 := httptest.NewRecorder()
-	h.ServeHTTPCompat(w1, r1)
-	require.Equal(t, 200, w1.Code)
+	r1 := testCtx("GET", "http://example.com/swr")
+	h.ServeRequest(r1)
+	require.Equal(t, 200, respCode(r1))
 
 	// Wait for TTL to expire so the next request is a StaleHit + SWR trigger.
 	time.Sleep(2 * time.Second)
@@ -2026,10 +1996,9 @@ func TestHandler_SWR_Close_DrainsInFlightRevalidate(t *testing.T) {
 
 	// Second request: StaleHit → serves stale, triggers background revalidation.
 	// The blocking store will hold the SWR goroutine inside Put.
-	r2 := httptest.NewRequest("GET", "http://example.com/swr", nil)
-	w2 := httptest.NewRecorder()
-	h.ServeHTTPCompat(w2, r2)
-	require.Equal(t, 200, w2.Code)
+	r2 := testCtx("GET", "http://example.com/swr")
+	h.ServeRequest(r2)
+	require.Equal(t, 200, respCode(r2))
 
 	// Wait for the SWR goroutine to reach store.Put.
 	select {
@@ -2081,23 +2050,22 @@ func TestHandler_SWR_Close_NoNewRevalidateAfterClose(t *testing.T) {
 	})
 	bs := newBlockingStore(innerStore)
 
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=1, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	h := NewHandler(HandlerConfig{
-		Upstream:   fasthttpadaptor.NewFastHTTPHandler(upstream),
-		FastClient: &handlerFastClient{handler: upstream},
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
 		Store:      bs,
 	})
 
 	// Populate cache.
-	r1 := httptest.NewRequest("GET", "http://example.com/swr2", nil)
-	w1 := httptest.NewRecorder()
-	h.ServeHTTPCompat(w1, r1)
+	r1 := testCtx("GET", "http://example.com/swr2")
+	h.ServeRequest(r1)
 
 	time.Sleep(2 * time.Second)
 
@@ -2105,9 +2073,8 @@ func TestHandler_SWR_Close_NoNewRevalidateAfterClose(t *testing.T) {
 	require.NoError(t, h.Close(context.Background()))
 
 	// Request after close: should not spawn a new SWR goroutine.
-	r2 := httptest.NewRequest("GET", "http://example.com/swr2", nil)
-	w2 := httptest.NewRecorder()
-	h.ServeHTTPCompat(w2, r2)
+	r2 := testCtx("GET", "http://example.com/swr2")
+	h.ServeRequest(r2)
 
 	// The SWR goroutine should not have been spawned, so Put should not be reached.
 	select {
@@ -2133,35 +2100,35 @@ func TestParseSurrogateKeys(t *testing.T) {
 	t.Parallel()
 	t.Run("surrogate_key", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("Surrogate-Key", "key1 key2")
-		keys := parseSurrogateKeys(header.FromHTTP(h))
+		keys := parseSurrogateKeys(h)
 		assert.Equal(t, []string{"key1", "key2"}, keys)
 	})
 	t.Run("cache_tag", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("Cache-Tag", "tag1,tag2")
-		keys := parseSurrogateKeys(header.FromHTTP(h))
+		keys := parseSurrogateKeys(h)
 		assert.Equal(t, []string{"tag1", "tag2"}, keys)
 	})
 	t.Run("x_cache_tags", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("X-Cache-Tags", "t1 t2, t3")
-		keys := parseSurrogateKeys(header.FromHTTP(h))
+		keys := parseSurrogateKeys(h)
 		assert.Equal(t, []string{"t1", "t2", "t3"}, keys)
 	})
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
-		assert.Nil(t, parseSurrogateKeys(header.FromHTTP(h)))
+		h := header.Map{}
+		assert.Nil(t, parseSurrogateKeys(h))
 	})
 	t.Run("dedup", func(t *testing.T) {
 		t.Parallel()
-		h := http.Header{}
+		h := header.Map{}
 		h.Set("Surrogate-Key", "key1 key1 key2")
-		keys := parseSurrogateKeys(header.FromHTTP(h))
+		keys := parseSurrogateKeys(h)
 		assert.Equal(t, []string{"key1", "key2"}, keys)
 	})
 }
@@ -2181,7 +2148,7 @@ func TestStripNoCacheFields(t *testing.T) {
 
 func TestStripNoCacheFields_Empty(t *testing.T) {
 	t.Parallel()
-	dst := http.Header{"ETag": {`"v1"`}}
+	dst := map[string][]string{"ETag": {`"v1"`}}
 	stripNoCacheFields(&fasthttp.ResponseHeader{}, "")
 	stripNoCacheFields(&fasthttp.ResponseHeader{}, "max-age=60")
 	assert.Contains(t, dst, "ETag")
@@ -2190,11 +2157,11 @@ func TestStripNoCacheFields_Empty(t *testing.T) {
 func TestIsInvalidating(t *testing.T) {
 	t.Parallel()
 	assert.True(t, isInvalidating("POST"))
-	assert.True(t, isInvalidating(http.MethodPut))
-	assert.True(t, isInvalidating(http.MethodDelete))
-	assert.True(t, isInvalidating(http.MethodPatch))
+	assert.True(t, isInvalidating("PUT"))
+	assert.True(t, isInvalidating("DELETE"))
+	assert.True(t, isInvalidating("PATCH"))
 	assert.False(t, isInvalidating("GET"))
-	assert.False(t, isInvalidating(http.MethodHead))
+	assert.False(t, isInvalidating("HEAD"))
 }
 
 func TestStaleFallbackAllowed(t *testing.T) {
@@ -2226,39 +2193,36 @@ func TestSourceSlice(t *testing.T) {
 
 func TestComputeTTL_NegativeTTL(t *testing.T) {
 	t.Parallel()
-	h := http.Header{}
-	ttl := computeTTL(header.FromHTTP(h), 404, Directives{}, 30*time.Second, 0, 0, 0, time.Now())
+	h := header.Map{}
+	ttl := computeTTL(h, 404, Directives{}, 30*time.Second, 0, 0, 0, time.Now())
 	assert.Equal(t, 30*time.Second, ttl)
 }
 
 func TestComputeTTL_HeuristicTTL(t *testing.T) {
 	t.Parallel()
-	h := http.Header{
-		header.Date:         []string{"Mon, 01 Jan 2024 00:00:00 GMT"},
-		header.LastModified: []string{"Mon, 01 Jan 2023 00:00:00 GMT"},
-	}
-	ttl := computeTTL(header.FromHTTP(h), 200, Directives{}, 0, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	h := headerMap(header.Date, "Mon, 01 Jan 2024 00:00:00 GMT", header.LastModified, "Mon, 01 Jan 2023 00:00:00 GMT")
+	ttl := computeTTL(h, 200, Directives{}, 0, 0, 0, 0, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, 876*time.Hour, ttl)
 }
 
 func TestComputeTTL_DefaultTTL(t *testing.T) {
 	t.Parallel()
-	h := http.Header{}
-	ttl := computeTTL(header.FromHTTP(h), 200, Directives{}, 0, 60*time.Second, 0, 0, time.Now())
+	h := header.Map{}
+	ttl := computeTTL(h, 200, Directives{}, 0, 60*time.Second, 0, 0, time.Now())
 	assert.Equal(t, 60*time.Second, ttl)
 }
 
 func TestHandler_OnlyIfCachedBypass(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
-	r := httptest.NewRequest("GET", "http://example.com/nonexistent", nil)
-	r.Header.Set(header.CacheControl, "only-if-cached")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
-	require.Equal(t, fasthttp.StatusGatewayTimeout, rr.Code)
-	assert.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
+	r := testCtx("GET", "http://example.com/nonexistent")
+	r.Request.Header.Set(header.CacheControl, "only-if-cached")
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, fasthttp.StatusGatewayTimeout, respCode(rr))
+	assert.Equal(t, "MISS", respHeader(rr, header.XCache))
 }
 
 func TestHandler_RefreshStats(t *testing.T) {
@@ -2284,16 +2248,16 @@ func TestHandler_RefreshEnabled(t *testing.T) {
 
 func TestBuildObject_CDNCacheControl(t *testing.T) {
 	t.Parallel()
-	resHeader := http.Header{}
+	resHeader := header.Map{}
 	resHeader.Set("CDN-Cache-Control", "max-age=120")
 	resHeader.Set(header.ContentType, "text/html")
 	res := fetchResult{
 		StatusCode: 200,
-		Header:     fromHeaderMap(header.FromHTTP(resHeader)),
+		Header:     fromHeaderMap(resHeader),
 		Body:       []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 120*time.Second, obj.TTL)
 	assert.Contains(t, obj.CacheControl, "max-age=120")
@@ -2308,8 +2272,8 @@ func TestBuildObject_OverrideTTL(t *testing.T) {
 		})),
 		Body: []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 300*time.Second, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 300*time.Second, obj.TTL)
 }
@@ -2321,8 +2285,8 @@ func TestBuildObject_ContentLengthSynthesis(t *testing.T) {
 		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}})),
 		Body:       []byte("hello world"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, "11", obj.Header.Get(header.ContentLength))
 }
@@ -2339,8 +2303,8 @@ func TestBuildObject_DateApparentAge(t *testing.T) {
 		})),
 		Body: []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 0, 0, 0, nil, now)
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, now)
 	require.NotNil(t, obj)
 	// OriginAge should be max(5s from Age header, ~10s apparent age from Date).
 	assert.GreaterOrEqual(t, obj.OriginAge, 5*time.Second)
@@ -2356,8 +2320,8 @@ func TestBuildObject_LastModifiedParsed(t *testing.T) {
 		})),
 		Body: []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.False(t, obj.LastModified.IsZero())
 }
@@ -2369,8 +2333,8 @@ func TestBuildObject_SWRDefault(t *testing.T) {
 		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}})),
 		Body:       []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 30*time.Second, 0, 0, nil, time.Now())
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 30*time.Second, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 30*time.Second, obj.StaleWhileRevalidate)
 }
@@ -2382,8 +2346,8 @@ func TestBuildObject_SIEDefault(t *testing.T) {
 		Header:     fromHeaderMap(header.FromHTTP(http.Header{header.CacheControl: []string{"max-age=60"}})),
 		Body:       []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 0, 60*time.Second, 0, nil, time.Now())
+	r := testCtx("GET", "http://example.com/")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 60*time.Second, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	assert.Equal(t, 60*time.Second, obj.StaleIfError)
 }
@@ -2398,9 +2362,8 @@ func TestBuildObject_VaryKeyComputed(t *testing.T) {
 		})),
 		Body: []byte("hello"),
 	}
-	r := httptest.NewRequest("GET", "http://example.com/", nil)
-	r.Header.Set(header.AcceptEncoding, "gzip")
-	obj := buildObject(api.Key{}, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
+	r := testCtxWithHeader("GET", "http://example.com/", header.AcceptEncoding, "gzip")
+	obj := buildObject(api.Key{}, requestInfoFromCtx(r), res, 0, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)
 	// VaryKey should be non-empty (the object has a Vary header).
 	assert.NotEqual(t, "", obj.VaryKey)
@@ -2423,7 +2386,7 @@ func TestDoBackgroundRefresh_BadURL(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(1)
 	// Register with a URL containing a control character that url.Parse rejects.
-	h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/\x00bad"), "", 0)
 	// This should unregister and skip without panicking.
 	h.doBackgroundRefresh(context.Background(), key, &api.Object{
 		StoredAt: time.Now(),
@@ -2437,18 +2400,13 @@ func TestDoBackgroundRefresh_ResErr_Backoff(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(1)
 	// Register the key with a valid URL.
-	req := &http.Request{
-		Method: "GET",
-		URL:    mustURL("http://example.com/test"),
-		Header: http.Header{},
-	}
-	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 	// Use an upstream that returns 502 (error response).
-	errUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(502)
-	})
-	h.upstream = wrapUpstream(errUpstream)
-	h.fastClient = &handlerFastClient{handler: errUpstream}
+	errUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(502)
+	}
+	h.upstream = errUpstream
+	h.fastClient = &testFastClient{handler: errUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2469,12 +2427,7 @@ func TestDoBackgroundRefresh_ContextCancelled(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(2)
-	req := &http.Request{
-		Method: "GET",
-		URL:    mustURL("http://example.com/test"),
-		Header: http.Header{},
-	}
-	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 	stale := &api.Object{
@@ -2496,19 +2449,14 @@ func TestDoBackgroundRefresh_UncacheableSkip(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(3)
-	req := &http.Request{
-		Method: "GET",
-		URL:    mustURL("http://example.com/test"),
-		Header: http.Header{},
-	}
-	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 	// Upstream returns no-store (uncacheable).
-	nsUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "no-store")
-		w.WriteHeader(200)
-	})
-	h.upstream = wrapUpstream(nsUpstream)
-	h.fastClient = &handlerFastClient{handler: nsUpstream}
+	nsUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+	}
+	h.upstream = nsUpstream
+	h.fastClient = &testFastClient{handler: nsUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2528,19 +2476,14 @@ func TestDoBackgroundRefresh_SetCookieSkip(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	h.allowSetCookie = false
 	key := testkey.Key(4)
-	req := &http.Request{
-		Method: "GET",
-		URL:    mustURL("http://example.com/test"),
-		Header: http.Header{},
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	scUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.SetCookie, "sid=abc")
+		ctx.SetStatusCode(200)
 	}
-	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
-	scUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.SetCookie, "sid=abc")
-		w.WriteHeader(200)
-	})
-	h.upstream = wrapUpstream(scUpstream)
-	h.fastClient = &handlerFastClient{handler: scUpstream}
+	h.upstream = scUpstream
+	h.fastClient = &testFastClient{handler: scUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2560,19 +2503,14 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 	h := testRefreshHandler(t, 1)
 	h.maxObjectSize = 5
 	key := testkey.Key(5)
-	req := &http.Request{
-		Method: "GET",
-		URL:    mustURL("http://example.com/test"),
-		Header: http.Header{},
+	h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
+	bigUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("this is a very long body that exceeds the max object size"))
 	}
-	h.refreshRegistry.Register(key, requestInfoFromHTTP(req.Method, req.URL.String(), req.Host, req.URL.Path, req.TLS != nil, header.FromHTTP(req.Header)), "", 0)
-	bigUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "this is a very long body that exceeds the max object size")
-	})
-	h.upstream = wrapUpstream(bigUpstream)
-	h.fastClient = &handlerFastClient{handler: bigUpstream}
+	h.upstream = bigUpstream
+	h.fastClient = &testFastClient{handler: bigUpstream}
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2590,36 +2528,36 @@ func TestDoBackgroundRefresh_MaxObjectSizeSkip(t *testing.T) {
 func TestWriteAndMaybeStore_VariantStore(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.Vary, "Accept-Encoding")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body-"+r.Header.Get(header.AcceptEncoding))
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body-" + string(ctx.Request.Header.Peek(header.AcceptEncoding))))
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(upstream),
-		FastClient: &handlerFastClient{handler: upstream},
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
 	})
 	// First request — MISS, stores with Vary.
-	r1 := httptest.NewRequest("GET", "http://example.com/v", nil)
-	r1.Header.Set(header.AcceptEncoding, "gzip")
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, r1)
-	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+	r1 := testCtx("GET", "http://example.com/v")
+	r1.Request.Header.Set(header.AcceptEncoding, "gzip")
+	rr1 := r1
+	h.ServeRequest(rr1)
+	require.Equal(t, "MISS", respHeader(rr1, header.XCache))
 	// Second request with different encoding — MISS, stores variant.
-	r2 := httptest.NewRequest("GET", "http://example.com/v", nil)
-	r2.Header.Set(header.AcceptEncoding, "br")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, r2)
-	require.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	r2 := testCtx("GET", "http://example.com/v")
+	r2.Request.Header.Set(header.AcceptEncoding, "br")
+	rr2 := r2
+	h.ServeRequest(rr2)
+	require.Equal(t, "MISS", respHeader(rr2, header.XCache))
 	// Third request with gzip — HIT.
-	r3 := httptest.NewRequest("GET", "http://example.com/v", nil)
-	r3.Header.Set(header.AcceptEncoding, "gzip")
-	rr3 := httptest.NewRecorder()
-	h.ServeHTTPCompat(rr3, r3)
-	require.Equal(t, "HIT", rr3.Header().Get(header.XCache))
+	r3 := testCtx("GET", "http://example.com/v")
+	r3.Request.Header.Set(header.AcceptEncoding, "gzip")
+	rr3 := r3
+	h.ServeRequest(rr3)
+	require.Equal(t, "HIT", respHeader(rr3, header.XCache))
 }
 
 func TestTryConditional304_Match(t *testing.T) {
@@ -2634,14 +2572,13 @@ func TestTryConditional304_Match(t *testing.T) {
 		TTL:        60 * time.Second,
 		ETag:       `"v1"`,
 	}
-	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set(header.IfNoneMatch, `"v1"`)
-	ctx := fasthttpReqCtx(r)
-	ok := h.tryConditional304(ctx, obj, api.SourceHot)
+	r := testCtx("GET", "http://example.com/")
+	r.Request.Header.Set(header.IfNoneMatch, `"v1"`)
+	ok := h.tryConditional304(r, obj, api.SourceHot)
 	require.True(t, ok)
-	assert.Equal(t, fasthttp.StatusNotModified, ctx.Response.StatusCode())
-	assert.Equal(t, `"v1"`, string(ctx.Response.Header.Peek(header.ETag)))
-	assert.Equal(t, "HIT", string(ctx.Response.Header.Peek(header.XCache)))
+	assert.Equal(t, fasthttp.StatusNotModified, r.Response.StatusCode())
+	assert.Equal(t, `"v1"`, string(r.Response.Header.Peek(header.ETag)))
+	assert.Equal(t, "HIT", string(r.Response.Header.Peek(header.XCache)))
 }
 
 func TestTryConditional304_NoMatch(t *testing.T) {
@@ -2656,9 +2593,9 @@ func TestTryConditional304_NoMatch(t *testing.T) {
 		TTL:        60 * time.Second,
 		ETag:       `"v1"`,
 	}
-	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Set(header.IfNoneMatch, `"v2"`)
-	ok := h.tryConditional304(fasthttpReqCtx(r), obj, api.SourceHot)
+	r := testCtx("GET", "http://example.com/")
+	r.Request.Header.Set(header.IfNoneMatch, `"v2"`)
+	ok := h.tryConditional304(r, obj, api.SourceHot)
 	require.False(t, ok)
 }
 
@@ -2685,14 +2622,14 @@ func TestShouldRefresh_ScoreGate(t *testing.T) {
 
 func TestDoFetch_Truncated(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
 		// Write more than maxResponseBytes.
-		_, _ = w.Write(make([]byte, 2*(1<<20))) // 2 MiB
-	}))
+		_, _ = ctx.Write(make([]byte, 2*(1<<20))) // 2 MiB
+	})
 	h.maxResponseBytes = 1 << 20 // 1 MiB
-	req := httptest.NewRequest("GET", "/", nil)
-	res := h.doFetch(fasthttpReqCtx(req))
+	req := testCtx("GET", "http://example.com/")
+	res := h.doFetch(req)
 	require.NotNil(t, res.Err)
 	assert.Contains(t, res.Err.Error(), "exceeds")
 }
@@ -2700,34 +2637,33 @@ func TestDoFetch_Truncated(t *testing.T) {
 func TestHandleBypass_OnlyIfCached_504(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	r := httptest.NewRequest("GET", "http://example.com/nonexistent", nil)
-	r.Header.Set(header.CacheControl, "only-if-cached")
-	ctx := fasthttpReqCtx(r)
-	h.handleBypass(ctx)
-	require.Equal(t, fasthttp.StatusGatewayTimeout, ctx.Response.StatusCode())
+	r := testCtx("GET", "http://example.com/nonexistent")
+	r.Request.Header.Set(header.CacheControl, "only-if-cached")
+	h.handleBypass(r)
+	require.Equal(t, fasthttp.StatusGatewayTimeout, r.Response.StatusCode())
 }
 
 func TestBuildLocationKey_AbsoluteURL(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	r := httptest.NewRequest("POST", "http://example.com/submit", nil)
-	key := h.buildLocationKey(fasthttpReqCtx(r), "http://example.com/other")
+	r := testCtx("POST", "http://example.com/submit")
+	key := h.buildLocationKey(r, "http://example.com/other")
 	require.False(t, key.IsZero())
 }
 
 func TestBuildLocationKey_RelativePath(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	r := httptest.NewRequest("POST", "http://example.com/api/submit", nil)
-	key := h.buildLocationKey(fasthttpReqCtx(r), "../v2")
+	r := testCtx("POST", "http://example.com/api/submit")
+	key := h.buildLocationKey(r, "../v2")
 	require.False(t, key.IsZero())
 }
 
 func TestBuildLocationKey_InvalidURL(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	r := httptest.NewRequest("POST", "http://example.com/submit", nil)
-	key := h.buildLocationKey(fasthttpReqCtx(r), "ht\ttp://invalid")
+	r := testCtx("POST", "http://example.com/submit")
+	key := h.buildLocationKey(r, "ht\ttp://invalid")
 	require.True(t, key.IsZero())
 }
 
@@ -2735,7 +2671,7 @@ func TestLookupForRefresh_StaleObject(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 	// Store a stale object.
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/stale", "example.com", "/stale", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromURL("GET", "http://example.com/"), nil)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2754,7 +2690,7 @@ func TestLookupForRefresh_StaleObject(t *testing.T) {
 func TestLookupForRefresh_FreshObject(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/fresh", "", "", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromURL("GET", "http://example.com/"), nil)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2772,7 +2708,7 @@ func TestLookupForRefresh_FreshObject(t *testing.T) {
 func TestLookupForRefresh_NotFound(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/missing", "", "", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromURL("GET", "http://example.com/"), nil)
 	result := h.lookupForRefresh(key)
 	require.Nil(t, result)
 }
@@ -2781,7 +2717,7 @@ func TestStoreObject_RefreshScheduling(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(10)
-	r := httptest.NewRequest("GET", "http://example.com/test", nil)
+	r := testCtx("GET", "http://example.com/test")
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -2791,7 +2727,7 @@ func TestStoreObject_RefreshScheduling(t *testing.T) {
 		StoredAt:   time.Now(),
 		TTL:        60 * time.Second,
 	}
-	h.storeObject(context.Background(), key, obj, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), false, 0)
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
 	// Should be registered in the refresh registry.
 	assert.Equal(t, 1, h.refreshRegistry.Len())
 	// Should be scheduled in the scheduler.
@@ -2802,7 +2738,7 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 	t.Parallel()
 	h := testRefreshHandler(t, 1)
 	key := testkey.Key(11)
-	r := httptest.NewRequest("GET", "http://example.com/404", nil)
+	r := testCtx("GET", "http://example.com/404")
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 404,
@@ -2812,7 +2748,7 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 		StoredAt:   time.Now(),
 		TTL:        30 * time.Second,
 	}
-	h.storeObject(context.Background(), key, obj, requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), false, 0)
+	h.storeObject(context.Background(), key, obj, requestInfoFromCtx(r), false, 0)
 	// Negative cacheable objects should NOT be scheduled for refresh.
 	assert.Equal(t, 0, h.refreshRegistry.Len())
 }
@@ -2820,28 +2756,28 @@ func TestStoreObject_NegativeCacheableSkipRefresh(t *testing.T) {
 func TestInvalidateAndProxy_5xxNoInvalidation(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			w.WriteHeader(500)
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Method()) == "POST" {
+			ctx.SetStatusCode(500)
 			return
 		}
 		calls.Add(1)
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	}))
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 	// Populate cache with GET.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/res", nil))
+	rr := testCtx("GET", "http://example.com/res")
+	h.ServeRequest(rr)
 	// POST with 5xx should NOT invalidate.
-	r := httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data"))
-	rr = newRR()
-	h.ServeHTTPCompat(rr, r)
-	assert.Equal(t, 500, rr.Code)
+	r := testCtx("POST", "http://example.com/res")
+	rr = r
+	h.ServeRequest(rr)
+	assert.Equal(t, 500, respCode(rr))
 	// GET should still be HIT (not invalidated).
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/res", nil))
-	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	rr2 := testCtx("GET", "http://example.com/res")
+	h.ServeRequest(rr2)
+	assert.Equal(t, "HIT", respHeader(rr2, header.XCache))
 }
 
 func TestMaybeStorePostResponse_NonPOST(t *testing.T) {
@@ -2861,12 +2797,12 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 	}
 	var originCalls atomic.Int32
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Upstream: func(ctx *fasthttp.RequestCtx) {
 			originCalls.Add(1)
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "from-origin")
-		}),
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("from-origin"))
+		},
 		Store: store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "peer1:8080"}, false // not local
@@ -2875,11 +2811,11 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 			return peerObj, nil
 		},
 	})
-	r := httptest.NewRequest("GET", "http://example.com/peer", nil)
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
-	require.Equal(t, 200, rr.Code)
-	assert.Equal(t, "from-peer", rr.Body.String())
+	r := testCtx("GET", "http://example.com/peer")
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-peer", respBody(rr))
 	assert.Equal(t, int32(0), originCalls.Load())
 }
 
@@ -2894,15 +2830,15 @@ func TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch(t *testing.T) {
 	var originCalls atomic.Int32
 	var peerPutCalls atomic.Int32
 	var peerPutObj *api.Object
-	originUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
 		originCalls.Add(1)
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "from-origin")
-	})
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(originUpstream),
-		FastClient: &handlerFastClient{handler: originUpstream},
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
 		Store:      store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
@@ -2916,19 +2852,19 @@ func TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch(t *testing.T) {
 		},
 	})
 
-	r := httptest.NewRequest("GET", "http://example.com/non-owner-origin", nil)
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
-	require.Equal(t, 200, rr.Code)
-	assert.Equal(t, "from-origin", rr.Body.String())
+	r := testCtx("GET", "http://example.com/non-owner-origin")
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
 	assert.Equal(t, int32(1), originCalls.Load())
 
 	// The non-owner must NOT have cached the object locally: a second
 	// request must MISS again (peer-fetch miss → origin fetch).
-	r2 := httptest.NewRequest("GET", "http://example.com/non-owner-origin", nil)
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, r2)
-	assert.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	r2 := testCtx("GET", "http://example.com/non-owner-origin")
+	rr2 := r2
+	h.ServeRequest(rr2)
+	assert.Equal(t, "MISS", respHeader(rr2, header.XCache))
 	assert.Equal(t, int32(2), originCalls.Load(), "non-owner must re-fetch from origin (no local cache)")
 
 	// Each origin-fetch must forward the object to the owner.
@@ -2953,9 +2889,9 @@ func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
 		TTL:        60 * time.Second,
 	}
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstreamFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Upstream: func(ctx *fasthttp.RequestCtx) {
 			t.Fatal("origin should not be called when peer fetch hits")
-		}),
+		},
 		Store: store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
@@ -2968,19 +2904,19 @@ func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
 		},
 	})
 
-	r := httptest.NewRequest("GET", "http://example.com/non-owner-peer", nil)
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
-	require.Equal(t, 200, rr.Code)
-	assert.Equal(t, "from-peer", rr.Body.String())
+	r := testCtx("GET", "http://example.com/non-owner-peer")
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-peer", respBody(rr))
 
 	// The non-owner must NOT have cached the object locally: a second
 	// request must peer-fetch again, not HIT locally.
-	r2 := httptest.NewRequest("GET", "http://example.com/non-owner-peer", nil)
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, r2)
-	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache), "peer-fetched object should be served as HIT")
-	assert.Equal(t, "peer", rr2.Header().Get(header.XCacheSource), "second request should also come from peer")
+	r2 := testCtx("GET", "http://example.com/non-owner-peer")
+	rr2 := r2
+	h.ServeRequest(rr2)
+	assert.Equal(t, "HIT", respHeader(rr2, header.XCache), "peer-fetched object should be served as HIT")
+	assert.Equal(t, "peer", respHeader(rr2, header.XCacheSource), "second request should also come from peer")
 
 	// Peer-fetch promotion must not trigger a write-to-owner RPC: the
 	// object came FROM the owner, forwarding it back would be redundant.
@@ -2994,14 +2930,14 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	var peerPutCalls atomic.Int32
-	ownerUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "owner-body")
-	})
+	ownerUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("owner-body"))
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(ownerUpstream),
-		FastClient: &handlerFastClient{handler: ownerUpstream},
+		Upstream:   ownerUpstream,
+		FastClient: &testFastClient{handler: ownerUpstream},
 		Store:      store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "self:8080"}, true // local owner
@@ -3015,17 +2951,17 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 		},
 	})
 
-	r := httptest.NewRequest("GET", "http://example.com/owner-key", nil)
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
-	require.Equal(t, 200, rr.Code)
-	assert.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	r := testCtx("GET", "http://example.com/owner-key")
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "MISS", respHeader(rr, header.XCache))
 
 	// The owner must have cached locally: second request is a HIT.
-	r2 := httptest.NewRequest("GET", "http://example.com/owner-key", nil)
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, r2)
-	assert.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+	r2 := testCtx("GET", "http://example.com/owner-key")
+	rr2 := r2
+	h.ServeRequest(rr2)
+	assert.Equal(t, "HIT", respHeader(rr2, header.XCache))
 
 	// The owner must not forward to itself via peerPut.
 	assert.Equal(t, int32(0), peerPutCalls.Load())
@@ -3033,23 +2969,23 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 
 func TestLookup_VaryVariantMiss(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.Vary, "Accept-Encoding")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body-"+r.Header.Get(header.AcceptEncoding))
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body-" + string(ctx.Request.Header.Peek(header.AcceptEncoding))))
+	})
 	// Populate with gzip variant.
-	r1 := httptest.NewRequest("GET", "http://example.com/vary-miss", nil)
-	r1.Header.Set(header.AcceptEncoding, "gzip")
-	h.ServeHTTPCompat(httptest.NewRecorder(), r1)
+	r1 := testCtx("GET", "http://example.com/vary-miss")
+	r1.Request.Header.Set(header.AcceptEncoding, "gzip")
+	h.ServeRequest(r1)
 	// Request with br — should miss (variant not found), then store.
-	r2 := httptest.NewRequest("GET", "http://example.com/vary-miss", nil)
-	r2.Header.Set(header.AcceptEncoding, "br")
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, r2)
-	assert.Equal(t, "MISS", rr2.Header().Get(header.XCache))
+	r2 := testCtx("GET", "http://example.com/vary-miss")
+	r2.Request.Header.Set(header.AcceptEncoding, "br")
+	rr2 := r2
+	h.ServeRequest(rr2)
+	assert.Equal(t, "MISS", respHeader(rr2, header.XCache))
 }
 
 func TestAppendCanonicalQueryString_Policy(t *testing.T) {
@@ -3102,22 +3038,22 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 		var calls atomic.Int32
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
-		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) != "" {
-				w.Header().Set(header.CacheControl, "max-age=120")
-				w.WriteHeader(304)
+		orig304 := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) != "" {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=120")
+				ctx.SetStatusCode(304)
 				return
 			}
 			calls.Add(1)
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte("body"))
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(orig304),
+			Upstream:            orig304,
 			Store:               store,
-			FastClient:          &handlerFastClient{handler: orig304},
+			FastClient:          &testFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3127,7 +3063,7 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 			RouteName:           "test",
 		})
 		defer h.Close(context.Background())
-		key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/refresh304", "", "", false, header.Map{}), nil)
+		key := BuildKey(requestInfoFromURL("GET", "http://example.com/test"), nil)
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
@@ -3139,7 +3075,7 @@ func TestTriggerBgRefresh_304Refresh(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		updated, _, _ := h.store.Get(context.Background(), key)
@@ -3152,20 +3088,20 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
-		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-				w.WriteHeader(fasthttp.StatusNotModified)
+		orig304 := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "body")
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(orig304),
+			Upstream:            orig304,
 			Store:               store,
-			FastClient:          &handlerFastClient{handler: orig304},
+			FastClient:          &testFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3176,7 +3112,7 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 		})
 		defer h.Close(context.Background())
 		h.refreshLimiter = newRefreshRateLimiter(0)
-		key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/rl", "", "", false, header.Map{}), nil)
+		key := BuildKey(requestInfoFromURL("GET", "http://example.com/test"), nil)
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
@@ -3188,7 +3124,7 @@ func TestTriggerBgRefresh_RateLimited(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 1, h.refreshRegistry.Len())
@@ -3199,20 +3135,20 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
-		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-				w.WriteHeader(fasthttp.StatusNotModified)
+		orig304 := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "body")
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(orig304),
+			Upstream:            orig304,
 			Store:               store,
-			FastClient:          &handlerFastClient{handler: orig304},
+			FastClient:          &testFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3225,7 +3161,7 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 		for range cap(h.refreshSem) {
 			h.refreshSem <- struct{}{}
 		}
-		key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/sem", "", "", false, header.Map{}), nil)
+		key := BuildKey(requestInfoFromURL("GET", "http://example.com/test"), nil)
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
@@ -3237,7 +3173,7 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 1, h.refreshRegistry.Len())
@@ -3249,47 +3185,47 @@ func TestTriggerBgRefresh_SemaphoreFull(t *testing.T) {
 
 func TestHeaderGuard_BypassWrite(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "text/html")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("bypass-body"))
-	}))
-	r := httptest.NewRequest("GET", "http://example.com/bypass-write", nil)
-	r.Header.Set(header.CacheControl, "no-store")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
-	assert.Equal(t, "BYPASS", rr.Header().Get(header.XCache))
-	assert.Equal(t, "bypass-body", rr.Body.String())
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "text/html")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("bypass-body"))
+	})
+	r := testCtx("GET", "http://example.com/bypass-write")
+	r.Request.Header.Set(header.CacheControl, "no-store")
+	rr := r
+	h.ServeRequest(rr)
+	assert.Equal(t, "BYPASS", respHeader(rr, header.XCache))
+	assert.Equal(t, "bypass-body", respBody(rr))
 }
 
 func TestPurge_WithVariants(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.Vary, "Accept-Encoding")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("body-" + r.Header.Get(header.AcceptEncoding)))
-	}))
-	r1 := httptest.NewRequest("GET", "http://example.com/purge-var", nil)
-	r1.Header.Set(header.AcceptEncoding, "gzip")
-	h.ServeHTTPCompat(httptest.NewRecorder(), r1)
-	r2 := httptest.NewRequest("GET", "http://example.com/purge-var", nil)
-	r2.Header.Set(header.AcceptEncoding, "br")
-	h.ServeHTTPCompat(httptest.NewRecorder(), r2)
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body-" + string(ctx.Request.Header.Peek(header.AcceptEncoding))))
+	})
+	r1 := testCtx("GET", "http://example.com/purge-var")
+	r1.Request.Header.Set(header.AcceptEncoding, "gzip")
+	h.ServeRequest(r1)
+	r2 := testCtx("GET", "http://example.com/purge-var")
+	r2.Request.Header.Set(header.AcceptEncoding, "br")
+	h.ServeRequest(r2)
 	key := BuildKey(requestInfoFromURL("GET", "http://example.com/purge-var"), nil)
 	owned, err := h.Purge(context.Background(), key)
 	require.NoError(t, err)
 	require.True(t, owned)
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/purge-var", nil))
-	assert.Equal(t, "MISS", rr.Header().Get(header.XCache))
+	rr := testCtx("GET", "http://example.com/purge-var")
+	h.ServeRequest(rr)
+	assert.Equal(t, "MISS", respHeader(rr, header.XCache))
 }
 
 func TestPurge_NotOwned(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/nonexistent", "", "", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromURL("GET", "http://example.com/"), nil)
 	owned, err := h.Purge(context.Background(), key)
 	require.NoError(t, err)
 	require.False(t, owned)
@@ -3297,20 +3233,20 @@ func TestPurge_NotOwned(t *testing.T) {
 
 func TestDoBackgroundRevalidate_DirectCall(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(header.IfNoneMatch) != "" {
-			w.Header().Set(header.CacheControl, "max-age=120")
-			w.WriteHeader(304)
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Request.Header.Peek(header.IfNoneMatch)) != "" {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=120")
+			ctx.SetStatusCode(304)
 			return
 		}
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("body"))
-	}))
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	})
 	url := "http://example.com/reval-direct"
-	r := httptest.NewRequest("GET", url, nil)
-	key := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+	r := testCtx("GET", url)
+	key := BuildKey(requestInfoFromCtx(r), nil)
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -3322,7 +3258,7 @@ func TestDoBackgroundRevalidate_DirectCall(t *testing.T) {
 		ETag:       `"v1"`,
 	}
 	_ = h.store.Put(context.Background(), key, stale)
-	h.doBackgroundRevalidate(context.Background(), requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), key, stale)
+	h.doBackgroundRevalidate(context.Background(), requestInfoFromCtx(r), key, stale)
 	obj, _, _ := h.store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 }
@@ -3331,20 +3267,20 @@ func TestTriggerBgRefresh_NotFound(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
-		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-				w.WriteHeader(fasthttp.StatusNotModified)
+		orig304 := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "body")
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(orig304),
+			Upstream:            orig304,
 			Store:               store,
-			FastClient:          &handlerFastClient{handler: orig304},
+			FastClient:          &testFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3355,7 +3291,7 @@ func TestTriggerBgRefresh_NotFound(t *testing.T) {
 		})
 		defer h.Close(context.Background())
 		key := testkey.Key(999)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 0, h.refreshRegistry.Len())
@@ -3366,20 +3302,20 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
-		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-				w.WriteHeader(fasthttp.StatusNotModified)
+		orig304 := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "body")
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(orig304),
+			Upstream:            orig304,
 			Store:               store,
-			FastClient:          &handlerFastClient{handler: orig304},
+			FastClient:          &testFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3389,7 +3325,7 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 			RouteName:           "test",
 		})
 		defer h.Close(context.Background())
-		key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/stale", "example.com", "/stale", false, header.Map{}), nil)
+		key := BuildKey(requestInfoFromURL("GET", "http://example.com/test"), nil)
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
@@ -3400,7 +3336,7 @@ func TestTriggerBgRefresh_StaleObject(t *testing.T) {
 			TTL:        time.Second,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 		assert.Equal(t, 0, h.refreshRegistry.Len())
@@ -3411,20 +3347,20 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
-		orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-				w.WriteHeader(fasthttp.StatusNotModified)
+		orig304 := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, "body")
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(orig304),
+			Upstream:            orig304,
 			Store:               store,
-			FastClient:          &handlerFastClient{handler: orig304},
+			FastClient:          &testFastClient{handler: orig304},
 			DefaultTTL:          60 * time.Second,
 			RefreshBeforeExpiry: true,
 			RefreshMargin:       6 * time.Second,
@@ -3434,7 +3370,7 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 			RouteName:           "test",
 		})
 		defer h.Close(context.Background())
-		key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/fresh", "", "", false, header.Map{}), nil)
+		key := BuildKey(requestInfoFromURL("GET", "http://example.com/test"), nil)
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
@@ -3446,7 +3382,7 @@ func TestTriggerBgRefresh_FreshObject(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 		h.scheduler.Schedule(key, time.Now().Add(50*time.Millisecond))
 		synctest.Sleep(200 * time.Millisecond)
 	})
@@ -3456,12 +3392,12 @@ func TestHeaderGuard_Write(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 	// Create a bypass request to test headerGuard.
-	r := httptest.NewRequest("GET", "http://example.com/bypass", nil)
-	r.Header.Set(header.CacheControl, "no-store")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, r)
+	r := testCtx("GET", "http://example.com/bypass")
+	r.Request.Header.Set(header.CacheControl, "no-store")
+	rr := r
+	h.ServeRequest(rr)
 	// The bypass path wraps the writer in headerGuard which sets X-Cache.
-	assert.Equal(t, "BYPASS", rr.Header().Get(header.XCache))
+	assert.Equal(t, "BYPASS", respHeader(rr, header.XCache))
 }
 
 func TestResponseRecorder_WriteHeader(t *testing.T) {
@@ -3475,17 +3411,17 @@ func TestResponseRecorder_Write(t *testing.T) {
 func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
-	orig304 := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(503)
-	})
+	orig304 := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(503)
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:    wrapUpstream(orig304),
-		FastClient:  &handlerFastClient{handler: orig304},
+		Upstream:    orig304,
+		FastClient:  &testFastClient{handler: orig304},
 		Store:       store,
 		StayinAlive: true,
 	})
 	// Store a stale object manually.
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/stayin5xx", "", "", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromURL("GET", "http://example.com/stayin5xx"), nil)
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -3498,8 +3434,8 @@ func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 	}
 	_ = store.Put(context.Background(), key, stale)
 	// Call fetchAndStoreStayinAlive directly.
-	r := httptest.NewRequest("GET", "http://example.com/stayin5xx", nil)
-	ctx := fasthttpReqCtx(r)
+	r := testCtx("GET", "http://example.com/stayin5xx")
+	ctx := r
 	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot)
 	assert.Equal(t, "STALE", string(ctx.Response.Header.Peek(header.XCache)))
 	assert.Equal(t, "stale-body", string(ctx.Response.Body()))
@@ -3508,18 +3444,18 @@ func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
 	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
-	orig304 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	orig304 := func(ctx *fasthttp.RequestCtx) {
 		// Origin down: block until context cancelled (timeout).
-		<-r.Context().Done()
-	})
+		<-context.Background().Done()
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:     wrapUpstream(orig304),
-		FastClient:   &handlerFastClient{handler: orig304},
+		Upstream:     orig304,
+		FastClient:   &testFastClient{handler: orig304},
 		Store:        store,
 		StayinAlive:  true,
 		FetchTimeout: 100 * time.Millisecond,
 	})
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/stayin-err", "", "", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromURL("GET", "http://example.com/stayin-err"), nil)
 	stale := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -3531,8 +3467,8 @@ func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
 		ETag:       `"v1"`,
 	}
 	_ = store.Put(context.Background(), key, stale)
-	r := httptest.NewRequest("GET", "http://example.com/stayin-err", nil)
-	ctx := fasthttpReqCtx(r)
+	r := testCtx("GET", "http://example.com/stayin-err")
+	ctx := r
 	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot)
 	assert.Equal(t, "STALE", string(ctx.Response.Header.Peek(header.XCache)))
 }
@@ -3542,30 +3478,30 @@ func TestHandler_SyntheticTimeHitMiss(t *testing.T) {
 		store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 		defer store.Close(context.Background())
 		h := NewHandler(HandlerConfig{
-			Upstream:   wrapUpstream(origin200("body")),
-			FastClient: &handlerFastClient{handler: origin200("body")},
+			Upstream:   origin200("body"),
+			FastClient: &testFastClient{handler: origin200("body")},
 			Store:      store,
 		})
 		// First request: MISS, stores object with max-age=60.
-		r1 := httptest.NewRequest("GET", "http://example.com/synctime", nil)
-		rr1 := newRR()
-		h.ServeHTTPCompat(rr1, r1)
-		require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+		r1 := testCtx("GET", "http://example.com/synctime")
+		rr1 := r1
+		h.ServeRequest(rr1)
+		require.Equal(t, "MISS", respHeader(rr1, header.XCache))
 
 		// Advance synthetic clock by 30s — object still fresh.
 		synctest.Sleep(30 * time.Second)
-		r2 := httptest.NewRequest("GET", "http://example.com/synctime", nil)
-		rr2 := newRR()
-		h.ServeHTTPCompat(rr2, r2)
-		require.Equal(t, "HIT", rr2.Header().Get(header.XCache))
+		r2 := testCtx("GET", "http://example.com/synctime")
+		rr2 := r2
+		h.ServeRequest(rr2)
+		require.Equal(t, "HIT", respHeader(rr2, header.XCache))
 
 		// Advance past TTL — object is stale, triggers revalidation.
 		synctest.Sleep(40 * time.Second)
-		r3 := httptest.NewRequest("GET", "http://example.com/synctime", nil)
-		rr3 := httptest.NewRecorder()
-		h.ServeHTTPCompat(rr3, r3)
+		r3 := testCtx("GET", "http://example.com/synctime")
+		rr3 := r3
+		h.ServeRequest(rr3)
 		// Origin returns 200 with max-age=60, so it re-fetches (not HIT).
-		assert.NotEqual(t, "HIT", rr3.Header().Get(header.XCache))
+		assert.NotEqual(t, "HIT", respHeader(rr3, header.XCache))
 	})
 }
 
@@ -3576,20 +3512,20 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 			NumShards: 2,
 		})
 		defer store.Close(context.Background())
-		upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get(header.IfNoneMatch) == `"v1"` {
-				w.Header().Set(header.CacheControl, "max-age=120")
-				w.WriteHeader(fasthttp.StatusNotModified)
+		upstream := func(ctx *fasthttp.RequestCtx) {
+			if string(ctx.Request.Header.Peek(header.IfNoneMatch)) == `"v1"` {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=120")
+				ctx.SetStatusCode(fasthttp.StatusNotModified)
 				return
 			}
-			w.Header().Set(header.CacheControl, "max-age=60")
-			w.Header().Set(header.ETag, `"v1"`)
-			w.WriteHeader(200)
-			_, _ = w.Write([]byte("body"))
-		})
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.Response.Header.Set(header.ETag, `"v1"`)
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("body"))
+		}
 		h := NewHandler(HandlerConfig{
-			Upstream:            wrapUpstream(upstream),
-			FastClient:          &handlerFastClient{handler: upstream},
+			Upstream:            upstream,
+			FastClient:          &testFastClient{handler: upstream},
 			Store:               store,
 			Logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 			DefaultTTL:          60 * time.Second,
@@ -3602,7 +3538,7 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 		})
 		defer h.Close(context.Background())
 
-		key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/bgrefresh", "", "", false, header.Map{}), nil)
+		key := BuildKey(requestInfoFromURL("GET", "http://example.com/test"), nil)
 		obj := &api.Object{
 			Key:        key,
 			StatusCode: 200,
@@ -3614,7 +3550,7 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 			ETag:       `"v1"`,
 		}
 		_ = h.store.Put(context.Background(), key, obj)
-		h.refreshRegistry.Register(key, requestInfoFromHTTP("GET", "", "", "", false, header.Map{}), "", 0)
+		h.refreshRegistry.Register(key, requestInfoFromURL("GET", "http://example.com/test"), "", 0)
 
 		// Schedule refresh at now + 50ms and advance synthetic time.
 		// synctest.Sleep advances the fake clock AND waits for all
@@ -3640,24 +3576,24 @@ func TestHandler_SyntheticTimeBackgroundRefresh(t *testing.T) {
 func TestSoftPurge_MarksObjectStale(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		_, _ = w.Write([]byte("cached-body"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		_, _ = ctx.Write([]byte("cached-body"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/soft-purge", nil)
-	h.ServeHTTPCompat(httptest.NewRecorder(), req)
+	req := testCtx("GET", "http://example.com/soft-purge")
+	h.ServeRequest(req)
 
-	key := h.buildKey(fasthttpReqCtx(req))
+	key := h.buildKey(req)
 	obj, _, _ := store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 	require.True(t, obj.Fresh(time.Now()), "object should be fresh before soft purge")
@@ -3684,7 +3620,7 @@ func TestSoftPurge_UnknownKeyReturnsFalse(t *testing.T) {
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("x")),
+		Upstream: origin200("x"),
 		Store:    store,
 		Logger:   slog.Default(),
 	})
@@ -3700,24 +3636,24 @@ func TestSoftPurge_UnknownKeyReturnsFalse(t *testing.T) {
 func TestSoftPurge_NoSWRFallsBackToDelete(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.ETag, `"v1"`)
-		_, _ = w.Write([]byte("no-swr"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		_, _ = ctx.Write([]byte("no-swr"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/no-swr", nil)
-	h.ServeHTTPCompat(httptest.NewRecorder(), req)
+	req := testCtx("GET", "http://example.com/no-swr")
+	h.ServeRequest(req)
 
-	key := h.buildKey(fasthttpReqCtx(req))
+	key := h.buildKey(req)
 	obj, _, _ := store.Get(context.Background(), key)
 	require.NotNil(t, obj)
 	require.Equal(t, time.Duration(0), obj.StaleWhileRevalidate)
@@ -3736,25 +3672,25 @@ func TestSoftPurge_NoSWRFallsBackToDelete(t *testing.T) {
 func TestSoftPurge_PreservesValidators(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"etag-123"`)
-		w.Header().Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
-		_, _ = w.Write([]byte("body"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"etag-123"`)
+		ctx.Response.Header.Set(header.LastModified, "Mon, 01 Jan 2024 00:00:00 GMT")
+		_, _ = ctx.Write([]byte("body"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/validators", nil)
-	h.ServeHTTPCompat(httptest.NewRecorder(), req)
+	req := testCtx("GET", "http://example.com/validators")
+	h.ServeRequest(req)
 
-	key := h.buildKey(fasthttpReqCtx(req))
+	key := h.buildKey(req)
 	_, err := h.SoftPurge(context.Background(), key)
 	require.NoError(t, err)
 
@@ -3771,43 +3707,40 @@ func TestSoftPurge_ServeStaleThenRevalidate(t *testing.T) {
 	t.Parallel()
 
 	var originHits atomic.Int64
-	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	orig := func(ctx *fasthttp.RequestCtx) {
 		originHits.Add(1)
-		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		_, _ = w.Write([]byte("original"))
-	})
-	srv := httptest.NewServer(orig)
-	t.Cleanup(srv.Close)
-	_ = orig
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		_, _ = ctx.Write([]byte("original"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/swr-flow", nil)
+	req := testCtx("GET", "http://example.com/swr-flow")
 
 	// First request: cache miss, fetches from origin.
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, req)
-	require.Equal(t, "MISS", rr1.Header().Get(header.XCache))
+	rr1 := req
+	h.ServeRequest(rr1)
+	require.Equal(t, "MISS", respHeader(rr1, header.XCache))
 	require.Equal(t, int64(1), originHits.Load())
 
-	key := h.buildKey(fasthttpReqCtx(req))
+	key := h.buildKey(req)
 
 	// Soft purge: mark the object stale.
 	_, err := h.SoftPurge(context.Background(), key)
 	require.NoError(t, err)
 
 	// Second request: should serve stale body (STALE) from cache.
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, req)
-	require.Equal(t, "STALE", rr2.Header().Get(header.XCache), "should serve stale after soft purge")
-	require.Equal(t, "original", rr2.Body.String(), "should serve the original cached body")
+	rr2 := testCtx("GET", "http://example.com/swr-flow")
+	h.ServeRequest(rr2)
+	require.Equal(t, "STALE", respHeader(rr2, header.XCache), "should serve stale after soft purge")
+	require.Equal(t, "original", respBody(rr2), "should serve the original cached body")
 
 	// The background revalidation should have fetched from origin
 	// (conditional request). Wait briefly for the background goroutine.
@@ -3822,32 +3755,32 @@ func TestSoftPurge_ServeStaleThenRevalidate(t *testing.T) {
 func TestSoftPurge_Variants(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
-		w.Header().Set(header.ETag, `"v1"`)
-		w.Header().Set(header.Vary, "X-Test-Variant")
-		_, _ = w.Write([]byte(r.Header.Get("X-Test-Variant")))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600, stale-while-revalidate=60")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		ctx.Response.Header.Set(header.Vary, "X-Test-Variant")
+		_, _ = ctx.Write([]byte(string(ctx.Request.Header.Peek("X-Test-Variant"))))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(orig),
-		FastClient: &handlerFastClient{handler: orig},
+		Upstream:   orig,
+		FastClient: &testFastClient{handler: orig},
 		Store:      store,
 		Logger:     slog.Default(),
 	})
 
-	reqA := httptest.NewRequest("GET", "http://example.com/vary-sp", nil)
-	reqA.Header.Set("X-Test-Variant", "a")
-	h.ServeHTTPCompat(httptest.NewRecorder(), reqA)
+	reqA := testCtx("GET", "http://example.com/vary-sp")
+	reqA.Request.Header.Set("X-Test-Variant", "a")
+	h.ServeRequest(reqA)
 
-	reqB := httptest.NewRequest("GET", "http://example.com/vary-sp", nil)
-	reqB.Header.Set("X-Test-Variant", "b")
-	h.ServeHTTPCompat(httptest.NewRecorder(), reqB)
+	reqB := testCtx("GET", "http://example.com/vary-sp")
+	reqB.Request.Header.Set("X-Test-Variant", "b")
+	h.ServeRequest(reqB)
 
-	primaryKey := h.buildKey(fasthttpReqCtx(reqA))
-	keyA := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(reqA.Header), nil)
-	keyB := VariantKey(primaryKey, "X-Test-Variant", header.FromHTTP(reqB.Header), nil)
+	primaryKey := h.buildKey(reqA)
+	keyA := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqA), nil)
+	keyB := VariantKey(primaryKey, "X-Test-Variant", headerFromCtx(reqB), nil)
 
 	// All should be fresh.
 	objA, _, _ := store.Get(context.Background(), keyA)
@@ -3896,7 +3829,7 @@ func TestSoftPurge_AlreadyStaleObject(t *testing.T) {
 	require.False(t, obj.Fresh(time.Now()))
 
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("x")),
+		Upstream: origin200("x"),
 		Store:    store,
 		Logger:   slog.Default(),
 	})
@@ -3934,7 +3867,7 @@ func TestSoftPurge_SIEOnlyNoSWR(t *testing.T) {
 	require.NoError(t, store.Put(context.Background(), key, obj))
 
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("x")),
+		Upstream: origin200("x"),
 		Store:    store,
 		Logger:   slog.Default(),
 	})
@@ -3971,7 +3904,7 @@ func TestSoftPurge_NoSWRAndNoSIE_FallsBackToDelete(t *testing.T) {
 	require.NoError(t, store.Put(context.Background(), key, obj))
 
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("x")),
+		Upstream: origin200("x"),
 		Store:    store,
 		Logger:   slog.Default(),
 	})
@@ -4016,7 +3949,7 @@ func TestSoftPurge_PutError(t *testing.T) {
 
 	errStore := &errorOnPutStore{Store: store, putErr: errors.New("disk full")}
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("x")),
+		Upstream: origin200("x"),
 		Store:    errStore,
 		Logger:   slog.Default(),
 	})
@@ -4032,26 +3965,26 @@ func TestSoftPurge_PutError(t *testing.T) {
 func TestSoftPurge_RefreshRegistryUnregistered(t *testing.T) {
 	t.Parallel()
 
-	orig := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=3600")
-		w.Header().Set(header.ETag, `"v1"`)
-		_, _ = w.Write([]byte("no-swr"))
-	})
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
+		ctx.Response.Header.Set(header.ETag, `"v1"`)
+		_, _ = ctx.Write([]byte("no-swr"))
+	}
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 4 << 20})
 	h := NewHandler(HandlerConfig{
-		Upstream:            wrapUpstream(orig),
-		FastClient:          &handlerFastClient{handler: orig},
+		Upstream:            orig,
+		FastClient:          &testFastClient{handler: orig},
 		Store:               store,
 		Logger:              slog.Default(),
 		RefreshBeforeExpiry: true,
 		RefreshMargin:       30 * time.Second,
 	})
 
-	req := httptest.NewRequest("GET", "http://example.com/refresh-reg", nil)
-	h.ServeHTTPCompat(httptest.NewRecorder(), req)
+	req := testCtx("GET", "http://example.com/refresh-reg")
+	h.ServeRequest(req)
 
-	key := h.buildKey(fasthttpReqCtx(req))
+	key := h.buildKey(req)
 	require.NotNil(t, h.refreshRegistry)
 	require.Equal(t, 1, h.refreshRegistry.Len(), "object should be registered for refresh")
 

@@ -2,7 +2,6 @@ package cache
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -15,56 +14,41 @@ import (
 
 func TestBuildKey_Deterministic(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "http://example.com/foo?b=2&a=1", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/foo?a=1&b=2", nil)
-	require.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/foo?a=1&b=2"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/foo?b=2&a=1"), nil))
 }
 
 func TestBuildKey_HeadSharesGet(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "http://example.com/x", nil)
-	r2 := httptest.NewRequest("HEAD", "http://example.com/x", nil)
-	require.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.Equal(t, BuildKey(requestInfoFromURL("HEAD", "http://example.com/x"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/x"), nil))
 }
 
 func TestBuildKey_DifferentPaths(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "http://example.com/a", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/b", nil)
-	require.NotEqual(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.NotEqual(t, BuildKey(requestInfoFromURL("GET", "http://example.com/b"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/a"), nil))
 }
 
 func TestBuildKey_SchemeMatters(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
-	r2 := httptest.NewRequest("GET", "https://example.com/", nil)
-	require.NotEqual(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.NotEqual(t, BuildKey(requestInfoFromURL("GET", "https://example.com/"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/"), nil))
 }
 
 func TestBuildKey_DefaultPortStripped(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "http://example.com/", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com:80/", nil)
-	require.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com:80/"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/"), nil))
 }
 
 func TestBuildKey_DuplicateSlashes(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "http://example.com/a/b", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/a//b", nil)
-	require.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/a//b"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/a/b"), nil))
 }
 
 func TestBuildKey_HostNormalization(t *testing.T) {
 	t.Parallel()
 	// Same host, different casing → same key.
-	r1 := httptest.NewRequest("GET", "http://Example.COM/a", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/a", nil)
-	require.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/a"), nil), BuildKey(requestInfoFromURL("GET", "http://Example.COM/a"), nil))
 
 	// Non-default port produces different key.
-	r3 := httptest.NewRequest("GET", "http://example.com:8080/a", nil)
-	require.NotEqual(t, BuildKey(requestInfoFromHTTP(r3.Method, r3.URL.String(), r3.Host, r3.URL.Path, r3.TLS != nil, header.FromHTTP(r3.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	require.NotEqual(t, BuildKey(requestInfoFromURL("GET", "http://example.com:8080/a"), nil), BuildKey(requestInfoFromURL("GET", "http://Example.COM/a"), nil))
 }
 
 func TestBuildKey_LongURLNoPanic(t *testing.T) {
@@ -73,9 +57,8 @@ func TestBuildKey_LongURLNoPanic(t *testing.T) {
 	// panic with "index out of range [512]". This was a production crash
 	// in a staging deployment (see key.go:67).
 	longPath := strings.Repeat("a", 600)
-	r := httptest.NewRequest("GET", "http://example.com/"+longPath+"?b=2&a=1", nil)
 	// Must not panic.
-	k := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+	k := BuildKey(requestInfoFromURL("GET", "http://example.com/"+longPath+"?b=2&a=1"), nil)
 	require.NotEqual(t, 0, k)
 }
 
@@ -210,16 +193,13 @@ func TestBuildKeyFromURL_Invalid(t *testing.T) {
 
 func TestBuildKeyFromURL_Valid(t *testing.T) {
 	t.Parallel()
-	r := httptest.NewRequest("GET", "http://example.com/foo?a=1&b=2", nil)
-	expected := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+	expected := BuildKey(requestInfoFromURL("GET", "http://example.com/foo?a=1&b=2"), nil)
 	assert.Equal(t, expected, BuildKeyFromURL("http://example.com/foo?a=1&b=2", nil))
 }
 
 func TestBuildKey_HTTPS_DefaultPortStripped(t *testing.T) {
 	t.Parallel()
-	r1 := httptest.NewRequest("GET", "https://example.com/", nil)
-	r2 := httptest.NewRequest("GET", "https://example.com:443/", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "https://example.com:443/"), nil), BuildKey(requestInfoFromURL("GET", "https://example.com/"), nil))
 }
 
 func TestBuildKey_NormaliseListHeader_NoComma(t *testing.T) {
@@ -232,91 +212,69 @@ func TestBuildKey_PolicySlowPath(t *testing.T) {
 	t.Parallel()
 	// Exercise the policy slow path (appendCanonicalQuerySlow) with keepParams.
 	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
-	r1 := httptest.NewRequest("GET", "http://example.com/search?q=test&utm=x", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/search?q=test", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/search?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/search?q=test&utm=x"), policy))
 }
 
 func TestBuildKey_PolicySlowPath_StripParams(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=1&utm=x", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=1", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&utm=x"), policy))
 }
 
 func TestBuildKey_PolicySlowPath_StripEmpty(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, true, false)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=1&empty=", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=1", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&empty="), policy))
 }
 
 func TestBuildKey_PolicySlowPath_Dedup(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, true)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=2&a=1", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=2", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2&a=1"), policy))
 }
 
 func TestBuildKey_PercentEncodedNoPolicy(t *testing.T) {
 	t.Parallel()
 	// Percent-encoded params trigger the slow path.
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=%31&b=2", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?b=2&a=1", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?b=2&a=1"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&b=2"), nil))
 }
 
 func TestBuildKey_MoreThan8Params(t *testing.T) {
 	t.Parallel()
 	// >8 params triggers the slow path.
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=9", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?i=9&a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
-	require.NotEqual(t, api.Key{}, BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?i=9&a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8"), nil), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=9"), nil))
+	require.NotEqual(t, api.Key{}, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1&b=2&c=3&d=4&e=5&f=6&g=7&h=8&i=9"), nil))
 }
 
 func TestAppendCanonicalQuerySlow_KeepParams(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, false, false)
 	// Use percent-encoded params to force the slow path.
-	r1 := httptest.NewRequest("GET", "http://example.com/?q=%74est&utm=x", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?q=test", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?q=%74est&utm=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripParams(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(map[string]bool{"utm": true}, nil, nil, nil, false, false)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=%31&utm=x", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=1", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&utm=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripPrefixes(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=%31&utm_source=x", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=1", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&utm_source=x"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_StripEmpty(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, true, false)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=%31&empty=", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=1", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=1"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%31&empty="), policy))
 }
 
 func TestAppendCanonicalQuerySlow_Dedup(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, true)
-	r1 := httptest.NewRequest("GET", "http://example.com/?a=%32&a=%31", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?a=2", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?a=2"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?a=%32&a=%31"), policy))
 }
 
 func TestAppendCanonicalQuerySlow_AllFeatures(t *testing.T) {
@@ -325,9 +283,7 @@ func TestAppendCanonicalQuerySlow_AllFeatures(t *testing.T) {
 		map[string]bool{"q": true},
 		nil, nil, nil, true, true,
 	)
-	r1 := httptest.NewRequest("GET", "http://example.com/?q=%74est&q=dup&empty=", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/?q=test", nil)
-	assert.Equal(t, BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy), BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy))
+	assert.Equal(t, BuildKey(requestInfoFromURL("GET", "http://example.com/?q=test"), policy), BuildKey(requestInfoFromURL("GET", "http://example.com/?q=%74est&q=dup&empty="), policy))
 }
 
 func TestBuildKeyFromRaw_SchemeDefault(t *testing.T) {

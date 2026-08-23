@@ -19,6 +19,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/url"
@@ -38,6 +39,13 @@ import (
 
 	"github.com/valyala/fasthttp"
 )
+
+// ErrAbortHandler is the fasthttp equivalent of net/http.ErrAbortHandler.
+// An upstream handler may panic with this value to signal that the
+// response should be aborted. doFetch/doFetchBg recover it and convert
+// it to a fetchResult error instead of letting the panic propagate
+// through singleflight.
+var ErrAbortHandler = errors.New("abort handler")
 
 // headerFromCtx extracts request headers as header.Map from a fasthttp RequestCtx.
 func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
@@ -332,11 +340,10 @@ type HandlerConfig struct {
 	// RefreshMetrics records background refresh activity. Nil when the
 	// feature is disabled or metrics are not configured.
 	RefreshMetrics *observability.RefreshMetrics
-	// FastClient, when non-nil, is used by doFetch to fetch from the
-	// origin via fasthttp instead of httputil.ReverseProxy. This
-	// eliminates the struct{} (header.Map map + bytes.Buffer)
-	// and the make+copy body clone. When nil, doFetch falls back to
-	// the legacy Upstream fasthttp.RequestHandler path.
+	// FastClient is used by doFetch to fetch from the origin via
+	// fasthttp. The response is captured directly in a pooled
+	// *fasthttp.Response, eliminating intermediate header.Map and
+	// body buffer allocations.
 	FastClient FastClient
 }
 
@@ -805,15 +812,9 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 	return BuildKey(requestInfoFromCtx(ctx), h.policy)
 }
 
-// ServeRequest implements fasthttp.RequestHandler. It creates a
-// synchronous shim *fasthttp.RequestCtx and *fasthttp.RequestCtx from the
-// *fasthttp.RequestCtx and delegates to ServeHTTP. This eliminates the
-// fasthttpadaptor goroutine race (the adaptor runs fasthttp.RequestHandler in a
-// goroutine for Flush/Hijack; reading ctx.Response afterward races).
-//
-// The shim is synchronous — no goroutine, no race. The internal methods
-// (ServeHTTP, handleCacheMiss, serveObject, etc.) remain unchanged and
-// will be migrated to fasthttp types incrementally.
+// ServeRequest implements fasthttp.RequestHandler. It dispatches
+// cache-invalidating methods (POST/PUT/DELETE) to invalidateAndProxy
+// and all others to the cache lookup pipeline.
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if isInvalidating(string(ctx.Method())) {
 		h.invalidateAndProxy(ctx)
@@ -976,16 +977,12 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 	return true
 }
 
-// headerGuard wraps an *fasthttp.RequestCtx for the BYPASS path, where
-// the upstream handler writes directly to the client. It overwrites
-// bouine's attribution headers (X-Cache, X-Cache-Source) at WriteHeader
-// time so an origin-supplied value cannot spoof the source metric label
-// or the X-Cache result. All optional interfaces (Flusher, Hijacker,
-// ReaderFrom) are delegated to preserve streaming and zero-copy paths.
-// handleBypassFast handles the BYPASS path using FastClient, bypassing
-// httputil.ReverseProxy and headerGuard. The response is fetched via
-// fasthttp and written directly to the *fasthttp.RequestCtx with
-// bouine's attribution headers set after the origin response.
+// handleBypass handles the BYPASS path (requests with no-store or
+// no-cache directives). It delegates to handleBypassFast, which fetches
+// the origin response via FastClient and writes it directly to the
+// *fasthttp.RequestCtx, then overwrites bouine's attribution headers
+// (X-Cache, X-Cache-Source) so an origin-supplied value cannot spoof
+// the source metric label or X-Cache result.
 func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 	reqCC := ParseCacheControl(string(ctx.Request.Header.Peek(header.CacheControl)))
 	if reqCC.OnlyIfCached {
@@ -1145,6 +1142,15 @@ func (h *Handler) collapsedRevalidateBg(req *fasthttp.Request, key api.Key) fetc
 }
 
 func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
 	if h.fastClient == nil {
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
@@ -1587,8 +1593,9 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 	return false
 }
 
-// invalidateAndProxyFast handles POST/PUT/DELETE using FastClient,
-// bypassing struct{} and httputil.ReverseProxy.
+// invalidateAndProxy handles POST/PUT/DELETE by fetching the origin
+// response via FastClient, proxying it to the client, and invalidating
+// cached entries for the affected resource.
 func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.Set(header.XCache, "MISS")
@@ -1811,20 +1818,24 @@ func (h *Handler) shouldRefresh(staleHits int64, obj *api.Object) bool {
 }
 
 func (h *Handler) doFetch(ctx *fasthttp.RequestCtx) (res fetchResult) {
-	// Fast path: use fasthttp.HostClient when available, bypassing
-	// struct{} + httputil.ReverseProxy. Eliminates:
-	// - header.Map map allocation (2 allocs)
-	// - bytes.Buffer intermediate copy (1 alloc)
-	// - make+copy body clone (1 alloc)
-	// - context.WithValue for target selection (1 alloc)
+	// Fetch from origin using FastClient. The response is captured
+	// directly in a pooled *fasthttp.Response with no intermediate
+	// header.Map or body buffer allocations.
 	return h.doFetchFast(ctx)
 }
 
-// doFetchFast performs an origin fetch using the fasthttp client,
-// bypassing struct{} and httputil.ReverseProxy. The response
-// is captured directly in a pooled *fasthttp.Response — no header.Map
-// map, no bytes.Buffer, no make+copy body clone.
+// doFetchFast performs an origin fetch using the fasthttp client.
+// The response is captured directly in a pooled *fasthttp.Response.
 func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
 	if h.fastClient == nil {
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
@@ -1993,7 +2004,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defa
 	// SerializedHead is not computed here — it is lazily computed on
 	// the first fast-path cache hit by getOrComputeSerializedHead.
 	// This avoids allocating ~512 bytes per object for objects that
-	// are never served via the fast-path (misses, net/http path).
+	// are never served via the fast-path (misses, full handler path).
 
 	return obj
 }

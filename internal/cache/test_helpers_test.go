@@ -1,125 +1,93 @@
 package cache
 
 import (
-	"bytes"
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 
 	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/fasthttpadaptor"
+
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// ServeHTTPCompat is a test-only shim that wraps ServeRequest for tests
-// using httptest.ResponseRecorder. Not for production use.
-func (h *Handler) ServeHTTPCompat(rr *httptest.ResponseRecorder, r *http.Request) {
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.Header.SetMethod(r.Method)
-	ctx.Request.SetRequestURI(r.URL.String())
-	ctx.Request.Header.SetHost(r.Host)
-	for k, vs := range r.Header {
-		for _, v := range vs {
-			ctx.Request.Header.Add(k, v)
-		}
-	}
-	if r.Body != nil {
-		body, _ := io.ReadAll(r.Body)
-		ctx.Request.SetBody(body)
-	}
-	//nolint:contextcheck // test shim — RequestCtx carries its own context
-	h.ServeRequest(ctx)
-	rr.WriteHeader(ctx.Response.StatusCode())
-	//nolint:staticcheck // VisitAll deprecated but functional
-	ctx.Response.Header.VisitAll(func(k, v []byte) {
-		rr.Header().Add(string(k), string(v))
-	})
-	_, _ = rr.Write(ctx.Response.Body())
+// testFastClient wraps a fasthttp.RequestHandler as a FastClient for tests.
+// It copies the request into a RequestCtx, invokes the handler, and copies
+// the response back into the provided *fasthttp.Response.
+type testFastClient struct {
+	handler fasthttp.RequestHandler
 }
 
-// wrapUpstream wraps an http.Handler as fasthttp.RequestHandler for tests.
-func wrapUpstream(h http.Handler) fasthttp.RequestHandler {
-	return fasthttpadaptor.NewFastHTTPHandler(h)
-}
-
-// wrapUpstreamFunc wraps an http.HandlerFunc as fasthttp.RequestHandler for tests.
-func wrapUpstreamFunc(f func(http.ResponseWriter, *http.Request)) fasthttp.RequestHandler {
-	return fasthttpadaptor.NewFastHTTPHandlerFunc(f)
-}
-
-// handlerFastClient wraps an http.Handler as a FastClient for tests.
-// It converts the fasthttp.Request to an http.Request, calls the handler,
-// and copies the response into the fasthttp.Response.
-type handlerFastClient struct {
-	handler http.Handler
-}
-
-func (c *handlerFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
-	uri := req.URI()
-	requestURI := string(uri.RequestURI())
-	rURL, err := url.ParseRequestURI(requestURI)
-	if err != nil {
-		return err
-	}
-
-	body := req.Body()
-	httpReq := &http.Request{
-		Method:        string(req.Header.Method()),
-		URL:           rURL,
-		Host:          string(uri.Host()),
-		Body:          io.NopCloser(bytes.NewReader(body)),
-		Header:        make(http.Header),
-		RequestURI:    requestURI,
-		ContentLength: int64(len(body)),
-	}
-	httpReq = httpReq.WithContext(ctx)
-	//nolint:staticcheck // VisitAll deprecated but functional
-	req.Header.VisitAll(func(k, v []byte) {
-		httpReq.Header.Add(string(k), string(v))
-	})
-
-	rec := httptest.NewRecorder()
+func (c *testFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
+	rctx := &fasthttp.RequestCtx{}
+	req.CopyTo(&rctx.Request)
 	done := make(chan struct{})
-	var abortErr error
 	var panicVal any
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				if r == http.ErrAbortHandler {
-					abortErr = http.ErrAbortHandler
-				} else {
-					panicVal = r
-				}
+				panicVal = r
 			}
 			close(done)
 		}()
-		c.handler.ServeHTTP(rec, httpReq)
+		c.handler(rctx)
 	}()
-
 	select {
 	case <-done:
 		if panicVal != nil {
 			panic(panicVal)
 		}
+		rctx.Response.CopyTo(resp)
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
 
-	if abortErr != nil {
-		return abortErr
-	}
+// testCtx creates a *fasthttp.RequestCtx from method and URL.
+func testCtx(method, url string) *fasthttp.RequestCtx {
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(method)
+	ctx.Request.SetRequestURI(url)
+	return ctx
+}
 
-	resp.SetStatusCode(rec.Code)
-	for k, vs := range rec.Header() {
-		for _, v := range vs {
-			resp.Header.Add(k, v)
-		}
+// testCtxWithBody creates a *fasthttp.RequestCtx with a request body.
+func testCtxWithBody(method, url string, body []byte) *fasthttp.RequestCtx {
+	ctx := testCtx(method, url)
+	ctx.Request.SetBody(body)
+	return ctx
+}
+
+// testCtxWithHeader creates a *fasthttp.RequestCtx with a request header set.
+func testCtxWithHeader(method, url, key, value string) *fasthttp.RequestCtx {
+	ctx := testCtx(method, url)
+	ctx.Request.Header.Set(key, value)
+	return ctx
+}
+
+// serveRequest calls h.ServeRequest(ctx).
+func serveRequest(h *Handler, ctx *fasthttp.RequestCtx) {
+	h.ServeRequest(ctx)
+}
+
+// respCode returns the response status code from a RequestCtx.
+func respCode(ctx *fasthttp.RequestCtx) int {
+	return ctx.Response.StatusCode()
+}
+
+// respHeader returns a response header value from a RequestCtx.
+func respHeader(ctx *fasthttp.RequestCtx, key string) string {
+	return string(ctx.Response.Header.Peek(key))
+}
+
+// respBody returns the response body as a string from a RequestCtx.
+func respBody(ctx *fasthttp.RequestCtx) string {
+	return string(ctx.Response.Body())
+}
+
+// headerMap builds a header.Map from key-value pairs.
+func headerMap(kvs ...string) header.Map {
+	m := header.NewMap(len(kvs) / 2)
+	for i := 0; i+1 < len(kvs); i += 2 {
+		m.Set(kvs[i], kvs[i+1])
 	}
-	if rec.Body.Len() > 0 {
-		body := make([]byte, rec.Body.Len())
-		copy(body, rec.Body.Bytes())
-		resp.SetBody(body)
-	}
-	return nil
+	return m
 }

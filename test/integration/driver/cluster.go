@@ -5,16 +5,12 @@
 package driver
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/cmd/bouine/cmd"
 	"github.com/bouine-cache/bouine/internal/cluster"
@@ -37,6 +35,20 @@ const (
 	// invalidations across the in-process cluster.
 	GossipConvergence = 15 * time.Second
 )
+
+// HeaderMap is a map of response headers with a Get method compatible
+// with the http.Header API used by test callers.
+type HeaderMap map[string]string
+
+func (h HeaderMap) Get(key string) string { return h[key] }
+
+// Response is a minimal response type returned by driver HTTP methods,
+// replacing *http.Response. It carries the status code, headers, and body.
+type Response struct {
+	StatusCode int
+	Header     HeaderMap
+	Body       []byte
+}
 
 // ClusterNode describes one bouine node.
 type ClusterNode struct {
@@ -55,7 +67,7 @@ type ClusterStack struct {
 	Nodes     [3]ClusterNode
 	OriginURL string
 
-	origin    *httptest.Server
+	origin    *fasthttpTestServer
 	originCtl *originControl
 	cancels   [3]context.CancelFunc
 	errChs    [3]chan error
@@ -177,7 +189,7 @@ routes:
 	return b.String()
 }
 
-// BootCluster starts a 3-node in-process bouine cluster with an httptest origin.
+// BootCluster starts a 3-node in-process bouine cluster with a fasthttp origin.
 func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	t.Helper()
 	if opts.Mode == "" {
@@ -215,7 +227,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	}
 	s := &ClusterStack{
 		Mode:      opts.Mode,
-		OriginURL: origin.URL,
+		OriginURL: origin.url,
 		origin:    origin,
 		originCtl: originCtl,
 		configDir: configDir,
@@ -238,7 +250,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			adminPort:  p.admin,
 			gossipPort: p.gossip,
 			seedList:   seedList,
-			originAddr: origin.Listener.Addr().String(),
+			originAddr: origin.addr,
 			tls:        tlsOpts,
 		})
 
@@ -279,7 +291,7 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 	s.waitMembership(t, 30*time.Second, 3)
 
 	t.Logf("cluster: %s stack ready — %s %s %s (origin: %s)",
-		opts.Mode, s.Nodes[0].HTTPAddr, s.Nodes[1].HTTPAddr, s.Nodes[2].HTTPAddr, origin.URL)
+		opts.Mode, s.Nodes[0].HTTPAddr, s.Nodes[1].HTTPAddr, s.Nodes[2].HTTPAddr, origin.url)
 	return s
 }
 
@@ -288,14 +300,15 @@ func (s *ClusterStack) waitHealthy(t *testing.T, timeout time.Duration) {
 	for _, node := range s.Nodes {
 		ep := node.AdminAddr + "/readyz"
 		poll.Eventually(t, timeout, 50*time.Millisecond, func() bool {
-			resp, err := http.Get(ep) //nolint:noctx
-			if err != nil {
+			req := fasthttp.AcquireRequest()
+			resp := fasthttp.AcquireResponse()
+			defer fasthttp.ReleaseRequest(req)
+			defer fasthttp.ReleaseResponse(resp)
+			req.SetRequestURI(ep)
+			if err := fasthttp.Do(req, resp); err != nil {
 				return false
 			}
-			ok := resp.StatusCode == 200
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			return ok
+			return resp.StatusCode() == 200
 		})
 	}
 }
@@ -395,7 +408,7 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 		adminPort:  adminPort,
 		gossipPort: gossipPort,
 		seedList:   seedList,
-		originAddr: s.origin.Listener.Addr().String(),
+		originAddr: s.origin.addr,
 		tls:        tlsOpts,
 	})
 
@@ -428,13 +441,15 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 	}(s.errChs[n])
 
 	poll.Eventually(t, 30*time.Second, 50*time.Millisecond, func() bool {
-		resp, err := http.Get(s.Nodes[n].AdminAddr + "/readyz") //nolint:noctx
-		if err != nil {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+		req.SetRequestURI(s.Nodes[n].AdminAddr + "/readyz")
+		if err := fasthttp.Do(req, resp); err != nil {
 			return false
 		}
-		ok := resp.StatusCode == 200
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		ok := resp.StatusCode() == 200
 		if ok {
 			t.Logf("cluster: restarted %s on %s", name, s.Nodes[n].HTTPAddr)
 		}
@@ -505,43 +520,81 @@ func (s *ClusterStack) KillNode(t *testing.T, n int) {
 	}
 }
 
+// doGet performs a GET request and returns a Response.
+func doGet(url, host string) (*Response, error) {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if host != "" {
+		req.UseHostHeader = true
+		req.SetHost(host)
+	}
+	if err := fasthttp.Do(req, resp); err != nil {
+		return nil, err
+	}
+	return responseFromFastHTTP(resp), nil
+}
+
+// doGetWithClient performs a GET using a pre-allocated client.
+func doGetWithClient(client *fasthttp.Client, url, host string) (*Response, error) {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if host != "" {
+		req.UseHostHeader = true
+		req.SetHost(host)
+	}
+	if err := client.Do(req, resp); err != nil {
+		return nil, err
+	}
+	return responseFromFastHTTP(resp), nil
+}
+
+// responseFromFastHTTP copies relevant fields from a fasthttp.Response
+// into a Response. The caller must not use the fasthttp.Response after
+// this call (it may have been released).
+func responseFromFastHTTP(resp *fasthttp.Response) *Response {
+	hdr := HeaderMap{}
+	resp.Header.VisitAll(func(k, v []byte) {
+		hdr[string(k)] = string(v)
+	})
+	return &Response{
+		StatusCode: resp.StatusCode(),
+		Header:     hdr,
+		Body:       append([]byte(nil), resp.Body()...),
+	}
+}
+
 // Get performs a GET request against node n.
-func (s *ClusterStack) Get(t *testing.T, n int, path string) *http.Response {
+func (s *ClusterStack) Get(t *testing.T, n int, path string) *Response {
 	t.Helper()
 	return s.GetWithHost(t, n, path, "")
 }
 
 // GetWithHost performs a GET with a specific Host header.
-func (s *ClusterStack) GetWithHost(t *testing.T, n int, path string, host string) *http.Response {
+func (s *ClusterStack) GetWithHost(t *testing.T, n int, path string, host string) *Response {
 	t.Helper()
 	url := s.Nodes[n].HTTPAddr + path
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	resp, err := doGet(url, host)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	if host != "" {
-		req.Host = host
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 	return resp
 }
 
 // GetBody performs a GET and returns both the response and body.
-func (s *ClusterStack) GetBody(t *testing.T, n int, path string) (*http.Response, string) {
+func (s *ClusterStack) GetBody(t *testing.T, n int, path string) (*Response, string) {
 	t.Helper()
 	url := s.Nodes[n].HTTPAddr + path
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := doGet(url, "")
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return resp, string(body)
+	return resp, string(resp.Body)
 }
 
 // Purge sends POST /v1/purge to node n.
@@ -576,34 +629,40 @@ func (s *ClusterStack) PeerPurge(t *testing.T, n int, evt api.PurgeEvent) {
 func (s *ClusterStack) peerPost(t *testing.T, n int, path string, body []byte) {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + path
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod("POST")
+	req.SetBody(body)
+	req.Header.SetContentType("application/octet-stream")
 	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := fasthttp.Do(req, resp); err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	b, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode, string(b))
+	if resp.StatusCode() >= 300 {
+		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode(), string(resp.Body()))
 	}
 }
 
 func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + path
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	req.Header.SetMethod("POST")
+	req.SetBody(body)
+	req.Header.SetContentType("application/json")
 	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := fasthttp.Do(req, resp); err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	b, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode, string(b))
+	if resp.StatusCode() >= 300 {
+		t.Fatalf("POST %s: status %d body: %s", url, resp.StatusCode(), string(resp.Body()))
 	}
 }
 
@@ -611,15 +670,17 @@ func (s *ClusterStack) adminPost(t *testing.T, n int, path string, body []byte) 
 func (s *ClusterStack) Peers(t *testing.T, n int) []map[string]any {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + "/v1/cluster/peers"
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
 	req.Header.Set("Authorization", "Bearer "+s.Nodes[n].Token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := fasthttp.Do(req, resp); err != nil {
 		t.Fatalf("peers GET: %v", err)
 	}
-	defer resp.Body.Close()
 	var peers []map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&peers)
+	_ = json.Unmarshal(resp.Body(), &peers)
 	return peers
 }
 
@@ -627,12 +688,15 @@ func (s *ClusterStack) Peers(t *testing.T, n int) []map[string]any {
 func (s *ClusterStack) MetricValue(t *testing.T, n int, metric string) float64 {
 	t.Helper()
 	url := s.Nodes[n].AdminAddr + "/metrics"
-	resp, err := http.Get(url) //nolint:noctx
-	if err != nil {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if err := fasthttp.Do(req, resp); err != nil {
 		t.Fatalf("metrics GET: %v", err)
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw := resp.Body()
 	var total float64
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.HasPrefix(line, "#") {
@@ -660,58 +724,42 @@ func RetryUntil(t *testing.T, deadline time.Duration, interval time.Duration, f 
 }
 
 // XCache returns the X-Cache header value.
-func XCache(resp *http.Response) string {
+func XCache(resp *Response) string {
 	return resp.Header.Get("X-Cache")
 }
 
-// httpsClient returns an HTTP client configured for HTTPS with
-// InsecureSkipVerify (test certs are self-signed) and HTTP/2 enabled.
-func (s *ClusterStack) httpsClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
-			ForceAttemptHTTP2: true,
-		},
+// httpsClient returns a fasthttp client configured for HTTPS with
+// InsecureSkipVerify (test certs are self-signed).
+func (s *ClusterStack) httpsClient() *fasthttp.Client {
+	return &fasthttp.Client{
+		TLSConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
 	}
 }
 
 // GetTLS performs a GET request over HTTPS against node n.
-func (s *ClusterStack) GetTLS(t *testing.T, n int, path string) *http.Response {
+func (s *ClusterStack) GetTLS(t *testing.T, n int, path string) *Response {
 	t.Helper()
-	return s.GetTLSWithHost(t, n, path, "")
+	r, err := s.GetTLSWithHost(t, n, path, "")
+	if err != nil {
+		t.Fatalf("GET %s%s: %v", s.Nodes[n].HTTPSAddr, path, err)
+	}
+	return r
 }
 
 // GetTLSWithHost performs a GET over HTTPS with a specific Host header
 // (also used as SNI for the TLS handshake).
-func (s *ClusterStack) GetTLSWithHost(t *testing.T, n int, path string, host string) *http.Response {
+func (s *ClusterStack) GetTLSWithHost(t *testing.T, n int, path string, host string) (*Response, error) {
 	t.Helper()
 	url := s.Nodes[n].HTTPSAddr + path
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	if host != "" {
-		req.Host = host
-	}
-	resp, err := s.httpsClient().Do(req)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
-	return resp
+	return doGetWithClient(s.httpsClient(), url, host)
 }
 
 // GetTLSResponse performs a GET over HTTPS and returns the raw response
 // without draining the body. The caller is responsible for closing the body.
-func (s *ClusterStack) GetTLSResponse(t *testing.T, n int, path string) *http.Response {
+func (s *ClusterStack) GetTLSResponse(t *testing.T, n int, path string) *Response {
 	t.Helper()
 	url := s.Nodes[n].HTTPSAddr + path
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	resp, err := s.httpsClient().Do(req)
+	resp, err := doGetWithClient(s.httpsClient(), url, "")
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}

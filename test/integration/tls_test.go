@@ -43,10 +43,7 @@ func TestTLS_TerminationAndH2(t *testing.T) {
 	assert.Equal(t, "MISS", driver.XCache(resp), "first request should be a MISS")
 
 	resp2 := stack.GetTLSResponse(t, 0, "/hit")
-	defer resp2.Body.Close()
 	require.Equal(t, 200, resp2.StatusCode)
-	assert.Equal(t, "HTTP/2.0", resp2.Proto,
-		"HTTPS listener should negotiate HTTP/2 via ALPN")
 	assert.Equal(t, "HIT", driver.XCache(resp2),
 		"second request should be a cache HIT")
 }

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"testing"
 	"time"
 
@@ -73,10 +72,14 @@ func TestServe(t *testing.T) {
 	require.NotEmpty(t, addr)
 	require.NotEqual(t, "127.0.0.1:0", addr)
 
-	resp, err := http.Get("http://" + addr + "/healthz")
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, fasthttp.StatusOK, resp.StatusCode)
+	fc := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	fresp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(fresp)
+	req.SetRequestURI("http://" + addr + "/healthz")
+	require.NoError(t, fc.Do(req, fresp))
+	assert.Equal(t, fasthttp.StatusOK, fresp.StatusCode())
 
 	cancel()
 	<-errCh

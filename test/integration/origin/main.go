@@ -20,106 +20,102 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
+
+const httpTimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	flag.Parse()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "ok")
-	})
-	mux.HandleFunc("/hit", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("ETag", `"hit-v1"`)
-		fmt.Fprintf(w, "hit at %s", time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/miss", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		fmt.Fprintf(w, "miss at %s", time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/bypass", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "private")
-		fmt.Fprintf(w, "bypass at %s", time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/stale", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=1, stale-while-revalidate=3600")
-		w.Header().Set("ETag", `"stale-v1"`)
-		fmt.Fprintf(w, "stale at %s", time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/revalidate", func(w http.ResponseWriter, r *http.Request) {
+	srv := &fasthttp.Server{
+		Handler:     originHandler,
+		ReadTimeout: 5 * time.Second,
+	}
+
+	log.Printf("test-origin listening on %s", *addr)
+	log.Fatal(srv.ListenAndServe(*addr))
+}
+
+func originHandler(ctx *fasthttp.RequestCtx) {
+	path := string(ctx.Path())
+	switch path {
+	case "/healthz":
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		ctx.WriteString("ok")
+	case "/hit":
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("ETag", `"hit-v1"`)
+		fmt.Fprintf(ctx, "hit at %s", time.Now().Format(time.RFC3339Nano))
+	case "/miss":
+		ctx.Response.Header.Set("Cache-Control", "no-store")
+		fmt.Fprintf(ctx, "miss at %s", time.Now().Format(time.RFC3339Nano))
+	case "/bypass":
+		ctx.Response.Header.Set("Cache-Control", "private")
+		fmt.Fprintf(ctx, "bypass at %s", time.Now().Format(time.RFC3339Nano))
+	case "/stale":
+		ctx.Response.Header.Set("Cache-Control", "max-age=1, stale-while-revalidate=3600")
+		ctx.Response.Header.Set("ETag", `"stale-v1"`)
+		fmt.Fprintf(ctx, "stale at %s", time.Now().Format(time.RFC3339Nano))
+	case "/revalidate":
 		etag := `"reval-v1"`
-		if r.Header.Get("If-None-Match") == etag {
-			w.WriteHeader(http.StatusNotModified)
+		if string(ctx.Request.Header.Peek("If-None-Match")) == etag {
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
 			return
 		}
-		w.Header().Set("Cache-Control", "max-age=0, must-revalidate")
-		w.Header().Set("ETag", etag)
-		fmt.Fprintf(w, "revalidate at %s", time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/vary", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("Vary", "Accept-Encoding")
-		fmt.Fprintf(w, "vary enc=%s at %s", r.Header.Get("Accept-Encoding"), time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/heuristic", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Last-Modified", time.Now().Add(-24*time.Hour).UTC().Format(http.TimeFormat))
-		fmt.Fprintf(w, "heuristic at %s", time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/error", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(503)
-		fmt.Fprint(w, "origin error")
-	})
-	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
-		ms, _ := strconv.Atoi(r.URL.Query().Get("ms"))
+		ctx.Response.Header.Set("Cache-Control", "max-age=0, must-revalidate")
+		ctx.Response.Header.Set("ETag", etag)
+		fmt.Fprintf(ctx, "revalidate at %s", time.Now().Format(time.RFC3339Nano))
+	case "/vary":
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Vary", "Accept-Encoding")
+		enc := string(ctx.Request.Header.Peek("Accept-Encoding"))
+		fmt.Fprintf(ctx, "vary enc=%s at %s", enc, time.Now().Format(time.RFC3339Nano))
+	case "/heuristic":
+		ctx.Response.Header.Set("Last-Modified", time.Now().Add(-24*time.Hour).UTC().Format(httpTimeFormat))
+		fmt.Fprintf(ctx, "heuristic at %s", time.Now().Format(time.RFC3339Nano))
+	case "/error":
+		ctx.SetStatusCode(503)
+		ctx.WriteString("origin error")
+	case "/slow":
+		ms, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("ms")))
 		if ms <= 0 {
 			ms = 500
 		}
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-		w.Header().Set("Cache-Control", "max-age=60")
-		fmt.Fprintf(w, "slow %dms", ms)
-	})
-
-	mux.HandleFunc("/large", func(w http.ResponseWriter, r *http.Request) {
-		kb, _ := strconv.Atoi(r.URL.Query().Get("kb"))
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		fmt.Fprintf(ctx, "slow %dms", ms)
+	case "/large":
+		kb, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("kb")))
 		if kb <= 0 {
 			kb = 64
 		}
-		w.Header().Set("Cache-Control", "max-age=3600")
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(make([]byte, kb*1024))
-	})
-	mux.HandleFunc("/unique", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "max-age=3600")
-		fmt.Fprintf(w, "unique %s at %s", r.URL.Path, time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/ttl", func(w http.ResponseWriter, r *http.Request) {
-		s, _ := strconv.Atoi(r.URL.Query().Get("s"))
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Content-Type", "application/octet-stream")
+		ctx.Write(make([]byte, kb*1024))
+	case "/unique":
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		fmt.Fprintf(ctx, "unique %s at %s", ctx.Path(), time.Now().Format(time.RFC3339Nano))
+	case "/ttl":
+		s, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("s")))
 		if s <= 0 {
 			s = 60
 		}
-		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", s))
-		fmt.Fprintf(w, "ttl=%ds at %s", s, time.Now().Format(time.RFC3339Nano))
-	})
-	mux.HandleFunc("/outlier", func(w http.ResponseWriter, r *http.Request) {
-		// 5% of requests take 2000ms; rest take 10ms (for hedging tests)
+		ctx.Response.Header.Set("Cache-Control", fmt.Sprintf("max-age=%d", s))
+		fmt.Fprintf(ctx, "ttl=%ds at %s", s, time.Now().Format(time.RFC3339Nano))
+	case "/outlier":
 		if time.Now().UnixNano()%20 == 0 {
 			time.Sleep(2000 * time.Millisecond)
 		} else {
 			time.Sleep(10 * time.Millisecond)
 		}
-		w.Header().Set("Cache-Control", "max-age=60")
-		fmt.Fprint(w, "outlier")
-	})
-
-	log.Printf("test-origin listening on %s", *addr)
-	log.Fatal((&http.Server{
-		Addr:              *addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}).ListenAndServe())
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.WriteString("outlier")
+	default:
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+	}
 }

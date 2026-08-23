@@ -1042,7 +1042,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 // (X-Cache, X-Cache-Source) so an origin-supplied value cannot spoof
 // the source metric label or X-Cache result.
 func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
-	reqCC := ParseCacheControl(string(ctx.Request.Header.Peek(header.CacheControl)))
+	reqCC := ParseCacheControlBytes(ctx.Request.Header.Peek(header.CacheControl))
 	if reqCC.OnlyIfCached {
 		ctx.Error("Gateway Timeout", fasthttp.StatusGatewayTimeout)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
@@ -1413,18 +1413,19 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 // result with its own context. Shared by foreground revalidate and background
 // SWR revalidation so the recompute logic lives in exactly one place.
 //
-// stale.Header is cloned before mutation: it is shared with any other
-// goroutine that looked up the same object, and MergeHeaders304's writes would
-// race with their reads. Do not remove the Clone.
+// stale.Header is cloned by CloneForRefresh before mutation: it is shared
+// with any other goroutine that looked up the same object, and
+// MergeHeaders304's writes would race with their reads.
 func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Time) *api.Object {
 	refreshed := stale.CloneForRefresh()
-	refreshed.Header = stale.Header.Clone()
 	refreshed.StoredAt = now
 	// Reset Hits to 0 for the new TTL window. Object.Hits is a SIEVE
 	// eviction signal; the per-window popularity gate uses windowHits
 	// from the store, not Object.Hits.
 	refreshed.Hits = 0
 	MergeHeaders304(refreshed, res.Header.ToMap())
+	// Recompute HasDate in case the 304 response added or changed Date.
+	refreshed.HasDate = refreshed.Header.Has(header.Date)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
@@ -2031,7 +2032,9 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	originAge := parseOriginAge(resMap)
 	// RFC 9111 §4.2.3: corrected_initial_age = max(apparent_age, age_value).
 	// Apparent age is derived from the Date header: max(0, now - Date).
-	if dateStr := resMap.Get(header.Date); dateStr != "" {
+	dateStr := resMap.Get(header.Date)
+	hasDate := dateStr != ""
+	if hasDate {
 		if dt := parseHTTPDate(dateStr); !dt.IsZero() && !dt.After(now) {
 			if apparentAge := now.Sub(dt); apparentAge > originAge {
 				originAge = apparentAge
@@ -2065,6 +2068,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		ETag:         resMap.Get(header.ETag),
 		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
 		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
+		HasDate:      hasDate,
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).

@@ -92,6 +92,7 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	}
 	tracing.InjectFastHTTP(fetchCtx, req)
 
+	// codeql[go/request-forgery]: reverse proxy cache — forwarding request URLs to origin is the intended behavior
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		cancel()
 		fasthttp.ReleaseRequest(req)

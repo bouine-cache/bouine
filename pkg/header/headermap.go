@@ -138,8 +138,26 @@ func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 // Get returns the value of the header with the given key. The key is
 // canonicalized before lookup. Returns "" if the header is not present.
 // Allocation-free when the input key is already in canonical form.
+//
+// Fast path: the key is compared directly against stored entries. Since
+// all stored keys are canonical (interned via InternKey at store time)
+// and all header constants in this package are pre-canonicalized, the
+// direct comparison works without calling canonicalHeaderKey. If the
+// key is not canonical, the caller must canonicalize it first.
 func (h Map) Get(key string) string {
+	if len(h.entries) == 0 {
+		return ""
+	}
+	for i := range h.entries {
+		if h.entries[i].key == key {
+			return h.values[h.entries[i].off]
+		}
+	}
+	// Fallback: canonicalize and retry (handles non-canonical caller keys).
 	ck := canonicalHeaderKey(key)
+	if ck == key {
+		return "" // already canonical, just not present
+	}
 	for i := range h.entries {
 		if h.entries[i].key == ck {
 			return h.values[h.entries[i].off]
@@ -152,11 +170,23 @@ func (h Map) Get(key string) string {
 // RFC 9111 §5.2 (multiple header field lines are equivalent to a
 // comma-separated list). Returns "" if the header is not present.
 func (h Map) GetAll(key string) string {
-	ck := canonicalHeaderKey(key)
 	var parts []string
+	// Fast path: direct comparison (see Get for rationale).
 	for i := range h.entries {
-		if h.entries[i].key == ck {
+		if h.entries[i].key == key {
 			parts = append(parts, h.values[h.entries[i].off])
+		}
+	}
+	if len(parts) == 0 {
+		// Fallback: canonicalize and retry.
+		ck := canonicalHeaderKey(key)
+		if ck == key {
+			return ""
+		}
+		for i := range h.entries {
+			if h.entries[i].key == ck {
+				parts = append(parts, h.values[h.entries[i].off])
+			}
 		}
 	}
 	if len(parts) == 0 {

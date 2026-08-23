@@ -113,6 +113,181 @@ func buildKeyHeap(ri RequestInfo, policy *KeyPolicy, n int) api.Key {
 	return NewKey(heap[:n])
 }
 
+// BuildKeyFast constructs the canonical primary cache key directly from
+// *fasthttp.RequestCtx byte slices, avoiding the 4 string() conversions
+// that BuildKey requires (Method, URI, Host, Path). Only the query string
+// portion of the URI is converted to string (for strings.* parsing), which
+// is typically short. The method is compared as []byte to avoid allocation.
+//
+// Zero-alloc on the hot path when the URL has no query string.
+func BuildKeyFast(method, uri, host, path []byte, tls bool, policy *KeyPolicy) api.Key {
+	var buf [512]byte
+	n := 0
+
+	// Scheme.
+	if tls {
+		n += copyOverflowBytes(buf[:], n, sHTTPS)
+	} else {
+		n += copyOverflowBytes(buf[:], n, sHTTP)
+	}
+
+	// Host (canonical).
+	n = appendCanonicalHostBytes(buf[:], n, host)
+	n = appendByte(buf[:], n, '|')
+
+	// Path (canonical).
+	n = appendCanonicalPathBytes(buf[:], n, path)
+	n = appendByte(buf[:], n, '|')
+
+	// Query (canonical sorted, with optional param stripping).
+	// Extract query from URI bytes — only convert to string if non-empty.
+	rawQuery := extractRawQueryBytes(uri)
+	if len(rawQuery) > 0 {
+		n = appendCanonicalQueryString(buf[:], n, string(rawQuery), policy)
+	}
+	n = appendByte(buf[:], n, '|')
+
+	// Method (HEAD→GET).
+	if bytesEqual(method, headBytes) {
+		n += copyOverflowBytes(buf[:], n, sGET)
+	} else {
+		n += copyOverflowBytesFromBytes(buf[:], n, method)
+	}
+
+	if n <= len(buf) {
+		return NewKey(buf[:n])
+	}
+
+	// Overflow: redo with a heap buffer sized to fit.
+	heap := make([]byte, n)
+	n = 0
+	if tls {
+		n += copyOverflowBytes(heap, n, sHTTPS)
+	} else {
+		n += copyOverflowBytes(heap, n, sHTTP)
+	}
+	n = appendCanonicalHostBytes(heap, n, host)
+	n = appendByte(heap, n, '|')
+	n = appendCanonicalPathBytes(heap, n, path)
+	n = appendByte(heap, n, '|')
+	if len(rawQuery) > 0 {
+		n = appendCanonicalQueryString(heap, n, string(rawQuery), policy)
+	}
+	n = appendByte(heap, n, '|')
+	if bytesEqual(method, headBytes) {
+		n += copyOverflowBytes(heap, n, sGET)
+	} else {
+		n += copyOverflowBytesFromBytes(heap, n, method)
+	}
+	return NewKey(heap[:n])
+}
+
+// Pre-allocated string constants for scheme/method to avoid repeated
+// string literal allocations in copyOverflowBytes.
+var (
+	sHTTPS    = "https|"
+	sHTTP     = "http|"
+	sGET      = "GET"
+	headBytes = []byte("HEAD")
+)
+
+// bytesEqual compares two byte slices without allocation.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// copyOverflowBytesFromBytes is the []byte variant of copyOverflowBytes.
+func copyOverflowBytesFromBytes(dst []byte, n int, src []byte) int {
+	if n < len(dst) {
+		copy(dst[n:], src)
+	}
+	return len(src)
+}
+
+// copyOverflowBytes is the []byte variant of copyOverflow.
+func copyOverflowBytes(dst []byte, n int, src string) int {
+	if n < len(dst) {
+		copy(dst[n:], src)
+	}
+	return len(src)
+}
+
+// appendCanonicalHostBytes is the []byte variant of appendCanonicalHost.
+func appendCanonicalHostBytes(buf []byte, n int, host []byte) int {
+	for i := range len(host) {
+		c := host[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if n < len(buf) {
+			buf[n] = c
+		}
+		n++
+	}
+	if hasSuffixBytes(buf, n, ":80") {
+		n -= 3
+	} else if hasSuffixBytes(buf, n, ":443") {
+		n -= 4
+	}
+	return n
+}
+
+// hasSuffixBytes is the []byte variant of hasSuffix.
+func hasSuffixBytes(buf []byte, n int, s string) bool {
+	if n < len(s) || n > len(buf) {
+		return false
+	}
+	return string(buf[n-len(s):n]) == s
+}
+
+// appendCanonicalPathBytes is the []byte variant of appendCanonicalPathString.
+func appendCanonicalPathBytes(buf []byte, n int, p []byte) int {
+	if len(p) == 0 {
+		p = []byte("/")
+	}
+	prev := byte(0)
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c == '/' && prev == '/' {
+			continue
+		}
+		if n < len(buf) {
+			buf[n] = c
+		}
+		n++
+		prev = c
+	}
+	return n
+}
+
+// extractRawQueryBytes extracts the raw query string from a URI as []byte.
+// Returns nil if there is no query component.
+func extractRawQueryBytes(uri []byte) []byte {
+	if i := bytesIndexByte(uri, '?'); i >= 0 {
+		return uri[i+1:]
+	}
+	return nil
+}
+
+// bytesIndexByte is a thin wrapper around bytes.IndexByte to avoid
+// importing the bytes package (already imported via sort/strconv/strings).
+func bytesIndexByte(b []byte, c byte) int {
+	for i, v := range b {
+		if v == c {
+			return i
+		}
+	}
+	return -1
+}
+
 // appendByte writes a single byte at offset n into dst. If n is past
 // the end of dst the write is skipped but n is still incremented so the
 // caller can detect overflow by comparing n > len(dst).

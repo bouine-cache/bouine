@@ -806,17 +806,10 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 }
 
 // buildKey constructs the cache key, applying the route's KeyPolicy
-// when configured. Reads directly from *fasthttp.RequestCtx to avoid
-// constructing a RequestInfo (and its headerFromCtx allocation).
+// when configured. Reads directly from *fasthttp.RequestCtx byte slices
+// to avoid string() conversions — zero-alloc when URL has no query string.
 func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
-	ri := RequestInfo{
-		Method: string(ctx.Method()),
-		URI:    string(ctx.RequestURI()),
-		Host:   string(ctx.Host()),
-		Path:   string(ctx.Path()),
-		TLS:    ctx.IsTLS(),
-	}
-	return BuildKey(ri, h.policy)
+	return BuildKeyFast(ctx.Method(), ctx.RequestURI(), ctx.Host(), ctx.Path(), ctx.IsTLS(), h.policy)
 }
 
 // ServeRequest implements fasthttp.RequestHandler. It dispatches
@@ -830,13 +823,15 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 
 	now := time.Now()
 	primaryKey, key, obj, src := h.lookup(ctx)
-	ctx.SetUserValue("cacheKey", key)
 
 	// Fast path: evaluate using direct Peek calls on the request headers,
 	// avoiding the headerFromCtx allocation (which builds a header.Map
 	// with string conversions for every header on every request).
 	// Only construct a full RequestInfo (with header.Map) if we need to
 	// leave the hit path (miss, revalidate, bypass, range).
+	// SetUserValue is deferred to miss/revalidate/bypass paths to avoid
+	// the api.Key→any boxing allocation (1 alloc) on the hit path.
+	// Access logging handles a missing cacheKey gracefully (zero-value key).
 	disp := evaluateFast(ctx, obj, now)
 
 	switch disp.Decision {
@@ -860,9 +855,11 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 			h.triggerBgRevalidate(ctx, key, disp.Object)
 		}
 	case Miss:
+		ctx.SetUserValue("cacheKey", key)
 		ri := requestInfoFromCtx(ctx)
 		h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
 	case Revalidate:
+		ctx.SetUserValue("cacheKey", key)
 		if !h.isOwnerOrUnmanaged(key) {
 			ri := requestInfoFromCtx(ctx)
 			h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
@@ -871,6 +868,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		ri := requestInfoFromCtx(ctx)
 		h.revalidate(ctx, primaryKey, key, disp.Object, now, src, ri)
 	case Bypass:
+		ctx.SetUserValue("cacheKey", key)
 		h.handleBypass(ctx)
 	}
 }

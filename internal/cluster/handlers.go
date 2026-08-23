@@ -2,87 +2,87 @@ package cluster
 
 import (
 	"encoding/json"
-	"io"
-	"net/http"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
-// NewPeerPurgeHandler returns an http.Handler that decodes binary
-// PurgeEvent frames and delegates to fn. Mounted at POST /v1/peer/purge.
-func NewPeerPurgeHandler(fn func(api.PurgeEvent) error) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+// NewPeerPurgeHandler returns a fasthttp.RequestHandler that decodes
+// binary PurgeEvent frames and delegates to fn. Mounted at POST /v1/peer/purge.
+func NewPeerPurgeHandler(fn func(api.PurgeEvent) error) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > 1<<20 {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		evt, err := DecodePurgeHTTP(body)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		if err := fn(evt); err != nil {
-			writePeerError(w, err)
+			writePeerError(ctx, err)
 			return
 		}
-		writePeerOK(w, "purged")
-	})
+		writePeerOK(ctx, "purged")
+	}
 }
 
-// NewPeerBanHandler returns an http.Handler that decodes binary
-// BanEvent frames and delegates to fn. Mounted at POST /v1/peer/ban.
-func NewPeerBanHandler(fn func(api.BanEvent) error) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+// NewPeerBanHandler returns a fasthttp.RequestHandler that decodes
+// binary BanEvent frames and delegates to fn. Mounted at POST /v1/peer/ban.
+func NewPeerBanHandler(fn func(api.BanEvent) error) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > 1<<20 {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		evt, err := DecodeBanHTTP(body)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		if err := fn(evt); err != nil {
-			writePeerError(w, err)
+			writePeerError(ctx, err)
 			return
 		}
-		writePeerOK(w, "banned")
-	})
+		writePeerOK(ctx, "banned")
+	}
 }
 
-// NewPeerRefreshHandler returns an http.Handler that decodes binary
-// RefreshEvent frames and delegates to fn. Mounted at POST /v1/peer/refresh.
-func NewPeerRefreshHandler(fn func(api.RefreshEvent) error) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+// NewPeerRefreshHandler returns a fasthttp.RequestHandler that decodes
+// binary RefreshEvent frames and delegates to fn. Mounted at POST /v1/peer/refresh.
+func NewPeerRefreshHandler(fn func(api.RefreshEvent) error) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > 1<<20 {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		evt, err := DecodeRefreshHTTP(body)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
 			return
 		}
 		if err := fn(evt); err != nil {
-			writePeerError(w, err)
+			writePeerError(ctx, err)
 			return
 		}
-		writePeerOK(w, "refreshed")
-	})
+		writePeerOK(ctx, "refreshed")
+	}
 }
 
-func writePeerError(w http.ResponseWriter, err error) {
-	w.Header().Set(header.ContentType, "application/json")
-	w.WriteHeader(http.StatusInternalServerError)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+func writePeerError(ctx *fasthttp.RequestCtx, err error) {
+	ctx.Response.Header.Set(header.ContentType, "application/json")
+	ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+	_ = json.NewEncoder(ctx).Encode(map[string]string{"error": err.Error()})
 }
 
-func writePeerOK(w http.ResponseWriter, status string) {
-	w.Header().Set(header.ContentType, "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+func writePeerOK(ctx *fasthttp.RequestCtx, status string) {
+	ctx.Response.Header.Set(header.ContentType, "application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	_ = json.NewEncoder(ctx).Encode(map[string]string{"status": status})
 }

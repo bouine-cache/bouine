@@ -11,7 +11,6 @@ package tracing
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/valyala/fasthttp"
@@ -36,35 +35,10 @@ func Tracer() trace.Tracer {
 // HTTPMiddleware wraps an http.Handler with an OTel span named spanName.
 // The span inherits any trace context propagated in the incoming HTTP
 // headers via W3C TraceContext (http.Header propagation).
-func HTTPMiddleware(spanName string, next http.Handler) http.Handler {
-	t := Tracer()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		ctx, span := t.Start(r.Context(), spanName,
-			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(
-				attribute.String("http.method", r.Method),
-				attribute.String("http.scheme", scheme),
-				attribute.String("http.host", r.Host),
-				attribute.String("http.path", r.URL.Path),
-			),
-		)
-		defer span.End()
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
 
 // FastHTTPMiddleware wraps a fasthttp.RequestHandler with an OTel span
 // named spanName. The span inherits trace context from the incoming
 // request headers via W3C TraceContext (fasthttpHeaderCarrier).
-//
-// Not wired into the handler chain yet — the cache handler still uses
-// http.Handler via fasthttpadaptor, and reading ctx.Response after the
-// adaptor returns causes a race. This will be wired when the cache
-// handler is migrated to fasthttp.RequestHandler.
 func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	t := Tracer()
 	return func(ctx *fasthttp.RequestCtx) {
@@ -109,9 +83,6 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 // Baggage headers into req so the upstream origin can continue the trace.
 // It is a no-op when no tracer is configured or the context has no active
 // span, so callers do not need to guard against unconfigured tracing.
-func InjectHTTP(ctx context.Context, req *http.Request) {
-	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
-}
 
 // RecordError records err on span and sets the span status to Error.
 // Safe to call with a nil span.

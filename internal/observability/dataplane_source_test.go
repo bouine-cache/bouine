@@ -1,10 +1,7 @@
 package observability
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,9 +9,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestNormaliseSource(t *testing.T) {
@@ -57,24 +55,21 @@ func TestNormaliseCacheResult(t *testing.T) {
 	}
 }
 
-// TestMiddleware_SpoofedRouteHeader_OnNoMatch verifies that an
-// attacker-supplied X-Bouine-Route header on a 404 (no-match) does NOT
-// appear as the route Prometheus label. The middleware must strip the
-// header before dispatching to the router.
-func TestMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
+func TestFastHTTPMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCache, "MISS")
-		w.WriteHeader(http.StatusNotFound)
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+	})
 
-	req := httptest.NewRequest("GET", "/nonexistent", nil)
-	req.Header.Set(header.XBouineRoute, "evil-route-12345")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/nonexistent")
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.Header.Set(header.XBouineRoute, "evil-route-12345")
+	h(ctx)
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -95,49 +90,42 @@ func TestMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
 	assert.True(t, foundDefault, "route label must be _default on no-match, not empty or spoofed")
 }
 
-// TestMiddleware_SpoofedRouteHeader_StrippedBeforeHandler verifies that
-// the inbound X-Bouine-Route header is removed before the handler runs,
-// so the handler never sees an attacker-controlled value.
-func TestMiddleware_SpoofedRouteHeader_StrippedBeforeHandler(t *testing.T) {
+func TestFastHTTPMiddleware_SpoofedRouteHeader_StrippedBeforeHandler(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
 	var seenHeader string
-	h := m.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		seenHeader = r.Header.Get(header.XBouineRoute)
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		seenHeader = string(ctx.Request.Header.Peek(header.XBouineRoute))
+	})
 
-	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set(header.XBouineRoute, "attacker-value")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/test")
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.Header.Set(header.XBouineRoute, "attacker-value")
+	h(ctx)
 
 	assert.Empty(t, seenHeader,
 		"handler must not see attacker-supplied X-Bouine-Route header")
 }
 
-// TestMiddleware_RouterSetsRouteLabel verifies that when the router sets
-// the X-Bouine-Route header (simulating a route match), the metrics
-// middleware uses it as the route label.
-func TestMiddleware_RouterSetsRouteLabel(t *testing.T) {
+func TestFastHTTPMiddleware_RouterSetsRouteLabel(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate the router setting the header on match.
-		r.Header[header.XBouineRoute] = []string{"my-route"}
-		w.Header().Set(header.XCache, "MISS")
-		w.WriteHeader(200)
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.SetUserValue(header.XBouineRoute, "my-route")
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.SetStatusCode(200)
+	})
 
-	req := httptest.NewRequest("GET", "/api/v1/foo", nil)
-	// Even if the attacker sets a spoofed value, the middleware strips it
-	// before the handler runs, and the handler (router) sets the real one.
-	req.Header.Set(header.XBouineRoute, "spoofed")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/v1/foo")
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.Header.Set(header.XBouineRoute, "spoofed")
+	h(ctx)
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -161,21 +149,20 @@ func TestMiddleware_RouterSetsRouteLabel(t *testing.T) {
 	assert.False(t, spoofedFound, "spoofed route label must not appear in metrics")
 }
 
-// TestMiddleware_UnknownCacheResultMapsToUnknown verifies that an
-// unknown X-Cache response header value maps to "UNKNOWN" and does not
-// pass through as a Prometheus label.
-func TestMiddleware_UnknownCacheResultMapsToUnknown(t *testing.T) {
+func TestFastHTTPMiddleware_UnknownCacheResultMapsToUnknown(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCache, "WEIRD-CACHE-VALUE")
-		w.WriteHeader(200)
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "WEIRD-CACHE-VALUE")
+		ctx.SetStatusCode(200)
+	})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/test")
+	ctx.Request.Header.SetMethod("GET")
+	h(ctx)
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -196,20 +183,22 @@ func TestMiddleware_UnknownCacheResultMapsToUnknown(t *testing.T) {
 	assert.True(t, found, "cache_result must be UNKNOWN for unrecognized X-Cache value")
 }
 
-func TestMiddleware_SourceLabel(t *testing.T) {
+func TestFastHTTPMiddleware_SourceLabel(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCache, "HIT")
-		w.Header().Set(header.XCacheSource, "hot")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("ok"))
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "HIT")
+		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.SetStatusCode(200)
+		ctx.Write([]byte("ok"))
+	})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/test")
+	ctx.Request.Header.SetMethod("GET")
+	h(ctx)
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -234,18 +223,20 @@ func TestMiddleware_SourceLabel(t *testing.T) {
 	assert.True(t, foundBytes)
 }
 
-func TestMiddleware_SourceLabel_Empty(t *testing.T) {
+func TestFastHTTPMiddleware_SourceLabel_Empty(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCache, "BYPASS")
-		w.WriteHeader(200)
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "BYPASS")
+		ctx.SetStatusCode(200)
+	})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/test")
+	ctx.Request.Header.SetMethod("GET")
+	h(ctx)
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -267,15 +258,17 @@ func TestResponseBytesOut_HasCacheResultAndSource(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	h := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCache, "MISS")
-		w.Header().Set(header.XCacheSource, "origin")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("body"))
-	}))
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.Set(header.XCacheSource, "origin")
+		ctx.SetStatusCode(200)
+		ctx.Write([]byte("body"))
+	})
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/test")
+	ctx.Request.Header.SetMethod("GET")
+	h(ctx)
 
 	got, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -293,7 +286,6 @@ func TestResponseBytesOut_HasCacheResultAndSource(t *testing.T) {
 	t.Error("response_bytes_total: no MISS/origin series found")
 }
 
-// labelValue returns the value of a Prometheus label by name.
 func labelValue(m *dto.Metric, name string) string {
 	for _, l := range m.GetLabel() {
 		if l.GetName() == name {
@@ -368,19 +360,4 @@ func TestShouldLogAccess_WithKey(t *testing.T) {
 	key := api.Key{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	result := m.shouldLogAccess(key)
 	_ = result
-}
-
-func TestBuildAccessLogAttrs(t *testing.T) {
-	t.Parallel()
-	m := &DataPlaneMetrics{}
-	r := httptest.NewRequest("GET", "http://example.com/path", nil)
-	r.RemoteAddr = "1.2.3.4:5678"
-	sw := &responsewriter.ResponseWriter{Status: 200, Bytes: 1024}
-	attrs := m.buildAccessLogAttrs(r, sw, "HIT", 50*time.Millisecond)
-	assert.NotEmpty(t, attrs)
-	assert.Contains(t, attrs, "method")
-	assert.Contains(t, attrs, "GET")
-	assert.Contains(t, attrs, "host")
-	assert.Contains(t, attrs, "path")
-	assert.Contains(t, attrs, "status")
 }

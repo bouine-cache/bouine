@@ -3,7 +3,6 @@ package staticfile
 import (
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,6 +18,9 @@ import (
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
+
+// httpTimeFormat is the HTTP date format per RFC 9110 §6.6.1.
+const httpTimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
 
 // defaultMaxFileSize is the per-file size cap when MaxFileSize is zero.
 const defaultMaxFileSize int64 = 10 << 20 // 10 MiB
@@ -82,7 +84,6 @@ type etagEntry struct {
 // Only GET and HEAD methods are accepted; all others return 405.
 type Handler struct {
 	root       string
-	fs         http.FileSystem
 	indexFiles []string
 	maxBytes   int64
 	logger     observability.Logger
@@ -138,7 +139,6 @@ func New(cfg Config) (*Handler, error) {
 
 	return &Handler{
 		root:       resolved,
-		fs:         http.Dir(resolved),
 		indexFiles: cfg.IndexFiles,
 		maxBytes:   maxBytes,
 		logger:     cfg.Logger,
@@ -208,60 +208,6 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 // compatibility until the cache handler is fully migrated to fasthttp.
 //
 //nolint:depguard // net/http required for cache-handler upstream interface
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		h.recordResult(resultMethodNotAllowed)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	cleaned := path.Clean("/" + r.URL.Path)
-	if !h.isPathContained(cleaned) {
-		h.recordResult(resultTraversalBlocked)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	f, stat, servedPath, ok := h.resolveFile(cleaned)
-	if !ok {
-		h.recordResult(resultNotFound)
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	defer func() { _ = f.Close() }()
-
-	if stat.Size() > h.maxBytes {
-		h.recordResult(resultTooLarge)
-		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	h.setHeaders(w, f, servedPath, stat)
-
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		h.logger.Warn("staticfile: seek to start failed", "path", servedPath, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	if h.handleConditional(w, r, stat) {
-		return
-	}
-
-	if rng := r.Header.Get(header.Range); rng != "" {
-		if h.handleRange(w, r, f, rng, stat.Size()) {
-			return
-		}
-	}
-
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		h.recordResult(resultServed)
-		return
-	}
-
-	h.streamFile(w, f, servedPath)
-}
 
 // isPathContained checks whether the cleaned path, when joined with
 // root, stays within the root directory.
@@ -275,8 +221,8 @@ func (h *Handler) isPathContained(cleaned string) bool {
 // tries index files. Returns the opened file, its stat info, the
 // effective served path (may differ from cleanedPath if an index file
 // was used), and whether the file was found.
-func (h *Handler) resolveFile(cleanedPath string) (http.File, os.FileInfo, string, bool) {
-	f, err := h.fs.Open(filepath.ToSlash(cleanedPath))
+func (h *Handler) resolveFile(cleanedPath string) (*os.File, os.FileInfo, string, bool) {
+	f, err := os.Open(filepath.Join(h.root, filepath.FromSlash(cleanedPath))) //nolint:gosec // path sanitized by isPathContained
 	if err != nil {
 		h.logger.Warn("staticfile: open error", "path", cleanedPath, "error", err)
 		return nil, nil, "", false
@@ -298,13 +244,14 @@ func (h *Handler) resolveFile(cleanedPath string) (http.File, os.FileInfo, strin
 }
 
 // resolveIndex tries each index file in the directory at cleanedPath.
-func (h *Handler) resolveIndex(cleanedPath string) (http.File, os.FileInfo, string, bool) {
+func (h *Handler) resolveIndex(cleanedPath string) (*os.File, os.FileInfo, string, bool) {
 	for _, idx := range h.indexFiles {
 		idxPath := path.Join(cleanedPath, idx)
 		if !h.isPathContained(idxPath) {
 			continue
 		}
-		idxFile, err := h.fs.Open(filepath.ToSlash(idxPath))
+		fullPath := filepath.Join(h.root, filepath.FromSlash(idxPath))
+		idxFile, err := os.Open(fullPath) //nolint:gosec // path sanitized by isPathContained
 		if err != nil {
 			continue
 		}
@@ -313,7 +260,7 @@ func (h *Handler) resolveIndex(cleanedPath string) (http.File, os.FileInfo, stri
 		if err != nil || idxStat.IsDir() {
 			continue
 		}
-		f, err := h.fs.Open(filepath.ToSlash(idxPath))
+		f, err := os.Open(fullPath) //nolint:gosec // path sanitized by isPathContained
 		if err != nil {
 			continue
 		}
@@ -330,30 +277,17 @@ func (h *Handler) resolveIndex(cleanedPath string) (http.File, os.FileInfo, stri
 // setHeaders sets Content-Length, Content-Type, Last-Modified, and ETag
 // headers on the response. The already-opened file f is used for ETag
 // computation to avoid a redundant open syscall.
-func (h *Handler) setHeaders(w http.ResponseWriter, f http.File, cleanedPath string, stat os.FileInfo) {
-	w.Header().Set(header.ContentLength, strconv.FormatInt(stat.Size(), 10))
-
-	ext := filepath.Ext(cleanedPath)
-	w.Header().Set(header.ContentType, contentTypeByExtension(ext))
-
-	lastMod := stat.ModTime().UTC()
-	w.Header().Set(header.LastModified, lastMod.Format(http.TimeFormat))
-
-	if etag := h.computeETag(f, cleanedPath, stat); etag != "" {
-		w.Header().Set(header.ETag, etag)
-	}
-}
 
 // setFastHeaders sets Content-Length, Content-Type, Last-Modified, and ETag
 // headers on the fasthttp response.
-func (h *Handler) setFastHeaders(ctx *fasthttp.RequestCtx, f http.File, cleanedPath string, stat os.FileInfo) {
+func (h *Handler) setFastHeaders(ctx *fasthttp.RequestCtx, f *os.File, cleanedPath string, stat os.FileInfo) {
 	ctx.Response.Header.Set(header.ContentLength, strconv.FormatInt(stat.Size(), 10))
 
 	ext := filepath.Ext(cleanedPath)
 	ctx.Response.Header.Set(header.ContentType, contentTypeByExtension(ext))
 
 	lastMod := stat.ModTime().UTC()
-	ctx.Response.Header.Set(header.LastModified, lastMod.Format(http.TimeFormat))
+	ctx.Response.Header.Set(header.LastModified, lastMod.Format(httpTimeFormat))
 
 	if etag := h.computeETag(f, cleanedPath, stat); etag != "" {
 		ctx.Response.Header.Set(header.ETag, etag)
@@ -363,26 +297,6 @@ func (h *Handler) setFastHeaders(ctx *fasthttp.RequestCtx, f http.File, cleanedP
 // handleConditional checks If-None-Match and If-Modified-Since headers
 // and writes a 304 response if the conditions are met. Returns true if
 // the response was written.
-func (h *Handler) handleConditional(w http.ResponseWriter, r *http.Request, stat os.FileInfo) bool {
-	etag := w.Header().Get(header.ETag)
-	if match := r.Header.Get(header.IfNoneMatch); match != "" {
-		if isETagMatch(match, etag) {
-			w.WriteHeader(http.StatusNotModified)
-			h.recordResult(resultServed)
-			return true
-		}
-		return false
-	}
-	if ims := r.Header.Get(header.IfModifiedSince); ims != "" {
-		lastMod := stat.ModTime().UTC()
-		if isModifiedSinceMatch(ims, lastMod) {
-			w.WriteHeader(http.StatusNotModified)
-			h.recordResult(resultServed)
-			return true
-		}
-	}
-	return false
-}
 
 // handleFastConditional checks If-None-Match and If-Modified-Since headers
 // for the fasthttp handler and writes a 304 response if conditions are met.
@@ -409,23 +323,10 @@ func (h *Handler) handleFastConditional(ctx *fasthttp.RequestCtx, stat os.FileIn
 
 // streamFile copies the file body to the response writer using a pooled
 // buffer. Records the bytes served metric on success.
-func (h *Handler) streamFile(w http.ResponseWriter, f http.File, cleanedPath string) {
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
-
-	written, err := io.CopyBuffer(w, f, buf)
-	if err != nil {
-		h.logger.Warn("staticfile: stream error", "path", cleanedPath, "error", err)
-		return
-	}
-
-	h.recordServed(written)
-}
 
 // streamFastFile copies the file body to the fasthttp response using a
 // pooled buffer.
-func (h *Handler) streamFastFile(ctx *fasthttp.RequestCtx, f http.File, cleanedPath string) {
+func (h *Handler) streamFastFile(ctx *fasthttp.RequestCtx, f *os.File, cleanedPath string) {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
@@ -452,7 +353,7 @@ func (h *Handler) streamFastFile(ctx *fasthttp.RequestCtx, f http.File, cleanedP
 // (seek/read error). Per ADR-0017 §7, a missing ETag is strictly safer
 // than a wrong mtime-based one: clients fall back to If-Modified-Since
 // validation, which is correct.
-func (h *Handler) computeETag(f http.File, cleanedPath string, stat os.FileInfo) string {
+func (h *Handler) computeETag(f *os.File, cleanedPath string, stat os.FileInfo) string {
 	mtime := stat.ModTime()
 	if cached, ok := h.etagCache.Load(cleanedPath); ok {
 		if e, ok := cached.(etagEntry); ok && e.mtime.Equal(mtime) {
@@ -496,7 +397,7 @@ func isETagMatch(ifNoneMatch, etag string) bool {
 // isModifiedSinceMatch returns true if the file has NOT been modified
 // since the If-Modified-Since time (i.e., a 304 should be sent).
 func isModifiedSinceMatch(ims string, lastMod time.Time) bool {
-	imsTime, err := http.ParseTime(ims)
+	imsTime, err := time.Parse(httpTimeFormat, ims)
 	if err != nil {
 		return false
 	}
@@ -541,53 +442,9 @@ const (
 // returns false (rangeInvalid), it must NOT have called Seek on f, so
 // the caller can safely fall through to streamFile which reads from
 // offset 0.
-func (h *Handler) handleRange(w http.ResponseWriter, r *http.Request, f http.File, rangeHeader string, size int64) bool {
-	start, end, status := parseRangeSpec(rangeHeader, size)
-	switch status {
-	case rangeInvalid:
-		return false
-	case rangeUnsatisfiable:
-		w.Header().Set(header.ContentRange, fmt.Sprintf("bytes */%d", size))
-		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		h.recordResult(resultServed)
-		return true
-	}
-
-	length := end - start + 1
-	w.Header().Set(header.ContentRange, fmt.Sprintf("bytes %d-%d/%d", start, end, size))
-	w.Header().Set(header.ContentLength, strconv.FormatInt(length, 10))
-
-	if start > 0 {
-		if _, err := f.Seek(start, io.SeekStart); err != nil {
-			h.logger.Warn("staticfile: range seek error", "error", err)
-			w.Header().Del(header.ContentRange)
-			w.Header().Del(header.ContentLength)
-			http.Error(w, "range seek error", http.StatusInternalServerError)
-			return true
-		}
-	}
-
-	w.WriteHeader(http.StatusPartialContent)
-	if r.Method == http.MethodHead {
-		h.recordResult(resultServed)
-		return true
-	}
-
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
-
-	written, err := io.CopyBuffer(w, io.LimitReader(f, length), buf)
-	if err != nil {
-		h.logger.Warn("staticfile: range stream error", "error", err)
-		return true
-	}
-	h.recordServed(written)
-	return true
-}
 
 // handleFastRange processes a Range header for the fasthttp handler.
-func (h *Handler) handleFastRange(ctx *fasthttp.RequestCtx, f http.File, rangeHeader string, size int64, method string) bool {
+func (h *Handler) handleFastRange(ctx *fasthttp.RequestCtx, f *os.File, rangeHeader string, size int64, method string) bool {
 	start, end, status := parseRangeSpec(rangeHeader, size)
 	switch status {
 	case rangeInvalid:

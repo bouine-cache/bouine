@@ -3,19 +3,15 @@ package tracing
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // newTestTracerProvider installs a TracerProvider backed by sr (a span
@@ -101,107 +97,6 @@ func TestStartSpan_PropagatesContextToChild(t *testing.T) {
 		"child span's parent should be the parent span")
 	assert.Equal(t, parent.SpanContext().TraceID(), child.SpanContext().TraceID(),
 		"child should share the parent's trace ID")
-}
-
-func TestHTTPMiddleware_CreatesServerSpan(t *testing.T) {
-	// Cannot use t.Parallel(): installs global OTel tracer provider.
-	sr := tracetest.NewSpanRecorder()
-	cleanup := newTestTracerProvider(t, sr)
-	defer cleanup()
-
-	called := false
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		span := trace.SpanFromContext(r.Context())
-		assert.True(t, span.SpanContext().IsValid(),
-			"inner handler should see an active span in context")
-		w.WriteHeader(http.StatusOK)
-	})
-
-	h := HTTPMiddleware("http-server", inner)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/foo/bar", nil)
-	req.Host = "example.com"
-	h.ServeHTTP(rr, req)
-
-	require.True(t, called, "inner handler must be called")
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	spans := sr.Ended()
-	require.Len(t, spans, 1)
-	s := spans[0]
-	assert.Equal(t, "http-server", s.Name())
-	assert.Equal(t, trace.SpanKindServer, s.SpanKind())
-}
-
-func TestHTTPMiddleware_SetsHTTPAttributes(t *testing.T) {
-	// Cannot use t.Parallel(): installs global OTel tracer provider.
-	sr := tracetest.NewSpanRecorder()
-	cleanup := newTestTracerProvider(t, sr)
-	defer cleanup()
-
-	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	h := HTTPMiddleware("http-server", inner)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/cache", nil)
-	req.Host = "cache.bouine.io"
-	h.ServeHTTP(rr, req)
-
-	spans := sr.Ended()
-	require.Len(t, spans, 1)
-	attrs := attribute.NewSet(spans[0].Attributes()...)
-
-	for _, kv := range []struct {
-		key   string
-		value string
-	}{
-		{"http.method", "POST"},
-		{"http.scheme", "http"},
-		{"http.host", "cache.bouine.io"},
-		{"http.path", "/api/v1/cache"},
-	} {
-		val, ok := attrs.Value(attribute.Key(kv.key))
-		require.True(t, ok, "attribute %s should be set", kv.key)
-		assert.Equal(t, kv.value, val.AsString())
-	}
-}
-
-func TestInjectHTTP_InjectsTraceparentHeader(t *testing.T) {
-	// Cannot use t.Parallel(): installs global OTel tracer provider.
-	sr := tracetest.NewSpanRecorder()
-	cleanup := newTestTracerProvider(t, sr)
-	defer cleanup()
-
-	ctx, span := StartSpan(context.Background(), "test-span")
-	defer span.End()
-
-	req := httptest.NewRequest(http.MethodGet, "http://upstream/api", nil)
-	InjectHTTP(ctx, req)
-
-	tp := req.Header.Get("traceparent")
-	require.NotEmpty(t, tp, "traceparent header must be injected")
-	// W3C traceparent format: version-traceid-spanid-flags
-	assert.Regexp(t, `^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`, tp,
-		"traceparent must match W3C format")
-
-	traceID := span.SpanContext().TraceID().String()
-	assert.Contains(t, tp, traceID,
-		"traceparent must contain the span's trace ID")
-}
-
-func TestInjectHTTP_NoSpanIsNoOp(t *testing.T) {
-	// Cannot use t.Parallel(): installs global OTel tracer provider.
-	cleanup := newTestTracerProvider(t, tracetest.NewSpanRecorder())
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodGet, "http://upstream/", nil)
-	InjectHTTP(context.Background(), req)
-
-	assert.Empty(t, req.Header.Get("traceparent"),
-		"no traceparent should be injected when context has no span")
 }
 
 func TestRecordError_RecordsErrorOnSpan(t *testing.T) {

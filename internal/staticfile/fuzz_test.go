@@ -1,13 +1,12 @@
 package staticfile
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/valyala/fasthttp"
 )
 
 // FuzzPathTraversal fuzzes the path cleaning and containment check.
@@ -59,22 +58,20 @@ func FuzzPathTraversal(f *testing.F) {
 			t.Skip()
 		}
 
-		// Construct the request manually to avoid httptest.NewRequest
-		// panicking on invalid URL escapes (e.g. "%" without hex digits).
-		u := &url.URL{Path: "/" + urlPath}
-		r := &http.Request{Method: "GET", URL: u}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.SetRequestURI("/" + urlPath)
+		ctx.Request.Header.SetMethod("GET")
+		h.ServeRequest(ctx)
 
 		// The handler must NEVER return the secret file content.
-		if strings.Contains(w.Body.String(), "secret") {
+		if strings.Contains(string(ctx.Response.Body()), "secret") {
 			t.Fatalf("path traversal: urlPath=%q returned secret content", urlPath)
 		}
 
 		// If the response is 200, the body must be "safe" (the only
 		// legitimate file in the root).
-		if w.Code == http.StatusOK && w.Body.String() != "safe" {
-			t.Fatalf("unexpected 200 body: urlPath=%q body=%q", urlPath, w.Body.String())
+		if ctx.Response.StatusCode() == fasthttp.StatusOK && string(ctx.Response.Body()) != "safe" {
+			t.Fatalf("unexpected 200 body: urlPath=%q body=%q", urlPath, string(ctx.Response.Body()))
 		}
 	})
 }

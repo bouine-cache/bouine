@@ -1,17 +1,13 @@
 package observability
 
 import (
-	"context"
-	"net/http"
 	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"go.opentelemetry.io/otel/trace"
 
-	"github.com/bouine-cache/bouine/internal/observability/responsewriter"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -21,12 +17,6 @@ import (
 // HeaderVal returns the first value for key from h via direct map access,
 // avoiding the CanonicalMIMEHeaderKey allocation that http.Header.Get
 // performs. The caller must pass an already-canonical key.
-func HeaderVal(h http.Header, key string) string {
-	if vals := h[key]; len(vals) > 0 {
-		return vals[0]
-	}
-	return ""
-}
 
 // DataPlaneMetrics holds the RED counters for the data-plane pipeline.
 // Injected by the engine; consumed by the pipeline middleware which
@@ -623,66 +613,10 @@ func init() {
 // This merged middleware replaces the former separate accesslog + metrics
 // middleware pair, halving the ResponseWriter pool acquires and wrapper
 // layers on the Write path from two to one.
-func (m *DataPlaneMetrics) Middleware(next http.Handler) http.Handler {
-	nowFunc := m.nowFunc
-	if nowFunc == nil {
-		nowFunc = time.Now
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Strip any inbound X-Bouine-Route header before dispatching to
-		// the router. This header is server-internal: the router sets it
-		// on match. An attacker-supplied value would otherwise flow
-		// directly into Prometheus labels as the `route` dimension,
-		// creating an unbounded cardinality bomb on 404s (no-match path
-		// where the router never overwrites it). delete() by canonical
-		// key is zero-allocation.
-		delete(r.Header, header.XBouineRoute)
-
-		start := nowFunc()
-		sw := responsewriter.Acquire(w)
-		defer responsewriter.Release(sw)
-
-		next.ServeHTTP(sw, r)
-
-		status := statusString(sw.Status)
-		route := "_default"
-		if vals := r.Header[header.XBouineRoute]; len(vals) > 0 {
-			route = vals[0]
-		}
-		xCache := HeaderVal(w.Header(), header.XCache)
-		cacheResult := normaliseCacheResult(xCache)
-		source := normaliseSource(HeaderVal(w.Header(), header.XCacheSource))
-
-		elapsed := time.Since(start)
-		dur := elapsed.Seconds()
-		bytesOut := float64(sw.Bytes)
-
-		m.recordMetrics(r, sw.Status, status, route, cacheResult, source, dur, bytesOut, r.Context())
-
-		m.recordRings(xCache, sw.Status, route, r.URL.Path, elapsed, w.Header())
-
-		if m.accessLog != nil {
-			msg := accessLogMessage(xCache, sw.Status)
-			if sw.Status != http.StatusOK {
-				attrs := m.buildAccessLogAttrs(r, sw, xCache, elapsed)
-				m.accessLog.Warn(msg, attrs...)
-			} else if m.shouldLogAccess(sw.Key) {
-				attrs := m.buildAccessLogAttrs(r, sw, xCache, elapsed)
-				m.accessLog.Info(msg, attrs...)
-			}
-		}
-	})
-}
 
 // FastHTTPMiddleware wraps a fasthttp.RequestHandler and records RED
 // metrics + structured access log for every request. This is the
-// fasthttp-native version of Middleware.
-//
-// Not wired into the handler chain yet — the cache handler still uses
-// http.Handler via fasthttpadaptor, and reading ctx.Response after the
-// adaptor returns causes a race (the adaptor's Flush/Hijack goroutine
-// may still be writing). This will be wired when the cache handler is
-// migrated to fasthttp.RequestHandler.
+// fasthttp-native middleware, wired into the data-plane handler chain.
 func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	nowFunc := m.nowFunc
 	if nowFunc == nil {
@@ -720,7 +654,7 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 
 		if m.accessLog != nil {
 			msg := accessLogMessage(xCache, statusCode)
-			if statusCode != http.StatusOK {
+			if statusCode != fasthttp.StatusOK {
 				attrs := m.buildFastHTTPAccessLogAttrs(ctx, xCache, elapsed, statusCode)
 				m.accessLog.Warn(msg, attrs...)
 			} else {
@@ -777,38 +711,9 @@ func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx,
 
 // recordMetrics increments the RED counters using pre-resolved labels when
 // available, falling back to WithLabelValues for uncommon tuples.
-func (m *DataPlaneMetrics) recordMetrics(r *http.Request, code int, status, route, cacheResult, source string, dur, bytesOut float64, ctx context.Context) {
-	if rm, ok := m.lookupRouteMetrics(route); ok {
-		mi := methodIndex(r.Method)
-		si := statusIndex(code)
-		ri := cacheResultIndex(cacheResult)
-		src := sourceIndex(source)
-		if si >= 0 && ri >= 0 && src >= 0 {
-			rm.requestsTotal[mi][si][ri][src].Inc()
-			observeDuration(rm.requestDuration[mi][si][ri][src], dur, ctx)
-			rm.responseBytes[mi][ri][src].Add(bytesOut)
-			return
-		}
-		m.fallbackCount.Add(1)
-	}
-	m.RequestsTotal.WithLabelValues(r.Method, status, cacheResult, source, route).Inc()
-	observeDuration(m.RequestDuration.WithLabelValues(r.Method, status, cacheResult, source, route), dur, ctx)
-	m.ResponseBytesOut.WithLabelValues(r.Method, cacheResult, source, route).Add(bytesOut)
-}
 
 // observeDuration records the request duration on the given observer,
 // attaching a trace exemplar when a valid span context is available.
-func observeDuration(obs prometheus.Observer, dur float64, ctx context.Context) {
-	if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-		if eo, ok := obs.(prometheus.ExemplarObserver); ok {
-			eo.ObserveWithExemplar(dur, prometheus.Labels{
-				"trace_id": span.SpanContext().TraceID().String(),
-			})
-			return
-		}
-	}
-	obs.Observe(dur)
-}
 
 // RecordHit implements api.FastPathMetrics. It increments the RED
 // counters for a fast-path hit without going through the middleware
@@ -841,20 +746,6 @@ func (m *DataPlaneMetrics) IncrementSmugglingRejected() {
 }
 
 // recordRings updates the dashboard ring buffers for non-HIT requests.
-func (m *DataPlaneMetrics) recordRings(xCache string, status int, route, path string, elapsed time.Duration, hdr http.Header) {
-	if m.Rings == nil || xCache == "HIT" {
-		return
-	}
-	durMs := elapsed.Milliseconds()
-	m.Rings.Request.RecordRequest(xCache, status, durMs)
-	if route != "_default" {
-		m.Rings.Route.RecordRoute(route, xCache, status, durMs)
-	}
-	m.Rings.URL.RecordURL(path, route, xCache)
-	if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
-		m.Rings.HeaderRing.Sample(route, hdr, status)
-	}
-}
 
 // recordFastHTTPRings updates the dashboard ring buffers for non-HIT
 // requests from the fasthttp middleware path.
@@ -890,7 +781,7 @@ func (m *DataPlaneMetrics) lookupRouteMetrics(route string) (*routeMetrics, bool
 // accessLogMessage returns a human-readable log message based on the
 // cache result and HTTP status code.
 func accessLogMessage(cacheResult string, status int) string {
-	if status != http.StatusOK {
+	if status != fasthttp.StatusOK {
 		return "request completed with error"
 	}
 	switch cacheResult {
@@ -915,23 +806,6 @@ func accessLogMessage(cacheResult string, status int) string {
 // an access log entry. Called only when the sampling decision is positive
 // or the status is non-200, so the 20-element []any allocation is avoided
 // for the vast majority of hit requests.
-func (m *DataPlaneMetrics) buildAccessLogAttrs(r *http.Request, sw *responsewriter.ResponseWriter, cacheResult string, elapsed time.Duration) []any {
-	attrs := []any{
-		"method", r.Method,
-		"host", r.Host,
-		"path", r.URL.Path,
-		"proto", r.Proto,
-		"status", sw.Status,
-		"bytes_out", sw.Bytes,
-		"dur_ms", elapsed.Milliseconds(),
-		"remote", r.RemoteAddr,
-		"cache_status", cacheResult,
-	}
-	if !sw.Key.IsZero() {
-		attrs = append(attrs, "key", sw.Key)
-	}
-	return attrs
-}
 
 // shouldLogAccess returns true when this request should emit an Info-level
 // access log entry. Uses key-based deterministic sampling when a cache key

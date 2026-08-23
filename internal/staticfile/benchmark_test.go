@@ -8,11 +8,11 @@ package staticfile_test
 import (
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/staticfile"
 )
@@ -36,14 +36,16 @@ func BenchmarkStaticFile_SmallFile(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "/file.bin", nil)
+	r := &fasthttp.RequestCtx{}
+	r.Request.SetRequestURI("/file.bin")
+	r.Request.Header.SetMethod("GET")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != 200 {
-			b.Fatalf("status: %d", w.Code)
+		w := &fasthttp.RequestCtx{}
+		h.ServeRequest(w)
+		if w.Response.StatusCode() != 200 {
+			b.Fatalf("status: %d", w.Response.StatusCode())
 		}
 	}
 }
@@ -54,14 +56,16 @@ func BenchmarkStaticFile_LargeFile(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "/file.bin", nil)
+	r := &fasthttp.RequestCtx{}
+	r.Request.SetRequestURI("/file.bin")
+	r.Request.Header.SetMethod("GET")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != 200 {
-			b.Fatalf("status: %d", w.Code)
+		w := &fasthttp.RequestCtx{}
+		h.ServeRequest(w)
+		if w.Response.StatusCode() != 200 {
+			b.Fatalf("status: %d", w.Response.StatusCode())
 		}
 	}
 }
@@ -73,20 +77,24 @@ func BenchmarkStaticFile_ConditionalGET_304(b *testing.B) {
 		b.Fatal(err)
 	}
 	// Get the ETag first.
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/file.bin", nil)
-	h.ServeHTTP(w, r)
-	etag := w.Header().Get("Etag")
+	w := &fasthttp.RequestCtx{}
+	r := &fasthttp.RequestCtx{}
+	r.Request.SetRequestURI("/file.bin")
+	r.Request.Header.SetMethod("GET")
+	h.ServeRequest(w)
+	etag := string(w.Response.Header.Peek("Etag"))
 
-	r2 := httptest.NewRequest("GET", "/file.bin", nil)
-	r2.Header.Set("If-None-Match", etag)
+	r2 := &fasthttp.RequestCtx{}
+	r2.Request.SetRequestURI("/file.bin")
+	r2.Request.Header.SetMethod("GET")
+	r2.Request.Header.Set("If-None-Match", etag)
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r2)
-		if w.Code != 304 {
-			b.Fatalf("status: %d", w.Code)
+		w := &fasthttp.RequestCtx{}
+		h.ServeRequest(w)
+		if w.Response.StatusCode() != 304 {
+			b.Fatalf("status: %d", w.Response.StatusCode())
 		}
 	}
 }
@@ -97,30 +105,17 @@ func BenchmarkStaticFile_Range(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "/file.bin", nil)
-	r.Header.Set("Range", "bytes=0-1023")
+	r := &fasthttp.RequestCtx{}
+	r.Request.SetRequestURI("/file.bin")
+	r.Request.Header.SetMethod("GET")
+	r.Request.Header.Set("Range", "bytes=0-1023")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != 206 {
-			b.Fatalf("status: %d", w.Code)
-		}
-	}
-}
-
-func BenchmarkStaticFile_vsHTTPFileServer(b *testing.B) {
-	dir := setupBenchDir(b, 1024)
-	fs := http.FileServer(http.Dir(dir))
-	r := httptest.NewRequest("GET", "/file.bin", nil)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for range b.N {
-		w := httptest.NewRecorder()
-		fs.ServeHTTP(w, r)
-		if w.Code != 200 {
-			b.Fatalf("status: %d", w.Code)
+		w := &fasthttp.RequestCtx{}
+		h.ServeRequest(w)
+		if w.Response.StatusCode() != 206 {
+			b.Fatalf("status: %d", w.Response.StatusCode())
 		}
 	}
 }
@@ -131,14 +126,16 @@ func BenchmarkStaticFile_NotFound(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "/nonexistent", nil)
+	r := &fasthttp.RequestCtx{}
+	r.Request.SetRequestURI("/nonexistent")
+	r.Request.Header.SetMethod("GET")
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != 404 {
-			b.Fatalf("status: %d", w.Code)
+		w := &fasthttp.RequestCtx{}
+		h.ServeRequest(w)
+		if w.Response.StatusCode() != 404 {
+			b.Fatalf("status: %d", w.Response.StatusCode())
 		}
 	}
 }
@@ -150,17 +147,19 @@ func BenchmarkStaticFile_ETagCached(b *testing.B) {
 		b.Fatal(err)
 	}
 	// Prime the ETag cache with a first request.
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/file.bin", nil)
-	h.ServeHTTP(w, r)
+	w := &fasthttp.RequestCtx{}
+	r := &fasthttp.RequestCtx{}
+	r.Request.SetRequestURI("/file.bin")
+	r.Request.Header.SetMethod("GET")
+	h.ServeRequest(w)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for range b.N {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != 200 {
-			b.Fatalf("status: %d", w.Code)
+		w := &fasthttp.RequestCtx{}
+		h.ServeRequest(w)
+		if w.Response.StatusCode() != 200 {
+			b.Fatalf("status: %d", w.Response.StatusCode())
 		}
 	}
 }

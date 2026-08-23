@@ -48,9 +48,9 @@ type Config struct {
 	MaxBodyBytes       int
 	RateLimitPerSecond int
 	RefreshFn          func(key api.Key) error
-	PeerPurgeHandler   http.Handler
-	PeerBanHandler     http.Handler
-	PeerRefreshHandler http.Handler
+	PeerPurgeHandler   fasthttp.RequestHandler
+	PeerBanHandler     fasthttp.RequestHandler
+	PeerRefreshHandler fasthttp.RequestHandler
 	CFStatusFn         func() CloudflareStatus
 	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
 	OnPurged           func(ctx context.Context, url string)
@@ -255,13 +255,13 @@ func (s *Server) routeHandler() fasthttp.RequestHandler {
 
 func (s *Server) buildPeerHandlers() (peerPurge, peerBan, peerRefresh, peerFetch, peerPut, peerMetrics fasthttp.RequestHandler) {
 	if s.cfg.PeerPurgeHandler != nil {
-		peerPurge = fasthttpadaptor.NewFastHTTPHandler(s.cfg.PeerPurgeHandler)
+		peerPurge = s.cfg.PeerPurgeHandler
 	}
 	if s.cfg.PeerBanHandler != nil {
-		peerBan = fasthttpadaptor.NewFastHTTPHandler(s.cfg.PeerBanHandler)
+		peerBan = s.cfg.PeerBanHandler
 	}
 	if s.cfg.PeerRefreshHandler != nil {
-		peerRefresh = fasthttpadaptor.NewFastHTTPHandler(s.cfg.PeerRefreshHandler)
+		peerRefresh = s.cfg.PeerRefreshHandler
 	}
 	if s.cfg.PeerFetchHandler != nil {
 		peerFetch = s.cfg.PeerFetchHandler
@@ -310,8 +310,7 @@ func (s *Server) handleCoreRoutes(ctx *fasthttp.RequestCtx, p string) bool {
 		return true
 	case "/metrics":
 		if s.cfg.Metrics != nil {
-			h := fasthttpadaptor.NewFastHTTPHandler(s.cfg.Metrics.Handler())
-			h(ctx)
+			s.cfg.Metrics.Handler()(ctx)
 			return true
 		}
 	case "/v1/cluster/peers":

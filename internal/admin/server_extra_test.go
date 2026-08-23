@@ -35,15 +35,11 @@ func TestNewMinimal_DefaultAddr(t *testing.T) {
 func TestSwapHandler(t *testing.T) {
 	t.Parallel()
 	s := NewMinimal(":0", nil, nil, nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	newMux := http.NewServeMux()
-	newMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
 	s.SwapHandler(func(ctx *fasthttp.RequestCtx) { ctx.Error("ok", fasthttp.StatusOK) })
 	// Verify the new handler is served.
 	ctx := testCtx("GET", "/")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestSwapHandler_NilSwap(t *testing.T) {
@@ -80,7 +76,7 @@ func TestServe(t *testing.T) {
 	resp, err := http.Get("http://" + addr + "/healthz")
 	require.NoError(t, err)
 	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, fasthttp.StatusOK, resp.StatusCode)
 
 	cancel()
 	<-errCh
@@ -124,7 +120,7 @@ func TestNew_WithDashboard(t *testing.T) {
 	// Root should redirect to dashboard.
 	ctx := testCtx("GET", "/")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusFound, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusFound, ctx.Response.StatusCode())
 }
 
 func TestNew_WithDashboardAndFavicon(t *testing.T) {
@@ -141,22 +137,22 @@ func TestNew_WithDashboardAndFavicon(t *testing.T) {
 	// Root redirects to /dashboard/ (302 Found).
 	ctx := testCtx("GET", "/")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusFound, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusFound, ctx.Response.StatusCode())
 
 	// Favicon redirect (301 Moved Permanently).
 	ctx2 := testCtx("GET", "/favicon.ico")
 	s.Handler()(ctx2)
-	assert.Equal(t, http.StatusMovedPermanently, ctx2.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusMovedPermanently, ctx2.Response.StatusCode())
 
 	// Apple touch icon redirect.
 	ctx3 := testCtx("GET", "/apple-touch-icon.png")
 	s.Handler()(ctx3)
-	assert.Equal(t, http.StatusMovedPermanently, ctx3.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusMovedPermanently, ctx3.Response.StatusCode())
 
 	// Manifest redirect.
 	ctx4 := testCtx("GET", "/site.webmanifest")
 	s.Handler()(ctx4)
-	assert.Equal(t, http.StatusMovedPermanently, ctx4.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusMovedPermanently, ctx4.Response.StatusCode())
 }
 
 func TestNew_WithDashboard_NonRootPath(t *testing.T) {
@@ -170,7 +166,7 @@ func TestNew_WithDashboard_NonRootPath(t *testing.T) {
 	// Non-dashboard path with no auth should get 401 from the inner handler.
 	ctx := testCtx("GET", "/v1/purge")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusUnauthorized, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
 
 func TestClusterPeers(t *testing.T) {
@@ -181,7 +177,7 @@ func TestClusterPeers(t *testing.T) {
 	})
 	ctx := testCtx("GET", "/v1/cluster/peers")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	var peers []api.PeerInfo
 	err := json.Unmarshal(ctx.Response.Body(), &peers)
 	require.NoError(t, err)
@@ -197,7 +193,7 @@ func TestPurge_PurgeFnError(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/"}`), "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestRefresh_RefreshFnError(t *testing.T) {
@@ -209,7 +205,7 @@ func TestRefresh_RefreshFnError(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/refresh", []byte(`{"url":"https://example.com/"}`), "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestBan_BanFnError(t *testing.T) {
@@ -221,7 +217,7 @@ func TestBan_BanFnError(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"path_regex":"^/reviews/"}`), "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestBan_InvalidHostRegex(t *testing.T) {
@@ -233,7 +229,7 @@ func TestBan_InvalidHostRegex(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"host_regex":"["}`), "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestBan_InvalidPathRegex(t *testing.T) {
@@ -245,7 +241,7 @@ func TestBan_InvalidPathRegex(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"path_regex":"(?P<name"}`), "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestPurgeBatch_EmptyEntries(t *testing.T) {
@@ -257,7 +253,7 @@ func TestPurgeBatch_EmptyEntries(t *testing.T) {
 	})
 	ctx := testCtxWithBodyAuth("POST", "/v1/purge/batch", []byte(`{"urls":[""]}`), "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestStats(t *testing.T) {
@@ -269,7 +265,7 @@ func TestStats(t *testing.T) {
 	})
 	ctx := testCtxWithAuth("GET", "/v1/stats", "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 	var stats api.Stats
 	err := json.Unmarshal(ctx.Response.Body(), &stats)
 	require.NoError(t, err)
@@ -285,7 +281,7 @@ func TestConfigHandler(t *testing.T) {
 	})
 	ctx := testCtxWithAuth("GET", "/v1/config", "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestCacheCheck(t *testing.T) {
@@ -299,7 +295,7 @@ func TestCacheCheck(t *testing.T) {
 	})
 	ctx := testCtxWithAuth("GET", "/v1/debug/cachecheck?url=https://example.com/", "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestCacheCheck_MissingURL(t *testing.T) {
@@ -313,7 +309,7 @@ func TestCacheCheck_MissingURL(t *testing.T) {
 	})
 	ctx := testCtxWithAuth("GET", "/v1/debug/cachecheck", "secret")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusBadRequest, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
 }
 
 func TestAuthMiddleware_PanicRecovery(t *testing.T) {
@@ -330,7 +326,7 @@ func TestAuthMiddleware_PanicRecovery(t *testing.T) {
 	wrapped := s.authMiddleware(panicHandler)
 	ctx := testCtx("GET", "/healthz")
 	wrapped(ctx)
-	assert.Equal(t, http.StatusInternalServerError, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
 }
 
 func TestBodyLimitMiddleware_GetNotLimited(t *testing.T) {
@@ -343,14 +339,14 @@ func TestBodyLimitMiddleware_GetNotLimited(t *testing.T) {
 	// GET should not be limited.
 	ctx := testCtx("GET", "/healthz")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestReadyz_Detail_NoConditionsFn_NotReady(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, func() bool { return false })
 	status, body := get(t, s, "/readyz?detail=1")
-	assert.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Equal(t, fasthttp.StatusServiceUnavailable, status)
 	var resp map[string]any
 	err := json.Unmarshal(body, &resp)
 	require.NoError(t, err)
@@ -411,7 +407,7 @@ func TestSwapHandler_ServeHTTP(t *testing.T) {
 	})
 	ctx := testCtx("GET", "/")
 	sh.ServeRequest(ctx)
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestServe_ErrServerClosed(t *testing.T) {
@@ -438,15 +434,15 @@ func TestPeerRefreshHandler_RouteMounted(t *testing.T) {
 	var called bool
 	s := New(Config{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PeerRefreshHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		PeerRefreshHandler: func(ctx *fasthttp.RequestCtx) {
 			called = true
-			w.WriteHeader(http.StatusOK)
-		}),
+			ctx.SetStatusCode(fasthttp.StatusOK)
+		},
 	})
 	ctx := testCtx("POST", "/v1/peer/refresh")
 	s.Handler()(ctx)
 	assert.True(t, called, "PeerRefreshHandler should be mounted at POST /v1/peer/refresh")
-	assert.Equal(t, http.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
 func TestPeerRefreshHandler_NotMountedWhenNil(t *testing.T) {
@@ -456,5 +452,5 @@ func TestPeerRefreshHandler_NotMountedWhenNil(t *testing.T) {
 	})
 	ctx := testCtx("POST", "/v1/peer/refresh")
 	s.Handler()(ctx)
-	assert.Equal(t, http.StatusNotFound, ctx.Response.StatusCode(), "route should not be mounted when PeerRefreshHandler is nil")
+	assert.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(), "route should not be mounted when PeerRefreshHandler is nil")
 }

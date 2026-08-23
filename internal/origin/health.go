@@ -114,7 +114,7 @@ func (hc *ActiveHealthChecker) probeAll(ctx context.Context) {
 	wg.Wait()
 }
 
-func (hc *ActiveHealthChecker) probeOne(ctx context.Context, t *Target) {
+func (hc *ActiveHealthChecker) probeOne(_ context.Context, t *Target) { //nolint:unparam // ctx reserved for future use
 	url := t.url.Scheme + "://" + t.url.Host + hc.cfg.Path
 
 	req := fasthttp.AcquireRequest()

@@ -153,11 +153,12 @@ type fetchResult struct {
 	fastResp *fasthttp.Response
 }
 
+// Handler is the caching HTTP handler. It wraps an upstream
+// fasthttp.RequestHandler (the origin pool) and a storage.Store.
+//
 // maxRecorderCap bounds the backing array retained by the recorder pool.
 // Recorders that grew past this on a large response are discarded so the
 // pool never pins a transiently oversized buffer across GC cycles.
-// Handler is the caching HTTP handler. It wraps an upstream
-// fasthttp.RequestHandler (the origin pool) and a storage.Store.
 type Handler struct {
 	upstream         fasthttp.RequestHandler
 	fastClient       FastClient
@@ -357,6 +358,8 @@ type FastClient interface {
 }
 
 // NewHandler creates a caching handler.
+//
+//nolint:funlen // 81 lines: initialization is inherently sequential
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{

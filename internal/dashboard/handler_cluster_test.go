@@ -67,21 +67,3 @@ func TestHandler_ClusterWithoutStoreData(t *testing.T) {
 	assert.False(t, strings.Contains(body, "c-cache-bytes"))
 	assert.False(t, strings.Contains(body, "total cached"))
 }
-
-// substringAround returns a window of +/- n chars around the first
-// occurrence of needle in s, for debugging test failures.
-func substringAround(s, needle string, n int) string {
-	idx := strings.Index(s, needle)
-	if idx < 0 {
-		return "(not found)"
-	}
-	start := idx - n
-	if start < 0 {
-		start = 0
-	}
-	end := idx + len(needle) + n
-	if end > len(s) {
-		end = len(s)
-	}
-	return s[start:end]
-}

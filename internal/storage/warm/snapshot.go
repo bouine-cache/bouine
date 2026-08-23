@@ -227,6 +227,8 @@ func (s *Store) validateSegmentTable(segTbl []byte, segCount uint32) error {
 // index and stats counters. Returns ErrSnapshotInvalid if the snapshot
 // is corrupt or references missing segments; the caller should fall
 // back to WAL replay + RecomputeStats.
+//
+//nolint:funlen // 52 statements: snapshot loading is sequential
 func (s *Store) LoadSnapshot(path string) error {
 	data, err := os.ReadFile(path) //nolint:gosec // operator-configured path
 	if err != nil {

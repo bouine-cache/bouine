@@ -195,7 +195,7 @@ type TieredConfig struct {
 // NewTieredStore creates a tiered store. If WALDir is non-empty, the
 // WAL is replayed on open to rebuild the warm-tier index.
 //
-//nolint:gocyclo // 19: store initialization has many independent config branches
+//nolint:gocyclo,funlen // store initialization is inherently branchy and sequential
 func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	if cfg.BodyThreshold <= 0 {
@@ -452,9 +452,10 @@ func (t *TieredStore) initWAL(walDir string) error {
 	// No snapshot — may need full scan if WAL was empty/corrupt.
 	needRebuild := rErr != nil || t.warm.IndexLen() == 0
 	if needRebuild {
-		if rErr != nil {
+		switch {
+		case rErr != nil:
 			t.logger.Warn("rebuilding index from segment scan after WAL replay error")
-		} else if walEntries == 0 {
+		case walEntries == 0:
 			// Fresh start: no snapshot, no WAL entries, no index. This is
 			// expected on first boot or after the warm dir was cleaned.
 			// Run the segment scan in case segment files exist from a
@@ -462,7 +463,7 @@ func (t *TieredStore) initWAL(walDir string) error {
 			// snapshot was lost. If there are no segments either, the
 			// scan is a no-op.
 			t.logger.Info("warm index is empty; running segment scan for existing data")
-		} else {
+		default:
 			t.logger.Warn("wal replay produced empty index; rebuilding from segment scan")
 		}
 		if err := t.rebuildIndexFromScan(); err != nil {
@@ -742,6 +743,8 @@ func (t *TieredStore) Stats() api.Stats {
 //
 // compactLoop runs per-segment incremental compaction on the 30s tick
 // and global compaction on the 30m tick (or when disk is over budget).
+//
+//nolint:gocyclo // 19: compaction has many branches
 func (t *TieredStore) compactLoop() {
 	defer t.compactWg.Done()
 	startupDelay := t.compactStartupDelay

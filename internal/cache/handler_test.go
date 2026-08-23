@@ -3417,7 +3417,7 @@ func TestFetchAndStoreStayinAlive_5xxFallback(t *testing.T) {
 	// Call fetchAndStoreStayinAlive directly.
 	r := testCtx("GET", "http://example.com/stayin5xx")
 	ctx := r
-	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot)
+	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot, requestInfoFromCtx(ctx))
 	assert.Equal(t, "STALE", string(ctx.Response.Header.Peek(header.XCache)))
 	assert.Equal(t, "stale-body", string(ctx.Response.Body()))
 }
@@ -3450,7 +3450,7 @@ func TestFetchAndStoreStayinAlive_ErrorFallback(t *testing.T) {
 	_ = store.Put(context.Background(), key, stale)
 	r := testCtx("GET", "http://example.com/stayin-err")
 	ctx := r
-	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot)
+	h.fetchAndStoreStayinAlive(ctx, key, key, stale, time.Now(), api.SourceHot, requestInfoFromCtx(ctx))
 	assert.Equal(t, "STALE", string(ctx.Response.Header.Peek(header.XCache)))
 }
 

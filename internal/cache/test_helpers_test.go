@@ -2,21 +2,29 @@ package cache
 
 import (
 	"context"
+	"sync"
 
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
+var rctxPool = sync.Pool{
+	New: func() any { return &fasthttp.RequestCtx{} },
+}
+
 // testFastClient wraps a fasthttp.RequestHandler as a FastClient for tests.
-// It copies the request into a RequestCtx, invokes the handler, and copies
-// the response back into the provided *fasthttp.Response.
+// It copies the request into a pooled RequestCtx, invokes the handler, and
+// copies the response back into the provided *fasthttp.Response.
 type testFastClient struct {
 	handler fasthttp.RequestHandler
 }
 
 func (c *testFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
-	rctx := &fasthttp.RequestCtx{}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rctx := rctxPool.Get().(*fasthttp.RequestCtx)
 	req.CopyTo(&rctx.Request)
 	done := make(chan struct{})
 	var panicVal any
@@ -32,11 +40,20 @@ func (c *testFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 	select {
 	case <-done:
 		if panicVal != nil {
+			rctx.Request.Reset()
+			rctx.Response.Reset()
+			rctx.ResetUserValues()
+			rctxPool.Put(rctx)
 			panic(panicVal)
 		}
 		rctx.Response.CopyTo(resp)
+		rctx.Request.Reset()
+		rctx.Response.Reset()
+		rctx.ResetUserValues()
+		rctxPool.Put(rctx)
 		return nil
 	case <-ctx.Done():
+		// Don't return rctx to pool — the goroutine may still be using it.
 		return ctx.Err()
 	}
 }

@@ -321,22 +321,42 @@ func (h Map) Clone() Map {
 // WriteToFastHTTP copies all headers into a *fasthttp.ResponseHeader.
 // This is the fasthttp-native version of WriteTo, used on the hit path
 // to set response headers without going through net/http.Header.
-// Date and Transfer-Encoding are skipped because fasthttp's Set()
-// silently drops them as "managed automatically" headers. The caller
-// must use SetDateRaw to set the Date header after calling this method.
+//
+// Uses SetCanonical instead of Set to skip normalizeHeaderKey (35% of
+// serveObject CPU), since all stored keys are already canonical (interned
+// via InternKey at store time).
+//
+// Hop-by-hop headers (Connection, KeepAlive, TE, Trailer, Upgrade) and
+// internal headers (XBouinePath, XBouineHost, XBouineRoute) are skipped
+// here so the caller doesn't need to Del them afterward. Date and
+// Transfer-Encoding are also skipped (Date is set via SetDateRaw).
+// Age is skipped (set dynamically per-request by serveObject).
 func (h Map) WriteToFastHTTP(dst *fasthttp.ResponseHeader) {
 	for i := range h.entries {
-		off := h.entries[i].off
 		key := h.entries[i].key
-		// Skip Date and Transfer-Encoding — fasthttp's Set() silently
-		// drops them via setSpecialHeader. Date is set separately via
-		// SetDateRaw; Transfer-Encoding is a hop-by-hop header.
-		if key == Date || key == TransferEncoding {
+		switch key {
+		case Date, TransferEncoding, Connection, KeepAlive,
+			TE, Trailer, Upgrade, XBouinePath, XBouineHost,
+			XBouineRoute, Age:
 			continue
 		}
-		dst.Set(key, h.values[off])
+		dst.SetCanonical(s2b(key), s2b(h.values[h.entries[i].off]))
 	}
 }
+
+// S2b converts a string to []byte without allocation by pointing at
+// the string's backing memory. Safe for read-only use (SetCanonical
+// copies the bytes into its own buffer). This mirrors fasthttp's
+// internal s2b function.
+func S2b(s string) []byte {
+	if s == "" {
+		return nil
+	}
+	return unsafe.Slice(unsafe.StringData(s), len(s)) //nolint:gosec // G103: read-only slice from string
+}
+
+// s2b is an alias for S2b for internal use.
+func s2b(s string) []byte { return S2b(s) }
 
 // httpKV mirrors fasthttp's internal argsKV struct layout.
 // It is used by SetDateRaw to bypass the setSpecialHeader check

@@ -852,7 +852,8 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		}
 		h.serveObject(ctx, disp.Object, now, cacheRes, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
-			h.triggerBgRevalidate(ctx, key, disp.Object)
+			ri := requestInfoFromCtx(ctx)
+			h.triggerBgRevalidate(ctx, ri, key, disp.Object)
 		}
 	case Miss:
 		ctx.SetUserValue("cacheKey", key)
@@ -917,9 +918,9 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// objects without an explicit SIE window still get stale-on-error
 	// fallback, matching the revalidate path's behaviour.
 	if obj != nil && (h.stayinAlive || obj.StaleForSIE(now) || staleFallbackAllowed(obj)) {
-		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src)
+		h.fetchAndStoreStayinAlive(ctx, lookupKey, primaryKey, obj, now, src, ri)
 	} else {
-		h.fetchAndStore(ctx, lookupKey, primaryKey)
+		h.fetchAndStore(ctx, lookupKey, primaryKey, ri)
 	}
 }
 
@@ -980,7 +981,8 @@ func (h *Handler) forwardToOwnerIfRemote(ctx context.Context, obj *api.Object) {
 // conditional headers match the cached object. Used for both hit and
 // revalidate paths. src is the storage-tier source (hot/warm).
 func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source) bool {
-	if !ClientConditionalMatch(requestInfoFromCtx(ctx), obj) {
+	ri := requestInfoFromCtx(ctx)
+	if !ClientConditionalMatch(ri, obj) {
 		return false
 	}
 	if obj.ETag != "" {
@@ -988,8 +990,8 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 	}
 	// Direct map assignment avoids http.CanonicalMIMEHeaderKey alloc
 	// from .Set() on the hit path.
-	ctx.Response.Header.Set(header.XCache, "HIT")
-	ctx.Response.Header.Set(header.XCacheSource, string(src))
+	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
+	ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
 	ctx.SetStatusCode(fasthttp.StatusNotModified)
 	return true
 }
@@ -1004,7 +1006,7 @@ func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 	reqCC := ParseCacheControl(string(ctx.Request.Header.Peek(header.CacheControl)))
 	if reqCC.OnlyIfCached {
 		ctx.Error("Gateway Timeout", fasthttp.StatusGatewayTimeout)
-		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		return
 	}
 	h.handleBypassFast(ctx)
@@ -1012,7 +1014,7 @@ func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 
 func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
-		ctx.Response.Header.Set(header.XCache, "BYPASS")
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
@@ -1039,7 +1041,7 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
-		ctx.Response.Header.Set(header.XCache, "BYPASS")
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 		return
 	}
 
@@ -1052,7 +1054,7 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 		}
 		dst.Add(ks, string(v))
 	}
-	dst.Set(header.XCache, "BYPASS")
+	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 	ctx.SetStatusCode(resp.StatusCode())
 	if string(ctx.Method()) != "HEAD" {
 		_, _ = ctx.Write(resp.Body())
@@ -1114,6 +1116,8 @@ const (
 // set as X-Cache-Source via direct map assignment (zero alloc).
 func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
 	dst := &ctx.Response.Header
+	// WriteToFastHTTP skips hop-by-hop, internal, Date, Transfer-Encoding,
+	// and Age headers — no Del calls needed afterward.
 	obj.Header.WriteToFastHTTP(dst)
 	// Set the Date header from the stored object. fasthttp's Set()
 	// silently drops Date as "managed automatically", so we use
@@ -1122,27 +1126,20 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	if dateVal := obj.Header.Get(header.Date); dateVal != "" {
 		header.SetDateRaw(dst, dateVal)
 	}
-	// Strip internal headers used for ban matching — never forwarded to clients.
-	dst.Del(header.XBouinePath)
-	dst.Del(header.XBouineHost)
-	// Strip hop-by-hop headers (RFC 9110 §7.6.1).
-	dst.Del(header.Connection)
-	dst.Del(header.KeepAlive)
-	dst.Del(header.TE)
-	dst.Del(header.Trailer)
-	dst.Del(header.Upgrade)
 	// Strip headers listed in the stored Connection header (RFC 9110 §7.6.1).
+	// Connection itself is already skipped by WriteToFastHTTP, but the
+	// headers it lists (e.g. Proxy-Connection) must still be removed.
 	stripConnectionListedHeaders(dst, obj.Header)
-	dst.Set(header.Age, ageHeader(ComputeAge(obj, now)))
-	dst.Set(header.XCacheSource, string(src))
+	dst.SetCanonical(header.S2b(header.Age), header.S2b(ageHeader(ComputeAge(obj, now))))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
 	switch result {
 	case cacheHit:
-		dst.Set(header.XCache, "HIT")
+		dst.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
 	case cacheStale:
-		dst.Set(header.XCache, "STALE")
-		dst.Set(header.Warning, `110 - "Response is Stale"`)
+		dst.SetCanonical(header.S2b(header.XCache), header.S2b("STALE"))
+		dst.SetCanonical(header.S2b(header.Warning), header.S2b(`110 - "Response is Stale"`))
 	case cacheRevalidated:
-		dst.Set(header.XCache, "REVALIDATED")
+		dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
 	}
 	stripNoCacheFields(dst, obj.CacheControl)
 	ctx.SetStatusCode(obj.StatusCode)
@@ -1241,16 +1238,16 @@ func releaseFetchResult(res fetchResult) {
 	// fastResp is always nil now — the response is released in doFetch.
 }
 
-func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key) {
+func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, ri RequestInfo) {
 	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)
 	if res.Err != nil {
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
-		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		return
 	}
-	h.writeAndMaybeStore(ctx, res, primaryKey)
+	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -1262,7 +1259,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 // Vary variants do not collapse into a single fetch.
 // primaryKey is the canonical key used for Vary variant storage in
 // writeAndMaybeStore.
-func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source) {
+func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)
 	if res.Err != nil {
@@ -1277,7 +1274,7 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
-	h.writeAndMaybeStore(ctx, res, primaryKey)
+	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
 }
 
 // revalidate sends a conditional request to the origin and refreshes the
@@ -1349,7 +1346,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		return
 	}
 
-	h.writeAndMaybeStore(ctx, res, primaryKey)
+	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
 }
 
 // refreshFrom304 builds an updated copy of stale after a 304 Not Modified:
@@ -1392,7 +1389,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 // stale-while-revalidate response. revalSem prevents goroutine explosion.
 // The goroutine is tracked by revalWg so Close can drain it before
 // store.Close, preventing use-after-close panics.
-func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, key api.Key, stale *api.Object) {
+func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, ri RequestInfo, key api.Key, stale *api.Object) {
 	// Bail out early if the handler is already shutting down.
 	select {
 	case <-h.done:
@@ -1409,7 +1406,7 @@ func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, key api.Key, sta
 	// cancelled when the response is sent, but wrap it in a cancellable
 	// context so Close can signal shutdown.
 	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(ctx))
-	bgReq := requestInfoFromCtx(ctx)
+	bgReq := ri
 	h.revalWg.Add(1)
 	go func() {
 		defer func() {
@@ -1479,17 +1476,18 @@ func (h *Handler) writeAndMaybeStore(
 	ctx *fasthttp.RequestCtx,
 	res fetchResult,
 	primaryKey api.Key,
+	ri RequestInfo,
 ) {
 	dst := &ctx.Response.Header
 	res.Header.VisitAll(func(k, v string) {
 		dst.Add(k, v)
 	})
-	dst.Set(header.XCache, "MISS")
-	dst.Set(header.XCacheSource, string(api.SourceOrigin))
+	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	// A proxy SHOULD add an Age header to responses it forwards,
 	// even on first fetch (Age: 0 + any origin Age).
 	if res.Header.Get(header.Age) == "" {
-		dst.Set(header.Age, "0")
+		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
 	ctx.SetStatusCode(res.StatusCode)
 	if string(ctx.Method()) != "HEAD" {
@@ -1499,7 +1497,7 @@ func (h *Handler) writeAndMaybeStore(
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	parsed := newParsedResponse(res.StatusCode, headerFromCtx(ctx), res.Header.ToMap())
+	parsed := newParsedResponse(res.StatusCode, ri.Header, res.Header.ToMap())
 
 	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1512,7 +1510,7 @@ func (h *Handler) writeAndMaybeStore(
 		// buildKey call on the same request.
 		storeKey := primaryKey
 		if vary := res.Header.Get(header.Vary); vary != "" {
-			storeKey = VariantKey(primaryKey, vary, headerFromCtx(ctx), h.policy)
+			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
 		// has MaxVariants distinct Vary variants. RFC 9110 §12.5.5 — unbounded
@@ -1522,8 +1520,8 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, requestInfoFromCtx(ctx), res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
-		h.storeObject(ctx, storeKey, obj, requestInfoFromCtx(ctx), false, 0)
+		obj := buildObject(storeKey, ri, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
 		// from this or other non-owners hit instead of going to origin
@@ -1544,7 +1542,7 @@ func (h *Handler) writeAndMaybeStore(
 			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
-			h.storeObject(ctx, primaryKey, primaryObj, requestInfoFromCtx(ctx), false, 0)
+			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
 			// Forward the primary (Vary-resolver) entry to its owner too —
 			// the primary key may hash to a different owner than the variant.
 			h.forwardToOwnerIfRemote(ctx, primaryObj)
@@ -1635,8 +1633,8 @@ func (h *Handler) reserveVariantSlot(reqCtx context.Context, primaryKey, storeKe
 // cached entries for the affected resource.
 func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
-		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
@@ -1666,8 +1664,8 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
-		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
@@ -1675,8 +1673,8 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
 		h.logger.Warn("upstream response exceeded max_response_bytes, aborting",
 			"key", h.buildKey(ctx), "limit", h.maxResponseBytes)
-		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		ctx.Error("upstream response too large", fasthttp.StatusBadGateway)
 		return
 	}
@@ -1690,8 +1688,8 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		}
 		dst.Add(ks, string(v))
 	}
-	dst.Set(header.XCache, "MISS")
-	dst.Set(header.XCacheSource, string(api.SourceOrigin))
+	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(resp.StatusCode())
 	_, _ = ctx.Write(resp.Body())
 

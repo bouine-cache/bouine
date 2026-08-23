@@ -1,11 +1,10 @@
 name: "CodeQL Config"
 
-# go/request-forgery is a false positive for a reverse proxy cache:
-# forwarding requests to origin/peer nodes based on the incoming URL
-# is the core product behavior, not an SSRF vulnerability. Origin
-# addresses are operator-configured, not user-controlled.
+# bouine is a reverse proxy cache. The go/request-forgery query (in the
+# security-extended suite) flags every origin/peer fetch as SSRF because
+# the request URL is user-controlled. This is the intended behavior of a
+# reverse proxy, not a vulnerability. We use only security-and-quality
+# which excludes go/request-forgery while keeping quality + maintainability
+# queries. Origin addresses are operator-configured, not user input.
 queries:
   - uses: security-and-quality
-  - uses: security-extended
-    disable:
-      - go/request-forgery

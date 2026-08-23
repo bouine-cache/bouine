@@ -307,7 +307,6 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 
 	start := time.Now()
 	pc := f.getPipelineClient(peerAddr(peer))
-	// codeql[go/request-forgery]: peer addresses are cluster-internal, not user-controlled
 	if err := transport.PipelineDo(ctx, pc, httpReq, resp); err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
@@ -493,7 +492,6 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	// codeql[go/request-forgery]: peer addresses are cluster-internal, not user-controlled
 	if err := transport.PipelineDo(ctx, f.getPipelineClient(peerAddr(peer)), req, resp); err != nil {
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}

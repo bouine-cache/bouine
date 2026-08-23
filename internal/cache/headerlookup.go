@@ -30,7 +30,11 @@ func fromFastHTTPHeader(h *fasthttp.ResponseHeader) headerLookup {
 
 func (h headerLookup) Get(key string) string {
 	if h.fastHdr != nil {
-		return string(h.fastHdr.Peek(key))
+		v := h.fastHdr.Peek(key)
+		if len(v) == 0 {
+			return ""
+		}
+		return string(v)
 	}
 	return h.hdr.Get(key)
 }
@@ -40,6 +44,9 @@ func (h headerLookup) GetAll(key string) string {
 		values := h.fastHdr.PeekAll(key)
 		if len(values) == 0 {
 			return ""
+		}
+		if len(values) == 1 {
+			return string(values[0])
 		}
 		parts := make([]string, len(values))
 		for i, v := range values {

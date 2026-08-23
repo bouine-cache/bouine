@@ -53,7 +53,7 @@ var ErrAbortHandler = errors.New("abort handler")
 func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 	hm := header.NewMap(ctx.Request.Header.Len())
 	for k, v := range ctx.Request.Header.All() {
-		hm.AppendEntry(string(k), string(v))
+		hm.AppendEntry(header.InternKeyCanonical(string(k)), string(v))
 	}
 	hm.SortEntries()
 	return hm
@@ -731,7 +731,8 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 		return
 	}
 
-	if IsCacheableWithDefault(res.StatusCode, ri.Header, res.Header.ToMap(), h.negativeTTL, h.defaultTTL) {
+	resMap := res.Header.ToMap()
+	if IsCacheableWithDefault(res.StatusCode, ri.Header, resMap, h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
 			h.refreshMetrics.IncSkips("set_cookie")
 			return
@@ -740,7 +741,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 			h.refreshMetrics.IncSkips("too_large")
 			return
 		}
-		obj := buildObject(key, ri, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		obj.Hits = 0
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 		h.refreshMetrics.IncTotal("200")
@@ -1468,7 +1469,8 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	bgParsed := newParsedResponse(res.StatusCode, ri.Header, res.Header.ToMap())
+	bgResMap := res.Header.ToMap()
+	bgParsed := newParsedResponse(res.StatusCode, ri.Header, bgResMap)
 
 	if bgParsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1477,7 +1479,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			return
 		}
-		obj := buildObject(key, ri, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(key, ri, res, bgResMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, key, obj, ri, true, staleHits)
 	}
 }
@@ -1506,7 +1508,10 @@ func (h *Handler) writeAndMaybeStore(
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
 	// IsCacheableWithDefault re-parses again).
-	parsed := newParsedResponse(res.StatusCode, ri.Header, res.Header.ToMap())
+	// Cache the ToMap() result — buildObject also needs it, and each
+	// ToMap() call invokes FromFastHTTP which allocates a new header.Map.
+	resMap := res.Header.ToMap()
+	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
 
 	if parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) {
 		if !h.allowSetCookie && res.Header.Get(header.SetCookie) != "" {
@@ -1529,7 +1534,7 @@ func (h *Handler) writeAndMaybeStore(
 				return
 			}
 		}
-		obj := buildObject(storeKey, ri, res, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+		obj := buildObject(storeKey, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
 		h.storeObject(ctx, storeKey, obj, ri, false, 0)
 		// In strong mode, storeObject is a no-op for non-owners. Forward
 		// the freshly fetched object to the owner so subsequent peer-fetches
@@ -1754,7 +1759,7 @@ func (h *Handler) maybeStorePostResponseFast(ctx *fasthttp.RequestCtx, getRI Req
 		Body:       body,
 	}
 	now := time.Now()
-	obj := buildObject(key, getRI, res, h.negativeTTL, h.defaultTTL, h.overrideTTL,
+	obj := buildObject(key, getRI, res, hdr, h.negativeTTL, h.defaultTTL, h.overrideTTL,
 		h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, now)
 	if obj == nil {
 		return
@@ -1945,14 +1950,13 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy
-func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
+func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map, negativeTTL, defaultTTL, overrideTTL, defaultSWR, defaultSIE time.Duration, jitterPct int, policy *KeyPolicy, now time.Time) *api.Object {
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
 	//
 	// Cache the ToMap() result — it was called 5x before, each allocating a
-	// new header.Map via FromFastHTTP.
-	resMap := res.Header.ToMap()
+	// new header.Map via FromFastHTTP. Now passed in from writeAndMaybeStore.
 	ccHeader := res.Header.GetAll(header.CacheControl)
 	var respCC Directives
 	if cdnCC, hasCDN := cdnCacheControl(resMap); hasCDN {

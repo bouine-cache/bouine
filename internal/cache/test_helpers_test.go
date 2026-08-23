@@ -26,14 +26,14 @@ func (c *testFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 	}
 	rctx := rctxPool.Get().(*fasthttp.RequestCtx)
 	req.CopyTo(&rctx.Request)
-	done := make(chan struct{})
+	done := make(chan struct{}, 1)
 	var panicVal any
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				panicVal = r
 			}
-			close(done)
+			done <- struct{}{}
 		}()
 		c.handler(rctx)
 	}()
@@ -53,9 +53,28 @@ func (c *testFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 		rctxPool.Put(rctx)
 		return nil
 	case <-ctx.Done():
-		// Don't return rctx to pool — the goroutine may still be using it.
 		return ctx.Err()
 	}
+}
+
+// benchFastClient is a zero-overhead FastClient for benchmarks. It calls
+// the handler directly without spawning a goroutine or allocating a channel,
+// eliminating scheduler overhead that would dominate the profile and mask
+// real handler cost. Tests that need context cancellation use testFastClient.
+type benchFastClient struct {
+	handler fasthttp.RequestHandler
+}
+
+func (c *benchFastClient) Do(_ context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
+	rctx := rctxPool.Get().(*fasthttp.RequestCtx)
+	req.CopyTo(&rctx.Request)
+	c.handler(rctx)
+	rctx.Response.CopyTo(resp)
+	rctx.Request.Reset()
+	rctx.Response.Reset()
+	rctx.ResetUserValues()
+	rctxPool.Put(rctx)
+	return nil
 }
 
 // testCtx creates a *fasthttp.RequestCtx from method and URL.

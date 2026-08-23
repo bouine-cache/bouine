@@ -3,7 +3,7 @@ package header
 import (
 	"encoding/json"
 	"net/textproto"
-	"sort"
+	"slices"
 	"strings"
 	"unique"
 	"unsafe"
@@ -101,8 +101,21 @@ type headerEntry struct {
 }
 
 // InternKey returns the shared, canonicalized form of key.
+// Fast path: if the key is already canonical (common case for headers
+// from fasthttp which are already normalized), skip canonicalHeaderKey
+// and intern directly.
 func InternKey(key string) string {
+	if isCanonical(key) {
+		return unique.Make(key).Value()
+	}
 	return unique.Make(canonicalHeaderKey(key)).Value()
+}
+
+// InternKeyCanonical interns a key that is already known to be canonical,
+// skipping the isCanonical check. Used by FromFastHTTP and headerFromCtx
+// where fasthttp guarantees normalized keys.
+func InternKeyCanonical(key string) string {
+	return unique.Make(key).Value()
 }
 
 // InternValue deduplicates header value strings across all cached objects.
@@ -131,7 +144,7 @@ func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 		}
 		hm.values = append(hm.values, InternValue(string(v)))
 		hm.entries = append(hm.entries, headerEntry{
-			key: InternKey(string(k)),
+			key: InternKeyCanonical(string(k)),
 			off: len(hm.values) - 1,
 		})
 	}
@@ -262,12 +275,14 @@ func (h *Map) AppendEntry(key, value string) {
 }
 
 // SortEntries sorts the entries slice by canonical key in place.
+// Uses slices.SortStableFunc (generic, no reflection) instead of
+// sort.SliceStable (which allocates via reflectlite.Swapper).
 func (h *Map) SortEntries() {
 	if len(h.entries) <= 1 {
 		return
 	}
-	sort.SliceStable(h.entries, func(i, j int) bool {
-		return h.entries[i].key < h.entries[j].key
+	slices.SortStableFunc(h.entries, func(a, b headerEntry) int {
+		return strings.Compare(a.key, b.key)
 	})
 }
 

@@ -117,9 +117,13 @@ func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 	if h == nil || h.Len() == 0 {
 		return Map{}
 	}
+	// Over-allocate by 4 to leave room for internal headers (X-Bouine-Path,
+	// X-Bouine-Host) and Content-Length that buildObject adds after
+	// construction, avoiding slice growth/rehashing.
+	n := h.Len() + 4
 	hm := Map{
-		entries: make([]headerEntry, 0, h.Len()),
-		values:  make([]string, 0, h.Len()),
+		entries: make([]headerEntry, 0, n),
+		values:  make([]string, 0, n),
 	}
 	for k, v := range h.All() {
 		if len(k) == 0 || len(v) == 0 {

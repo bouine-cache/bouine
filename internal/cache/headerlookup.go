@@ -19,6 +19,15 @@ func fromHeaderMap(h header.Map) headerLookup {
 	return headerLookup{hdr: h}
 }
 
+// fromFastHTTPHeader creates a headerLookup backed directly by a
+// *fasthttp.ResponseHeader. This enables CopyToFastHTTP to use
+// ResponseHeader.CopyTo (bulk struct copy) instead of per-header
+// SetCanonical, and defers the FromFastHTTP conversion to ToMap()
+// until buildObject actually needs the header.Map.
+func fromFastHTTPHeader(h *fasthttp.ResponseHeader) headerLookup {
+	return headerLookup{fastHdr: h}
+}
+
 func (h headerLookup) Get(key string) string {
 	if h.fastHdr != nil {
 		return string(h.fastHdr.Peek(key))

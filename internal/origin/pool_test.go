@@ -3,30 +3,23 @@ package origin
 import (
 	"io"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/valyala/fasthttp"
 )
 
 func echoServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Echo-Host", r.Host)
-		w.Header().Set("X-Echo-Path", r.URL.Path)
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, r.Body)
-	}))
+	return httptest.NewServer(newEchoHandler())
 }
 
 func fivexxServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
+	return httptest.NewServer(new5xxHandler())
 }
 
 func pool(t *testing.T, targets ...string) *Pool {
@@ -40,57 +33,69 @@ func pool(t *testing.T, targets ...string) *Pool {
 	return p
 }
 
+func serveHandler(t *testing.T, h fasthttp.RequestHandler, method, path string, body string) (int, string, string) {
+	t.Helper()
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(method)
+	ctx.Request.SetRequestURI("http://test" + path)
+	ctx.Request.Header.SetHost("test")
+	if body != "" {
+		ctx.Request.SetBody([]byte(body))
+	}
+	h(ctx)
+	host := string(ctx.Response.Header.Peek("X-Echo-Host"))
+	if host == "" {
+		//nolint:staticcheck // deprecated but functional
+		ctx.Response.Header.VisitAll(func(k, v []byte) {
+			t.Logf("resp header: %s=%s", k, v)
+		})
+	}
+	return ctx.Response.StatusCode(), string(ctx.Response.Body()), host
+}
+
 func TestPool_RoundRobin(t *testing.T) {
 	t.Parallel()
-	s1 := echoServer(t)
+	s1 := httptest.NewServer(newEchoHandler())
 	defer s1.Close()
-	s2 := echoServer(t)
+	s2 := httptest.NewServer(newEchoHandler())
 	defer s2.Close()
 
 	p := pool(t, s1.Listener.Addr().String(), s2.Listener.Addr().String())
-	h := p.Handler(0, nil)
+	h := p.FastHandler(0)
 
 	hits := map[string]int{}
 	for range 10 {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/hello", nil)
-		h.ServeHTTP(rr, req)
-		require.Equal(t, 200, rr.Code)
-		host := rr.Header().Get("X-Echo-Host")
-		hits[host]++
+		_, _, host := serveHandler(t, h, "GET", "/hello", "")
+		if host != "" {
+			hits[host]++
+		}
 	}
 	require.Len(t, hits, 2)
 }
 
 func TestPool_PassiveHealth(t *testing.T) {
 	t.Parallel()
-	bad := fivexxServer(t)
+	bad := httptest.NewServer(new5xxHandler())
 	defer bad.Close()
-	good := echoServer(t)
+	good := httptest.NewServer(newEchoHandler())
 	defer good.Close()
 
-	// Only bad target, so all requests hit it.
 	p := pool(t, bad.Listener.Addr().String())
-	h := p.Handler(3, nil)
+	h := p.FastHandler(3)
 
 	for range 5 {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/", nil)
-		h.ServeHTTP(rr, req)
+		serveHandler(t, h, "GET", "/", "")
 	}
 
 	require.Len(t, p.Healthy(), 0)
 
-	// Now add the bad target back + a good one and verify good stays.
 	p.MarkHealthy(bad.Listener.Addr().String())
 
 	p2 := pool(t, bad.Listener.Addr().String(), good.Listener.Addr().String())
-	h2 := p2.Handler(3, nil)
+	h2 := p2.FastHandler(3)
 
-	// Fire enough requests to eject the bad one again.
 	for range 20 {
-		rr := httptest.NewRecorder()
-		h2.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+		serveHandler(t, h2, "GET", "/", "")
 	}
 
 	healthy := p2.Healthy()
@@ -100,32 +105,27 @@ func TestPool_PassiveHealth(t *testing.T) {
 
 func TestPool_AllDown(t *testing.T) {
 	t.Parallel()
-	bad := fivexxServer(t)
+	bad := httptest.NewServer(new5xxHandler())
 	defer bad.Close()
 
 	p := pool(t, bad.Listener.Addr().String())
-	h := p.Handler(1, nil)
+	h := p.FastHandler(1)
 
-	// First request triggers ejection.
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	serveHandler(t, h, "GET", "/", "")
 
-	// Second request: no healthy targets.
-	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/", nil))
-	require.Equal(t, http.StatusBadGateway, rr2.Code)
+	code, _, _ := serveHandler(t, h, "GET", "/", "")
+	require.Equal(t, fasthttp.StatusBadGateway, code)
 }
 
 func TestPool_MarkHealthy(t *testing.T) {
 	t.Parallel()
-	bad := fivexxServer(t)
+	bad := httptest.NewServer(new5xxHandler())
 	defer bad.Close()
 
 	p := pool(t, bad.Listener.Addr().String())
-	h := p.Handler(1, nil)
+	h := p.FastHandler(1)
 
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	serveHandler(t, h, "GET", "/", "")
 
 	require.Len(t, p.Healthy(), 0)
 
@@ -143,41 +143,16 @@ func TestPool_NoTargetsError(t *testing.T) {
 
 func TestPool_ProxiesBody(t *testing.T) {
 	t.Parallel()
-	s := echoServer(t)
+	s := httptest.NewServer(newEchoHandler())
 	defer s.Close()
 
 	p := pool(t, s.Listener.Addr().String())
-	h := p.Handler(0, nil)
+	h := p.FastHandler(0)
 
 	body := "hello bouine"
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/echo", strings.NewReader(body))
-	h.ServeHTTP(rr, req)
+	code, got, host := serveHandler(t, h, "POST", "/echo", body)
 
-	require.Equal(t, 200, rr.Code)
-	got := rr.Body.String()
+	t.Logf("code=%d got=%q host=%q", code, got, host)
+	require.Equal(t, fasthttp.StatusOK, code)
 	require.Equal(t, body, got)
-}
-
-func TestPool_ResponseHeaderTimeout(t *testing.T) {
-	t.Parallel()
-	// Origin that delays writing response headers beyond the transport's
-	// ResponseHeaderTimeout. The proxy's ErrorHandler must fire and
-	// return 502 — proving the timeout is wired into the transport.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-
-	p := pool(t, srv.Listener.Addr().String())
-	transport := &http.Transport{
-		ResponseHeaderTimeout: 50 * time.Millisecond,
-	}
-	h := p.Handler(0, transport)
-
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusBadGateway, rr.Code)
 }

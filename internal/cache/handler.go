@@ -989,8 +989,8 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 	reqCC := ParseCacheControl(string(ctx.Request.Header.Peek(header.CacheControl)))
 	if reqCC.OnlyIfCached {
-		ctx.Response.Header.Set(header.XCache, "MISS")
 		ctx.Error("Gateway Timeout", fasthttp.StatusGatewayTimeout)
+		ctx.Response.Header.Set(header.XCache, "MISS")
 		return
 	}
 	h.handleBypassFast(ctx)
@@ -1002,7 +1002,8 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
-	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
+	bgCtx := context.Background()
+	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
 	defer span.End()
 
 	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
@@ -1023,8 +1024,8 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
-		ctx.Response.Header.Set(header.XCache, "BYPASS")
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
+		ctx.Response.Header.Set(header.XCache, "BYPASS")
 		return
 	}
 
@@ -1161,7 +1162,6 @@ func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
 	defer cancel()
 
 	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(resp)
 
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
@@ -1179,29 +1179,32 @@ func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
 		detachedHdr.SetBytesKV(k, v)
 	}
 
+	statusCode := resp.StatusCode()
+	bodyCopy := make([]byte, len(resp.Body()))
+	copy(bodyCopy, resp.Body())
+	fasthttp.ReleaseResponse(resp)
+
 	return fetchResult{
-		StatusCode: resp.StatusCode(),
+		StatusCode: statusCode,
 		Header:     fromFastHeader(detachedHdr),
-		Body:       resp.Body(),
-		fastResp:   resp,
+		Body:       bodyCopy,
 	}
 }
 
-// releaseFetchResult releases the pooled fasthttp.Response if present.
-// Called after all singleflight waiters have finished reading Body.
+// releaseFetchResult is now a no-op — the pooled response is released
+// immediately in doFetch/doFetchBg after copying the body. Kept for
+// backward compatibility with callers that defer it.
 func releaseFetchResult(res fetchResult) {
-	if res.fastResp != nil {
-		fasthttp.ReleaseResponse(res.fastResp)
-	}
+	// fastResp is always nil now — the response is released in doFetch.
 }
 
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key) {
 	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)
 	if res.Err != nil {
+		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.Set(header.XCache, "MISS")
 		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 	h.writeAndMaybeStore(ctx, res, primaryKey)
@@ -1284,9 +1287,9 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 			h.serveObject(ctx, stale, now, cacheStale, src)
 			return
 		}
+		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.Set(header.XCache, "MISS")
 		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
 	if res.StatusCode >= 500 {
@@ -1881,15 +1884,18 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		detachedHdr.SetBytesKV(k, v)
 	}
 
-	// Keep the pooled response alive — Body references resp's internal
-	// buffer. The caller must ReleaseResponse after all singleflight
-	// waiters have finished reading Body. This eliminates the make+copy
-	// body clone (1 alloc per miss).
+	// Copy the body to an independent slice. The pooled response is
+	// released immediately to avoid data races when singleflight
+	// waiters read Body from different goroutines.
+	statusCode := resp.StatusCode()
+	bodyCopy := make([]byte, len(resp.Body()))
+	copy(bodyCopy, resp.Body())
+	fasthttp.ReleaseResponse(resp)
+
 	return fetchResult{
-		StatusCode: resp.StatusCode(),
+		StatusCode: statusCode,
 		Header:     fromFastHeader(detachedHdr),
-		Body:       resp.Body(),
-		fastResp:   resp,
+		Body:       bodyCopy,
 	}
 }
 

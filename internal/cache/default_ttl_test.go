@@ -21,7 +21,7 @@ func newDefaultTTLHandler(t *testing.T, upstream http.Handler, def time.Duration
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
 		Upstream:   wrapUpstream(upstream),
-		FastClient: &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient: &handlerFastClient{handler: upstream},
 		Store:      store,
 		DefaultTTL: def,
 	})
@@ -110,8 +110,7 @@ func TestDefaultTTL_DisabledKeepsMISS(t *testing.T) {
 	h := newDefaultTTLHandler(t, upstream, 0)
 
 	for range 2 {
-		var rr *httptest.ResponseRecorder
-		rr = newRR()
+		var rr = newRR()
 		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
 		got := rr.Header().Get(header.XCache)
 		require.Equal(t, "MISS", got)
@@ -130,8 +129,7 @@ func TestDefaultTTL_NoStoreStillBypasses(t *testing.T) {
 	h := newDefaultTTLHandler(t, upstream, 5*time.Second)
 
 	for range 2 {
-		var rr *httptest.ResponseRecorder
-		rr = newRR()
+		var rr = newRR()
 		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
 		got := rr.Header().Get(header.XCache)
 		require.Equal(t, "MISS", got)

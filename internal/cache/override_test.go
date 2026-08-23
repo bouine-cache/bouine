@@ -22,7 +22,7 @@ func newOverrideHandler(t *testing.T, upstream http.Handler, override time.Durat
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
 		Upstream:    wrapUpstream(upstream),
-		FastClient:  &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=30"}}},
+		FastClient:  &handlerFastClient{handler: upstream},
 		Store:       store,
 		OverrideTTL: override,
 	})
@@ -190,7 +190,7 @@ func TestOverrideTTL_WithJitter(t *testing.T) {
 	})
 	h := NewHandler(HandlerConfig{
 		Upstream:      wrapUpstream(upstream),
-		FastClient:    &mockOriginClient{status: 200, body: []byte("body"), headers: http.Header{header.CacheControl: []string{"max-age=60"}}},
+		FastClient:    &handlerFastClient{handler: upstream},
 		Store:         store,
 		OverrideTTL:   time.Hour,
 		JitterPercent: 10,
@@ -241,7 +241,7 @@ func TestOverrideTTL_PreservedAfterConditionalRevalidation(t *testing.T) {
 
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	const override = 90 * time.Minute
-	h := NewHandler(HandlerConfig{Upstream: wrapUpstream(upstream), Store: store, OverrideTTL: override})
+	h := NewHandler(HandlerConfig{Upstream: wrapUpstream(upstream), FastClient: &handlerFastClient{handler: upstream}, Store: store, OverrideTTL: override})
 
 	url := "http://example.com/reval"
 

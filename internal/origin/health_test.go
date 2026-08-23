@@ -20,7 +20,6 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 	defer healthy.Close()
 
 	p := pool(t, healthy.Listener.Addr().String())
-	// Manually eject the target.
 	p.targets[0].healthy.Store(false)
 	p.targets[0].probeErrors.Store(10)
 

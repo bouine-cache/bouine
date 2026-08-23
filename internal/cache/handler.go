@@ -58,6 +58,8 @@ func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 }
 
 // requestInfoFromCtx constructs a RequestInfo from a fasthttp RequestCtx.
+// This allocates a header.Map from the request headers — use on the
+// miss/revalidate paths where the full header map is needed.
 func requestInfoFromCtx(ctx *fasthttp.RequestCtx) RequestInfo {
 	return RequestInfo{
 		Method:     string(ctx.Method()),
@@ -804,10 +806,17 @@ func (h *Handler) StoreFromPeer(ctx context.Context, obj *api.Object) {
 }
 
 // buildKey constructs the cache key, applying the route's KeyPolicy
-// when configured. Inlined to avoid overhead on the hit path when no
-// policy is configured (zero added allocs).
+// when configured. Reads directly from *fasthttp.RequestCtx to avoid
+// constructing a RequestInfo (and its headerFromCtx allocation).
 func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
-	return BuildKey(requestInfoFromCtx(ctx), h.policy)
+	ri := RequestInfo{
+		Method: string(ctx.Method()),
+		URI:    string(ctx.RequestURI()),
+		Host:   string(ctx.Host()),
+		Path:   string(ctx.Path()),
+		TLS:    ctx.IsTLS(),
+	}
+	return BuildKey(ri, h.policy)
 }
 
 // ServeRequest implements fasthttp.RequestHandler. It dispatches
@@ -822,16 +831,25 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	now := time.Now()
 	primaryKey, key, obj, src := h.lookup(ctx)
 	ctx.SetUserValue("cacheKey", key)
-	ri := requestInfoFromCtx(ctx)
-	disp := Evaluate(ri, obj, now)
+
+	// Fast path: evaluate using direct Peek calls on the request headers,
+	// avoiding the headerFromCtx allocation (which builds a header.Map
+	// with string conversions for every header on every request).
+	// Only construct a full RequestInfo (with header.Map) if we need to
+	// leave the hit path (miss, revalidate, bypass, range).
+	disp := evaluateFast(ctx, obj, now)
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if h.tryConditional304(ctx, disp.Object, src) {
+		if tryConditional304Fast(ctx, disp.Object, src) {
 			return
 		}
-		if ServeRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, src) {
-			return
+		// Range requests need the full RequestInfo for ServeRange.
+		if hasRangeHeader(ctx) {
+			ri := requestInfoFromCtx(ctx)
+			if ServeRange(&ctxResponseWriter{ctx}, ri, disp.Object, disp.Decision == StaleHit, src) {
+				return
+			}
 		}
 		cacheRes := cacheHit
 		if disp.Decision == StaleHit {
@@ -842,13 +860,16 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 			h.triggerBgRevalidate(ctx, key, disp.Object)
 		}
 	case Miss:
-		h.handleCacheMiss(ctx, primaryKey, key, obj, now, src)
+		ri := requestInfoFromCtx(ctx)
+		h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
 	case Revalidate:
 		if !h.isOwnerOrUnmanaged(key) {
-			h.handleCacheMiss(ctx, primaryKey, key, obj, now, src)
+			ri := requestInfoFromCtx(ctx)
+			h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
 			return
 		}
-		h.revalidate(ctx, primaryKey, key, disp.Object, now, src)
+		ri := requestInfoFromCtx(ctx)
+		h.revalidate(ctx, primaryKey, key, disp.Object, now, src, ri)
 	case Bypass:
 		h.handleBypass(ctx)
 	}
@@ -866,12 +887,12 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 // keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
-func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source) {
+func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			if peerObj, err := h.peerFetch(ctx, owner, lookupKey); err == nil && peerObj != nil {
 				// Re-evaluate: the peer may have returned a stale object.
-				if d2 := Evaluate(requestInfoFromCtx(ctx), peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
+				if d2 := Evaluate(ri, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
 					cacheRes := cacheHit
 					if d2.Decision == StaleHit {
 						cacheRes = cacheStale
@@ -1266,7 +1287,7 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 // (may be a Vary variant key); it is used for singleflight dedup and for
 // storing the 304-refreshed object. primaryKey is the canonical key used for
 // Vary variant storage in writeAndMaybeStore.
-func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source) {
+func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethod(string(ctx.Method()))
@@ -1325,7 +1346,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 
 	if res.StatusCode == fasthttp.StatusNotModified {
 		refreshed := h.refreshFrom304(stale, res, now)
-		h.storeObject(ctx, lookupKey, refreshed, requestInfoFromCtx(ctx), false, 0)
+		h.storeObject(ctx, lookupKey, refreshed, ri, false, 0)
 		h.serveObject(ctx, refreshed, now, cacheRevalidated, src)
 		return
 	}

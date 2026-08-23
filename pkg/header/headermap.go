@@ -15,10 +15,41 @@ import (
 // the first letter of each dash-separated word is uppercased, the rest
 // is lowercased. This produces the same output as net/http.CanonicalHeaderKey
 // without importing net/http on the hot path.
+//
+// Fast path: if the key is already in canonical form (the common case
+// since all header constants are pre-canonicalized), the function
+// returns the input string directly without any allocation.
 func canonicalHeaderKey(key string) string {
-	if key == "" {
-		return ""
+	if isCanonical(key) {
+		return key
 	}
+	return canonicalize(key)
+}
+
+// isCanonical reports whether key is already in canonical MIME header form.
+// Inlineable so the compiler can optimize the common case where the key
+// is a package-level constant (already canonical).
+func isCanonical(key string) bool {
+	upper := true
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case upper && c >= 'a' && c <= 'z':
+			return false
+		case upper:
+			upper = false
+		case c == '-':
+			upper = true
+		case c >= 'A' && c <= 'Z':
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalize performs the actual canonicalization. Separated from
+// canonicalHeaderKey so the slow path doesn't bloat the inlineable fast path.
+func canonicalize(key string) string {
 	b := []byte(key)
 	upper := true
 	for i, c := range b {
@@ -287,6 +318,9 @@ type httpKV struct {
 	noValue bool //nolint:unused // required for argsKV layout compatibility
 }
 
+// dateKey is a cached []byte("Date") to avoid per-call allocation in SetDateRaw.
+var dateKey = []byte("Date")
+
 // SetDateRaw sets the Date header on a *fasthttp.ResponseHeader by
 // directly appending to its internal header map. This bypasses
 // fasthttp's setSpecialHeader, which treats Date as "managed
@@ -298,7 +332,7 @@ func SetDateRaw(dst *fasthttp.ResponseHeader, date string) {
 	// first field is h []argsKV. Since httpKV has the same memory
 	// layout as argsKV, we can safely reinterpret the slice.
 	hp := (*[]httpKV)(unsafe.Pointer(dst)) //nolint:gosec // G103: controlled unsafe for fasthttp interop
-	*hp = append(*hp, httpKV{key: []byte("Date"), value: []byte(date)})
+	*hp = append(*hp, httpKV{key: dateKey, value: []byte(date)})
 }
 
 // At returns the key and value at index i. Panics if i >= Len().

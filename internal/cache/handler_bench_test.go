@@ -33,7 +33,7 @@ func BenchmarkGate_Handler_CacheHit_ReusableWriter(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for b.Loop() {
-		ctx := testCtx("GET", "http://bench.local/hit")
+		ctx.Response.Reset()
 		h.ServeRequest(ctx)
 	}
 }

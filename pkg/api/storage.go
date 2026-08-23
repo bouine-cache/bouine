@@ -74,6 +74,24 @@ type Object struct {
 	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
 	// Accessed via atomic.Pointer for race-safe lazy initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
+
+	// FastHeader stores a pre-built *fasthttp.ResponseHeader for use by
+	// serveObject's CopyTo fast path. Lazily computed on the first hit
+	// and cached for subsequent hits. Stored as atomic.Value (any) to
+	// avoid importing fasthttp in pkg/api. Not serialized to disk.
+	FastHeader atomic.Value `json:"-"`
+
+	// HasConnectionList indicates whether the stored response has a
+	// Connection header listing per-connection headers that must be
+	// stripped before forwarding (RFC 9110 §7.6.1). Pre-computed at
+	// build time so the hit path can skip stripConnectionListedHeaders
+	// when false (the common case).
+	HasConnectionList bool `json:"-"`
+
+	// HasNoCacheFields indicates whether the stored Cache-Control has a
+	// no-cache="..." directive with field names. Pre-computed at build
+	// time so the hit path can skip stripNoCacheFields when false.
+	HasNoCacheFields bool `json:"-"`
 }
 
 // LoadSerializedHead returns the lazily-computed serialized header block,
@@ -123,9 +141,14 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		Hits:                 o.Hits,
 		CacheControl:         o.CacheControl,
 		OriginAge:            o.OriginAge,
+		HasConnectionList:    o.HasConnectionList,
+		HasNoCacheFields:     o.HasNoCacheFields,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
+	}
+	if v := o.FastHeader.Load(); v != nil {
+		clone.FastHeader.Store(v)
 	}
 	return clone
 }

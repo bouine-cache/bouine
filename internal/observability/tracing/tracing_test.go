@@ -32,10 +32,13 @@ func newTestTracerProvider(t *testing.T, sr *tracetest.SpanRecorder) func() {
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	prevEnabled := tracerEnabled.Load()
+	tracerEnabled.Store(true)
 	return func() {
 		_ = tp.Shutdown(context.Background())
 		otel.SetTracerProvider(prevTP)
 		otel.SetTextMapPropagator(prevProp)
+		tracerEnabled.Store(prevEnabled)
 	}
 }
 

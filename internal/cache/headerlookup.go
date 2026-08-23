@@ -67,3 +67,15 @@ func (h headerLookup) ToMap() header.Map {
 	}
 	return h.hdr
 }
+
+// CopyToFastHTTP copies all headers to dst using the fastest available
+// method. When the underlying source is a *fasthttp.ResponseHeader, it
+// uses CopyTo (a bulk struct copy without per-header normalization).
+// Otherwise it falls back to WriteToFastHTTP (per-header SetCanonical).
+func (h headerLookup) CopyToFastHTTP(dst *fasthttp.ResponseHeader) {
+	if h.fastHdr != nil {
+		h.fastHdr.CopyTo(dst)
+		return
+	}
+	h.hdr.WriteToFastHTTP(dst)
+}

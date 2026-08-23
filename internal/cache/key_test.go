@@ -113,6 +113,25 @@ func TestParseCacheControl_NoStore(t *testing.T) {
 	assert.True(t, d.NoStore)
 }
 
+func TestParseCacheControlBytes_ParityWithString(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"max-age=300, public, stale-while-revalidate=60",
+		"no-store",
+		"max-stale",
+		"no-cache, no-transform, immutable",
+		"max-age=3600, s-maxage=600, stale-if-error=86400",
+		`no-cache="Accept-Encoding"`,
+		"only-if-cached",
+		"",
+	}
+	for _, cc := range cases {
+		want := ParseCacheControl(cc)
+		got := ParseCacheControlBytes([]byte(cc))
+		assert.Equal(t, want, got, "mismatch for %q", cc)
+	}
+}
+
 func TestParseCacheControl_MaxStaleNoValue(t *testing.T) {
 	t.Parallel()
 	d := ParseCacheControl("max-stale")

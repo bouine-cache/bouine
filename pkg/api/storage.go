@@ -92,6 +92,12 @@ type Object struct {
 	// no-cache="..." directive with field names. Pre-computed at build
 	// time so the hit path can skip stripNoCacheFields when false.
 	HasNoCacheFields bool `json:"-"`
+
+	// HasDate indicates whether the stored response has a Date header.
+	// Pre-computed at build time so the fast-path hit can skip a Map.Get
+	// scan (and the subsequent AppendFormat for Date synthesis) when the
+	// origin already provided a Date.
+	HasDate bool `json:"-"`
 }
 
 // LoadSerializedHead returns the lazily-computed serialized header block,
@@ -143,6 +149,7 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		OriginAge:            o.OriginAge,
 		HasConnectionList:    o.HasConnectionList,
 		HasNoCacheFields:     o.HasNoCacheFields,
+		HasDate:              o.HasDate,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
@@ -153,23 +160,21 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 	return clone
 }
 
-// CloneForRefresh returns a shallow copy of o with serializedHead left
-// nil so the clone lazy-inits its own header block independently. Use
-// this whenever the caller will mutate fields that affect the serialized
-// header block (Header, StatusCode, ETag, etc.) — the original's cached
-// serializedHead is no longer valid for the clone and sharing it would
-// serve a stale pre-rendered block.
+// CloneForRefresh returns a copy of o with the header map deep-cloned
+// (so callers can mutate headers without racing other goroutines that hold
+// the same stale *Object) and serializedHead left nil so the clone
+// lazy-inits its own header block independently.
 //
-// Body, Header, and other slices are shared with o (immutable after
-// construction); callers that mutate Header should call Header.Clone()
-// on the result. Exists to avoid copylocks violations from value-copying
-// Object, which contains an atomic.Pointer.
+// Body and other slices are shared with o (immutable after construction);
+// only Header is deep-copied because MergeHeaders304 writes to it.
+// Exists to avoid copylocks violations from value-copying Object, which
+// contains an atomic.Pointer.
 func (o *Object) CloneForRefresh() *Object {
 	return &Object{
 		Key:                  o.Key,
 		VaryKey:              o.VaryKey,
 		StatusCode:           o.StatusCode,
-		Header:               o.Header,
+		Header:               o.Header.Clone(),
 		Body:                 o.Body,
 		BodySize:             o.BodySize,
 		StoredAt:             o.StoredAt,
@@ -182,6 +187,9 @@ func (o *Object) CloneForRefresh() *Object {
 		Hits:                 o.Hits,
 		CacheControl:         o.CacheControl,
 		OriginAge:            o.OriginAge,
+		HasConnectionList:    o.HasConnectionList,
+		HasNoCacheFields:     o.HasNoCacheFields,
+		HasDate:              o.HasDate,
 	}
 }
 

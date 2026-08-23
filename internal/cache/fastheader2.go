@@ -50,7 +50,8 @@ func getOrComputeFastHeader(obj *api.Object) *fasthttp.ResponseHeader {
 	hdr := &fasthttp.ResponseHeader{}
 	hdr.DisableNormalizing()
 	obj.Header.WriteToFastHTTP(hdr)
-	if dateVal := obj.Header.Get(header.Date); dateVal != "" {
+	if obj.HasDate {
+		dateVal := obj.Header.Get(header.Date)
 		header.SetDateRaw(hdr, dateVal)
 	}
 	if obj.HasConnectionList {

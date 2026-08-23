@@ -52,6 +52,174 @@ func ParseCacheControl(header string) Directives {
 	return d
 }
 
+// ParseCacheControlBytes parses a Cache-Control header value from a []byte
+// without converting to string first. Used on the bypass path where the
+// header value comes from fasthttp's Peek (zero-copy []byte).
+func ParseCacheControlBytes(cc []byte) Directives {
+	var d Directives
+	i := 0
+	for i < len(cc) {
+		i = skipDelimitersBytes(cc, i)
+		if i >= len(cc) {
+			break
+		}
+		var key, val []byte
+		key, val, i = scanTokenBytes(cc, i)
+		applyDirectiveBytes(&d, key, val)
+	}
+	return d
+}
+
+func skipDelimitersBytes(s []byte, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == ',' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+func scanTokenBytes(s []byte, i int) (key, val []byte, next int) {
+	keyStart := i
+	for i < len(s) && s[i] != '=' && s[i] != ',' && s[i] != ' ' && s[i] != '\t' {
+		i++
+	}
+	key = s[keyStart:i]
+
+	if i < len(s) && s[i] == '=' {
+		i++
+		val, i = scanValueBytes(s, i)
+	}
+	return key, val, i
+}
+
+func scanValueBytes(s []byte, i int) ([]byte, int) {
+	if i < len(s) && s[i] == '"' {
+		i++
+		start := i
+		for i < len(s) && s[i] != '"' {
+			i++
+		}
+		val := s[start:i]
+		if i < len(s) {
+			i++
+		}
+		return val, i
+	}
+	start := i
+	for i < len(s) && s[i] != ',' && s[i] != ' ' && s[i] != '\t' {
+		i++
+	}
+	return s[start:i], i
+}
+
+func applyDirectiveBytes(d *Directives, key, val []byte) {
+	if eqFoldBytes(key, []byte("no-cache")) && len(val) > 0 {
+		d.NoCacheFields = string(val)
+		return
+	}
+	if applyBoolDirectiveBytes(d, key) {
+		return
+	}
+	applyDurDirectiveBytes(d, key, val)
+}
+
+func applyBoolDirectiveBytes(d *Directives, key []byte) bool {
+	switch {
+	case eqFoldBytes(key, []byte("no-store")):
+		d.NoStore = true
+	case eqFoldBytes(key, []byte("no-cache")):
+		d.NoCache = true
+	case eqFoldBytes(key, []byte("private")):
+		d.Private = true
+	case eqFoldBytes(key, []byte("public")):
+		d.Public = true
+	case eqFoldBytes(key, []byte("must-revalidate")):
+		d.MustRevalidate = true
+	case eqFoldBytes(key, []byte("proxy-revalidate")):
+		d.ProxyRevalidate = true
+	case eqFoldBytes(key, []byte("immutable")):
+		d.Immutable = true
+	case eqFoldBytes(key, []byte("no-transform")):
+		d.NoTransform = true
+	case eqFoldBytes(key, []byte("only-if-cached")):
+		d.OnlyIfCached = true
+	case eqFoldBytes(key, []byte("must-understand")):
+		d.MustUnderstand = true
+	default:
+		return false
+	}
+	return true
+}
+
+func applyDurDirectiveBytes(d *Directives, key, val []byte) {
+	switch {
+	case eqFoldBytes(key, []byte("max-age")):
+		parseDurBytes(&d.MaxAge, &d.MaxAgeSet, val)
+	case eqFoldBytes(key, []byte("s-maxage")):
+		parseDurBytes(&d.SMaxAge, &d.SMaxAgeSet, val)
+	case eqFoldBytes(key, []byte("min-fresh")):
+		parseDurBytes(&d.MinFresh, &d.MinFreshSet, val)
+	case eqFoldBytes(key, []byte("max-stale")):
+		if len(val) == 0 {
+			d.MaxStale = time.Duration(1<<63 - 1)
+			d.MaxStaleSet = true
+		} else {
+			parseDurBytes(&d.MaxStale, &d.MaxStaleSet, val)
+		}
+	case eqFoldBytes(key, []byte("stale-while-revalidate")):
+		parseDurBytes(&d.StaleWhileRevalid, &d.StaleWhileRevalidSet, val)
+	case eqFoldBytes(key, []byte("stale-if-error")):
+		parseDurBytes(&d.StaleIfError, &d.StaleIfErrorSet, val)
+	}
+}
+
+func parseDurBytes(dur *time.Duration, set *bool, val []byte) {
+	n, ok := parseIntBytes(val)
+	if !ok {
+		return
+	}
+	d := time.Duration(n) * time.Second
+	if !*set || d > *dur {
+		*dur = d
+		*set = true
+	}
+}
+
+func parseIntBytes(s []byte) (int64, bool) {
+	if len(s) == 0 {
+		return 0, false
+	}
+	var n int64
+	found := false
+	for i := range s {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+		found = true
+	}
+	return n, found
+}
+
+func eqFoldBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
 func skipDelimiters(s string, i int) int {
 	for i < len(s) && (s[i] == ' ' || s[i] == ',' || s[i] == '\t') {
 		i++

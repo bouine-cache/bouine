@@ -246,7 +246,7 @@ func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served
 	// it). Only synthesize a Date when the stored object has none.
-	if obj.Header.Get(header.Date) == "" {
+	if !obj.HasDate {
 		hbuf = append(hbuf, header.Date...)
 		hbuf = append(hbuf, ": "...)
 		hbuf = now.UTC().AppendFormat(hbuf, httpTimeFormat)

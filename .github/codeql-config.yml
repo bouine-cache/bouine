@@ -6,4 +6,4 @@ name: "CodeQL Config"
 # vulnerability. We use a custom query suite that excludes this query.
 # Origin addresses are operator-configured, not user input.
 queries:
-  - uses: .github/codeql/bouine.qls
+  - uses: ./.github/codeql/bouine.qls

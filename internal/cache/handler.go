@@ -1223,6 +1223,7 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 
 	resp := fasthttp.AcquireResponse()
 
+	// codeql[go/request-forgery]: reverse proxy cache — forwarding request URLs to origin is the intended behavior
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
 		tracing.RecordError(span, err)
@@ -1730,6 +1731,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	}
 	tracing.InjectFastHTTP(fetchCtx, req)
 
+	// codeql[go/request-forgery]: reverse proxy cache — forwarding request URLs to origin is the intended behavior
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		tracing.RecordError(span, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
@@ -1982,6 +1984,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 
+	// codeql[go/request-forgery]: reverse proxy cache — forwarding request URLs to origin is the intended behavior
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
 		tracing.RecordError(span, err)

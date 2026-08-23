@@ -421,7 +421,6 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1)}))
 	})
 	defer srv.Close()
-	defer close(block)
 
 	f := NewPeerFetcher(nil, nil, 0)
 	defer f.Close(context.Background())
@@ -444,6 +443,11 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 		api.PeerFetchRequest{Key: testkey.Key(2)})
 	require.Error(t, err)
 
+	// Unblock the server so the pending fetches can complete and wg.Wait()
+	// doesn't deadlock. Without this, close(block) would only run in a
+	// defer — after the function returns — but wg.Wait() blocks the
+	// function from returning.
+	close(block)
 	wg.Wait()
 }
 

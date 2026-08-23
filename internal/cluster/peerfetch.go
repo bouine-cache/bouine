@@ -33,10 +33,6 @@ var peerFetchEncodePool = sync.Pool{
 // JSON's '{' (0x7B).
 const peerFetchBinaryVersion = 2
 
-// maxPeerFetchBinaryBody is the maximum binary request body size.
-// 1 (version) + 16 (key) + 1 (vary-key len) + 255 (vary-key) = 273.
-const maxPeerFetchBinaryBody = 512
-
 const (
 	// PeerFetchPath is the HTTP path for peer cache lookups.
 	PeerFetchPath = "/v1/peer/fetch"

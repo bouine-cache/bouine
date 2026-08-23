@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -3013,11 +3012,6 @@ func TestAppendCanonicalQuerySlowString_Policy(t *testing.T) {
 	assert.Contains(t, result, "q=test")
 	assert.NotContains(t, result, "utm")
 	assert.NotContains(t, result, "fbclid")
-}
-
-func mustURL(raw string) *url.URL {
-	u, _ := url.Parse(raw)
-	return u
 }
 
 func TestTriggerBgRefresh_304Refresh(t *testing.T) {

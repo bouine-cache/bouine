@@ -1677,7 +1677,7 @@ func (s *Store) activeSegRLocked() (*Segment, error) {
 	return nil, errSegFull
 }
 
-func (s *Store) newSegment() (*Segment, error) {
+func (s *Store) newSegment() (*Segment, error) { //nolint:unparam // result used in some callers
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

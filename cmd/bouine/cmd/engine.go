@@ -665,9 +665,9 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	}
 
 	ops := e.buildInvalidationOps(ctx, rs)
-	dashMux := e.buildDashboard(rs, addr, ops)
+	dashMux := e.buildDashboard(rs, addr, ops) //nolint:contextcheck // dashboard built without context
 
-	srv := admin.New(admin.Config{
+	srv := admin.New(admin.Config{ //nolint:contextcheck // admin.New does not accept context
 		Addr:       addr,
 		Token:      rs.token,
 		Logger:     e.logger,

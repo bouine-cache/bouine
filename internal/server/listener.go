@@ -258,6 +258,8 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 // listeners share a single connection-limit semaphore. If the first
 // listener creation fails (e.g. SO_REUSEPORT unsupported at runtime),
 // it falls back to serveSingle.
+//
+//nolint:gocyclo // 17: multi-protocol serving is branchy
 func (s *Listener) serveMulti(ctx context.Context) error {
 	n := runtime.GOMAXPROCS(0)
 

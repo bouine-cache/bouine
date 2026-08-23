@@ -590,6 +590,7 @@ func (s *Server) refresh(ctx *fasthttp.RequestCtx) {
 	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"status": "refreshed"})
 }
 
+// Serve starts the admin server on the configured address.
 func (s *Server) Serve(ctx context.Context) error {
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(ctx, "tcp", s.addr)
@@ -613,6 +614,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 
+// Addr returns the resolved address the server is listening on.
 func (s *Server) Addr() string {
 	if v := s.resolved.Load(); v != nil {
 		return v.(string)
@@ -724,6 +726,7 @@ func decodeJSON(ctx *fasthttp.RequestCtx, v any) bool {
 	return true
 }
 
+// CacheCheckResult is the JSON response for the /debug/cachecheck endpoint.
 type CacheCheckResult struct {
 	URL         string `json:"url"`
 	KeyHex      string `json:"key_hex"`
@@ -735,6 +738,7 @@ type CacheCheckResult struct {
 	Age         string `json:"age,omitempty"`
 }
 
+// CloudflareStatus is the JSON response for the Cloudflare integration status endpoint.
 type CloudflareStatus struct {
 	Enabled       bool    `json:"enabled"`
 	ZoneID        string  `json:"zone_id,omitempty"`
@@ -748,6 +752,7 @@ type CloudflareStatus struct {
 	TokenCount    int     `json:"token_count,omitempty"`
 }
 
+// CFPropagateRequest is the JSON body for Cloudflare purge/propagation requests.
 type CFPropagateRequest struct {
 	Kind  string   `json:"kind"`
 	Items []string `json:"items"`

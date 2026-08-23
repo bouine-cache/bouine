@@ -52,6 +52,8 @@ type cfPropagator struct {
 // buildCFPropagator constructs a cfPropagator. inv may be nil when CF is
 // disabled; all propagate methods become no-ops. closeCtx is the lifecycle
 // context whose cancellation stops in-flight async propagations.
+//
+//nolint:funlen // 90 lines: CF propagator setup is sequential
 func buildCFPropagator(
 	inv bouinecf.Invalidator,
 	cfg config.CloudflareConfig,
@@ -407,6 +409,8 @@ func (p *cfPropagator) PropagateForPurge(ctx context.Context, url string) {
 // to PurgeByPrefixes/PurgeByHostnames; non-literal regexes are skipped.
 // Compound bans (host AND path) are over-purged: both host and path are
 // purged independently (OR semantics) to ensure the CF cache is invalidated.
+//
+//nolint:gocyclo // 20: ban propagation is inherently branchy
 func (p *cfPropagator) PropagateForBan(ctx context.Context, expr api.BanExpr) {
 	if p.inv == nil || !p.cfg.Propagate.Ban {
 		return

@@ -12,11 +12,6 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-func echoServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(newEchoHandler())
-}
-
 func fivexxServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(new5xxHandler())

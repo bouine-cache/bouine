@@ -1429,7 +1429,10 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	refreshed.VaryValue = refreshed.Header.Get(header.Vary)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
-	if ttl, ok := FreshnessLifetime(ParseCacheControl(refreshed.CacheControl), refreshed.Header.Get); ok {
+	newCC := ParseCacheControl(refreshed.CacheControl)
+	refreshed.RespNoCache = newCC.NoCache
+	refreshed.RespMustRevalidate = newCC.MustRevalidate || newCC.ProxyRevalidate
+	if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 		refreshed.TTL = ttl
 	}
 	// Re-apply route override so a 304 cannot revert bouine's storage lifetime
@@ -2059,18 +2062,20 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	copy(bodyCopy, res.Body)
 
 	obj := &api.Object{
-		Key:          key,
-		StatusCode:   res.StatusCode,
-		Header:       resMap,
-		Body:         bodyCopy,
-		BodySize:     int64(len(bodyCopy)),
-		StoredAt:     now,
-		TTL:          ttl,
-		ETag:         resMap.Get(header.ETag),
-		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
-		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
-		HasDate:      hasDate,
-		VaryValue:    resMap.Get(header.Vary),
+		Key:                key,
+		StatusCode:         res.StatusCode,
+		Header:             resMap,
+		Body:               bodyCopy,
+		BodySize:           int64(len(bodyCopy)),
+		StoredAt:           now,
+		TTL:                ttl,
+		ETag:               resMap.Get(header.ETag),
+		CacheControl:       ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
+		OriginAge:          originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
+		HasDate:            hasDate,
+		VaryValue:          resMap.Get(header.Vary),
+		RespNoCache:        respCC.NoCache,
+		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).

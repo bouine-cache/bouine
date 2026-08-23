@@ -1,6 +1,6 @@
-# Custom CodeQL query suite for bouine.
-# Excludes go/request-forgery — a reverse proxy cache legitimately
-# forwards request URLs to operator-configured origin servers.
-- uses: codeql-suites/go-security-and-quality
+## Custom CodeQL query suite for bouine.
+## Excludes go/request-forgery — a reverse proxy cache legitimately
+## forwards request URLs to operator-configured origin servers.
+- import: codeql-suites/go-security-and-quality
 - exclude:
     id: go/request-forgery

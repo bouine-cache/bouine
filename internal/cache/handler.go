@@ -50,9 +50,9 @@ var ErrAbortHandler = errors.New("abort handler")
 // headerFromCtx extracts request headers as header.Map from a fasthttp RequestCtx.
 func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 	hm := header.NewMap(ctx.Request.Header.Len())
-	ctx.Request.Header.VisitAll(func(k, v []byte) {
+	for k, v := range ctx.Request.Header.All() {
 		hm.AppendEntry(string(k), string(v))
-	})
+	}
 	hm.SortEntries()
 	return hm
 }
@@ -146,11 +146,6 @@ type fetchResult struct {
 	Header     headerLookup
 	Body       []byte
 	Err        error
-	// fastResp, when non-nil, holds the pooled *fasthttp.Response from
-	// doFetchFast. The caller must call fasthttp.ReleaseResponse(fastResp)
-	// after all singleflight waiters have finished reading Body. When
-	// nil (legacy path), Body is already an independent copy.
-	fastResp *fasthttp.Response
 }
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -702,7 +697,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	})
 	setConditionalHeaders(func(k, v string) { req.Header.Set(k, v) }, stale)
 
-	res := h.collapsedFetchBg(req, key)
+	res := h.collapsedFetchBg(ctx, req, key)
 	if res.Err != nil {
 		h.refreshMetrics.IncTotal("error")
 		h.refreshMetrics.IncErrors(errorType(res.Err))
@@ -1017,9 +1012,9 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	req.Header.SetMethod(string(ctx.Method()))
 	req.SetRequestURI(string(ctx.RequestURI()))
 	req.Header.SetHost(string(ctx.Host()))
-	ctx.Request.Header.VisitAll(func(k, v []byte) {
+	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
-	})
+	}
 	tracing.InjectFastHTTP(fetchCtx, req)
 
 	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
@@ -1151,33 +1146,24 @@ func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchRes
 // while still deduplicating concurrent revalidations for that key.
 const revalKeySuffix uint64 = 0x726576616c // "reval" in ASCII
 
-func (h *Handler) collapsedRevalidate(ctx *fasthttp.RequestCtx, key api.Key) fetchResult {
-	sfKey := key.SingleFlightKey(revalKeySuffix)
-	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
-		res := h.doFetch(ctx)
-		return res, nil
-	})
-	return v.(fetchResult)
-}
-
-func (h *Handler) collapsedFetchBg(req *fasthttp.Request, key api.Key) fetchResult {
+func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
 	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
-		res := h.doFetchBg(req)
+		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
 	return v.(fetchResult)
 }
 
-func (h *Handler) collapsedRevalidateBg(req *fasthttp.Request, key api.Key) fetchResult {
+func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
 	sfKey := key.SingleFlightKey(revalKeySuffix)
 	v, _, _ := h.flight.Do(sfKey, func() (any, error) {
-		res := h.doFetchBg(req)
+		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
 	return v.(fetchResult)
 }
 
-func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
+func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fetchResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
@@ -1190,7 +1176,6 @@ func (h *Handler) doFetchBg(req *fasthttp.Request) (res fetchResult) {
 	if h.fastClient == nil {
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	ctx := context.Background()
 	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
 
@@ -1287,9 +1272,9 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	revalReq.Header.SetMethod(string(ctx.Method()))
 	revalReq.SetRequestURI(string(ctx.RequestURI()))
 	revalReq.Header.SetHost(string(ctx.Host()))
-	ctx.Request.Header.VisitAll(func(k, v []byte) {
+	for k, v := range ctx.Request.Header.All() {
 		revalReq.Header.AddBytesKV(k, v)
-	})
+	}
 	setConditionalHeaders(func(k, v string) { revalReq.Header.Set(k, v) }, stale)
 
 	// Collapse concurrent revalidations for the same key. Each concurrent
@@ -1297,7 +1282,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// own conditional origin request. The singleflight key is suffixed
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
-	res := h.collapsedRevalidateBg(revalReq, lookupKey)
+	res := h.collapsedRevalidateBg(context.Background(), revalReq, lookupKey)
 	defer releaseFetchResult(res)
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
@@ -1443,7 +1428,7 @@ func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, ke
 
 	staleHits := h.store.WindowHits(key)
 
-	res := h.collapsedFetchBg(revalReq, key)
+	res := h.collapsedFetchBg(ctx, revalReq, key)
 	if res.Err != nil {
 		return
 	}
@@ -1651,9 +1636,9 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	req.Header.SetMethod(string(ctx.Method()))
 	req.SetRequestURI(string(ctx.RequestURI()))
 	req.Header.SetHost(string(ctx.Host()))
-	ctx.Request.Header.VisitAll(func(k, v []byte) {
+	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
-	})
+	}
 	if ctx.Request.Body() != nil {
 		body := ctx.Request.Body()
 		req.SetBodyRaw(body)
@@ -1900,9 +1885,9 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	req.Header.SetMethod(string(ctx.Method()))
 	req.SetRequestURI(string(ctx.RequestURI()))
 	req.Header.SetHost(string(ctx.Host()))
-	ctx.Request.Header.VisitAll(func(k, v []byte) {
+	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
-	})
+	}
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 

@@ -6,10 +6,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
-	"github.com/valyala/fasthttp"
 )
 
 func chunkedOrigin(bodySize, chunkSize int) fasthttp.RequestHandler {

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/valyala/fasthttp"
 	"go.opentelemetry.io/otel"
@@ -26,6 +27,11 @@ import (
 )
 
 const tracerName = "bouine"
+
+// tracerEnabled is set to true when InitTracer configures a real exporter.
+// When false, StartSpan returns a no-op span without calling into the OTel
+// global tracer, avoiding ~3 allocations per fetch on the miss path.
+var tracerEnabled atomic.Bool
 
 // Tracer returns the global tracer under the bouine instrumentation name.
 func Tracer() trace.Tracer {
@@ -71,12 +77,24 @@ func FastHTTPMiddleware(spanName string, next fasthttp.RequestHandler) fasthttp.
 
 // StartSpan is a thin helper that starts a child span in ctx and
 // returns the enriched context. The caller is responsible for calling
-// span.End().
+// span.End(). When no tracer is configured (InitTracer was not called
+// or had no endpoint), this is a no-op that returns ctx and a no-op
+// span without allocating.
 func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	if !tracerEnabled.Load() {
+		return ctx, trace.SpanFromContext(ctx)
+	}
 	ctx, span := Tracer().Start(ctx, name,
 		trace.WithAttributes(attrs...),
 	)
 	return ctx, span
+}
+
+// TracerEnabled reports whether InitTracer has configured a real tracer.
+// Callers on hot paths can use this to skip span creation overhead
+// (context.WithValue, cancelCtx allocation) when tracing is not configured.
+func TracerEnabled() bool {
+	return tracerEnabled.Load()
 }
 
 // InjectHTTP stamps the W3C TraceContext (traceparent / tracestate) and
@@ -102,6 +120,7 @@ func InitTracer(ctx context.Context, cfg TracingConfig) (func(), error) {
 	if cfg.Endpoint == "" {
 		return func() {}, nil
 	}
+	tracerEnabled.Store(true)
 	// otlptracehttp.WithEndpoint expects "host:port" without a scheme.
 	// The OTEL_EXPORTER_OTLP_ENDPOINT env var (and some YAML configs)
 	// include the "http://" or "https://" prefix, so strip it here.

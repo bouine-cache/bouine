@@ -29,6 +29,8 @@ import (
 	"sync"
 	"time"
 
+	"bytes"
+
 	"golang.org/x/sync/singleflight"
 
 	"github.com/bouine-cache/bouine/internal/observability"
@@ -1048,11 +1050,10 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	// Copy origin response headers, then overwrite bouine's attribution.
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
-		ks := string(k)
-		if ks == header.XCache || ks == header.XCacheSource {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
 			continue
 		}
-		dst.Add(ks, string(v))
+		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 	ctx.SetStatusCode(resp.StatusCode())
@@ -1113,25 +1114,32 @@ const (
 // serveObject writes a cached object to the client with the appropriate
 // X-Cache header and Age. Stale responses also get Warning: 110 per
 // RFC 7234 §5.5.3. src is the storage-tier source (hot/warm/peer),
-// set as X-Cache-Source via direct map assignment (zero alloc).
+// set as X-Cache-Source via SetCanonical (zero alloc).
+//
+// On the first hit, a pre-built *fasthttp.ResponseHeader is constructed
+// from the stored headers (excluding hop-by-hop, internal, no-cache fields,
+// and dynamic headers). On subsequent hits, CopyTo copies the pre-built
+// header into the response, replacing N SetCanonical calls with a single
+// bulk copyArgs. Only 4 dynamic headers (Age, X-Cache, X-Cache-Source,
+// Warning) are set per request. The body is set via SetBodyRaw (zero-copy
+// from the immutable cached body).
 func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now time.Time, result cacheResult, src api.Source) {
 	dst := &ctx.Response.Header
-	// WriteToFastHTTP skips hop-by-hop, internal, Date, Transfer-Encoding,
-	// and Age headers — no Del calls needed afterward.
-	obj.Header.WriteToFastHTTP(dst)
-	// Set the Date header from the stored object. fasthttp's Set()
-	// silently drops Date as "managed automatically", so we use
-	// SetDateRaw which bypasses the special header check. The server
-	// has NoDefaultDate=true to prevent auto-Date overwriting this.
-	if dateVal := obj.Header.Get(header.Date); dateVal != "" {
-		header.SetDateRaw(dst, dateVal)
-	}
-	// Strip headers listed in the stored Connection header (RFC 9110 §7.6.1).
-	// Connection itself is already skipped by WriteToFastHTTP, but the
-	// headers it lists (e.g. Proxy-Connection) must still be removed.
-	stripConnectionListedHeaders(dst, obj.Header)
-	dst.SetCanonical(header.S2b(header.Age), header.S2b(ageHeader(ComputeAge(obj, now))))
+
+	// Use the pre-built header for CopyTo. This replaces per-header
+	// SetCanonical calls (each doing initHeaderValueBytes + removeNewLines
+	// + setSpecialHeader + setNonSpecial) with a single copyArgs bulk copy.
+	fh := getOrComputeFastHeader(obj)
+	fh.CopyTo(dst)
+
+	// Set dynamic headers per request.
+	var ageBuf [16]byte
+	ageSeconds := int64(ComputeAge(obj, now).Seconds())
+	ageStr := strconv.AppendInt(ageBuf[:0], ageSeconds, 10)
+	dst.SetCanonical(header.S2b(header.Age), ageStr)
+
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+
 	switch result {
 	case cacheHit:
 		dst.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
@@ -1141,10 +1149,10 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	case cacheRevalidated:
 		dst.SetCanonical(header.S2b(header.XCache), header.S2b("REVALIDATED"))
 	}
-	stripNoCacheFields(dst, obj.CacheControl)
+
 	ctx.SetStatusCode(obj.StatusCode)
 	if string(ctx.Method()) != "HEAD" {
-		_, _ = ctx.Write(obj.Body) // #nosec G705 -- obj.Body is a cached origin response, not user input
+		ctx.Response.SetBodyRaw(obj.Body) // #nosec G705 -- obj.Body is an immutable cached origin response
 	}
 }
 
@@ -1479,9 +1487,7 @@ func (h *Handler) writeAndMaybeStore(
 	ri RequestInfo,
 ) {
 	dst := &ctx.Response.Header
-	res.Header.VisitAll(func(k, v string) {
-		dst.Add(k, v)
-	})
+	res.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	// A proxy SHOULD add an Age header to responses it forwards,
@@ -1682,11 +1688,10 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	// Write the captured response to the client.
 	dst := &ctx.Response.Header
 	for k, v := range resp.Header.All() {
-		ks := string(k)
-		if ks == header.XCache || ks == header.XCacheSource {
+		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
 			continue
 		}
-		dst.Add(ks, string(v))
+		dst.AddBytesKV(k, v)
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
@@ -1947,13 +1952,17 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defa
 	// Parse Cache-Control (may be multiple headers — merge first).
 	// CDN-Cache-Control overrides Cache-Control for shared caches (RFC 9211):
 	// use it as the authoritative directive source when present.
+	//
+	// Cache the ToMap() result — it was called 5x before, each allocating a
+	// new header.Map via FromFastHTTP.
+	resMap := res.Header.ToMap()
 	ccHeader := res.Header.GetAll(header.CacheControl)
 	var respCC Directives
-	if cdnCC, hasCDN := cdnCacheControl(res.Header.ToMap()); hasCDN {
+	if cdnCC, hasCDN := cdnCacheControl(resMap); hasCDN {
 		respCC = cdnCC
 		// Store CDN-Cache-Control string as the object's pre-parsed CC so
 		// Evaluate reads the CDN directives on every hit path.
-		ccHeader = mergeHeaderValues(res.Header.ToMap(), "CDN-Cache-Control")
+		ccHeader = mergeHeaderValues(resMap, "CDN-Cache-Control")
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}
@@ -1968,7 +1977,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defa
 		}
 	}
 	// computeTTL consolidates heuristic, fallback, negative, jitter, and Age subtraction.
-	ttl := computeTTL(res.Header.ToMap(), res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
+	ttl := computeTTL(resMap, res.StatusCode, respCC, negativeTTL, defaultTTL, jitterPct, originAge, now)
 	// Route-level override wins over the upstream's freshness directives.
 	// Applied after computeTTL so jitter is seeded from the override value,
 	// not the origin's max-age. The stored object retains the unaltered
@@ -1986,7 +1995,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defa
 	obj := &api.Object{
 		Key:          key,
 		StatusCode:   res.StatusCode,
-		Header:       res.Header.ToMap(),
+		Header:       resMap,
 		Body:         bodyCopy,
 		BodySize:     int64(len(bodyCopy)),
 		StoredAt:     now,
@@ -2031,7 +2040,16 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, negativeTTL, defa
 	}
 	obj.VaryKey = BuildVaryKey(res.Header.Get(header.Vary), ri.Header, policy)
 
-	obj.SurrogateKeys = parseSurrogateKeys(res.Header.ToMap())
+	obj.SurrogateKeys = parseSurrogateKeys(resMap)
+
+	// Pre-compute whether strip functions are needed on the hit path.
+	// Most objects have neither Connection headers nor no-cache fields,
+	// so the hit path can skip those calls entirely.
+	obj.HasConnectionList = obj.Header.Get(header.Connection) != ""
+	if ccHeader != "" {
+		cc := ParseCacheControl(ccHeader)
+		obj.HasNoCacheFields = cc.NoCacheFields != ""
+	}
 
 	// SerializedHead is not computed here — it is lazily computed on
 	// the first fast-path cache hit by getOrComputeSerializedHead.

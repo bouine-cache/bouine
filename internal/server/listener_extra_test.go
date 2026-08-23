@@ -6,12 +6,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/valyala/fasthttp"
 )
 
 // TestServeSingle_WithMaxConnections verifies the connection limit listener
@@ -29,11 +30,15 @@ func TestServeSingle_WithMaxConnections(t *testing.T) {
 	go func() { errCh <- srv.Serve(ctx) }()
 	waitForAddr(t, srv)
 
-	resp, err := http.Get("http://" + srv.Addr())
-	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	assert.Contains(t, string(body), "hello")
+	client := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI("http://" + srv.Addr())
+	require.NoError(t, client.Do(req, resp))
+	body := string(resp.Body())
+	assert.Contains(t, body, "hello")
 	cancel()
 	<-errCh
 }
@@ -140,11 +145,15 @@ func TestServe_ReusePortFallsBack(t *testing.T) {
 	go func() { errCh <- srv.Serve(ctx) }()
 	waitForAddr(t, srv)
 
-	resp, err := http.Get("http://" + srv.Addr())
-	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	assert.Contains(t, string(body), "hello")
+	client := &fasthttp.Client{}
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI("http://" + srv.Addr())
+	require.NoError(t, client.Do(req, resp))
+	body := string(resp.Body())
+	assert.Contains(t, body, "hello")
 	cancel()
 	<-errCh
 }

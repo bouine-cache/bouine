@@ -2,7 +2,6 @@ package header
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/textproto"
 	"sort"
 	"strings"
@@ -50,7 +49,7 @@ func canonicalHeaderKey(key string) string {
 //
 // Multi-value headers are joined with ", " at store time (RFC 9110 §5.2).
 //
-// The flat values design allows WriteTo to populate an http.Header
+// The flat values design allows WriteToFastHTTP to populate a
 // (map[string][]string) without any per-header allocations on the hit
 // path: each entry's value is a sub-slice of the shared values slice,
 // assigned by reference into the destination map.
@@ -77,42 +76,6 @@ func InternKey(key string) string {
 // InternValue deduplicates header value strings across all cached objects.
 func InternValue(s string) string {
 	return unique.Make(s).Value()
-}
-
-// FromHTTP converts an http.Header into a Map. The resulting Map
-// does not share any underlying storage with h. Multi-value headers are
-// joined with ", " per RFC 9110 §5.2.
-//
-// Entries are sorted by canonical key so that Range and the binary
-// codec produce deterministic output without per-call allocation.
-//
-//nolint:depguard // net/http required until cache handler fully migrated
-func FromHTTP(h http.Header) Map {
-	if len(h) == 0 {
-		return Map{}
-	}
-	hm := Map{
-		entries: make([]headerEntry, 0, len(h)),
-		values:  make([]string, 0, len(h)),
-	}
-	for k, vals := range h {
-		if len(vals) == 0 {
-			continue
-		}
-		var v string
-		if len(vals) == 1 {
-			v = vals[0]
-		} else {
-			v = strings.Join(vals, ", ")
-		}
-		hm.values = append(hm.values, InternValue(v))
-		hm.entries = append(hm.entries, headerEntry{
-			key: InternKey(k),
-			off: len(hm.values) - 1,
-		})
-	}
-	hm.SortEntries()
-	return hm
 }
 
 // FromFastHTTP converts a *fasthttp.ResponseHeader into a Map.
@@ -271,17 +234,6 @@ func (h Map) Clone() Map {
 	values := make([]string, len(h.values))
 	copy(values, h.values)
 	return Map{entries: entries, values: values}
-}
-
-// WriteTo copies all headers into dst, converting each to the
-// map[string][]string form expected by net/http.
-//
-//nolint:depguard // net/http required until cache handler fully migrated
-func (h Map) WriteTo(dst http.Header) {
-	for i := range h.entries {
-		off := h.entries[i].off
-		dst[h.entries[i].key] = h.values[off : off+1 : off+1]
-	}
 }
 
 // WriteToFastHTTP copies all headers into a *fasthttp.ResponseHeader.

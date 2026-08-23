@@ -121,11 +121,14 @@ func TestDecodeRejectsCorruptAndLegacyJSON(t *testing.T) {
 }
 func TestEncodeDecodeObject_RoundTrip(t *testing.T) {
 	t.Parallel()
+	hm := header.NewMap(2)
+	hm.Set("Content-Type", "text/html")
+	hm.Set("X-Custom", "val")
 	obj := &api.Object{
 		Key:                  api.Key{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
 		VaryKey:              "variant1",
 		StatusCode:           200,
-		Header:               header.FromHTTP(map[string][]string{"Content-Type": {"text/html"}, "X-Custom": {"val"}}),
+		Header:               hm,
 		Body:                 []byte("hello world"),
 		BodySize:             11,
 		StoredAt:             time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),

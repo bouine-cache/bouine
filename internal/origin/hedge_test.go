@@ -3,14 +3,13 @@ package origin
 import (
 	"context"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/transport"
 
@@ -20,14 +19,14 @@ import (
 func TestHedgeClient_FastResponse(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		calls.Add(1)
-		w.WriteHeader(200)
-	}))
+		ctx.SetStatusCode(200)
+	})
 	defer srv.Close()
 
 	fc := &fasthttp.Client{Dial: func(addr string) (net.Conn, error) {
-		return net.Dial("tcp", srv.Listener.Addr().String())
+		return net.Dial("tcp", srv.Addr)
 	}}
 	hc := &HedgeClient{
 		Inner:   transport.NewClient(fc),
@@ -47,17 +46,17 @@ func TestHedgeClient_FastResponse(t *testing.T) {
 func TestHedgeClient_SlowFiresHedge(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		n := calls.Add(1)
 		if n == 1 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		w.WriteHeader(200)
-	}))
+		ctx.SetStatusCode(200)
+	})
 	defer srv.Close()
 
 	fc := &fasthttp.Client{Dial: func(addr string) (net.Conn, error) {
-		return net.Dial("tcp", srv.Listener.Addr().String())
+		return net.Dial("tcp", srv.Addr)
 	}}
 	hc := &HedgeClient{
 		Inner:   transport.NewClient(fc),
@@ -82,15 +81,15 @@ func TestHedgeClient_NoGoroutineLeak(t *testing.T) {
 func TestHedgeClient_NoHedgeForPost(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		calls.Add(1)
 		time.Sleep(50 * time.Millisecond)
-		w.WriteHeader(200)
-	}))
+		ctx.SetStatusCode(200)
+	})
 	defer srv.Close()
 
 	fc := &fasthttp.Client{Dial: func(addr string) (net.Conn, error) {
-		return net.Dial("tcp", srv.Listener.Addr().String())
+		return net.Dial("tcp", srv.Addr)
 	}}
 	hc := &HedgeClient{
 		Inner:   transport.NewClient(fc),

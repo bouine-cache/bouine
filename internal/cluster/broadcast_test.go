@@ -3,9 +3,6 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +13,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
+	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 
@@ -26,24 +25,23 @@ import (
 func TestBroadcaster_BroadcastPurge(t *testing.T) {
 	t.Parallel()
 	var received []api.PurgeEvent
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/peer/purge" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Path()) != "/v1/peer/purge" {
+			t.Errorf("unexpected path: %s", string(ctx.Path()))
 		}
-		body, _ := io.ReadAll(r.Body)
-		evt, err := DecodePurgeHTTP(body)
+		evt, err := DecodePurgeHTTP(ctx.PostBody())
 		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
 		received = append(received, evt)
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -56,24 +54,23 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 func TestBroadcaster_BroadcastBan(t *testing.T) {
 	t.Parallel()
 	var received []api.BanEvent
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/peer/ban" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Path()) != "/v1/peer/ban" {
+			t.Errorf("unexpected path: %s", string(ctx.Path()))
 		}
-		body, _ := io.ReadAll(r.Body)
-		evt, err := DecodeBanHTTP(body)
+		evt, err := DecodeBanHTTP(ctx.PostBody())
 		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
 		received = append(received, evt)
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -89,20 +86,20 @@ func TestBroadcaster_BroadcastBan(t *testing.T) {
 func TestBroadcaster_SkipsSelf(t *testing.T) {
 	t.Parallel()
 	called := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		called++
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-0"] = &Member{Info: api.PeerInfo{
 		Name:      "node-0",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -114,16 +111,16 @@ func TestBroadcaster_SkipsSelf(t *testing.T) {
 func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
 	t.Parallel()
 	httpCalled := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(_ *fasthttp.RequestCtx) {
 		httpCalled++
-	}))
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "eventual"
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -135,16 +132,16 @@ func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
 func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 	t.Parallel()
 	httpCalled := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(_ *fasthttp.RequestCtx) {
 		httpCalled++
-	}))
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "strong"
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -156,16 +153,16 @@ func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 	t.Parallel()
 	httpCalled := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(_ *fasthttp.RequestCtx) {
 		httpCalled++
-	}))
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "eventual"
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -176,9 +173,9 @@ func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 
 func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+	})
 	defer srv.Close()
 
 	reg := prometheus.NewRegistry()
@@ -188,7 +185,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 	c.metrics = m
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -254,16 +251,16 @@ func minimalCluster(_ *testing.T, _ string) *Cluster {
 func TestBroadcastPurge_NotCancelledByParentContext(t *testing.T) {
 	t.Parallel()
 	var received atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		received.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -281,16 +278,16 @@ func TestBroadcastPurge_NotCancelledByParentContext(t *testing.T) {
 func TestBroadcastBan_NotCancelledByParentContext(t *testing.T) {
 	t.Parallel()
 	var received atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		received.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -308,15 +305,15 @@ func TestBroadcastBan_NotCancelledByParentContext(t *testing.T) {
 func TestBroadcaster_UsesHTTPWhenNoTLS(t *testing.T) {
 	t.Parallel()
 	var gotTLS bool
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		gotTLS = r.TLS != nil
-	}))
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		gotTLS = ctx.IsTLS()
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -330,15 +327,15 @@ func TestBroadcaster_UsesHTTPWhenNoTLS(t *testing.T) {
 func TestBroadcaster_UsesHTTPSWhenFetcherHasTLS(t *testing.T) {
 	t.Parallel()
 	var gotTLS bool
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		gotTLS = r.TLS != nil
-	}))
+	srv := fasthttptest.NewTLSServer(t, func(ctx *fasthttp.RequestCtx) {
+		gotTLS = ctx.IsTLS()
+	}, tlsutil.ServerConfig(t))
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	fc := &fasthttp.Client{
@@ -356,8 +353,6 @@ func TestBroadcaster_UsesHTTPSWhenFetcherHasTLS(t *testing.T) {
 		t.Fatal("expected HTTPS with TLS fetcher, got plaintext")
 	}
 
-	// Verify the broadcaster reuses the fetcher's client (connection
-	// pool sharing), not a standalone copy.
 	if b.client != fetcher.client {
 		t.Fatal("broadcaster must share the fetcher's transport, not create its own")
 	}
@@ -376,15 +371,15 @@ func TestBroadcaster_SendsAuthToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var authHeader string
-			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-				authHeader = r.Header.Get("Authorization")
-			}))
+			srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+				authHeader = string(ctx.Request.Header.Peek("Authorization"))
+			})
 			defer srv.Close()
 
 			c := minimalCluster(t, "node-0")
 			c.peers["node-1"] = &Member{Info: api.PeerInfo{
 				Name:      "node-1",
-				AdminAddr: srv.Listener.Addr().String(),
+				AdminAddr: srv.Addr,
 			}}
 
 			b := NewBroadcaster(c, nil, "secret-token")
@@ -400,24 +395,23 @@ func TestBroadcaster_SendsAuthToken(t *testing.T) {
 func TestBroadcaster_BroadcastRefresh(t *testing.T) {
 	t.Parallel()
 	var received []api.RefreshEvent
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/peer/refresh" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		if string(ctx.Path()) != "/v1/peer/refresh" {
+			t.Errorf("unexpected path: %s", string(ctx.Path()))
 		}
-		body, _ := io.ReadAll(r.Body)
-		evt, err := DecodeRefreshHTTP(body)
+		evt, err := DecodeRefreshHTTP(ctx.PostBody())
 		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
 		received = append(received, evt)
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -431,17 +425,17 @@ func TestBroadcaster_BroadcastRefresh(t *testing.T) {
 func TestBroadcastRefresh_Eventual_NoHTTPFanout(t *testing.T) {
 	t.Parallel()
 	called := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		called++
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "eventual"
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -453,17 +447,17 @@ func TestBroadcastRefresh_Eventual_NoHTTPFanout(t *testing.T) {
 func TestBroadcastRefresh_Strong_DoesHTTPFanout(t *testing.T) {
 	t.Parallel()
 	called := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		called++
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.cfg.Mode = "strong"
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -475,20 +469,20 @@ func TestBroadcastRefresh_Strong_DoesHTTPFanout(t *testing.T) {
 func TestBroadcastRefresh_SkipsSelf(t *testing.T) {
 	t.Parallel()
 	called := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		called++
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-0"] = &Member{Info: api.PeerInfo{
 		Name:      "node-0",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
@@ -500,22 +494,22 @@ func TestBroadcastRefresh_SkipsSelf(t *testing.T) {
 func TestBroadcastRefresh_NotCancelledByParentContext(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
 		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
+		ctx.SetStatusCode(fasthttp.StatusOK)
+	})
 	defer srv.Close()
 
 	c := minimalCluster(t, "node-0")
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
-		AdminAddr: srv.Listener.Addr().String(),
+		AdminAddr: srv.Addr,
 	}}
 
 	b := NewBroadcaster(c, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // pre-cancelled — broadcast must still reach peers
+	cancel()
 
 	b.BroadcastRefresh(ctx, testkey.Key(1))
 	require.Equal(t, int32(1), hits.Load(), "refresh broadcast must not be cancelled by parent context")

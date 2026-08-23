@@ -4,22 +4,24 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestActiveHealth_RecoversTarget(t *testing.T) {
 	t.Parallel()
-	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
+	healthy := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	})
 	defer healthy.Close()
 
-	p := pool(t, healthy.Listener.Addr().String())
+	p := pool(t, healthy.Addr)
 	p.targets[0].healthy.Store(false)
 	p.targets[0].probeErrors.Store(10)
 
@@ -43,12 +45,12 @@ func TestActiveHealth_RecoversTarget(t *testing.T) {
 
 func TestActiveHealth_EjectsUnhealthy(t *testing.T) {
 	t.Parallel()
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(500)
-	}))
+	bad := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(500)
+	})
 	defer bad.Close()
 
-	p := pool(t, bad.Listener.Addr().String())
+	p := pool(t, bad.Addr)
 
 	hc := NewActiveHealthChecker(p, ActiveHealthConfig{
 		Path:               "/",

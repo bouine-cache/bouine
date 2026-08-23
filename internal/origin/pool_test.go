@@ -3,18 +3,19 @@ package origin
 import (
 	"io"
 	"log/slog"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
+
 	"github.com/valyala/fasthttp"
 )
 
-func fivexxServer(t *testing.T) *httptest.Server {
+func fivexxServer(t *testing.T) *fasthttptest.Server {
 	t.Helper()
-	return httptest.NewServer(new5xxHandler())
+	return fasthttptest.NewServer(t, new5xxHandler())
 }
 
 func pool(t *testing.T, targets ...string) *Pool {
@@ -50,12 +51,12 @@ func serveHandler(t *testing.T, h fasthttp.RequestHandler, method, path string, 
 
 func TestPool_RoundRobin(t *testing.T) {
 	t.Parallel()
-	s1 := httptest.NewServer(newEchoHandler())
+	s1 := fasthttptest.NewServer(t, newEchoHandler())
 	defer s1.Close()
-	s2 := httptest.NewServer(newEchoHandler())
+	s2 := fasthttptest.NewServer(t, newEchoHandler())
 	defer s2.Close()
 
-	p := pool(t, s1.Listener.Addr().String(), s2.Listener.Addr().String())
+	p := pool(t, s1.Addr, s2.Addr)
 	h := p.FastHandler(0)
 
 	hits := map[string]int{}
@@ -70,12 +71,12 @@ func TestPool_RoundRobin(t *testing.T) {
 
 func TestPool_PassiveHealth(t *testing.T) {
 	t.Parallel()
-	bad := httptest.NewServer(new5xxHandler())
+	bad := fasthttptest.NewServer(t, new5xxHandler())
 	defer bad.Close()
-	good := httptest.NewServer(newEchoHandler())
+	good := fasthttptest.NewServer(t, newEchoHandler())
 	defer good.Close()
 
-	p := pool(t, bad.Listener.Addr().String())
+	p := pool(t, bad.Addr)
 	h := p.FastHandler(3)
 
 	for range 5 {
@@ -84,9 +85,9 @@ func TestPool_PassiveHealth(t *testing.T) {
 
 	require.Len(t, p.Healthy(), 0)
 
-	p.MarkHealthy(bad.Listener.Addr().String())
+	p.MarkHealthy(bad.Addr)
 
-	p2 := pool(t, bad.Listener.Addr().String(), good.Listener.Addr().String())
+	p2 := pool(t, bad.Addr, good.Addr)
 	h2 := p2.FastHandler(3)
 
 	for range 20 {
@@ -95,15 +96,15 @@ func TestPool_PassiveHealth(t *testing.T) {
 
 	healthy := p2.Healthy()
 	require.Len(t, healthy, 1)
-	require.Equal(t, good.Listener.Addr().String(), healthy[0])
+	require.Equal(t, good.Addr, healthy[0])
 }
 
 func TestPool_AllDown(t *testing.T) {
 	t.Parallel()
-	bad := httptest.NewServer(new5xxHandler())
+	bad := fasthttptest.NewServer(t, new5xxHandler())
 	defer bad.Close()
 
-	p := pool(t, bad.Listener.Addr().String())
+	p := pool(t, bad.Addr)
 	h := p.FastHandler(1)
 
 	serveHandler(t, h, "GET", "/", "")
@@ -114,17 +115,17 @@ func TestPool_AllDown(t *testing.T) {
 
 func TestPool_MarkHealthy(t *testing.T) {
 	t.Parallel()
-	bad := httptest.NewServer(new5xxHandler())
+	bad := fasthttptest.NewServer(t, new5xxHandler())
 	defer bad.Close()
 
-	p := pool(t, bad.Listener.Addr().String())
+	p := pool(t, bad.Addr)
 	h := p.FastHandler(1)
 
 	serveHandler(t, h, "GET", "/", "")
 
 	require.Len(t, p.Healthy(), 0)
 
-	p.MarkHealthy(bad.Listener.Addr().String())
+	p.MarkHealthy(bad.Addr)
 	require.Len(t, p.Healthy(), 1)
 }
 
@@ -138,10 +139,10 @@ func TestPool_NoTargetsError(t *testing.T) {
 
 func TestPool_ProxiesBody(t *testing.T) {
 	t.Parallel()
-	s := httptest.NewServer(newEchoHandler())
+	s := fasthttptest.NewServer(t, newEchoHandler())
 	defer s.Close()
 
-	p := pool(t, s.Listener.Addr().String())
+	p := pool(t, s.Addr)
 	h := p.FastHandler(0)
 
 	body := "hello bouine"

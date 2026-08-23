@@ -2,8 +2,6 @@ package dashboard
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -12,16 +10,18 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *httptest.Server {
+func mockPeerServer(t *testing.T, sum observability.MetricsSummary) *fasthttptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.ContentType, "application/json")
-		_ = json.NewEncoder(w).Encode(sum)
-	}))
+	return fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/json")
+		data, _ := json.Marshal(sum)
+		_, _ = ctx.Write(data)
+	})
 }
 
 func TestAggregator_CollectSingleNode(t *testing.T) {
@@ -55,7 +55,7 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 	srv := mockPeerServer(t, peerSum)
 	defer srv.Close()
 
-	peerAddr := srv.Listener.Addr().String()
+	peerAddr := srv.Addr
 
 	rings := observability.NewRings("self")
 	// Record two local requests. RecordRequest's third arg is duration in ms,
@@ -98,14 +98,14 @@ func TestAggregator_CollectWithPeer(t *testing.T) {
 
 func TestAggregator_PeerTimeout(t *testing.T) {
 	t.Parallel()
-	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
+	slowSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		time.Sleep(1 * time.Second)
+	})
 	defer slowSrv.Close()
 
 	rings := observability.NewRings("self")
 	peersFn := func() []api.PeerInfo {
-		return []api.PeerInfo{{Name: "slow", AdminAddr: slowSrv.Listener.Addr().String()}}
+		return []api.PeerInfo{{Name: "slow", AdminAddr: slowSrv.Addr}}
 	}
 	agg := NewAggregator(rings, peersFn, "self:9999", nil)
 
@@ -138,7 +138,7 @@ func TestAggregator_LastKnownOnStale(t *testing.T) {
 	liveSrv := mockPeerServer(t, peerSum)
 
 	peersFn := func() []api.PeerInfo {
-		return []api.PeerInfo{{Name: "flaky", AdminAddr: liveSrv.Listener.Addr().String()}}
+		return []api.PeerInfo{{Name: "flaky", AdminAddr: liveSrv.Addr}}
 	}
 	agg := NewAggregator(rings, peersFn, "self:9999", nil)
 	_, peers := agg.Collect(t.Context())

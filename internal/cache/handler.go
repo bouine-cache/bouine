@@ -994,7 +994,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 	if len(inm) > 0 {
 		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
 			if obj.ETag != "" {
-				ctx.Response.Header.Set(header.ETag, obj.ETag)
+				ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 			}
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
@@ -1011,7 +1011,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 		}
 		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
 			if obj.ETag != "" {
-				ctx.Response.Header.Set(header.ETag, obj.ETag)
+				ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 			}
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
@@ -1022,7 +1022,7 @@ func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, s
 			if d := obj.Header.Get(header.Date); d != "" {
 				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
 					if obj.ETag != "" {
-						ctx.Response.Header.Set(header.ETag, obj.ETag)
+						ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 					}
 					ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
 					ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
@@ -1386,8 +1386,8 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 			return
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
-		ctx.Response.Header.Set(header.XCache, "MISS")
-		ctx.Response.Header.Set(header.XCacheSource, string(api.SourceOrigin))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 		return
 	}
 	if res.StatusCode >= 500 {

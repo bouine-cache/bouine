@@ -27,8 +27,8 @@
 # Gate budgets (allocs/op, keyed by the suffix after BenchmarkGate_):
 #   Evaluate_Hit:                     0
 #   HotStore_Get_Hit:                 0
-#   Handler_CacheHit_ReusableWriter: 13  (6 are test harness)
-#   Handler_CacheMiss_Cacheable:     58
+#   Handler_CacheHit_ReusableWriter:  5  (4 are buildKey string conversions + 1 SetUserValue)
+#   Handler_CacheMiss_Cacheable:     123
 #   SIEVE_Access:                     0
 #   Cachaner_Access:                   0
 #   Cachaner_AccessSlowPath:           0
@@ -58,8 +58,8 @@ GATE_BENCH='^BenchmarkGate_'
 declare -A BUDGETS=(
     [Evaluate_Hit]=0
     [HotStore_Get_Hit]=0
-    [Handler_CacheHit_ReusableWriter]=13
-    [Handler_CacheMiss_Cacheable]=58
+    [Handler_CacheHit_ReusableWriter]=5
+    [Handler_CacheMiss_Cacheable]=123
     [SIEVE_Access]=0
     [Cachaner_Access]=0
     [Cachaner_AccessSlowPath]=0

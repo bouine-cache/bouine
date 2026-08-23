@@ -51,12 +51,13 @@ func (k Key) WithVary(varyHash uint64) Key {
 // suffix is XORed into the first 8 bytes (the high half) so
 // revalidation singleflight (suffix != 0) is distinguished from fetch
 // singleflight (suffix == 0) without hashing the full key. The result
-// is the 32-char hex of the (possibly suffix-mixed) key.
+// is the raw 16-byte key as a string — valid as a map key without hex
+// encoding, avoiding an allocation.
 func (k Key) SingleFlightKey(suffix uint64) string {
 	var x Key
 	binary.BigEndian.PutUint64(x[:8], binary.BigEndian.Uint64(k[:8])^suffix)
 	copy(x[8:], k[8:])
-	return hex.EncodeToString(x[:])
+	return string(x[:])
 }
 
 // IsZero reports whether the key is the all-zero value (the zero Key

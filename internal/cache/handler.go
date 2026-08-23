@@ -942,7 +942,7 @@ func (h *Handler) lookup(ctx *fasthttp.RequestCtx) (primaryKey api.Key, lookupKe
 	if obj == nil || obj.Header.Get(header.Vary) == "" {
 		return primaryKey, primaryKey, obj, src
 	}
-	vk := VariantKey(primaryKey, obj.Header.Get(header.Vary), headerFromCtx(ctx), h.policy)
+	vk := VariantKeyFast(primaryKey, obj.Header.Get(header.Vary), &ctx.Request.Header, h.policy)
 	if vk == primaryKey {
 		return primaryKey, primaryKey, obj, src
 	}
@@ -987,19 +987,52 @@ func (h *Handler) forwardToOwnerIfRemote(ctx context.Context, obj *api.Object) {
 // conditional headers match the cached object. Used for both hit and
 // revalidate paths. src is the storage-tier source (hot/warm).
 func (h *Handler) tryConditional304(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source) bool {
-	ri := requestInfoFromCtx(ctx)
-	if !ClientConditionalMatch(ri, obj) {
+	// Read conditional headers directly from ctx.Request.Header via Peek
+	// to avoid building a full RequestInfo (headerFromCtx allocates a
+	// header.Map with string() for every request header).
+	inm := ctx.Request.Header.Peek(header.IfNoneMatch)
+	if len(inm) > 0 {
+		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
+			if obj.ETag != "" {
+				ctx.Response.Header.Set(header.ETag, obj.ETag)
+			}
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return true
+		}
 		return false
 	}
-	if obj.ETag != "" {
-		ctx.Response.Header.Set(header.ETag, obj.ETag)
+	ims := ctx.Request.Header.Peek(header.IfModifiedSince)
+	if len(ims) > 0 {
+		imsTime := parseHTTPDate(string(ims))
+		if imsTime.IsZero() {
+			return false
+		}
+		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
+			if obj.ETag != "" {
+				ctx.Response.Header.Set(header.ETag, obj.ETag)
+			}
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+			ctx.SetStatusCode(fasthttp.StatusNotModified)
+			return true
+		}
+		if obj.LastModified.IsZero() {
+			if d := obj.Header.Get(header.Date); d != "" {
+				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
+					if obj.ETag != "" {
+						ctx.Response.Header.Set(header.ETag, obj.ETag)
+					}
+					ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
+					ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
+					ctx.SetStatusCode(fasthttp.StatusNotModified)
+					return true
+				}
+			}
+		}
 	}
-	// Direct map assignment avoids http.CanonicalMIMEHeaderKey alloc
-	// from .Set() on the hit path.
-	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
-	ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
-	ctx.SetStatusCode(fasthttp.StatusNotModified)
-	return true
+	return false
 }
 
 // handleBypass handles the BYPASS path (requests with no-store or
@@ -1067,7 +1100,7 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 	ctx.SetStatusCode(resp.StatusCode())
-	if string(ctx.Method()) != "HEAD" {
+	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		_, _ = ctx.Write(resp.Body())
 	}
 }
@@ -1161,7 +1194,7 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	}
 
 	ctx.SetStatusCode(obj.StatusCode)
-	if string(ctx.Method()) != "HEAD" {
+	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(obj.Body) // #nosec G705 -- obj.Body is an immutable cached origin response
 	}
 }
@@ -1310,9 +1343,9 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
-	revalReq.Header.SetMethod(string(ctx.Method()))
-	revalReq.SetRequestURI(string(ctx.RequestURI()))
-	revalReq.Header.SetHost(string(ctx.Host()))
+	revalReq.Header.SetMethodBytes(ctx.Method())
+	revalReq.SetRequestURIBytes(ctx.RequestURI())
+	revalReq.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		revalReq.Header.AddBytesKV(k, v)
 	}
@@ -2050,7 +2083,9 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	// the body; we do the same at store time.
 	if obj.Header.Get(header.ContentLength) == "" && obj.BodySize > 0 &&
 		obj.StatusCode != fasthttp.StatusNotModified {
-		obj.Header.Set(header.ContentLength, strconv.FormatInt(obj.BodySize, 10))
+		var clBuf [16]byte
+		clStr := strconv.AppendInt(clBuf[:0], obj.BodySize, 10)
+		obj.Header.Set(header.ContentLength, string(clStr))
 	}
 	if respCC.StaleWhileRevalidSet {
 		obj.StaleWhileRevalidate = respCC.StaleWhileRevalid

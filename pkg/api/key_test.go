@@ -68,7 +68,7 @@ func TestSingleFlightKeyDistinguishesSuffix(t *testing.T) {
 	base := k.SingleFlightKey(0)
 	reval := k.SingleFlightKey(1)
 	require.NotEqual(t, base, reval)
-	require.Len(t, base, 32)
+	require.Len(t, base, 16) // raw 16-byte key, not hex-encoded
 }
 
 func TestKeyJSONRoundTrip(t *testing.T) {

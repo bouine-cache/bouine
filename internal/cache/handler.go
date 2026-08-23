@@ -1028,17 +1028,23 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
 	defer span.End()
 
-	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
+	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
+	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
+	fetchCtx, cancel := context.WithCancel(fetchCtx)
 	defer cancel()
+	if h.fetchTimeout > 0 {
+		timer := time.AfterFunc(h.fetchTimeout, cancel)
+		defer timer.Stop()
+	}
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.SetMethod(string(ctx.Method()))
-	req.SetRequestURI(string(ctx.RequestURI()))
-	req.Header.SetHost(string(ctx.Host()))
+	req.Header.SetMethodBytes(ctx.Method())
+	req.SetRequestURIBytes(ctx.RequestURI())
+	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
@@ -1213,8 +1219,14 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	default:
 	}
 
-	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
+	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
+	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
+	fetchCtx, cancel := context.WithCancel(fetchCtx)
 	defer cancel()
+	if h.fetchTimeout > 0 {
+		timer := time.AfterFunc(h.fetchTimeout, cancel)
+		defer timer.Stop()
+	}
 
 	resp := fasthttp.AcquireResponse()
 
@@ -1659,17 +1671,23 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
 	defer span.End()
 
-	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
+	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
+	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
+	fetchCtx, cancel := context.WithCancel(fetchCtx)
 	defer cancel()
+	if h.fetchTimeout > 0 {
+		timer := time.AfterFunc(h.fetchTimeout, cancel)
+		defer timer.Stop()
+	}
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	req.Header.SetMethod(string(ctx.Method()))
-	req.SetRequestURI(string(ctx.RequestURI()))
-	req.Header.SetHost(string(ctx.Host()))
+	req.Header.SetMethodBytes(ctx.Method())
+	req.SetRequestURIBytes(ctx.RequestURI())
+	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
@@ -1903,8 +1921,14 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", fetchCtx.Err())}
 	}
 
-	fetchCtx, cancel := context.WithTimeout(fetchCtx, h.fetchTimeout)
+	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
+	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
+	fetchCtx, cancel := context.WithCancel(fetchCtx)
 	defer cancel()
+	if h.fetchTimeout > 0 {
+		timer := time.AfterFunc(h.fetchTimeout, cancel)
+		defer timer.Stop()
+	}
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
@@ -1967,7 +1991,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		respCC = cdnCC
 		// Store CDN-Cache-Control string as the object's pre-parsed CC so
 		// Evaluate reads the CDN directives on every hit path.
-		ccHeader = mergeHeaderValues(resMap, "CDN-Cache-Control")
+		ccHeader = mergeHeaderValues(resMap, header.CDNCacheControl)
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}

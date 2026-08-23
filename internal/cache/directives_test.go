@@ -15,7 +15,7 @@ func TestFreshnessLifetime(t *testing.T) {
 	t.Run("cdn_cc_max_age", func(t *testing.T) {
 		t.Parallel()
 		getHdr := func(key string) string {
-			if key == "CDN-Cache-Control" {
+			if key == header.CDNCacheControl {
 				return "max-age=120"
 			}
 			return ""
@@ -27,7 +27,7 @@ func TestFreshnessLifetime(t *testing.T) {
 	t.Run("cdn_cc_no_store", func(t *testing.T) {
 		t.Parallel()
 		getHdr := func(key string) string {
-			if key == "CDN-Cache-Control" {
+			if key == header.CDNCacheControl {
 				return "no-store"
 			}
 			return ""
@@ -39,7 +39,7 @@ func TestFreshnessLifetime(t *testing.T) {
 	t.Run("cdn_cc_no_ttl", func(t *testing.T) {
 		t.Parallel()
 		getHdr := func(key string) string {
-			if key == "CDN-Cache-Control" {
+			if key == header.CDNCacheControl {
 				return "public"
 			}
 			return ""
@@ -114,7 +114,7 @@ func TestFreshnessLifetimeH(t *testing.T) {
 	t.Run("cdn_cc_max_age", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "max-age=120")
+		h.Set(header.CDNCacheControl, "max-age=120")
 		d, ok := FreshnessLifetimeH(Directives{}, h)
 		require.True(t, ok)
 		assert.Equal(t, 120*time.Second, d)
@@ -122,7 +122,7 @@ func TestFreshnessLifetimeH(t *testing.T) {
 	t.Run("cdn_cc_no_store", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "no-store")
+		h.Set(header.CDNCacheControl, "no-store")
 		d, ok := FreshnessLifetimeH(Directives{}, h)
 		require.True(t, ok)
 		assert.Equal(t, time.Duration(0), d)

@@ -54,21 +54,21 @@ func TestCDNCacheControl(t *testing.T) {
 	t.Run("forbidden_char", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "max-age=60&foo")
+		h.Set(header.CDNCacheControl, "max-age=60&foo")
 		_, ok := cdnCacheControl(h)
 		require.False(t, ok)
 	})
 	t.Run("no_meaningful_directive", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "public")
+		h.Set(header.CDNCacheControl, "public")
 		_, ok := cdnCacheControl(h)
 		require.False(t, ok)
 	})
 	t.Run("valid_max_age", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "max-age=60")
+		h.Set(header.CDNCacheControl, "max-age=60")
 		d, ok := cdnCacheControl(h)
 		require.True(t, ok)
 		assert.True(t, d.MaxAgeSet)
@@ -76,7 +76,7 @@ func TestCDNCacheControl(t *testing.T) {
 	t.Run("valid_s_maxage", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "s-maxage=30")
+		h.Set(header.CDNCacheControl, "s-maxage=30")
 		d, ok := cdnCacheControl(h)
 		require.True(t, ok)
 		assert.True(t, d.SMaxAgeSet)
@@ -109,7 +109,7 @@ func TestNewParsedResponse(t *testing.T) {
 	t.Run("with_cdn_cc", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.Set("CDN-Cache-Control", "max-age=60")
+		h.Set(header.CDNCacheControl, "max-age=60")
 		p := newParsedResponse(200, header.Map{}, h)
 		assert.True(t, p.hasCDN)
 		assert.True(t, p.respCC.MaxAgeSet)

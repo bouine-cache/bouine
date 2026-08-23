@@ -2247,7 +2247,7 @@ func TestHandler_RefreshEnabled(t *testing.T) {
 func TestBuildObject_CDNCacheControl(t *testing.T) {
 	t.Parallel()
 	resHeader := header.Map{}
-	resHeader.Set("CDN-Cache-Control", "max-age=120")
+	resHeader.Set(header.CDNCacheControl, "max-age=120")
 	resHeader.Set(header.ContentType, "text/html")
 	res := fetchResult{
 		StatusCode: 200,

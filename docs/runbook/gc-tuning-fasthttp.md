@@ -7,6 +7,12 @@ allocation rate by 60-73%. The default `GOGC=100` triggers GC when the
 heap doubles. With fewer allocations, the heap grows slower between GC
 cycles, so GC already runs less frequently after the migration.
 
+Peer fetch pipelining (ADR-0039, Phase 6.4) further reduces memory by
+replacing 256 connections per peer (~12.8 MiB at 50 KiB/conn) with 8
+pipelined connections (~400 KiB per peer) — a ~97% reduction in
+per-peer connection buffer memory. This compounds with the allocation
+reduction to keep the live heap smaller at steady state.
+
 This guide documents how to tune GC further to minimize p99 jitter on
 the hit path.
 

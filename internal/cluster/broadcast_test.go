@@ -16,7 +16,6 @@ import (
 	"github.com/bouine-cache/bouine/internal/testutil/fasthttptest"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
-	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 
 	"github.com/valyala/fasthttp"
@@ -338,12 +337,9 @@ func TestBroadcaster_UsesHTTPSWhenFetcherHasTLS(t *testing.T) {
 		AdminAddr: srv.Addr,
 	}}
 
-	fc := &fasthttp.Client{
-		TLSConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // G402: test-only
-	}
 	fetcher := &PeerFetcher{
-		client: transport.NewClient(fc),
-		useTLS: true,
+		useTLS:    true,
+		tlsConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // G402: test-only
 	}
 
 	b := NewBroadcaster(c, fetcher)
@@ -351,10 +347,6 @@ func TestBroadcaster_UsesHTTPSWhenFetcherHasTLS(t *testing.T) {
 
 	if !gotTLS {
 		t.Fatal("expected HTTPS with TLS fetcher, got plaintext")
-	}
-
-	if b.client != fetcher.client {
-		t.Fatal("broadcaster must share the fetcher's transport, not create its own")
 	}
 }
 

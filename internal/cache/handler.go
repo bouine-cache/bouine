@@ -222,6 +222,11 @@ type Handler struct {
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
 	peerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
+	// inflightStreams tracks in-progress streaming fetches for
+	// singleflight dedup. The leader streams the origin response to
+	// its client while buffering for the cache; followers wait on
+	// the done channel and serve the buffered result.
+	inflightStreams sync.Map // map[api.Key]*inflightStream
 }
 
 // HandlerConfig configures a cache Handler.
@@ -1057,52 +1062,7 @@ func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
-	bgCtx := context.Background()
-	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
-	defer span.End()
-
-	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
-	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
-	fetchCtx, cancel := context.WithCancel(fetchCtx)
-	defer cancel()
-	if h.fetchTimeout > 0 {
-		timer := time.AfterFunc(h.fetchTimeout, cancel)
-		defer timer.Stop()
-	}
-
-	req := fasthttp.AcquireRequest()
-	defer fasthttp.ReleaseRequest(req)
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(resp)
-
-	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(ctx.RequestURI())
-	req.Header.SetHostBytes(ctx.Host())
-	for k, v := range ctx.Request.Header.All() {
-		req.Header.AddBytesKV(k, v)
-	}
-	tracing.InjectFastHTTP(fetchCtx, req)
-
-	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
-		tracing.RecordError(span, err)
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-		return
-	}
-
-	// Copy origin response headers, then overwrite bouine's attribution.
-	dst := &ctx.Response.Header
-	for k, v := range resp.Header.All() {
-		if bytes.Equal(k, []byte(header.XCache)) || bytes.Equal(k, []byte(header.XCacheSource)) {
-			continue
-		}
-		dst.AddBytesKV(k, v)
-	}
-	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
-	ctx.SetStatusCode(resp.StatusCode())
-	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
-		_, _ = ctx.Write(resp.Body())
-	}
+	h.streamBypass(ctx, "BYPASS")
 }
 
 // stripNoCacheFields removes headers named in a `no-cache="…"` field list
@@ -1297,15 +1257,27 @@ func releaseFetchResult(res fetchResult) {
 }
 
 func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, ri RequestInfo) {
-	res := h.collapsedFetch(ctx, lookupKey)
-	defer releaseFetchResult(res)
-	if res.Err != nil {
-		ctx.Error("upstream error", fasthttp.StatusBadGateway)
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
-		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	// Try to become the streaming leader for this key.
+	// If another request is already streaming, wait for its buffered result.
+	inflight := &inflightStream{done: make(chan struct{})}
+	if actual, loaded := h.inflightStreams.LoadOrStore(lookupKey, inflight); loaded {
+		// Follower: wait for the leader's buffered result.
+		existing := actual.(*inflightStream)
+		<-existing.done
+		res := existing.res
+		if res.Err != nil {
+			ctx.Error("upstream error", fasthttp.StatusBadGateway)
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			return
+		}
+		// Write the buffered result without re-storing (leader already stored).
+		h.writeBufferedResult(ctx, res, primaryKey, ri)
 		return
 	}
-	h.writeAndMaybeStore(ctx, res, primaryKey, ri)
+	// Leader: remove from inflight map when done.
+	defer h.inflightStreams.Delete(lookupKey)
+	h.streamMiss(ctx, primaryKey, ri, inflight)
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -1317,6 +1289,29 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 // Vary variants do not collapse into a single fetch.
 // primaryKey is the canonical key used for Vary variant storage in
 // writeAndMaybeStore.
+// writeBufferedResult writes a fetchResult to the client without
+// storing (the leader already stored it). Used by singleflight
+// followers in the streaming miss path.
+func (h *Handler) writeBufferedResult(
+	ctx *fasthttp.RequestCtx,
+	res fetchResult,
+	_ api.Key,
+	_ RequestInfo,
+) {
+	dst := &ctx.Response.Header
+	res.Header.CopyToFastHTTP(dst)
+	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
+	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+	resMap := res.Header.ToMap()
+	if resMap.Get(header.Age) == "" {
+		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
+	}
+	ctx.SetStatusCode(res.StatusCode)
+	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
+		ctx.Response.SetBodyRaw(res.Body)
+	}
+}
+
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)

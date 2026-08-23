@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/valyala/fasthttp"
 )
@@ -28,7 +29,10 @@ func NewServer(t testing.TB, handler fasthttp.RequestHandler) *Server {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &fasthttp.Server{Handler: handler}
+	srv := &fasthttp.Server{
+		Handler:     handler,
+		IdleTimeout: 50 * time.Millisecond,
+	}
 	go func() { _ = srv.Serve(ln) }()
 	return &Server{Addr: ln.Addr().String(), server: srv, ln: ln}
 }
@@ -43,7 +47,7 @@ func NewTLSServer(t testing.TB, handler fasthttp.RequestHandler, tlsCfg *tls.Con
 		t.Fatalf("listen: %v", err)
 	}
 	tlsLn := tls.NewListener(ln, tlsCfg)
-	srv := &fasthttp.Server{Handler: handler, TLSConfig: tlsCfg}
+	srv := &fasthttp.Server{Handler: handler, TLSConfig: tlsCfg, IdleTimeout: 50 * time.Millisecond}
 	go func() { _ = srv.Serve(tlsLn) }()
 	return &Server{Addr: ln.Addr().String(), server: srv, ln: ln}
 }

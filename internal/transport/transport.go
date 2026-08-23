@@ -65,6 +65,24 @@ func (c *Client) DoTimeout(req *fasthttp.Request, resp *fasthttp.Response, timeo
 	return c.Client.DoTimeout(req, resp, timeout)
 }
 
+// PipelineDo performs an HTTP request via a PipelineClient with
+// context-aware cancellation. It mirrors Client.Do but for
+// fasthttp.PipelineClient, which pipelines requests over a limited
+// set of connections per host.
+//
+// If ctx has a deadline, PipelineDo uses DoDeadline. If ctx has no
+// deadline, PipelineDo uses DoTimeout with a 60s default. If ctx is
+// already done, PipelineDo returns ctx.Err() immediately.
+func PipelineDo(ctx context.Context, c *fasthttp.PipelineClient, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		return c.DoDeadline(req, resp, deadline)
+	}
+	return c.DoTimeout(req, resp, defaultDoTimeout)
+}
+
 // Server wraps fasthttp.Server for inbound HTTP (data plane, admin,
 // cluster). It is a thin wrapper that exists to provide a consistent
 // type across the codebase and to add logging integration in future

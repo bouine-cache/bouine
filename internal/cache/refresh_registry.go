@@ -70,8 +70,8 @@ func (r *refreshRegistry) Register(key api.Key, ri RequestInfo, varyHeader strin
 
 	r.mu.Lock()
 	r.entries[key] = &refreshEntry{
-		url:           ri.URI,
-		method:        ri.Method,
+		url:           ri.GetURI(),
+		method:        ri.GetMethod(),
 		header:        saved,
 		persistCycles: persistCycles,
 	}

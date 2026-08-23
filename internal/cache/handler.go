@@ -67,12 +67,12 @@ func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 // ctx.RemoteAddr().String() allocates via net.JoinHostPort on every call.
 func requestInfoFromCtx(ctx *fasthttp.RequestCtx) RequestInfo {
 	return RequestInfo{
-		Method: string(ctx.Method()),
-		URI:    string(ctx.RequestURI()),
-		Host:   string(ctx.Host()),
-		Path:   string(ctx.Path()),
-		TLS:    ctx.IsTLS(),
-		Header: headerFromCtx(ctx),
+		TLS:         ctx.IsTLS(),
+		Header:      headerFromCtx(ctx),
+		methodBytes: ctx.Method(),
+		uriBytes:    ctx.RequestURI(),
+		hostBytes:   ctx.Host(),
+		pathBytes:   ctx.Path(),
 	}
 }
 
@@ -695,9 +695,9 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	}
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
-	req.Header.SetMethod(ri.Method)
-	req.SetRequestURI(ri.URI)
-	req.Header.SetHost(ri.Host)
+	req.Header.SetMethod(ri.GetMethod())
+	req.SetRequestURI(ri.GetURI())
+	req.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		req.Header.Set(k, v)
 		return true
@@ -1458,9 +1458,9 @@ func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, ri RequestInfo, 
 func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, key api.Key, stale *api.Object) {
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
-	revalReq.Header.SetMethod(ri.Method)
-	revalReq.SetRequestURI(ri.URI)
-	revalReq.Header.SetHost(ri.Host)
+	revalReq.Header.SetMethod(ri.GetMethod())
+	revalReq.SetRequestURI(ri.GetURI())
+	revalReq.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		revalReq.Header.Set(k, v)
 		return true
@@ -2035,8 +2035,8 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).
-	obj.Header.Set(header.XBouinePath, ri.Path)
-	obj.Header.Set(header.XBouineHost, ri.Host)
+	obj.Header.Set(header.XBouinePath, ri.GetPath())
+	obj.Header.Set(header.XBouineHost, ri.GetHost())
 	// Set-Cookie is always stripped from cached objects: joining multiple
 	// Set-Cookie values with ", " is non-conformant per RFC 9110 §5.2,
 	// and serving stale cookies to a different client is a security risk.

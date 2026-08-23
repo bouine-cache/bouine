@@ -45,7 +45,7 @@ type Disposition struct {
 
 // Evaluate runs the RFC 9111 state machine.
 func Evaluate(ri RequestInfo, obj *api.Object, now time.Time) Disposition {
-	if ri.Method != "GET" && ri.Method != "HEAD" {
+	if ri.GetMethod() != "GET" && ri.GetMethod() != "HEAD" {
 		return Disposition{Decision: Bypass}
 	}
 

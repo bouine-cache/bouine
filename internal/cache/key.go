@@ -57,22 +57,22 @@ func BuildKey(ri RequestInfo, policy *KeyPolicy) api.Key {
 	}
 
 	// Host (canonical).
-	n = appendCanonicalHost(buf[:], n, ri.Host)
+	n = appendCanonicalHost(buf[:], n, ri.GetHost())
 	n = appendByte(buf[:], n, '|')
 
 	// Path (canonical).
-	n = appendCanonicalPathString(buf[:], n, ri.Path)
+	n = appendCanonicalPathString(buf[:], n, ri.GetPath())
 	n = appendByte(buf[:], n, '|')
 
 	// Query (canonical sorted, with optional param stripping).
-	n = appendCanonicalQueryString(buf[:], n, extractRawQuery(ri.URI), policy)
+	n = appendCanonicalQueryString(buf[:], n, extractRawQuery(ri.GetURI()), policy)
 	n = appendByte(buf[:], n, '|')
 
 	// Method (HEAD→GET).
-	if ri.Method == "HEAD" {
+	if ri.GetMethod() == "HEAD" {
 		n += copyOverflow(buf[:], n, "GET")
 	} else {
-		n += copyOverflow(buf[:], n, ri.Method)
+		n += copyOverflow(buf[:], n, ri.GetMethod())
 	}
 
 	if n <= len(buf) {
@@ -95,19 +95,19 @@ func buildKeyHeap(ri RequestInfo, policy *KeyPolicy, n int) api.Key {
 		n += copyOverflow(heap, n, "http|")
 	}
 
-	n = appendCanonicalHost(heap, n, ri.Host)
+	n = appendCanonicalHost(heap, n, ri.GetHost())
 	n = appendByte(heap, n, '|')
 
-	n = appendCanonicalPathString(heap, n, ri.Path)
+	n = appendCanonicalPathString(heap, n, ri.GetPath())
 	n = appendByte(heap, n, '|')
 
-	n = appendCanonicalQueryString(heap, n, extractRawQuery(ri.URI), policy)
+	n = appendCanonicalQueryString(heap, n, extractRawQuery(ri.GetURI()), policy)
 	n = appendByte(heap, n, '|')
 
-	if ri.Method == "HEAD" {
+	if ri.GetMethod() == "HEAD" {
 		n += copyOverflow(heap, n, "GET")
 	} else {
-		n += copyOverflow(heap, n, ri.Method)
+		n += copyOverflow(heap, n, ri.GetMethod())
 	}
 
 	return NewKey(heap[:n])

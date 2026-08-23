@@ -274,6 +274,18 @@ func (h *Map) AppendEntry(key, value string) {
 	})
 }
 
+// AppendEntryCanonical adds a key-value pair without checking for
+// duplicates, skipping the canonicalization check on the key. Use when
+// the key is already known canonical (e.g. from InternKeyCanonical or
+// a package-level constant). The value is still interned.
+func (h *Map) AppendEntryCanonical(key, value string) {
+	h.values = append(h.values, InternValue(value))
+	h.entries = append(h.entries, headerEntry{
+		key: InternKeyCanonical(key),
+		off: len(h.values) - 1,
+	})
+}
+
 // SortEntries sorts the entries slice by canonical key in place.
 // Uses slices.SortStableFunc (generic, no reflection) instead of
 // sort.SliceStable (which allocates via reflectlite.Swapper).

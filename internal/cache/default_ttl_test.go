@@ -1,70 +1,62 @@
 package cache
 
 import (
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/valyala/fasthttp"
+
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/header"
 )
 
-// newDefaultTTLHandler builds a Handler with DefaultTTL set, backed by an
-// in-process hot store.
-func newDefaultTTLHandler(t *testing.T, upstream http.Handler, def time.Duration) *Handler {
+func newDefaultTTLHandler(t *testing.T, upstream fasthttp.RequestHandler, def time.Duration) *Handler {
 	t.Helper()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
 	return NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(upstream),
-		FastClient: &handlerFastClient{handler: upstream},
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
 		Store:      store,
 		DefaultTTL: def,
 	})
 }
 
-// TestIsCacheableWithDefault_NoFreshness verifies that a bare 200 with no
-// freshness headers becomes eligible once DefaultTTL > 0, while remaining
-// uncacheable under the strict RFC decision.
 func TestIsCacheableWithDefault_NoFreshness(t *testing.T) {
 	t.Parallel()
-	req := http.Header{}
-	resp := http.Header{} // no Cache-Control, Expires, or Last-Modified
+	req := header.Map{}
+	resp := header.Map{}
 
-	require.False(t, IsCacheable(200, header.FromHTTP(req), header.FromHTTP(resp)))
-	assert.True(t, IsCacheableWithDefault(200, header.FromHTTP(req), header.FromHTTP(resp), 0, 5*time.Second))
-	assert.False(t, IsCacheableWithDefault(200, header.FromHTTP(req), header.FromHTTP(resp), 0, 0))
+	require.False(t, IsCacheable(200, req, resp))
+	assert.True(t, IsCacheableWithDefault(200, req, resp, 0, 5*time.Second))
+	assert.False(t, IsCacheableWithDefault(200, req, resp, 0, 0))
 }
 
-// TestIsCacheableWithDefault_HonoursBlocks verifies blocking directives still
-// prevent storage even when DefaultTTL is configured.
 func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
 	t.Parallel()
 	const def = 5 * time.Second
 	cases := []struct {
 		name   string
 		status int
-		req    http.Header
-		resp   http.Header
+		req    header.Map
+		resp   header.Map
 		want   bool
 	}{
-		{"no-store", 200, http.Header{}, http.Header{header.CacheControl: {"no-store"}}, false},
-		{"private", 200, http.Header{}, http.Header{header.CacheControl: {"private"}}, false},
-		{"set-cookie", 200, http.Header{}, http.Header{header.SetCookie: {"sid=abc"}}, false},
-		{"vary-star", 200, http.Header{}, http.Header{header.Vary: {"*"}}, false},
-		{"pragma-no-cache", 200, http.Header{}, http.Header{header.Pragma: {"no-cache"}}, false},
-		{"authorization", 200, http.Header{header.Authorization: {"Bearer x"}}, http.Header{}, false},
-		{"5xx-excluded", 500, http.Header{}, http.Header{}, false},
-		{"plain-200-ok", 200, http.Header{}, http.Header{}, true},
+		{"no-store", 200, header.Map{}, headerMap(header.CacheControl, "no-store"), false},
+		{"private", 200, header.Map{}, headerMap(header.CacheControl, "private"), false},
+		{"set-cookie", 200, header.Map{}, headerMap(header.SetCookie, "sid=abc"), false},
+		{"vary-star", 200, header.Map{}, headerMap(header.Vary, "*"), false},
+		{"pragma-no-cache", 200, header.Map{}, headerMap(header.Pragma, "no-cache"), false},
+		{"authorization", 200, headerMap(header.Authorization, "Bearer x"), header.Map{}, false},
+		{"5xx-excluded", 500, header.Map{}, header.Map{}, false},
+		{"plain-200-ok", 200, header.Map{}, header.Map{}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := IsCacheableWithDefault(tc.status, header.FromHTTP(tc.req), header.FromHTTP(tc.resp), 0, def)
+			got := IsCacheableWithDefault(tc.status, tc.req, tc.resp, 0, def)
 			if got != tc.want {
 				t.Errorf("IsCacheableWithDefault(%d) = %v, want %v", tc.status, got, tc.want)
 			}
@@ -72,66 +64,53 @@ func TestIsCacheableWithDefault_HonoursBlocks(t *testing.T) {
 	}
 }
 
-// TestDefaultTTL_CachesHeaderlessResponse is the end-to-end regression test
-// for the reported bug: an origin that sends a bare 200 (no Cache-Control,
-// Expires, or Last-Modified) must be cached for DefaultTTL, so the second
-// request is a HIT rather than a perpetual MISS.
 func TestDefaultTTL_CachesHeaderlessResponse(t *testing.T) {
 	t.Parallel()
 	var hits int
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := func(ctx *fasthttp.RequestCtx) {
 		hits++
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 	h := newDefaultTTLHandler(t, upstream, 5*time.Second)
 
-	req := httptest.NewRequest("GET", "http://example.com/r", nil)
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, req)
-	got := rr1.Header().Get(header.XCache)
-	require.Equal(t, "MISS", got)
+	ctx1 := testCtx("GET", "http://example.com/r")
+	serveRequest(h, ctx1)
+	require.Equal(t, "MISS", respHeader(ctx1, header.XCache))
 
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/r", nil))
-	got = rr2.Header().Get(header.XCache)
-	require.Equal(t, "HIT", got)
+	ctx2 := testCtx("GET", "http://example.com/r")
+	serveRequest(h, ctx2)
+	require.Equal(t, "HIT", respHeader(ctx2, header.XCache))
 	assert.Equal(t, 1, hits)
 }
 
-// TestDefaultTTL_DisabledKeepsMISS guards the strict default: with no
-// DefaultTTL configured, a header-less response is never cached.
 func TestDefaultTTL_DisabledKeepsMISS(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 	h := newDefaultTTLHandler(t, upstream, 0)
 
 	for range 2 {
-		var rr = newRR()
-		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
-		got := rr.Header().Get(header.XCache)
-		require.Equal(t, "MISS", got)
+		ctx := testCtx("GET", "http://example.com/r")
+		serveRequest(h, ctx)
+		require.Equal(t, "MISS", respHeader(ctx, header.XCache))
 	}
 }
 
-// TestDefaultTTL_NoStoreStillBypasses verifies an explicit no-store response
-// is never cached even with DefaultTTL set.
 func TestDefaultTTL_NoStoreStillBypasses(t *testing.T) {
 	t.Parallel()
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "no-store")
-		w.WriteHeader(200)
-		_, _ = io.WriteString(w, "body")
-	})
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("body"))
+	}
 	h := newDefaultTTLHandler(t, upstream, 5*time.Second)
 
 	for range 2 {
-		var rr = newRR()
-		h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/r", nil))
-		got := rr.Header().Get(header.XCache)
-		require.Equal(t, "MISS", got)
+		ctx := testCtx("GET", "http://example.com/r")
+		serveRequest(h, ctx)
+		require.Equal(t, "MISS", respHeader(ctx, header.XCache))
 	}
 }

@@ -1,10 +1,7 @@
 package cache
 
 import (
-	"net/http/httptest"
 	"testing"
-
-	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,11 +11,11 @@ func TestBuildKey_KeepQueryParams(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, map[string]bool{"q": true, "page": true}, nil, nil, false, false)
 
-	r1 := httptest.NewRequest("GET", "http://example.com/search?q=test&page=1&utm_source=email&fbclid=xyz", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/search?q=test&page=1", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1&utm_source=email&fbclid=xyz")
+	r2ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy)
+	k1 := BuildKey(r1ri, policy)
+	k2 := BuildKey(r2ri, policy)
 
 	assert.Equal(t, k2, k1)
 }
@@ -27,11 +24,11 @@ func TestBuildKey_KeepQueryParams_EmptyValue(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, map[string]bool{"q": true}, nil, nil, true, false)
 
-	r1 := httptest.NewRequest("GET", "http://example.com/search?q=&other=1", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/search?q=", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/search?q=&other=1")
+	r2ri := requestInfoFromURL("GET", "http://example.com/search?q=")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy)
+	k1 := BuildKey(r1ri, policy)
+	k2 := BuildKey(r2ri, policy)
 
 	assert.Equal(t, k2, k1)
 }
@@ -40,11 +37,11 @@ func TestBuildKey_StripQueryPrefix(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_"}, false, false)
 
-	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&utm_source=email&utm_medium=social&utm_campaign=launch", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/page?a=1&utm_source=email&utm_medium=social&utm_campaign=launch")
+	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=1")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy)
+	k1 := BuildKey(r1ri, policy)
+	k2 := BuildKey(r2ri, policy)
 
 	assert.Equal(t, k2, k1)
 }
@@ -53,11 +50,11 @@ func TestBuildKey_StripEmptyParams(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, true, false)
 
-	r1 := httptest.NewRequest("GET", "http://example.com/page?foo=&bar=1", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/page?bar=1", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/page?foo=&bar=1")
+	r2ri := requestInfoFromURL("GET", "http://example.com/page?bar=1")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy)
+	k1 := BuildKey(r1ri, policy)
+	k2 := BuildKey(r2ri, policy)
 
 	assert.Equal(t, k2, k1)
 }
@@ -66,11 +63,11 @@ func TestBuildKey_DedupQueryParams(t *testing.T) {
 	t.Parallel()
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, true)
 
-	r1 := httptest.NewRequest("GET", "http://example.com/page?a=2&a=1", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/page?a=2", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/page?a=2&a=1")
+	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=2")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy)
+	k1 := BuildKey(r1ri, policy)
+	k2 := BuildKey(r2ri, policy)
 
 	assert.Equal(t, k2, k1)
 }
@@ -78,11 +75,11 @@ func TestBuildKey_DedupQueryParams(t *testing.T) {
 func TestBuildKey_Dedup_WithoutDedup(t *testing.T) {
 	t.Parallel()
 
-	r1 := httptest.NewRequest("GET", "http://example.com/page?a=2&a=1", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&a=2", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/page?a=2&a=1")
+	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=1&a=2")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil)
+	k1 := BuildKey(r1ri, nil)
+	k2 := BuildKey(r2ri, nil)
 
 	assert.Equal(t, k2, k1)
 }
@@ -97,11 +94,11 @@ func TestBuildKey_AllFeaturesCombined(t *testing.T) {
 		true, true,
 	)
 
-	r1 := httptest.NewRequest("GET", "http://example.com/search?q=test&page=1&q=duplicate&tracker=x&empty=", nil)
-	r2 := httptest.NewRequest("GET", "http://example.com/search?q=test&page=1", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1&q=duplicate&tracker=x&empty=")
+	r2ri := requestInfoFromURL("GET", "http://example.com/search?q=test&page=1")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), policy)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), policy)
+	k1 := BuildKey(r1ri, policy)
+	k2 := BuildKey(r2ri, policy)
 
 	assert.Equal(t, k2, k1)
 }
@@ -109,13 +106,13 @@ func TestBuildKey_AllFeaturesCombined(t *testing.T) {
 func TestBuildKey_NoPolicyParity(t *testing.T) {
 	t.Parallel()
 
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&c=3", nil)
-	k := BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+	rri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&c=3")
+	k := BuildKey(rri, nil)
 
 	require.NotEqual(t, 0, k)
 
-	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&c=3", nil)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil)
+	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&c=3")
+	k2 := BuildKey(r2ri, nil)
 
 	assert.Equal(t, k2, k)
 }
@@ -123,12 +120,12 @@ func TestBuildKey_NoPolicyParity(t *testing.T) {
 func TestBuildKey_FastSlowPathParity(t *testing.T) {
 	t.Parallel()
 
-	r1 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&a=3", nil)
+	r1ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&a=3")
 
-	k1 := BuildKey(requestInfoFromHTTP(r1.Method, r1.URL.String(), r1.Host, r1.URL.Path, r1.TLS != nil, header.FromHTTP(r1.Header)), nil)
+	k1 := BuildKey(r1ri, nil)
 
-	r2 := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&a=3", nil)
-	k2 := BuildKey(requestInfoFromHTTP(r2.Method, r2.URL.String(), r2.Host, r2.URL.Path, r2.TLS != nil, header.FromHTTP(r2.Header)), nil)
+	r2ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&a=3")
+	k2 := BuildKey(r2ri, nil)
 
 	assert.Equal(t, k2, k1)
 }

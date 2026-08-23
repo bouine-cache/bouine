@@ -2,13 +2,12 @@ package cache
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -19,109 +18,81 @@ func TestHandler_XCacheSource_MissThenHit(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
-	// MISS → origin
-	rr1 := newRR()
-	h.ServeHTTPCompat(rr1, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	got := rr1.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceOrigin), got)
+	ctx1 := testCtx("GET", "http://example.com/foo")
+	serveRequest(h, ctx1)
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx1, header.XCacheSource))
 
-	// HIT → hot
-	rr2 := newRR()
-	h.ServeHTTPCompat(rr2, httptest.NewRequest("GET", "http://example.com/foo", nil))
-	got = rr2.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceHot), got)
+	ctx2 := testCtx("GET", "http://example.com/foo")
+	serveRequest(h, ctx2)
+	require.Equal(t, string(api.SourceHot), respHeader(ctx2, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_Bypass(t *testing.T) {
 	t.Parallel()
-	// Request no-store → Bypass decision → X-Cache: BYPASS, source empty.
 	h := testHandler(t, origin200("body"))
 
-	req := httptest.NewRequest("GET", "http://example.com/bypass", nil)
-	req.Header.Set(header.CacheControl, "no-store")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, req)
-	got := rr.Header().Get(header.XCache)
-	require.Equal(t, "BYPASS", got)
-	// BYPASS → source should be empty (origin was contacted but not
-	// attributed to a cache tier).
-	got = rr.Header().Get(header.XCacheSource)
-	require.Equal(t, "", got)
+	ctx := testCtxWithHeader("GET", "http://example.com/bypass", header.CacheControl, "no-store")
+	serveRequest(h, ctx)
+	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
+	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_OnlyIfCached_504(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
-	// only-if-cached with no cached object → 504, source empty
-	req := httptest.NewRequest("GET", "http://example.com/missing", nil)
-	req.Header.Set(header.CacheControl, "only-if-cached")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, req)
+	ctx := testCtxWithHeader("GET", "http://example.com/missing", header.CacheControl, "only-if-cached")
+	serveRequest(h, ctx)
 
-	require.Equal(t, 504, rr.Code)
-	got := rr.Header().Get(header.XCache)
-	require.Equal(t, "MISS", got)
-	got = rr.Header().Get(header.XCacheSource)
-	require.Equal(t, "", got)
+	require.Equal(t, 504, respCode(ctx))
+	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_InvalidateAndProxy_Origin(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
-	// POST → invalidateAndProxy → source=origin
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("POST", "http://example.com/res", strings.NewReader("data")))
-	got := rr.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceOrigin), got)
+	ctx := testCtx("POST", "http://example.com/res")
+	serveRequest(h, ctx)
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_FetchAndStore_Error_Origin(t *testing.T) {
 	t.Parallel()
-	// An upstream that returns a body larger than maxResponseBytes triggers
-	// the truncation error path in doFetch (fetchResult.Err != nil), which
-	// makes fetchAndStore set X-Cache-Source: origin before the 502.
-	bigUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-		_, _ = w.Write(make([]byte, 10<<20)) // 10 MiB > 4 MiB default
-	})
+	bigUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write(make([]byte, 10<<20))
+	}
 	h := NewHandler(HandlerConfig{
-		Upstream:   wrapUpstream(bigUpstream),
-		FastClient: &handlerFastClient{handler: bigUpstream},
+		Upstream:   bigUpstream,
+		FastClient: &testFastClient{handler: bigUpstream},
 		Store: storage.NewHotStore(storage.HotConfig{
 			MaxBytes:  1 << 20,
 			NumShards: 2,
 		}),
 	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/fail", nil))
+	ctx := testCtx("GET", "http://example.com/fail")
+	serveRequest(h, ctx)
 
-	require.Equal(t, 502, rr.Code)
-	got := rr.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceOrigin), got)
+	require.Equal(t, 502, respCode(ctx))
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_Conditional304_Hot(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
-	// Populate cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/304", nil))
+	ctx := testCtx("GET", "http://example.com/304")
+	serveRequest(h, ctx)
 
-	// Conditional GET → 304, source=hot
-	req := httptest.NewRequest("GET", "http://example.com/304", nil)
-	req.Header.Set(header.IfNoneMatch, `"v1"`)
-	rr = newRR()
-	h.ServeHTTPCompat(rr, req)
+	ctx2 := testCtxWithHeader("GET", "http://example.com/304", header.IfNoneMatch, `"v1"`)
+	serveRequest(h, ctx2)
 
-	require.Equal(t, 304, rr.Code)
-	got := rr.Header().Get(header.XCache)
-	require.Equal(t, "HIT", got)
-	got = rr.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceHot), got)
+	require.Equal(t, 304, respCode(ctx2))
+	require.Equal(t, "HIT", respHeader(ctx2, header.XCache))
+	require.Equal(t, string(api.SourceHot), respHeader(ctx2, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_PeerHit(t *testing.T) {
@@ -131,16 +102,16 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 		NumShards: 2,
 	})
 	h := NewHandler(HandlerConfig{
-		Upstream: wrapUpstream(origin200("body")),
+		Upstream: origin200("body"),
 		Store:    store,
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
-			return api.PeerInfo{Addr: "peer:1"}, false // always remote
+			return api.PeerInfo{Addr: "peer:1"}, false
 		},
 		PeerFetch: func(_ context.Context, _ api.PeerInfo, key api.Key) (*api.Object, error) {
 			return &api.Object{
 				Key:        key,
 				StatusCode: 200,
-				Header:     header.FromHTTP(http.Header{header.CacheControl: {"max-age=60"}}),
+				Header:     headerMap(header.CacheControl, "max-age=60"),
 				Body:       []byte("peer-body"),
 				BodySize:   9,
 				TTL:        time.Minute,
@@ -149,110 +120,77 @@ func TestHandler_XCacheSource_PeerHit(t *testing.T) {
 		},
 	})
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/peer", nil))
+	ctx := testCtx("GET", "http://example.com/peer")
+	serveRequest(h, ctx)
 
-	got := rr.Header().Get(header.XCache)
-	require.Equal(t, "HIT", got)
-	got = rr.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourcePeer), got)
+	require.Equal(t, "HIT", respHeader(ctx, header.XCache))
+	require.Equal(t, string(api.SourcePeer), respHeader(ctx, header.XCacheSource))
 }
 
 func TestHandler_XCacheSource_Range_Hot(t *testing.T) {
 	t.Parallel()
-	h := testHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.CacheControl, "max-age=60")
-		w.Header().Set(header.ContentType, "text/plain")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("0123456789"))
-	}))
+	h := testHandler(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.ContentType, "text/plain")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("0123456789"))
+	})
 
-	// Populate cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/range", nil))
+	ctx := testCtx("GET", "http://example.com/range")
+	serveRequest(h, ctx)
 
-	// Range request → 206, source=hot
-	req := httptest.NewRequest("GET", "http://example.com/range", nil)
-	req.Header.Set(header.Range, "bytes=0-4")
-	rr = newRR()
-	h.ServeHTTPCompat(rr, req)
+	ctx2 := testCtxWithHeader("GET", "http://example.com/range", header.Range, "bytes=0-4")
+	serveRequest(h, ctx2)
 
-	require.Equal(t, 206, rr.Code)
-	got := rr.Header().Get(header.XCache)
-	require.Equal(t, "HIT", got)
-	got = rr.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceHot), got)
+	require.Equal(t, 206, respCode(ctx2))
+	require.Equal(t, "HIT", respHeader(ctx2, header.XCache))
+	require.Equal(t, string(api.SourceHot), respHeader(ctx2, header.XCacheSource))
 }
 
-// TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention verifies
-// that an origin-supplied X-Cache-Source header cannot override bouine's
-// source=origin attribution on the POST/PUT/DELETE proxy path.
 func TestHandler_XCacheSource_InvalidateAndProxy_SpoofPrevention(t *testing.T) {
 	t.Parallel()
-	// Upstream attempts to spoof the source label by sending
-	// X-Cache-Source: hot.
-	spoofUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCacheSource, "hot")
-		w.Header().Set(header.XCache, "HIT")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("ok"))
-	})
+	spoofUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.Response.Header.Set(header.XCache, "HIT")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("ok"))
+	}
 	h := testHandler(t, spoofUpstream)
 
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("POST", "http://example.com/spoof", strings.NewReader("data")))
+	ctx := testCtx("POST", "http://example.com/spoof")
+	serveRequest(h, ctx)
 
-	got := rr.Header().Get(header.XCacheSource)
-	require.Equal(t, string(api.SourceOrigin), got)
-	got = rr.Header().Get(header.XCache)
-	require.Equal(t, "MISS", got)
+	require.Equal(t, string(api.SourceOrigin), respHeader(ctx, header.XCacheSource))
+	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
 }
 
-// TestHandler_XCacheSource_Bypass_SpoofPrevention verifies that an
-// origin-supplied X-Cache-Source header is stripped on the BYPASS path,
-// preventing metric label spoofing when the upstream writes directly to
-// the client.
 func TestHandler_XCacheSource_Bypass_SpoofPrevention(t *testing.T) {
 	t.Parallel()
-	spoofUpstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set(header.XCacheSource, "hot")
-		w.Header().Set(header.XCache, "HIT")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("ok"))
-	})
+	spoofUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCacheSource, "hot")
+		ctx.Response.Header.Set(header.XCache, "HIT")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("ok"))
+	}
 	h := testHandler(t, spoofUpstream)
 
-	req := httptest.NewRequest("GET", "http://example.com/bypass-spoof", nil)
-	req.Header.Set(header.CacheControl, "no-store")
-	rr := newRR()
-	h.ServeHTTPCompat(rr, req)
+	ctx := testCtxWithHeader("GET", "http://example.com/bypass-spoof", header.CacheControl, "no-store")
+	serveRequest(h, ctx)
 
-	got := rr.Header().Get(header.XCache)
-	require.Equal(t, "BYPASS", got)
-	got = rr.Header().Get(header.XCacheSource)
-	require.Equal(t, "", got)
+	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
+	require.Equal(t, "", respHeader(ctx, header.XCacheSource))
 }
 
-// TestHandler_Conditional304_ETagCanonical verifies that the ETag header
-// on a 304 response is stored under the canonical key so that
-// http.Header.Get can find it.
 func TestHandler_Conditional304_ETagCanonical(t *testing.T) {
 	t.Parallel()
 	h := testHandler(t, origin200("body"))
 
-	// Populate cache.
-	rr := newRR()
-	h.ServeHTTPCompat(rr, httptest.NewRequest("GET", "http://example.com/etag304", nil))
+	ctx := testCtx("GET", "http://example.com/etag304")
+	serveRequest(h, ctx)
 
-	// Conditional GET → 304
-	req := httptest.NewRequest("GET", "http://example.com/etag304", nil)
-	req.Header.Set(header.IfNoneMatch, `"v1"`)
-	rr = newRR()
-	h.ServeHTTPCompat(rr, req)
+	ctx2 := testCtxWithHeader("GET", "http://example.com/etag304", header.IfNoneMatch, `"v1"`)
+	serveRequest(h, ctx2)
 
-	require.Equal(t, 304, rr.Code)
-	// Header.Get canonicalises the key — this will fail if the header
-	// was stored under a non-canonical key like "ETag" instead of "Etag".
-	got := rr.Header().Get(header.ETag)
-	require.Equal(t, `"v1"`, got)
+	require.Equal(t, 304, respCode(ctx2))
+	require.Equal(t, `"v1"`, respHeader(ctx2, header.ETag))
 }

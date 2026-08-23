@@ -1,58 +1,55 @@
 package cache
 
 import (
-	"net/http/httptest"
 	"testing"
-
-	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func BenchmarkBuildKey_NoPolicy(b *testing.B) {
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&c=3&d=4", nil)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&c=3&d=4")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), nil)
+		_ = BuildKey(ri, nil)
 	}
 }
 
 func BenchmarkBuildKey_KeepParams(b *testing.B) {
 	policy := NewKeyPolicy(nil, map[string]bool{"a": true, "b": true}, nil, nil, false, false)
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&d=4", nil)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&d=4")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
+		_ = BuildKey(ri, policy)
 	}
 }
 
 func BenchmarkBuildKey_StripPrefix(b *testing.B) {
 	policy := NewKeyPolicy(nil, nil, nil, []string{"utm_", "fbclid", "gclid", "_ga"}, false, false)
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&d=4", nil)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&d=4")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
+		_ = BuildKey(ri, policy)
 	}
 }
 
 func BenchmarkBuildKey_StripEmpty(b *testing.B) {
 	policy := NewKeyPolicy(nil, nil, nil, nil, true, false)
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=&c=3&d=4&e=", nil)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=&c=3&d=4&e=")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
+		_ = BuildKey(ri, policy)
 	}
 }
 
 func BenchmarkBuildKey_Dedup(b *testing.B) {
 	policy := NewKeyPolicy(nil, nil, nil, nil, false, true)
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&c=3&a=4&d=5", nil)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&c=3&a=4&d=5")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
+		_ = BuildKey(ri, policy)
 	}
 }
 
@@ -64,10 +61,10 @@ func BenchmarkBuildKey_AllPolicies(b *testing.B) {
 		[]string{"utm_", "fbclid"},
 		true, true,
 	)
-	r := httptest.NewRequest("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&a=4&tracker=x&d=", nil)
+	ri := requestInfoFromURL("GET", "http://example.com/page?a=1&b=2&utm_source=x&c=3&a=4&tracker=x&d=")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = BuildKey(requestInfoFromHTTP(r.Method, r.URL.String(), r.Host, r.URL.Path, r.TLS != nil, header.FromHTTP(r.Header)), policy)
+		_ = BuildKey(ri, policy)
 	}
 }

@@ -115,15 +115,15 @@ func FuzzVariantKey(f *testing.F) {
 	f.Add("Accept, Accept, Accept", `{"Accept": ["text/html"]}`)
 
 	f.Fuzz(func(t *testing.T, vary, headerJSON string) {
-		var hdrs http.Header
+		var hdrs header.Map
 		if err := json.Unmarshal([]byte(headerJSON), &hdrs); err != nil {
 			t.Skip()
 		}
 
 		primary := api.Key{}
 
-		k1 := VariantKey(primary, vary, header.FromHTTP(hdrs), nil)
-		k2 := VariantKey(primary, vary, header.FromHTTP(hdrs), nil)
+		k1 := VariantKey(primary, vary, hdrs, nil)
+		k2 := VariantKey(primary, vary, hdrs, nil)
 		if k1 != k2 {
 			t.Fatalf("VariantKey not deterministic for vary=%q headers=%q", vary, headerJSON)
 		}
@@ -138,7 +138,7 @@ func FuzzVariantKey(f *testing.F) {
 					fields[i], fields[j] = fields[j], fields[i]
 				}
 				reversed := strings.Join(fields, ",")
-				kRev := VariantKey(primary, reversed, header.FromHTTP(hdrs), nil)
+				kRev := VariantKey(primary, reversed, hdrs, nil)
 				if k1 != kRev {
 					t.Fatalf("VariantKey not commutative: %q vs %q -> %v != %v",
 						vary, reversed, k1, kRev)

@@ -115,6 +115,13 @@ const (
 	// caches along the request/response path.
 	CacheControl = "Cache-Control"
 
+	// CDNCacheControl — RFC 9211 §4. CDN-specific cache directives that
+	// override Cache-Control for shared caches. The canonical MIME form
+	// is "Cdn-Cache-Control" (first letter uppercase, rest lowercase per
+	// word); using this constant avoids canonicalize allocations on every
+	// header lookup.
+	CDNCacheControl = "Cdn-Cache-Control"
+
 	// Vary — RFC 9111 §4.1. Request header fields that a cache must
 	// include in the cache key to select the correct variant.
 	Vary = "Vary"

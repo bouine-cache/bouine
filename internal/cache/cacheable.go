@@ -30,7 +30,7 @@ func hasMeaningfulCDNCCDirective(d Directives) bool {
 // RFC 9211 §4 "must be able to parse the CDN-Cache-Control field as a
 // list of tokens"), the header is treated as absent.
 func cdnCacheControl(respHeader header.Map) (Directives, bool) {
-	v := mergeHeaderValues(respHeader, "CDN-Cache-Control")
+	v := mergeHeaderValues(respHeader, header.CDNCacheControl)
 	if v == "" {
 		return Directives{}, false
 	}

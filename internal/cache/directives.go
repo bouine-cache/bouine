@@ -223,7 +223,7 @@ func eqFold(a, b string) bool {
 // (RFC 9211).
 func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Duration, bool) {
 	// CDN-Cache-Control takes precedence when present.
-	if cdnCC := getHdr("CDN-Cache-Control"); cdnCC != "" {
+	if cdnCC := getHdr(header.CDNCacheControl); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
 		if cdnD.MaxAgeSet {
 			return cdnD.MaxAge, true
@@ -262,7 +262,7 @@ func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Dura
 // invalid per RFC 9110 §5.3) and read CDN-Cache-Control.
 func FreshnessLifetimeH(respCC Directives, h header.Map) (time.Duration, bool) {
 	// CDN-Cache-Control takes precedence when present (RFC 9211).
-	if cdnCC := mergeHeaderValues(h, "CDN-Cache-Control"); cdnCC != "" {
+	if cdnCC := mergeHeaderValues(h, header.CDNCacheControl); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
 		if cdnD.MaxAgeSet {
 			return cdnD.MaxAge, true

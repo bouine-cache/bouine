@@ -24,6 +24,11 @@ import (
 // (which would cancel in-flight requests across all goroutines).
 const broadcastTimeout = 2 * time.Second
 
+// broadcastMaxConnsPerHost caps persistent connections per peer for the
+// broadcast fan-out client. Broadcast sends one request per peer per
+// event; 52 is a generous ceiling for large clusters and burst purges.
+const broadcastMaxConnsPerHost = 52
+
 // countPeers returns the number of live peers excluding the local node.
 func countPeers(members []api.PeerInfo) int {
 	n := len(members)
@@ -66,7 +71,7 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		tlsCfg = fetcher.tlsConfig
 	}
 	fc := &fasthttp.Client{
-		MaxConnsPerHost:     256,
+		MaxConnsPerHost:     broadcastMaxConnsPerHost,
 		MaxIdleConnDuration: 90 * time.Second,
 		ReadTimeout:         broadcastTimeout,
 		WriteTimeout:        5 * time.Minute,

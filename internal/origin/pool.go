@@ -119,6 +119,12 @@ func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, 
 // when the operator has not configured connect.response_header_timeout.
 const DefaultResponseHeaderTimeout = 30 * time.Second
 
+// defaultOriginMaxConnsPerHost caps persistent connections per origin host
+// in the fasthttp.Client pool. At 3k req/s with ~2.6ms mean origin latency,
+// Little's Law requires ~8 concurrent connections; 52 gives ~6.5x headroom
+// for traffic growth while bounding FD usage.
+const defaultOriginMaxConnsPerHost = 52
+
 // PoolConfig configures a Pool at construction time.
 type PoolConfig struct {
 	Name    string
@@ -203,7 +209,7 @@ func (p *Pool) pick() *Target {
 func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	p.client = &fasthttp.Client{
-		MaxConnsPerHost:               64,
+		MaxConnsPerHost:               defaultOriginMaxConnsPerHost,
 		MaxIdleConnDuration:           90 * time.Second,
 		ReadTimeout:                   DefaultResponseHeaderTimeout,
 		WriteTimeout:                  5 * time.Minute,
@@ -294,7 +300,7 @@ func (p *Pool) FastClient() *PoolFastClient {
 	return &PoolFastClient{
 		pool: p,
 		client: &fasthttp.Client{
-			MaxConnsPerHost:     64,
+			MaxConnsPerHost:     defaultOriginMaxConnsPerHost,
 			MaxIdleConnDuration: 90 * time.Second,
 			ReadTimeout:         DefaultResponseHeaderTimeout,
 			WriteTimeout:        5 * time.Minute,

@@ -43,6 +43,28 @@ const maxServerConcurrency = 256 * 1024
 // shared import. If you change one, change the other.
 const safetyNetWriteTimeout = 5 * time.Minute
 
+// quickAckListener wraps a net.Listener so that each accepted connection
+// gets TCP_QUICKACK set immediately. This tells the kernel to ACK
+// received packets without delay, reducing perceived latency for
+// keep-alive clients. On non-Linux platforms SetTCPQuickAckConn is a
+// no-op, so the wrapper has zero overhead.
+type quickAckListener struct {
+	net.Listener
+}
+
+func newQuickAckListener(ln net.Listener) net.Listener {
+	return &quickAckListener{Listener: ln}
+}
+
+func (l *quickAckListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	platform.SetTCPQuickAckConn(conn)
+	return conn, nil
+}
+
 // setSocketOptions applies Linux-specific TCP optimizations to the
 // listener socket: TCP_FASTOPEN (data in SYN, -1 RTT) and
 // TCP_DEFER_ACCEPT (defer accept until data arrives). Both are no-ops
@@ -250,7 +272,7 @@ func (s *Listener) serveSingle(ctx context.Context) error {
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.inner.Serve(ln) }()
+	go func() { errCh <- s.inner.Serve(newQuickAckListener(ln)) }()
 
 	select {
 	case <-ctx.Done():
@@ -323,7 +345,7 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 	errCh := make(chan error, len(listeners))
 	for _, ln := range listeners {
 		go func(l net.Listener) {
-			if err := s.inner.Serve(l); err != nil && !errors.Is(err, fasthttp.ErrConnectionClosed) {
+			if err := s.inner.Serve(newQuickAckListener(l)); err != nil && !errors.Is(err, fasthttp.ErrConnectionClosed) {
 				errCh <- err
 			}
 		}(ln)

@@ -4,6 +4,7 @@ package platform
 
 import (
 	"errors"
+	"net"
 	"runtime"
 	"time"
 )
@@ -32,6 +33,9 @@ func SetReusePort(fd int) error { return errReusePortUnsupported }
 
 // SetTCPQuickAck is a no-op on non-Linux platforms.
 func SetTCPQuickAck(fd int) error { return nil }
+
+// SetTCPQuickAckConn is a no-op on non-Linux platforms.
+func SetTCPQuickAckConn(conn net.Conn) {}
 
 // MadviseSequential is a no-op on non-Linux platforms.
 func MadviseSequential(data []byte) error { return nil }

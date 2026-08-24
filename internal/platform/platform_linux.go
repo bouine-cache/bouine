@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,6 +60,22 @@ func SetReusePort(fd int) error {
 // acknowledgment of received packets.
 func SetTCPQuickAck(fd int) error {
 	return unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
+}
+
+// SetTCPQuickAckConn sets TCP_QUICKACK on a *net.TCPConn by extracting
+// the raw file descriptor via SyscallConn. This is the per-connection
+// equivalent of SetTCPQuickAck, called after accept on each new
+// connection. On non-Linux platforms the no-op stub in platform_other.go
+// makes this a zero-cost call.
+func SetTCPQuickAckConn(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+		if rc, err := tcp.SyscallConn(); err == nil {
+			_ = rc.Control(func(fd uintptr) {
+				_ = SetTCPQuickAck(int(fd))
+			})
+		}
+	}
 }
 
 // MadviseSequential hints the kernel that the mmap'd region will be

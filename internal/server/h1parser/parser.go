@@ -20,6 +20,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -104,6 +105,10 @@ func (p *Parser) Serve(conn net.Conn) error {
 		_ = tcp.SetKeepAlive(true)
 		_ = tcp.SetNoDelay(true) // Critical: prevents Nagle's 40ms delay on small hit responses.
 	}
+	// TCP_QUICKACK tells the kernel to ACK received packets immediately
+	// instead of delaying, reducing perceived latency for keep-alive
+	// clients. No-op on non-Linux.
+	platform.SetTCPQuickAckConn(conn)
 
 	var readBuf [readBufferSize]byte
 

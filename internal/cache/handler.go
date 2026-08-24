@@ -134,11 +134,13 @@ const defaultFetchConcurrency = 32
 // When exceeded, new cacheable misses fall back to the synchronous
 // buffered path (streamMissBuffered) instead of streaming, preventing
 // the SetBodyStreamWriter callback from pinning unbounded memory
-// during slow-origin events. The cap is set to half of
-// defaultFetchConcurrency × defaultMaxResponseBytes × 2 (the
-// worst-case streaming buffer footprint), giving 128 MiB — enough for
-// normal traffic but low enough to avoid OOMKill at 1 Gi pod limits.
-const defaultMaxStreamingBufferBytes int64 = 128 << 20 // 128 MiB
+// during slow-origin events. The cap tracks actual buffer bytes, not
+// a pre-reserved estimate. Each tee buffer is also individually capped
+// at maxResponseBytes (see teeStreamToClient), so the worst case is
+// concurrency × maxResponseBytes = 32 × 4 MiB = 128 MiB. The cap is
+// set to 64 MiB — half the theoretical worst case — so the global cap
+// triggers before all 32 slots fill with full buffers.
+const defaultMaxStreamingBufferBytes int64 = 64 << 20 // 64 MiB
 
 // defaultFetchTimeout bounds the total origin fetch time (header + body)
 // when the operator has not configured fetch_timeout. This replaces the

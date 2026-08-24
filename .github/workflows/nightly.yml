@@ -26,6 +26,7 @@ env:
   GO_VERSION: "1.27.0"
   CGO_ENABLED: "1"
   DOCKER_IMAGE: bouinecache/bouine
+  GOTOOLCHAIN: local
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -46,6 +47,8 @@ jobs:
           cache: false
       - name: golangci-lint (via prek)
         uses: j178/prek-action@v3.0.0
+        with:
+          cache: false
       - name: govulncheck
         run: make govulncheck
 
@@ -258,7 +261,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+          cache: false
       - name: Build (multi-arch)
         env:
           VERSION: nightly-${{ github.run_id }}
@@ -401,6 +404,7 @@ jobs:
 
       - name: Configure kubeconfig
         run: |
+          mkdir -p $HOME/.kube
           if [ -n "${{ secrets.STRESS_KUBECONFIG }}" ]; then
             echo "${{ secrets.STRESS_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
           else

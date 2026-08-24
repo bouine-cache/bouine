@@ -15,6 +15,7 @@ concurrency:
 env:
   GO_VERSION: "1.27.0"
   CGO_ENABLED: "1"
+  GOTOOLCHAIN: local
 
 jobs:
   dco:

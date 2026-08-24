@@ -509,6 +509,12 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 					rs.dpMetrics.WarmStoreSelfHeals.Add(float64(warmHealDelta))
 					lastWarmSelfHeals = s.WarmSelfHeals
 				}
+				// Aggregate streaming buffer bytes across all cache handlers.
+				var streamBufBytes int64
+				for _, h := range rs.handlers {
+					streamBufBytes += h.StreamingBufferBytes()
+				}
+				rs.dpMetrics.StreamingBufferBytes.Set(float64(streamBufBytes))
 				// WAL async metrics: poll dropped entries and last sync time.
 				if walStore, ok := rs.store.(interface {
 					WALStats() (int64, time.Time)

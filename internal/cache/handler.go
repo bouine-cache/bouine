@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"bytes"
@@ -128,6 +129,17 @@ const defaultMaxResponseBytes int64 = 4 << 20 // 4 MiB
 // at concurrency × 2 × maxResponseBytes = 32 × 2 × 4 MiB = 256 MiB.
 const defaultFetchConcurrency = 32
 
+// defaultMaxStreamingBufferBytes caps the total bytes held in live
+// streaming tee buffers across all concurrent streamMissTee calls.
+// When exceeded, new cacheable misses fall back to the synchronous
+// buffered path (streamMissBuffered) instead of streaming, preventing
+// the SetBodyStreamWriter callback from pinning unbounded memory
+// during slow-origin events. The cap is set to half of
+// defaultFetchConcurrency × defaultMaxResponseBytes × 2 (the
+// worst-case streaming buffer footprint), giving 128 MiB — enough for
+// normal traffic but low enough to avoid OOMKill at 1 Gi pod limits.
+const defaultMaxStreamingBufferBytes int64 = 128 << 20 // 128 MiB
+
 // defaultFetchTimeout bounds the total origin fetch time (header + body)
 // when the operator has not configured fetch_timeout. This replaces the
 // blanket WriteTimeout on the data plane, which was the wrong tool for a
@@ -179,7 +191,16 @@ type Handler struct {
 	maxResponseBytes int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
 	fetchSem         chan struct{} // bounds concurrent foreground origin fetches
 	fetchTimeout     time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
-	policy           *KeyPolicy    // pre-compiled cache key policy (query + Vary headers); nil = none
+	// streamingBufferBytes tracks the total bytes currently held in live
+	// streaming tee buffers across all concurrent streamMissTee calls.
+	// When it exceeds maxStreamingBufferBytes, new misses fall back to
+	// the synchronous buffered path to prevent OOMKill under slow-origin
+	// conditions (see status-0-investigation.md).
+	streamingBufferBytes atomic.Int64
+	// maxStreamingBufferBytes caps total streaming buffer memory. 0 means
+	// defaultMaxStreamingBufferBytes.
+	maxStreamingBufferBytes int64
+	policy                  *KeyPolicy // pre-compiled cache key policy (query + Vary headers); nil = none
 
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
@@ -212,6 +233,13 @@ type Handler struct {
 	variantSets map[api.Key]map[api.Key]struct{}
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
 	VaryCapHits interface{ Inc() }
+	// StreamingBufferBytesSet updates the streaming buffer bytes gauge;
+	// nil-safe. Polled by the engine's background metrics loop.
+	StreamingBufferBytesSet interface{ Set(float64) }
+	// StreamingFallbackInc is incremented when a cacheable miss falls
+	// back to synchronous buffering because the streaming memory cap
+	// was exceeded; nil-safe.
+	StreamingFallbackInc interface{ Inc() }
 	// ownerFn returns the peer that owns a cache key and whether the key
 	// is local to this node. Nil in single-node mode.
 	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
@@ -295,6 +323,14 @@ type HandlerConfig struct {
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
+	// StreamingBufferBytes, if non-nil, is set to the current total
+	// bytes held in live streaming tee buffers. Polled by the engine's
+	// background metrics loop.
+	StreamingBufferBytes interface{ Set(float64) }
+	// StreamingFallback, if non-nil, is incremented when a cacheable
+	// miss falls back to synchronous buffering because the streaming
+	// memory cap was exceeded.
+	StreamingFallback interface{ Inc() }
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
 	// the handler operates in single-node mode: every miss goes to origin.
@@ -370,39 +406,42 @@ type FastClient interface {
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{
-		upstream:             cfg.Upstream,
-		fastClient:           cfg.FastClient,
-		store:                cfg.Store,
-		logger:               cfg.Logger,
-		negativeTTL:          cfg.NegativeTTL,
-		jitterPercent:        cfg.JitterPercent,
-		stayinAlive:          cfg.StayinAlive,
-		defaultTTL:           cfg.DefaultTTL,
-		overrideTTL:          cfg.OverrideTTL,
-		defaultSWR:           cfg.DefaultSWR,
-		defaultSIE:           cfg.DefaultSIE,
-		variantSets:          make(map[api.Key]map[api.Key]struct{}),
-		VaryCapHits:          cfg.VaryCapHits,
-		ownerFn:              cfg.OwnerFn,
-		peerFetch:            cfg.PeerFetch,
-		peerPut:              cfg.PeerPut,
-		allowSetCookie:       cfg.AllowSetCookie,
-		maxObjectSize:        cfg.MaxObjectSize,
-		maxResponseBytes:     cfg.MaxResponseBytes,
-		policy:               cfg.Policy,
-		refreshBeforeExpiry:  cfg.RefreshBeforeExpiry,
-		refreshMargin:        cfg.RefreshMargin,
-		refreshTimeout:       cfg.RefreshTimeout,
-		refreshMinHits:       cfg.RefreshMinHits,
-		refreshPersistCycles: cfg.RefreshPersistCycles,
-		refreshMinScore:      cfg.RefreshMinScore,
-		refreshReactiveFirst: cfg.RefreshReactiveFirst,
-		routeName:            cfg.RouteName,
-		done:                 make(chan struct{}),
+		upstream:                cfg.Upstream,
+		fastClient:              cfg.FastClient,
+		store:                   cfg.Store,
+		logger:                  cfg.Logger,
+		negativeTTL:             cfg.NegativeTTL,
+		jitterPercent:           cfg.JitterPercent,
+		stayinAlive:             cfg.StayinAlive,
+		defaultTTL:              cfg.DefaultTTL,
+		overrideTTL:             cfg.OverrideTTL,
+		defaultSWR:              cfg.DefaultSWR,
+		defaultSIE:              cfg.DefaultSIE,
+		variantSets:             make(map[api.Key]map[api.Key]struct{}),
+		VaryCapHits:             cfg.VaryCapHits,
+		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
+		StreamingFallbackInc:    cfg.StreamingFallback,
+		ownerFn:                 cfg.OwnerFn,
+		peerFetch:               cfg.PeerFetch,
+		peerPut:                 cfg.PeerPut,
+		allowSetCookie:          cfg.AllowSetCookie,
+		maxObjectSize:           cfg.MaxObjectSize,
+		maxResponseBytes:        cfg.MaxResponseBytes,
+		policy:                  cfg.Policy,
+		refreshBeforeExpiry:     cfg.RefreshBeforeExpiry,
+		refreshMargin:           cfg.RefreshMargin,
+		refreshTimeout:          cfg.RefreshTimeout,
+		refreshMinHits:          cfg.RefreshMinHits,
+		refreshPersistCycles:    cfg.RefreshPersistCycles,
+		refreshMinScore:         cfg.RefreshMinScore,
+		refreshReactiveFirst:    cfg.RefreshReactiveFirst,
+		routeName:               cfg.RouteName,
+		done:                    make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
 	}
+	h.maxStreamingBufferBytes = defaultMaxStreamingBufferBytes
 	conc := cfg.MaxFetchConcurrency
 	if conc <= 0 {
 		conc = defaultFetchConcurrency
@@ -799,6 +838,14 @@ func (h *Handler) RouteName() string {
 // separate slice.
 func (h *Handler) RefreshEnabled() bool {
 	return h.refreshBeforeExpiry
+}
+
+// StreamingBufferBytes returns the total bytes currently held in live
+// streaming tee buffers across all concurrent streamMissTee calls.
+// The engine polls this to update the bouine_streaming_buffer_bytes
+// Prometheus gauge.
+func (h *Handler) StreamingBufferBytes() int64 {
+	return h.streamingBufferBytes.Load()
 }
 
 // StoreFromPeer stores an object received via the write-to-owner RPC and

@@ -95,6 +95,12 @@ type DataPlaneMetrics struct {
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
+	// Streaming miss buffer metrics. The gauge tracks total bytes held
+	// in live SetBodyStreamWriter tee buffers; the counter tracks how
+	// many cacheable misses fell back to the synchronous buffered path
+	// because the streaming memory cap was exceeded.
+	StreamingBufferBytes   prometheus.Gauge
+	StreamingFallbackTotal prometheus.Counter
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -159,6 +165,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 	})
 	m.initRefreshMetrics()
 	m.initWALMetrics()
+	m.initStreamingMetrics()
 	m.HTTPSmugglingRejected = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "bouine",
 		Name:      "http_smuggling_rejected_total",
@@ -175,8 +182,25 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
-		m.HTTPSmugglingRejected)
+		m.HTTPSmugglingRejected,
+		m.StreamingBufferBytes, m.StreamingFallbackTotal)
 	return m
+}
+
+// initStreamingMetrics creates the streaming buffer gauge and fallback
+// counter. Called by NewDataPlaneMetrics; extracted to keep
+// NewDataPlaneMetrics under the funlen limit.
+func (m *DataPlaneMetrics) initStreamingMetrics() {
+	m.StreamingBufferBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "streaming_buffer_bytes",
+		Help:      "Total bytes held in live streaming tee buffers across concurrent streamMissTee calls.",
+	})
+	m.StreamingFallbackTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "streaming_fallback_total",
+		Help:      "Cacheable misses that fell back to synchronous buffering because the streaming memory cap was exceeded.",
+	})
 }
 
 // SetNowFunc injects a custom time function for the metrics middleware.

@@ -233,6 +233,21 @@ func (h *Handler) streamMiss(
 		return
 	}
 
+	// Fall back to synchronous buffering when total streaming buffer
+	// memory exceeds the cap. The streaming path (SetBodyStreamWriter)
+	// defers buffer release to a post-handler callback, so under
+	// slow-origin conditions all fetchSem slots can fill with live
+	// buffers that GC cannot collect. The buffered path reads the body
+	// synchronously and releases it before the handler returns,
+	// preventing accumulation. See status-0-investigation.md.
+	if h.maxStreamingBufferBytes > 0 && h.streamingBufferBytes.Load() >= h.maxStreamingBufferBytes {
+		if h.StreamingFallbackInc != nil {
+			h.StreamingFallbackInc.Inc()
+		}
+		h.streamMissBuffered(ctx, sf, inflight, primaryKey, ri, resMap, isHEAD, cacheable)
+		return
+	}
+
 	h.streamMissTee(ctx, sf, inflight, primaryKey, ri, resMap)
 }
 
@@ -342,7 +357,16 @@ func (h *Handler) streamMissTee(
 	buf := streamBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 
+	// Reserve streaming buffer memory. We account for the worst-case
+	// buffer size (maxResponseBytes × 2 for bytes.Buffer over-allocation)
+	// upfront and release it when the tee callback completes. This
+	// prevents the total from growing unbounded under slow-origin
+	// conditions where all fetchSem slots fill with live buffers.
+	reserveBytes := h.maxResponseBytes * 2
+	h.streamingBufferBytes.Add(reserveBytes)
+
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer h.streamingBufferBytes.Add(-reserveBytes)
 		h.teeStreamToClient(w, bodyStream, buf, sf, inflight, finalStoreKey, primaryKey, ri, resMap)
 	})
 }

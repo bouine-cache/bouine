@@ -121,9 +121,9 @@ const DefaultResponseHeaderTimeout = 30 * time.Second
 
 // defaultOriginMaxConnsPerHost caps persistent connections per origin host
 // in the fasthttp.Client pool. At 3k req/s with ~2.6ms mean origin latency,
-// Little's Law requires ~8 concurrent connections; 52 gives ~6.5x headroom
+// Little's Law requires ~8 concurrent connections; 64 gives ~8x headroom
 // for traffic growth while bounding FD usage.
-const defaultOriginMaxConnsPerHost = 52
+const defaultOriginMaxConnsPerHost = 64
 
 // PoolConfig configures a Pool at construction time.
 type PoolConfig struct {

@@ -21,6 +21,14 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// maxServerConcurrency caps the number of concurrent connections the
+// fasthttp.Server will handle simultaneously. fasthttp's default is
+// 256 * 1024 (effectively unlimited), which allows unbounded goroutine
+// creation under load spikes — each connection spawns a goroutine with
+// its own stack and buffers. A high but finite cap prevents goroutine
+// exhaustion while leaving ample headroom for traffic bursts.
+const maxServerConcurrency = 256 * 1024
+
 // safetyNetWriteTimeout is a generous write deadline that acts as a
 // last-resort guard against slowloris-style clients that read 1 byte/s.
 // It is NOT the primary origin-fetch timeout — that is bounded per-fetch
@@ -123,6 +131,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		WriteTimeout:          safetyNetWriteTimeout,
 		IdleTimeout:           120 * time.Second,
 		ReadBufferSize:        64 << 10,
+		Concurrency:           maxServerConcurrency,
 		NoDefaultServerHeader: true,
 		NoDefaultContentType:  true,
 		NoDefaultDate:         true,
@@ -159,6 +168,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		WriteTimeout:          safetyNetWriteTimeout,
 		IdleTimeout:           120 * time.Second,
 		ReadBufferSize:        64 << 10,
+		Concurrency:           maxServerConcurrency,
 		NoDefaultServerHeader: true,
 		NoDefaultContentType:  true,
 		NoDefaultDate:         true,

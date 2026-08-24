@@ -26,8 +26,8 @@ const broadcastTimeout = 2 * time.Second
 
 // broadcastMaxConnsPerHost caps persistent connections per peer for the
 // broadcast fan-out client. Broadcast sends one request per peer per
-// event; 52 is a generous ceiling for large clusters and burst purges.
-const broadcastMaxConnsPerHost = 52
+// event; 128 is a generous ceiling for large clusters and burst purges.
+const broadcastMaxConnsPerHost = 128
 
 // countPeers returns the number of live peers excluding the local node.
 func countPeers(members []api.PeerInfo) int {

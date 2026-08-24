@@ -239,7 +239,15 @@ func (h *Handler) streamMiss(
 	// slow-origin conditions all fetchSem slots can fill with live
 	// buffers that GC cannot collect. The buffered path reads the body
 	// synchronously and releases it before the handler returns,
-	// preventing accumulation. See status-0-investigation.md.
+	// preventing accumulation.
+	//
+	// The global cap (streamingBufferBytes) tracks the actual sum of
+	// live tee buffer sizes, not a pre-reserved estimate. Inside each
+	// tee callback, the per-stream buffer is also capped at
+	// maxResponseBytes: once it reaches the cap, the rest of the origin
+	// body is streamed directly to the client without further caching.
+	// This bounds per-stream memory regardless of how fast the origin
+	// sends vs how slowly the client reads.
 	if h.maxStreamingBufferBytes > 0 && h.streamingBufferBytes.Load() >= h.maxStreamingBufferBytes {
 		if h.StreamingFallbackInc != nil {
 			h.StreamingFallbackInc.Inc()
@@ -357,16 +365,7 @@ func (h *Handler) streamMissTee(
 	buf := streamBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 
-	// Reserve streaming buffer memory. We account for the worst-case
-	// buffer size (maxResponseBytes × 2 for bytes.Buffer over-allocation)
-	// upfront and release it when the tee callback completes. This
-	// prevents the total from growing unbounded under slow-origin
-	// conditions where all fetchSem slots fill with live buffers.
-	reserveBytes := h.maxResponseBytes * 2
-	h.streamingBufferBytes.Add(reserveBytes)
-
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
-		defer h.streamingBufferBytes.Add(-reserveBytes)
 		h.teeStreamToClient(w, bodyStream, buf, sf, inflight, finalStoreKey, primaryKey, ri, resMap)
 	})
 }
@@ -385,13 +384,38 @@ func (h *Handler) teeStreamToClient(
 	resMap header.Map,
 ) {
 	var totalBytes int64
+	cacheExceeded := false
+
+	// Per-stream buffer cap: once the tee buffer reaches maxResponseBytes,
+	// stop buffering for cache and stream the rest directly to the client.
+	// This bounds the bytes.Buffer's memory regardless of how fast the
+	// origin sends vs how slowly the client reads.
+	bufCap := h.maxResponseBytes
+	if bufCap <= 0 {
+		bufCap = defaultMaxResponseBytes
+	}
+
+	// Track actual buffer bytes for the global cap. Account after each
+	// read so the global counter reflects real memory, not a pre-reserved
+	// estimate.
+	h.streamingBufferBytes.Add(int64(buf.Len()))
+	defer h.streamingBufferBytes.Add(-int64(buf.Len()))
+
 	tee := io.TeeReader(bodyStream, buf)
 	chunk := make([]byte, 32*1024)
-	cacheExceeded := false
 	for {
 		n, readErr := tee.Read(chunk)
 		if n > 0 {
 			totalBytes += int64(n)
+
+			// If the buffer has reached the per-stream cap, stop
+			// buffering for cache and stream the rest to the client.
+			if int64(buf.Len()) >= bufCap {
+				cacheExceeded = true
+				_, _ = w.Write(chunk[:n])
+				_, _ = io.Copy(w, bodyStream)
+				break
+			}
 			if h.maxResponseBytes > 0 && totalBytes > h.maxResponseBytes {
 				cacheExceeded = true
 				_, _ = w.Write(chunk[:n])

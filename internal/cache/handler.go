@@ -2097,18 +2097,17 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		ttl = JitterTTL(overrideTTL, jitterPct)
 	}
 
-	// Copy body — res.Body may reference a pooled fasthttp.Response
-	// buffer that is released after writeAndMaybeStore. The cached
-	// object must own its body independently.
-	bodyCopy := make([]byte, len(res.Body))
-	copy(bodyCopy, res.Body)
-
+	// res.Body is already an independently-owned copy: all production
+	// callers (doFetchFast, streamMissBuffered, streamMissTee,
+	// doFetchBg, maybeStorePostResponseFast) copy the body from the
+	// pooled fasthttp.Response buffer before calling buildObject.
+	// Using res.Body directly avoids a redundant make+copy per miss.
 	obj := &api.Object{
 		Key:                key,
 		StatusCode:         res.StatusCode,
 		Header:             resMap,
-		Body:               bodyCopy,
-		BodySize:           int64(len(bodyCopy)),
+		Body:               res.Body,
+		BodySize:           int64(len(res.Body)),
 		StoredAt:           now,
 		TTL:                ttl,
 		ETag:               resMap.Get(header.ETag),
@@ -2163,10 +2162,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	// Most objects have neither Connection headers nor no-cache fields,
 	// so the hit path can skip those calls entirely.
 	obj.HasConnectionList = obj.Header.Get(header.Connection) != ""
-	if ccHeader != "" {
-		cc := ParseCacheControl(ccHeader)
-		obj.HasNoCacheFields = cc.NoCacheFields != ""
-	}
+	obj.HasNoCacheFields = respCC.NoCacheFields != ""
 
 	// SerializedHead is not computed here — it is lazily computed on
 	// the first fast-path cache hit by getOrComputeSerializedHead.

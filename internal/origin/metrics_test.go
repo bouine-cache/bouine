@@ -2,7 +2,6 @@ package origin
 
 import (
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -145,5 +144,5 @@ func TestMetrics_ObserveDurationZero(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := RegisterMetrics(reg)
 	m.observeRequestDuration("p", "t", "200", 0)
-	time.Sleep(time.Millisecond) // ensure test doesn't race with gather
+	_ = reg // reg is used to ensure metrics are initialized
 }

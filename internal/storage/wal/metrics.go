@@ -20,9 +20,11 @@ type Metrics struct {
 	// WriteQueueDepth is the current number of entries buffered in the
 	// async sync channel. Near syncChSize means drops are imminent.
 	WriteQueueDepth prometheus.Gauge
-	// WriteTotal counts all WAL write attempts (Enqueue + EnqueueBatch
-	// entries). Combined with WALDroppedEntries, computes the drop rate:
-	// 1 - (drops / writes).
+	// WriteTotal counts async WAL write attempts (Enqueue + EnqueueBatch
+	// entries sent to the async channel). Sync-mode writes (when syncCh
+	// is nil) are not counted — in sync mode there are no drops, so the
+	// drop rate is always 0. Combined with WALDroppedEntries, computes
+	// the drop rate: 1 - (drops / writes).
 	WriteTotal prometheus.Counter
 }
 

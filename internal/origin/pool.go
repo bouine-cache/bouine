@@ -120,6 +120,27 @@ func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, 
 // when the operator has not configured connect.response_header_timeout.
 const DefaultResponseHeaderTimeout = 30 * time.Second
 
+// classifyConnError maps an origin connection error to a short reason
+// string for the bouine_origin_connection_errors_total metric label.
+// Uses string matching on the error message to avoid platform-specific
+// syscall imports. Returns "timeout", "refused", "reset", or "error".
+func classifyConnError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if strings.Contains(s, "timeout") || strings.Contains(s, "deadline") {
+		return "timeout"
+	}
+	if strings.Contains(s, "refused") {
+		return "refused"
+	}
+	if strings.Contains(s, "reset") || strings.Contains(s, "broken pipe") {
+		return "reset"
+	}
+	return "error"
+}
+
 // defaultOriginMaxConnsPerHost caps persistent connections per origin host
 // in the fasthttp.Client pool. At 3k req/s with ~2.6ms mean origin latency,
 // Little's Law requires ~8 concurrent connections; 64 gives ~8x headroom
@@ -266,10 +287,11 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 				"target", t.addr,
 				"uri", uri,
 				"error", err)
-			t.metrics.incConnectionError(p.Name, t.addr, "timeout")
-			t.metrics.observeRequestDuration(p.Name, t.addr, "timeout", time.Since(originStart).Seconds())
+			connErrReason := classifyConnError(err)
+			t.metrics.incConnectionError(p.Name, t.addr, connErrReason)
+			t.metrics.observeRequestDuration(p.Name, t.addr, connErrReason, time.Since(originStart).Seconds())
 			if conc5xx > 0 {
-				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error", "timeout")
+				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error", connErrReason)
 			}
 			ctx.Error("upstream error", fasthttp.StatusBadGateway)
 			return
@@ -349,8 +371,9 @@ func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 	tc := transport.NewClient(c.client)
 	err := tc.Do(ctx, req, resp)
 	if err != nil {
-		t.metrics.incConnectionError(c.pool.Name, t.addr, "error")
-		t.metrics.observeRequestDuration(c.pool.Name, t.addr, "error", time.Since(originStart).Seconds())
+		connErrReason := classifyConnError(err)
+		t.metrics.incConnectionError(c.pool.Name, t.addr, connErrReason)
+		t.metrics.observeRequestDuration(c.pool.Name, t.addr, connErrReason, time.Since(originStart).Seconds())
 		return err
 	}
 	t.metrics.observeRequestDuration(c.pool.Name, t.addr, strconv.Itoa(resp.StatusCode()), time.Since(originStart).Seconds())

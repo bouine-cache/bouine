@@ -136,8 +136,8 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
-// IncOverBudget increments the over-budget rejection counter and sets
-// the over-budget bytes gauge. Safe to call on a nil Metrics.
+// IncOverBudget increments the over-budget rejection counter. Safe to
+// call on a nil Metrics.
 func (m *Metrics) IncOverBudget() {
 	if m == nil || m.OverBudget == nil {
 		return

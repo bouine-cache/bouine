@@ -10,19 +10,70 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+- Streaming origin responses with pipelined peer fetch.
+- TCP_QUICKACK on accepted connections for reduced latency.
+
 ### Changed
-- Toolchain bumped from Go 1.26.6 to Go 1.27.0 (Dockerfile, CI workflows,
-  go.mod, documentation).
+- Migrated the entire data plane from `net/http` to `fasthttp`, achieving
+  zero-allocation hit path and exceeding pre-migration benchmark performance.
+- Pre-computed cache-control flags, status lines, Date formatting, and Vary
+  values for hot-path performance.
+- Byte-based `ParseCacheControl`, `isInvalidating`, and header comparisons
+  throughout the cache pipeline.
+- `SetCanonical` for ETag and X-Cache headers on revalidate/error paths.
+- Lazy string conversion in `RequestInfo` via `[]byte` fields.
 
 ### Removed
-- **Breaking (SDK):** removed `bouineapi.Client.Reload` and `ReloadResult`.
-  The admin `POST /v1/config/reload` endpoint, the dashboard "Reload config"
-  button, and the dashboard `ReloadFn` field are gone. bouine does not support
-  live config reload — configuration is sourced from version control and
-  applied by rolling the pod (standard Kubernetes rolling update). The
-  `pkg/bouineapi` SDK surface moves to v2.0; callers using `Client.Reload`
-  must remove that call. Config and TLS changes take effect on the next pod
-  restart.
+- HTTP/2 support (fasthttp is HTTP/1.1 only).
+- `net/http` from all production code and test files.
+
+### Fixed
+- Capped per-stream tee buffer to prevent OOMKill under slow-origin, derived
+  cap from `GOMEMLIMIT`.
+- Capped `fasthttp.Server.Concurrency` and reduced `MaxConnsPerHost` to curb
+  FD exhaustion and status-0 errors.
+- Resolved all fasthttp migration conformance regressions.
+- Used short `MaxIdleConnDuration` in peer fetch tests to prevent goroutine
+  leak timeout.
+- Resolved test deadlock and suppressed CodeQL request-forgery false positives.
+
+## [0.4.3] - 2026-08-21
+
+### Added
+- Nightly build workflow.
+- Cloudflare invalidation propagation with batching, circuit breaker, DLQ,
+  and multi-token support.
+
+### Changed
+- Go toolchain bumped from 1.26.6 to 1.27.0.
+- Per-segment incremental compaction to eliminate periodic latency spikes.
+
+### Fixed
+- Cluster: gated storage behind ownership in strong mode for 3x fleet cache.
+- Bench: skipped unit tests in bench-gate to prevent CI timeout.
+- Multiple nightly workflow failures resolved across lint, fuzz, docker, and
+  stress-test jobs.
+
+## [0.4.2] - 2026-08-19
+
+### Added
+- Cachaner eviction policy with pluggable selection.
+- Evictor package for pluggable eviction policies.
+
+### Changed
+- Dashboard accessibility improvements for WCAG 2.0 AA.
+- DCO sign-off required on all commits.
+- Docker build context trimmed via `.dockerignore`.
+- CI jobs (conformance, bench, integration) run in parallel.
+
+### Fixed
+- Stayin-alive log levels corrected, WAL snapshot written on close.
+- Build env vars, debug stripping, and reproducible builds.
+- Decoupled hot SIEVE eviction from warm tombstone.
+- Poll `/readyz` instead of `/healthz` in integration driver.
+- Test coverage increased across dashboard, server, admin, `pkg/api`, and
+  `cmd` packages.
 
 ## [0.4.1] - 2026-08-17
 
@@ -519,7 +570,9 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.3
+[0.4.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.2
 [0.4.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.1
 [0.4.0]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.0
 [0.3.7]: https://github.com/bouine-cache/bouine/releases/tag/v0.3.7

@@ -132,3 +132,61 @@ func TestDataPlaneMetrics_LookupRouteMetrics_Found(t *testing.T) {
 	assert.True(t, ok)
 	assert.Nil(t, rm)
 }
+
+func TestDataPlaneMetrics_TierMaxBytesGauges(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.HotStoreMaxBytes.Set(float64(1 << 30))  // 1 GiB
+	m.WarmStoreMaxBytes.Set(float64(2 << 30)) // 2 GiB
+
+	mfs, err := reg.Gather()
+	assert.NoError(t, err)
+	names := make(map[string]float64)
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "bouine_hot_store_max_bytes":
+			names["hot"] = mf.GetMetric()[0].GetGauge().GetValue()
+		case "bouine_warm_store_max_bytes":
+			names["warm"] = mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	assert.Equal(t, float64(1<<30), names["hot"])
+	assert.Equal(t, float64(2<<30), names["warm"])
+}
+
+func TestDataPlaneMetrics_MetricsResetTotal(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.MetricsResetTotal.Inc()
+
+	mfs, err := reg.Gather()
+	assert.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "bouine_metrics_reset_total" {
+			assert.Equal(t, float64(1), mf.GetMetric()[0].GetCounter().GetValue())
+			return
+		}
+	}
+	assert.Fail(t, "metrics_reset_total not found")
+}
+
+func TestDataPlaneMetrics_RequestQueueDepth(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.RequestQueueDepth.Inc()
+	m.RequestQueueDepth.Inc()
+	m.RequestQueueDepth.Dec()
+
+	mfs, err := reg.Gather()
+	assert.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() == "bouine_request_queue_depth" {
+			assert.Equal(t, float64(1), mf.GetMetric()[0].GetGauge().GetValue())
+			return
+		}
+	}
+	assert.Fail(t, "request_queue_depth not found")
+}

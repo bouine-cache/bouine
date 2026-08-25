@@ -122,6 +122,9 @@ type PeerFetcher struct {
 	pMisses   prometheus.Counter
 	pHopLimit prometheus.Counter
 	pDuration prometheus.Observer
+	// pActive is the current number of in-flight peer-fetch RPCs.
+	// Detects queue buildup before timeouts appear.
+	pActive prometheus.Gauge
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -206,7 +209,11 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
 		})
 		f.pDuration = dur
-		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur)
+		f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "bouine", Name: "peer_fetch_active",
+			Help: "Current number of in-flight peer-fetch RPCs. A rising value indicates queue buildup before timeouts appear.",
+		})
+		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive)
 	}
 	return f
 }
@@ -298,6 +305,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	select {
 	case f.fetchSem <- struct{}{}:
 		defer func() { <-f.fetchSem }()
+		if f.pActive != nil {
+			f.pActive.Inc()
+			defer f.pActive.Dec()
+		}
 	case <-ctx.Done():
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ctx.Err())
 	}

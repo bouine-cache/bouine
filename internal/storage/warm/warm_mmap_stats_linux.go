@@ -9,15 +9,18 @@ import (
 )
 
 // MmapStats returns the total resident bytes from all mmap'd warm-tier
-// segments and the number of newly-faulted pages since the last call.
-// The page fault count is computed as the increase in total resident
-// pages between consecutive calls — a proxy for major page faults on
-// warm-tier mmap reads. Returns zeros when no segments are mmap'd.
+// segments and the net increase in resident pages since the last call.
+// The delta is computed as the increase in total resident pages between
+// consecutive calls — this measures net new residency, NOT page faults.
+// It is only non-zero when the working set is growing; steady-state
+// eviction+refault cycles will not be visible. Returns zeros when no
+// segments are mmap'd.
 //
 // The caller should poll this periodically (e.g., every 15s) and update
-// the bouine_warm_mmap_resident_bytes gauge and bouine_warm_mmap_page_faults_total
-// counter. Safe to call concurrently with Get (holds s.mu.RLock).
-func (s *Store) MmapStats() (residentBytes int64, newPageFaults int64) {
+// the bouine_warm_mmap_resident_bytes gauge and
+// bouine_warm_mmap_resident_page_delta_total counter. Safe to call
+// concurrently with Get (holds s.mu.RLock).
+func (s *Store) MmapStats() (residentBytes int64, residentPageDelta int64) {
 	pageSize := int64(unix.Getpagesize())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -43,7 +46,7 @@ func (s *Store) MmapStats() (residentBytes int64, newPageFaults int64) {
 	residentBytes = totalResidentPages * pageSize
 	prev := s.mmapPrevResidentPages.Swap(totalResidentPages)
 	if totalResidentPages > prev {
-		newPageFaults = totalResidentPages - prev
+		residentPageDelta = totalResidentPages - prev
 	}
-	return residentBytes, newPageFaults
+	return residentBytes, residentPageDelta
 }

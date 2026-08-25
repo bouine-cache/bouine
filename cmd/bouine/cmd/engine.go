@@ -556,10 +556,10 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 					if warmStore, ok := rs.store.(interface {
 						MmapStats() (int64, int64)
 					}); ok {
-						residentBytes, pageFaults := warmStore.MmapStats()
+						residentBytes, residentPageDelta := warmStore.MmapStats()
 						rs.warmMetrics.SetMmapResidentBytes(residentBytes)
-						if pageFaults > 0 {
-							rs.warmMetrics.IncMmapPageFaults(pageFaults)
+						if residentPageDelta > 0 {
+							rs.warmMetrics.IncMmapResidentPageDelta(residentPageDelta)
 						}
 					}
 				}

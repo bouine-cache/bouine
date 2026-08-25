@@ -89,7 +89,7 @@ func TestMetrics_WriteTotalIncremented(t *testing.T) {
 
 func TestLog_QueueDepth(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.wal")
-	l, err := OpenAsync(path, 50*time.Millisecond)
+	l, err := OpenAsync(path, time.Hour)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 
@@ -98,10 +98,10 @@ func TestLog_QueueDepth(t *testing.T) {
 	for range 10 {
 		require.NoError(t, l.Enqueue(Entry{Op: opPut}))
 	}
-	// Queue depth should be > 0 (entries are buffered before the sync
-	// loop drains them).
+	// With a 1-hour sync interval the drain loop cannot have ticked,
+	// so all 10 entries must still be buffered in the channel.
 	depth := l.QueueDepth()
-	require.GreaterOrEqual(t, depth, 0, "queue depth should not panic")
+	require.Equal(t, 10, depth, "queue depth should reflect all buffered entries")
 }
 
 func TestLog_SetMetrics_NilSafe(t *testing.T) {

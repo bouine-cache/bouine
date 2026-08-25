@@ -2142,6 +2142,7 @@ func (s *Store) Compact() error {
 	if written == 0 {
 		_ = tmp.Close()
 		_ = os.RemoveAll(compactDir)
+		s.metrics.ObserveCompactionDuration(time.Since(compactStart))
 		return nil
 	}
 	if err := tmp.Close(); err != nil {

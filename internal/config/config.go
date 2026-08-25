@@ -459,12 +459,12 @@ type RouteCache struct {
 	// the fetch is aborted and the client receives a 502. Unlike
 	// MaxObjectSize (which only skips storage), this prevents the
 	// allocation that causes OOM. Zero (default) applies a safe
-	// built-in limit (64 MiB).
+	// built-in limit (4 MiB).
 	MaxResponseBytes ByteSize `yaml:"max_response_bytes,omitempty" json:"max_response_bytes,omitempty"`
 	// MaxFetchConcurrency bounds the number of concurrent foreground
 	// origin fetches per route. When the limit is reached, additional
 	// fetches block until a slot frees or the request context is
-	// cancelled. Zero (default) applies a safe built-in limit (64).
+	// cancelled. Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the client receives
@@ -479,6 +479,15 @@ type RouteCache struct {
 	// during the origin fetch, aborting the client connection before the
 	// fetch completes.
 	FetchTimeout time.Duration `yaml:"fetch_timeout,omitempty" json:"fetch_timeout,omitempty"`
+	// MaxStreamingBufferBytes caps the total bytes held in live streaming
+	// tee buffers across all concurrent miss-fetches on this route. When
+	// exceeded, new cacheable misses fall back to synchronous buffering
+	// (streamMissBuffered) instead of streaming, preventing the
+	// SetBodyStreamWriter callback from pinning unbounded memory during
+	// slow-origin events. Zero (default) derives from GOMEMLIMIT at startup
+	// (7% of the runtime soft memory limit); if GOMEMLIMIT is also unset,
+	// a safe built-in default (64 MiB) is used.
+	MaxStreamingBufferBytes ByteSize `yaml:"max_streaming_buffer_bytes,omitempty" json:"max_streaming_buffer_bytes,omitempty"`
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin, performing
 	// a conditional fetch (If-None-Match / If-Modified-Since). On 304,

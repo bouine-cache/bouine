@@ -129,17 +129,15 @@ const defaultMaxResponseBytes int64 = 4 << 20 // 4 MiB
 // at concurrency × 2 × maxResponseBytes = 32 × 2 × 4 MiB = 256 MiB.
 const defaultFetchConcurrency = 32
 
-// defaultMaxStreamingBufferBytes caps the total bytes held in live
-// streaming tee buffers across all concurrent streamMissTee calls.
-// When exceeded, new cacheable misses fall back to the synchronous
-// buffered path (streamMissBuffered) instead of streaming, preventing
-// the SetBodyStreamWriter callback from pinning unbounded memory
-// during slow-origin events. The cap tracks actual buffer bytes, not
-// a pre-reserved estimate. Each tee buffer is also individually capped
-// at maxResponseBytes (see teeStreamToClient), so the worst case is
-// concurrency × maxResponseBytes = 32 × 4 MiB = 128 MiB. The cap is
-// set to 64 MiB — half the theoretical worst case — so the global cap
-// triggers before all 32 slots fill with full buffers.
+// defaultMaxStreamingBufferBytes is the fallback cap on total bytes held
+// in live streaming tee buffers when neither max_streaming_buffer_bytes
+// nor GOMEMLIMIT is configured. When GOMEMLIMIT is set, the cap is
+// derived at startup as 5% of the runtime soft memory limit (see
+// config.ResolveMaxStreamingBufferBytes). Each tee buffer is also
+// individually capped at maxResponseBytes (see teeStreamToClient), so
+// the worst case is concurrency × maxResponseBytes = 32 × 4 MiB =
+// 128 MiB. This fallback (64 MiB) is half the theoretical worst case,
+// so the global cap triggers before all 32 slots fill with full buffers.
 const defaultMaxStreamingBufferBytes int64 = 64 << 20 // 64 MiB
 
 // defaultFetchTimeout bounds the total origin fetch time (header + body)
@@ -318,6 +316,11 @@ type HandlerConfig struct {
 	// a fetchResult error. Zero (default) applies a safe built-in limit
 	// (60s). This replaces the blanket WriteTimeout on the data plane.
 	FetchTimeout time.Duration
+	// MaxStreamingBufferBytes caps the total bytes held in live streaming
+	// tee buffers across all concurrent miss-fetches on this route. When
+	// exceeded, new cacheable misses fall back to synchronous buffering.
+	// Zero (default) applies a safe built-in limit (64 MiB).
+	MaxStreamingBufferBytes int64
 	// Policy, when non-nil, encodes cache key construction rules for this
 	// route: query param stripping/keeping/prefix/empty/dedup and Vary
 	// header exclusion. nil means no query/header policy.
@@ -443,7 +446,10 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if h.maxResponseBytes == 0 {
 		h.maxResponseBytes = defaultMaxResponseBytes
 	}
-	h.maxStreamingBufferBytes = defaultMaxStreamingBufferBytes
+	h.maxStreamingBufferBytes = cfg.MaxStreamingBufferBytes
+	if h.maxStreamingBufferBytes <= 0 {
+		h.maxStreamingBufferBytes = defaultMaxStreamingBufferBytes
+	}
 	conc := cfg.MaxFetchConcurrency
 	if conc <= 0 {
 		conc = defaultFetchConcurrency

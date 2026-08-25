@@ -757,7 +757,7 @@ func TestBuildStore_HotOnly(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -771,7 +771,7 @@ func TestBuildStore_WithWarmDir(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -906,7 +906,7 @@ func TestCacheCheck_WithStore(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rs := &runState{store: store}
 	result := cacheCheck(context.Background(), "https://example.com/page", rs)
@@ -955,7 +955,7 @@ func TestBuildInvalidationOps_Purge(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -972,7 +972,7 @@ func TestBuildInvalidationOps_Ban(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -990,7 +990,7 @@ func TestBuildInvalidationOps_Refresh(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:  store,
@@ -1007,7 +1007,7 @@ func TestPurgeKey_WithHandler(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	handler := cache.NewHandler(cache.HandlerConfig{
 		Upstream: func(ctx *fasthttp.RequestCtx) {},
@@ -1030,7 +1030,7 @@ func TestBuildStore_WithEvictionAlgo(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 }
@@ -1053,7 +1053,7 @@ func TestBuildStaticRoute_NoCache(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1074,7 +1074,7 @@ func TestBuildStaticRoute_WithCache(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{
@@ -1097,7 +1097,7 @@ func TestBuildStaticRoute_InvalidRoot(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1116,7 +1116,7 @@ func TestBuildStaticRoute_WithStripPrefix(t *testing.T) {
 		cfg:    &config.Config{},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	router := server.NewRouter(server.RouterConfig{Logger: newTestLogger()})
 	rs := &runState{store: store}
@@ -1142,7 +1142,7 @@ func TestBuildRouter_WithStaticRoute(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	metrics := origin.RegisterMetrics(observability.NewMetrics().Registry)
 	rs := &runState{
@@ -1165,7 +1165,7 @@ func TestBuildRouter_WithMissingPool(t *testing.T) {
 		},
 		logger: newTestLogger(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rs := &runState{
 		store:     store,
@@ -1195,7 +1195,7 @@ func TestBuildRouter_WithRoute(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: observability.NewMetrics(),
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	m := origin.RegisterMetrics(e.metrics.Registry)
 	pools, err := e.buildPools(m)
@@ -1277,7 +1277,7 @@ func TestStartBackgroundTasks(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rings, snap := e.initRings()
 	rs := &runState{
@@ -1533,7 +1533,7 @@ func TestCacheCheck_WithStoredObject(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	rawURL := "https://example.com/page"
 	key := cache.BuildKeyFromURL(rawURL, nil)
@@ -1585,7 +1585,7 @@ func TestPurgeKey_WithMatchingHandler(t *testing.T) {
 		logger:  newTestLogger(),
 		metrics: metrics,
 	}
-	store, err := e.buildStore(nil)
+	store, err := e.buildStore(nil, nil)
 	require.NoError(t, err)
 	key := cache.BuildKeyFromURL("https://example.com/test", nil)
 	obj := &api.Object{

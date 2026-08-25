@@ -41,6 +41,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -430,6 +431,11 @@ type Store struct {
 	// metrics receives warm-tier Prometheus collectors. Nil when the
 	// store is constructed without a registry (tests, single-node).
 	metrics *Metrics
+	// mmapPrevResidentPages tracks the total resident page count from
+	// the previous MmapStats poll. The delta (current - previous) is
+	// reported as new page faults. Linux-only; unused on other platforms.
+	//nolint:unused // used only in warm_mmap_stats_linux.go
+	mmapPrevResidentPages atomic.Int64
 	// fdCache bounds the number of open segment file descriptors.
 	// Nil when SegmentCacheSize is -1 (unlimited). ensureOpen calls
 	// fdCache.touch after opening a segment so the cache can evict the
@@ -1634,6 +1640,21 @@ func (s *Store) OverBudget() bool {
 	return false
 }
 
+// OverBudgetBytes returns the current number of logical bytes by which
+// the warm tier exceeds its configured maxBytes budget. Returns 0 when
+// at or under budget, or when the budget is unlimited (maxBytes == 0).
+// Exposed for the bouine_warm_over_budget_bytes Prometheus gauge.
+func (s *Store) OverBudgetBytes() int64 {
+	if s.maxBytes <= 0 {
+		return 0
+	}
+	over := s.stats.bytes.Load() - s.maxBytes
+	if over < 0 {
+		return 0
+	}
+	return over
+}
+
 // DiskOverBudget reports whether the physical disk usage exceeds
 // warm_max_disk_bytes or the filesystem free space drops below
 // min_free_disk. Unlike OverBudget (which checks logical bytes),
@@ -2090,6 +2111,7 @@ func (s *Store) NeedsCompaction() bool {
 //nolint:funlen // munmapAll adds 1 statement over the limit; extracting would harm readability
 func (s *Store) Compact() error {
 	s.metrics.IncCompactionTriggered()
+	compactStart := time.Now()
 
 	// Hold s.mu.Lock for the entire compaction to prevent concurrent
 	// Put/Delete from creating segments or index entries that the swap
@@ -2144,6 +2166,13 @@ func (s *Store) Compact() error {
 	// point at file offsets that will be replaced by swapSegmentFiles.
 	// POSIX guarantees mappings are valid after fd close, but the files
 	// themselves are about to be deleted — munmap first for cleanliness.
+	// Compute old disk bytes before munmap for the reclaimed-bytes metric.
+	var oldDiskBytes int64
+	for _, seg := range s.segs {
+		seg.mu.Lock()
+		oldDiskBytes += seg.size
+		seg.mu.Unlock()
+	}
 	munmapAll(s.segs)
 
 	s.fdCache.clear()
@@ -2187,6 +2216,18 @@ func (s *Store) Compact() error {
 	s.stats.entries.Store(int64(len(newIndex)))
 	s.stats.bytes.Store(liveBytes)
 	s.compactKeysBuf = orderedKeys
+
+	// Record compaction duration and reclaimed bytes.
+	var newDiskBytes int64
+	for _, seg := range s.segs {
+		seg.mu.Lock()
+		newDiskBytes += seg.size
+		seg.mu.Unlock()
+	}
+	if reclaimed := oldDiskBytes - newDiskBytes; reclaimed > 0 {
+		s.metrics.AddCompactionBytesReclaimed(reclaimed)
+	}
+	s.metrics.ObserveCompactionDuration(time.Since(compactStart))
 	return nil
 }
 
@@ -2307,6 +2348,7 @@ type compactRec struct {
 // ErrSegmentNotFound for the active segment or a missing segID.
 func (s *Store) CompactSegment(segID int) error {
 	s.metrics.IncCompactionTriggered()
+	compactStart := time.Now()
 
 	s.mu.RLock()
 	var target *Segment
@@ -2353,6 +2395,7 @@ func (s *Store) CompactSegment(segID int) error {
 		pending = append(pending, pendingRec{key: r.Key, body: r.Body})
 		return nil
 	})
+	oldSegSize := target.size
 	target.mu.Unlock()
 	s.mu.RUnlock()
 	if scanErr != nil {
@@ -2364,7 +2407,20 @@ func (s *Store) CompactSegment(segID int) error {
 		return err
 	}
 
-	return s.swapCompactSegment(segID, newSegID, recs)
+	if err := s.swapCompactSegment(segID, newSegID, recs); err != nil {
+		return err
+	}
+
+	// Record compaction duration and reclaimed bytes.
+	var newSegSize int64
+	for _, r := range recs {
+		newSegSize += r.size
+	}
+	if reclaimed := oldSegSize - newSegSize; reclaimed > 0 {
+		s.metrics.AddCompactionBytesReclaimed(reclaimed)
+	}
+	s.metrics.ObserveCompactionDuration(time.Since(compactStart))
+	return nil
 }
 
 // writeCompactTemp writes live records to a temp segment file and

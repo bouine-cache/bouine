@@ -56,10 +56,18 @@ type DataPlaneMetrics struct {
 	HotStoreBytes     prometheus.Gauge
 	HotStoreEntries   prometheus.Gauge
 	HotStoreEvictions prometheus.Counter
+	// HotStoreMaxBytes is the configured hot-tier byte budget. Set once
+	// at startup from config. Enables fill ratio computation:
+	// hot_store_bytes / hot_store_max_bytes.
+	HotStoreMaxBytes prometheus.Gauge
 	// Warm-tier storage gauges — updated on every Stats() poll by the engine.
 	WarmStoreBytes     prometheus.Gauge
 	WarmStoreEntries   prometheus.Gauge
 	WarmStoreSelfHeals prometheus.Counter
+	// WarmStoreMaxBytes is the configured warm-tier byte budget. Set
+	// once at startup from config. Enables fill ratio computation:
+	// warm_store_bytes / warm_store_max_bytes.
+	WarmStoreMaxBytes prometheus.Gauge
 	// Cloudflare propagation counters.
 	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
 	CFPurgeDuration *prometheus.HistogramVec // labels: operation
@@ -92,6 +100,14 @@ type DataPlaneMetrics struct {
 	// WALLastSyncTimestamp is a gauge set from the WAL log's LastSyncTime.
 	WALDroppedEntries    prometheus.Counter
 	WALLastSyncTimestamp prometheus.Gauge
+	// MetricsResetTotal counts metrics re-initialization events. A
+	// non-zero value indicates the process restarted or metrics were
+	// re-registered, which explains histogram count discontinuities.
+	MetricsResetTotal prometheus.Counter
+	// RequestQueueDepth is the current number of in-flight HTTP
+	// requests being processed by the data plane. A rising value
+	// indicates CPU starvation before timeouts appear.
+	RequestQueueDepth prometheus.Gauge
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
@@ -113,13 +129,12 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Help:      "Total number of requests processed by the data plane.",
 		}, []string{"method", "status", "cache_result", "source", "route"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace:                       "bouine",
-			Name:                            "request_duration_seconds",
-			Help:                            "Histogram of request durations in seconds.",
-			Buckets:                         []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-			NativeHistogramBucketFactor:     1.1,
-			NativeHistogramMaxBucketNumber:  100,
-			NativeHistogramMinResetDuration: 15 * time.Minute,
+			Namespace:                      "bouine",
+			Name:                           "request_duration_seconds",
+			Help:                           "Histogram of request durations in seconds.",
+			Buckets:                        []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			NativeHistogramBucketFactor:    1.1,
+			NativeHistogramMaxBucketNumber: 100,
 		}, []string{"method", "status", "cache_result", "source", "route"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
@@ -163,6 +178,26 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "warm_store_self_heals_total",
 		Help:      "Total stale warm-tier index entries dropped by the self-heal path since boot. A non-zero rate indicates segment-management bugs or disk faults.",
 	})
+	m.HotStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "hot_store_max_bytes",
+		Help:      "Configured hot-tier byte budget. Set once at startup. Compute fill ratio: hot_store_bytes / hot_store_max_bytes.",
+	})
+	m.WarmStoreMaxBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "warm_store_max_bytes",
+		Help:      "Configured warm-tier byte budget. Set once at startup. Compute fill ratio: warm_store_bytes / warm_store_max_bytes.",
+	})
+	m.MetricsResetTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "metrics_reset_total",
+		Help:      "Metrics re-initialization events. Non-zero indicates the process restarted or metrics were re-registered, explaining histogram count discontinuities.",
+	})
+	m.RequestQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "request_queue_depth",
+		Help:      "Current number of in-flight HTTP requests being processed by the data plane. A rising value indicates CPU starvation before timeouts appear.",
+	})
 	m.initRefreshMetrics()
 	m.initWALMetrics()
 	m.initStreamingMetrics()
@@ -177,11 +212,12 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.CFTokenRotated, m.CFTokenAvailable,
 		m.CFCircuitRejected, m.CFCircuitState,
 		m.CFDLQEnqueued, m.CFDLQDropped, m.CFDLQRetried, m.CFDLQExpired, m.CFDLQDepth,
-		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions,
-		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals,
+		m.HotStoreBytes, m.HotStoreEntries, m.HotStoreEvictions, m.HotStoreMaxBytes,
+		m.WarmStoreBytes, m.WarmStoreEntries, m.WarmStoreSelfHeals, m.WarmStoreMaxBytes,
 		m.RefreshTotal, m.RefreshErrorsTotal, m.RefreshSkipsTotal,
 		m.RefreshInFlight, m.RefreshScheduled, m.RefreshRegistrySize,
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
+		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
 		m.StreamingBufferBytes, m.StreamingFallbackTotal)
 	return m
@@ -648,6 +684,9 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		ctx.Request.Header.Del(header.XBouineRoute)
+
+		m.RequestQueueDepth.Inc()
+		defer m.RequestQueueDepth.Dec()
 
 		start := nowFunc()
 		next(ctx)

@@ -125,6 +125,10 @@ type Log struct {
 	dropped      atomic.Int64
 	lastSync     atomic.Int64 // Unix nanoseconds; 0 = never synced
 	syncWg       sync.WaitGroup
+
+	// metrics holds Prometheus collectors for WAL write operations.
+	// Nil when metrics are not registered (tests, sync-only mode).
+	metrics *Metrics
 }
 
 // Open opens or creates a WAL file at path in synchronous mode.
@@ -221,6 +225,7 @@ func (l *Log) Enqueue(e Entry) error {
 	buf := encodeEntry(e)
 	select {
 	case l.syncCh <- buf:
+		l.metrics.IncWriteTotal(1)
 	default:
 		l.dropped.Add(1)
 		entryBufPool.Put(&buf)
@@ -244,6 +249,7 @@ func (l *Log) EnqueueBatch(entries []Entry) {
 		buf := encodeEntry(e)
 		select {
 		case l.syncCh <- buf:
+			l.metrics.IncWriteTotal(1)
 		default:
 			l.dropped.Add(1)
 			entryBufPool.Put(&buf)
@@ -305,6 +311,7 @@ write:
 		}
 		return
 	}
+	writeStart := time.Now()
 	l.mu.Lock()
 	written := 0
 	var writeErr error
@@ -319,17 +326,13 @@ write:
 	if writeErr == nil {
 		l.lastSync.Store(time.Now().UnixNano())
 	} else {
-		// Write failed: entries from batch[written:] were drained from
-		// the channel but never persisted. Count them as dropped so the
-		// operator metric reflects the loss and return their buffers to
-		// the pool. LastSyncTime is left stale — the runbook tells
-		// operators to alert when it lags past 2x sync_interval.
 		l.dropped.Add(int64(len(batch) - written))
 		for _, buf := range batch[written:] {
 			entryBufPool.Put(&buf)
 		}
 	}
 	l.mu.Unlock()
+	l.metrics.ObserveWriteDuration(time.Since(writeStart))
 	if done != nil {
 		close(done)
 	}
@@ -361,6 +364,22 @@ func (l *Log) Sync() error {
 	case <-l.stopCh:
 		return nil
 	}
+}
+
+// SetMetrics injects Prometheus collectors for WAL write operations.
+// Must be called before the first Enqueue/EnqueueBatch. Nil is safe
+// (all metric methods are no-ops on a nil Metrics).
+func (l *Log) SetMetrics(m *Metrics) {
+	l.metrics = m
+}
+
+// QueueDepth returns the current number of entries buffered in the
+// async sync channel. Returns 0 for sync-only logs.
+func (l *Log) QueueDepth() int {
+	if l.syncCh == nil {
+		return 0
+	}
+	return len(l.syncCh)
 }
 
 // DroppedEntries returns the number of WAL entries dropped because the

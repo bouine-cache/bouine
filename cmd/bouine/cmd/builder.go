@@ -21,6 +21,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/server"
 	"github.com/bouine-cache/bouine/internal/staticfile"
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/storage/wal"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
 
@@ -31,7 +32,9 @@ import (
 // configured, or a plain HotStore for ephemeral/dev deployments.
 // warmMetrics, when non-nil, is injected into the warm store so it can
 // increment over-budget, eviction, and compaction counters inline.
-func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
+// walMetrics, when non-nil, is injected into the WAL log so it can
+// record write duration, queue depth, and write count metrics.
+func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) (storage.Store, error) {
 	hotAlgo := e.cfg.Storage.HotEvictionAlgorithm
 	if hotAlgo == "" {
 		hotAlgo = e.cfg.Storage.EvictionAlgorithm
@@ -64,6 +67,7 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics) (storage.Store, error) {
 		TombstoneDrainInterval: e.cfg.Storage.TombstoneDrainInterval,
 		Logger:                 e.logger,
 		WarmMetrics:            warmMetrics,
+		WALMetrics:             walMetrics,
 	})
 }
 

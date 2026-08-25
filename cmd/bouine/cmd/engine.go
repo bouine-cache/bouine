@@ -29,6 +29,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/runtime/supervised"
 	"github.com/bouine-cache/bouine/internal/server"
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/storage/wal"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
 	webdash "github.com/bouine-cache/bouine/web/dashboard"
@@ -75,6 +76,7 @@ type runState struct {
 	clusterMetrics *cluster.Metrics
 
 	warmMetrics    *warm.Metrics
+	walMetrics     *wal.Metrics
 	startupMetrics *observability.StartupMetrics
 
 	cfProp    *cfPropagator
@@ -248,16 +250,26 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 	// "unlimited" budget, which misleads operators and alert rules into
 	// thinking a warm tier exists and is healthy.
 	var warmMetrics *warm.Metrics
+	var walMetrics *wal.Metrics
 	if e.cfg.Storage.WarmDir != "" {
 		warmMetrics = warm.RegisterMetrics(e.metrics.Registry)
+		walMetrics = wal.RegisterMetrics(e.metrics.Registry)
 	}
-	store, err := e.buildStore(warmMetrics)
+	store, err := e.buildStore(warmMetrics, walMetrics)
 	if err != nil {
 		return nil, func() {}, err
 	}
 
 	dpMetrics := observability.NewDataPlaneMetrics(e.metrics.Registry)
 	dpMetrics.SetAccessLog(e.logger, observability.DefaultKeySampleRate)
+
+	// Set tier budget gauges from config. These are set once at startup
+	// and never change during the process lifetime.
+	dpMetrics.HotStoreMaxBytes.Set(float64(e.cfg.Storage.HotMaxBytes.Bytes()))
+	dpMetrics.WarmStoreMaxBytes.Set(float64(e.cfg.Storage.WarmMaxBytes.Bytes()))
+	// Record that metrics were initialized. If the process restarts,
+	// this counter will jump, explaining histogram count discontinuities.
+	dpMetrics.MetricsResetTotal.Inc()
 
 	startupMetrics := observability.NewStartupMetrics(e.metrics.Registry)
 
@@ -304,6 +316,7 @@ func (e *engine) initSubsystems(ctx context.Context, seq *shutdown.Sequencer) (*
 		peersFn:        peersFn,
 		clusterMetrics: clusterMetrics,
 		warmMetrics:    warmMetrics,
+		walMetrics:     walMetrics,
 		startupMetrics: startupMetrics,
 		cfProp:         cfProp,
 		cfCancel:       cfCancel,
@@ -525,6 +538,29 @@ func (e *engine) startBackgroundTasks(g *supervised.Group, rs *runState) {
 					}
 					if !lastSync.IsZero() {
 						rs.dpMetrics.WALLastSyncTimestamp.Set(float64(lastSync.UnixNano()) / 1e9)
+					}
+				}
+				// WAL queue depth gauge.
+				if walStore, ok := rs.store.(interface {
+					WALQueueDepth() int
+				}); ok {
+					rs.walMetrics.SetQueueDepth(walStore.WALQueueDepth())
+				}
+				// Warm-tier over-budget bytes and mmap stats.
+				if rs.warmMetrics != nil {
+					if warmStore, ok := rs.store.(interface {
+						OverBudgetBytes() int64
+					}); ok {
+						rs.warmMetrics.SetOverBudgetBytes(warmStore.OverBudgetBytes())
+					}
+					if warmStore, ok := rs.store.(interface {
+						MmapStats() (int64, int64)
+					}); ok {
+						residentBytes, pageFaults := warmStore.MmapStats()
+						rs.warmMetrics.SetMmapResidentBytes(residentBytes)
+						if pageFaults > 0 {
+							rs.warmMetrics.IncMmapPageFaults(pageFaults)
+						}
 					}
 				}
 				// Refresh gauges: poll scheduler heap and registry sizes.

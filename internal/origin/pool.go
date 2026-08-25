@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,10 +50,10 @@ type Target struct {
 // target via CompareAndSwap if the threshold is reached. Called from both
 // the 5xx and connection-error paths. The source string is included in
 // the ejection log for operator visibility.
-func (t *Target) recordPassiveError(threshold int, logger observability.Logger, poolName, source string) {
+func (t *Target) recordPassiveError(threshold int, logger observability.Logger, poolName, source, status string) {
 	cnt := t.passiveErrors.Add(1)
 	if t.metrics != nil {
-		t.metrics.incPassiveError(poolName, t.addr)
+		t.metrics.incPassiveError(poolName, t.addr, status)
 	}
 	if cnt >= int64(threshold) {
 		if t.healthy.CompareAndSwap(true, false) {
@@ -227,6 +228,10 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 			return
 		}
 
+		t.metrics.incActiveConnection(p.Name, t.addr)
+		defer t.metrics.decActiveConnection(p.Name, t.addr)
+		originStart := time.Now()
+
 		scheme := t.url.Scheme
 		if scheme == "" {
 			scheme = "http"
@@ -261,17 +266,23 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 				"target", t.addr,
 				"uri", uri,
 				"error", err)
+			t.metrics.incConnectionError(p.Name, t.addr, "timeout")
+			t.metrics.observeRequestDuration(p.Name, t.addr, "timeout", time.Since(originStart).Seconds())
 			if conc5xx > 0 {
-				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error")
+				t.recordPassiveError(conc5xx, p.logger, p.Name, "connection error", "timeout")
 			}
 			ctx.Error("upstream error", fasthttp.StatusBadGateway)
 			return
 		}
 
+		statusCode := resp.StatusCode()
+		statusStr := strconv.Itoa(statusCode)
+		t.metrics.observeRequestDuration(p.Name, t.addr, statusStr, time.Since(originStart).Seconds())
+
 		// Passive health: eject on consecutive 5xx, reset on success.
 		if conc5xx > 0 {
-			if resp.StatusCode() >= 500 {
-				t.recordPassiveError(conc5xx, p.logger, p.Name, "passive 5xx")
+			if statusCode >= 500 {
+				t.recordPassiveError(conc5xx, p.logger, p.Name, "passive 5xx", statusStr)
 			} else {
 				t.passiveErrors.Store(0)
 			}
@@ -283,7 +294,7 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 		resp.Header.VisitAll(func(k, v []byte) {
 			dst.AddBytesKV(k, v)
 		})
-		ctx.SetStatusCode(resp.StatusCode())
+		ctx.SetStatusCode(statusCode)
 		if string(ctx.Method()) != "HEAD" {
 			_, _ = ctx.Write(resp.Body())
 		}
@@ -330,8 +341,20 @@ func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 		scheme = "http"
 	}
 	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
+
+	t.metrics.incActiveConnection(c.pool.Name, t.addr)
+	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)
+	originStart := time.Now()
+
 	tc := transport.NewClient(c.client)
-	return tc.Do(ctx, req, resp)
+	err := tc.Do(ctx, req, resp)
+	if err != nil {
+		t.metrics.incConnectionError(c.pool.Name, t.addr, "error")
+		t.metrics.observeRequestDuration(c.pool.Name, t.addr, "error", time.Since(originStart).Seconds())
+		return err
+	}
+	t.metrics.observeRequestDuration(c.pool.Name, t.addr, strconv.Itoa(resp.StatusCode()), time.Since(originStart).Seconds())
+	return nil
 }
 
 // Healthy returns the list of currently healthy target addresses.

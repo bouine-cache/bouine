@@ -28,6 +28,8 @@ type walStore interface {
 	Truncate() error
 	LastSyncTime() time.Time
 	DroppedEntries() int64
+	QueueDepth() int
+	SetMetrics(m *wal.Metrics)
 	Close() error
 }
 
@@ -99,6 +101,13 @@ type TieredStore struct {
 
 	// walPath is the WAL file path, stored for WAL rewrite after compaction.
 	walPath string
+	// walMetrics receives WAL Prometheus collectors. Nil when WAL
+	// metrics are not registered (tests, no warm tier).
+	walMetrics *wal.Metrics
+	// warmMetrics receives warm-tier Prometheus collectors. Nil when
+	// warm metrics are not registered. Used by runWarmSyncCycle to
+	// record promotion skips.
+	warmMetrics *warm.Metrics
 
 	// done is closed by Close to stop the background goroutines.
 	done chan struct{}
@@ -146,6 +155,11 @@ type TieredConfig struct {
 	// for polling TieredStore.Stats() and calling SetDiskBytes on this
 	// handle to update the disk_bytes gauge.
 	WarmMetrics *warm.Metrics
+
+	// WALMetrics holds the WAL Prometheus collectors. When non-nil and
+	// WALDir is also set, the WAL log records write duration, queue depth,
+	// and write count metrics inline.
+	WALMetrics *wal.Metrics
 
 	// BodyThreshold controls the hot/warm admission boundary. Objects
 	// with BodySize <= this value stay in the hot tier only. Objects
@@ -252,6 +266,7 @@ func NewTieredStore(cfg TieredConfig) (*TieredStore, error) {
 		done:                   make(chan struct{}),
 		logger:                 cfg.Logger,
 		walSyncInterval:        walSyncInterval,
+		walMetrics:             cfg.WALMetrics,
 		compactStartupDelay:    cfg.CompactStartupDelay,
 		compactInterval:        cfg.CompactInterval,
 		checkpointInterval:     checkpointInterval,
@@ -361,6 +376,7 @@ func (t *TieredStore) initWarm(cfg *warm.Config, metrics *warm.Metrics) error {
 		}
 	}
 	t.warm = w
+	t.warmMetrics = metrics
 	return nil
 }
 
@@ -380,6 +396,7 @@ func (t *TieredStore) initWAL(walDir string) error {
 	if err != nil {
 		return err
 	}
+	l.SetMetrics(t.walMetrics)
 	t.wal = l
 	if t.warm == nil {
 		return nil
@@ -712,6 +729,19 @@ func (t *TieredStore) WALStats() (dropped int64, lastSync time.Time) {
 	return w.DroppedEntries(), w.LastSyncTime()
 }
 
+// WALQueueDepth returns the current number of entries buffered in the
+// async WAL sync channel. Returns 0 when WAL is not configured or in
+// sync-only mode. Exposed for the bouine_wal_write_queue_depth gauge.
+func (t *TieredStore) WALQueueDepth() int {
+	t.walMu.Lock()
+	w := t.wal
+	t.walMu.Unlock()
+	if w == nil {
+		return 0
+	}
+	return w.QueueDepth()
+}
+
 // OverBudget reports whether the hot tier is over its configured byte
 // budget. TieredStore consults this before promoting warm→hot to avoid
 // fighting the eviction policy: promoting into an already-full hot
@@ -721,6 +751,28 @@ func (t *TieredStore) WALStats() (dropped int64, lastSync time.Time) {
 // eviction policy (SIEVE) and compaction path — see warm.evictToFit.
 func (t *TieredStore) OverBudget() bool {
 	return t.hot.OverBudget()
+}
+
+// OverBudgetBytes returns the current number of bytes by which the warm
+// tier exceeds its configured budget. Returns 0 when at or under budget
+// or when no warm tier is configured. Exposed for the
+// bouine_warm_over_budget_bytes Prometheus gauge.
+func (t *TieredStore) OverBudgetBytes() int64 {
+	if t.warm == nil {
+		return 0
+	}
+	return t.warm.OverBudgetBytes()
+}
+
+// MmapStats returns mmap resident bytes and new page faults from the
+// warm tier. Returns zeros when no warm tier is configured or on
+// non-Linux platforms. Exposed for the bouine_warm_mmap_resident_bytes
+// gauge and bouine_warm_mmap_page_faults_total counter.
+func (t *TieredStore) MmapStats() (int64, int64) {
+	if t.warm == nil {
+		return 0, 0
+	}
+	return t.warm.MmapStats()
 }
 
 // Stats merges hot + warm stats.
@@ -975,9 +1027,13 @@ func (t *TieredStore) runWarmSyncCycle(ctx context.Context) {
 	promotionSkipped := false
 	if t.warm.OverBudget() {
 		promotionSkipped = true
+		t.warmMetrics.IncPromotionSkipped("budget_full")
 	} else {
 		hotOnlyKeys := t.collectHotOnlyKeys()
 		synced, skipped, skippedOverBudget = t.writeHotOnlyToWarm(ctx, hotOnlyKeys, &walEntries)
+		if skippedOverBudget > 0 {
+			t.warmMetrics.AddPromotionSkipped("budget_full", skippedOverBudget)
+		}
 	}
 
 	if len(walEntries) > 0 {
@@ -1396,6 +1452,7 @@ func (t *TieredStore) rewriteWAL() error {
 		if reopenErr != nil {
 			return fmt.Errorf("wal rewrite: rename: %w; reopen old WAL: %v", err, reopenErr)
 		}
+		reopened.SetMetrics(t.walMetrics)
 		t.wal = reopened
 		return fmt.Errorf("wal rewrite: rename: %w", err)
 	}
@@ -1403,6 +1460,7 @@ func (t *TieredStore) rewriteWAL() error {
 	if err != nil {
 		return fmt.Errorf("wal rewrite: reopen: %w", err)
 	}
+	t.wal.SetMetrics(t.walMetrics)
 	t.logger.Info("wal rewritten after compaction", "path", t.walPath)
 	return nil
 }

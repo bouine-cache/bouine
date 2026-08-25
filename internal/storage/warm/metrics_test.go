@@ -52,14 +52,22 @@ func assertMetricExists(t *testing.T, reg *prometheus.Registry, name string) {
 func TestRegisterMetrics_AllRegistered(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
-	_ = RegisterMetrics(reg)
+	m := RegisterMetrics(reg)
+	// Initialize vec metrics so they appear in gather output.
+	m.PromotionSkipped.WithLabelValues("test")
 
 	want := []string{
 		"bouine_warm_disk_bytes",
 		"bouine_warm_max_bytes",
 		"bouine_warm_over_budget_total",
+		"bouine_warm_over_budget_bytes",
 		"bouine_warm_evictions_total",
 		"bouine_warm_compaction_triggered_total",
+		"bouine_warm_compaction_duration_seconds",
+		"bouine_warm_compaction_bytes_reclaimed_total",
+		"bouine_warm_promotion_skipped_total",
+		"bouine_warm_mmap_page_faults_total",
+		"bouine_warm_mmap_resident_bytes",
 	}
 	for _, name := range want {
 		assertMetricExists(t, reg, name)
@@ -73,6 +81,13 @@ func TestRegisterMetrics_NilRegistryIsSafe(t *testing.T) {
 	m.IncOverBudget()
 	m.IncEvictions()
 	m.IncCompactionTriggered()
+	m.ObserveCompactionDuration(0)
+	m.AddCompactionBytesReclaimed(0)
+	m.IncPromotionSkipped("budget_full")
+	m.AddPromotionSkipped("budget_full", 5)
+	m.IncMmapPageFaults(1)
+	m.SetMmapResidentBytes(42)
+	m.SetOverBudgetBytes(100)
 	m.SetDiskBytes(42)
 	m.SetMaxBytes(100)
 }

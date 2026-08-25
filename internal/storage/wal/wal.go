@@ -223,9 +223,9 @@ func (l *Log) Enqueue(e Entry) error {
 		return l.Append(e)
 	}
 	buf := encodeEntry(e)
+	l.metrics.IncWriteTotal(1)
 	select {
 	case l.syncCh <- buf:
-		l.metrics.IncWriteTotal(1)
 	default:
 		l.dropped.Add(1)
 		entryBufPool.Put(&buf)
@@ -247,9 +247,9 @@ func (l *Log) EnqueueBatch(entries []Entry) {
 	}
 	for _, e := range entries {
 		buf := encodeEntry(e)
+		l.metrics.IncWriteTotal(1)
 		select {
 		case l.syncCh <- buf:
-			l.metrics.IncWriteTotal(1)
 		default:
 			l.dropped.Add(1)
 			entryBufPool.Put(&buf)

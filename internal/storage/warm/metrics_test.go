@@ -66,7 +66,7 @@ func TestRegisterMetrics_AllRegistered(t *testing.T) {
 		"bouine_warm_compaction_duration_seconds",
 		"bouine_warm_compaction_bytes_reclaimed_total",
 		"bouine_warm_promotion_skipped_total",
-		"bouine_warm_mmap_page_faults_total",
+		"bouine_warm_mmap_resident_page_delta_total",
 		"bouine_warm_mmap_resident_bytes",
 	}
 	for _, name := range want {
@@ -85,7 +85,7 @@ func TestRegisterMetrics_NilRegistryIsSafe(t *testing.T) {
 	m.AddCompactionBytesReclaimed(0)
 	m.IncPromotionSkipped("budget_full")
 	m.AddPromotionSkipped("budget_full", 5)
-	m.IncMmapPageFaults(1)
+	m.IncMmapResidentPageDelta(1)
 	m.SetMmapResidentBytes(42)
 	m.SetOverBudgetBytes(100)
 	m.SetDiskBytes(42)

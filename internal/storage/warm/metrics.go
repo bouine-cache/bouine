@@ -51,10 +51,12 @@ type Metrics struct {
 	// by reason (low_frequency, warm_disabled, budget_full). Used to
 	// validate selective promotion effectiveness.
 	PromotionSkipped *prometheus.CounterVec
-	// MmapPageFaults counts major page faults on warm-tier mmap'd
-	// segment reads. A high rate indicates warm reads are hitting disk
-	// rather than the page cache. Linux-only; always 0 on other platforms.
-	MmapPageFaults prometheus.Counter
+	// MmapResidentPageDelta counts the cumulative increase in resident
+	// pages from warm-tier mmap'd segments between polls. This is NOT a
+	// page fault count — it measures net new residency, which is only
+	// non-zero when the working set is growing. Use MmapResidentBytes to
+	// track current residency. Linux-only; always 0 on other platforms.
+	MmapResidentPageDelta prometheus.Counter
 	// MmapResidentBytes is the estimated resident memory from warm-tier
 	// mmap'd segment pages. Helps diagnose RSS overruns in hot+warm
 	// configurations where mmap pages are not controlled by Go's GOMEMLIMIT.
@@ -115,10 +117,10 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "warm_promotion_skipped_total",
 			Help:      "Hot→warm promotions skipped, by reason (low_frequency, warm_disabled, budget_full). Used to validate selective promotion effectiveness.",
 		}, []string{"reason"}),
-		MmapPageFaults: prometheus.NewCounter(prometheus.CounterOpts{
+		MmapResidentPageDelta: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",
-			Name:      "warm_mmap_page_faults_total",
-			Help:      "Major page faults on warm-tier mmap'd segment reads. High rate indicates warm reads are hitting disk. Linux-only; always 0 on other platforms.",
+			Name:      "warm_mmap_resident_page_delta_total",
+			Help:      "Cumulative increase in resident pages from warm-tier mmap'd segments between polls. NOT page faults — measures net new residency (non-zero only when working set grows). Linux-only; always 0 on other platforms.",
 		}),
 		MmapResidentBytes: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "bouine",
@@ -131,7 +133,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.Evictions, m.CompactionTriggered,
 		m.CompactionDuration, m.CompactionBytesReclaimed,
 		m.PromotionSkipped,
-		m.MmapPageFaults, m.MmapResidentBytes,
+		m.MmapResidentPageDelta, m.MmapResidentBytes,
 	)
 	return m
 }
@@ -212,13 +214,13 @@ func (m *Metrics) AddPromotionSkipped(reason string, n int) {
 	m.PromotionSkipped.WithLabelValues(reason).Add(float64(n))
 }
 
-// IncMmapPageFaults increments the mmap page fault counter by n. Safe
-// to call on a nil Metrics.
-func (m *Metrics) IncMmapPageFaults(n int64) {
-	if m == nil || m.MmapPageFaults == nil {
+// IncMmapResidentPageDelta adds n to the resident page delta counter.
+// Safe to call on a nil Metrics.
+func (m *Metrics) IncMmapResidentPageDelta(n int64) {
+	if m == nil || m.MmapResidentPageDelta == nil {
 		return
 	}
-	m.MmapPageFaults.Add(float64(n))
+	m.MmapResidentPageDelta.Add(float64(n))
 }
 
 // SetMmapResidentBytes sets the estimated resident bytes from mmap'd

@@ -764,10 +764,10 @@ func (t *TieredStore) OverBudgetBytes() int64 {
 	return t.warm.OverBudgetBytes()
 }
 
-// MmapStats returns mmap resident bytes and new page faults from the
-// warm tier. Returns zeros when no warm tier is configured or on
+// MmapStats returns mmap resident bytes and the resident page delta from
+// the warm tier. Returns zeros when no warm tier is configured or on
 // non-Linux platforms. Exposed for the bouine_warm_mmap_resident_bytes
-// gauge and bouine_warm_mmap_page_faults_total counter.
+// gauge and bouine_warm_mmap_resident_page_delta_total counter.
 func (t *TieredStore) MmapStats() (int64, int64) {
 	if t.warm == nil {
 		return 0, 0

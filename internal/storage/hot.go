@@ -101,7 +101,7 @@ const banTTL = 24 * time.Hour
 
 type shard struct {
 	mu          sync.RWMutex
-	entries     map[api.Key]*hotEntry
+	entries     hotTable
 	evict       evictor.List[api.Key]
 	bytes       int64
 	backedCount int64 // entries with a backup (cheap to evict)
@@ -278,7 +278,7 @@ func NewHotStore(cfg HotConfig) *HotStore {
 
 	shards := make([]shard, n)
 	for i := range shards {
-		shards[i].entries = make(map[api.Key]*hotEntry)
+		shards[i].entries.init(hotTableMinCap)
 		shards[i].evict = newEvictList(cfg)
 	}
 	reaperInterval := defaultReaperInterval
@@ -333,8 +333,8 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	// Fast path: read lock. If the entry exists and its visited bit is
 	// already set, no write is needed — just return the object.
 	s.mu.RLock()
-	e := s.entries[key]
-	if e != nil && e.entry.Visited() {
+	e, ok := s.entries.Get(key)
+	if ok && e.entry.Visited() {
 		e.windowHits.Add(1)
 		stored := e.obj
 		ret := h.detachBody(stored)
@@ -349,7 +349,7 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	}
 	s.mu.RUnlock()
 
-	if e == nil {
+	if !ok {
 		h.stats.misses.Add(1)
 		return nil, "", nil
 	}
@@ -357,9 +357,9 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	// Slow path: visited bit is false. Upgrade to write lock, re-check
 	// (entry may have been evicted between RUnlock and Lock), then set it.
 	s.mu.Lock()
-	e = s.entries[key]
+	e, ok = s.entries.Get(key)
 	var stored *api.Object
-	if e != nil {
+	if ok {
 		s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 			return e.entry
 		})
@@ -448,11 +448,11 @@ func (h *HotStore) flushSlabFrees(bodies [][]byte) {
 func (h *HotStore) evictBanned(s *shard, key api.Key, obj *api.Object) {
 	var slabFrees [][]byte
 	s.mu.Lock()
-	if cur, ok := s.entries[key]; ok && cur.obj == obj {
+	if cur, ok := s.entries.Get(key); ok && cur.obj == obj {
 		h.notifyEvict(key, cur, &slabFrees, evictReasonBan)
 		s.bytes -= objSize(obj)
 		s.evict.Remove(cur.entry)
-		delete(s.entries, key)
+		s.entries.Delete(key)
 		h.stats.evictions.Add(1)
 		cur.obj = nil
 		cur.entry = nil
@@ -506,11 +506,11 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 		if !ok {
 			break
 		}
-		if old, exists := s.entries[evKey]; exists {
+		if old, exists := s.entries.Get(evKey); exists {
 			recordEviction(&logs, evKey, old, "inline_overshoot")
 			h.notifyEvict(evKey, old, &slabFrees, evictReasonSIEVE)
 			s.bytes -= objSize(old.obj)
-			delete(s.entries, evKey)
+			s.entries.Delete(evKey)
 			h.stats.evictions.Add(1)
 			old.obj = nil
 			old.entry = nil
@@ -524,7 +524,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	}
 
 	// Remove old entry if replacing, return to pool.
-	if old, exists := s.entries[key]; exists {
+	if old, exists := s.entries.Get(key); exists {
 		h.notifyEvict(key, old, &slabFrees, evictReasonDelete)
 		s.bytes -= objSize(old.obj)
 		s.evict.Remove(old.entry)
@@ -545,7 +545,7 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 	e := hotEntryPool.Get().(*hotEntry)
 	e.obj = stored
 	e.entry = se
-	s.entries[key] = e
+	s.entries.Put(key, e)
 	s.bytes += size
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
@@ -596,9 +596,9 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 	s.mu.Lock()
 
 	deadline := time.Now().Add(reaperShardBudget)
-	for key, e := range s.entries {
+	s.entries.Iter(func(key api.Key, e *hotEntry, del func()) bool {
 		if time.Now().After(deadline) {
-			break
+			return false
 		}
 		expiry := e.obj.StoredAt.Add(e.obj.TTL + e.obj.StaleWhileRevalidate + e.obj.StaleIfError)
 		if now.After(expiry) {
@@ -606,7 +606,7 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 			h.notifyEvict(key, e, &slabFrees, evictReasonReaper)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.entry)
-			delete(s.entries, key)
+			del()
 			h.stats.evictions.Add(1)
 			e.obj = nil
 			e.entry = nil
@@ -614,7 +614,8 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 			e.windowHits.Store(0)
 			hotEntryPool.Put(e)
 		}
-	}
+		return true
+	})
 	s.mu.Unlock()
 	h.flushEvictionLogs(logs)
 	h.flushSlabFrees(slabFrees)
@@ -639,11 +640,11 @@ func (h *HotStore) sweeper() {
 				if !ok {
 					break
 				}
-				if old, exists := s.entries[evKey]; exists {
+				if old, exists := s.entries.Get(evKey); exists {
 					recordEviction(&logs, evKey, old, "sweeper_overshoot")
 					h.notifyEvict(evKey, old, &slabFrees, evictReasonSIEVE)
 					s.bytes -= objSize(old.obj)
-					delete(s.entries, evKey)
+					s.entries.Delete(evKey)
 					h.stats.evictions.Add(1)
 					old.obj = nil
 					old.entry = nil
@@ -665,7 +666,7 @@ func (h *HotStore) sweeper() {
 func (h *HotStore) Has(key api.Key) bool {
 	s := h.shard(key)
 	s.mu.RLock()
-	_, ok := s.entries[key]
+	_, ok := s.entries.Get(key)
 	s.mu.RUnlock()
 	return ok
 }
@@ -675,11 +676,11 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 	s := h.shard(key)
 	var slabFrees [][]byte
 	s.mu.Lock()
-	if e, ok := s.entries[key]; ok {
+	if e, ok := s.entries.Get(key); ok {
 		s.bytes -= objSize(e.obj)
 		s.evict.Remove(e.entry)
 		h.notifyEvict(key, e, &slabFrees, evictReasonDelete)
-		delete(s.entries, key)
+		s.entries.Delete(key)
 		e.obj = nil
 		e.entry = nil
 		e.hasBackup = false
@@ -756,12 +757,12 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 	n := 0
 	var slabFrees [][]byte
 	s.mu.Lock()
-	for key, e := range s.entries {
+	s.entries.Iter(func(key api.Key, e *hotEntry, del func()) bool {
 		if pred(e.obj) {
 			h.notifyEvict(key, e, &slabFrees, evictReasonBan)
 			s.bytes -= objSize(e.obj)
 			s.evict.Remove(e.entry)
-			delete(s.entries, key)
+			del()
 			h.stats.evictions.Add(1)
 			n++
 			e.obj = nil
@@ -770,7 +771,8 @@ func (h *HotStore) banShard(idx int, pred banPredicate) (int, error) { //nolint:
 			e.windowHits.Store(0)
 			hotEntryPool.Put(e)
 		}
-	}
+		return true
+	})
 	s.mu.Unlock()
 	h.flushSlabFrees(slabFrees)
 	return n, nil
@@ -858,7 +860,7 @@ func (h *HotStore) Stats() api.Stats {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		hotEntries += int64(len(s.entries))
+		hotEntries += s.entries.Len()
 		hotBytes += s.bytes
 		s.mu.RUnlock()
 	}
@@ -878,9 +880,9 @@ func (h *HotStore) Stats() api.Stats {
 func (h *HotStore) WindowHits(key api.Key) int64 {
 	s := h.shard(key)
 	s.mu.RLock()
-	e := s.entries[key]
+	e, ok := s.entries.Get(key)
 	var n int64
-	if e != nil {
+	if ok {
 		n = e.windowHits.Load()
 	}
 	s.mu.RUnlock()
@@ -911,7 +913,7 @@ func (h *HotStore) SetBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key]; ok && !e.hasBackup {
+	if e, ok := s.entries.Get(key); ok && !e.hasBackup {
 		e.hasBackup = true
 		s.backedCount++
 	}
@@ -924,7 +926,7 @@ func (h *HotStore) ClearBacked(key api.Key) {
 	s := h.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[key]; ok && e.hasBackup {
+	if e, ok := s.entries.Get(key); ok && e.hasBackup {
 		e.hasBackup = false
 		s.backedCount--
 	}
@@ -953,7 +955,7 @@ func (s *shard) evictPreferBacked() (key api.Key, ok bool) {
 		if !ok {
 			return k, false
 		}
-		if he, exists := s.entries[k]; exists {
+		if he, exists := s.entries.Get(k); exists {
 			if he.hasBackup {
 				s.backedCount--
 				return k, true
@@ -986,16 +988,17 @@ func (h *HotStore) Keys() []api.Key {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		totalEntries += len(s.entries)
+		totalEntries += int(s.entries.Len())
 		s.mu.RUnlock()
 	}
 	keys := make([]api.Key, 0, totalEntries)
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		for k := range s.entries {
+		s.entries.Iter(func(k api.Key, _ *hotEntry, _ func()) bool {
 			keys = append(keys, k)
-		}
+			return true
+		})
 		s.mu.RUnlock()
 	}
 	return keys
@@ -1019,11 +1022,12 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 	for i := range h.shards {
 		s := &h.shards[i]
 		s.mu.RLock()
-		for _, e := range s.entries {
+		s.entries.Iter(func(_ api.Key, e *hotEntry, _ func()) bool {
 			if !e.hasBackup {
 				total++
 			}
-		}
+			return true
+		})
 		s.mu.RUnlock()
 	}
 	if total == 0 {
@@ -1046,20 +1050,18 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 		}
 		s := &h.shards[i]
 		s.mu.RLock()
-		for k, e := range s.entries {
+		s.entries.Iter(func(k api.Key, e *hotEntry, _ func()) bool {
 			if e.hasBackup {
-				continue
+				return true
 			}
 			if skipped < offset {
 				skipped++
-				continue
+				return true
 			}
 			keys = append(keys, k)
 			needed--
-			if needed <= 0 {
-				break
-			}
-		}
+			return needed > 0
+		})
 		s.mu.RUnlock()
 	}
 
@@ -1067,10 +1069,15 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 }
 
 const (
-	objectStructSize    int64 = 320 // unsafe.Sizeof(api.Object{}) — RespNoCache + RespMustRevalidate added. Update when fields are added.
-	hotEntrySize        int64 = 32
-	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
-	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.
+	objectStructSize int64 = 320 // unsafe.Sizeof(api.Object{}) — RespNoCache + RespMustRevalidate added. Update when fields are added.
+	hotEntrySize     int64 = 32
+	sieveEntrySize   int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
+	// openAddrPerEntryOverhead is the per-live-entry memory cost of the
+	// open-addressing slot array. Each hotSlot is 40 bytes (16B key +
+	// 8B entry ptr + 8B hash + 1B state + 7B pad). At 0.75 load factor,
+	// capacity is ~1.33x live count, so per-live-entry overhead is
+	// 40 / 0.75 ≈ 53 bytes. This replaces the stdlib map's 32 B/entry.
+	openAddrPerEntryOverhead int64 = 53
 	// Map has two slice headers: entries ([]headerEntry) and values ([]string).
 	headerEntriesSlice int64 = 24 // []headerEntry slice header
 	headerValuesSlice  int64 = 24 // []string slice header
@@ -1080,7 +1087,7 @@ const (
 
 func objSize(obj *api.Object) int64 {
 	size := int64(len(obj.Body)) +
-		objectStructSize + hotEntrySize + sieveEntrySize + mapPerEntryOverhead
+		objectStructSize + hotEntrySize + sieveEntrySize + openAddrPerEntryOverhead
 
 	// Map: two slice headers + per-entry overhead (headerEntry 24B + value
 	// string header 16B) + value data bytes. Footprint counts orphaned value

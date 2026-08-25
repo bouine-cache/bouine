@@ -97,8 +97,10 @@ func TestHotStore_Delete(t *testing.T) {
 
 func TestHotStore_EvictsOnFull(t *testing.T) {
 	t.Parallel()
-	// 4 shards, 4096 bytes total = 1024 per shard.
-	s := NewHotStore(HotConfig{MaxBytes: 4096, NumShards: 4})
+	// 4 shards, 8192 bytes total = 2048 per shard. Each 500-byte-body
+	// object is ~1043 bytes with the open-addr per-entry overhead, so
+	// the budget holds 1 entry per shard; the 2nd Put forces eviction.
+	s := NewHotStore(HotConfig{MaxBytes: 8192, NumShards: 4})
 
 	// Insert objects until eviction must have happened.
 	for i := range 100 {
@@ -108,7 +110,7 @@ func TestHotStore_EvictsOnFull(t *testing.T) {
 
 	st := s.Stats()
 	require.NotEqual(t, 0, st.Evictions)
-	if st.HotBytes > 4096 {
+	if st.HotBytes > 8192 {
 		t.Fatalf("HotBytes = %d, exceeds budget", st.HotBytes)
 	}
 }
@@ -227,11 +229,10 @@ func TestObjSize_StructSizeConstantsNotDrifted(t *testing.T) {
 	assert.Equal(t, want, sieveEntrySize)
 }
 
-func TestObjSize_MapOverheadConstant(t *testing.T) {
+func TestObjSize_OpenAddrOverheadConstant(t *testing.T) {
 	t.Parallel()
-	// 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry.
-	// The hmap struct header (~96 B) is negligible at 1M+ entries.
-	assert.Equal(t, int64(32), mapPerEntryOverhead)
+	// 40-byte slot / 0.75 load factor ≈ 53 B/live entry.
+	assert.Equal(t, int64(53), openAddrPerEntryOverhead)
 }
 
 func TestObjSize_OrphanedValuesCounted(t *testing.T) {
@@ -279,14 +280,14 @@ func TestObjSize_ExactValue(t *testing.T) {
 
 	// Pin every component:
 	// body: 5
-	// objectStructSize: 320, hotEntrySize: 32, sieveEntrySize: 40, mapPerEntryOverhead: 32
+	// objectStructSize: 320, hotEntrySize: 32, sieveEntrySize: 40, openAddrPerEntryOverhead: 53
 	// headerEntriesSlice: 24, headerValuesSlice: 24
 	// headerEntrySize * 2: 48
 	// headerValueHeader * 2: 32
 	// valueBytes: len("text/html") + len("val") = 9 + 3 = 12
 	// VaryKey: 2, ETag: 2, CacheControl: 6
 	// SurrogateKeys: 2 + 2 = 4
-	want := int64(5) + 320 + 32 + 40 + 32 +
+	want := int64(5) + 320 + 32 + 40 + 53 +
 		24 + 24 + 48 + 32 + 12 +
 		2 + 2 + 6 + 4
 	got := objSize(obj)
@@ -399,7 +400,7 @@ func TestHotStore_SetBacked(t *testing.T) {
 	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+	if e, ok := sh.entries.Get(k); !ok || !e.hasBackup {
 		t.Fatal("expected entry to be marked hasBackup after SetBacked")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -477,8 +478,12 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	// obscuring the re-insert MarkVisited behavior under test.
 	shard := &s.shards[0]
 	shard.mu.Lock()
-	shard.entries[k1].entry.ClearVisited()
-	shard.entries[k2].entry.ClearVisited()
+	if e, ok := shard.entries.Get(k1); ok {
+		e.entry.ClearVisited()
+	}
+	if e, ok := shard.entries.Get(k2); ok {
+		e.entry.ClearVisited()
+	}
 	shard.mu.Unlock()
 
 	// First eviction: k1 (visited=false) is swept and re-inserted at
@@ -493,7 +498,9 @@ func TestHotStore_EvictPreferBacked_SkipPath_ReinsertWithVisited(t *testing.T) {
 	// and k3 is evicted — proving the re-insert MarkVisited is
 	// load-bearing.
 	shard.mu.Lock()
-	shard.entries[k3].entry.ClearVisited()
+	if e, ok := shard.entries.Get(k3); ok {
+		e.entry.ClearVisited()
+	}
 	shard.mu.Unlock()
 
 	// Second eviction: k1 (visited=true from re-insert) gets a second
@@ -547,7 +554,7 @@ func TestHotStore_BackedCountConsistency(t *testing.T) {
 	sh := &s.shards[k.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if e, ok := sh.entries[k]; !ok || !e.hasBackup {
+	if e, ok := sh.entries.Get(k); !ok || !e.hasBackup {
 		t.Fatal("entry should have hasBackup after re-marking")
 	}
 	require.Equal(t, int64(1), sh.backedCount)
@@ -896,7 +903,7 @@ func TestHot_484_FreshInsertVisited(t *testing.T) {
 
 	// Freshly inserted entry should have visited=true.
 	ts.hot.shards[0].mu.RLock()
-	entry, exists := ts.hot.shards[0].entries[k]
+	entry, exists := ts.hot.shards[0].entries.Get(k)
 	require.True(t, exists, "k should be in hot")
 	visited := entry.entry.Visited()
 	ts.hot.shards[0].mu.RUnlock()

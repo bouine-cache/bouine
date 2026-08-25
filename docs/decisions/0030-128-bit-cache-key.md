@@ -84,7 +84,7 @@ are bumped:
 
 - `api.Object` struct: 264→272 B (Key grew 8→16 B inline).
 - `sieve.Entry[api.Key]`: 32→40 B (Key 16 B + atomic.Bool 4 B + pad 4 B + prev 8 B + next 8 B).
-- `mapPerEntryOverhead`: 22→32 B (8-slot bucket with 16 B keys = 208 B / 6.5 load factor).
+- `mapPerEntryOverhead`: 22→32 B (8-slot bucket with 16 B keys = 208 B / 6.5 load factor). Superseded by `openAddrPerEntryOverhead` (53 B) in ADR-0040.
 - `EstimatedWarmLocHeapBytes`: 128→160 B (per-entry warm location cost).
 - `hotEntry` struct: unchanged (32 B — Key is not stored inline in hotEntry).
 

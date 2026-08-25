@@ -19,7 +19,7 @@ func hotOnlyContains(s *HotStore, key api.Key) bool {
 	sh := &s.shards[key.Hash64()&s.mask]
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	e, ok := sh.entries[key]
+	e, ok := sh.entries.Get(key)
 	return ok && !e.hasBackup
 }
 
@@ -29,11 +29,12 @@ func hotOnlyCount(s *HotStore) int {
 	for i := range s.shards {
 		sh := &s.shards[i]
 		sh.mu.RLock()
-		for _, e := range sh.entries {
+		sh.entries.Iter(func(_ api.Key, e *hotEntry, _ func()) bool {
 			if !e.hasBackup {
 				total++
 			}
-		}
+			return true
+		})
 		sh.mu.RUnlock()
 	}
 	return total
@@ -166,7 +167,7 @@ func TestHotOnly_SweeperEvictionRemovesKey(t *testing.T) {
 	for _, k := range keys {
 		inEntries := false
 		sh.mu.RLock()
-		_, inEntries = sh.entries[k]
+		_, inEntries = sh.entries.Get(k)
 		sh.mu.RUnlock()
 		if inEntries {
 			assert.True(t, hotOnlyContains(s, k))

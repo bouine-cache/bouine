@@ -316,3 +316,38 @@ func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkHotGet_CollisionChain measures the hit path when all keys
+// share the same Hash64 (high half) but differ in the low half. This is
+// the adversarial case for open addressing: every key probes from the
+// same home slot, so the probe chain length equals the number of
+// colliding keys. The benchmark confirms the table degrades
+// gracefully (linear in chain length, not catastrophic) under this
+// pathological input.
+func BenchmarkHotGet_CollisionChain(b *testing.B) {
+	const chain = 100
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	ctx := context.Background()
+
+	keys := make([]api.Key, chain)
+	for i := range chain {
+		var k api.Key
+		k[7] = 1
+		k[15] = byte(i + 1)
+		keys[i] = k
+		_ = s.Put(ctx, k, obj(k, 64))
+	}
+	for _, k := range keys {
+		_, _, _ = s.Get(ctx, k)
+		_, _, _ = s.Get(ctx, k)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	var i int
+	for b.Loop() {
+		_, _, _ = s.Get(ctx, keys[i%chain])
+		i++
+	}
+}

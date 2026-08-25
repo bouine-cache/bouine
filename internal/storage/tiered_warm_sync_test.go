@@ -729,6 +729,10 @@ func runChurnScenario(t *testing.T) churnResult {
 	)
 
 	// Size hot to hold ~50 entries (slightly above the working set of 40).
+	// The per-entry overhead (openAddrPerEntryOverhead=53B + hotEntrySize=32B
+	// + sieveEntrySize=40B + objectStructSize=320B + body=2000B) is ~2453B;
+	// round up to 2500B for headroom. The +21B from the open-addr slot
+	// (vs the old stdlib map's 32B) is already accounted for here.
 	hotMaxBytes := int64(50 * 2500) // ~50 entries at ~2500 bytes/entry
 
 	ts := tieredStore484(t, hotMaxBytes)

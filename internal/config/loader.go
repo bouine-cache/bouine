@@ -55,6 +55,17 @@ const defaultHotMaxBytesRatio = 75
 // fragmentation. At 14 GiB GOMEMLIMIT, 15% = ~16 M entries (~2 GiB heap).
 const defaultWarmMaxEntriesRatio = 15
 
+// defaultStreamingBufferRatio is the fraction of GOMEMLIMIT used to derive
+// the streaming tee buffer cap when max_streaming_buffer_bytes is unset.
+// 7% leaves headroom for the hot store (75%), warm index (15%), Go runtime
+// overhead, and fasthttp response buffers (bytebufferpool). At 768 MiB
+// GOMEMLIMIT, 7% = 53 MiB, bounding peak tee buffer allocations to ~106 MiB
+// (bytes.Buffer doubles) — below the OOMKill threshold with margin for the
+// in-loop cap to act before all 32 fetchSem slots fill. At 14 GiB
+// GOMEMLIMIT, 7% = ~1 GiB, generous enough that the cap rarely triggers
+// in normal traffic.
+const defaultStreamingBufferRatio = 7
+
 // Load reads a YAML file from path, applies Defaults, and validates.
 // Strict mode rejects unknown fields so typos surface immediately.
 func Load(path string) (*Config, error) {
@@ -97,6 +108,12 @@ func Parse(b []byte) (*Config, error) {
 	// in a container with GOMEMLIMIT still gets an eviction budget.
 	cfg.Storage.ResolveHotMaxBytes(os.Getenv("GOMEMLIMIT"))
 	cfg.Storage.ResolveWarmMaxEntries(os.Getenv("GOMEMLIMIT"))
+	// Derive max_streaming_buffer_bytes from GOMEMLIMIT when unset so
+	// the streaming tee buffer cap adapts to the pod's memory limit
+	// (PR #524 OOMKill fix). Per-route like the other cache fields.
+	for i := range cfg.Routes {
+		cfg.Routes[i].Cache.ResolveMaxStreamingBufferBytes(os.Getenv("GOMEMLIMIT"))
+	}
 	return &cfg, nil
 }
 
@@ -256,6 +273,32 @@ func (s *Storage) ResolveWarmMaxEntries(goMemLimit string) {
 	s.WarmMaxEntries = n * int64(defaultWarmMaxEntriesRatio) / (100 * 160)
 }
 
+// ResolveMaxStreamingBufferBytes derives the streaming tee buffer cap
+// from the GOMEMLIMIT value when max_streaming_buffer_bytes is not
+// explicitly configured. This bounds the total memory held in live
+// streaming buffers during concurrent miss-fetches, preventing the
+// OOMKill that occurs under slow-origin events when all fetchSem slots
+// fill with buffered responses (PR #524).
+//
+// When max_streaming_buffer_bytes is set explicitly it is kept as-is
+// (operator override). When GOMEMLIMIT is empty or unparseable, the
+// field is left unchanged so the handler falls back to its built-in
+// default (64 MiB).
+func (c *RouteCache) ResolveMaxStreamingBufferBytes(goMemLimit string) {
+	if c.MaxStreamingBufferBytes > 0 {
+		return
+	}
+	raw := strings.TrimSpace(goMemLimit)
+	if raw == "" {
+		return
+	}
+	n, err := parseByteSize(raw)
+	if err != nil || n <= 0 {
+		return
+	}
+	c.MaxStreamingBufferBytes = ByteSize(n * int64(defaultStreamingBufferRatio) / 100)
+}
+
 // validateRoute checks a single route entry and normalises its fields.
 // A route must specify exactly one of Pool or Static.Root.
 //
@@ -343,6 +386,9 @@ func validateRouteCache(i int, rc RouteCache) error {
 	}
 	if rc.MaxResponseBytes < 0 {
 		return fmt.Errorf("config: route %d max_response_bytes must be >= 0, got %s", i, rc.MaxResponseBytes)
+	}
+	if rc.MaxStreamingBufferBytes < 0 {
+		return fmt.Errorf("config: route %d max_streaming_buffer_bytes must be >= 0, got %s", i, rc.MaxStreamingBufferBytes)
 	}
 	if rc.MaxFetchConcurrency < 0 {
 		return fmt.Errorf("config: route %d max_fetch_concurrency must be >= 0, got %d", i, rc.MaxFetchConcurrency)

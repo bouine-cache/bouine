@@ -596,6 +596,91 @@ func TestResolveWarmMaxEntries_InvalidGomemLimitIgnored(t *testing.T) {
 	require.Equal(t, int64(0), s.WarmMaxEntries)
 }
 
+func TestResolveMaxStreamingBufferBytes_DerivesFromGomemLimitDefaultRatio(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		limit string
+		want  int64
+	}{
+		{"768MiB default 7%", "768MiB", int64(768<<20) * 7 / 100},
+		{"14GiB default 7%", "14GiB", int64(14<<30) * 7 / 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := RouteCache{}
+			c.ResolveMaxStreamingBufferBytes(tc.limit)
+			require.Equal(t, tc.want, c.MaxStreamingBufferBytes.Bytes())
+		})
+	}
+}
+
+func TestResolveMaxStreamingBufferBytes_ExplicitOverrideKept(t *testing.T) {
+	t.Parallel()
+	c := RouteCache{MaxStreamingBufferBytes: ByteSize(32 << 20)}
+	c.ResolveMaxStreamingBufferBytes("24GiB")
+	require.Equal(t, int64(32<<20), c.MaxStreamingBufferBytes.Bytes())
+}
+
+func TestResolveMaxStreamingBufferBytes_NoGomemLimitStaysZero(t *testing.T) {
+	t.Parallel()
+	c := RouteCache{}
+	c.ResolveMaxStreamingBufferBytes("")
+	require.Equal(t, int64(0), c.MaxStreamingBufferBytes.Bytes())
+}
+
+func TestResolveMaxStreamingBufferBytes_InvalidGomemLimitIgnored(t *testing.T) {
+	t.Parallel()
+	c := RouteCache{}
+	c.ResolveMaxStreamingBufferBytes("garbage")
+	require.Equal(t, int64(0), c.MaxStreamingBufferBytes.Bytes())
+}
+
+func TestParse_DerivesMaxStreamingBufferBytesFromGomemLimitEnv(t *testing.T) {
+	t.Setenv("GOMEMLIMIT", "768MiB")
+	yamlSrc := `
+listen:
+  admin: ":9000"
+routes:
+  - name: test
+    match:
+      host: example.com
+    pool: upstream
+upstream_pools:
+  - name: upstream
+    targets:
+      - "http://localhost:8080"
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "parse")
+	want := int64(768<<20) * 7 / 100
+	got := cfg.Routes[0].Cache.MaxStreamingBufferBytes.Bytes()
+	require.Equal(t, want, got)
+}
+
+func TestParse_ExplicitMaxStreamingBufferBytesNotOverriddenByGomemLimit(t *testing.T) {
+	t.Setenv("GOMEMLIMIT", "24GiB")
+	yamlSrc := `
+listen:
+  admin: ":9000"
+routes:
+  - name: test
+    match:
+      host: example.com
+    pool: upstream
+    cache:
+      max_streaming_buffer_bytes: 128MiB
+upstream_pools:
+  - name: upstream
+    targets:
+      - "http://localhost:8080"
+`
+	cfg, err := Parse([]byte(yamlSrc))
+	require.NoError(t, err, "parse")
+	require.Equal(t, int64(128<<20), cfg.Routes[0].Cache.MaxStreamingBufferBytes.Bytes())
+}
+
 func TestParse_GOGC(t *testing.T) {
 	t.Parallel()
 	gogc := 200

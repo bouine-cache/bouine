@@ -2170,10 +2170,15 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	obj.HasConnectionList = obj.Header.Get(header.Connection) != ""
 	obj.HasNoCacheFields = respCC.NoCacheFields != ""
 
-	// SerializedHead is not computed here — it is lazily computed on
-	// the first fast-path cache hit by getOrComputeSerializedHead.
-	// This avoids allocating ~512 bytes per object for objects that
-	// are never served via the fast-path (misses, full handler path).
+	// Pre-warm the serialized header block at cache-fill time so the
+	// first fast-path hit doesn't pay the ~512-byte serialization cost
+	// and the atomic CompareAndSwap on every hit. Objects never served
+	// via the fast-path still pay the cost, but this is off the hot path
+	// (store.Put is miss-path, not hit-path) and the ~512 bytes is
+	// amortized across all subsequent hits.
+	if head := serializeHead(obj); len(head) <= maxFastPathHeaderBytes {
+		obj.StoreSerializedHead(head)
+	}
 
 	return obj
 }

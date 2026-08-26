@@ -312,11 +312,12 @@ func (f *FastPathHandler) serialize304Response(req *api.RawRequest, obj *api.Obj
 	return resp
 }
 
-// getOrComputeSerializedHead returns the lazily-computed serialized
-// header block for the object. On the first call, it computes the
-// serialized headers via serializeHead and stores them atomically.
-// Subsequent calls return the cached bytes. Returns nil if the
-// serialized headers exceed maxFastPathHeaderBytes (the fast-path
+// getOrComputeSerializedHead returns the pre-rendered serialized
+// header block for the object. Objects built via buildObject have
+// serializedHead pre-warmed at cache-fill time; this function still
+// handles the fallback case (warm-tier loads, objects built outside
+// buildObject) by computing lazily on first access. Returns nil if
+// the serialized headers exceed maxFastPathHeaderBytes (the fast-path
 // falls back to appendResponseHeaders in that case).
 func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
 	if head := obj.LoadSerializedHead(); head != nil {

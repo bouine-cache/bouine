@@ -22,13 +22,13 @@ type Object struct {
 	// and cached for subsequent hits. Stored as atomic.Value (any) to
 	// avoid importing fasthttp in pkg/api. Not serialized to disk.
 	FastHeader atomic.Value `json:"-"`
-	// serializedHead is the lazily-computed pre-rendered HTTP response
-	// header block (static headers as "Key: Value\r\n" pairs, without
-	// status line or trailing \r\n). Computed on the first fast-path
-	// cache hit, not at store time — objects never served via the
-	// fast-path (misses, net/http path) never pay the ~512-byte cost.
-	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
-	// Accessed via atomic.Pointer for race-safe lazy initialization.
+	// serializedHead is the pre-rendered HTTP response header block
+	// (static headers as "Key: Value\r\n" pairs, without status line
+	// or trailing \r\n). Computed at cache-fill time in buildObject
+	// so the first fast-path hit doesn't pay the serialization cost.
+	// Not serialized to disk (json:"-"). Warm-tier loads leave this
+	// nil and it is lazily computed on the first hit.
+	// Accessed via atomic.Pointer for race-safe initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
 	// ETag is the strong or weak entity tag from the origin.
 	ETag string `json:"etag,omitempty"`

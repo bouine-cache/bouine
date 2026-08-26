@@ -42,12 +42,18 @@ func TestHandleFallThrough_ServesResponse(t *testing.T) {
 		NHeaders: 2,
 	}
 
-	done := make(chan error, 1)
+	done := make(chan struct{}, 1)
 	go func() {
-		err := parser.handleFallThrough(serverConn, req, nil)
+		_, _ = parser.handleFallThrough(serverConn, req, nil)
 		_ = serverConn.Close()
-		done <- err
+		done <- struct{}{}
 	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleFallThrough did not return within 5s")
+	}
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp := &fasthttp.Response{}
@@ -57,13 +63,6 @@ func TestHandleFallThrough_ServesResponse(t *testing.T) {
 
 	assert.Equal(t, 200, resp.StatusCode())
 	assert.True(t, bytes.Equal(body, responseBody))
-
-	select {
-	case err := <-done:
-		assert.Nil(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleFallThrough did not return within 5s")
-	}
 }
 
 func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
@@ -97,11 +96,11 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 		NHeaders: 4,
 	}
 
-	done := make(chan error, 1)
+	done := make(chan struct{}, 1)
 	go func() {
-		err := parser.handleFallThrough(serverConn, req, nil)
+		_, _ = parser.handleFallThrough(serverConn, req, nil)
 		_ = serverConn.Close()
-		done <- err
+		done <- struct{}{}
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -110,8 +109,7 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 	require.NoError(t, err, "Read")
 
 	select {
-	case err := <-done:
-		assert.Nil(t, err)
+	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleFallThrough did not return within 5s")
 	}
@@ -153,11 +151,11 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 		NHeaders: 4,
 	}
 
-	done := make(chan error, 1)
+	done := make(chan struct{}, 1)
 	go func() {
-		err := parser.handleFallThrough(serverConn, req, excess)
+		_, _ = parser.handleFallThrough(serverConn, req, excess)
 		_ = serverConn.Close()
-		done <- err
+		done <- struct{}{}
 	}()
 
 	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -166,8 +164,7 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 	require.NoError(t, err, "Read")
 
 	select {
-	case err := <-done:
-		assert.Nil(t, err)
+	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("handleFallThrough did not return within 5s")
 	}

@@ -13,33 +13,33 @@ const originHeaderRingCap = 1000
 // HeaderSample is a single sampled origin response header audit record.
 type HeaderSample struct {
 	Pool            string
+	CacheControlVal string
 	Timestamp       int64
+	StatusCode      int
 	HasCacheControl bool
 	HasETag         bool
 	HasLastModified bool
 	HasSurrogateKey bool
-	StatusCode      int
-	CacheControlVal string
 }
 
 // HeaderAuditSummary is the aggregated per-pool header audit statistics.
 type HeaderAuditSummary struct {
+	SampleCacheControl string
 	SampleCount        int64
 	HasCacheControlPct float64
 	HasETagPct         float64
 	HasLastModifiedPct float64
 	HasSurrogateKeyPct float64
-	SampleCacheControl string
 }
 
 // OriginHeaderRing is a fixed-size circular buffer that samples origin
 // response headers to audit Cache-Control, ETag, Last-Modified, and
 // Surrogate-Key presence per upstream pool.
 type OriginHeaderRing struct {
-	mu      sync.Mutex
 	samples [originHeaderRingCap]HeaderSample
 	head    int
 	count   int
+	mu      sync.Mutex
 }
 
 // NewOriginHeaderRing creates a new OriginHeaderRing.

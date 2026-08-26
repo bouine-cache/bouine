@@ -145,11 +145,11 @@ var errSegFull = errors.New("warm: active segment full")
 
 // Record is a single warm-tier entry read from a segment.
 type Record struct {
-	Key    api.Key
 	Body   []byte
-	IsTomb bool
 	Offset int64
 	SegID  int
+	Key    api.Key
+	IsTomb bool
 }
 
 // mmapRef wraps the mmap'd []byte so it can be stored in an atomic.Pointer.
@@ -161,18 +161,7 @@ type mmapRef struct {
 
 // Segment is an append-only file on disk.
 type Segment struct {
-	ID       int
-	Path     string
-	mu       sync.Mutex
-	f        *os.File
-	size     int64
-	maxBytes int64
-	opened   atomic.Bool
-	// readers counts in-flight read operations using this segment's fd.
-	// The fdCache checks this before evicting an open segment — a
-	// non-zero count means a read is in progress and the fd cannot be
-	// closed safely.
-	readers atomic.Int32
+	f *os.File
 	// mmap is a persistent MAP_SHARED mapping of the segment file used
 	// for zero-syscall point reads on inactive (sealed) segments. It is
 	// an atomic.Pointer for race-free access from multiple Get goroutines
@@ -180,7 +169,18 @@ type Segment struct {
 	// by fdCache eviction (POSIX guarantee); only Compact and Close munmap
 	// (under s.mu.Lock, which excludes all RLock holders). nil on non-Linux,
 	// before initialization, or while the segment is active.
-	mmap atomic.Pointer[mmapRef]
+	mmap     atomic.Pointer[mmapRef]
+	Path     string
+	size     int64
+	maxBytes int64
+	ID       int
+	mu       sync.Mutex
+	opened   atomic.Bool
+	// readers counts in-flight read operations using this segment's fd.
+	// The fdCache checks this before evicting an open segment — a
+	// non-zero count means a read is in progress and the fd cannot be
+	// closed safely.
+	readers atomic.Int32
 }
 
 // ensureOpen opens the segment file if not already open. Must be called
@@ -259,10 +259,10 @@ func (seg *Segment) Close() error {
 // on the next touch. The cache is protected by its own mutex, separate
 // from s.mu, so eviction does not block normal segment lookups.
 type fdCache struct {
-	mu       sync.Mutex
-	capacity int
 	entries  map[int]*list.Element
 	lru      *list.List
+	capacity int
+	mu       sync.Mutex
 }
 
 // newFDCache creates an FD cache with the given capacity. capacity <= 0
@@ -370,51 +370,21 @@ func (c *fdCache) Len() int {
 // skips these to avoid evicting a warm copy that the acceleration
 // tier would immediately re-sync — wasting I/O on both tiers.
 type warmLoc struct {
-	segID     int
+	entry     *evictor.Entry[api.Key]
 	offset    int64
 	size      int64
-	entry     *evictor.Entry[api.Key]
+	segID     int
 	protected bool
 }
 
 // Store is the warm-tier disk store.
 type Store struct {
-	dir          string
-	maxBytes     int64
-	maxEntries   int64
-	maxDiskBytes int64
-	minFreeDisk  int64
-	preallocate  int64
-	segMax       int64
-	mu           sync.RWMutex
-	segs         []*Segment
-	segByID      map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
-	nextID       atomic.Int32
-	stats        warmStats
-	idxMu        sync.RWMutex
-	index        map[api.Key]warmLoc
-	// protectedCount tracks the number of warm entries currently marked
-	// protected (backed by a live hot entry). Maintained as an atomic
-	// so ProtectedCount is O(1) — no index scan, no lock contention.
-	// Incremented by Protect (false→true), decremented by Unprotect
-	// (true→false), Delete (if the removed entry was protected), and
-	// Put overwrite (if the old entry was protected and the new one is
-	// not, which is the default — callers re-Protect if needed).
-	protectedCount atomic.Int64
 	// evictList is the SIEVE eviction list. O(1) eviction and access
 	// tracking — Get sets the visited bit atomically under RLock, Put
 	// inserts at head, Evict sweeps from the hand.
 	evictList evictor.List[api.Key]
-	// evictionAlgorithm records the configured policy so compact can
-	// rebuild the correct list type. Stored separately from evictList
-	// because evictList is replaced during compaction.
-	evictionAlgorithm string
-	// compactKeysBuf is a reusable buffer for collecting keys in append
-	// order during compaction. Compaction runs on a single goroutine
-	// (compactLoop), so no synchronization is needed. The buffer grows
-	// to fit the steady-state key count and is reused across compaction
-	// cycles, avoiding a per-compaction allocation of ~32 MB at 2M keys.
-	compactKeysBuf []api.Key
+	segByID   map[int]*Segment // O(1) segment lookup by ID, kept in sync with segs
+	index     map[api.Key]warmLoc
 	// OnEvict is called with the evicted key after evictOne removes the
 	// entry from the warm index and writes the tombstone. The acceleration
 	// tier uses this to clear hasBackup on the corresponding hot entry so
@@ -431,16 +401,46 @@ type Store struct {
 	// metrics receives warm-tier Prometheus collectors. Nil when the
 	// store is constructed without a registry (tests, single-node).
 	metrics *Metrics
-	// mmapPrevResidentPages tracks the total resident page count from
-	// the previous MmapStats poll. The delta (current - previous) is
-	// reported as new page faults. Linux-only; unused on other platforms.
-	//nolint:unused // used only in warm_mmap_stats_linux.go
-	mmapPrevResidentPages atomic.Int64
 	// fdCache bounds the number of open segment file descriptors.
 	// Nil when SegmentCacheSize is -1 (unlimited). ensureOpen calls
 	// fdCache.touch after opening a segment so the cache can evict the
 	// LRU entry when over capacity.
 	fdCache *fdCache
+	dir     string
+	// evictionAlgorithm records the configured policy so compact can
+	// rebuild the correct list type. Stored separately from evictList
+	// because evictList is replaced during compaction.
+	evictionAlgorithm string
+	// compactKeysBuf is a reusable buffer for collecting keys in append
+	// order during compaction. Compaction runs on a single goroutine
+	// (compactLoop), so no synchronization is needed. The buffer grows
+	// to fit the steady-state key count and is reused across compaction
+	// cycles, avoiding a per-compaction allocation of ~32 MB at 2M keys.
+	compactKeysBuf []api.Key
+	segs           []*Segment
+	stats          warmStats
+	// mmapPrevResidentPages tracks the total resident page count from
+	// the previous MmapStats poll. The delta (current - previous) is
+	// reported as new page faults. Linux-only; unused on other platforms.
+	//nolint:unused // used only in warm_mmap_stats_linux.go
+	mmapPrevResidentPages atomic.Int64
+	maxDiskBytes          int64
+	preallocate           int64
+	segMax                int64
+	// protectedCount tracks the number of warm entries currently marked
+	// protected (backed by a live hot entry). Maintained as an atomic
+	// so ProtectedCount is O(1) — no index scan, no lock contention.
+	// Incremented by Protect (false→true), decremented by Unprotect
+	// (true→false), Delete (if the removed entry was protected), and
+	// Put overwrite (if the old entry was protected and the new one is
+	// not, which is the default — callers re-Protect if needed).
+	protectedCount atomic.Int64
+	minFreeDisk    int64
+	maxEntries     int64
+	maxBytes       int64
+	mu             sync.RWMutex
+	idxMu          sync.RWMutex
+	nextID         atomic.Int32
 }
 
 // newEvictList builds the warm-tier eviction list from the Config's
@@ -479,9 +479,24 @@ type warmStats struct {
 
 // Config configures the warm store.
 type Config struct {
-	Dir      string
-	MaxBytes int64
-	SegMax   int64 // per-segment max, default 64 MiB
+	// Metrics receives warm-tier Prometheus collectors. Nil disables
+	// metric collection (single-node mode without a registry).
+	Metrics *Metrics
+	Dir     string
+	// WarmEvictionAlgorithm selects the eviction policy for the warm tier.
+	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
+	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
+	// hot objects up to 7 second chances (vs SIEVE's 1) before
+	// eviction.
+	//
+	// This is the resolved per-tier value: builders copy either
+	// config.Storage.WarmEvictionAlgorithm (when set) or the shared
+	// config.Storage.EvictionAlgorithm into this field. The distinct
+	// name from the shared config field keeps `grep EvictionAlgorithm`
+	// unambiguous.
+	WarmEvictionAlgorithm string
+	MaxBytes              int64
+	SegMax                int64 // per-segment max, default 64 MiB
 	// SegmentCacheSize caps the number of concurrently open segment
 	// file descriptors. 0 means auto (min(segCount, 256)). -1 means
 	// unlimited (no eviction). When the cache is full and a new segment
@@ -506,21 +521,6 @@ type Config struct {
 	// totaling this size. The store operates as a circular buffer.
 	// Zero means create segments on demand.
 	Preallocate int64
-	// Metrics receives warm-tier Prometheus collectors. Nil disables
-	// metric collection (single-node mode without a registry).
-	Metrics *Metrics
-	// WarmEvictionAlgorithm selects the eviction policy for the warm tier.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before
-	// eviction.
-	//
-	// This is the resolved per-tier value: builders copy either
-	// config.Storage.WarmEvictionAlgorithm (when set) or the shared
-	// config.Storage.EvictionAlgorithm into this field. The distinct
-	// name from the shared config field keeps `grep EvictionAlgorithm`
-	// unambiguous.
-	WarmEvictionAlgorithm string
 }
 
 // NewStore creates or opens a warm store in dir.
@@ -2268,8 +2268,8 @@ func swapSegmentFiles(dir, compactDir string) error {
 }
 
 type pendingRec struct {
-	key  api.Key
 	body []byte
+	key  api.Key
 }
 
 // compactSegments scans each source segment for live records and writes

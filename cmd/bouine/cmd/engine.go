@@ -40,11 +40,11 @@ import (
 )
 
 type engine struct {
-	cfg        *config.Config
-	configPath string
 	startTime  time.Time
 	logger     observability.Logger
+	cfg        *config.Config
 	metrics    *observability.Metrics
+	configPath string
 }
 
 func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engine {

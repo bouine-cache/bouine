@@ -160,11 +160,11 @@ func ageHeader(d time.Duration) string {
 
 // fetchResult is the outcome of an origin fetch, shared across collapsed requests.
 type fetchResult struct {
-	StatusCode int
-	Header     headerLookup
-	Body       []byte
 	Err        error
 	fastResp   *fasthttp.Response // non-nil when the response is kept alive for CopyTo
+	Header     headerLookup
+	Body       []byte
+	StatusCode int
 }
 
 // Handler is the caching HTTP handler. It wraps an upstream
@@ -174,75 +174,23 @@ type fetchResult struct {
 // Recorders that grew past this on a large response are discarded so the
 // pool never pins a transiently oversized buffer across GC cycles.
 type Handler struct {
-	upstream         fasthttp.RequestHandler
-	fastClient       FastClient
-	store            storage.Store
-	flight           singleflight.Group
-	logger           observability.Logger
-	negativeTTL      time.Duration
-	jitterPercent    int
-	stayinAlive      bool
-	defaultTTL       time.Duration // operator fallback when origin sends no freshness
-	overrideTTL      time.Duration // operator override; wins over origin max-age/Expires when > 0
-	defaultSWR       time.Duration // operator-level stale-while-revalidate floor
-	defaultSIE       time.Duration // operator-level stale-if-error floor
-	allowSetCookie   bool          // when false (default), Set-Cookie blocks caching
-	maxObjectSize    int64         // skip storage for responses larger than this; 0 = no limit
-	maxResponseBytes int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
-	fetchSem         chan struct{} // bounds concurrent foreground origin fetches
-	fetchTimeout     time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
-	// streamingBufferBytes tracks the total bytes currently held in live
-	// streaming tee buffers across all concurrent streamMissTee calls.
-	// When it exceeds maxStreamingBufferBytes, new misses fall back to
-	// the synchronous buffered path to prevent OOMKill under slow-origin
-	// conditions (see status-0-investigation.md).
-	streamingBufferBytes atomic.Int64
-	// maxStreamingBufferBytes caps total streaming buffer memory. 0 means
-	// defaultMaxStreamingBufferBytes.
-	maxStreamingBufferBytes int64
-	policy                  *KeyPolicy // pre-compiled cache key policy (query + Vary headers); nil = none
-
-	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
-	// a background scheduler fires conditional revalidation at
-	// TTL - margin, keeping objects perpetually fresh.
-	refreshBeforeExpiry  bool
-	refreshRegistry      *refreshRegistry
-	scheduler            *RefreshScheduler
-	refreshSem           chan struct{}
-	refreshMargin        time.Duration
-	refreshTimeout       time.Duration
-	refreshMinHits       int
-	refreshPersistCycles int
-	refreshMinScore      int64
-	refreshLimiter       *refreshRateLimiter
-	refreshReactiveFirst bool
-	refreshMetrics       observability.RefreshMetricsForRoute
-	routeName            string
-	done                 chan struct{}
-	closeOnce            sync.Once
-	refreshWg            sync.WaitGroup
-	revalSem             chan struct{}  // bounds concurrent SWR background goroutines
-	revalWg              sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
-	// variantSets tracks the live variant store keys per primary key to
-	// enforce MaxVariants cap. Entries are removed when the handler observes
-	// their eviction via store probes on the cap path, on explicit Delete,
-	// or when reserveVariantSlot detects the primary key has been evicted
-	// by SIEVE and resets the set.
-	// Protected by variantMu.
-	variantMu   sync.Mutex
-	variantSets map[api.Key]map[api.Key]struct{}
-	// VaryCapHits is incremented when a variant is rejected; nil-safe.
-	VaryCapHits interface{ Inc() }
-	// StreamingBufferBytesSet updates the streaming buffer bytes gauge;
-	// nil-safe. Polled by the engine's background metrics loop.
-	StreamingBufferBytesSet interface{ Set(float64) }
+	refreshMetrics observability.RefreshMetricsForRoute
 	// StreamingFallbackInc is incremented when a cacheable miss falls
 	// back to synchronous buffering because the streaming memory cap
 	// was exceeded; nil-safe.
 	StreamingFallbackInc interface{ Inc() }
-	// ownerFn returns the peer that owns a cache key and whether the key
-	// is local to this node. Nil in single-node mode.
-	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	store                storage.Store
+	flight               singleflight.Group
+	logger               observability.Logger
+	fastClient           FastClient
+	// StreamingBufferBytesSet updates the streaming buffer bytes gauge;
+	// nil-safe. Polled by the engine's background metrics loop.
+	StreamingBufferBytesSet interface{ Set(float64) }
+	// VaryCapHits is incremented when a variant is rejected; nil-safe.
+	VaryCapHits     interface{ Inc() }
+	refreshRegistry *refreshRegistry
+	upstream        fasthttp.RequestHandler
+	revalSem        chan struct{} // bounds concurrent SWR background goroutines
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
@@ -250,29 +198,141 @@ type Handler struct {
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
 	peerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
+	// variantSets tracks the live variant store keys per primary key to
+	// enforce MaxVariants cap. Entries are removed when the handler observes
+	// their eviction via store probes on the cap path, on explicit Delete,
+	// or when reserveVariantSlot detects the primary key has been evicted
+	// by SIEVE and resets the set.
+	// Protected by variantMu.
+	variantSets    map[api.Key]map[api.Key]struct{}
+	refreshSem     chan struct{}
+	done           chan struct{}
+	fetchSem       chan struct{} // bounds concurrent foreground origin fetches
+	scheduler      *RefreshScheduler
+	refreshLimiter *refreshRateLimiter
+	// ownerFn returns the peer that owns a cache key and whether the key
+	// is local to this node. Nil in single-node mode.
+	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	policy  *KeyPolicy // pre-compiled cache key policy (query + Vary headers); nil = none
 	// inflightStreams tracks in-progress streaming fetches for
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
 	// the done channel and serve the buffered result.
-	inflightStreams sync.Map // map[api.Key]*inflightStream
+	inflightStreams         sync.Map // map[api.Key]*inflightStream
+	routeName               string
+	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
+	refreshWg               sync.WaitGroup
+	refreshMargin           time.Duration
+	maxObjectSize           int64 // skip storage for responses larger than this; 0 = no limit
+	maxStreamingBufferBytes int64
+	// maxStreamingBufferBytes caps total streaming buffer memory. 0 means
+	// defaultMaxStreamingBufferBytes.
+	streamingBufferBytes atomic.Int64
+	// streamingBufferBytes tracks the total bytes currently held in live
+	// streaming tee buffers across all concurrent streamMissTee calls.
+	// When it exceeds maxStreamingBufferBytes, new misses fall back to
+	// the synchronous buffered path to prevent OOMKill under slow-origin
+	// conditions (see status-0-investigation.md).
+	refreshPersistCycles int
+	refreshMinScore      int64
+	refreshTimeout       time.Duration
+	defaultSWR           time.Duration // operator-level stale-while-revalidate floor
+	defaultTTL           time.Duration // operator fallback when origin sends no freshness
+	jitterPercent        int
+	defaultSIE           time.Duration // operator-level stale-if-error floor
+	maxResponseBytes     int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
+	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires when > 0
+	refreshMinHits       int
+	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
+	negativeTTL          time.Duration
+	closeOnce            sync.Once
+	variantMu            sync.Mutex
+	stayinAlive          bool
+	allowSetCookie       bool // when false (default), Set-Cookie blocks caching
+	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
+	// a background scheduler fires conditional revalidation at
+	// TTL - margin, keeping objects perpetually fresh.
+	refreshBeforeExpiry  bool
+	refreshReactiveFirst bool
 }
 
 // HandlerConfig configures a cache Handler.
 type HandlerConfig struct {
-	Upstream fasthttp.RequestHandler
-	Store    storage.Store
-	Logger   observability.Logger
+	// StreamingFallback, if non-nil, is incremented when a cacheable
+	// miss falls back to synchronous buffering because the streaming
+	// memory cap was exceeded.
+	StreamingFallback interface{ Inc() }
+	Store             storage.Store
+	Logger            observability.Logger
+	// FastClient is used by doFetch to fetch from the origin via
+	// fasthttp. The response is captured directly in a pooled
+	// *fasthttp.Response, eliminating intermediate header.Map and
+	// body buffer allocations.
+	FastClient FastClient
+	// VaryCapHits, if non-nil, is incremented when a variant is rejected
+	// because MaxVariants is exceeded.
+	VaryCapHits interface{ Inc() }
+	// StreamingBufferBytes, if non-nil, is set to the current total
+	// bytes held in live streaming tee buffers. Polled by the engine's
+	// background metrics loop.
+	StreamingBufferBytes interface{ Set(float64) }
+	// PeerPut, if non-nil, forwards a freshly origin-fetched object to
+	// the key's owner node via a write-to-owner RPC. Used in strong
+	// cluster mode so a non-owner that misses both locally and at the
+	// owner still delivers the object to the owner for future
+	// peer-fetches. Best-effort, fire-and-forget. Nil in single-node
+	// and eventual modes.
+	PeerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
+	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
+	// the key is owned by a remote peer. Returns nil, nil on peer miss;
+	// errors are treated as misses (origin fallback, logged at debug).
+	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	Upstream  fasthttp.RequestHandler
+	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
+	// peer that owns a cache key and whether the key is local. When nil,
+	// the handler operates in single-node mode: every miss goes to origin.
+	OwnerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	// Policy, when non-nil, encodes cache key construction rules for this
+	// route: query param stripping/keeping/prefix/empty/dedup and Vary
+	// header exclusion. nil means no query/header policy.
+	Policy *KeyPolicy
+	// RefreshMetrics records background refresh activity. Nil when the
+	// feature is disabled or metrics are not configured.
+	RefreshMetrics *observability.RefreshMetrics
+	// RouteName labels refresh metrics. Set from the route's config name.
+	RouteName string
+	// DefaultSWR is applied to every stored object when the origin does not
+	// send stale-while-revalidate. Zero leaves the object at origin semantics.
+	DefaultSWR time.Duration
+	// RefreshMinScore is the minimum refresh priority score (staleHits ×
+	// BodySize) required for re-scheduling. Zero disables the score gate.
+	RefreshMinScore int64
+	// MaxStreamingBufferBytes caps the total bytes held in live streaming
+	// tee buffers across all concurrent miss-fetches on this route. When
+	// exceeded, new cacheable misses fall back to synchronous buffering.
+	// Zero (default) applies a safe built-in limit (64 MiB).
+	MaxStreamingBufferBytes int64
+	// MaxFetchConcurrency bounds the number of concurrent foreground
+	// origin fetches. When the limit is reached, additional fetches
+	// block until a slot frees or the request context is cancelled.
+	// Zero (default) applies a safe built-in limit (32).
+	MaxFetchConcurrency int
+	// MaxResponseBytes is a hard limit on the amount of response body
+	// data buffered in memory during an upstream fetch. When exceeded the
+	// fetch is aborted and the client receives a 502. This is distinct
+	// from MaxObjectSize, which only prevents storage after the body has
+	// already been fully buffered. Zero (default) applies a safe built-in
+	// limit (4 MiB).
+	MaxResponseBytes int64
+	// MaxObjectSize, when > 0, skips caching for responses whose body
+	// exceeds this size. The response is still proxied to the client.
+	// Zero = no limit.
+	MaxObjectSize int64
 	// NegativeTTL enables caching of 404/405/410/501 responses.
 	NegativeTTL time.Duration
-	// JitterPercent adds random ±N% to TTLs (0–50). 0 disables.
-	JitterPercent int
-	// StayinAlive enables emergency stale mode: serve cached objects
-	// indefinitely when the upstream is unreachable or returning 5xx.
-	StayinAlive bool
-	// DefaultTTL is the operator-configured TTL used when the origin sends
-	// no explicit freshness (no max-age, no Expires, no Last-Modified).
-	// Zero means fall back to heuristic or treat as uncacheable.
-	DefaultTTL time.Duration
+	// DefaultSIE is applied to every stored object when the origin does not
+	// send stale-if-error. Zero disables SIE fallback for this route.
+	DefaultSIE time.Duration
 	// OverrideTTL, when > 0, forces bouine's internal cache TTL to this
 	// value regardless of the upstream's Cache-Control/Expires headers.
 	// The upstream's response headers are forwarded unaltered; only
@@ -281,80 +341,12 @@ type HandlerConfig struct {
 	// must-revalidate) are always honoured; OverrideTTL only replaces
 	// the numeric freshness lifetime.
 	OverrideTTL time.Duration
-	// DefaultSWR is applied to every stored object when the origin does not
-	// send stale-while-revalidate. Zero leaves the object at origin semantics.
-	DefaultSWR time.Duration
-	// DefaultSIE is applied to every stored object when the origin does not
-	// send stale-if-error. Zero disables SIE fallback for this route.
-	DefaultSIE time.Duration
-	// AllowSetCookie controls caching of responses with Set-Cookie.
-	// Default (false): Set-Cookie in the response blocks caching
-	// unconditionally, matching nginx's safe default and preventing
-	// session-cookie replay across users. When true: caching is
-	// permitted per RFC 9111, but Set-Cookie is stripped from the
-	// stored object so subsequent HITs do not replay another user's
-	// cookies.
-	AllowSetCookie bool
-	// MaxObjectSize, when > 0, skips caching for responses whose body
-	// exceeds this size. The response is still proxied to the client.
-	// Zero = no limit.
-	MaxObjectSize int64
-	// MaxResponseBytes is a hard limit on the amount of response body
-	// data buffered in memory during an upstream fetch. When exceeded the
-	// fetch is aborted and the client receives a 502. This is distinct
-	// from MaxObjectSize, which only prevents storage after the body has
-	// already been fully buffered. Zero (default) applies a safe built-in
-	// limit (4 MiB).
-	MaxResponseBytes int64
-	// MaxFetchConcurrency bounds the number of concurrent foreground
-	// origin fetches. When the limit is reached, additional fetches
-	// block until a slot frees or the request context is cancelled.
-	// Zero (default) applies a safe built-in limit (32).
-	MaxFetchConcurrency int
-	// FetchTimeout bounds the total time for an origin fetch (header +
-	// body). When exceeded, the fetch is aborted and the caller receives
-	// a fetchResult error. Zero (default) applies a safe built-in limit
-	// (60s). This replaces the blanket WriteTimeout on the data plane.
-	FetchTimeout time.Duration
-	// MaxStreamingBufferBytes caps the total bytes held in live streaming
-	// tee buffers across all concurrent miss-fetches on this route. When
-	// exceeded, new cacheable misses fall back to synchronous buffering.
-	// Zero (default) applies a safe built-in limit (64 MiB).
-	MaxStreamingBufferBytes int64
-	// Policy, when non-nil, encodes cache key construction rules for this
-	// route: query param stripping/keeping/prefix/empty/dedup and Vary
-	// header exclusion. nil means no query/header policy.
-	Policy *KeyPolicy
-	// VaryCapHits, if non-nil, is incremented when a variant is rejected
-	// because MaxVariants is exceeded.
-	VaryCapHits interface{ Inc() }
-	// StreamingBufferBytes, if non-nil, is set to the current total
-	// bytes held in live streaming tee buffers. Polled by the engine's
-	// background metrics loop.
-	StreamingBufferBytes interface{ Set(float64) }
-	// StreamingFallback, if non-nil, is incremented when a cacheable
-	// miss falls back to synchronous buffering because the streaming
-	// memory cap was exceeded.
-	StreamingFallback interface{ Inc() }
-	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
-	// peer that owns a cache key and whether the key is local. When nil,
-	// the handler operates in single-node mode: every miss goes to origin.
-	OwnerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
-	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
-	// the key is owned by a remote peer. Returns nil, nil on peer miss;
-	// errors are treated as misses (origin fallback, logged at debug).
-	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
-	// PeerPut, if non-nil, forwards a freshly origin-fetched object to
-	// the key's owner node via a write-to-owner RPC. Used in strong
-	// cluster mode so a non-owner that misses both locally and at the
-	// owner still delivers the object to the owner for future
-	// peer-fetches. Best-effort, fire-and-forget. Nil in single-node
-	// and eventual modes.
-	PeerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
-
-	// RefreshBeforeExpiry enables proactive background conditional
-	// revalidation. A background timer fires at TTL - margin.
-	RefreshBeforeExpiry bool
+	// DefaultTTL is the operator-configured TTL used when the origin sends
+	// no explicit freshness (no max-age, no Expires, no Last-Modified).
+	// Zero means fall back to heuristic or treat as uncacheable.
+	DefaultTTL time.Duration
+	// JitterPercent adds random ±N% to TTLs (0–50). 0 disables.
+	JitterPercent int
 	// RefreshMargin is the duration before TTL expiry at which the
 	// background refresh fires.
 	RefreshMargin time.Duration
@@ -374,9 +366,11 @@ type HandlerConfig struct {
 	// re-scheduling immediately. Requires refresh_min_hits > 0 to take
 	// effect.
 	RefreshPersistCycles int
-	// RefreshMinScore is the minimum refresh priority score (staleHits ×
-	// BodySize) required for re-scheduling. Zero disables the score gate.
-	RefreshMinScore int64
+	// FetchTimeout bounds the total time for an origin fetch (header +
+	// body). When exceeded, the fetch is aborted and the caller receives
+	// a fetchResult error. Zero (default) applies a safe built-in limit
+	// (60s). This replaces the blanket WriteTimeout on the data plane.
+	FetchTimeout time.Duration
 	// RefreshMaxRPS caps background refresh fetches per second per route.
 	// Zero means no limit.
 	RefreshMaxRPS int
@@ -384,16 +378,20 @@ type HandlerConfig struct {
 	// on SWR to promote popular objects. Requires StaleWhileRevalidate > 0
 	// and RefreshMinHits > 0.
 	RefreshReactiveFirst bool
-	// RouteName labels refresh metrics. Set from the route's config name.
-	RouteName string
-	// RefreshMetrics records background refresh activity. Nil when the
-	// feature is disabled or metrics are not configured.
-	RefreshMetrics *observability.RefreshMetrics
-	// FastClient is used by doFetch to fetch from the origin via
-	// fasthttp. The response is captured directly in a pooled
-	// *fasthttp.Response, eliminating intermediate header.Map and
-	// body buffer allocations.
-	FastClient FastClient
+	// StayinAlive enables emergency stale mode: serve cached objects
+	// indefinitely when the upstream is unreachable or returning 5xx.
+	StayinAlive bool
+	// RefreshBeforeExpiry enables proactive background conditional
+	// revalidation. A background timer fires at TTL - margin.
+	RefreshBeforeExpiry bool
+	// AllowSetCookie controls caching of responses with Set-Cookie.
+	// Default (false): Set-Cookie in the response blocks caching
+	// unconditionally, matching nginx's safe default and preventing
+	// session-cookie replay across users. When true: caching is
+	// permitted per RFC 9111, but Set-Cookie is stripped from the
+	// stored object so subsequent HITs do not replay another user's
+	// cookies.
+	AllowSetCookie bool
 }
 
 // FastClient performs an origin fetch using fasthttp, returning a

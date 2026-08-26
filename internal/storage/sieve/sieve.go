@@ -26,8 +26,8 @@ type List[K comparable] struct {
 	head *evictor.Entry[K]
 	tail *evictor.Entry[K]
 	hand *evictor.Entry[K]
-	len  int
 	pool *evictor.EntryPool[K]
+	len  int
 }
 
 // NewList creates an empty SIEVE list.

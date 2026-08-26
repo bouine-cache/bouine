@@ -12,38 +12,6 @@ import "time"
 //
 // Stable.
 type Config struct {
-	// Listen controls every network listener. Empty addresses disable
-	// the corresponding listener.
-	Listen Listen `yaml:"listen,omitempty" json:"listen,omitempty"`
-
-	// TLS configures the data-plane TLS handshake. The control-plane
-	// admin listener has its own minimal TLS hook (see internal/admin).
-	TLS TLS `yaml:"tls,omitempty" json:"tls,omitempty"`
-
-	// Storage controls the hot + warm tiers.
-	Storage Storage `yaml:"storage,omitempty" json:"storage,omitempty"`
-
-	// Cluster controls peer discovery and fan-out.
-	Cluster Cluster `yaml:"cluster,omitempty" json:"cluster,omitempty"`
-
-	// UpstreamPools declares the origin / backend pools that routes
-	// reference by name.
-	UpstreamPools []UpstreamPool `yaml:"upstream_pools,omitempty" json:"upstream_pools,omitempty"`
-
-	// Routes are matched in declaration order; the first match wins.
-	Routes []Route `yaml:"routes,omitempty" json:"routes,omitempty"`
-
-	// Admin controls the admin API security settings.
-	Admin AdminConfig `yaml:"admin,omitempty" json:"admin,omitempty"`
-
-	// Cloudflare configures optional invalidation propagation to the
-	// downstream Cloudflare CDN. When zone_id and api_token are set,
-	// purge/ban/refresh operations are forwarded to the CF edge.
-	Cloudflare CloudflareConfig `yaml:"cloudflare,omitempty" json:"cloudflare,omitempty"`
-
-	// Tracing configures OpenTelemetry span export. Empty endpoint = no-op.
-	Tracing TracingConfig `yaml:"tracing,omitempty" json:"tracing,omitempty"`
-
 	// GOGC controls the Go GC trigger percentage. nil defers to the
 	// GOGC env var (Go default 100). A value of -1 disables the
 	// percentage-based trigger entirely, relying solely on GOMEMLIMIT.
@@ -51,13 +19,34 @@ type Config struct {
 	// transient heap usage. Safe to raise when GOMEMLIMIT is set, since
 	// the soft memory limit acts as a hard cap.
 	GOGC *int `yaml:"gogc,omitempty" json:"gogc,omitempty"`
-
+	// Listen controls every network listener. Empty addresses disable
+	// the corresponding listener.
+	Listen Listen `yaml:"listen,omitempty" json:"listen,omitempty"`
+	// TLS configures the data-plane TLS handshake. The control-plane
+	// admin listener has its own minimal TLS hook (see internal/admin).
+	TLS TLS `yaml:"tls,omitempty" json:"tls,omitempty"`
+	// Tracing configures OpenTelemetry span export. Empty endpoint = no-op.
+	Tracing TracingConfig `yaml:"tracing,omitempty" json:"tracing,omitempty"`
+	// UpstreamPools declares the origin / backend pools that routes
+	// reference by name.
+	UpstreamPools []UpstreamPool `yaml:"upstream_pools,omitempty" json:"upstream_pools,omitempty"`
+	// Routes are matched in declaration order; the first match wins.
+	Routes []Route `yaml:"routes,omitempty" json:"routes,omitempty"`
+	// Admin controls the admin API security settings.
+	Admin AdminConfig `yaml:"admin,omitempty" json:"admin,omitempty"`
+	// Cluster controls peer discovery and fan-out.
+	Cluster Cluster `yaml:"cluster,omitempty" json:"cluster,omitempty"`
+	// Cloudflare configures optional invalidation propagation to the
+	// downstream Cloudflare CDN. When zone_id and api_token are set,
+	// purge/ban/refresh operations are forwarded to the CF edge.
+	Cloudflare CloudflareConfig `yaml:"cloudflare,omitempty" json:"cloudflare,omitempty"`
+	// Storage controls the hot + warm tiers.
+	Storage Storage `yaml:"storage,omitempty" json:"storage,omitempty"`
 	// URLRingSampleRate controls 1-in-N sampling for the dashboard URL
 	// ring buffer. Default 0 = record every non-HIT request. A value of
 	// 100 records 1 in 100, reducing sync.Map overhead under high miss
 	// rates. Set to 1 to record every call (debug mode).
 	URLRingSampleRate int `yaml:"url_ring_sample_rate,omitempty" json:"url_ring_sample_rate,omitempty"`
-
 	// Experimental holds opt-in features that are not yet stable.
 	// Fields default to off (zero value) and must be explicitly enabled.
 	Experimental ExperimentalConfig `yaml:"experimental,omitempty" json:"experimental,omitempty"`
@@ -84,11 +73,6 @@ type ExperimentalConfig struct {
 
 // Listen enumerates the listener addresses. Empty strings disable.
 type Listen struct {
-	HTTP           string `yaml:"http,omitempty" json:"http,omitempty"`
-	HTTPS          string `yaml:"https,omitempty" json:"https,omitempty"`
-	Admin          string `yaml:"admin,omitempty" json:"admin,omitempty"`
-	Cluster        string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
-	MaxConnections int    `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
 	// TCPFastOpen enables Linux TCP_FASTOPEN on data-plane listeners.
 	// nil defaults to true on Linux and no-op on other platforms.
 	TCPFastOpen *bool `yaml:"tcp_fast_open,omitempty" json:"tcp_fast_open,omitempty"`
@@ -99,14 +83,19 @@ type Listen struct {
 	// N parallel accept loops (one per GOMAXPROCS) for better connection
 	// distribution under high load. nil defaults to true on Linux, false
 	// on other platforms (macOS/BSD have different SO_REUSEPORT semantics).
-	ReusePort *bool `yaml:"reuse_port,omitempty" json:"reuse_port,omitempty"`
+	ReusePort      *bool  `yaml:"reuse_port,omitempty" json:"reuse_port,omitempty"`
+	HTTP           string `yaml:"http,omitempty" json:"http,omitempty"`
+	HTTPS          string `yaml:"https,omitempty" json:"https,omitempty"`
+	Admin          string `yaml:"admin,omitempty" json:"admin,omitempty"`
+	Cluster        string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
+	MaxConnections int    `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are
 // supported via SNI; the first matching cert wins.
 type TLS struct {
-	Certs      []TLSCert `yaml:"certs,omitempty" json:"certs,omitempty"`
 	MinVersion string    `yaml:"min_version,omitempty" json:"min_version,omitempty"`
+	Certs      []TLSCert `yaml:"certs,omitempty" json:"certs,omitempty"`
 }
 
 // TLSCert is a single cert/key pair plus its SNI matches.
@@ -118,23 +107,34 @@ type TLSCert struct {
 
 // Storage controls embedded hot + warm tiers. Phase 2+.
 type Storage struct {
-	HotMaxBytes ByteSize `yaml:"hot_max_bytes,omitempty" json:"hot_max_bytes,omitempty"`
-	// HotMmapSlab enables the mmap'd slab allocator for hot store body
-	// bytes. When true, bodies are allocated from mmap'd regions instead
-	// of Go heap, reducing GC pressure. Default false (Go heap).
-	HotMmapSlab  bool     `yaml:"hot_mmap_slab,omitempty" json:"hot_mmap_slab,omitempty"`
-	WarmDir      string   `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
-	WarmMaxBytes ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
-	// WarmMaxEntries caps the warm-tier index size in entries. Zero means
-	// derive from GOMEMLIMIT (see WarmMaxEntriesRatio). A positive value
-	// overrides the derived limit. Negative means unlimited.
-	WarmMaxEntries int64 `yaml:"warm_max_entries,omitempty" json:"warm_max_entries,omitempty"`
-	// WarmMaxDiskBytes caps the total physical disk usage of warm-tier
-	// segment files (live + dead bytes). Unlike WarmMaxBytes which limits
-	// logical bytes in the index, this limits actual disk consumption.
-	// When exceeded, compaction is triggered immediately. Zero means
-	// unlimited (backward compatible).
-	WarmMaxDiskBytes ByteSize `yaml:"warm_max_disk_bytes,omitempty" json:"warm_max_disk_bytes,omitempty"`
+	// EvictionAlgorithm selects the eviction policy for both tiers.
+	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
+	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
+	// hot objects up to 7 second chances (vs SIEVE's 1) before
+	// eviction. This is the shared default; per-tier fields below
+	// override it.
+	EvictionAlgorithm string `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
+	// WarmEvictionAlgorithm overrides the eviction policy for the warm
+	// tier only. When non-empty, it takes precedence over
+	// EvictionAlgorithm. Accepts the same values.
+	WarmEvictionAlgorithm string `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
+	WarmDir               string `yaml:"warm_dir,omitempty" json:"warm_dir,omitempty"`
+	// HotEvictionAlgorithm overrides the eviction policy for the hot
+	// tier only. When non-empty, it takes precedence over
+	// EvictionAlgorithm. Accepts the same values.
+	HotEvictionAlgorithm string `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
+	// WarmSyncInterval controls how often the hot→warm background sync
+	// runs. Default 60s (applied when warm_dir is set and the field is
+	// zero). Set to -1 to explicitly disable the sync loop. Only
+	// effective when warm_dir is configured.
+	WarmSyncInterval time.Duration `yaml:"warm_sync_interval,omitempty" json:"warm_sync_interval,omitempty"`
+	// CompactStartupDelay delays the first compaction check after
+	// startup. Compaction scans all segments and can take seconds with
+	// millions of keys — running it during startup (when WAL replay,
+	// cluster join, and initial traffic compete for I/O) causes probe
+	// timeouts and CrashLoopBackOff. Default 5 minutes. 0 means use the
+	// default. Set to -1 to start compaction immediately.
+	CompactStartupDelay time.Duration `yaml:"compact_startup_delay,omitempty" json:"compact_startup_delay,omitempty"`
 	// MinFreeDisk is the minimum free disk space (in bytes) to maintain
 	// on the warm-tier filesystem. When free space drops below this,
 	// compaction is triggered immediately and warm promotion is paused.
@@ -161,11 +161,7 @@ type Storage struct {
 	// written to warm only by the background sync loop. Default 64 KiB.
 	// Set to 0 to write all objects to warm on every Put (high disk I/O).
 	BodyThreshold ByteSize `yaml:"body_threshold,omitempty" json:"body_threshold,omitempty"`
-	// WarmSyncInterval controls how often the hot→warm background sync
-	// runs. Default 60s (applied when warm_dir is set and the field is
-	// zero). Set to -1 to explicitly disable the sync loop. Only
-	// effective when warm_dir is configured.
-	WarmSyncInterval time.Duration `yaml:"warm_sync_interval,omitempty" json:"warm_sync_interval,omitempty"`
+	HotMaxBytes   ByteSize `yaml:"hot_max_bytes,omitempty" json:"hot_max_bytes,omitempty"`
 	// WarmSyncBatchSize caps the number of entries written to warm per
 	// sync cycle. Default 5000. When the hot working set exceeds this,
 	// entries are rotated across cycles.
@@ -176,13 +172,12 @@ type Storage struct {
 	// synchronous mode (per-entry fsync, same as pre-ADR-0024 behavior).
 	// Only effective when warm_dir is configured. See ADR-0024.
 	WALSyncInterval time.Duration `yaml:"wal_sync_interval,omitempty" json:"wal_sync_interval,omitempty"`
-	// CompactStartupDelay delays the first compaction check after
-	// startup. Compaction scans all segments and can take seconds with
-	// millions of keys — running it during startup (when WAL replay,
-	// cluster join, and initial traffic compete for I/O) causes probe
-	// timeouts and CrashLoopBackOff. Default 5 minutes. 0 means use the
-	// default. Set to -1 to start compaction immediately.
-	CompactStartupDelay time.Duration `yaml:"compact_startup_delay,omitempty" json:"compact_startup_delay,omitempty"`
+	// WarmMaxDiskBytes caps the total physical disk usage of warm-tier
+	// segment files (live + dead bytes). Unlike WarmMaxBytes which limits
+	// logical bytes in the index, this limits actual disk consumption.
+	// When exceeded, compaction is triggered immediately. Zero means
+	// unlimited (backward compatible).
+	WarmMaxDiskBytes ByteSize `yaml:"warm_max_disk_bytes,omitempty" json:"warm_max_disk_bytes,omitempty"`
 	// CheckpointInterval controls how often a snapshot + WAL truncate
 	// checkpoint runs. Default 5m. 0 means use the default. Set to -1
 	// to disable periodic checkpointing (WAL grows until compaction).
@@ -210,21 +205,15 @@ type Storage struct {
 	// disable the dedicated drain goroutine (drains only on the warm
 	// sync cycle, which may cause drops under sustained eviction).
 	TombstoneDrainInterval time.Duration `yaml:"tombstone_drain_interval,omitempty" json:"tombstone_drain_interval,omitempty"`
-	// EvictionAlgorithm selects the eviction policy for both tiers.
-	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
-	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
-	// hot objects up to 7 second chances (vs SIEVE's 1) before
-	// eviction. This is the shared default; per-tier fields below
-	// override it.
-	EvictionAlgorithm string `yaml:"eviction_algorithm,omitempty" json:"eviction_algorithm,omitempty"`
-	// HotEvictionAlgorithm overrides the eviction policy for the hot
-	// tier only. When non-empty, it takes precedence over
-	// EvictionAlgorithm. Accepts the same values.
-	HotEvictionAlgorithm string `yaml:"hot_eviction_algorithm,omitempty" json:"hot_eviction_algorithm,omitempty"`
-	// WarmEvictionAlgorithm overrides the eviction policy for the warm
-	// tier only. When non-empty, it takes precedence over
-	// EvictionAlgorithm. Accepts the same values.
-	WarmEvictionAlgorithm string `yaml:"warm_eviction_algorithm,omitempty" json:"warm_eviction_algorithm,omitempty"`
+	// WarmMaxEntries caps the warm-tier index size in entries. Zero means
+	// derive from GOMEMLIMIT (see WarmMaxEntriesRatio). A positive value
+	// overrides the derived limit. Negative means unlimited.
+	WarmMaxEntries int64    `yaml:"warm_max_entries,omitempty" json:"warm_max_entries,omitempty"`
+	WarmMaxBytes   ByteSize `yaml:"warm_max_bytes,omitempty" json:"warm_max_bytes,omitempty"`
+	// HotMmapSlab enables the mmap'd slab allocator for hot store body
+	// bytes. When true, bodies are allocated from mmap'd regions instead
+	// of Go heap, reducing GC pressure. Default false (Go heap).
+	HotMmapSlab bool `yaml:"hot_mmap_slab,omitempty" json:"hot_mmap_slab,omitempty"`
 }
 
 // Cluster consistency modes. The mode controls how cache keys are
@@ -247,6 +236,10 @@ const maxHandoffQueueDepth = 1 << 20 // 1,048,576
 // Cluster controls peer membership and fan-out. The cluster is enabled
 // when Listen.Cluster is non-empty; there is no separate enabled flag.
 type Cluster struct {
+	// TLS configures mTLS for peer-to-peer cluster communication.
+	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
+	// certificates. Leave empty for plain HTTP (dev / single-node use).
+	TLS ClusterTLS `yaml:"tls,omitempty" json:"tls,omitempty"`
 	// NodeName overrides the hostname used for gossip membership. When
 	// empty, defaults to os.Hostname(). Required when running multiple
 	// nodes on the same host (e.g. integration tests).
@@ -272,10 +265,6 @@ type Cluster struct {
 	// drops; 4096 absorbs typical production bursts. Negative values
 	// are rejected.
 	HandoffQueueDepth int `yaml:"handoff_queue_depth,omitempty" json:"handoff_queue_depth,omitempty"`
-	// TLS configures mTLS for peer-to-peer cluster communication.
-	// When non-empty, peer-fetch and broadcast RPCs use TLS with client
-	// certificates. Leave empty for plain HTTP (dev / single-node use).
-	TLS ClusterTLS `yaml:"tls,omitempty" json:"tls,omitempty"`
 	// PeerMaxConnsPerHost limits the number of HTTP/1.1 pipelined
 	// connections per peer. With pipelining (PipelineClient), each
 	// connection handles MaxPendingRequests concurrent in-flight
@@ -319,11 +308,11 @@ type HealthPolicy struct {
 type ActiveHealthCheck struct {
 	Path                string        `yaml:"path,omitempty" json:"path,omitempty"`
 	Method              string        `yaml:"method,omitempty" json:"method,omitempty"`
+	ExpectedStatusCodes []int         `yaml:"expected_status_codes,omitempty" json:"expected_status_codes,omitempty"`
 	Interval            time.Duration `yaml:"interval,omitempty" json:"interval,omitempty"`
 	Timeout             time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	HealthyThreshold    int           `yaml:"healthy_threshold,omitempty" json:"healthy_threshold,omitempty"`
 	UnhealthyThreshold  int           `yaml:"unhealthy_threshold,omitempty" json:"unhealthy_threshold,omitempty"`
-	ExpectedStatusCodes []int         `yaml:"expected_status_codes,omitempty" json:"expected_status_codes,omitempty"`
 }
 
 // PassiveHealthCheck is the rolling-error-rate ejection policy.
@@ -364,12 +353,12 @@ type Route struct {
 	// Name is the human-readable route label used in Prometheus metrics and
 	// the operator dashboard. Defaults to host:path_prefix when empty.
 	Name     string        `yaml:"name,omitempty" json:"name,omitempty"`
-	Match    RouteMatch    `yaml:"match,omitempty" json:"match,omitempty"`
 	Pool     string        `yaml:"pool,omitempty" json:"pool,omitempty"`
-	Static   StaticConfig  `yaml:"static,omitempty" json:"static,omitempty"`
-	Cache    RouteCache    `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Match    RouteMatch    `yaml:"match,omitempty" json:"match,omitempty"`
 	Request  RouteRequest  `yaml:"request,omitempty" json:"request,omitempty"`
 	Response RouteResponse `yaml:"response,omitempty" json:"response,omitempty"`
+	Static   StaticConfig  `yaml:"static,omitempty" json:"static,omitempty"`
+	Cache    RouteCache    `yaml:"cache,omitempty" json:"cache,omitempty"`
 }
 
 // StaticConfig configures a route to serve files from a local directory
@@ -402,29 +391,6 @@ type RouteMatch struct {
 
 // RouteCache is the per-route cache policy.
 type RouteCache struct {
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// TTLDefault is the fallback cache lifetime applied when the origin
-	// sends no freshness information (no max-age/s-maxage, no valid
-	// Expires, no Last-Modified). When > 0 it also makes such a response
-	// eligible for storage — without it, a bare 200 is treated as
-	// uncacheable and every request is a MISS. Blocking directives
-	// (no-store, private, no-cache, Set-Cookie without freshness,
-	// Vary: *, Authorization) are always honoured. Mirrors nginx's
-	// proxy_cache_valid. Zero disables the fallback.
-	TTLDefault           time.Duration `yaml:"ttl_default,omitempty" json:"ttl_default,omitempty"`
-	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate,omitempty" json:"stale_while_revalidate,omitempty"`
-	StaleIfError         time.Duration `yaml:"stale_if_error,omitempty" json:"stale_if_error,omitempty"`
-	// NegativeTTL caches error responses (404, 405, 410, 501) for
-	// the configured duration. Zero disables negative caching.
-	NegativeTTL time.Duration `yaml:"negative_ttl,omitempty" json:"negative_ttl,omitempty"`
-	// JitterPercent adds a random ±N% to every TTL to prevent
-	// synchronized expiry stampedes. Range 0–50; 0 disables.
-	JitterPercent int `yaml:"jitter_percent,omitempty" json:"jitter_percent,omitempty"`
-	// StayinAlive enables emergency stale mode: when the upstream is
-	// unreachable or returns 5xx, serve the cached object regardless
-	// of how long ago it expired. Keeps the route alive until the
-	// upstream recovers.
-	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
 	// AllowSetCookie controls whether responses containing a Set-Cookie
 	// header are eligible for caching.
 	//
@@ -437,6 +403,40 @@ type RouteCache struct {
 	// the stored object so subsequent cache HITs do not replay cookies
 	// intended for the first client.
 	AllowSetCookie *bool `yaml:"allow_set_cookie,omitempty" json:"allow_set_cookie,omitempty"`
+	Enabled        *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Key controls cache key construction for this route.
+	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
+	// RefreshMinHits is the minimum number of cache hits an object must
+	// accumulate during its TTL window to qualify for re-scheduling
+	// after a background refresh. Zero (default) disables the gate —
+	// every cached object is refreshed regardless of access frequency.
+	// When set to N > 0, only objects hit at least N times are
+	// re-scheduled; unpopular long-tail objects expire naturally,
+	// reducing origin traffic on routes with many distinct paths.
+	// The first TTL window always gets one refresh cycle; the gate
+	// only applies on re-scheduling after a refresh completes.
+	RefreshMinHits int `yaml:"refresh_min_hits,omitempty" json:"refresh_min_hits,omitempty"`
+	// RefreshPersistCycles is the number of additional TTL cycles to
+	// keep refreshing an object after the popularity gate
+	// (refresh_min_hits) would block re-scheduling. Each background
+	// refresh that finds Hits < minHits decrements the counter; any
+	// popular refresh (Hits >= minHits) resets it to the configured
+	// value. Zero (default) disables persistence — the gate kills
+	// re-scheduling immediately. Requires refresh_min_hits > 0.
+	RefreshPersistCycles int `yaml:"refresh_persist_cycles,omitempty" json:"refresh_persist_cycles,omitempty"`
+	// JitterPercent adds a random ±N% to every TTL to prevent
+	// synchronized expiry stampedes. Range 0–50; 0 disables.
+	JitterPercent int `yaml:"jitter_percent,omitempty" json:"jitter_percent,omitempty"`
+	// TTLDefault is the fallback cache lifetime applied when the origin
+	// sends no freshness information (no max-age/s-maxage, no valid
+	// Expires, no Last-Modified). When > 0 it also makes such a response
+	// eligible for storage — without it, a bare 200 is treated as
+	// uncacheable and every request is a MISS. Blocking directives
+	// (no-store, private, no-cache, Set-Cookie without freshness,
+	// Vary: *, Authorization) are always honoured. Mirrors nginx's
+	// proxy_cache_valid. Zero disables the fallback.
+	TTLDefault   time.Duration `yaml:"ttl_default,omitempty" json:"ttl_default,omitempty"`
+	StaleIfError time.Duration `yaml:"stale_if_error,omitempty" json:"stale_if_error,omitempty"`
 	// TTLOverride, when > 0, forces bouine's internal cache TTL to this
 	// value regardless of the upstream's Cache-Control/Expires headers.
 	// The upstream's response headers are forwarded to downstream clients
@@ -488,6 +488,34 @@ type RouteCache struct {
 	// (7% of the runtime soft memory limit); if GOMEMLIMIT is also unset,
 	// a safe built-in default (64 MiB) is used.
 	MaxStreamingBufferBytes ByteSize `yaml:"max_streaming_buffer_bytes,omitempty" json:"max_streaming_buffer_bytes,omitempty"`
+	// RefreshMaxRPS caps the number of background refresh fetches per
+	// second per route. When the cap is reached, pending refreshes are
+	// deferred with jittered backoff rather than dropped. Zero (default)
+	// means no rate limit. Requires refresh_before_expiry. Range 0 or
+	// 1–10000.
+	RefreshMaxRPS int `yaml:"refresh_max_rps,omitempty" json:"refresh_max_rps,omitempty"`
+	// RefreshMarginPercent controls when the background refresh fires,
+	// as a percentage of TTL. Default 10 (fire at 90% of TTL). Range 1-50.
+	RefreshMarginPercent int `yaml:"refresh_margin_percent,omitempty" json:"refresh_margin_percent,omitempty"`
+	// RefreshConcurrency bounds concurrent background refresh fetches
+	// per route. Default 8. Zero means use the default. Range 1-64.
+	RefreshConcurrency int `yaml:"refresh_concurrency,omitempty" json:"refresh_concurrency,omitempty"`
+	// RefreshTimeout is the maximum duration for a single background
+	// refresh fetch. Default 10s. Range 5s-120s.
+	RefreshTimeout       time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
+	StaleWhileRevalidate time.Duration `yaml:"stale_while_revalidate,omitempty" json:"stale_while_revalidate,omitempty"`
+	// NegativeTTL caches error responses (404, 405, 410, 501) for
+	// the configured duration. Zero disables negative caching.
+	NegativeTTL time.Duration `yaml:"negative_ttl,omitempty" json:"negative_ttl,omitempty"`
+	// RefreshMinScore is the minimum refresh priority score required for
+	// re-scheduling after a background refresh. The score is computed as
+	// staleHits × obj.BodySize, where staleHits is the per-window hit count
+	// from the previous TTL window. This weights the refresh decision by
+	// object size: a 4 MB object with 1 hit outranks a 512 B object with
+	// 100 hits. Zero (default) disables the score gate. When both
+	// refresh_min_hits and refresh_min_score are set, both gates must pass.
+	// Requires refresh_before_expiry and refresh_min_hits > 0.
+	RefreshMinScore int64 `yaml:"refresh_min_score,omitempty" json:"refresh_min_score,omitempty"`
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin, performing
 	// a conditional fetch (If-None-Match / If-Modified-Since). On 304,
@@ -498,48 +526,6 @@ type RouteCache struct {
 	// scheduled. Negative-cached objects (404/405/410/501) are not
 	// refreshed.
 	RefreshBeforeExpiry bool `yaml:"refresh_before_expiry,omitempty" json:"refresh_before_expiry,omitempty"`
-	// RefreshMarginPercent controls when the background refresh fires,
-	// as a percentage of TTL. Default 10 (fire at 90% of TTL). Range 1-50.
-	RefreshMarginPercent int `yaml:"refresh_margin_percent,omitempty" json:"refresh_margin_percent,omitempty"`
-	// RefreshConcurrency bounds concurrent background refresh fetches
-	// per route. Default 8. Zero means use the default. Range 1-64.
-	RefreshConcurrency int `yaml:"refresh_concurrency,omitempty" json:"refresh_concurrency,omitempty"`
-	// RefreshTimeout is the maximum duration for a single background
-	// refresh fetch. Default 10s. Range 5s-120s.
-	RefreshTimeout time.Duration `yaml:"refresh_timeout,omitempty" json:"refresh_timeout,omitempty"`
-	// RefreshMinHits is the minimum number of cache hits an object must
-	// accumulate during its TTL window to qualify for re-scheduling
-	// after a background refresh. Zero (default) disables the gate —
-	// every cached object is refreshed regardless of access frequency.
-	// When set to N > 0, only objects hit at least N times are
-	// re-scheduled; unpopular long-tail objects expire naturally,
-	// reducing origin traffic on routes with many distinct paths.
-	// The first TTL window always gets one refresh cycle; the gate
-	// only applies on re-scheduling after a refresh completes.
-	RefreshMinHits int `yaml:"refresh_min_hits,omitempty" json:"refresh_min_hits,omitempty"`
-	// RefreshPersistCycles is the number of additional TTL cycles to
-	// keep refreshing an object after the popularity gate
-	// (refresh_min_hits) would block re-scheduling. Each background
-	// refresh that finds Hits < minHits decrements the counter; any
-	// popular refresh (Hits >= minHits) resets it to the configured
-	// value. Zero (default) disables persistence — the gate kills
-	// re-scheduling immediately. Requires refresh_min_hits > 0.
-	RefreshPersistCycles int `yaml:"refresh_persist_cycles,omitempty" json:"refresh_persist_cycles,omitempty"`
-	// RefreshMinScore is the minimum refresh priority score required for
-	// re-scheduling after a background refresh. The score is computed as
-	// staleHits × obj.BodySize, where staleHits is the per-window hit count
-	// from the previous TTL window. This weights the refresh decision by
-	// object size: a 4 MB object with 1 hit outranks a 512 B object with
-	// 100 hits. Zero (default) disables the score gate. When both
-	// refresh_min_hits and refresh_min_score are set, both gates must pass.
-	// Requires refresh_before_expiry and refresh_min_hits > 0.
-	RefreshMinScore int64 `yaml:"refresh_min_score,omitempty" json:"refresh_min_score,omitempty"`
-	// RefreshMaxRPS caps the number of background refresh fetches per
-	// second per route. When the cap is reached, pending refreshes are
-	// deferred with jittered backoff rather than dropped. Zero (default)
-	// means no rate limit. Requires refresh_before_expiry. Range 0 or
-	// 1–10000.
-	RefreshMaxRPS int `yaml:"refresh_max_rps,omitempty" json:"refresh_max_rps,omitempty"`
 	// RefreshReactiveFirst changes the refresh strategy from proactive to
 	// reactive for the initial TTL window. New objects are not scheduled
 	// for proactive refresh. Instead, they rely on stale-while-revalidate
@@ -549,8 +535,11 @@ type RouteCache struct {
 	// refresh_before_expiry, stale_while_revalidate > 0, and
 	// refresh_min_hits > 0.
 	RefreshReactiveFirst bool `yaml:"refresh_reactive_first,omitempty" json:"refresh_reactive_first,omitempty"`
-	// Key controls cache key construction for this route.
-	Key RouteKey `yaml:"key,omitempty" json:"key,omitempty"`
+	// StayinAlive enables emergency stale mode: when the upstream is
+	// unreachable or returns 5xx, serve the cached object regardless
+	// of how long ago it expired. Keeps the route alive until the
+	// upstream recovers.
+	StayinAlive bool `yaml:"stayin_alive,omitempty" json:"stayin_alive,omitempty"`
 }
 
 // RouteKey configures cache key construction for a route.
@@ -596,13 +585,13 @@ type RouteKey struct {
 
 // RouteRequest is the per-route request-side header rewrite block.
 type RouteRequest struct {
-	HeaderSet    map[string]string `yaml:"header_set,omitempty" json:"header_set,omitempty"`
-	HeaderRemove []string          `yaml:"header_remove,omitempty" json:"header_remove,omitempty"`
+	HeaderSet map[string]string `yaml:"header_set,omitempty" json:"header_set,omitempty"`
 	// StripPrefix removes this path prefix from the request URL before
 	// forwarding to the upstream. The cache key uses the original path
 	// so different routes with the same stripped path don't collide.
 	// Must start with "/" when non-empty.
-	StripPrefix string `yaml:"strip_prefix,omitempty" json:"strip_prefix,omitempty"`
+	StripPrefix  string   `yaml:"strip_prefix,omitempty" json:"strip_prefix,omitempty"`
+	HeaderRemove []string `yaml:"header_remove,omitempty" json:"header_remove,omitempty"`
 }
 
 // RouteResponse is the per-route response-side header rewrite block.
@@ -613,6 +602,11 @@ type RouteResponse struct {
 
 // CloudflareConfig configures Cloudflare Cache API invalidation propagation.
 type CloudflareConfig struct {
+	// Async controls whether CF propagation blocks the admin response.
+	// Defaults to true when omitted: the /v1/purge|ban|refresh response
+	// returns immediately and CF invalidation fires in a background goroutine.
+	// Set async: false to wait for CF confirmation (~50–300 ms extra latency).
+	Async *bool `yaml:"async,omitempty" json:"async,omitempty"`
 	// ZoneID is the Cloudflare zone identifier (non-secret; visible in the
 	// Cloudflare dashboard URL). Required when propagation is enabled.
 	ZoneID string `yaml:"zone_id,omitempty" json:"zone_id,omitempty"`
@@ -624,31 +618,26 @@ type CloudflareConfig struct {
 	// (including APIToken) to multiply the effective rate limit budget.
 	// Inject via CF_API_TOKENS (comma-separated) environment variable.
 	APITokens []string `yaml:"api_tokens,omitempty" json:"api_tokens,omitempty"`
-	// Propagate controls which bouine operations forward to Cloudflare.
-	Propagate CloudflarePropagation `yaml:"propagate,omitempty" json:"propagate,omitempty"`
-	// Async controls whether CF propagation blocks the admin response.
-	// Defaults to true when omitted: the /v1/purge|ban|refresh response
-	// returns immediately and CF invalidation fires in a background goroutine.
-	// Set async: false to wait for CF confirmation (~50–300 ms extra latency).
-	Async *bool `yaml:"async,omitempty" json:"async,omitempty"`
-	// Timeout for individual CF API calls (default 10s).
-	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	// Batch configures purge batching and deduplication to reduce CF API
-	// call volume. When MaxBatchSize > 0, individual purge requests are
-	// coalesced into batched, deduplicated API calls. When 0 (default),
-	// every purge fires an immediate individual API call (passthrough).
-	Batch CloudflareBatchConfig `yaml:"batch,omitempty" json:"batch,omitempty"`
-	// Circuit configures the circuit breaker that protects against
-	// cascading failures during CF API outages. When enabled, the circuit
-	// opens after N consecutive failures, failing fast to avoid wasting
-	// resources on a known-down API.
-	Circuit CloudflareCircuitConfig `yaml:"circuit,omitempty" json:"circuit,omitempty"`
 	// Retry configures the dead-letter queue for failed CF purges. When
 	// enabled, failed purge items are enqueued and retried with exponential
 	// backoff. This survives transient CF outages without losing
 	// invalidations, without increasing CF API request volume (items are
 	// deduplicated and go through the same batching pipeline on retry).
 	Retry CloudflareRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+	// Circuit configures the circuit breaker that protects against
+	// cascading failures during CF API outages. When enabled, the circuit
+	// opens after N consecutive failures, failing fast to avoid wasting
+	// resources on a known-down API.
+	Circuit CloudflareCircuitConfig `yaml:"circuit,omitempty" json:"circuit,omitempty"`
+	// Batch configures purge batching and deduplication to reduce CF API
+	// call volume. When MaxBatchSize > 0, individual purge requests are
+	// coalesced into batched, deduplicated API calls. When 0 (default),
+	// every purge fires an immediate individual API call (passthrough).
+	Batch CloudflareBatchConfig `yaml:"batch,omitempty" json:"batch,omitempty"`
+	// Timeout for individual CF API calls (default 10s).
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Propagate controls which bouine operations forward to Cloudflare.
+	Propagate CloudflarePropagation `yaml:"propagate,omitempty" json:"propagate,omitempty"`
 }
 
 // CloudflareBatchConfig configures CF purge batching.

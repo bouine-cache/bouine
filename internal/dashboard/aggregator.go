@@ -21,16 +21,14 @@ import (
 // It caches the last successful summary per peer so that stale entries
 // still contribute data when a peer is temporarily unreachable.
 type Aggregator struct {
-	rings    *observability.Rings
-	peersFn  func() []api.PeerInfo
-	selfAddr string
-	timeout  time.Duration
-	logger   observability.Logger
-
-	client *transport.Client
-
-	mu        sync.Mutex
+	logger    observability.Logger
+	rings     *observability.Rings
+	peersFn   func() []api.PeerInfo
+	client    *transport.Client
 	lastKnown map[string]observability.MetricsSummary // peer name → last successful summary
+	selfAddr  string
+	timeout   time.Duration
+	mu        sync.Mutex
 }
 
 // NewAggregator creates an Aggregator.
@@ -48,10 +46,10 @@ func NewAggregator(rings *observability.Rings, peersFn func() []api.PeerInfo, se
 
 // PeerResult holds the result of a single peer fetch.
 type PeerResult struct {
+	Err      error
 	NodeName string
 	Summary  observability.MetricsSummary
 	Stale    bool // true if the peer was unreachable (last-known used)
-	Err      error
 }
 
 // Collect fans out to all live peers and returns the merged summary.
@@ -130,8 +128,8 @@ func (a *Aggregator) recordPeerHealth(results []PeerResult) {
 
 type fetchResult struct {
 	peer    api.PeerInfo
-	summary observability.MetricsSummary
 	err     error
+	summary observability.MetricsSummary
 }
 
 // resolveResult returns the summary to use and whether the peer is stale.

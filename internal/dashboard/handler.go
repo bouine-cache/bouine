@@ -25,55 +25,55 @@ import (
 
 // Config controls the dashboard server.
 type Config struct {
-	Rings    *observability.Rings
-	PeersFn  func() []api.PeerInfo
-	SelfAddr string
-	Token    string
-	Logger   observability.Logger
-	// Version is the build version shown in the dashboard sidebar.
-	Version string
-	// Storage stats.
-	StoreFn      func() api.Stats
-	HotMaxBytes  int64
-	WarmMaxBytes int64
-	// Invalidation proxies (bearer token never in HTML).
-	PurgeFn   func(ctx context.Context, urlStr string) error
-	BanFn     func(ctx context.Context, hostRegex, pathRegex string) (int, error)
-	RefreshFn func(ctx context.Context, urlStr string) error
-	// Config viewer.
-	Config     *config.Config
-	ConfigPath string
-	StartTime  time.Time
-	// Cluster metadata for the cluster page ring stats box.
-	ClusterMeta templates.ClusterMeta
-	// RingFn returns consistent-hash ring ownership segments.
-	RingFn func() []api.RingSegment
-	// PeerFetchStatsFn returns live peer fetch telemetry (M7).
-	PeerFetchStatsFn func() templates.PeerFetchStats
-	// CFStatusFn returns the current Cloudflare propagation status.
-	// nil means CF is not configured.
-	CFStatusFn func() templates.CFStatusCard
+	StartTime time.Time
+	Logger    observability.Logger
 	// PoolHealthFn returns per-pool target health for the insights diagram.
 	// nil means pool health is not available (single-node or no pools).
 	PoolHealthFn func() map[string][]origin.TargetStatus
-	// OriginHeaderAuditFn returns per-pool origin header audit stats.
-	OriginHeaderAuditFn func() map[string]observability.HeaderAuditSummary
-	// VaryCapHitsFn returns the total Vary cap hit count.
-	VaryCapHitsFn func() int64
-	// BroadcastFailuresFn returns total cluster broadcast failures.
-	BroadcastFailuresFn func() int64
+	Rings        *observability.Rings
 	// CFPurgeSkippedFn returns total CF purges skipped.
 	CFPurgeSkippedFn func() int64
+	// BroadcastFailuresFn returns total cluster broadcast failures.
+	BroadcastFailuresFn func() int64
+	// Storage stats.
+	StoreFn func() api.Stats
+	// VaryCapHitsFn returns the total Vary cap hit count.
+	VaryCapHitsFn func() int64
+	// OriginHeaderAuditFn returns per-pool origin header audit stats.
+	OriginHeaderAuditFn func() map[string]observability.HeaderAuditSummary
+	// CFStatusFn returns the current Cloudflare propagation status.
+	// nil means CF is not configured.
+	CFStatusFn func() templates.CFStatusCard
+	BanFn      func(ctx context.Context, hostRegex, pathRegex string) (int, error)
+	RefreshFn  func(ctx context.Context, urlStr string) error
+	// Invalidation proxies (bearer token never in HTML).
+	PurgeFn func(ctx context.Context, urlStr string) error
+	// Config viewer.
+	Config  *config.Config
+	PeersFn func() []api.PeerInfo
+	// PeerFetchStatsFn returns live peer fetch telemetry (M7).
+	PeerFetchStatsFn func() templates.PeerFetchStats
+	// RingFn returns consistent-hash ring ownership segments.
+	RingFn     func() []api.RingSegment
+	ConfigPath string
+	Token      string
+	// Version is the build version shown in the dashboard sidebar.
+	Version  string
+	SelfAddr string
+	// Cluster metadata for the cluster page ring stats box.
+	ClusterMeta  templates.ClusterMeta
+	WarmMaxBytes int64
+	HotMaxBytes  int64
 }
 
 // Handler is the dashboard HTTP handler. Mount at /dashboard/.
 type Handler struct {
-	cfg              Config
 	auth             *sessionAuth
 	agg              *Aggregator
 	insightEngine    *insights.Engine
-	prevStoreStatsMu sync.Mutex
+	cfg              Config
 	prevStoreStats   api.Stats
+	prevStoreStatsMu sync.Mutex
 }
 
 // New creates and returns a fasthttp.RequestHandler for the dashboard.

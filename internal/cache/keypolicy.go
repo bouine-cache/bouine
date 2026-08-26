@@ -13,10 +13,10 @@ import "strings"
 type KeyPolicy struct {
 	stripParams    map[string]bool // exact names to strip from query
 	keepParams     map[string]bool // when non-nil, allowlist (only these participate)
+	excludeHeaders map[string]bool // headers to exclude from Vary variant key
 	stripPrefixes  []string        // prefix patterns to strip, capped at 16
 	stripEmpty     bool            // strip params with empty values
 	dedup          bool            // keep first value (in request order) for duplicate params
-	excludeHeaders map[string]bool // headers to exclude from Vary variant key
 }
 
 // shouldStripParam returns true if the query param should be excluded

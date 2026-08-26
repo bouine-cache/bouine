@@ -27,23 +27,23 @@ import (
 //
 // Stable.
 type Pool struct {
+	logger  observability.Logger
+	client  *fasthttp.Client
 	Name    string
 	targets []*Target
 	next    atomic.Uint64
-	logger  observability.Logger
 	mu      sync.RWMutex
-	client  *fasthttp.Client
 }
 
 // Target is a single upstream endpoint.
 type Target struct {
-	addr          string
 	url           *url.URL
-	healthy       atomic.Bool
+	metrics       *Metrics
+	addr          string
 	passiveErrors atomic.Int64
 	probeErrors   atomic.Int64
 	successes     atomic.Int64
-	metrics       *Metrics
+	healthy       atomic.Bool
 }
 
 // recordPassiveError increments the passive error counter and ejects the
@@ -149,20 +149,17 @@ const defaultOriginMaxConnsPerHost = 64
 
 // PoolConfig configures a Pool at construction time.
 type PoolConfig struct {
-	Name    string
-	Targets []string
-	Logger  observability.Logger
-
-	// Passive health: eject after this many consecutive 5xx.
-	// Zero disables passive health.
-	Consecutive5xx int
-
-	// DialTimeout bounds the TCP dial.
-	DialTimeout time.Duration
-
+	Logger observability.Logger
 	// Metrics holds Prometheus collectors for origin health events.
 	// Nil is safe — all counter methods are no-ops on a nil Metrics.
 	Metrics *Metrics
+	Name    string
+	Targets []string
+	// Passive health: eject after this many consecutive 5xx.
+	// Zero disables passive health.
+	Consecutive5xx int
+	// DialTimeout bounds the TCP dial.
+	DialTimeout time.Duration
 }
 
 // NewPool constructs a pool from config. Returns an error if no

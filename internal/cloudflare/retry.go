@@ -36,11 +36,11 @@ type httpStatusCoder interface {
 }
 
 type tryDecision struct {
-	shouldTry    bool
+	finalError   error
 	attempt      int
 	delay        time.Duration
 	defaultDelay time.Duration
-	finalError   error
+	shouldTry    bool
 }
 
 func firstTry(defaultDelay time.Duration) tryDecision {

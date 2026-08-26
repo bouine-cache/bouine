@@ -98,33 +98,33 @@ type PeerFetcherConfig struct {
 //
 // Stable.
 type PeerFetcher struct {
-	useTLS       bool
-	hopLimit     int
-	hits         atomic.Int64
-	misses       atomic.Int64
-	latSumMs     atomic.Int64
-	latN         atomic.Int64
-	hopLimitHits atomic.Int64
-	maxBodyBytes int64
-	fetchSem     chan struct{}
-	// putSem bounds concurrent write-to-owner RPCs to prevent memory
-	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
-	putSem chan struct{}
-	logger observability.Logger
-	// pipelining configuration (Phase 6.4).
-	maxConnsPerHost     int
-	maxIdleConnDuration time.Duration
-	tlsConfig           *tls.Config
-	// pipelineClients caches one PipelineClient per peer address.
-	pipelineClients sync.Map // map[string]*fasthttp.PipelineClient
-	// Prometheus counters — registered if a non-nil registry is passed.
-	pHits     prometheus.Counter
-	pMisses   prometheus.Counter
-	pHopLimit prometheus.Counter
 	pDuration prometheus.Observer
+	pHopLimit prometheus.Counter
+	pMisses   prometheus.Counter
+	pHits     prometheus.Counter
 	// pActive is the current number of in-flight peer-fetch RPCs.
 	// Detects queue buildup before timeouts appear.
 	pActive prometheus.Gauge
+	// Prometheus counters — registered if a non-nil registry is passed.
+	logger observability.Logger
+	// putSem bounds concurrent write-to-owner RPCs to prevent memory
+	// blow-up during miss fan-out (same rationale as fetchSem, issue #509).
+	putSem    chan struct{}
+	tlsConfig *tls.Config
+	fetchSem  chan struct{}
+	// pipelineClients caches one PipelineClient per peer address.
+	pipelineClients sync.Map // map[string]*fasthttp.PipelineClient
+	latSumMs        atomic.Int64
+	maxBodyBytes    int64
+	// pipelining configuration (Phase 6.4).
+	maxConnsPerHost     int
+	maxIdleConnDuration time.Duration
+	hopLimitHits        atomic.Int64
+	latN                atomic.Int64
+	misses              atomic.Int64
+	hits                atomic.Int64
+	hopLimit            int
+	useTLS              bool
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -369,8 +369,8 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 // requests from the local store. Mount on PeerFetchPath.
 type PeerFetchHandler struct {
 	store    PeerStore
-	hopLimit int
 	logger   observability.Logger
+	hopLimit int
 }
 
 // PeerStore is the minimal storage interface needed by peer fetch.

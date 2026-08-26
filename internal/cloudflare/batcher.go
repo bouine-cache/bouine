@@ -41,9 +41,9 @@ const (
 // batchBucket collects entries of a single kind. Each kind has its own
 // bucket so flushes map cleanly to one CF API call per kind.
 type batchBucket struct {
-	mu      sync.Mutex
 	items   map[string]struct{}
 	flushCh chan struct{}
+	mu      sync.Mutex
 }
 
 func newBatchBucket() *batchBucket {
@@ -94,17 +94,16 @@ type FlushFn func(ctx context.Context, items []string) error
 // When MaxBatchSize is 0 the batcher operates in passthrough mode: every
 // add call immediately invokes the flush function without dedup or delay.
 type Batcher struct {
-	cfg      BatchConfig
+	closeCtx context.Context
 	buckets  map[BatchKind]*batchBucket
 	flushFns map[BatchKind]FlushFn
-	wg       sync.WaitGroup
-	closeCtx context.Context
 	cancel   context.CancelFunc
-
 	// Metrics callbacks (optional, nil-safe).
 	onFlush    func(kind BatchKind, count int)
 	onDedup    func(kind BatchKind)
 	onFlushErr func(kind BatchKind, err error)
+	cfg        BatchConfig
+	wg         sync.WaitGroup
 }
 
 // NewBatcher creates a Batcher. The flush functions map defines one callback

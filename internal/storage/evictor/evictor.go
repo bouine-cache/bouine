@@ -42,10 +42,10 @@ import (
 // prev + 8B next = 40B.
 type Entry[K comparable] struct {
 	Key     K
-	visited atomic.Bool // safe to read under RLock; written under WLock
-	ioBits  uint32      // freq packing (cachaner); zero under SIEVE; WLock-only
 	prev    *Entry[K]
 	next    *Entry[K]
+	visited atomic.Bool // safe to read under RLock; written under WLock
+	ioBits  uint32      // freq packing (cachaner); zero under SIEVE; WLock-only
 }
 
 // Visited returns the current value of the visited bit.

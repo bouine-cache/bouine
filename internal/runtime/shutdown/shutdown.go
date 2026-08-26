@@ -18,24 +18,24 @@ import (
 // time budget. Steps run in the order they are registered.
 // It also tracks startup readiness via a ReadinessGate.
 type Sequencer struct {
-	steps  []step
 	logger observability.Logger
-	ready  atomic.Bool
 	gate   *ReadinessGate
+	steps  []step
+	ready  atomic.Bool
 }
 
 type step struct {
+	fn     func(ctx context.Context) error
 	name   string
 	budget time.Duration
-	fn     func(ctx context.Context) error
 }
 
 // ReadinessGate tracks named startup conditions. IsReady returns true
 // only when the Sequencer is not shutting down and all registered
 // conditions are marked ready.
 type ReadinessGate struct {
-	mu         sync.RWMutex
 	conditions map[string]*atomic.Bool
+	mu         sync.RWMutex
 }
 
 // NewReadinessGate creates an empty ReadinessGate.

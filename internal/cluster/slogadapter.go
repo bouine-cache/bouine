@@ -23,15 +23,14 @@ import (
 const handlerQueueFullMsg = "handler queue full"
 
 type slogAdapter struct {
-	logger    observability.Logger
-	component string
+	logger observability.Logger
 	// metrics is read atomically so that SetMetrics can update it
 	// concurrently with memberlist's logging goroutine, which starts
 	// inside memberlist.Create (before the caller can call SetMetrics).
-	metrics atomic.Pointer[Metrics]
-
-	mu  sync.Mutex
-	buf bytes.Buffer
+	metrics   atomic.Pointer[Metrics]
+	component string
+	buf       bytes.Buffer
+	mu        sync.Mutex
 }
 
 // newSlogAdapter returns an io.Writer that forwards memberlist log lines

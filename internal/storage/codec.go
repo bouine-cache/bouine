@@ -185,9 +185,9 @@ func appendTime(buf []byte, t time.Time) []byte {
 // subsequent read is a no-op, so callers can decode optimistically and
 // check err once at the end (or at each allocation-sizing boundary).
 type objReader struct {
+	err error
 	b   []byte
 	pos int
-	err error
 }
 
 func (r *objReader) byte() byte {

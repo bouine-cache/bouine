@@ -224,14 +224,14 @@ type RouteBucket struct {
 
 // RouteRing holds per-route 1-minute buckets for the last 24h.
 type RouteRing struct {
-	mu      sync.RWMutex
-	buckets []RouteBucket // grows as routes are discovered
 	// live per-route accumulators
-	liveRoutes sync.Map // string → *routeCounters
+	liveRoutes sync.Map      // string → *routeCounters
+	buckets    []RouteBucket // grows as routes are discovered
 	// size tracks the number of entries in liveRoutes for best-effort
 	// cap enforcement. A few extra entries may appear under concurrent
 	// inserts before the cap is observed (TOCTOU, same as URLRing).
 	size atomic.Int64
+	mu   sync.RWMutex
 }
 
 type routeCounters struct {
@@ -360,33 +360,33 @@ func (r *RouteRing) RouteStats(windowBuckets int) []RouteStat {
 // RouteStat is the aggregated view of one route over a time window.
 type RouteStat struct {
 	Route     string
+	Sparkline []int64 // last sparklinePoints per-minute request counts
+	LatHist   LatencyHistogram
 	Requests  int64
 	Hits      int64
 	Misses    int64
 	Errors    int64 // HTTP 5xx
 	P99MS     int64
-	LatHist   LatencyHistogram
 	HitPct    float64 // 0-100
-	Sparkline []int64 // last sparklinePoints per-minute request counts
 }
 
 // ── Ops log ring ─────────────────────────────────────────────────────
 
 // OpsLogEntry records a single operator invalidation action.
 type OpsLogEntry struct {
-	Timestamp int64  // unix seconds
 	Op        string // "purge" | "ban" | "refresh"
 	Arg       string // URL or predicate summary
 	Result    string // "ok" | error message
+	Timestamp int64  // unix seconds
 }
 
 // OpsLogRing is a circular buffer of the last opsLogCap operator actions.
 // It is safe for concurrent use and never allocates on Record after warm-up.
 type OpsLogRing struct {
-	mu      sync.Mutex
 	entries [opsLogCap]OpsLogEntry
 	head    int
 	count   int
+	mu      sync.Mutex
 }
 
 // Record appends an invalidation event to the ring.
@@ -428,8 +428,8 @@ func (r *OpsLogRing) Snapshot(n int) []OpsLogEntry {
 
 // PeerBucket records whether a peer was reachable in a 30s window.
 type PeerBucket struct {
-	Timestamp int64
 	NodeName  string
+	Timestamp int64
 	Reachable bool
 }
 
@@ -437,8 +437,8 @@ type PeerBucket struct {
 // It records one sample per peer per 30s window and retains 30 minutes
 // of history (60 buckets per peer).
 type PeerRing struct {
-	mu      sync.Mutex
 	buckets []PeerBucket
+	mu      sync.Mutex
 }
 
 // Record appends a health sample; old samples beyond peerBuckets are pruned.
@@ -537,9 +537,9 @@ func (ri *Rings) Start(ctx interface{ Done() <-chan struct{} }, snapshotPath str
 // ringSnapshot is the gob-serialisable form of all rings.
 type ringSnapshot struct {
 	SavedAt      time.Time
-	RequestHead  int
-	RequestBucts [requestBuckets]RequestBucket
 	RouteBucts   []RouteBucket
+	RequestBucts [requestBuckets]RequestBucket
+	RequestHead  int
 }
 
 // Save serialises rings to a file. Called on graceful shutdown and every 60s.

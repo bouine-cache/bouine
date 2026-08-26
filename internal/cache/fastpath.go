@@ -43,17 +43,11 @@ const maxFastPathHeaderBytes = 8 * 1024
 // It holds a reference to the storage store and cache config, and attempts
 // to serve cache hits without constructing a full RequestInfo.
 type FastPathHandler struct {
-	store     storage.Store
-	routeName string
-	policy    *KeyPolicy // nil = no query/header policy
-
-	// cachedDate caches the HTTP-formatted Date string for the current
-	// second. Updated lock-free: the unix second is stored in
-	// cachedDateUnix, the formatted string in cachedDate. If now.Unix()
-	// matches cachedDateUnix, the cached string is reused, avoiding the
-	// expensive time.Time.AppendFormat call (~40% of FastPath CPU).
-	cachedDateUnix atomic.Int64
+	store          storage.Store
+	policy         *KeyPolicy // nil = no query/header policy
 	cachedDate     atomic.Pointer[string]
+	routeName      string
+	cachedDateUnix atomic.Int64
 }
 
 // NewFastPathHandler creates a FastPathHandler from a Handler's config.

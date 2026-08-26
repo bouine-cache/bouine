@@ -19,15 +19,14 @@ import (
 // across tokens in round-robin order. When a token receives a 429, it is
 // marked as rate-limited for a cooldown period and skipped during rotation.
 type TokenPool struct {
-	tokens      []string
-	rrIndex     atomic.Uint64
-	mu          sync.Mutex
-	cooldowns   []time.Time // rate-limited-until timestamps
-	cooldownDur time.Duration
-
 	// onRotate is called when a token is rotated due to rate limiting.
 	// Optional, nil-safe.
-	onRotate func(tokenIndex int)
+	onRotate    func(tokenIndex int)
+	tokens      []string
+	cooldowns   []time.Time // rate-limited-until timestamps
+	rrIndex     atomic.Uint64
+	cooldownDur time.Duration
+	mu          sync.Mutex
 }
 
 // NewTokenPool creates a TokenPool from a list of API tokens. If only one

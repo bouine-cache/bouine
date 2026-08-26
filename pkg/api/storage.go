@@ -13,59 +13,15 @@ import (
 //
 // Unstable until phase 3 ships.
 type Object struct {
-	// Key is the primary cache key.
-	Key Key `json:"key"`
-	// VaryKey is the secondary key derived from Vary headers. Empty
-	// string if the response does not Vary.
-	VaryKey string `json:"vary_key,omitempty"`
-	// StatusCode is the origin HTTP status code.
-	StatusCode int `json:"status_code"`
-	// Header is the stored response headers. Hop-by-hop headers are
-	// stripped at store time. Stored as a compact Map (flat slice
-	// with interned keys) instead of http.Header to reduce per-entry
-	// memory overhead from ~528 B to ~144 B for a typical 10-header
-	// response.
-	Header header.Map `json:"header"`
-	// Body is the response body. For objects in the hot tier this is
-	// the full body; for warm-tier objects it may be nil (body lives
-	// on disk in the mmap segment).
-	Body []byte `json:"body,omitempty"`
-	// BodySize is the total body size in bytes, whether the body is
-	// in-memory or on disk.
-	BodySize int64 `json:"body_size"`
-
 	// StoredAt is the wall-clock time the object was first stored.
 	StoredAt time.Time `json:"stored_at"`
-	// TTL is the remaining freshness lifetime at store time.
-	TTL time.Duration `json:"ttl"`
-	// StaleWhileRevalidate is the SWR window (RFC 5861).
-	StaleWhileRevalidate time.Duration `json:"swr,omitempty"`
-	// StaleIfError is the SIE window (RFC 5861).
-	StaleIfError time.Duration `json:"sie,omitempty"`
-
-	// ETag is the strong or weak entity tag from the origin.
-	ETag string `json:"etag,omitempty"`
 	// LastModified is the origin's Last-Modified value.
 	LastModified time.Time `json:"last_modified,omitempty"`
-
-	// SurrogateKeys are opaque labels for grouped invalidation (deferred
-	// to post-v1.0, see §18).
-	SurrogateKeys []string `json:"surrogate_keys,omitempty"`
-
-	// Hits counts how many times this object has been served.
-	Hits uint64 `json:"hits"`
-
-	// CacheControl is the merged Cache-Control header from the origin
-	// response, stored verbatim at cache-fill time. Avoids re-reading the
-	// header map on every cache hit in Evaluate. Not serialized (it is
-	// re-derived from Header on warm-tier load).
-	CacheControl string `json:"-"`
-
-	// OriginAge is the Age header value from the origin at cache-fill
-	// time. Pre-parsed once so the read path never re-parses it per request.
-	// Not serialized (re-derived from Header on warm-tier load).
-	OriginAge time.Duration `json:"-"`
-
+	// FastHeader stores a pre-built *fasthttp.ResponseHeader for use by
+	// serveObject's CopyTo fast path. Lazily computed on the first hit
+	// and cached for subsequent hits. Stored as atomic.Value (any) to
+	// avoid importing fasthttp in pkg/api. Not serialized to disk.
+	FastHeader atomic.Value `json:"-"`
 	// serializedHead is the lazily-computed pre-rendered HTTP response
 	// header block (static headers as "Key: Value\r\n" pairs, without
 	// status line or trailing \r\n). Computed on the first fast-path
@@ -74,41 +30,71 @@ type Object struct {
 	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
 	// Accessed via atomic.Pointer for race-safe lazy initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
-
-	// FastHeader stores a pre-built *fasthttp.ResponseHeader for use by
-	// serveObject's CopyTo fast path. Lazily computed on the first hit
-	// and cached for subsequent hits. Stored as atomic.Value (any) to
-	// avoid importing fasthttp in pkg/api. Not serialized to disk.
-	FastHeader atomic.Value `json:"-"`
-
+	// ETag is the strong or weak entity tag from the origin.
+	ETag string `json:"etag,omitempty"`
+	// VaryKey is the secondary key derived from Vary headers. Empty
+	// string if the response does not Vary.
+	VaryKey string `json:"vary_key,omitempty"`
+	// VaryValue is the stored Vary header value, pre-computed at build
+	// time so the fast-path hit can skip a Map.Get scan. Empty string
+	// means no Vary header (the common case).
+	VaryValue string `json:"-"`
+	// CacheControl is the merged Cache-Control header from the origin
+	// response, stored verbatim at cache-fill time. Avoids re-reading the
+	// header map on every cache hit in Evaluate. Not serialized (it is
+	// re-derived from Header on warm-tier load).
+	CacheControl string `json:"-"`
+	// Header is the stored response headers. Hop-by-hop headers are
+	// stripped at store time. Stored as a compact Map (flat slice
+	// with interned keys) instead of http.Header to reduce per-entry
+	// memory overhead from ~528 B to ~144 B for a typical 10-header
+	// response.
+	Header header.Map `json:"header"`
+	// SurrogateKeys are opaque labels for grouped invalidation (deferred
+	// to post-v1.0, see §18).
+	SurrogateKeys []string `json:"surrogate_keys,omitempty"`
+	// Body is the response body. For objects in the hot tier this is
+	// the full body; for warm-tier objects it may be nil (body lives
+	// on disk in the mmap segment).
+	Body []byte `json:"body,omitempty"`
+	// BodySize is the total body size in bytes, whether the body is
+	// in-memory or on disk.
+	BodySize int64 `json:"body_size"`
+	// Hits counts how many times this object has been served.
+	Hits uint64 `json:"hits"`
+	// TTL is the remaining freshness lifetime at store time.
+	TTL time.Duration `json:"ttl"`
+	// OriginAge is the Age header value from the origin at cache-fill
+	// time. Pre-parsed once so the read path never re-parses it per request.
+	// Not serialized (re-derived from Header on warm-tier load).
+	OriginAge time.Duration `json:"-"`
+	// StaleIfError is the SIE window (RFC 5861).
+	StaleIfError time.Duration `json:"sie,omitempty"`
+	// StaleWhileRevalidate is the SWR window (RFC 5861).
+	StaleWhileRevalidate time.Duration `json:"swr,omitempty"`
+	// StatusCode is the origin HTTP status code.
+	StatusCode int `json:"status_code"`
+	// Key is the primary cache key.
+	Key Key `json:"key"`
 	// HasConnectionList indicates whether the stored response has a
 	// Connection header listing per-connection headers that must be
 	// stripped before forwarding (RFC 9110 §7.6.1). Pre-computed at
 	// build time so the hit path can skip stripConnectionListedHeaders
 	// when false (the common case).
 	HasConnectionList bool `json:"-"`
-
 	// HasNoCacheFields indicates whether the stored Cache-Control has a
 	// no-cache="..." directive with field names. Pre-computed at build
 	// time so the hit path can skip stripNoCacheFields when false.
 	HasNoCacheFields bool `json:"-"`
-
 	// HasDate indicates whether the stored response has a Date header.
 	// Pre-computed at build time so the fast-path hit can skip a Map.Get
 	// scan (and the subsequent AppendFormat for Date synthesis) when the
 	// origin already provided a Date.
 	HasDate bool `json:"-"`
-
-	// VaryValue is the stored Vary header value, pre-computed at build
-	// time so the fast-path hit can skip a Map.Get scan. Empty string
-	// means no Vary header (the common case).
-	VaryValue string `json:"-"`
-
 	// RespNoCache indicates the response Cache-Control has no-cache.
 	// Pre-computed at build time so evaluateFromRaw can skip
 	// ParseCacheControl on every FastPath hit.
 	RespNoCache bool `json:"-"`
-
 	// RespMustRevalidate indicates the response Cache-Control has
 	// must-revalidate or proxy-revalidate. Pre-computed at build time.
 	RespMustRevalidate bool `json:"-"`
@@ -264,15 +250,15 @@ func (o *Object) StaleForSIE(now time.Time) bool {
 //
 // Unstable until phase 4 ships.
 type BanExpr struct {
+	// CreatedAt is the wall-clock time the ban was created. Objects
+	// stored after this time are not subject to the ban.
+	CreatedAt time.Time `json:"created_at"`
 	// HostRegex matches against the request host.
 	HostRegex string `json:"host_regex,omitempty"`
 	// PathRegex matches against the request path.
 	PathRegex string `json:"path_regex,omitempty"`
 	// SurrogateKey matches exactly against stored surrogate keys.
 	SurrogateKey string `json:"surrogate_key,omitempty"`
-	// CreatedAt is the wall-clock time the ban was created. Objects
-	// stored after this time are not subject to the ban.
-	CreatedAt time.Time `json:"created_at"`
 }
 
 // Stats is the runtime snapshot returned by Store.Stats(). Every

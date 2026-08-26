@@ -33,6 +33,11 @@ const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
 //
 // Stable.
 type Config struct {
+	// PeerInfo is the metadata this node broadcasts to peers.
+	PeerInfo api.PeerInfo
+	// Logger receives gossip and lifecycle records. Defaults to
+	// a SampledLogger wrapping slog.Default().
+	Logger observability.Logger
 	// NodeName is the unique identifier for this node (pod name).
 	// Defaults to the hostname if empty.
 	NodeName string
@@ -41,21 +46,16 @@ type Config struct {
 	// AdvertiseAddr is the address announced to peers (optional;
 	// useful behind NAT or in K8s where the pod IP differs).
 	AdvertiseAddr string
-	// Join is the list of seed addresses for bootstrapping.
-	Join []string
-	// PeerInfo is the metadata this node broadcasts to peers.
-	PeerInfo api.PeerInfo
-	// Logger receives gossip and lifecycle records. Defaults to
-	// a SampledLogger wrapping slog.Default().
-	Logger observability.Logger
-	// VirtualNodes is the number of virtual nodes per real node on
-	// the consistent hash ring. Default 256.
-	VirtualNodes int
 	// Mode determines how cache keys are distributed across the cluster.
 	// "strong" uses a consistent hash ring with peer fetch on miss.
 	// "eventual" caches locally with no peer fetch; invalidation by gossip.
 	// Defaults to "strong" for backward compatibility.
 	Mode string
+	// Join is the list of seed addresses for bootstrapping.
+	Join []string
+	// VirtualNodes is the number of virtual nodes per real node on
+	// the consistent hash ring. Default 256.
+	VirtualNodes int
 	// PushPullInterval is the interval between memberlist push/pull sync
 	// rounds. Lower values accelerate gossip convergence at the cost of
 	// higher network traffic. Default 5s; production deployments may use
@@ -95,20 +95,20 @@ type Member struct {
 //
 // Stable.
 type Cluster struct {
-	cfg    Config
-	ml     *memberlist.Memberlist
-	ring   *ring
-	mu     sync.RWMutex
-	peers  map[string]*Member // keyed by NodeName
-	local  api.PeerInfo
-	logger observability.Logger
+	local   api.PeerInfo
+	inv     Invalidator
+	logger  observability.Logger
+	ml      *memberlist.Memberlist
+	ring    *ring
+	peers   map[string]*Member // keyed by NodeName
+	metrics *Metrics
+	adapter *slogAdapter
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
-	gossipMu    sync.Mutex
 	gossipQueue []gossipBroadcast
-	inv         Invalidator
-	metrics     *Metrics
-	adapter     *slogAdapter
+	cfg         Config
+	mu          sync.RWMutex
+	gossipMu    sync.Mutex
 }
 
 // New creates a Cluster and starts the gossip listener. Call Join
@@ -524,9 +524,9 @@ func (c *Cluster) removePeer(name string) {
 // ---- Consistent-hash ring ----
 
 type ring struct {
-	vnodes int
-	nodes  []uint64          // sorted virtual node hashes
 	owners map[uint64]string // virtual hash → real node name
+	nodes  []uint64          // sorted virtual node hashes
+	vnodes int
 }
 
 func newRing(vnodes int) *ring {

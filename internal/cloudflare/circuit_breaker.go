@@ -56,20 +56,18 @@ const (
 //
 // The circuit breaker is safe for concurrent use.
 type CircuitBreaker struct {
-	cfg          CircuitConfig
-	mu           sync.Mutex
-	state        CircuitState
-	failures     int
-	openedAt     time.Time
-	halfOpenUsed int
-
+	openedAt time.Time
 	// nowFunc returns the current time. Defaults to time.Now.
 	// Injected for testing.
 	nowFunc func() time.Time
-
 	// Metrics callbacks (optional, nil-safe).
 	onStateChange func(from, to CircuitState)
 	onReject      func()
+	cfg           CircuitConfig
+	state         CircuitState
+	failures      int
+	halfOpenUsed  int
+	mu            sync.Mutex
 }
 
 // NewCircuitBreaker creates a CircuitBreaker with the given config.

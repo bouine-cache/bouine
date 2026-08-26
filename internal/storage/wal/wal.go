@@ -113,22 +113,20 @@ type Entry struct {
 // the walSyncLoop goroutine batches Enqueue'd entries and writes them
 // once per syncInterval.
 type Log struct {
-	mu   sync.Mutex
-	f    *os.File
-	path string
-
+	f *os.File
 	// Async-mode fields. nil/zero when opened with Open (sync mode).
-	syncCh       chan []byte        // buffered 4096; carries encoded entries
-	flushCh      chan chan struct{} // per-caller done channels for Sync()
-	stopCh       chan struct{}
+	syncCh  chan []byte        // buffered 4096; carries encoded entries
+	flushCh chan chan struct{} // per-caller done channels for Sync()
+	stopCh  chan struct{}
+	// metrics holds Prometheus collectors for WAL write operations.
+	// Nil when metrics are not registered (tests, sync-only mode).
+	metrics      *Metrics
+	path         string
+	syncWg       sync.WaitGroup
 	syncInterval time.Duration
 	dropped      atomic.Int64
 	lastSync     atomic.Int64 // Unix nanoseconds; 0 = never synced
-	syncWg       sync.WaitGroup
-
-	// metrics holds Prometheus collectors for WAL write operations.
-	// Nil when metrics are not registered (tests, sync-only mode).
-	metrics *Metrics
+	mu           sync.Mutex
 }
 
 // Open opens or creates a WAL file at path in synchronous mode.

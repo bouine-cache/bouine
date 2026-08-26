@@ -83,34 +83,33 @@ type etagEntry struct {
 //
 // Only GET and HEAD methods are accepted; all others return 405.
 type Handler struct {
-	root       string
-	indexFiles []string
-	maxBytes   int64
 	logger     observability.Logger
 	metrics    *Metrics
+	etagCache  sync.Map // map[string]etagEntry
+	root       string
 	routeLabel string
-
-	etagCache sync.Map // map[string]etagEntry
+	indexFiles []string
+	maxBytes   int64
 }
 
 // Config configures a static file Handler.
 type Config struct {
+	// Logger is the structured logger. Nil defaults to NoopLogger.
+	Logger observability.Logger
+	// Metrics holds the Prometheus counters. May be nil — the handler
+	// checks before incrementing.
+	Metrics *Metrics
 	// Root is the absolute path to the directory from which files are
 	// served. Symlinks are resolved once at construction time.
 	Root string
+	// RouteLabel is the route name used in metric labels.
+	RouteLabel string
 	// IndexFiles are tried (in order) when the request path maps to a
 	// directory. If none match, bouine returns 404.
 	IndexFiles []string
 	// MaxBytes is the per-file size cap. Files larger than this are
 	// rejected with 413. Zero applies a 10 MiB default.
 	MaxBytes int64
-	// Logger is the structured logger. Nil defaults to NoopLogger.
-	Logger observability.Logger
-	// Metrics holds the Prometheus counters. May be nil — the handler
-	// checks before incrementing.
-	Metrics *Metrics
-	// RouteLabel is the route name used in metric labels.
-	RouteLabel string
 }
 
 // New opens the root directory, resolves symlinks, and returns a Handler.

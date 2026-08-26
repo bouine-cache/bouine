@@ -40,13 +40,13 @@ type Invalidator interface {
 //
 // Stable.
 type Client struct {
-	purger     CachePurger
+	purger CachePurger
+	// tokenPool is non-nil when multiple API tokens are configured.
+	// nil for single-token mode.
+	tokenPool  *TokenPool
 	zoneID     string
 	timeout    time.Duration
 	retryDelay time.Duration
-	// tokenPool is non-nil when multiple API tokens are configured.
-	// nil for single-token mode.
-	tokenPool *TokenPool
 }
 
 // Config carries the credentials and behaviour knobs for the Cloudflare client.

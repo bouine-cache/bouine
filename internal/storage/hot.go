@@ -44,34 +44,13 @@ const reaperShardBudget = 10 * time.Millisecond
 //
 // Stable.
 type HotStore struct {
-	shards   []shard
-	mask     uint64
-	maxBytes int64
-	stats    hotStats
-	logger   observability.Logger
-	// bans is the lazy ban list, stored as an atomic pointer to an
-	// immutable snapshot. Ban() appends + prunes under bansMu, then
-	// publishes a new slice via atomic.Store. The read path
-	// (matchesActiveBan) does a lock-free atomic.Load and iterates the
-	// snapshot — no lock, no allocation, no mutation on the hit path.
-	// Objects stored AFTER a ban's CreatedAt are not subject to it
-	// (RFC 9111 §4.4 semantics).
-	bansMu sync.Mutex
-	bans   atomic.Pointer[[]activeBan]
+	logger observability.Logger
+	// done is closed by Close() to stop all background goroutines.
+	done chan struct{}
 	// evictSignal receives shard indices that need further eviction after
 	// the inline cap was reached. Buffered to len(shards); non-blocking
 	// sends coalesce burst signals.
 	evictSignal chan int
-	// reaperInterval is how often the TTL reaper wakes to scan for
-	// expired entries. Zero disables background reaping.
-	reaperInterval time.Duration
-	// done is closed by Close() to stop all background goroutines.
-	done chan struct{}
-	// wg tracks the sweeper and reaper goroutines so Close can wait
-	// for them to fully exit before munmapping slab regions. Without
-	// this, a goroutine mid-flushSlabFrees could access munmap'd
-	// memory and segfault.
-	wg sync.WaitGroup
 	// onEvict is called when a backed entry is removed by a non-SIEVE
 	// path. Set via HotConfig.OnEvict. See HotConfig.OnEvict for the
 	// constraint.
@@ -84,6 +63,27 @@ type HotStore struct {
 	// slab allocates body bytes from mmap'd regions to reduce GC
 	// pressure. nil means use Go heap (default, backward compatible).
 	slab *SlabAllocator
+	// bans is the lazy ban list, stored as an atomic pointer to an
+	// immutable snapshot. Ban() appends + prunes under bansMu, then
+	// publishes a new slice via atomic.Store. The read path
+	// (matchesActiveBan) does a lock-free atomic.Load and iterates the
+	// snapshot — no lock, no allocation, no mutation on the hit path.
+	// Objects stored AFTER a ban's CreatedAt are not subject to it
+	// (RFC 9111 §4.4 semantics).
+	bans   atomic.Pointer[[]activeBan]
+	shards []shard
+	stats  hotStats
+	// wg tracks the sweeper and reaper goroutines so Close can wait
+	// for them to fully exit before munmapping slab regions. Without
+	// this, a goroutine mid-flushSlabFrees could access munmap'd
+	// memory and segfault.
+	wg       sync.WaitGroup
+	maxBytes int64
+	mask     uint64
+	// reaperInterval is how often the TTL reaper wakes to scan for
+	// expired entries. Zero disables background reaping.
+	reaperInterval time.Duration
+	bansMu         sync.Mutex
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
@@ -100,11 +100,11 @@ type activeBan struct {
 const banTTL = 24 * time.Hour
 
 type shard struct {
-	mu          sync.RWMutex
 	entries     map[api.Key]*hotEntry
 	evict       evictor.List[api.Key]
 	bytes       int64
 	backedCount int64 // entries with a backup (cheap to evict)
+	mu          sync.RWMutex
 }
 
 type hotEntry struct {
@@ -152,10 +152,10 @@ func newEvictList(cfg HotConfig) evictor.List[api.Key] {
 // budget for no operational value. Unbacked evictions signal potential
 // data loss and are always logged at Warn.
 type evictionLog struct {
-	key     api.Key
+	varyKey string
 	reason  string
 	size    int64
-	varyKey string
+	key     api.Key
 }
 
 func (h *HotStore) flushEvictionLogs(logs []evictionLog) {
@@ -204,20 +204,6 @@ const (
 
 // HotConfig configures the hot store.
 type HotConfig struct {
-	// MaxBytes is the total memory budget across all shards.
-	MaxBytes int64
-	// NumShards overrides the default shard count. Zero means
-	// min(runtime.NumCPU(), 64).
-	NumShards int
-	// Slab enables the mmap'd slab allocator for body bytes. When
-	// true, bodies are allocated from mmap'd regions instead of Go
-	// heap, reducing GC pressure. Default false (Go heap).
-	Slab bool
-	// ReaperInterval controls how often the background TTL reaper scans
-	// shards for entries past TTL + SWR + SIE. Zero means use the
-	// default (30 s). A negative value disables background reaping
-	// entirely (lazy expiry on Get remains).
-	ReaperInterval time.Duration
 	// Logger receives eviction records. Defaults to a SampledLogger
 	// wrapping slog.Default().
 	Logger observability.Logger
@@ -248,7 +234,6 @@ type HotConfig struct {
 	// to a warmUnprotectQueue drained outside the hot lock to avoid a
 	// lock-ordering cycle with warm.idxMu).
 	OnEvictDemoted func(key api.Key)
-
 	// HotEvictionAlgorithm selects the eviction policy for the hot tier.
 	// "" and "sieve" (the default) use the SIEVE visited-bit sweep.
 	// "cachaner" uses SIEVE with a 3-bit frequency counter that gives
@@ -260,6 +245,20 @@ type HotConfig struct {
 	// name from the shared config field keeps `grep EvictionAlgorithm`
 	// unambiguous.
 	HotEvictionAlgorithm string
+	// MaxBytes is the total memory budget across all shards.
+	MaxBytes int64
+	// NumShards overrides the default shard count. Zero means
+	// min(runtime.NumCPU(), 64).
+	NumShards int
+	// ReaperInterval controls how often the background TTL reaper scans
+	// shards for entries past TTL + SWR + SIE. Zero means use the
+	// default (30 s). A negative value disables background reaping
+	// entirely (lazy expiry on Get remains).
+	ReaperInterval time.Duration
+	// Slab enables the mmap'd slab allocator for body bytes. When
+	// true, bodies are allocated from mmap'd regions instead of Go
+	// heap, reducing GC pressure. Default false (Go heap).
+	Slab bool
 }
 
 // NewHotStore creates a sharded in-memory store and starts the
@@ -1067,7 +1066,7 @@ func (h *HotStore) HotOnlyKeys(offset, limit int) ([]api.Key, int) {
 }
 
 const (
-	objectStructSize    int64 = 320 // unsafe.Sizeof(api.Object{}) — RespNoCache + RespMustRevalidate added. Update when fields are added.
+	objectStructSize    int64 = 312 // unsafe.Sizeof(api.Object{}) — fieldalignment reorder reduced from 320. Update when fields are added.
 	hotEntrySize        int64 = 32
 	sieveEntrySize      int64 = 40 // unsafe.Sizeof(evictor.Entry[api.Key]{}): 16B key + 4B atomic.Bool + 4B pad + 8B prev + 8B next
 	mapPerEntryOverhead int64 = 32 // 8-slot bucket = 208 B at load factor 6.5 (16B keys) → ~32 B/entry. hmap header negligible at 1M+ entries.

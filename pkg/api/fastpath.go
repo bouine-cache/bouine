@@ -14,14 +14,14 @@ import (
 //
 // Unstable.
 type RawRequest struct {
+	Headers     [MaxRawHeaders]RawHeader
 	Method      string
 	Path        string
 	Query       string
 	Host        string
 	Scheme      string // "http" or "https" — set by the listener
-	Headers     [MaxRawHeaders]RawHeader
-	NHeaders    int
 	HTTPVersion string
+	NHeaders    int
 }
 
 // MaxRawHeaders caps the number of headers the h1parser can store inline.
@@ -110,14 +110,14 @@ type FastPathHandlerCtx interface {
 //
 // Unstable.
 type FastPathResponse struct {
-	Buffers     net.Buffers
-	BuffersArr  [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
-	HeaderBuf   []byte
 	BufPtr      *[]byte // original pool pointer for HeaderBuf, used by Release
-	StatusCode  int
 	CacheResult string
 	Source      string
 	Route       string
+	BuffersArr  [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
+	Buffers     net.Buffers
+	HeaderBuf   []byte
+	StatusCode  int
 	BytesOut    int
 }
 

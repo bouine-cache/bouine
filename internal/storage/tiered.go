@@ -42,47 +42,13 @@ type walStore interface {
 //
 // Stable.
 type TieredStore struct {
-	hot    *HotStore
-	warm   *warm.Store
 	wal    walStore
-	walMu  sync.Mutex // guards wal field access during rewriteWAL vs concurrent Enqueue/EnqueueBatch
 	logger observability.Logger
-
-	// bodyThreshold: objects with Body <= this stay hot-only.
-	bodyThreshold int64
-
-	// warmSyncInterval controls how often hot→warm background sync runs.
-	warmSyncInterval time.Duration
-	// warmSyncBatchSize caps entries written per sync cycle.
-	warmSyncBatchSize int
-	// warmSyncOffset rotates through the hot key set across cycles.
-	warmSyncOffset int
-	// warmSyncCycleCount tracks sync cycles since the last full
-	// reconciliation scan. Every 10th cycle the fallback scan runs
-	// to catch any hasBackup flag drift.
-	warmSyncCycleCount int
-
-	// walSyncInterval controls the async WAL fsync batching interval.
-	// <= 0 means synchronous mode (per-entry fsync). See ADR-0024.
-	walSyncInterval time.Duration
-
 	// tombstoneQueue receives keys evicted from hot that had a warm
 	// backup. Drained by warmSyncLoop and tombstoned in warm + WAL.
 	// Buffered; non-blocking sends — overflow drops the tombstone.
 	tombstoneQueue chan api.Key
-	// droppedTombstones counts tombstones dropped (queue full).
-	droppedTombstones atomic.Int64
-
-	// warmEvictQueue receives keys evicted from the warm tier by its
-	// eviction policy. Drained by warmSyncLoop to append WAL delete
-	// entries so warm eviction survives restart. The hot tier's
-	// hasBackup flag is cleared immediately in the callback (no I/O).
-	// Buffered; non-blocking sends — overflow drops the WAL entry (the
-	// tombstone is already on disk; the WAL is a fast-replay optimization).
-	warmEvictQueue chan api.Key
-	// droppedWarmEvicts counts warm-eviction WAL entries dropped.
-	droppedWarmEvicts atomic.Int64
-
+	warm           *warm.Store
 	// warmUnprotectQueue receives keys SIEVE-evicted from the hot tier
 	// when hotEvictNoWarmTomb is true (Fix A for #484). Drained by
 	// drainQueues/runWarmSyncCycle outside the hot shard lock to avoid
@@ -96,85 +62,108 @@ type TieredStore struct {
 	// `dropped_warm_unprotects` in the drain log counts these
 	// fallbacks; treat any non-zero value as a capacity signal.
 	warmUnprotectQueue chan api.Key
-	// droppedWarmUnprotects counts warm-unprotect entries dropped.
-	droppedWarmUnprotects atomic.Int64
-
-	// walPath is the WAL file path, stored for WAL rewrite after compaction.
-	walPath string
-	// walMetrics receives WAL Prometheus collectors. Nil when WAL
-	// metrics are not registered (tests, no warm tier).
-	walMetrics *wal.Metrics
+	hot                *HotStore
+	// warmEvictQueue receives keys evicted from the warm tier by its
+	// eviction policy. Drained by warmSyncLoop to append WAL delete
+	// entries so warm eviction survives restart. The hot tier's
+	// hasBackup flag is cleared immediately in the callback (no I/O).
+	// Buffered; non-blocking sends — overflow drops the WAL entry (the
+	// tombstone is already on disk; the WAL is a fast-replay optimization).
+	warmEvictQueue chan api.Key
+	// done is closed by Close to stop the background goroutines.
+	done chan struct{}
 	// warmMetrics receives warm-tier Prometheus collectors. Nil when
 	// warm metrics are not registered. Used by runWarmSyncCycle to
 	// record promotion skips.
 	warmMetrics *warm.Metrics
-
-	// done is closed by Close to stop the background goroutines.
-	done chan struct{}
+	// walMetrics receives WAL Prometheus collectors. Nil when WAL
+	// metrics are not registered (tests, no warm tier).
+	walMetrics *wal.Metrics
+	// walPath is the WAL file path, stored for WAL rewrite after compaction.
+	walPath string
+	// drainWg tracks the tombstone drain goroutine for join-on-close.
+	drainWg sync.WaitGroup
 	// compactWg tracks the compaction goroutine for join-on-close.
 	compactWg sync.WaitGroup
+	// checkpointWg tracks the checkpoint goroutine for join-on-close.
+	checkpointWg sync.WaitGroup
+	// syncWg tracks the warm sync goroutine for join-on-close.
+	syncWg sync.WaitGroup
+	// droppedWarmUnprotects counts warm-unprotect entries dropped.
+	droppedWarmUnprotects atomic.Int64
+	// checkpointWALThreshold triggers a checkpoint when the WAL entry
+	// count exceeds this value, regardless of the interval. Default 100K.
+	checkpointWALThreshold int64
+	// droppedTombstones counts tombstones dropped (queue full).
+	droppedTombstones atomic.Int64
+	// walSyncInterval controls the async WAL fsync batching interval.
+	// <= 0 means synchronous mode (per-entry fsync). See ADR-0024.
+	walSyncInterval time.Duration
+	// warmSyncCycleCount tracks sync cycles since the last full
+	// reconciliation scan. Every 10th cycle the fallback scan runs
+	// to catch any hasBackup flag drift.
+	warmSyncCycleCount int
+	// warmSyncOffset rotates through the hot key set across cycles.
+	warmSyncOffset int
+	// warmSyncBatchSize caps entries written per sync cycle.
+	warmSyncBatchSize int
 	// CompactStartupDelay delays the first compaction after startup.
 	compactStartupDelay time.Duration
 	// checkpointInterval controls how often a snapshot + WAL truncate
 	// checkpoint runs. Default 5m. 0 disables periodic checkpointing.
 	checkpointInterval time.Duration
-	// checkpointWALThreshold triggers a checkpoint when the WAL entry
-	// count exceeds this value, regardless of the interval. Default 100K.
-	checkpointWALThreshold int64
-	// checkpointing is true during the WAL truncate window. WAL enqueues
-	// spin until it is false. See checkpoint() for the sequence.
-	checkpointing atomic.Bool
-	// walEntryCount tracks entries since the last checkpoint. Used for
-	// the threshold trigger.
-	walEntryCount atomic.Int64
-	// checkpointWg tracks the checkpoint goroutine for join-on-close.
-	checkpointWg sync.WaitGroup
-	// syncWg tracks the warm sync goroutine for join-on-close.
-	syncWg sync.WaitGroup
-	// drainWg tracks the tombstone drain goroutine for join-on-close.
-	drainWg sync.WaitGroup
-	// compactInterval is the configured compaction check interval.
-	compactInterval time.Duration
+	// droppedWarmEvicts counts warm-eviction WAL entries dropped.
+	droppedWarmEvicts atomic.Int64
 	// tombstoneDrainInterval controls how often the dedicated drain
 	// goroutine flushes the tombstone and warm-evict queues. <= 0
 	// means the dedicated drain goroutine is disabled and draining
 	// happens only on the warm sync cycle.
 	tombstoneDrainInterval time.Duration
+	// walEntryCount tracks entries since the last checkpoint. Used for
+	// the threshold trigger.
+	walEntryCount atomic.Int64
+	// warmSyncInterval controls how often hot→warm background sync runs.
+	warmSyncInterval time.Duration
+	// bodyThreshold: objects with Body <= this stay hot-only.
+	bodyThreshold int64
+	// compactInterval is the configured compaction check interval.
+	compactInterval time.Duration
+	walMu           sync.Mutex // guards wal field access during rewriteWAL vs concurrent Enqueue/EnqueueBatch
+	// checkpointing is true during the WAL truncate window. WAL enqueues
+	// spin until it is false. See checkpoint() for the sequence.
+	checkpointing atomic.Bool
 }
 
 // TieredConfig configures a TieredStore.
 type TieredConfig struct {
-	Hot    HotConfig
-	Warm   *warm.Config // nil = no warm tier (ephemeral mode)
-	WALDir string       // empty = no WAL
 	Logger observability.Logger
-
+	Warm   *warm.Config // nil = no warm tier (ephemeral mode)
 	// WarmMetrics holds the warm-tier Prometheus collectors. When non-nil
 	// and Warm is also set, the warm store increments the over-budget,
 	// eviction, and compaction counters inline. The caller is responsible
 	// for polling TieredStore.Stats() and calling SetDiskBytes on this
 	// handle to update the disk_bytes gauge.
 	WarmMetrics *warm.Metrics
-
 	// WALMetrics holds the WAL Prometheus collectors. When non-nil and
 	// WALDir is also set, the WAL log records write duration, queue depth,
 	// and write count metrics inline.
 	WALMetrics *wal.Metrics
-
+	WALDir     string // empty = no WAL
+	Hot        HotConfig
+	// WarmSyncBatchSize caps entries written to warm per sync cycle.
+	// Default 5000.
+	WarmSyncBatchSize int
+	// WarmSyncInterval controls how often hot→warm background sync runs.
+	// Set to 0 to disable (warm tier only stores objects above body_threshold).
+	// Operators should set this explicitly (e.g. 60s) when they want
+	// small objects to survive restarts.
+	WarmSyncInterval time.Duration
 	// BodyThreshold controls the hot/warm admission boundary. Objects
 	// with BodySize <= this value stay in the hot tier only. Objects
 	// above this value are also written to the warm tier so they can
 	// be evicted from RAM without data loss.
 	// Default: 64 KiB.
 	BodyThreshold int64
-	// WarmSyncInterval controls how often hot→warm background sync runs.
-	// Set to 0 to disable (warm tier only stores objects above body_threshold).
-	// Operators should set this explicitly (e.g. 60s) when they want
-	// small objects to survive restarts.
-	WarmSyncInterval time.Duration
-	// WarmSyncBatchSize caps entries written to warm per sync cycle.
-	// Default 5000.
-	WarmSyncBatchSize int
 	// WALSyncInterval controls the async WAL fsync batching interval.
 	// Default 100ms. Set to -1 for synchronous mode (per-entry fsync,
 	// same as pre-ADR-0024 behavior). See ADR-0024.
@@ -194,11 +183,9 @@ type TieredConfig struct {
 	// CompactInterval controls how often the warm-tier compaction check
 	// runs. Default 30m. Set to -1 to disable periodic compaction.
 	CompactInterval time.Duration
-
 	// TombstoneQueueSize controls the buffer size of the hot→warm
 	// tombstone channel and the warm-evict queue. Default 65536.
 	TombstoneQueueSize int
-
 	// TombstoneDrainInterval controls how often the dedicated drain
 	// goroutine flushes tombstone and warm-evict queues to the warm
 	// tier + WAL. Default 1s. Set to -1 to disable the dedicated drain

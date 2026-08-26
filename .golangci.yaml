@@ -40,6 +40,15 @@ linters:
     - misspell
 
   settings:
+    govet:
+      enable:
+        # fieldalignment flags suboptimal struct field ordering that
+        # wastes memory via pointer padding. DO NOT run
+        # `golangci-lint run --fix` — the fieldalignment auto-fix
+        # strips ALL comments from struct fields. Reorder manually
+        # instead, preserving every comment. See ADR-0035 and #433.
+        - fieldalignment
+
     gocyclo:
       min-complexity: 15
 
@@ -274,6 +283,13 @@ linters:
           - errcheck
           - noctx
           - depguard
+      # fieldalignment: anonymous structs in test case tables have no
+      # performance impact and cannot be reordered without converting
+      # to named types — unjustified busywork.
+      - path: "_test\\.go"
+        linters:
+          - govet
+        text: "fieldalignment"
       # SA5011 (possible nil pointer dereference after nil check) is a
       # false positive in tests: t.Fatal calls runtime.Goexit and never
       # returns, but staticcheck does not model that.

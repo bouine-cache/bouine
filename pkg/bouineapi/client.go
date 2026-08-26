@@ -25,13 +25,13 @@ const maxErrorBody = 4096
 //
 // Stable.
 type Client struct {
+	// HTTPClient is the underlying fasthttp client. If nil, a default
+	// client with a 10s timeout is used.
+	HTTPClient *fasthttp.Client
 	// BaseURL is the admin server base URL (e.g. "http://127.0.0.1:9000").
 	BaseURL string
 	// Token is the optional bearer token for admin authentication.
 	Token string
-	// HTTPClient is the underlying fasthttp client. If nil, a default
-	// client with a 10s timeout is used.
-	HTTPClient *fasthttp.Client
 }
 
 // New creates a Client with the given base URL. The returned client

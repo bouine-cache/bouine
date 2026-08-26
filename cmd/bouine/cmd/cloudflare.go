@@ -24,18 +24,12 @@ var errCircuitOpen = errors.New("cloudflare: circuit breaker open")
 // purge requests are coalesced and deduplicated before reaching the CF API,
 // significantly reducing API call volume under burst traffic.
 type cfPropagator struct {
-	inv     bouinecf.Invalidator
-	cfg     config.CloudflareConfig
-	metrics *observability.DataPlaneMetrics
-	logger  observability.Logger
-
+	inv         bouinecf.Invalidator
+	logger      observability.Logger
+	closeCtx    context.Context
+	metrics     *observability.DataPlaneMetrics
 	lastErr     atomic.Pointer[string]
 	lastSuccess atomic.Pointer[time.Time]
-	lastLagMs   atomic.Int64
-
-	wg       sync.WaitGroup
-	closeCtx context.Context
-
 	// batcher is non-nil when batching is enabled. In batched mode,
 	// propagate methods add items to the batcher instead of calling the
 	// invalidator directly. The batcher's flush goroutines handle the
@@ -47,6 +41,9 @@ type cfPropagator struct {
 	// retryQueue is non-nil when the DLQ is enabled. Failed purge items
 	// are enqueued and retried with exponential backoff.
 	retryQueue *bouinecf.RetryQueue
+	cfg        config.CloudflareConfig
+	wg         sync.WaitGroup
+	lastLagMs  atomic.Int64
 }
 
 // buildCFPropagator constructs a cfPropagator. inv may be nil when CF is

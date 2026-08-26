@@ -7,6 +7,8 @@ import "time"
 //
 // Stable.
 type PeerInfo struct {
+	// JoinedAt is the wall-clock time the node joined.
+	JoinedAt time.Time `json:"joined_at"`
 	// Name is the unique node name, typically the pod name in K8s.
 	Name string `json:"name"`
 	// Addr is the peer-fetch address (host:port, mTLS HTTP/2).
@@ -15,12 +17,10 @@ type PeerInfo struct {
 	AdminAddr string `json:"admin_addr"`
 	// DataAddr is the data-plane HTTP listener.
 	DataAddr string `json:"data_addr"`
-	// Weight is the relative ring weight (default 1.0).
-	Weight float64 `json:"weight"`
 	// Version is the bouine binary version string.
 	Version string `json:"version"`
-	// JoinedAt is the wall-clock time the node joined.
-	JoinedAt time.Time `json:"joined_at"`
+	// Weight is the relative ring weight (default 1.0).
+	Weight float64 `json:"weight"`
 }
 
 // RingDigest is a lightweight fingerprint of the consistent-hash ring
@@ -53,16 +53,16 @@ type RingSegment struct {
 //
 // Stable.
 type PurgeEvent struct {
-	// Key is the primary cache key to invalidate.
-	Key Key `json:"key"`
+	// IssuedAt is the wall-clock time of the purge.
+	IssuedAt time.Time `json:"issued_at"`
 	// VaryKey, if non-empty, targets only the variant.
 	VaryKey string `json:"vary_key,omitempty"`
 	// Issuer is the node name that originated the purge.
 	Issuer string `json:"issuer"`
-	// IssuedAt is the wall-clock time of the purge.
-	IssuedAt time.Time `json:"issued_at"`
 	// Seq is the monotonic sequence number from the issuer.
 	Seq uint64 `json:"seq"`
+	// Key is the primary cache key to invalidate.
+	Key Key `json:"key"`
 }
 
 // BanEvent is broadcast when a predicate ban is issued.
@@ -71,10 +71,10 @@ type PurgeEvent struct {
 type BanEvent struct {
 	// Predicate is the ban expression.
 	Predicate BanExpr `json:"predicate"`
-	// Issuer is the node name that originated the ban.
-	Issuer string `json:"issuer"`
 	// IssuedAt is the wall-clock time of the ban.
 	IssuedAt time.Time `json:"issued_at"`
+	// Issuer is the node name that originated the ban.
+	Issuer string `json:"issuer"`
 	// Seq is the monotonic sequence number from the issuer.
 	Seq uint64 `json:"seq"`
 }
@@ -86,24 +86,24 @@ type BanEvent struct {
 //
 // Stable.
 type RefreshEvent struct {
-	// Key is the primary cache key to soft-purge.
-	Key Key `json:"key"`
-	// Issuer is the node name that originated the refresh.
-	Issuer string `json:"issuer"`
 	// IssuedAt is the wall-clock time of the refresh.
 	IssuedAt time.Time `json:"issued_at"`
+	// Issuer is the node name that originated the refresh.
+	Issuer string `json:"issuer"`
 	// Seq is the monotonic sequence number from the issuer.
 	Seq uint64 `json:"seq"`
+	// Key is the primary cache key to soft-purge.
+	Key Key `json:"key"`
 }
 
 // PeerFetchRequest is the HTTP request body for a peer cache lookup.
 //
 // Stable.
 type PeerFetchRequest struct {
-	// Key is the cache key being requested.
-	Key Key `json:"key"`
 	// VaryKey is the variant key (empty = any variant).
 	VaryKey string `json:"vary_key,omitempty"`
 	// Hops is the number of peers already traversed (T36 loop guard).
 	Hops int `json:"hops"`
+	// Key is the cache key being requested.
+	Key Key `json:"key"`
 }

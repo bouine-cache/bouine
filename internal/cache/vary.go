@@ -178,7 +178,7 @@ func VariantKeyFast(primary api.Key, vary string, reqHeader *fasthttp.RequestHea
 func headerFromFastHTTPReqHeader(h *fasthttp.RequestHeader) header.Map {
 	hm := header.NewMap(h.Len())
 	for k, v := range h.All() {
-		hm.AppendEntryCanonical(string(k), string(v))
+		hm.AppendEntryCanonical(header.BytesToString(k), header.BytesToString(v))
 	}
 	hm.SortEntries()
 	return hm

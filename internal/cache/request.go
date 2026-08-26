@@ -24,7 +24,6 @@ type RequestInfo struct {
 	Host       string
 	Path       string
 	RemoteAddr string
-	TLS        bool
 	Header     header.Map
 
 	// []byte forms populated by requestInfoFromCtx. These reference the
@@ -35,6 +34,7 @@ type RequestInfo struct {
 	uriBytes    []byte
 	hostBytes   []byte
 	pathBytes   []byte
+	TLS         bool
 }
 
 // GetMethod returns the request method as a string, converting from

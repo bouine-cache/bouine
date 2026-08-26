@@ -24,34 +24,37 @@ import (
 //
 // Stable.
 type DataPlaneMetrics struct {
-	RequestsTotal    *prometheus.CounterVec
-	RequestDuration  *prometheus.HistogramVec
-	ResponseBytesOut *prometheus.CounterVec
-	VaryCapHits      prometheus.Counter // incremented when MaxVariants cap is hit
-	Rings            *Rings             // nil when dashboard is disabled
+	// Cloudflare token rotation metrics.
+	CFTokenRotated         prometheus.Counter
+	StreamingFallbackTotal prometheus.Counter
+	// Streaming miss buffer metrics. The gauge tracks total bytes held
+	// in live SetBodyStreamWriter tee buffers; the counter tracks how
+	// many cacheable misses fell back to the synchronous buffered path
+	// because the streaming memory cap was exceeded.
+	StreamingBufferBytes prometheus.Gauge
+	VaryCapHits          prometheus.Counter // incremented when MaxVariants cap is hit
+	// HTTP smuggling rejection counter. Incremented when the h1parser
+	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
+	HTTPSmugglingRejected prometheus.Counter
 	// accessLog receives structured access log entries. nil disables
 	// access logging (used in tests and when the operator sets log
 	// level above Info).
 	accessLog Logger
-	// accessSampleRate is the 1-in-N sampling rate for Info-level access
-	// log entries. 0 means always log (no sampling). The cache key is
-	// used for deterministic sampling so the same key is always logged
-	// or always skipped.
-	accessSampleRate uint64
-	accessCounter    atomic.Uint64
-	// nowFunc returns the current time. Defaults to time.Now; the engine
-	// injects platform.CoarseNow (~2-4ns vs ~25-40ns) to reduce hit-path
-	// CPU cost. Injected rather than imported directly to respect the L7
-	// layering rule (observability cannot import internal/platform).
-	nowFunc func() time.Time
-	// routeTable holds pre-resolved Prometheus collectors indexed by route
-	// ID, eliminating per-request WithLabelValues hash lookups for common
-	// label tuples. nil when PreResolveRoutes has not been called (tests,
-	// minimal configs). When nil, the middleware falls back to
-	// WithLabelValues for all requests.
-	routeTable    []*routeMetrics
-	routeIDs      map[string]int
-	fallbackCount atomic.Uint64
+	// RequestQueueDepth is the current number of in-flight HTTP
+	// requests being processed by the data plane. A rising value
+	// indicates CPU starvation before timeouts appear.
+	RequestQueueDepth prometheus.Gauge
+	// MetricsResetTotal counts metrics re-initialization events. A
+	// non-zero value indicates the process restarted or metrics were
+	// re-registered, which explains histogram count discontinuities.
+	MetricsResetTotal    prometheus.Counter
+	WALLastSyncTimestamp prometheus.Gauge
+	// WAL async metrics. WALDroppedEntries is a counter; the engine
+	// polls the WAL log's DroppedEntries() and adds the delta.
+	// WALLastSyncTimestamp is a gauge set from the WAL log's LastSyncTime.
+	WALDroppedEntries prometheus.Counter
+	CFDLQDepth        prometheus.Gauge // current queue depth
+	CFCircuitState    prometheus.Gauge // 0=closed, 1=open, 2=half_open
 	// Hot-tier storage gauges — updated on every Stats() poll by the engine.
 	HotStoreBytes     prometheus.Gauge
 	HotStoreEntries   prometheus.Gauge
@@ -68,26 +71,24 @@ type DataPlaneMetrics struct {
 	// once at startup from config. Enables fill ratio computation:
 	// warm_store_bytes / warm_store_max_bytes.
 	WarmStoreMaxBytes prometheus.Gauge
-	// Cloudflare propagation counters.
-	CFPurgeTotal    *prometheus.CounterVec   // labels: operation, status
-	CFPurgeDuration *prometheus.HistogramVec // labels: operation
-	CFPurgeSkipped  *prometheus.CounterVec   // labels: reason
-	// Cloudflare batching metrics.
-	CFBatchFlushed  *prometheus.CounterVec // labels: kind
-	CFBatchDeduped  *prometheus.CounterVec // labels: kind
-	CFBatchFlushErr *prometheus.CounterVec // labels: kind, error_type
-	// Cloudflare token rotation metrics.
-	CFTokenRotated   prometheus.Counter
-	CFTokenAvailable prometheus.Gauge // number of tokens not in cooldown
 	// Cloudflare circuit breaker metrics.
-	CFCircuitRejected prometheus.Counter // calls rejected because circuit open
-	CFCircuitState    prometheus.Gauge   // 0=closed, 1=open, 2=half_open
+	CFCircuitRejected prometheus.Counter     // calls rejected because circuit open
+	CFTokenAvailable  prometheus.Gauge       // number of tokens not in cooldown
+	CFBatchDeduped    *prometheus.CounterVec // labels: kind
+	CFDLQExpired      *prometheus.CounterVec // labels: kind
+	RequestsTotal     *prometheus.CounterVec
+	CFBatchFlushErr   *prometheus.CounterVec   // labels: kind, error_type
+	CFPurgeSkipped    *prometheus.CounterVec   // labels: reason
+	CFPurgeDuration   *prometheus.HistogramVec // labels: operation
+	// Cloudflare propagation counters.
+	CFPurgeTotal    *prometheus.CounterVec // labels: operation, status
+	RequestDuration *prometheus.HistogramVec
 	// Cloudflare retry queue (DLQ) metrics.
 	CFDLQEnqueued *prometheus.CounterVec // labels: kind
 	CFDLQDropped  *prometheus.CounterVec // labels: kind
 	CFDLQRetried  *prometheus.CounterVec // labels: kind
-	CFDLQExpired  *prometheus.CounterVec // labels: kind
-	CFDLQDepth    prometheus.Gauge       // current queue depth
+	Rings         *Rings                 // nil when dashboard is disabled
+	routeIDs      map[string]int
 	// Refresh-before-expiry metrics. Nil when no route enables the feature.
 	RefreshTotal        *prometheus.CounterVec // labels: route, result
 	RefreshErrorsTotal  *prometheus.CounterVec // labels: route, error_type
@@ -95,28 +96,27 @@ type DataPlaneMetrics struct {
 	RefreshInFlight     *prometheus.GaugeVec   // labels: route
 	RefreshScheduled    *prometheus.GaugeVec   // labels: route
 	RefreshRegistrySize *prometheus.GaugeVec   // labels: route
-	// WAL async metrics. WALDroppedEntries is a counter; the engine
-	// polls the WAL log's DroppedEntries() and adds the delta.
-	// WALLastSyncTimestamp is a gauge set from the WAL log's LastSyncTime.
-	WALDroppedEntries    prometheus.Counter
-	WALLastSyncTimestamp prometheus.Gauge
-	// MetricsResetTotal counts metrics re-initialization events. A
-	// non-zero value indicates the process restarted or metrics were
-	// re-registered, which explains histogram count discontinuities.
-	MetricsResetTotal prometheus.Counter
-	// RequestQueueDepth is the current number of in-flight HTTP
-	// requests being processed by the data plane. A rising value
-	// indicates CPU starvation before timeouts appear.
-	RequestQueueDepth prometheus.Gauge
-	// HTTP smuggling rejection counter. Incremented when the h1parser
-	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
-	HTTPSmugglingRejected prometheus.Counter
-	// Streaming miss buffer metrics. The gauge tracks total bytes held
-	// in live SetBodyStreamWriter tee buffers; the counter tracks how
-	// many cacheable misses fell back to the synchronous buffered path
-	// because the streaming memory cap was exceeded.
-	StreamingBufferBytes   prometheus.Gauge
-	StreamingFallbackTotal prometheus.Counter
+	// Cloudflare batching metrics.
+	CFBatchFlushed *prometheus.CounterVec // labels: kind
+	// nowFunc returns the current time. Defaults to time.Now; the engine
+	// injects platform.CoarseNow (~2-4ns vs ~25-40ns) to reduce hit-path
+	// CPU cost. Injected rather than imported directly to respect the L7
+	// layering rule (observability cannot import internal/platform).
+	nowFunc          func() time.Time
+	ResponseBytesOut *prometheus.CounterVec
+	// routeTable holds pre-resolved Prometheus collectors indexed by route
+	// ID, eliminating per-request WithLabelValues hash lookups for common
+	// label tuples. nil when PreResolveRoutes has not been called (tests,
+	// minimal configs). When nil, the middleware falls back to
+	// WithLabelValues for all requests.
+	routeTable []*routeMetrics
+	// accessSampleRate is the 1-in-N sampling rate for Info-level access
+	// log entries. 0 means always log (no sampling). The cache key is
+	// used for deterministic sampling so the same key is always logged
+	// or always skipped.
+	accessSampleRate uint64
+	accessCounter    atomic.Uint64
+	fallbackCount    atomic.Uint64
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED

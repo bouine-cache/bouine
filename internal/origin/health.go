@@ -17,21 +17,21 @@ import (
 //
 // Stable.
 type ActiveHealthChecker struct {
-	pool   *Pool
-	cfg    ActiveHealthConfig
 	logger observability.Logger
+	pool   *Pool
 	client *fasthttp.Client
+	cfg    ActiveHealthConfig
 }
 
 // ActiveHealthConfig controls the probe behavior.
 type ActiveHealthConfig struct {
 	Path               string
 	Method             string
+	ExpectedCodes      []int
 	Interval           time.Duration
 	Timeout            time.Duration
 	HealthyThreshold   int
 	UnhealthyThreshold int
-	ExpectedCodes      []int
 }
 
 // NewActiveHealthChecker creates a health checker for the given pool.

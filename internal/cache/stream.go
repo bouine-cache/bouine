@@ -30,12 +30,12 @@ const maxStreamBufRetain = 1 << 20
 // When buffered is true, the body is already in resp.Body() (the client
 // doesn't support streaming) and callers should use the buffered path.
 type streamFetchResult struct {
-	StatusCode int
-	Header     headerLookup
 	resp       *fasthttp.Response // body stream still open (or buffered)
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
 	cancel     context.CancelFunc
+	Header     headerLookup
+	StatusCode int
 	buffered   bool // true when resp.BodyStream() is nil (test clients)
 }
 
@@ -44,9 +44,9 @@ type streamFetchResult struct {
 // wait for the leader's body to be fully buffered and then serve
 // the buffered result instead of issuing a duplicate origin fetch.
 type inflightStream struct {
+	err  error         // set by leader on fetch error
 	done chan struct{} // closed when body is fully buffered
 	res  fetchResult   // set by leader before closing done
-	err  error         // set by leader on fetch error
 }
 
 // doFetchStream starts an origin fetch with response body streaming

@@ -11,8 +11,8 @@ import (
 // headerLookup provides a uniform read interface over response headers
 // from either a header.Map or a *fasthttp.ResponseHeader.
 type headerLookup struct {
-	hdr     header.Map
 	fastHdr *fasthttp.ResponseHeader
+	hdr     header.Map
 }
 
 func fromHeaderMap(h header.Map) headerLookup {

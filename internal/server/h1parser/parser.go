@@ -38,11 +38,11 @@ type Parser struct {
 	fastPath      api.FastPathHandler
 	fallback      fasthttp.RequestHandler
 	nowFunc       func() time.Time
-	idleRead      time.Duration
-	writeTime     time.Duration
-	scheme        string
 	metricsHook   func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	smugglingHook func()
+	scheme        string
+	idleRead      time.Duration
+	writeTime     time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests

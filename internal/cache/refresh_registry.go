@@ -27,8 +27,8 @@ type refreshEntry struct {
 // cleaned up on explicit Delete, invalidateAndProxy, and when the
 // scheduler detects the object is gone from the store.
 type refreshRegistry struct {
-	mu      sync.Mutex
 	entries map[api.Key]*refreshEntry
+	mu      sync.Mutex
 }
 
 func newRefreshRegistry() *refreshRegistry {

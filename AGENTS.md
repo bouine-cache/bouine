@@ -392,6 +392,7 @@ make build           # binary to ./bin/bouine
 make test            # go test -race ./...
 make test-short      # go test -race -short ./... (prek)
 make lint            # golangci-lint run
+make lint-fix        # golangci-lint --fix (disables fieldalignment to protect comments)
 make vet             # go vet ./...
 make bench-gate      # gating benchmarks, enforces alloc budgets, diffs baseline
 make bench-all       # full benchmarks (no gates), diffs baseline
@@ -633,6 +634,11 @@ Before declaring a change ready:
 - ❌ Catching an error and returning `nil` with a log.
 - ❌ Spec deviation ("close enough to RFC 9111").
 - ❌ Touching `docs/architecture.md` without explicit user approval.
+- ❌ Running `golangci-lint run --fix` directly. The `fieldalignment`
+  auto-fix strips ALL comments from struct fields. Use
+  `make lint-fix` instead, which disables `fieldalignment` during
+  the fix pass. Reorder struct fields manually when `fieldalignment`
+  reports a finding.
 
 ---
 

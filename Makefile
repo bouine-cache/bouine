@@ -68,6 +68,13 @@ test-short: ## Run unit tests with -short (used by prek).
 lint: ## Run golangci-lint.
 	golangci-lint run
 
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint --fix (safe: disables fieldalignment to prevent comment stripping).
+	@tmp=$$(mktemp /tmp/golangci.XXXXXX.yaml); \
+	sed '/- fieldalignment/d' .golangci.yaml > $$tmp; \
+	golangci-lint run --fix --config=$$tmp; \
+	status=$$?; rm -f $$tmp; exit $$status
+
 .PHONY: vet
 vet: ## Run go vet across all packages.
 	$(GO) vet ./...
@@ -191,6 +198,7 @@ setup-dev: ## Install all development tools and hooks. Run this once after cloni
 	@echo "  make build    - build the binary"
 	@echo "  make test     - run all tests"
 	@echo "  make lint     - run golangci-lint"
+	@echo "  make lint-fix - run golangci-lint --fix (disables fieldalignment to protect comments)"
 	@echo "  make ci       - run the full CI gate locally"
 
 .PHONY: hooks-run

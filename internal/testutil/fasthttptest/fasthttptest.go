@@ -15,9 +15,9 @@ import (
 // Server is a minimal fasthttp test server with the same lifecycle
 // semantics as httptest.Server: call Close when done.
 type Server struct {
-	Addr   string
-	server *fasthttp.Server
 	ln     net.Listener
+	server *fasthttp.Server
+	Addr   string
 }
 
 // NewServer starts a fasthttp.Server on 127.0.0.1:0 with the given handler

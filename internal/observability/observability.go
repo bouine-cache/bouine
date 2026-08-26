@@ -14,12 +14,12 @@ import (
 //
 // Stable.
 type Options struct {
+	// Output is the io.Writer to write to. nil defaults to os.Stdout.
+	Output io.Writer
 	// Level is the minimum log level. Empty defaults to "info".
 	Level string
 	// Format is "json" (default) or "text".
 	Format string
-	// Output is the io.Writer to write to. nil defaults to os.Stdout.
-	Output io.Writer
 }
 
 // New returns a configured *slog.Logger. It never returns nil; invalid

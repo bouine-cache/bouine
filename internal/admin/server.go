@@ -34,37 +34,37 @@ import (
 //
 // Stable.
 type Config struct {
-	Addr               string
 	Logger             observability.Logger
-	ReadyFn            func() bool
+	PeerPutHandler     fasthttp.RequestHandler
+	PeerPurgeHandler   fasthttp.RequestHandler
 	Metrics            *observability.Metrics
 	PeersFn            func() []api.PeerInfo
 	PurgeFn            func(key api.Key) error
 	BanFn              func(expr api.BanExpr) (int, error)
-	Token              string
-	MaxBatchSize       int
-	MaxBodyBytes       int
-	RateLimitPerSecond int
+	CacheCheckFn       func(ctx context.Context, rawURL string) CacheCheckResult
+	ConfigFn           func() any
+	StatsFn            func() api.Stats
+	DrainFn            func()
 	RefreshFn          func(key api.Key) error
-	PeerPurgeHandler   fasthttp.RequestHandler
+	ConditionsFn       func() []Condition
 	PeerBanHandler     fasthttp.RequestHandler
 	PeerRefreshHandler fasthttp.RequestHandler
+	ReadyFn            func() bool
 	CFStatusFn         func() CloudflareStatus
-	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
-	OnPurged           func(ctx context.Context, url string)
+	DashboardHandler   fasthttp.RequestHandler
 	OnRefreshed        func(ctx context.Context, url string)
 	OnBanned           func(ctx context.Context, expr api.BanExpr)
 	PeerFetchHandler   fasthttp.RequestHandler
-	PeerPutHandler     fasthttp.RequestHandler
+	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
 	PeerMetricsHandler fasthttp.RequestHandler
-	DashboardHandler   fasthttp.RequestHandler
+	OnPurged           func(ctx context.Context, url string)
 	FaviconHandler     fasthttp.RequestHandler
+	Addr               string
+	Token              string
+	RateLimitPerSecond int
+	MaxBodyBytes       int
+	MaxBatchSize       int
 	PprofEnabled       bool
-	ConditionsFn       func() []Condition
-	DrainFn            func()
-	StatsFn            func() api.Stats
-	ConfigFn           func() any
-	CacheCheckFn       func(ctx context.Context, rawURL string) CacheCheckResult
 }
 
 // Condition is a readiness condition status entry for the
@@ -92,11 +92,11 @@ func (s *swapHandler) Store(h fasthttp.RequestHandler) {
 //
 // Stable.
 type Server struct {
+	resolved atomic.Value
 	inner    *fasthttp.Server
+	swap     *swapHandler
 	addr     string
 	cfg      Config
-	swap     *swapHandler
-	resolved atomic.Value
 }
 
 // NewMinimal creates an admin server with only healthz, readyz, version,
@@ -727,16 +727,16 @@ type CacheCheckResult struct {
 
 // CloudflareStatus is the JSON response for the Cloudflare integration status endpoint.
 type CloudflareStatus struct {
-	Enabled       bool    `json:"enabled"`
-	ZoneID        string  `json:"zone_id,omitempty"`
-	Async         bool    `json:"async"`
 	LastError     *string `json:"last_error"`
 	LastSuccessAt *string `json:"last_success_at"`
-	LastLagMs     int64   `json:"last_lag_ms,omitempty"`
-	BatchEnabled  bool    `json:"batch_enabled,omitempty"`
+	ZoneID        string  `json:"zone_id,omitempty"`
 	CircuitState  string  `json:"circuit_state,omitempty"`
+	LastLagMs     int64   `json:"last_lag_ms,omitempty"`
 	DLQDepth      int     `json:"dlq_depth,omitempty"`
 	TokenCount    int     `json:"token_count,omitempty"`
+	Enabled       bool    `json:"enabled"`
+	Async         bool    `json:"async"`
+	BatchEnabled  bool    `json:"batch_enabled,omitempty"`
 }
 
 // CFPropagateRequest is the JSON body for Cloudflare purge/propagation requests.

@@ -39,8 +39,8 @@ const (
 
 // Disposition describes what the caller should do after the Decision.
 type Disposition struct {
-	Decision Decision
 	Object   *api.Object
+	Decision Decision
 }
 
 // Evaluate runs the RFC 9111 state machine.

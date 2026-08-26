@@ -31,10 +31,10 @@ const (
 
 // queueItem holds a failed purge item and its retry metadata.
 type queueItem struct {
-	kind      BatchKind
-	value     string
-	attempts  int
 	nextRetry time.Time
+	value     string
+	kind      BatchKind
+	attempts  int
 }
 
 // RetryQueue holds failed purge items and retries them with exponential
@@ -45,27 +45,25 @@ type queueItem struct {
 // The retry goroutine reads items from the queue, waits until their
 // nextRetry time, then re-adds them to the batcher for processing.
 type RetryQueue struct {
-	cfg     RetryQueueConfig
-	mu      sync.Mutex
-	items   map[string]*queueItem // key = kind:value
-	order   []string              // FIFO order for items with same nextRetry
-	nowFunc func() time.Time
-
+	closeCtx context.Context
+	onExpire func(kind BatchKind)
+	items    map[string]*queueItem // key = kind:value
+	nowFunc  func() time.Time
 	// retryFn is called to retry an item. If it returns nil, the item
 	// is removed from the queue (success). If it returns an error, the
 	// item stays in the queue with an incremented attempts count and
 	// a new nextRetry time (exponential backoff).
 	retryFn func(ctx context.Context, kind BatchKind, value string) error
-
 	// Metrics callbacks (optional, nil-safe).
 	onEnqueue func(kind BatchKind)
 	onDrop    func(kind BatchKind)
 	onRetry   func(kind BatchKind)
-	onExpire  func(kind BatchKind)
 	onDepth   func(depth int)
-	wg        sync.WaitGroup
-	closeCtx  context.Context
 	cancel    context.CancelFunc
+	order     []string // FIFO order for items with same nextRetry
+	cfg       RetryQueueConfig
+	wg        sync.WaitGroup
+	mu        sync.Mutex
 }
 
 // NewRetryQueue creates a RetryQueue. The retry goroutine starts immediately.

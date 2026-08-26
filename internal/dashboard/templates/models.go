@@ -50,31 +50,35 @@ func (c CacheSplitData) Total() int64 {
 // TrendData carries delta vs the prior window for one metric.
 // Positive = improvement (more requests, better hit %, lower error).
 type TrendData struct {
+	Label string  // e.g. "↑ 12% vs prior"
 	Delta float64 // absolute change
 	Up    bool    // direction arrow
 	Down  bool
-	Label string // e.g. "↑ 12% vs prior"
 }
 
 // OverviewData is the view model for the overview page.
 type OverviewData struct {
-	LayoutProps
-	ReqPerSec   float64
-	HitPct      float64
-	P99MS       int64
-	P50MS       int64
-	P90MS       int64
-	ErrPct      float64
-	TrendReq    TrendData
-	TrendHit    TrendData
-	TrendLat    TrendData
-	TrendErr    TrendData
-	CacheSplit  CacheSplitData
-	ChartLabels []string
-	ChartReqs   []int64
+	TrendReq TrendData
+	TrendErr TrendData
+	TrendLat TrendData
+	TrendHit TrendData
+	// ClusterMode is the active cluster consistency model:
+	// "strong", "eventual", or "single-node" when cluster is disabled.
+	// Used to conditionally render ring SVG vs. mode info on overview.
+	ClusterMode string
+	PeerResults []PeerResult
 	ChartErrs   []int64 // error count per bucket (second chart line)
 	RouteRows   []RouteRow
-	PeerResults []PeerResult
+	ChartReqs   []int64
+	// Ring for the compact circular SVG on the overview bottom row.
+	RingSegs    []api.RingSegment
+	ChartLabels []string
+	LayoutProps
+	CacheSplit CacheSplitData
+	ErrPct     float64
+	P90MS      int64
+	P50MS      int64
+	P99MS      int64
 	// Storage tier stats.
 	HotBytes     int64
 	HotMaxBytes  int64
@@ -83,23 +87,19 @@ type OverviewData struct {
 	WarmMaxBytes int64
 	WarmEntries  int64
 	Evictions    int64
-	// Ring for the compact circular SVG on the overview bottom row.
-	RingSegs []api.RingSegment
-	// ClusterMode is the active cluster consistency model:
-	// "strong", "eventual", or "single-node" when cluster is disabled.
-	// Used to conditionally render ring SVG vs. mode info on overview.
-	ClusterMode string
+	HitPct       float64
+	ReqPerSec    float64
 }
 
 // CFStatusCard is the view model for the Cloudflare status card on the
 // overview page.
 type CFStatusCard struct {
-	Enabled       bool
 	ZoneID        string
-	Async         bool
 	LastError     string // empty when no error
 	LastSuccessAt string // RFC 3339 or empty
 	LastLagMs     int64  // async propagation latency (0 when sync or disabled)
+	Enabled       bool
+	Async         bool
 }
 
 // HotFillPct returns the hot-tier fill percentage (0–100), clamped.
@@ -133,24 +133,27 @@ func sharePct(part, total int64) float64 {
 // PerformanceData is the view model for the performance page. It focuses
 // exclusively on request-latency signals so the overview stays lean.
 type PerformanceData struct {
-	LayoutProps
-	// Latency percentiles over the recent window (last ~60s).
-	P50MS, P90MS, P99MS, AvgMS int64
-	TrendP99                   TrendData
+	AvgSeries []int64
 	// LatHist is the latency distribution (request counts per bucket) for
 	// the recent window; bucket bounds are observability.LatencyBoundsMs.
 	LatHist []int64
+	// SLO compliance: share of requests at or under each latency target.
+	SLO []SLOBucket
 	// Per-bucket latency series over the selected time range.
 	ChartLabels []string
 	P99Series   []int64
-	AvgSeries   []int64
+	TrendP99    TrendData
+	LayoutProps
+	// Latency percentiles over the recent window (last ~60s).
+	AvgMS int64
 	// Apdex application-performance index over the recent window.
 	Apdex          float64 // 0..1
-	ApdexTargetMS  int64   // satisfied threshold T
-	ApdexToleratMS int64   // tolerating threshold (≈4T, bucket-aligned)
-	// SLO compliance: share of requests at or under each latency target.
-	SLO          []SLOBucket
-	TotalSamples int64
+	P50MS          int64
+	P99MS          int64
+	ApdexTargetMS  int64 // satisfied threshold T
+	ApdexToleratMS int64 // tolerating threshold (≈4T, bucket-aligned)
+	P90MS          int64
+	TotalSamples   int64
 }
 
 // SLOBucket is the share of requests served at or under a latency target.
@@ -196,26 +199,26 @@ func (p PerformanceData) ApdexClass() string {
 // RouteRow joins a configured route's policy with its live ring stats.
 type RouteRow struct {
 	// From config.Route
-	Name        string
-	PathPrefix  string
-	Host        string
-	Pool        string
-	TTL         string // formatted NegativeTTL or "—"
-	SWR         string // StaleWhileRevalidate or "—"
-	SIE         string // StaleIfError or "—"
-	NegTTL      string
-	StayinAlive bool
-	Jitter      string
+	Name       string
+	Jitter     string
+	Host       string
+	Pool       string
+	TTL        string // formatted NegativeTTL or "—"
+	SWR        string // StaleWhileRevalidate or "—"
+	PathPrefix string
+	SIE        string // StaleIfError or "—"
 	// v0.1.0 route features
-	Methods  string         // "GET·HEAD" or "" (all methods)
-	Features []RouteFeature // compact badges for set per-route features
-	IsBypass bool           // private or no-store: no cache policy
-	// From observability.RouteStat
-	Requests  int64
-	Hits      int64
-	Misses    int64
-	HitPct    float64
+	Methods   string // "GET·HEAD" or "" (all methods)
+	NegTTL    string
+	Features  []RouteFeature // compact badges for set per-route features
 	Sparkline []int64
+	HitPct    float64
+	// From observability.RouteStat
+	Requests    int64
+	Hits        int64
+	Misses      int64
+	StayinAlive bool
+	IsBypass    bool // private or no-store: no cache policy
 }
 
 // RouteFeature is a compact badge describing a per-route capability that
@@ -229,23 +232,23 @@ type RouteFeature struct {
 
 // RoutesData is the view model for the routes page.
 type RoutesData struct {
+	RouteRows []RouteRow
+	URLStats  []observability.URLStat
 	LayoutProps
 	RouteCount int
-	RouteRows  []RouteRow
-	URLStats   []observability.URLStat
 }
 
 // ── Cluster ──────────────────────────────────────────────────────────
 
 // ClusterMeta holds static cluster configuration shown in the ring stats box.
 type ClusterMeta struct {
-	VirtualNodes     int
-	HopLimit         int
 	PeerFetchTimeout string
 	ProtocolVersion  string
 	GossipInterval   string
 	JoinRetryBudget  string
 	Mode             string // "strong" | "eventual" | "single-node"
+	VirtualNodes     int
+	HopLimit         int
 }
 
 // PeerFetchStats holds aggregated peer fetch telemetry for the cluster page.
@@ -259,12 +262,12 @@ type PeerFetchStats struct {
 
 // ClusterData is the view model for the cluster page.
 type ClusterData struct {
-	LayoutProps
-	PeerResults []PeerResult
 	PeerHealth  map[string]float64 // uptime % over last 30 min
-	RingSegs    []api.RingSegment
 	Meta        ClusterMeta
-	FetchStats  PeerFetchStats
+	PeerResults []PeerResult
+	RingSegs    []api.RingSegment
+	LayoutProps
+	FetchStats PeerFetchStats
 	// Store stats (same fields as OverviewData).
 	HotBytes     int64
 	HotMaxBytes  int64
@@ -305,12 +308,12 @@ func (d ClusterData) WarmAvgObjSize() int64 {
 
 // InvalidationData is the view model for the invalidation page.
 type InvalidationData struct {
-	LayoutProps
-	OpsLog []observability.OpsLogEntry
 	// CFStatus is the Cloudflare propagation status (nil when CF is not
 	// configured). Cache invalidation on bouine propagates to the CDN, so
 	// the CF status belongs with the invalidation controls.
 	CFStatus *CFStatusCard
+	OpsLog   []observability.OpsLogEntry
+	LayoutProps
 }
 
 // HistTypeClass maps an ops-log op to the .ht-* CSS class.
@@ -356,11 +359,11 @@ type ConfigRouteEntry struct {
 
 // ConfigData is the view model for the config page.
 type ConfigData struct {
-	LayoutProps
 	ConfigPath string
-	Sections   []ConfigSection
 	RawJSON    string // pretty-printed JSON of the running config
 	RawYAML    string // pretty-printed YAML of the running config
+	Sections   []ConfigSection
+	LayoutProps
 	// Storage capacity (live usage vs configured max).
 	HotBytes     int64
 	HotMaxBytes  int64
@@ -440,12 +443,12 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 
 // PeerResult holds one peer's fan-out result.
 type PeerResult struct {
+	JoinedAt  time.Time
 	NodeName  string
 	DataAddr  string
 	AdminAddr string
-	Weight    float64
-	JoinedAt  time.Time
 	Summary   observability.MetricsSummary
+	Weight    float64
 	Stale     bool
 }
 
@@ -457,11 +460,11 @@ type RingArc struct {
 	Color      string
 	DashArray  string // "arcLen circumference"
 	DashOffset string // "-cumulativeLen"
+	PctLabel   string
 	LabelX     float64
 	LabelY     float64
 	LabelX2    float64
 	LabelY2    float64
-	PctLabel   string
 }
 
 // RingColors cycles through the palette used in the reference.
@@ -843,11 +846,11 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 
 // InsightsData is the view model for /dashboard/insights.
 type InsightsData struct {
-	LayoutProps
 	// Architecture nodes for the flow diagram.
 	Nodes []ArchNode
 	// Insights sorted by severity (HIGH first).
 	Insights []InsightCard
+	LayoutProps
 	// InsightCount per severity for the filter chips.
 	HighCount, MedCount, LowCount int
 }

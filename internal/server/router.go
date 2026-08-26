@@ -14,18 +14,18 @@ import (
 //
 // Stable.
 type Router struct {
-	routes  []routeEntry
 	logger  observability.Logger
 	metrics *RouterMetrics
+	routes  []routeEntry
 }
 
 type routeEntry struct {
+	methods    map[string]bool // nil = match all methods
+	handler    fasthttp.RequestHandler
 	host       string
 	pathPrefix string
-	methods    map[string]bool // nil = match all methods
 	label      string
 	labelVal   string
-	handler    fasthttp.RequestHandler
 }
 
 // RouterMetrics are the data-plane counters exposed by the router.

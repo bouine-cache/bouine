@@ -49,24 +49,24 @@ type Insight struct {
 	Title    string
 	Detail   string
 	Evidence string
-	Routes   []string
 	Action   string
+	Routes   []string
 }
 
 // InsightData is the aggregated data collected by the dashboard handler
 // before calling Engine.Evaluate. It holds all the inputs the rules need.
 type InsightData struct {
-	Config            *config.Config
-	StoreStats        api.Stats
-	RouteStats        []observability.RouteStat
-	RequestBuckets    []observability.RequestBucket
-	PeerResults       []PeerInfo
 	PeerHealth        map[string]float64 // peer name → uptime % (0-100)
-	CFStatus          CFStatus
-	PoolHealth        map[string][]origin.TargetStatus
 	HeaderAudit       map[string]observability.HeaderAuditSummary
-	VaryCapHits       int64
+	PoolHealth        map[string][]origin.TargetStatus
+	Config            *config.Config
+	PeerResults       []PeerInfo
+	RequestBuckets    []observability.RequestBucket
+	RouteStats        []observability.RouteStat
+	CFStatus          CFStatus
+	StoreStats        api.Stats
 	PrevStoreStats    api.Stats
+	VaryCapHits       int64
 	BroadcastFailures int64 // total cluster broadcast failures
 	CFPurgeSkipped    int64 // total CF purges skipped
 }
@@ -79,10 +79,10 @@ type PeerInfo struct {
 
 // CFStatus is the Cloudflare integration status.
 type CFStatus struct {
+	LastError string // empty when no error
+	LastLagMs int64
 	Enabled   bool
 	Async     bool
-	LastLagMs int64
-	LastError string // empty when no error
 }
 
 // Engine evaluates all registered insight rules against the provided data.

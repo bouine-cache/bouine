@@ -161,11 +161,11 @@ func IsCacheableWithDefault(status int, reqHeader, respHeader header.Map, negati
 // parses, isCacheBlocked re-parses for hasCDN, IsCacheableWithDefault
 // re-parses again).
 type parsedResponse struct {
-	status     int
-	respCC     Directives
-	hasCDN     bool
 	reqHeader  header.Map
 	respHeader header.Map
+	respCC     Directives
+	status     int
+	hasCDN     bool
 }
 
 // newParsedResponse constructs a parsedResponse from the response and

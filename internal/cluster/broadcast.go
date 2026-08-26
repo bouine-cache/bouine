@@ -44,14 +44,14 @@ func countPeers(members []api.PeerInfo) int {
 //
 // Stable.
 type Broadcaster struct {
+	logger  observability.Logger
 	cluster *Cluster
 	fetcher *PeerFetcher
 	client  *transport.Client // shared across all postBinary calls for connection reuse
-	seq     atomic.Uint64
-	logger  observability.Logger
+	metrics *Metrics
 	token   string
 	mode    string // ClusterModeStrong | ClusterModeEventual
-	metrics *Metrics
+	seq     atomic.Uint64
 }
 
 // NewBroadcaster creates a broadcaster for the given cluster.

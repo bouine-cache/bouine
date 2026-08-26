@@ -45,6 +45,8 @@ func SkipCategory(reason string) string {
 // MapResult holds the result of mapping a bouine invalidation to one or more
 // Cloudflare purge operations.
 type MapResult struct {
+	// SkipReason explains why the invalidation was skipped.
+	SkipReason string
 	// URLs are exact URLs to purge (PurgeSingleFile).
 	URLs []string
 	// Tags are cache tags to purge (PurgeByTags).
@@ -56,8 +58,6 @@ type MapResult struct {
 	// Skipped is true when the invalidation could not be mapped to a CF
 	// operation (e.g. a non-literal regex). The caller should log a warning.
 	Skipped bool
-	// SkipReason explains why the invalidation was skipped.
-	SkipReason string
 }
 
 // MapURL maps a bouine purge-by-URL to CF PurgeSingleFile.

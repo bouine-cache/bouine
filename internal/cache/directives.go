@@ -9,29 +9,29 @@ import (
 // Directives holds the parsed Cache-Control directives from either a
 // request or a response. Zero values mean the directive was absent.
 type Directives struct {
-	NoStore              bool
-	NoCache              bool
 	NoCacheFields        string // comma-separated field names from no-cache="…"
-	Private              bool
-	Public               bool
+	MaxAge               time.Duration
+	StaleIfError         time.Duration
+	StaleWhileRevalid    time.Duration
+	MaxStale             time.Duration
+	MinFresh             time.Duration
+	SMaxAge              time.Duration
+	MaxAgeSet            bool
+	SMaxAgeSet           bool
+	MinFreshSet          bool
+	MaxStaleSet          bool
+	StaleWhileRevalidSet bool
+	StaleIfErrorSet      bool
 	MustRevalidate       bool
 	ProxyRevalidate      bool
 	Immutable            bool
 	NoTransform          bool
 	OnlyIfCached         bool
 	MustUnderstand       bool
-	MaxAge               time.Duration
-	MaxAgeSet            bool
-	SMaxAge              time.Duration
-	SMaxAgeSet           bool
-	MinFresh             time.Duration
-	MinFreshSet          bool
-	MaxStale             time.Duration
-	MaxStaleSet          bool
-	StaleWhileRevalid    time.Duration
-	StaleWhileRevalidSet bool
-	StaleIfError         time.Duration
-	StaleIfErrorSet      bool
+	NoStore              bool
+	Public               bool
+	Private              bool
+	NoCache              bool
 }
 
 // ParseCacheControl parses a Cache-Control header value into

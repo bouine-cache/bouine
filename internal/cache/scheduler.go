@@ -71,17 +71,9 @@ const compactionWindow = 5 * time.Second
 // The scheduler is per-Handler (not shared across routes) so that hot
 // reload can stop and GC the old scheduler cleanly.
 type RefreshScheduler struct {
-	mu    sync.Mutex
-	heap  refreshHeap
 	index map[api.Key]*heapEntry // O(1) lookup for updates
 	done  chan struct{}
 	ready chan struct{} // signals the drainer to wake early (new top)
-	wg    sync.WaitGroup
-
-	// stopped is set atomically when Stop is called. Schedule checks
-	// this to avoid inserting entries into a heap whose drainer has
-	// exited (which would leak memory).
-	stopped atomic.Bool
 
 	// onPop is called when an entry's refreshAt has elapsed.
 	// The callback must not block — it should spawn a goroutine.
@@ -91,6 +83,14 @@ type RefreshScheduler struct {
 	// Returns the live object, or nil if the key is gone or stale.
 	// Used by the compaction pass to filter dead entries.
 	alive func(key api.Key) *api.Object
+	heap  refreshHeap
+	wg    sync.WaitGroup
+	mu    sync.Mutex
+
+	// stopped is set atomically when Stop is called. Schedule checks
+	// this to avoid inserting entries into a heap whose drainer has
+	// exited (which would leak memory).
+	stopped atomic.Bool
 }
 
 // NewRefreshScheduler creates a scheduler. onPop is called for each

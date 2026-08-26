@@ -109,17 +109,17 @@ func setSocketOptions(log observability.Logger, fastOpen, deferAccept, reusePort
 // immediately closed with a 503 response, preventing FD exhaustion
 // under slowloris or connection-flood attacks.
 type ListenerConfig struct {
-	Addr           string
-	Handler        fasthttp.RequestHandler
 	Logger         observability.Logger
+	FastPath       api.FastPathHandler
+	FastMetrics    api.FastPathMetrics
+	Handler        fasthttp.RequestHandler
 	TLSConfig      *tls.Config
+	Addr           string
+	Scheme         string
 	MaxConnections int
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
-	FastPath       api.FastPathHandler
-	FastMetrics    api.FastPathMetrics
-	Scheme         string
 }
 
 // Listener wraps a fasthttp.Server with lifecycle methods matching
@@ -127,18 +127,18 @@ type ListenerConfig struct {
 //
 // Stable.
 type Listener struct {
+	logger         observability.Logger
+	resolved       atomic.Value // stores string
+	fastPath       api.FastPathHandler
+	fastMetrics    api.FastPathMetrics
 	inner          *fasthttp.Server
 	addr           string
 	name           string
-	logger         observability.Logger
-	resolved       atomic.Value // stores string
+	scheme         string
 	maxConns       int
 	tcpFastOpen    bool
 	tcpDeferAccept bool
 	reusePort      bool
-	fastPath       api.FastPathHandler
-	fastMetrics    api.FastPathMetrics
-	scheme         string
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 listener.

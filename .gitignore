@@ -69,3 +69,4 @@ scripts/__pycache__/
 .envrc
 kubeconfig.yaml
 scripts/__pycache__/
+kubeconfig-bouine1.yaml

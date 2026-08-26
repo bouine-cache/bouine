@@ -279,7 +279,8 @@ func isConditional304(req *api.RawRequest, obj *api.Object) bool {
 // serialize304Response builds a 304 Not Modified FastPathResponse.
 // A 304 has no body — only the status line, ETag, and dynamic headers
 // (Age, X-Cache, X-Cache-Source, Connection) are sent. This is cheaper
-// than a full 200 hit because BuffersArr[2] is nil.
+// than a full 200 hit because the Buffers slice has 2 entries instead
+// of 3 (no body buffer).
 func (f *FastPathHandler) serialize304Response(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) *api.FastPathResponse {
 	bufPtr := fastPathHeaderPool.Get().(*[]byte)
 	hbuf := (*bufPtr)[:0]

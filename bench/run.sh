@@ -28,7 +28,7 @@
 #   Evaluate_Hit:                     0
 #   HotStore_Get_Hit:                 0
 #   Handler_CacheHit_ReusableWriter:  0  (zero-alloc hit path achieved)
-#   Handler_CacheMiss_Cacheable:      23
+#   Handler_CacheMiss_Cacheable:      26  (pre-warmed serializedHead: +3 allocs on miss path)
 #   SIEVE_Access:                     0
 #   Cachaner_Access:                   0
 #   Cachaner_AccessSlowPath:           0
@@ -59,7 +59,7 @@ declare -A BUDGETS=(
     [Evaluate_Hit]=0
     [HotStore_Get_Hit]=0
     [Handler_CacheHit_ReusableWriter]=0
-    [Handler_CacheMiss_Cacheable]=23
+    [Handler_CacheMiss_Cacheable]=26
     [SIEVE_Access]=0
     [Cachaner_Access]=0
     [Cachaner_AccessSlowPath]=0

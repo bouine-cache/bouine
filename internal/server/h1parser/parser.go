@@ -99,7 +99,9 @@ func WithSmugglingHook(fn func()) Option {
 
 // Serve handles a single connection: parse HTTP/1.1 requests in a
 // keep-alive loop, dispatching hits to the fast path and misses to
-// the fallback handler.
+// the fallback handler. The connection stays alive across both hits
+// and misses until the client sends Connection: close, the parser
+// hits a read error, or the idle deadline expires.
 func (p *Parser) Serve(conn net.Conn) error {
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetKeepAlive(true)
@@ -112,9 +114,25 @@ func (p *Parser) Serve(conn net.Conn) error {
 
 	var readBuf [readBufferSize]byte
 
+	// Set the initial read deadline once. The deadline is refreshed
+	// lazily: only when the remaining time drops below the refresh
+	// threshold, avoiding a setsockopt syscall on every request.
+	deadline := p.nowFunc().Add(p.idleRead)
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	const refreshThreshold = 2 * time.Second
+
 	for {
-		if err := conn.SetReadDeadline(time.Now().Add(p.idleRead)); err != nil {
-			return err
+		// Refresh the deadline only when the remaining window is too
+		// small to read another request. This reduces setsockopt syscalls
+		// from one-per-request to roughly one per refreshThreshold interval.
+		now := p.nowFunc()
+		if remaining := deadline.Sub(now); remaining < refreshThreshold {
+			deadline = now.Add(p.idleRead)
+			if err := conn.SetReadDeadline(deadline); err != nil {
+				return err
+			}
 		}
 
 		req, fallThrough, excess, err := p.parseRequest(conn, &readBuf)
@@ -122,7 +140,22 @@ func (p *Parser) Serve(conn net.Conn) error {
 			return err
 		}
 		if fallThrough {
-			return p.handleFallThrough(conn, req, excess)
+			close, ftErr := p.handleFallThrough(conn, req, excess)
+			if ftErr != nil {
+				return ftErr
+			}
+			if close {
+				return nil
+			}
+			// handleFallThrough cleared the read deadline so the fallback
+			// handler could manage its own timeouts. Re-arm it now for the
+			// next keep-alive request, otherwise the connection is
+			// unprotected against slowloris.
+			deadline = p.nowFunc().Add(p.idleRead)
+			if err := conn.SetReadDeadline(deadline); err != nil {
+				return err
+			}
+			continue
 		}
 
 		// Try the fast path.
@@ -145,7 +178,18 @@ func (p *Parser) Serve(conn net.Conn) error {
 		}
 
 		// Miss path: call the fallback handler with a fasthttp.RequestCtx.
-		return p.handleFallThrough(conn, req, excess)
+		close, ftErr := p.handleFallThrough(conn, req, excess)
+		if ftErr != nil {
+			return ftErr
+		}
+		if close {
+			return nil
+		}
+		// Re-arm the read deadline for the next keep-alive request.
+		deadline = p.nowFunc().Add(p.idleRead)
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			return err
+		}
 	}
 }
 
@@ -358,10 +402,17 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Ti
 // fasthttp.RequestHandler. It constructs a *fasthttp.RequestCtx from
 // the parsed RawRequest, calls the handler, and writes the response
 // to the connection.
-func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []byte) error {
+//
+// Returns (close, err). When close is true the caller should return
+// from the keep-alive loop — the client requested Connection: close
+// or the response indicates the connection should be closed.
+func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []byte) (bool, error) {
 	if req == nil {
-		return errors.New("h1parser: nil request on fall-through")
+		return false, errors.New("h1parser: nil request on fall-through")
 	}
+
+	// Check if the client requested Connection: close.
+	clientClose := isConnectionClose(req)
 
 	// Reset deadlines so the fallback handler manages its own timeouts.
 	_ = conn.SetReadDeadline(time.Time{})
@@ -393,12 +444,25 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// Call the fallback handler.
 	p.fallback(&ctx)
 
-	// Write the response to the connection.
-	if err := conn.SetWriteDeadline(time.Now().Add(p.writeTime)); err != nil {
-		return err
+	// Propagate Connection: close from the request to the response so
+	// the client knows the connection will not be reused. The fasthttp
+	// server's own serve loop does this automatically (server.go:2653),
+	// but handleFallThrough bypasses that loop.
+	if clientClose {
+		ctx.Response.Header.SetConnectionClose()
 	}
-	_, err := ctx.Response.WriteTo(conn)
-	return err
+
+	// Write the response to the connection.
+	if err := conn.SetWriteDeadline(p.nowFunc().Add(p.writeTime)); err != nil {
+		return false, err
+	}
+	if _, err := ctx.Response.WriteTo(conn); err != nil {
+		return false, err
+	}
+
+	// If the handler itself set Connection: close (e.g. via
+	// ctx.SetConnectionClose), honour that too.
+	return clientClose || ctx.Response.Header.ConnectionClose(), nil
 }
 
 // indexByte is a simple byte search.
@@ -421,4 +485,50 @@ func bytesToString(b []byte) string {
 		return ""
 	}
 	return unsafe.String(&b[0], len(b))
+}
+
+// isConnectionClose reports whether the request contains a
+// Connection: close token (RFC 9110 §7.6.1). The Connection header
+// is a comma-separated list of tokens; "close" may appear alongside
+// other tokens like "keep-alive". This determines whether the
+// keep-alive loop should terminate after serving the response.
+func isConnectionClose(req *api.RawRequest) bool {
+	val := req.Header(header.Connection)
+	if val == "" {
+		return false
+	}
+	for _, token := range splitHeaderTokens(val) {
+		if api.EqualFold(token, "close") {
+			return true
+		}
+	}
+	return false
+}
+
+// splitHeaderTokens splits a comma-separated header value into trimmed
+// tokens. It does not allocate — it returns subslices of the input.
+func splitHeaderTokens(val string) []string {
+	var tokens []string
+	for len(val) > 0 {
+		comma := indexByte(val, ',')
+		var token string
+		if comma < 0 {
+			token = val
+			val = ""
+		} else {
+			token = val[:comma]
+			val = val[comma+1:]
+		}
+		// Trim OWS (optional whitespace).
+		for len(token) > 0 && (token[0] == ' ' || token[0] == '\t') {
+			token = token[1:]
+		}
+		for len(token) > 0 && (token[len(token)-1] == ' ' || token[len(token)-1] == '\t') {
+			token = token[:len(token)-1]
+		}
+		if token != "" {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
 }

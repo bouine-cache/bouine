@@ -246,6 +246,11 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 func isConditional304(req *api.RawRequest, obj *api.Object) bool {
 	inm := req.Header(header.IfNoneMatch)
 	if inm != "" {
+		// RFC 9110 §13.1.2: If-None-Match: * is true if the resource
+		// has any current representation — regardless of ETag presence.
+		if inm == "*" {
+			return true
+		}
 		if obj.ETag != "" && etagMatch(inm, obj.ETag) {
 			return true
 		}
@@ -305,11 +310,13 @@ func (f *FastPathHandler) serialize304Response(req *api.RawRequest, obj *api.Obj
 	resp := buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
 	// buildFastPathResponse sets StatusCode from obj.StatusCode (200)
 	// and BytesOut from obj.Body; override both for the 304 response,
-	// which has no body regardless of request method.
+	// which has no body regardless of request method. Trim the Buffers
+	// slice to 2 entries (status line + headers only) so writev sends
+	// exactly 2 iovecs with no zero-length filtering needed.
 	resp.StatusCode = 304
 	resp.BytesOut = 0
 	resp.BuffersArr[2] = nil
-	resp.Buffers = resp.BuffersArr[:3]
+	resp.Buffers = resp.BuffersArr[:2]
 	return resp
 }
 

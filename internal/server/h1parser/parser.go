@@ -289,7 +289,9 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*ap
 }
 
 // headerEndBytes is the HTTP/1.1 header terminator. Package-level
-// to avoid allocating a 4-byte slice on every findHeaderEnd call.
+// for explicitness and to guarantee zero allocation across all
+// compiler versions (the compiler may optimize string-to-bytes
+// conversions in some cases, but the package var is certain).
 var headerEndBytes = []byte("\r\n\r\n")
 
 // findHeaderEnd searches for \r\n\r\n in buf.

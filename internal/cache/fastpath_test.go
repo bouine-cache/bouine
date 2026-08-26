@@ -115,9 +115,8 @@ func TestFastPathHandler_ConditionalIfNoneMatch_304(t *testing.T) {
 	assert.Equal(t, 304, resp.StatusCode)
 	assert.Equal(t, "HIT", resp.CacheResult)
 	assert.Equal(t, 0, resp.BytesOut, "304 must have no body")
-	// Buffers[2] should be nil for 304.
-	require.GreaterOrEqual(t, len(resp.Buffers), 3)
-	assert.Nil(t, resp.Buffers[2], "304 body buffer must be nil")
+	// 304 sends only 2 buffers (status line + headers), no body buffer.
+	require.Len(t, resp.Buffers, 2, "304 should have 2 buffers (no body)")
 	// ETag should be present in the header block.
 	assert.Contains(t, string(resp.Buffers[1]), `Etag: "abc123"`)
 	fp.Release(resp)
@@ -259,6 +258,44 @@ func TestFastPathHandler_ConditionalIfNoneMatchWildcard(t *testing.T) {
 	resp, ok := fp.TryHit(req, time.Now())
 	require.True(t, ok)
 	assert.Equal(t, 304, resp.StatusCode)
+	assert.Equal(t, 0, resp.BytesOut)
+	fp.Release(resp)
+}
+
+func TestFastPathHandler_ConditionalIfNoneMatchWildcardNoETag(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	// Object has Last-Modified but NO ETag — RFC 9110 §13.1.2 says
+	// If-None-Match: * is true if the resource has any current
+	// representation, regardless of ETag presence.
+	obj := &api.Object{
+		Key:          key,
+		StatusCode:   200,
+		Header:       headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		LastModified: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+		Body:         []byte("Hello, World!"),
+		BodySize:     13,
+		StoredAt:     time.Now(),
+		TTL:          60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	// If-None-Match: * on an object without ETag → 304 (RFC 9110 §13.1.2).
+	req := &api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}
+	req.Headers[0] = api.RawHeader{Key: "If-None-Match", Value: "*"}
+	req.NHeaders = 1
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	require.NotNil(t, resp)
+	assert.Equal(t, 304, resp.StatusCode, "If-None-Match: * must return 304 even without ETag")
 	assert.Equal(t, 0, resp.BytesOut)
 	fp.Release(resp)
 }

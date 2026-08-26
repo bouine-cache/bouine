@@ -126,6 +126,14 @@ func InternValue(s string) string {
 // FromFastHTTP converts a *fasthttp.ResponseHeader into a Map.
 // Multi-value headers are joined with ", " per RFC 9110 §5.2.
 // Entries are sorted by canonical key for deterministic output.
+//
+// Zero-copy: header keys and values are converted from []byte to string
+// via BytesToString (unsafe.String) without allocation. unique.Make then
+// interns the string; if the value is already interned (common after
+// warm-up: text/html, gzip, application/json, etc.), no allocation occurs
+// at all. If it's a new value, unique.Make copies it into the intern
+// table — a retained copy, not garbage, so it doesn't contribute to GC
+// pressure.
 func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 	if h == nil || h.Len() == 0 {
 		return Map{}
@@ -142,9 +150,9 @@ func FromFastHTTP(h *fasthttp.ResponseHeader) Map {
 		if len(k) == 0 || len(v) == 0 {
 			continue
 		}
-		hm.values = append(hm.values, InternValue(string(v)))
+		hm.values = append(hm.values, InternValue(BytesToString(v)))
 		hm.entries = append(hm.entries, headerEntry{
-			key: InternKeyCanonical(string(k)),
+			key: InternKeyCanonical(BytesToString(k)),
 			off: len(hm.values) - 1,
 		})
 	}
@@ -373,6 +381,26 @@ func (h Map) WriteToFastHTTP(dst *fasthttp.ResponseHeader) {
 		}
 		dst.SetCanonical(s2b(key), s2b(h.values[h.entries[i].off]))
 	}
+}
+
+// BytesToString converts a []byte to string without copying the underlying
+// bytes. The returned string shares its backing memory with b — it is only
+// valid as long as b is not modified or garbage-collected.
+//
+// Safe for read-only use where the string is immediately consumed (e.g.
+// passed to unique.Make which copies the content into its intern table).
+// The zero-length case returns "" without dereferencing the slice header,
+// avoiding an index-out-of-range panic on empty slices.
+//
+// does not outlive the caller's byte slice in any path that doesn't
+// immediately copy it (unique.Make, InternKey, etc.).
+//
+//nolint:gosec // G103: unsafe.String is safe: the string is read-only and
+func BytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(&b[0], len(b))
 }
 
 // S2b converts a string to []byte without allocation by pointing at

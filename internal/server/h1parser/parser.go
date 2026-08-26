@@ -18,7 +18,6 @@ import (
 	"io"
 	"net"
 	"time"
-	"unsafe"
 
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -267,7 +266,7 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 	if sp1 == len(line) {
 		return errors.New("h1parser: missing path")
 	}
-	req.Method = bytesToString(line[:sp1])
+	req.Method = header.BytesToString(line[:sp1])
 
 	sp2 := sp1 + 1
 	for sp2 < len(line) && line[sp2] != ' ' {
@@ -276,7 +275,7 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 	if sp2 == len(line) {
 		return errors.New("h1parser: missing version")
 	}
-	fullPath := bytesToString(line[sp1+1 : sp2])
+	fullPath := header.BytesToString(line[sp1+1 : sp2])
 
 	if q := indexByte(fullPath, '?'); q >= 0 {
 		req.Path = fullPath[:q]
@@ -285,7 +284,7 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 		req.Path = fullPath
 	}
 
-	req.HTTPVersion = bytesToString(line[sp2+1:])
+	req.HTTPVersion = header.BytesToString(line[sp2+1:])
 
 	return nil
 }
@@ -373,12 +372,12 @@ func appendHeader(req *api.RawRequest, line []byte) {
 		return
 	}
 
-	key := bytesToString(line[:colon])
+	key := header.BytesToString(line[:colon])
 	valStart := colon + 1
 	for valStart < len(line) && (line[valStart] == ' ' || line[valStart] == '\t') {
 		valStart++
 	}
-	value := bytesToString(line[valStart:])
+	value := header.BytesToString(line[valStart:])
 
 	req.Headers[req.NHeaders] = api.RawHeader{
 		Key:   key,
@@ -473,18 +472,6 @@ func indexByte(s string, b byte) int {
 		}
 	}
 	return -1
-}
-
-// bytesToString converts a []byte to string without copying. The
-// returned string is only valid as long as the underlying byte slice
-// is not modified or garbage-collected.
-//
-//nolint:gosec // unsafe.String is safe: the string is valid only while
-func bytesToString(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	return unsafe.String(&b[0], len(b))
 }
 
 // isConnectionClose reports whether the request contains a

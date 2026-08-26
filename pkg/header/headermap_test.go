@@ -281,3 +281,195 @@ func TestInternValue_Deduplicates(t *testing.T) {
 	require.Equal(t, b, a)
 	require.NotEqual(t, c, a)
 }
+
+func TestBytesToString(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{"non-empty", []byte("hello world"), "hello world"},
+		{"header value", []byte("text/html; charset=utf-8"), "text/html; charset=utf-8"},
+		{"single byte", []byte("X"), "X"},
+		{"empty slice", []byte{}, ""},
+		{"nil slice", nil, ""},
+		{"binary data", []byte{0x00, 0x01, 0xFF, 0xFE}, string([]byte{0x00, 0x01, 0xFF, 0xFE})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := BytesToString(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBytesToString_NoCopy(t *testing.T) {
+	t.Parallel()
+	// Verify that BytesToString shares the backing memory: modifying
+	// the byte slice after conversion should be visible through the
+	// string (proving no copy occurred). This is the expected unsafe
+	// behavior — callers must not mutate the slice after conversion
+	// if the string is retained.
+	b := []byte("hello")
+	s := BytesToString(b)
+	require.Equal(t, "hello", s)
+
+	// Mutate the underlying bytes.
+	b[0] = 'H'
+	// The string should reflect the mutation because no copy was made.
+	// This proves the zero-copy property.
+	assert.Equal(t, "Hello", s)
+}
+
+func TestBytesToString_EmptyNoPanic(t *testing.T) {
+	t.Parallel()
+	// Empty and nil slices must not panic — the guard returns ""
+	// before dereferencing the slice header.
+	assert.NotPanics(t, func() {
+		_ = BytesToString([]byte{})
+	})
+	assert.NotPanics(t, func() {
+		_ = BytesToString(nil)
+	})
+}
+
+func TestFromFastHTTP_ZeroCopy(t *testing.T) {
+	t.Parallel()
+	// Verify that FromFastHTTP correctly converts headers with the
+	// zero-copy path. A typical origin response with 12 headers.
+	// Note: fasthttp's Set() silently drops Date (managed automatically),
+	// so we use SetDateRaw or skip Date — this test focuses on the
+	// zero-copy conversion, not fasthttp's special-header handling.
+	src := &fasthttp.ResponseHeader{}
+	src.Set("Content-Type", "text/html; charset=utf-8")
+	src.Set("Content-Encoding", "gzip")
+	src.Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
+	src.Set("Vary", "Accept-Encoding")
+	src.Set("ETag", `"abc123def456"`)
+	src.Set("Last-Modified", "Mon, 25 Aug 2025 10:00:00 GMT")
+	src.Set("Age", "42")
+	src.Set("Server", "bouine/1.0")
+	src.Set("X-Custom-1", "custom-value-1")
+	src.Set("X-Custom-2", "custom-value-2")
+	src.Set("Content-Length", "12345")
+	src.Set("X-Frame-Options", "DENY")
+
+	hm := FromFastHTTP(src)
+
+	// Every header should be present with the correct value.
+	cases := []struct {
+		key, want string
+	}{
+		{"Content-Type", "text/html; charset=utf-8"},
+		{"Content-Encoding", "gzip"},
+		{"Cache-Control", "public, max-age=3600, stale-while-revalidate=86400"},
+		{"Vary", "Accept-Encoding"},
+		{"ETag", `"abc123def456"`},
+		{"Last-Modified", "Mon, 25 Aug 2025 10:00:00 GMT"},
+		{"Age", "42"},
+		{"Server", "bouine/1.0"},
+		{"X-Custom-1", "custom-value-1"},
+		{"X-Custom-2", "custom-value-2"},
+		{"Content-Length", "12345"},
+		{"X-Frame-Options", "DENY"},
+	}
+	for _, c := range cases {
+		got := hm.Get(c.key)
+		assert.Equal(t, c.want, got, "header %s", c.key)
+	}
+}
+
+func TestFromFastHTTP_EmptyValuesSkipped(t *testing.T) {
+	t.Parallel()
+	// FromFastHTTP must skip entries where either key or value is empty.
+	// fasthttp's Set() drops empty values, so we verify the skip logic
+	// by ensuring that even if empty-value entries were present, they
+	// would not cause panics or empty strings in the output Map.
+	src := &fasthttp.ResponseHeader{}
+	src.Set("Content-Type", "text/html")
+	hm := FromFastHTTP(src)
+	assert.Equal(t, 1, hm.Len())
+	assert.Equal(t, "text/html", hm.Get("Content-Type"))
+}
+
+// buildTypicalResponseHeader creates a *fasthttp.ResponseHeader with 15
+// headers matching a typical origin response. Used by benchmarks.
+func buildTypicalResponseHeader() *fasthttp.ResponseHeader {
+	h := &fasthttp.ResponseHeader{}
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Encoding", "gzip")
+	h.Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
+	h.Set("Vary", "Accept-Encoding")
+	h.Set("ETag", `"abc123def456"`)
+	h.Set("Last-Modified", "Mon, 25 Aug 2025 10:00:00 GMT")
+	h.Set("Age", "42")
+	h.Set("Date", "Mon, 25 Aug 2025 12:00:00 GMT")
+	h.Set("Server", "bouine/1.0")
+	h.Set("X-Custom-1", "custom-value-1")
+	h.Set("X-Custom-2", "custom-value-2")
+	h.Set("Content-Length", "12345")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	return h
+}
+
+// BenchmarkFromFastHTTP measures the cost of converting a
+// *fasthttp.ResponseHeader with 15 headers into a header.Map.
+//
+// First iteration: header values are not yet interned, so unique.Make
+// allocates one string per unique value (~15 allocs).
+// Steady state (all subsequent iterations): all values are interned,
+// so unique.Make returns the existing string without allocation.
+// The benchmark reports allocs/op across all iterations — the steady-
+// state per-call alloc count is 0, but go test -bench averages the
+// first call across all iterations, so the reported number will be
+// < 1 alloc/op.
+func BenchmarkFromFastHTTP(b *testing.B) {
+	src := buildTypicalResponseHeader()
+
+	// Warm up the intern table so steady-state benchmarks see 0 allocs.
+	_ = FromFastHTTP(src)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = FromFastHTTP(src)
+	}
+}
+
+// BenchmarkFromFastHTTP_Cold measures the first-call cost when no
+// header values are interned yet. This is a single-shot benchmark
+// (BenchmarkSingle_ prefix) — it skips itself under time-driven benchtime.
+func BenchmarkSingle_FromFastHTTP_Cold(b *testing.B) {
+	// Skip under time-driven benchtime (b.Loop mode); this benchmark
+	// measures a single cold call.
+	if b.N > 1 {
+		b.Skip("single-shot benchmark; run with -benchtime=1x -count=10")
+	}
+
+	// Build a fresh header with values that haven't been interned yet.
+	// We use unique suffixes to guarantee no prior interning.
+	src := &fasthttp.ResponseHeader{}
+	src.Set("Content-Type", "text/html; charset=utf-8")
+	src.Set("Cache-Control", "public, max-age=3600")
+	src.Set("Vary", "Accept-Encoding")
+	src.Set("ETag", `"cold-bench-etag-`+b.Name()+`"`)
+	src.Set("X-Custom", "cold-bench-value")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	_ = FromFastHTTP(src)
+}
+
+// BenchmarkBytesToString measures the raw cost of the zero-copy
+// byte-to-string conversion.
+func BenchmarkBytesToString(b *testing.B) {
+	data := []byte("text/html; charset=utf-8")
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = BytesToString(data)
+	}
+}

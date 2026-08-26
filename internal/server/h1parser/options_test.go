@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
 )
@@ -146,14 +147,14 @@ func TestParser_Serve_NilFallback(t *testing.T) {
 func TestBytesToString(t *testing.T) {
 	t.Parallel()
 	b := []byte("hello")
-	s := bytesToString(b)
+	s := header.BytesToString(b)
 	assert.Equal(t, "hello", s)
 }
 
 func TestBytesToString_Empty(t *testing.T) {
 	t.Parallel()
 	b := []byte{}
-	s := bytesToString(b)
+	s := header.BytesToString(b)
 	assert.Equal(t, "", s)
 }
 

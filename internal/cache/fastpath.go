@@ -106,12 +106,28 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	disp := evaluateFromRaw(req, obj, now, reqCC)
 	switch disp.Decision {
 	case Hit:
+		// Check conditional headers for 304 fast path (RFC 9110 §13.1.2/§13.1.3).
+		// If-None-Match takes precedence over If-Modified-Since.
+		if isConditional304(req, obj) {
+			resp := f.serialize304Response(req, obj, src, now, "HIT")
+			if resp == nil {
+				return nil, false
+			}
+			return resp, true
+		}
 		resp := f.serializeResponse(req, obj, src, now, "HIT")
 		if resp == nil {
 			return nil, false
 		}
 		return resp, true
 	case StaleHit:
+		if isConditional304(req, obj) {
+			resp := f.serialize304Response(req, obj, src, now, "STALE")
+			if resp == nil {
+				return nil, false
+			}
+			return resp, true
+		}
 		resp := f.serializeResponse(req, obj, src, now, "STALE")
 		if resp == nil {
 			return nil, false
@@ -126,7 +142,9 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 // before attempting a cache lookup. This avoids the store.Get call
 // entirely for requests that can never be served from cache.
 // Returns the parsed request Cache-Control directives so the caller can
-// pass them to evaluateFromRaw without re-parsing.
+// pass them to evaluateFromRaw without re-parsing, plus the values of
+// If-None-Match and If-Modified-Since if present (for 304 conditional
+// handling in the fast path).
 func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 	if req.Method != "GET" && req.Method != "HEAD" {
 		return Directives{}, false
@@ -137,9 +155,7 @@ func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 	for i := 0; i < req.NHeaders; i++ {
 		h := &req.Headers[i]
 		switch {
-		case api.EqualFold(h.Key, header.IfNoneMatch),
-			api.EqualFold(h.Key, header.IfModifiedSince),
-			api.EqualFold(h.Key, header.Range),
+		case api.EqualFold(h.Key, header.Range),
 			api.EqualFold(h.Key, "If-Range"),
 			api.EqualFold(h.Key, "If-Unmodified-Since"),
 			api.EqualFold(h.Key, "If-Match"):
@@ -220,6 +236,80 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 	}
 
 	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
+}
+
+// isConditional304 checks whether the request's conditional headers
+// match the cached object, indicating a 304 Not Modified response is
+// appropriate per RFC 9110 §13.1.2 (If-None-Match) and §13.1.3
+// (If-Modified-Since). If-None-Match takes precedence.
+func isConditional304(req *api.RawRequest, obj *api.Object) bool {
+	inm := req.Header(header.IfNoneMatch)
+	if inm != "" {
+		if obj.ETag != "" && etagMatch(inm, obj.ETag) {
+			return true
+		}
+		return false
+	}
+	ims := req.Header(header.IfModifiedSince)
+	if ims != "" {
+		imsTime := parseHTTPDate(ims)
+		if imsTime.IsZero() {
+			return false
+		}
+		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
+			return true
+		}
+		if obj.LastModified.IsZero() {
+			if d := obj.Header.Get(header.Date); d != "" {
+				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// serialize304Response builds a 304 Not Modified FastPathResponse.
+// A 304 has no body — only the status line, ETag, and dynamic headers
+// (Age, X-Cache, X-Cache-Source, Connection) are sent. This is cheaper
+// than a full 200 hit because BuffersArr[2] is nil.
+func (f *FastPathHandler) serialize304Response(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) *api.FastPathResponse {
+	bufPtr := fastPathHeaderPool.Get().(*[]byte)
+	hbuf := (*bufPtr)[:0]
+
+	hbuf = appendStatusLine(hbuf, 304)
+
+	// ETag validator (RFC 9110 §8.8.3).
+	if obj.ETag != "" {
+		hbuf = append(hbuf, header.ETag...)
+		hbuf = append(hbuf, ": "...)
+		hbuf = append(hbuf, obj.ETag...)
+		hbuf = append(hbuf, '\r', '\n')
+	}
+
+	// Append dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date,
+	// Connection). Same as a normal hit but without the pre-serialized
+	// static header block — 304 responses only carry validators and
+	// cache metadata, not content headers.
+	dateStr := f.getCachedDate(now)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr)
+
+	if cap(hbuf) > maxFastPathHeaderBytes {
+		*bufPtr = hbuf
+		fastPathHeaderPool.Put(bufPtr)
+		return nil
+	}
+
+	resp := buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
+	// buildFastPathResponse sets StatusCode from obj.StatusCode (200)
+	// and BytesOut from obj.Body; override both for the 304 response,
+	// which has no body regardless of request method.
+	resp.StatusCode = 304
+	resp.BytesOut = 0
+	resp.BuffersArr[2] = nil
+	resp.Buffers = resp.BuffersArr[:3]
+	return resp
 }
 
 // getOrComputeSerializedHead returns the lazily-computed serialized

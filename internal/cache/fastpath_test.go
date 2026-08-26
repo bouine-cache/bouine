@@ -82,23 +82,185 @@ func TestFastPathHandler_Miss(t *testing.T) {
 	require.Nil(t, resp)
 }
 
-func TestFastPathHandler_ConditionalHeadersFallthrough(t *testing.T) {
+func TestFastPathHandler_ConditionalIfNoneMatch_304(t *testing.T) {
+	t.Parallel()
 	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
 	fp := NewFastPathHandlerFromStore(store)
 
-	// Request with If-None-Match should not qualify for fast path.
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		ETag:       `"abc123"`,
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	// If-None-Match matches → 304.
 	req := &api.RawRequest{
-		Method: "GET",
-		Path:   "/",
-		Host:   "example.com",
-		Scheme: "http",
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
 	}
 	req.Headers[0] = api.RawHeader{Key: "If-None-Match", Value: `"abc123"`}
 	req.NHeaders = 1
 
 	resp, ok := fp.TryHit(req, time.Now())
-	require.False(t, ok)
-	require.Nil(t, resp)
+	require.True(t, ok)
+	require.NotNil(t, resp)
+	assert.Equal(t, 304, resp.StatusCode)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, 0, resp.BytesOut, "304 must have no body")
+	// Buffers[2] should be nil for 304.
+	require.GreaterOrEqual(t, len(resp.Buffers), 3)
+	assert.Nil(t, resp.Buffers[2], "304 body buffer must be nil")
+	// ETag should be present in the header block.
+	assert.Contains(t, string(resp.Buffers[1]), `Etag: "abc123"`)
+	fp.Release(resp)
+}
+
+func TestFastPathHandler_ConditionalIfNoneMatch_Mismatch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		ETag:       `"abc123"`,
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	// If-None-Match does NOT match → full 200 hit.
+	req := &api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}
+	req.Headers[0] = api.RawHeader{Key: "If-None-Match", Value: `"different"`}
+	req.NHeaders = 1
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	require.NotNil(t, resp)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, 13, resp.BytesOut, "mismatch should serve full body")
+	fp.Release(resp)
+}
+
+func TestFastPathHandler_ConditionalIfModifiedSince_304(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:          key,
+		StatusCode:   200,
+		Header:       headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		LastModified: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+		Body:         []byte("Hello, World!"),
+		BodySize:     13,
+		StoredAt:     time.Now(),
+		TTL:          60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	// If-Modified-Since after Last-Modified → 304.
+	req := &api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}
+	req.Headers[0] = api.RawHeader{Key: "If-Modified-Since", Value: "Mon, 01 Jan 2024 00:00:00 GMT"}
+	req.NHeaders = 1
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	require.NotNil(t, resp)
+	assert.Equal(t, 304, resp.StatusCode)
+	assert.Equal(t, 0, resp.BytesOut, "304 must have no body")
+	fp.Release(resp)
+}
+
+func TestFastPathHandler_ConditionalIfModifiedSince_Mismatch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:          key,
+		StatusCode:   200,
+		Header:       headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		LastModified: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		Body:         []byte("Hello, World!"),
+		BodySize:     13,
+		StoredAt:     time.Now(),
+		TTL:          60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	// If-Modified-Since before Last-Modified → full 200 hit.
+	req := &api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}
+	req.Headers[0] = api.RawHeader{Key: "If-Modified-Since", Value: "Mon, 01 Jan 2023 00:00:00 GMT"}
+	req.NHeaders = 1
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	require.NotNil(t, resp)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, 13, resp.BytesOut)
+	fp.Release(resp)
+}
+
+func TestFastPathHandler_ConditionalIfNoneMatchWildcard(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		ETag:       `"abc123"`,
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	// If-None-Match: * → 304.
+	req := &api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}
+	req.Headers[0] = api.RawHeader{Key: "If-None-Match", Value: "*"}
+	req.NHeaders = 1
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	assert.Equal(t, 304, resp.StatusCode)
+	assert.Equal(t, 0, resp.BytesOut)
+	fp.Release(resp)
 }
 
 func TestFastPathHandler_NoCacheFallthrough(t *testing.T) {

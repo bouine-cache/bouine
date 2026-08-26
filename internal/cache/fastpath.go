@@ -142,9 +142,10 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 // before attempting a cache lookup. This avoids the store.Get call
 // entirely for requests that can never be served from cache.
 // Returns the parsed request Cache-Control directives so the caller can
-// pass them to evaluateFromRaw without re-parsing, plus the values of
-// If-None-Match and If-Modified-Since if present (for 304 conditional
-// handling in the fast path).
+// pass them to evaluateFromRaw without re-parsing. If-None-Match and
+// If-Modified-Since are allowed through (handled by isConditional304
+// after the cache lookup); Range, If-Range, If-Match, and
+// If-Unmodified-Since are still rejected.
 func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 	if req.Method != "GET" && req.Method != "HEAD" {
 		return Directives{}, false

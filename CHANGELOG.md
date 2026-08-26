@@ -10,33 +10,45 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-26
+
 ### Added
-- Streaming origin responses with pipelined peer fetch.
-- TCP_QUICKACK on accepted connections for reduced latency.
+- Stress-test diagnostics metrics for WAL, warm tier, origin, and peer
+  fetch subsystems (15 new Prometheus metrics).
+- `hot_store_max_bytes` and `warm_store_max_bytes` gauges for fill-ratio
+  computation.
+- `request_queue_depth` and `peer_fetch_active` gauges for CPU starvation
+  and in-flight RPC detection.
 
 ### Changed
-- Migrated the entire data plane from `net/http` to `fasthttp`, achieving
-  zero-allocation hit path and exceeding pre-migration benchmark performance.
-- Pre-computed cache-control flags, status lines, Date formatting, and Vary
-  values for hot-path performance.
-- Byte-based `ParseCacheControl`, `isInvalidating`, and header comparisons
-  throughout the cache pipeline.
-- `SetCanonical` for ETag and X-Cache headers on revalidate/error paths.
-- Lazy string conversion in `RequestInfo` via `[]byte` fields.
-
-### Removed
-- HTTP/2 support (fasthttp is HTTP/1.1 only).
-- `net/http` from all production code and test files.
+- Reordered Go struct fields across 58 files to minimize padding waste
+  (govet fieldalignment), and enabled the fieldalignment linter to
+  prevent regressions.
+- Zero-copy header interning with `unsafe.String` in `FromFastHTTP` —
+  header keys and values are converted to strings without allocation,
+  then interned via `unique.Make`.
+- `warm_mmap_page_faults_total` renamed to
+  `warm_mmap_resident_page_delta_total` to accurately describe the
+  mincore-based resident-page delta it measures.
+- WAL `WriteTotal` now counts all write attempts including drops; drop
+  rate is `drops / writes`.
+- `classifyConnError` helper distinguishes timeout/refused/reset/error
+  instead of hardcoding generic labels.
 
 ### Fixed
-- Capped per-stream tee buffer to prevent OOMKill under slow-origin, derived
-  cap from `GOMEMLIMIT`.
-- Capped `fasthttp.Server.Concurrency` and reduced `MaxConnsPerHost` to curb
-  FD exhaustion and status-0 errors.
-- Resolved all fasthttp migration conformance regressions.
-- Used short `MaxIdleConnDuration` in peer fetch tests to prevent goroutine
-  leak timeout.
-- Resolved test deadlock and suppressed CodeQL request-forgery false positives.
+- Keep-alive preserved after cache miss in h1parser — the connection is
+  no longer terminated on every fallthrough, reducing connection churn
+  under mixed hit/miss workloads.
+- Reduced `SetReadDeadline` syscalls: deadline is set once at connection
+  start and refreshed lazily (only when remaining time drops below 2s).
+- `Connection: close` propagation from request to response per
+  RFC 9110 §7.6.1.
+- `Compact()` early return now observes compaction duration even for
+  no-op compactions.
+- `TestLog_QueueDepth` now asserts the correct queue depth instead of
+  `>= 0`.
+- `TestMetrics_ObserveDurationZero` no longer uses a pointless
+  `time.Sleep`.
 
 ## [0.4.3] - 2026-08-21
 

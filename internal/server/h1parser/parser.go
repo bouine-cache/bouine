@@ -1,6 +1,6 @@
 // Package h1parser implements a zero-allocation HTTP/1.1 request parser
 // for the cache hit fast path. It parses request lines and headers from
-// a net.Conn into a stack-allocated RawRequest struct, avoiding the
+// a net.Conn into a pooled RawRequest struct, avoiding the
 // *http.Request allocation that net/http imposes on every request.
 //
 // The parser handles keep-alive in a loop: parse → try fast path →
@@ -17,6 +17,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/platform"
@@ -30,6 +31,46 @@ import (
 // 99.9%+ of real-world HTTP/1.1 request headers. Requests exceeding
 // this fall through to the fallback handler.
 const readBufferSize = 16 * 1024
+
+// rawRequestPool pools *api.RawRequest to eliminate the per-hit heap
+// allocation. RawRequest contains a fixed-size [100]RawHeader array
+// (~1.6 KB); without pooling this escapes to the heap because
+// parseRequest returns the pointer. Pooling reduces this to zero
+// amortized allocations after warm-up.
+var rawRequestPool = sync.Pool{
+	New: func() any {
+		return &api.RawRequest{}
+	},
+}
+
+// getRawRequest returns a reset *RawRequest from the pool.
+func (p *Parser) getRawRequest() *api.RawRequest {
+	req := rawRequestPool.Get().(*api.RawRequest)
+	req.NHeaders = 0
+	req.Scheme = p.scheme
+	req.Method = ""
+	req.Path = ""
+	req.Query = ""
+	req.Host = ""
+	req.HTTPVersion = ""
+	return req
+}
+
+// putRawRequest resets and returns a *RawRequest to the pool.
+// No-op if req is nil.
+func putRawRequest(req *api.RawRequest) {
+	if req == nil {
+		return
+	}
+	req.NHeaders = 0
+	req.Method = ""
+	req.Path = ""
+	req.Query = ""
+	req.Host = ""
+	req.Scheme = ""
+	req.HTTPVersion = ""
+	rawRequestPool.Put(req)
+}
 
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to the fasthttp.RequestHandler.
@@ -140,6 +181,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 		}
 		if fallThrough {
 			close, ftErr := p.handleFallThrough(conn, req, excess)
+			putRawRequest(req)
 			if ftErr != nil {
 				return ftErr
 			}
@@ -164,6 +206,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			if hit && resp != nil {
 				if err := p.serveHit(conn, resp, now); err != nil {
 					p.fastPath.Release(resp)
+					putRawRequest(req)
 					return err
 				}
 				if p.metricsHook != nil {
@@ -172,12 +215,14 @@ func (p *Parser) Serve(conn net.Conn) error {
 						resp.Source, resp.StatusCode, resp.BytesOut, dur)
 				}
 				p.fastPath.Release(resp)
+				putRawRequest(req)
 				continue
 			}
 		}
 
 		// Miss path: call the fallback handler with a fasthttp.RequestCtx.
 		close, ftErr := p.handleFallThrough(conn, req, excess)
+		putRawRequest(req)
 		if ftErr != nil {
 			return ftErr
 		}
@@ -217,11 +262,13 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*ap
 		}
 	}
 
-	req := &api.RawRequest{Scheme: p.scheme}
+	req := p.getRawRequest()
 	if err := parseRequestLine(buf, req); err != nil {
+		putRawRequest(req)
 		return nil, true, nil, err
 	}
 	if err := parseHeaders(buf, req); err != nil {
+		putRawRequest(req)
 		return nil, true, nil, err
 	}
 

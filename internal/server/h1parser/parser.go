@@ -17,6 +17,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -286,9 +287,13 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*ap
 	return req, false, excess, nil
 }
 
+// headerEndBytes is the HTTP/1.1 header terminator. Package-level
+// to avoid allocating a 4-byte slice on every findHeaderEnd call.
+var headerEndBytes = []byte("\r\n\r\n")
+
 // findHeaderEnd searches for \r\n\r\n in buf.
 func findHeaderEnd(buf []byte) int {
-	idx := bytes.Index(buf, []byte("\r\n\r\n"))
+	idx := bytes.Index(buf, headerEndBytes)
 	if idx < 0 {
 		return -1
 	}
@@ -324,7 +329,7 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 	}
 	fullPath := header.BytesToString(line[sp1+1 : sp2])
 
-	if q := indexByte(fullPath, '?'); q >= 0 {
+	if q := strings.IndexByte(fullPath, '?'); q >= 0 {
 		req.Path = fullPath[:q]
 		req.Query = fullPath[q+1:]
 	} else {
@@ -511,16 +516,6 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	return clientClose || ctx.Response.Header.ConnectionClose(), nil
 }
 
-// indexByte is a simple byte search.
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
-
 // isConnectionClose reports whether the request contains a
 // Connection: close token (RFC 9110 §7.6.1). The Connection header
 // is a comma-separated list of tokens; "close" may appear alongside
@@ -544,7 +539,7 @@ func isConnectionClose(req *api.RawRequest) bool {
 func splitHeaderTokens(val string) []string {
 	var tokens []string
 	for len(val) > 0 {
-		comma := indexByte(val, ',')
+		comma := strings.IndexByte(val, ',')
 		var token string
 		if comma < 0 {
 			token = val

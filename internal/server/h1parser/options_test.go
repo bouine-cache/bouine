@@ -998,7 +998,8 @@ func TestServeHit_WriteDeadlineError(t *testing.T) {
 		callCount: 0,
 	}
 
-	err := p.serveHit(wrapped, resp, time.Now())
+	var wd time.Time
+	err := p.serveHit(wrapped, resp, time.Now(), &wd)
 	assert.Error(t, err)
 }
 

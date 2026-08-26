@@ -154,6 +154,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 	platform.SetTCPQuickAckConn(conn)
 
 	var readBuf [readBufferSize]byte
+	var writeDeadline time.Time
 
 	// Set the initial read deadline once. The deadline is refreshed
 	// lazily: only when the remaining time drops below the refresh
@@ -205,7 +206,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			now := p.nowFunc()
 			resp, hit := p.fastPath.TryHit(req, now)
 			if hit && resp != nil {
-				if err := p.serveHit(conn, resp, now); err != nil {
+				if err := p.serveHit(conn, resp, now, &writeDeadline); err != nil {
 					p.fastPath.Release(resp)
 					putRawRequest(req)
 					return err
@@ -439,11 +440,17 @@ func appendHeader(req *api.RawRequest, line []byte) {
 }
 
 // serveHit writes the fast path response to the connection via
-// net.Buffers.WriteTo (single writev syscall). The caller is
-// responsible for calling Release on resp after this returns.
-func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time) error {
-	if err := conn.SetWriteDeadline(now.Add(p.writeTime)); err != nil {
-		return err
+// net.Buffers.WriteTo (single writev syscall). The write deadline is
+// refreshed lazily: only when the remaining window drops below the
+// refresh threshold, avoiding a setsockopt syscall on every hit. The
+// caller is responsible for calling Release on resp after this returns.
+func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time, writeDeadline *time.Time) error {
+	const writeRefreshThreshold = 30 * time.Second
+	if remaining := writeDeadline.Sub(now); remaining < writeRefreshThreshold {
+		*writeDeadline = now.Add(p.writeTime)
+		if err := conn.SetWriteDeadline(*writeDeadline); err != nil {
+			return err
+		}
 	}
 	_, err := resp.Buffers.WriteTo(conn)
 	return err

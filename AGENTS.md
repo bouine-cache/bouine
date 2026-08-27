@@ -215,6 +215,14 @@ L1 → L7, /pkg/api
 
 ## 7. Performance Rules
 
+- **Production target is Linux.** bouine runs on Linux in production
+  (Kubernetes, amd64 + arm64). Performance optimizations should always
+  prefer improving Linux performance over darwin. Local darwin
+  benchmarks are useful for regression detection, but never treat a
+  darwin slowdown as blocking if the optimization improves Linux
+  production behavior (syscall counts, cache locality, vDSO costs,
+  allocator pressure). When in doubt, reason about the Linux code path
+  and document the expected production impact in the PR description.
 - **Hit path budget**: < 5 µs CPU per request at p50, allocs/op = 0,
   bytes/op = 0 after warm-up.
 - **Hot loops** must not contain: `fmt.Sprintf`, `errors.New`, map growth,

@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/server/h1parser"
 )
 
@@ -26,7 +25,7 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		s.fastPath,
 		s.inner.Handler,
 		h1parser.WithScheme(scheme),
-		h1parser.WithNowFunc(platform.CoarseNow),
+		h1parser.WithNowFunc(time.Now),
 		h1parser.WithIdleReadTimeout(10*time.Second),
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),

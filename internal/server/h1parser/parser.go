@@ -54,6 +54,7 @@ func (p *Parser) getRawRequest() *api.RawRequest {
 	req.Query = ""
 	req.Host = ""
 	req.HTTPVersion = ""
+	req.HasConditional = false
 	return req
 }
 
@@ -70,6 +71,7 @@ func putRawRequest(req *api.RawRequest) {
 	req.Host = ""
 	req.Scheme = ""
 	req.HTTPVersion = ""
+	req.HasConditional = false
 	rawRequestPool.Put(req)
 }
 
@@ -166,9 +168,10 @@ func (p *Parser) Serve(conn net.Conn) error {
 	const refreshThreshold = 2 * time.Second
 
 	for {
-		// Refresh the deadline only when the remaining window is too
-		// small to read another request. This reduces setsockopt syscalls
-		// from one-per-request to roughly one per refreshThreshold interval.
+		// Single time.Now() per iteration: used for the read-deadline
+		// refresh check, the cache TTL/Age evaluation, and the hit
+		// duration metric. time.Now includes a monotonic reading so
+		// time.Since(now) is accurate for sub-microsecond durations.
 		now := p.nowFunc()
 		if remaining := deadline.Sub(now); remaining < refreshThreshold {
 			deadline = now.Add(p.idleRead)
@@ -203,7 +206,6 @@ func (p *Parser) Serve(conn net.Conn) error {
 
 		// Try the fast path.
 		if p.fastPath != nil {
-			now := p.nowFunc()
 			resp, hit := p.fastPath.TryHit(req, now)
 			if hit && resp != nil {
 				if err := p.serveHit(conn, resp, now, &writeDeadline); err != nil {
@@ -212,7 +214,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 					return err
 				}
 				if p.metricsHook != nil {
-					dur := p.nowFunc().Sub(now)
+					dur := time.Since(now)
 					p.metricsHook(req.Method, resp.Route, resp.CacheResult,
 						resp.Source, resp.StatusCode, resp.BytesOut, dur)
 				}

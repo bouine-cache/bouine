@@ -106,36 +106,32 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	disp := evaluateFromRaw(req, obj, now, reqCC)
 	switch disp.Decision {
 	case Hit:
-		// Check conditional headers for 304 fast path (RFC 9110 §13.1.2/§13.1.3).
-		// If-None-Match takes precedence over If-Modified-Since.
-		if isConditional304(req, obj) {
-			resp := f.serialize304Response(req, obj, src, now, "HIT")
-			if resp == nil {
-				return nil, false
-			}
-			return resp, true
-		}
-		resp := f.serializeResponse(req, obj, src, now, "HIT")
-		if resp == nil {
-			return nil, false
-		}
-		return resp, true
+		return f.serveHitOr304(req, obj, src, now, "HIT")
 	case StaleHit:
-		if isConditional304(req, obj) {
-			resp := f.serialize304Response(req, obj, src, now, "STALE")
-			if resp == nil {
-				return nil, false
-			}
-			return resp, true
-		}
-		resp := f.serializeResponse(req, obj, src, now, "STALE")
-		if resp == nil {
-			return nil, false
-		}
-		return resp, true
+		return f.serveHitOr304(req, obj, src, now, "STALE")
 	default:
 		return nil, false
 	}
+}
+
+// serveHitOr304 serves a cache hit, falling back to a 304 Not Modified
+// when the request has matching conditional headers (RFC 9110 §13.1.2/
+// §13.1.3). The HasConditional flag (set in qualifiesForFastPath) is
+// checked inline to skip the isConditional304 call on the common path
+// (requests without If-None-Match / If-Modified-Since).
+func (f *FastPathHandler) serveHitOr304(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) (*api.FastPathResponse, bool) {
+	if req.HasConditional && isConditional304(req, obj) {
+		resp := f.serialize304Response(req, obj, src, now, cacheResult)
+		if resp == nil {
+			return nil, false
+		}
+		return resp, true
+	}
+	resp := f.serializeResponse(req, obj, src, now, cacheResult)
+	if resp == nil {
+		return nil, false
+	}
+	return resp, true
 }
 
 // qualifiesForFastPath checks request-level conditions that must be met
@@ -161,6 +157,14 @@ func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 			api.EqualFold(h.Key, "If-Unmodified-Since"),
 			api.EqualFold(h.Key, "If-Match"):
 			return Directives{}, false
+		case api.EqualFold(h.Key, header.IfNoneMatch),
+			api.EqualFold(h.Key, header.IfModifiedSince):
+			// Detect conditional headers for the 304 fast path.
+			// Setting the flag here is free — we are already
+			// iterating all headers. isConditional304 checks this
+			// flag to skip two O(N) header scans on requests
+			// without conditional headers (the common case).
+			req.HasConditional = true
 		}
 		if api.EqualFold(h.Key, header.TransferEncoding) || api.EqualFold(h.Key, header.ContentLength) {
 			return Directives{}, false
@@ -349,7 +353,7 @@ func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
 // objects loaded from disk without pre-serialization).
 func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string) []byte {
 	var noCacheFields map[string]bool
-	if obj.CacheControl != "" {
+	if obj.HasNoCacheFields {
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
 	}
 	n := obj.Header.Len()

@@ -22,6 +22,11 @@ type RawRequest struct {
 	Scheme      string // "http" or "https" — set by the listener
 	HTTPVersion string
 	NHeaders    int
+	// HasConditional is set during qualifiesForFastPath when the
+	// request contains If-None-Match or If-Modified-Since. It lets
+	// isConditional304 skip two O(N) header scans on the common path
+	// (requests without conditional headers).
+	HasConditional bool
 }
 
 // MaxRawHeaders caps the number of headers the h1parser can store inline.

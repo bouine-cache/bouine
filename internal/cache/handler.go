@@ -1480,6 +1480,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	newCC := ParseCacheControl(refreshed.CacheControl)
 	refreshed.RespNoCache = newCC.NoCache
 	refreshed.RespMustRevalidate = newCC.MustRevalidate || newCC.ProxyRevalidate
+	refreshed.HasNoCacheFields = newCC.NoCacheFields != ""
 	if ttl, ok := FreshnessLifetime(newCC, refreshed.Header.Get); ok {
 		refreshed.TTL = ttl
 	}
@@ -2191,7 +2192,13 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 // Excludes dynamic headers (Age, X-Cache, X-Cache-Source, Warning), internal
 // headers (X-Bouine-*), and no-cache fields stripped per RFC 9111 §5.2.2.4.
 func serializeHead(obj *api.Object) []byte {
-	noCacheFields := parseNoCacheFieldNames(obj.CacheControl)
+	// Skip the parseNoCacheFieldNames map allocation when the object
+	// has no no-cache fields (the common case). obj.HasNoCacheFields
+	// was already computed above in buildObject.
+	var noCacheFields map[string]bool
+	if obj.HasNoCacheFields {
+		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
+	}
 	buf := make([]byte, 0, 512)
 	n := obj.Header.Len()
 	for i := 0; i < n; i++ {

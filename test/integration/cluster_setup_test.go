@@ -49,7 +49,21 @@ func TestMain(m *testing.M) {
 		// with backoff, but memberlist's cleanup can take a few seconds
 		// on slow CI runners. Give the goroutines time to drain.
 		time.Sleep(3 * time.Second)
-		if err := goleak.Find(); err != nil {
+		// fasthttp.Do uses a package-level default Client and per-host
+		// HostClients whose background goroutines (mCleaner, connsCleaner,
+		// pipelineConnClient worker/reader/writer, TCPDialer tcpAddrsClean,
+		// updateServerDate) never exit — there is no Close method.
+		// Ignore them so they don't trigger false-positive goleak failures.
+		if err := goleak.Find(
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*Client).mCleaner"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*HostClient).connsCleaner"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*pipelineConnClient).worker"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*pipelineConnClient).reader"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*pipelineConnClient).writer"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*TCPDialer).tcpAddrsClean"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.updateServerDate.func1"),
+			goleak.IgnoreAnyFunction("github.com/valyala/fasthttp.(*workerPool).Start.func2"),
+		); err != nil {
 			fmt.Fprintf(os.Stderr, "goleak: %v\n", err)
 			code = 1
 		}

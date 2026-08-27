@@ -403,10 +403,12 @@ jobs:
           cache: false
 
       - name: Configure kubeconfig
+        env:
+          STRESS_KUBECONFIG: ${{ secrets.STRESS_KUBECONFIG }}
         run: |
           mkdir -p $HOME/.kube
-          if [ -n "${{ secrets.STRESS_KUBECONFIG }}" ]; then
-            echo "${{ secrets.STRESS_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          if [ -n "$STRESS_KUBECONFIG" ]; then
+            echo "$STRESS_KUBECONFIG" | base64 -d > $HOME/.kube/config
           else
             echo "STRESS_KUBECONFIG secret not set — using runner default kubeconfig"
           fi

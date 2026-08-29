@@ -96,7 +96,57 @@ func TestRawRequest_Header(t *testing.T) {
 	assert.Equal(t, "", v)
 }
 
+// repeatReader is an io.Reader that yields raw endlessly, simulating a
+// keep-alive connection delivering back-to-back requests.
+type repeatReader struct {
+	buf []byte
+	off int
+}
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	n := copy(p, r.buf[r.off:])
+	r.off += n
+	if r.off >= len(r.buf) {
+		r.off = 0
+	}
+	return n, nil
+}
+
+// BenchmarkGate_H1Parse_Get measures the full production parse path:
+// parseRequest on a keep-alive stream, including the scratch RawRequest
+// reset. The gate budget is 0 allocs/op — this benchmark exists
+// precisely so that a per-request allocation in parseRequest (e.g. a
+// heap-allocated RawRequest, which once dominated hit-path GC pressure
+// at ~4 KB/request) fails CI instead of hiding behind a benchmark that
+// pre-allocates outside the loop.
 func BenchmarkGate_H1Parse_Get(b *testing.B) {
+	raw := []byte("GET /api/v1/users/42 HTTP/1.1\r\nHost: example.com\r\nAccept: application/json\r\nUser-Agent: Bouine-Test/1.0\r\nX-Forwarded-For: 10.0.0.1\r\n\r\n")
+	parser := New(nil, nil)
+	conn := &mockConn{r: &repeatReader{buf: raw}}
+	var readBuf [readBufferSize]byte
+	var scratch api.RawRequest
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, &scratch)
+		if err != nil {
+			b.Fatalf("parseRequest: %v", err)
+		}
+		if fallThrough {
+			b.Fatal("parseRequest fell through unexpectedly")
+		}
+		if req.Method != "GET" {
+			b.Fatalf("method = %q", req.Method)
+		}
+	}
+}
+
+// BenchmarkH1Parse_Get_Components measures the individual parse helpers
+// in isolation (request line, header block, header-end scan) for
+// component-level analysis. Not gated on allocs — the production-path
+// gate is BenchmarkGate_H1Parse_Get above.
+func BenchmarkH1Parse_Get_Components(b *testing.B) {
 	raw := []byte("GET /api/v1/users/42 HTTP/1.1\r\nHost: example.com\r\nAccept: application/json\r\nUser-Agent: Bouine-Test/1.0\r\nX-Forwarded-For: 10.0.0.1\r\n\r\n")
 	b.ReportAllocs()
 	b.ResetTimer()

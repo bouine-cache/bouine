@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — internal/cache (miss-path fetch), internal/origin (PoolFastClient) — MISS-path alloc reduction: SwapBody body ownership + deadline-based fetch timeout — started: 2026-08-29 19:40 UTC — ETA: 2026-08-30
+_(none — see Recently completed)_
 
 ## fasthttp migration — phase claims
 
@@ -42,6 +42,8 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 **Parallelization:** Phases 5-8 can run in parallel after Phase 2 lands the `fasthttp.RequestHandler` interface. Phases 3-4 depend on Phase 5 but can overlap with 6-8. One agent per package at a time. PR size limit: 400 changed lines (AGENTS.md §15.4).
 
 ## Recently completed
+
+- [DONE] crush — internal/cache (miss-path fetch), internal/origin (PoolFastClient) — MISS-path alloc reduction: SwapBody body ownership + deadline-based fetch timeout (PR #556) — 2026-08-29
 
 - [DONE] crush — pre-flight — phase 1 prep (config, supervised, tlsutil, metrics, pkg/api, integration skeleton, ADRs 0002-0005) — 2026-05-19
 - [DONE] crush — repo-bootstrap — phase 0 scaffolding (toolchain, hooks, Cobra entry, Fiber `/healthz`) — 2026-05-19

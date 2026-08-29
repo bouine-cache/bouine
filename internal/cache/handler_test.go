@@ -1855,11 +1855,11 @@ func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
 
 // TestDoFetchDeadlineRespectedByFastClient verifies the foreground fetch
 // path routes through FastClient.DoDeadline (kernel-level deadline in
-// production) rather than a context-based Do that production transports
-// cannot observe mid-fetch.
+// production) with a deadline of now + fetchTimeout, rather than a
+// context-based Do that production transports cannot observe mid-fetch.
 func TestDoFetchDeadlineRespectedByFastClient(t *testing.T) {
 	t.Parallel()
-	var gotDeadline bool
+	var gotDeadline time.Time
 	c := &deadlineSpyClient{handler: func(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(200)
 	}}
@@ -1874,16 +1874,23 @@ func TestDoFetchDeadlineRespectedByFastClient(t *testing.T) {
 	})
 	c.deadlineSeen = &gotDeadline
 
+	before := time.Now()
 	req := testCtx("GET", "http://example.com/spy")
 	res := h.doFetch(req)
+	after := time.Now()
 	require.Nil(t, res.Err)
-	require.True(t, gotDeadline, "foreground fetch must use the DoDeadline path")
+	// The deadline must be a plausible now + fetchTimeout: not zero (the
+	// ctx Do path was used instead), not in the past, and not beyond the
+	// configured budget.
+	require.False(t, gotDeadline.IsZero(), "foreground fetch must use the DoDeadline path")
+	require.True(t, gotDeadline.After(before), "deadline must be in the future")
+	require.True(t, gotDeadline.Before(after.Add(5*time.Second)), "deadline must be now + fetch_timeout, not later")
 }
 
-// deadlineSpyClient records whether DoDeadline was invoked.
+// deadlineSpyClient records the deadline DoDeadline was invoked with.
 type deadlineSpyClient struct {
 	handler      fasthttp.RequestHandler
-	deadlineSeen *bool
+	deadlineSeen *time.Time
 }
 
 func (c *deadlineSpyClient) Do(_ context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
@@ -1898,7 +1905,7 @@ func (c *deadlineSpyClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Res
 	if deadline.IsZero() {
 		return fasthttp.ErrTimeout
 	}
-	*c.deadlineSeen = true
+	*c.deadlineSeen = deadline
 	return c.Do(context.Background(), req, resp)
 }
 

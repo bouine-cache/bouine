@@ -436,13 +436,14 @@ func TestTakeResponseBody_NilResponse(t *testing.T) {
 }
 
 // TestStreamBypass_BufferedTakesOwnership verifies that a buffered
-// BYPASS response serves the stolen buffer (no extra body copy) and
-// releases the origin response without retaining the body.
+// BYPASS response (request carries Cache-Control: no-store) serves the
+// stolen buffer (no extra body copy) and releases the origin response
+// without retaining the body.
 func TestStreamBypass_BufferedTakesOwnership(t *testing.T) {
 	t.Parallel()
 	const payload = "bypass-body"
 	upstream := func(ctx *fasthttp.RequestCtx) {
-		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.Response.Header.Set(header.CacheControl, "max-age=3600")
 		ctx.SetStatusCode(200)
 		_, _ = ctx.WriteString(payload)
 	}
@@ -456,10 +457,11 @@ func TestStreamBypass_BufferedTakesOwnership(t *testing.T) {
 	})
 
 	ctx := testCtx("GET", "http://example.com/bypass-no-store")
+	ctx.Request.Header.Set(header.CacheControl, "no-store")
 	serveRequest(h, ctx)
 
 	require.Equal(t, 200, respCode(ctx))
-	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	require.Equal(t, "BYPASS", respHeader(ctx, header.XCache))
 	require.Equal(t, payload, respBody(ctx))
 }
 

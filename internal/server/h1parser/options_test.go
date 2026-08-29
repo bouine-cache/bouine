@@ -998,8 +998,10 @@ func TestServeHit_WriteDeadlineError(t *testing.T) {
 		callCount: 0,
 	}
 
-	err := p.serveHit(wrapped, resp, time.Now())
+	var wd time.Time
+	err := p.serveHit(wrapped, resp, time.Now(), &wd)
 	assert.Error(t, err)
+	assert.False(t, wd.IsZero(), "write deadline tracker should be set even on error")
 }
 
 // TestAppendHeader_NoColon verifies that a header line without a colon

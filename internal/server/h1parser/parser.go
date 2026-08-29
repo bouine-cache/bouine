@@ -31,6 +31,14 @@ import (
 // this fall through to the fallback handler.
 const readBufferSize = 16 * 1024
 
+// writeRefreshThreshold is the minimum remaining write-deadline window
+// below which serveHit re-arms the safety-net write deadline. Mirrors
+// the read-deadline refresh strategy in Serve: one setsockopt per
+// threshold interval instead of one per request. Each hit response is
+// guaranteed at least this much write budget, and the full safety-net
+// window (p.writeTime, 5 minutes) is far larger.
+const writeRefreshThreshold = time.Minute
+
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to the fasthttp.RequestHandler.
 type Parser struct {
@@ -133,6 +141,14 @@ func (p *Parser) Serve(conn net.Conn) error {
 	}
 	const refreshThreshold = 2 * time.Second
 
+	// writeDeadline mirrors the read-deadline refresh strategy for the
+	// hit-path write safety net. The zero value means "not armed" — the
+	// first hit arms it, and it is re-armed only when the remaining
+	// window drops below writeRefreshThreshold. Fall-through paths
+	// clear and set the OS write deadline themselves, so the tracker is
+	// reset to zero after each fall-through.
+	var writeDeadline time.Time
+
 	for {
 		// Refresh the deadline only when the remaining window is too
 		// small to read another request. This reduces setsockopt syscalls
@@ -165,6 +181,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			if err := conn.SetReadDeadline(deadline); err != nil {
 				return err
 			}
+			writeDeadline = time.Time{}
 			continue
 		}
 
@@ -173,7 +190,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			now := p.nowFunc()
 			resp, hit := p.fastPath.TryHit(req, now)
 			if hit && resp != nil {
-				if err := p.serveHit(conn, resp, now); err != nil {
+				if err := p.serveHit(conn, resp, now, &writeDeadline); err != nil {
 					p.fastPath.Release(resp)
 					return err
 				}
@@ -200,6 +217,10 @@ func (p *Parser) Serve(conn net.Conn) error {
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return err
 		}
+		// handleFallThrough cleared the OS write deadline so the fallback
+		// handler could manage its own timeouts; reset the tracker so the
+		// next hit re-arms it.
+		writeDeadline = time.Time{}
 	}
 }
 
@@ -402,11 +423,19 @@ func appendHeader(req *api.RawRequest, line []byte) {
 }
 
 // serveHit writes the fast path response to the connection via
-// net.Buffers.WriteTo (single writev syscall). The caller is
-// responsible for calling Release on resp after this returns.
-func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time) error {
-	if err := conn.SetWriteDeadline(now.Add(p.writeTime)); err != nil {
-		return err
+// net.Buffers.WriteTo (single writev syscall). The write deadline is
+// armed lazily via wd: it is set only on the first hit and re-armed
+// when the remaining window drops below writeRefreshThreshold — one
+// setsockopt per threshold interval instead of one per request. Each
+// hit write is guaranteed at least writeRefreshThreshold of budget.
+// The caller is responsible for calling Release on resp after this
+// returns.
+func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time, wd *time.Time) error {
+	if wd.IsZero() || wd.Sub(now) < writeRefreshThreshold {
+		*wd = now.Add(p.writeTime)
+		if err := conn.SetWriteDeadline(*wd); err != nil {
+			return err
+		}
 	}
 	_, err := resp.Buffers.WriteTo(conn)
 	return err

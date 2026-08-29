@@ -377,6 +377,41 @@ func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 	return nil
 }
 
+// DoDeadline performs an origin fetch bounded by an absolute deadline,
+// enforced via fasthttp's kernel-level connection read/write deadlines.
+// It maps directly to fasthttp.Client.DoDeadline: no context, no timer
+// goroutine, no timer allocation. The deadline aborts a hung origin at
+// the socket level — the only mechanism that actually reaches the
+// transport (transport.Client.Do contexts without a deadline fall
+// back to a fixed 60s DoTimeout, so ctx-based timeouts alone never
+// enforce fetch_timeout here).
+func (c *PoolFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	t := c.pool.pick()
+	if t == nil {
+		return fmt.Errorf("no healthy upstream")
+	}
+	// Rewrite the request URI to the selected target.
+	scheme := t.url.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
+
+	t.metrics.incActiveConnection(c.pool.Name, t.addr)
+	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)
+	originStart := time.Now()
+
+	err := c.client.DoDeadline(req, resp, deadline)
+	if err != nil {
+		connErrReason := classifyConnError(err)
+		t.metrics.incConnectionError(c.pool.Name, t.addr, connErrReason)
+		t.metrics.observeRequestDuration(c.pool.Name, t.addr, connErrReason, time.Since(originStart).Seconds())
+		return err
+	}
+	t.metrics.observeRequestDuration(c.pool.Name, t.addr, strconv.Itoa(resp.StatusCode()), time.Since(originStart).Seconds())
+	return nil
+}
+
 // Healthy returns the list of currently healthy target addresses.
 func (p *Pool) Healthy() []string {
 	p.mu.RLock()

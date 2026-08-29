@@ -5,6 +5,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -283,6 +284,17 @@ func (c *streamFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *
 	rctx.ResetUserValues()
 	rctxPool.Put(rctx)
 	return nil
+}
+
+// DoDeadline implements the deadline-based fetch path. The stream test
+// client's handler returns immediately, so no deadline enforcement is
+// needed; an already-passed deadline is rejected to preserve timeout
+// semantics.
+func (c *streamFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	if time.Until(deadline) <= 0 {
+		return fasthttp.ErrTimeout
+	}
+	return c.Do(context.Background(), req, resp)
 }
 
 type incCounter struct {

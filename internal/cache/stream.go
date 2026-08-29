@@ -33,7 +33,6 @@ type streamFetchResult struct {
 	resp       *fasthttp.Response // body stream still open (or buffered)
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
-	cancel     context.CancelFunc
 	Header     headerLookup
 	StatusCode int
 	buffered   bool // true when resp.BodyStream() is nil (test clients)
@@ -74,12 +73,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		return nil, fmt.Errorf("origin fetch semaphore: %w", spanCtx.Err())
 	}
 
-	fetchCtx, cancel := context.WithCancel(spanCtx)
-	if h.fetchTimeout > 0 {
-		timer := time.AfterFunc(h.fetchTimeout, cancel)
-		defer timer.Stop()
-	}
-
 	req := fasthttp.AcquireRequest()
 	resp := fasthttp.AcquireResponse()
 	resp.StreamBody = true
@@ -90,10 +83,18 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
-	tracing.InjectFastHTTP(fetchCtx, req)
+	tracing.InjectFastHTTP(spanCtx, req)
 
-	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
-		cancel()
+	// Deadline-based fetch via doFastFetch (FastClient.DoDeadline): no
+	// context.WithTimeout, no timer goroutine, and the deadline is
+	// actually enforced on production transports via fasthttp's
+	// kernel-level connection deadlines. The previous context.WithCancel
+	// + time.AfterFunc never reached production transports (WithCancel
+	// has no deadline, so transport.Client.Do fell back to a fixed 60s
+	// DoTimeout) — fetch_timeout was silently ignored in production.
+	// The conn read deadline persists into the body stream, bounding
+	// the total fetch (header + body) per the fetch_timeout contract.
+	if err := h.doFastFetch(req, resp); err != nil {
 		fasthttp.ReleaseRequest(req)
 		fasthttp.ReleaseResponse(resp)
 		<-h.fetchSem
@@ -105,7 +106,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	// Check Content-Length against maxResponseBytes if available.
 	if h.maxResponseBytes > 0 {
 		if cl := resp.Header.ContentLength(); cl > 0 && int64(cl) > h.maxResponseBytes {
-			cancel()
 			fasthttp.ReleaseRequest(req)
 			fasthttp.ReleaseResponse(resp)
 			<-h.fetchSem
@@ -120,7 +120,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 		resp:       resp,
 		req:        req,
 		sem:        h.fetchSem,
-		cancel:     cancel,
 		buffered:   !resp.IsBodyStream(),
 	}
 
@@ -136,7 +135,6 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 // call after the body stream has been fully consumed. For buffered mode,
 // call immediately.
 func releaseStreamFetch(sf *streamFetchResult) {
-	sf.cancel()
 	if sf.resp != nil {
 		_ = sf.resp.CloseBodyStream()
 		fasthttp.ReleaseRequest(sf.req)

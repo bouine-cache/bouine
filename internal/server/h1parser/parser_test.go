@@ -4,8 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestParseRequestLine(t *testing.T) {
@@ -142,18 +144,39 @@ func BenchmarkGate_H1Parse_Get(b *testing.B) {
 	}
 }
 
-// BenchmarkH1Parse_Get_Components measures the individual parse helpers
-// in isolation (request line, header block, header-end scan) for
-// component-level analysis. Not gated on allocs — the production-path
-// gate is BenchmarkGate_H1Parse_Get above.
-func BenchmarkH1Parse_Get_Components(b *testing.B) {
-	raw := []byte("GET /api/v1/users/42 HTTP/1.1\r\nHost: example.com\r\nAccept: application/json\r\nUser-Agent: Bouine-Test/1.0\r\nX-Forwarded-For: 10.0.0.1\r\n\r\n")
+// BenchmarkH1Parse_FallThroughHeaderCopy measures the per-header cost
+// of populating fasthttp request headers from the parsed RawRequest —
+// the conversion handleFallThrough performs on every miss. Tracked for
+// allocation regressions on the miss path.
+func BenchmarkH1Parse_FallThroughHeaderCopy(b *testing.B) {
+	req := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/api/v1/users/42",
+		Host:     "example.com",
+		NHeaders: 4,
+		Headers: [api.MaxRawHeaders]api.RawHeader{
+			{Key: "Host", Value: "example.com"},
+			{Key: "Accept", Value: "application/json"},
+			{Key: "User-Agent", Value: "Bouine-Test/1.0"},
+			{Key: "X-Forwarded-For", Value: "10.0.0.1"},
+		},
+	}
+
+	var ctx fasthttp.RequestCtx
+	ctx.Init2(&mockConn{}, nil, false)
+	r := &ctx.Request
+
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		req := &api.RawRequest{}
-		_ = findHeaderEnd(raw)
-		_ = parseRequestLine(raw, req)
-		_ = parseHeaders(raw, req)
+		r.Reset()
+		r.Header.SetMethod(req.Method)
+		r.Header.SetHost(req.Host)
+		for i := 0; i < req.NHeaders; i++ {
+			r.Header.SetBytesKV(
+				header.S2b(req.Headers[i].Key),
+				header.S2b(req.Headers[i].Value),
+			)
+		}
 	}
 }

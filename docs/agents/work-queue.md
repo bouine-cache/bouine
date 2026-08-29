@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-_(none — all phases through 6 are complete; see ROADMAP.md for pending work)_
+- [WIP] crush — internal/cache (miss-path fetch), internal/origin (PoolFastClient) — MISS-path alloc reduction: SwapBody body ownership + deadline-based fetch timeout — started: 2026-08-29 19:40 UTC — ETA: 2026-08-30
 
 ## fasthttp migration — phase claims
 

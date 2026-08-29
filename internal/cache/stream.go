@@ -175,8 +175,12 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	}
 
 	if sf.buffered {
-		// Client doesn't support streaming — write body directly.
-		_, _ = ctx.Write(sf.resp.Body())
+		// Client doesn't support streaming — take ownership of the body
+		// buffer instead of copying it into the ctx's own buffer. BYPASS
+		// bodies are never stored, so the pool-slack concern doesn't
+		// apply, and the release path drops the response's copy
+		// immediately (peak in-flight body memory is halved).
+		ctx.Response.SetBodyRaw(takeResponseBody(sf.resp))
 		releaseStreamFetch(sf)
 		return
 	}
@@ -291,8 +295,20 @@ func (h *Handler) streamMissBuffered(
 		return
 	}
 
-	bodyCopy := make([]byte, len(sf.resp.Body()))
-	copy(bodyCopy, sf.resp.Body())
+	// Body ownership: when the response will be stored, copy into an
+	// exact-size slice so the hot tier does not pin fasthttp's doubling
+	// slack for the object's lifetime. When it will never be stored
+	// (non-cacheable miss), steal the buffer via SwapBody: the body is
+	// transient (written to this client and released singleflight
+	// followers) and the steal removes a full-body memcpy plus halves
+	// peak in-flight body memory.
+	var body []byte
+	if cacheable {
+		body = make([]byte, len(sf.resp.Body()))
+		copy(body, sf.resp.Body())
+	} else {
+		body = takeResponseBody(sf.resp)
+	}
 
 	// Owned header.Map: followers read res.Header after close(done),
 	// concurrently with releaseStreamFetch returning the pooled response
@@ -300,7 +316,7 @@ func (h *Handler) streamMissBuffered(
 	res := fetchResult{
 		StatusCode: sf.StatusCode,
 		Header:     fromHeaderMap(sf.Header.ToMap()),
-		Body:       bodyCopy,
+		Body:       body,
 	}
 	inflight.res = res
 	close(inflight.done)
@@ -310,7 +326,7 @@ func (h *Handler) streamMissBuffered(
 	}
 
 	if cacheable && !isHEAD {
-		if h.maxObjectSize > 0 && int64(len(bodyCopy)) > h.maxObjectSize {
+		if h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize {
 			releaseStreamFetch(sf)
 			return
 		}
@@ -333,6 +349,39 @@ func (h *Handler) streamMissBuffered(
 		}
 	}
 	releaseStreamFetch(sf)
+}
+
+// takeResponseBody transfers ownership of resp's body into an
+// independently-owned []byte and leaves resp empty, so the pooled
+// response can be released immediately without invalidating the
+// returned slice. The returned slice must be treated as immutable:
+// it may be shared by the client response and singleflight
+// followers, which only read it. It must NOT be stored in the
+// cache — SwapBody returns fasthttp's pooled buffer with its
+// doubling-growth slack, which the hot tier would pin for the
+// object's lifetime (see TestFetchStoresRightSizedBody).
+//
+// fasthttp's client read path represents the body as either a pooled
+// bytebufferpool buffer (buffered fetches) or a stream (StreamBody).
+// SwapBody returns the former directly and drains the latter into a
+// fresh buffer first — either way the body is handed over with no
+// copy by the caller. The response returns to fasthttp's pool with an
+// empty body, halving peak in-flight body memory for transient
+// bodies and removing the full-body memcpy the defensive copy did.
+//
+// Steady-state allocation count is unchanged: the buffer fasthttp
+// would have reused is taken, so the next read through that pool slot
+// allocates a fresh one. What disappears is one full-body memcpy per
+// transient fetch.
+//
+// Precondition: resp's body was produced by fasthttp's client read
+// path. SwapBody discards a body set via SetBodyRaw; no FastClient in
+// this codebase returns SetBodyRaw responses.
+func takeResponseBody(resp *fasthttp.Response) []byte {
+	if resp == nil {
+		return nil
+	}
+	return resp.SwapBody(nil)
 }
 
 // streamMissTee handles the streaming cacheable path: tee origin body
@@ -432,6 +481,10 @@ func (h *Handler) teeStreamToClient(
 		}
 	}
 
+	// Copy the tee buffer into an exact-size slice. Stealing the buffer's
+	// backing array instead (buf.Bytes()) would persist the doubling-growth
+	// slack in the stored cache object — the hot tier pins that slack for
+	// the object's lifetime. The copy keeps stored bodies right-sized.
 	bodyCopy := make([]byte, buf.Len())
 	copy(bodyCopy, buf.Bytes())
 

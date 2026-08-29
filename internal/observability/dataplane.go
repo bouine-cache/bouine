@@ -291,20 +291,6 @@ func methodIndexBytes(method []byte) int {
 	}
 }
 
-// methodLabel returns the Prometheus label for a method index
-// (methodIndexBytes). Only used on the WithLabelValues fallback path,
-// where per-request allocation is irrelevant.
-func methodLabel(mi int) string {
-	switch mi {
-	case 0:
-		return "GET"
-	case 1:
-		return "HEAD"
-	default:
-		return "OTHER"
-	}
-}
-
 // statusIndex maps common HTTP status codes to array indices. Returns -1
 // for uncommon codes, signalling the middleware to fall back to WithLabelValues.
 func statusIndex(code int) int {
@@ -839,12 +825,13 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 }
 
 // recordFastHTTPMetrics increments the RED counters. The method is
-// passed as []byte and classified with methodIndexBytes (zero-alloc);
-// the label string is materialized via methodLabel only on the uncommon
-// WithLabelValues fallback, where allocation is irrelevant.
+// passed as []byte and classified with methodIndexBytes (zero-alloc on
+// the pre-resolved path). The fallback passes the real method string —
+// WithLabelValues allocates there anyway, and squashing uncommon
+// methods to "OTHER" would destroy the method dimension exactly where
+// it matters most.
 func (m *DataPlaneMetrics) recordFastHTTPMetrics(method []byte, code int, status, route, cacheResult, source string, dur, bytesOut float64) {
 	mi := methodIndexBytes(method)
-	label := methodLabel(mi)
 	if rm, ok := m.lookupRouteMetrics(route); ok {
 		si := statusIndex(code)
 		ri := cacheResultIndex(cacheResult)
@@ -857,6 +844,7 @@ func (m *DataPlaneMetrics) recordFastHTTPMetrics(method []byte, code int, status
 		}
 		m.fallbackCount.Add(1)
 	}
+	label := string(method)
 	m.RequestsTotal.WithLabelValues(label, status, cacheResult, source, route).Inc()
 	m.RequestDuration.WithLabelValues(label, status, cacheResult, source, route).Observe(dur)
 	m.ResponseBytesOut.WithLabelValues(label, cacheResult, source, route).Add(bytesOut)

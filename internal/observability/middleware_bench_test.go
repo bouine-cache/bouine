@@ -13,6 +13,10 @@ import (
 func BenchmarkGate_Middleware_Miss(b *testing.B) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
+	// Production always pre-resolves the route table (engine wiring);
+	// the benchmark must measure that shape, not the WithLabelValues
+	// fallback.
+	m.PreResolveRoutes([]string{"_default"})
 	m.SetAccessLog(NoopLogger{}, 0) // sampling off: worst case for the log path
 	inner := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("X-Cache", "MISS")
@@ -39,6 +43,7 @@ func BenchmarkGate_Middleware_Miss(b *testing.B) {
 func BenchmarkGate_Middleware_Miss_NoLog(b *testing.B) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
+	m.PreResolveRoutes([]string{"_default"})
 	inner := func(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("X-Cache", "MISS")
 		ctx.Response.Header.Set("X-Cache-Source", "origin")

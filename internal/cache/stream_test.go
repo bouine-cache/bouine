@@ -377,3 +377,104 @@ func TestStreamMiss_PerStreamCapStopsBuffering(t *testing.T) {
 	serveRequest(h, ctx2)
 	require.Equal(t, "MISS", respHeader(ctx2, header.XCache))
 }
+
+// TestTakeResponseBody_GivesOwnership pins the body-ownership-transfer
+// contract used by the transient (non-stored) fetch paths:
+//  1. The returned slice carries the full body and remains valid after
+//     the response is released.
+//  2. The response is left with an empty body — the pooled response
+//     returns to fasthttp's pool without pinning the body buffer.
+//  3. Both body representations fasthttp's client read path produces
+//     (pooled buffer and stream) are handled.
+func TestTakeResponseBody_GivesOwnership(t *testing.T) {
+	t.Parallel()
+
+	const payload = "streamed-body-payload"
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString(payload)
+	}
+
+	// Pooled-buffer representation.
+	resp := fasthttp.AcquireResponse()
+	c := &benchFastClient{handler: upstream}
+	if err := c.Do(context.Background(), fasthttp.AcquireRequest(), resp); err != nil {
+		t.Fatal(err)
+	}
+	body := takeResponseBody(resp)
+	require.Equal(t, payload, string(body))
+	require.Empty(t, resp.Body(), "response must be empty after ownership transfer")
+	fasthttp.ReleaseResponse(resp)
+	// The taken slice must still be intact after release.
+	require.Equal(t, payload, string(body))
+
+	// bodyStream representation: SwapBody must drain the stream.
+	resp2 := fasthttp.AcquireResponse()
+	resp2.SetBodyStream(bytes.NewReader([]byte(payload)), -1)
+	body2 := takeResponseBody(resp2)
+	require.Equal(t, payload, string(body2))
+	require.Empty(t, resp2.Body())
+	fasthttp.ReleaseResponse(resp2)
+}
+
+// TestTakeResponseBody_NilResponse pins the nil guard.
+func TestTakeResponseBody_NilResponse(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, takeResponseBody(nil))
+}
+
+// TestStreamBypass_BufferedTakesOwnership verifies that a buffered
+// BYPASS response serves the stolen buffer (no extra body copy) and
+// releases the origin response without retaining the body.
+func TestStreamBypass_BufferedTakesOwnership(t *testing.T) {
+	t.Parallel()
+	const payload = "bypass-body"
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString(payload)
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:  1 << 20,
+			NumShards: 2,
+		}),
+	})
+
+	ctx := testCtx("GET", "http://example.com/bypass-no-store")
+	serveRequest(h, ctx)
+
+	require.Equal(t, 200, respCode(ctx))
+	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	require.Equal(t, payload, respBody(ctx))
+}
+
+// TestStreamMissNonCacheable_ServesBody verifies the non-cacheable miss
+// path (no-store origin response) still serves the full body via the
+// ownership-transfer path, and singleflight followers see the same body.
+func TestStreamMissNonCacheable_ServesBody(t *testing.T) {
+	t.Parallel()
+	const payload = "no-store-miss-body"
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString(payload)
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &benchFastClient{handler: upstream},
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:  1 << 20,
+			NumShards: 2,
+		}),
+	})
+
+	ctx := testCtx("GET", "http://example.com/no-store")
+	serveRequest(h, ctx)
+
+	require.Equal(t, 200, respCode(ctx))
+	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
+	require.Equal(t, payload, respBody(ctx))
+}

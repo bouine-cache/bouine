@@ -1290,6 +1290,9 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	hdrMap := header.FromFastHTTP(&resp.Header)
 
 	statusCode := resp.StatusCode()
+	// Exact-size copy: the body may be stored in the cache (background
+	// revalidation fills), and the hot tier pins slice slack for the
+	// object's lifetime.
 	bodyCopy := make([]byte, len(resp.Body()))
 	copy(bodyCopy, resp.Body())
 	fasthttp.ReleaseResponse(resp)
@@ -2066,10 +2069,13 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy the body to an independent slice. The pooled response is
+	// Copy the body into an exact-size slice. The pooled response is
 	// kept alive in fetchResult.fastResp so writeAndMaybeStore can use
 	// CopyTo for zero-normalization header copying. It is released by
 	// releaseFetchResult after all singleflight waiters have finished.
+	// The exact-size copy is load-bearing: this body is stored in the
+	// cache on cacheable revalidate/stayin-alive fills, and the hot tier
+	// pins whatever slack the slice carries for the object's lifetime.
 	statusCode := resp.StatusCode()
 	bodyCopy := make([]byte, len(resp.Body()))
 	copy(bodyCopy, resp.Body())

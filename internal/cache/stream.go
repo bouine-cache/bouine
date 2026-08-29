@@ -219,16 +219,25 @@ func (h *Handler) streamMiss(
 	sf.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-	resMap := sf.Header.ToMap()
-	if resMap.Get(header.Age) == "" {
+	if len(sf.resp.Header.Peek(header.Age)) == 0 {
 		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
 	ctx.SetStatusCode(sf.StatusCode)
 
 	isHEAD := bytes.Equal(ctx.Method(), []byte("HEAD"))
 
-	// Determine cacheability before streaming.
-	cacheable := h.isResponseCacheable(sf, ri, resMap)
+	// Determine cacheability before streaming — and before building the
+	// header.Map. The pre-check reads the raw fasthttp response headers
+	// (Peek + ParseCacheControlBytes, zero-alloc). Non-cacheable misses
+	// (no-store, private, uncacheable status, oversized) never materialize
+	// the Map at all: every non-cacheable miss saves the FromFastHTTP
+	// conversion plus header-entry interning that only cacheable storage
+	// needs.
+	cacheable := h.isResponseCacheableBytes(sf, ri)
+	var resMap header.Map
+	if cacheable {
+		resMap = sf.Header.ToMap()
+	}
 
 	if sf.buffered || isHEAD || !cacheable {
 		h.streamMissBuffered(ctx, sf, inflight, primaryKey, ri, resMap, isHEAD, cacheable)
@@ -267,6 +276,158 @@ func (h *Handler) isResponseCacheable(sf *streamFetchResult, ri RequestInfo, res
 		}
 	}
 	return cacheable
+}
+
+// isResponseCacheableBytes is isResponseCacheable over the raw fasthttp
+// response headers, without building a header.Map first. It mirrors the
+// Map-based path exactly: CDN-Cache-Control precedence (RFC 9211), the
+// blocking directives (no-store, private, Vary:*, Pragma, Set-Cookie,
+// request Authorization), explicit freshness (max-age/s-maxage/Expires),
+// heuristic freshness (Last-Modified on heuristically-cacheable status),
+// negative caching, and the operator default-TTL fallback. Every check
+// reads via Peek/ParseCacheControlBytes — zero allocations.
+//
+// The one deliberate difference from the Map-based path: request-side
+// headers (Authorization) are checked via ri.Header, exactly as before —
+// ri.Header is already materialized on the miss path.
+func (h *Handler) isResponseCacheableBytes(sf *streamFetchResult, ri RequestInfo) bool {
+	hdr := &sf.resp.Header
+	status := sf.StatusCode
+
+	// CDN-Cache-Control overrides Cache-Control for shared caches
+	// (RFC 9211). Reuse the Map path when present: merging multiple
+	// values and validating token characters needs the joined value,
+	// and CDN-CC is rare enough that the Map build is acceptable.
+	if cdn := hdr.Peek(header.CDNCacheControl); len(cdn) > 0 {
+		return h.isResponseCacheable(sf, ri, sf.Header.ToMap())
+	}
+
+	respCC := ParseCacheControlBytes(hdr.Peek(header.CacheControl))
+	if h.isBytesBlocked(hdr, respCC, ri, status) {
+		return false
+	}
+	if !h.hasBytesFreshness(hdr, respCC, status) {
+		return false
+	}
+	// Set-Cookie with explicit freshness is cacheable per the Map path's
+	// handler gate only when allowSetCookie is set — handled above.
+	if h.maxObjectSize > 0 {
+		if cl := hdr.ContentLength(); cl > 0 && int64(cl) > h.maxObjectSize {
+			return false
+		}
+	}
+	return true
+}
+
+// isBytesBlocked mirrors isCacheBlocked over raw header bytes: no-store
+// without must-understand, private, Vary:*, the Set-Cookie handler gate,
+// request Authorization without shared-cache opt-in, and Pragma: no-cache
+// without explicit freshness.
+func (h *Handler) isBytesBlocked(hdr *fasthttp.ResponseHeader, respCC Directives, ri RequestInfo, status int) bool {
+	if h.isBlockedByDirectives(hdr, respCC, status) {
+		return true
+	}
+	// Request Authorization without explicit shared-cache opt-in
+	// (mirrors isCacheBlocked's request-side check).
+	if ri.Header.Get(header.Authorization) != "" {
+		if !respCC.Public && !respCC.MustRevalidate && !respCC.SMaxAgeSet {
+			return true
+		}
+	}
+	return isBlockedByPragmaBytes(hdr, respCC)
+}
+
+// isBlockedByDirectives covers the response-side blocking directives:
+// no-store without must-understand, private, Vary:*, and the handler's
+// Set-Cookie gate.
+func (h *Handler) isBlockedByDirectives(hdr *fasthttp.ResponseHeader, respCC Directives, status int) bool {
+	if respCC.NoStore {
+		if !respCC.MustUnderstand || !isUnderstoodStatus(status) {
+			return true
+		}
+	}
+	if respCC.Private {
+		return true
+	}
+	// Vary: * — "always fails to match" (RFC 9111 §4.1); bouine refuses
+	// to store such responses.
+	if varyContainsStarBytes(hdr.Peek(header.Vary)) {
+		return true
+	}
+	// Set-Cookie: the handler gate is stricter than isBlockedBySetCookie —
+	// when allowSetCookie is false (default), ANY Set-Cookie response is
+	// not stored, even with explicit freshness (matches the Map-based
+	// handler gate in isResponseCacheable, which overrides the MAY-store
+	// reading in isBlockedBySetCookie).
+	return !h.allowSetCookie && len(hdr.Peek(header.SetCookie)) > 0
+}
+
+// isBlockedByPragmaBytes mirrors isBlockedByPragma over raw header bytes:
+// Pragma: no-cache blocks when there is no explicit freshness signal
+// (skipped under CDN-CC per RFC 9211).
+func isBlockedByPragmaBytes(hdr *fasthttp.ResponseHeader, respCC Directives) bool {
+	if !bytes.Equal(hdr.Peek(header.Pragma), []byte("no-cache")) {
+		return false
+	}
+	return !respCC.MaxAgeSet && !respCC.SMaxAgeSet &&
+		len(hdr.Peek(header.Expires)) == 0 &&
+		len(hdr.Peek(header.LastModified)) == 0
+}
+
+// hasBytesFreshness mirrors the freshness half of
+// parsedResponse.isCacheableWithDefault over raw header bytes: explicit
+// freshness (max-age/s-maxage/valid Expires), heuristic freshness
+// (Last-Modified on heuristically-cacheable status or CC public), negative
+// caching, and the operator default-TTL fallback for heuristically-cacheable
+// statuses.
+func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directives, status int) bool {
+	if respCC.MaxAgeSet || respCC.SMaxAgeSet {
+		return true
+	}
+	if exp := hdr.Peek(header.Expires); len(exp) > 0 && !parseHTTPDate(string(exp)).IsZero() {
+		return true
+	}
+	// Heuristic freshness: Last-Modified AND heuristically-cacheable
+	// status (or CC public) — RFC 9111 §4.2.2.
+	if len(hdr.Peek(header.LastModified)) > 0 &&
+		(isHeuristicStatus(status) || respCC.Public) {
+		return true
+	}
+	if h.negativeTTL > 0 && IsNegativeCacheable(status) {
+		return true
+	}
+	// Operator default-TTL fallback: only heuristically-cacheable
+	// statuses qualify (mirrors isCacheableWithDefault).
+	return h.defaultTTL > 0 && isHeuristicStatus(status)
+}
+
+// varyContainsStarBytes reports whether a raw Vary header value contains
+// the "*" token (RFC 9111 §4.1). Byte-level mirror of varyContainsStar:
+// split on commas, trim whitespace, compare to "*".
+func varyContainsStarBytes(vary []byte) bool {
+	for len(vary) > 0 {
+		// Find the end of this comma-separated field.
+		end := 0
+		for end < len(vary) && vary[end] != ',' {
+			end++
+		}
+		token := vary[:end]
+		// Trim leading and trailing OWS.
+		for len(token) > 0 && (token[0] == ' ' || token[0] == '\t') {
+			token = token[1:]
+		}
+		for len(token) > 0 && (token[len(token)-1] == ' ' || token[len(token)-1] == '\t') {
+			token = token[:len(token)-1]
+		}
+		if len(token) == 1 && token[0] == '*' {
+			return true
+		}
+		if end < len(vary) {
+			end++ // skip the comma
+		}
+		vary = vary[end:]
+	}
+	return false
 }
 
 // streamMissBuffered handles the non-streaming fallback: the client

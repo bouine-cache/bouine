@@ -294,6 +294,31 @@ func (h *Map) AppendEntryCanonical(key, value string) {
 	})
 }
 
+// SetEntryRaw sets the header with the given key to the single value
+// without interning key or value. The key must already be canonical
+// (a package-level constant). The value is stored as-is: the caller
+// must guarantee the string's backing memory outlives the Map (e.g. it
+// is a fresh allocation owned by the caller).
+//
+// Use this for per-object internal headers whose values are unique
+// per object (paths, hosts): interning unique values never hits, costs
+// an allocation per attempt, and serializes all callers on the global
+// intern-table mutex. Callers that duplicate keys across objects (content
+// types, cache directives) should keep Set — interning those wins.
+func (h *Map) SetEntryRaw(key, value string) {
+	for i := range h.entries {
+		if h.entries[i].key == key {
+			h.values[h.entries[i].off] = value
+			return
+		}
+	}
+	h.values = append(h.values, value)
+	h.entries = append(h.entries, headerEntry{
+		key: key,
+		off: len(h.values) - 1,
+	})
+}
+
 // SortEntries sorts the entries slice by canonical key in place.
 // Uses slices.SortStableFunc (generic, no reflection) instead of
 // sort.SliceStable (which allocates via reflectlite.Swapper).

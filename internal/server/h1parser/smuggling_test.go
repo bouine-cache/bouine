@@ -103,10 +103,11 @@ func TestSmugglingHookCalled(t *testing.T) {
 	conn := &mockConn{r: bytes.NewReader(raw)}
 
 	var readBuf [readBufferSize]byte
+	var scratch api.RawRequest
 
 	// parseRequest should detect smuggling, call the hook, and fall
 	// through with the parsed request so net/http can return 400.
-	req, fallThrough, _, err := parser.parseRequest(conn, &readBuf)
+	req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, &scratch)
 	require.NoError(t, err, "parseRequest returned error")
 	assert.True(t, fallThrough)
 	assert.NotNil(t, req)

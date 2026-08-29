@@ -1289,8 +1289,10 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	// context.WithCancel + time.AfterFunc never reached production transports
 	// (WithCancel has no deadline, so transport.Client.Do fell back to a
 	// fixed 60s DoTimeout) — fetch_timeout was silently ignored in
-	// production. context.WithTimeout provides the deadline while keeping
-	// ctx-derived cancellation for background callers (shutdown).
+	// production. Unlike the foreground paths (doFastFetch — no context
+	// at all), this background path uses context.WithTimeout instead of
+	// DoDeadline because background callers hold a ctx they cancel on
+	// handler shutdown, and that cancellation must reach the transport.
 	if h.fetchTimeout > 0 {
 		var cancel context.CancelFunc
 		spanCtx, cancel = context.WithTimeout(spanCtx, h.fetchTimeout)

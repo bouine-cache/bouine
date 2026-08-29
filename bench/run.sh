@@ -52,6 +52,7 @@ PACKAGES=(
     ./internal/cache/...
     ./internal/storage/...
     ./internal/server/h1parser/...
+    ./internal/observability/...
 )
 
 # Gate benchmarks are selected by prefix — no explicit list to maintain.
@@ -70,6 +71,8 @@ declare -A BUDGETS=(
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
     [H1Parse_Get]=0
+    [Middleware_Miss]=11
+    [Middleware_Miss_NoLog]=0
 )
 
 run_bench() {

@@ -411,8 +411,9 @@ func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directi
 // a raw response header: all Cache-Control field lines joined with ", "
 // per RFC 9110 §5.2 (multiple field lines are equivalent to a single
 // comma-separated list). The common single-line case returns fasthttp's
-// zero-copy Peek; only multi-line headers materialize a joined copy,
-// which is stored in buf (stack-allocated by the caller when small).
+// zero-copy Peek; multi-line headers append into the caller's buffer —
+// stack-backed while the joined value fits 512 bytes, growing to the
+// heap past that (rare; headers are capped at 8 KiB per line).
 func joinedCacheControlBytes(hdr *fasthttp.ResponseHeader, buf *[512]byte) []byte {
 	all := hdr.PeekAll(header.CacheControl)
 	switch len(all) {
@@ -436,7 +437,8 @@ func joinedCacheControlBytes(hdr *fasthttp.ResponseHeader, buf *[512]byte) []byt
 // joinedVaryBytes returns the effective Vary value from a raw response
 // header: all Vary field lines joined with ", " per RFC 9110 §5.2, so a
 // "Vary: *" on any line is visible to varyContainsStarBytes. Single-line
-// Vary (the common case) is the zero-copy Peek.
+// Vary (the common case) is the zero-copy Peek; multi-line joins append
+// into the caller's buffer, spilling to the heap past 512 bytes.
 func joinedVaryBytes(hdr *fasthttp.ResponseHeader, buf *[512]byte) []byte {
 	all := hdr.PeekAll(header.Vary)
 	switch len(all) {

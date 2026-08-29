@@ -278,6 +278,33 @@ func methodIndex(method string) int {
 	}
 }
 
+// methodIndexBytes is methodIndex over a []byte. The switch form lets the
+// compiler elide the string([]byte) conversion — zero allocation.
+func methodIndexBytes(method []byte) int {
+	switch string(method) {
+	case "GET":
+		return 0
+	case "HEAD":
+		return 1
+	default:
+		return 2
+	}
+}
+
+// methodLabel returns the Prometheus label for a method index
+// (methodIndexBytes). Only used on the WithLabelValues fallback path,
+// where per-request allocation is irrelevant.
+func methodLabel(mi int) string {
+	switch mi {
+	case 0:
+		return "GET"
+	case 1:
+		return "HEAD"
+	default:
+		return "OTHER"
+	}
+}
+
 // statusIndex maps common HTTP status codes to array indices. Returns -1
 // for uncommon codes, signalling the middleware to fall back to WithLabelValues.
 func statusIndex(code int) int {
@@ -320,9 +347,47 @@ func cacheResultIndex(s string) int {
 	}
 }
 
+// cacheResultIndexBytes is cacheResultIndex over a []byte, zero-alloc
+// (see methodIndexBytes).
+func cacheResultIndexBytes(s []byte) int {
+	switch string(s) {
+	case "HIT":
+		return 0
+	case "MISS":
+		return 1
+	case "STALE":
+		return 2
+	case "REVALIDATED":
+		return 3
+	case "BYPASS":
+		return 4
+	default:
+		return -1
+	}
+}
+
 // sourceIndex maps source strings to array indices. Returns -1 for unknown.
 func sourceIndex(s string) int {
 	switch s {
+	case string(api.SourceHot):
+		return 0
+	case string(api.SourceWarm):
+		return 1
+	case string(api.SourcePeer):
+		return 2
+	case string(api.SourceOrigin):
+		return 3
+	case "":
+		return 4
+	default:
+		return -1
+	}
+}
+
+// sourceIndexBytes is sourceIndex over a []byte, zero-alloc
+// (see methodIndexBytes).
+func sourceIndexBytes(s []byte) int {
+	switch string(s) {
 	case string(api.SourceHot):
 		return 0
 	case string(api.SourceWarm):
@@ -702,23 +767,61 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 				route = rs
 			}
 		}
-		xCache := string(ctx.Response.Header.Peek(header.XCache))
-		cacheResult := normaliseCacheResult(xCache)
-		source := normaliseSource(string(ctx.Response.Header.Peek(header.XCacheSource)))
+		// Classify X-Cache and X-Cache-Source from the raw header bytes.
+		// The byte switches are zero-alloc (the compiler elides string([]byte)
+		// in switch positions); the label strings for the metrics paths are
+		// derived from the classification below instead of converting the
+		// header values per request.
+		xCacheBytes := ctx.Response.Header.Peek(header.XCache)
+		cacheResultIdx := cacheResultIndexBytes(xCacheBytes)
+		var cacheResult string
+		switch cacheResultIdx {
+		case 0:
+			cacheResult = "HIT"
+		case 1:
+			cacheResult = "MISS"
+		case 2:
+			cacheResult = "STALE"
+		case 3:
+			cacheResult = "REVALIDATED"
+		case 4:
+			cacheResult = "BYPASS"
+		default:
+			// Empty or unknown: empty counts as MISS, anything else as
+			// UNKNOWN (closed label set, see normaliseCacheResult).
+			if len(xCacheBytes) == 0 {
+				cacheResult = "MISS"
+			} else {
+				cacheResult = "UNKNOWN"
+			}
+		}
+		srcIdx := sourceIndexBytes(ctx.Response.Header.Peek(header.XCacheSource))
+		var source string
+		switch srcIdx {
+		case 0:
+			source = string(api.SourceHot)
+		case 1:
+			source = string(api.SourceWarm)
+		case 2:
+			source = string(api.SourcePeer)
+		case 3:
+			source = string(api.SourceOrigin)
+		default:
+			source = ""
+		}
 
 		elapsed := time.Since(start)
 		dur := elapsed.Seconds()
 		bytesOut := float64(len(ctx.Response.Body()))
 
-		method := string(ctx.Method())
-		m.recordFastHTTPMetrics(method, statusCode, status, route, cacheResult, source, dur, bytesOut)
+		m.recordFastHTTPMetrics(ctx.Method(), statusCode, status, route, cacheResult, source, dur, bytesOut)
 
-		m.recordFastHTTPRings(xCache, statusCode, route, string(ctx.Path()), elapsed, &ctx.Response.Header)
+		m.recordFastHTTPRings(cacheResult, cacheResultIdx, statusCode, route, ctx.Path(), elapsed, &ctx.Response.Header)
 
 		if m.accessLog != nil {
-			msg := accessLogMessage(xCache, statusCode)
+			msg := accessLogMessage(cacheResult, statusCode)
 			if statusCode != fasthttp.StatusOK {
-				attrs := m.buildFastHTTPAccessLogAttrs(ctx, xCache, elapsed, statusCode)
+				attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
 				m.accessLog.Warn(msg, attrs...)
 			} else {
 				keyVal := ctx.UserValue("cacheKey")
@@ -727,7 +830,7 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 					key = k
 				}
 				if m.shouldLogAccess(key) {
-					attrs := m.buildFastHTTPAccessLogAttrs(ctx, xCache, elapsed, statusCode)
+					attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
 					m.accessLog.Info(msg, attrs...)
 				}
 			}
@@ -735,10 +838,14 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 	}
 }
 
-// recordFastHTTPMetrics increments the RED counters.
-func (m *DataPlaneMetrics) recordFastHTTPMetrics(method string, code int, status, route, cacheResult, source string, dur, bytesOut float64) {
+// recordFastHTTPMetrics increments the RED counters. The method is
+// passed as []byte and classified with methodIndexBytes (zero-alloc);
+// the label string is materialized via methodLabel only on the uncommon
+// WithLabelValues fallback, where allocation is irrelevant.
+func (m *DataPlaneMetrics) recordFastHTTPMetrics(method []byte, code int, status, route, cacheResult, source string, dur, bytesOut float64) {
+	mi := methodIndexBytes(method)
+	label := methodLabel(mi)
 	if rm, ok := m.lookupRouteMetrics(route); ok {
-		mi := methodIndex(method)
 		si := statusIndex(code)
 		ri := cacheResultIndex(cacheResult)
 		src := sourceIndex(source)
@@ -750,9 +857,9 @@ func (m *DataPlaneMetrics) recordFastHTTPMetrics(method string, code int, status
 		}
 		m.fallbackCount.Add(1)
 	}
-	m.RequestsTotal.WithLabelValues(method, status, cacheResult, source, route).Inc()
-	m.RequestDuration.WithLabelValues(method, status, cacheResult, source, route).Observe(dur)
-	m.ResponseBytesOut.WithLabelValues(method, cacheResult, source, route).Add(bytesOut)
+	m.RequestsTotal.WithLabelValues(label, status, cacheResult, source, route).Inc()
+	m.RequestDuration.WithLabelValues(label, status, cacheResult, source, route).Observe(dur)
+	m.ResponseBytesOut.WithLabelValues(label, cacheResult, source, route).Add(bytesOut)
 }
 
 // buildFastHTTPAccessLogAttrs constructs the structured-log attribute
@@ -811,18 +918,22 @@ func (m *DataPlaneMetrics) IncrementSmugglingRejected() {
 // recordRings updates the dashboard ring buffers for non-HIT requests.
 
 // recordFastHTTPRings updates the dashboard ring buffers for non-HIT
-// requests from the fasthttp middleware path.
-func (m *DataPlaneMetrics) recordFastHTTPRings(xCache string, status int, route, path string, elapsed time.Duration, hdr *fasthttp.ResponseHeader) {
-	if m.Rings == nil || xCache == "HIT" {
+// requests from the fasthttp middleware path. cacheResultIdx is the
+// pre-classified X-Cache index (cacheResultIndexBytes) so the ring methods
+// can early-return on HIT without the caller materializing header strings;
+// path is passed as []byte and converted only when the URL ring actually
+// records (sampling gate first).
+func (m *DataPlaneMetrics) recordFastHTTPRings(cacheResult string, cacheResultIdx int, status int, route string, path []byte, elapsed time.Duration, hdr *fasthttp.ResponseHeader) {
+	if m.Rings == nil || cacheResultIdx == 0 { // 0 == HIT
 		return
 	}
 	durMs := elapsed.Milliseconds()
-	m.Rings.Request.RecordRequest(xCache, status, durMs)
+	m.Rings.Request.RecordRequest(cacheResult, status, durMs)
 	if route != "_default" {
-		m.Rings.Route.RecordRoute(route, xCache, status, durMs)
+		m.Rings.Route.RecordRoute(route, cacheResult, status, durMs)
 	}
-	m.Rings.URL.RecordURL(path, route, xCache)
-	if m.Rings.HeaderRing != nil && (xCache == "MISS" || xCache == "BYPASS") {
+	m.Rings.URL.RecordURL(string(path), route, cacheResult)
+	if m.Rings.HeaderRing != nil && (cacheResultIdx == 1 || cacheResultIdx == 4) { // MISS or BYPASS
 		m.Rings.HeaderRing.SampleFastHTTP(route, hdr, status)
 	}
 }

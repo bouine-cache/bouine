@@ -1513,6 +1513,19 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 	default:
 		return // semaphore full — next client will retry
 	}
+	// Materialize the request fields now: ri's []byte fields alias the
+	// *fasthttp.RequestCtx's internal buffers (request.go), which are
+	// reused by the next keep-alive request the moment our handler
+	// returns. The background goroutine must not read them after that.
+	// ri.Header is an owned header.Map (headerFromCtx copies) — safe as is.
+	bgReq := RequestInfo{
+		Method: ri.GetMethod(),
+		URI:    ri.GetURI(),
+		Host:   ri.GetHost(),
+		Path:   ri.GetPath(),
+		Header: ri.Header,
+		TLS:    ri.TLS,
+	}
 	// Detach from the client's context so the background fetch is not
 	// cancelled when the response is sent, but wrap it in a cancellable
 	// context so Close can signal shutdown.
@@ -1524,7 +1537,6 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 	// race with that reset (SpanFromContext on the derived context
 	// walks into the RequestCtx's userdata map).
 	bgCtx, bgCancel := context.WithCancel(context.Background())
-	bgReq := ri
 	h.revalWg.Add(1)
 	go func() {
 		defer func() {

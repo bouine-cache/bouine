@@ -427,9 +427,9 @@ func appendHeader(req *api.RawRequest, line []byte) {
 // armed lazily via wd: it is set only on the first hit and re-armed
 // when the remaining window drops below writeRefreshThreshold — one
 // setsockopt per threshold interval instead of one per request. Each
-// hit write is guaranteed at least writeRefreshThreshold of budget.
-// The caller is responsible for calling Release on resp after this
-// returns.
+// hit write is guaranteed at least min(writeTime, writeRefreshThreshold)
+// of budget. The caller is responsible for calling Release on resp
+// after this returns.
 func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time, wd *time.Time) error {
 	if wd.IsZero() || wd.Sub(now) < writeRefreshThreshold {
 		*wd = now.Add(p.writeTime)

@@ -401,6 +401,25 @@ type HandlerConfig struct {
 // the caller. The context is used for timeout/cancellation.
 type FastClient interface {
 	Do(ctx context.Context, req *fasthttp.Request, resp *fasthttp.Response) error
+	// DoDeadline performs the fetch bounded by an absolute deadline,
+	// enforced via the connection read/write deadlines (kernel-level)
+	// rather than a context timer. It is the preferred method for
+	// foreground fetches: it needs no context.WithTimeout allocation
+	// and no goroutine, and unlike Do with a context whose cancellation
+	// is not observed mid-fetch, the deadline is actually enforced on
+	// production transports.
+	DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error
+}
+
+// doFastFetch invokes the fast client with the handler's fetch
+// timeout as an absolute deadline. When no timeout is configured
+// (only possible via direct Handler field mutation — NewHandler
+// always defaults it), it falls back to an undeadlined context Do.
+func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) error {
+	if h.fetchTimeout > 0 {
+		return h.fastClient.DoDeadline(req, resp, time.Now().Add(h.fetchTimeout))
+	}
+	return h.fastClient.Do(context.Background(), req, resp)
 }
 
 // NewHandler creates a caching handler.
@@ -1256,7 +1275,7 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	if h.fastClient == nil {
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	fetchCtx, span := tracing.StartSpan(ctx, "bouine.origin")
+	spanCtx, span := tracing.StartSpan(ctx, "bouine.origin")
 	defer span.End()
 
 	select {
@@ -1265,18 +1284,22 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 	default:
 	}
 
-	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
-	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
-	fetchCtx, cancel := context.WithCancel(fetchCtx)
-	defer cancel()
+	// Deadline-based timeout: transport.Client.Do maps ctx.Deadline() to
+	// fasthttp's kernel-level connection deadlines. The previous
+	// context.WithCancel + time.AfterFunc never reached production transports
+	// (WithCancel has no deadline, so transport.Client.Do fell back to a
+	// fixed 60s DoTimeout) — fetch_timeout was silently ignored in
+	// production. context.WithTimeout provides the deadline while keeping
+	// ctx-derived cancellation for background callers (shutdown).
 	if h.fetchTimeout > 0 {
-		timer := time.AfterFunc(h.fetchTimeout, cancel)
-		defer timer.Stop()
+		var cancel context.CancelFunc
+		spanCtx, cancel = context.WithTimeout(spanCtx, h.fetchTimeout)
+		defer cancel()
 	}
 
 	resp := fasthttp.AcquireResponse()
 
-	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
+	if err := h.fastClient.Do(spanCtx, req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
 		tracing.RecordError(span, err)
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
@@ -1779,15 +1802,6 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
 	defer span.End()
 
-	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
-	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
-	fetchCtx, cancel := context.WithCancel(fetchCtx)
-	defer cancel()
-	if h.fetchTimeout > 0 {
-		timer := time.AfterFunc(h.fetchTimeout, cancel)
-		defer timer.Stop()
-	}
-
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
@@ -1805,7 +1819,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	}
 	tracing.InjectFastHTTP(fetchCtx, req)
 
-	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
+	if err := h.doFastFetch(req, resp); err != nil {
 		tracing.RecordError(span, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
@@ -2029,15 +2043,6 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", fetchCtx.Err())}
 	}
 
-	// Use context.WithCancel + time.AfterFunc instead of context.WithTimeout
-	// to avoid the timerCtx struct allocation (saves ~3 allocs per fetch).
-	fetchCtx, cancel := context.WithCancel(fetchCtx)
-	defer cancel()
-	if h.fetchTimeout > 0 {
-		timer := time.AfterFunc(h.fetchTimeout, cancel)
-		defer timer.Stop()
-	}
-
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
@@ -2057,7 +2062,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Inject W3C TraceContext.
 	tracing.InjectFastHTTP(fetchCtx, req)
 
-	if err := h.fastClient.Do(fetchCtx, req, resp); err != nil {
+	if err := h.doFastFetch(req, resp); err != nil {
 		fasthttp.ReleaseResponse(resp)
 		tracing.RecordError(span, err)
 		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}

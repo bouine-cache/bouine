@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/valyala/fasthttp"
 
@@ -57,6 +58,56 @@ func (c *testFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 	}
 }
 
+// DoDeadline implements the deadline-based fetch path, mirroring how the
+// production client enforces it (kernel connection deadlines, no context).
+// The test handler runs in a goroutine; a select on an AfterFunc-driven
+// done channel aborts the fetch when the deadline passes, without the
+// context.WithTimeout allocations that would distort allocation profiles.
+func (c *testFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fasthttp.ErrTimeout
+	}
+	rctx := rctxPool.Get().(*fasthttp.RequestCtx)
+	req.CopyTo(&rctx.Request)
+	done := make(chan struct{}, 1)
+	var panicVal any
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicVal = r
+			}
+			done <- struct{}{}
+		}()
+		c.handler(rctx)
+	}()
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-done:
+		if panicVal != nil {
+			rctx.Request.Reset()
+			rctx.Response.Reset()
+			rctx.ResetUserValues()
+			rctxPool.Put(rctx)
+			panic(panicVal)
+		}
+		rctx.Response.CopyTo(resp)
+		rctx.Request.Reset()
+		rctx.Response.Reset()
+		rctx.ResetUserValues()
+		rctxPool.Put(rctx)
+		return nil
+	case <-timer.C:
+		// The handler goroutine may still be running on rctx; resetting
+		// it here would race. Abandon the object to the GC instead —
+		// this mirrors the production behavior where the connection
+		// deadline aborts the read and the request context is torn down
+		// by the server, not by the fetch caller.
+		return fasthttp.ErrTimeout
+	}
+}
+
 // benchFastClient is a zero-overhead FastClient for benchmarks. It calls
 // the handler directly without spawning a goroutine or allocating a channel,
 // eliminating scheduler overhead that would dominate the profile and mask
@@ -75,6 +126,12 @@ func (c *benchFastClient) Do(_ context.Context, req *fasthttp.Request, resp *fas
 	rctx.ResetUserValues()
 	rctxPool.Put(rctx)
 	return nil
+}
+
+// DoDeadline implements the deadline-based fetch path without any
+// deadline enforcement: the benchmark handler returns immediately.
+func (c *benchFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, _ time.Time) error {
+	return c.Do(context.Background(), req, resp)
 }
 
 // testCtx creates a *fasthttp.RequestCtx from method and URL.

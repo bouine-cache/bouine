@@ -1822,6 +1822,86 @@ func TestDoFetchTimeoutAbortsSlowOrigin(t *testing.T) {
 	require.NotNil(t, res.Err)
 }
 
+// TestDoFetchStreamDeadlineAbortsSlowOrigin verifies the streaming miss
+// path enforces fetch_timeout through the deadline-based context. The
+// slow origin blocks past the timeout; the fetch must abort instead of
+// hanging until the transport's own 60s fallback.
+func TestDoFetchStreamDeadlineAbortsSlowOrigin(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+		time.Sleep(2 * time.Second)
+		_, _ = ctx.WriteString("late")
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:  1 << 20,
+			NumShards: 2,
+		}),
+		FetchTimeout: 100 * time.Millisecond,
+	})
+
+	start := time.Now()
+	ctx := testCtx("GET", "http://example.com/slow-stream")
+	serveRequest(h, ctx)
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, 1500*time.Millisecond, "fetch timeout must abort the slow origin")
+	require.Equal(t, 502, respCode(ctx))
+}
+
+// TestDoFetchDeadlineRespectedByFastClient verifies the foreground fetch
+// path routes through FastClient.DoDeadline (kernel-level deadline in
+// production) rather than a context-based Do that production transports
+// cannot observe mid-fetch.
+func TestDoFetchDeadlineRespectedByFastClient(t *testing.T) {
+	t.Parallel()
+	var gotDeadline bool
+	c := &deadlineSpyClient{handler: func(ctx *fasthttp.RequestCtx) {
+		ctx.SetStatusCode(200)
+	}}
+	h := NewHandler(HandlerConfig{
+		Upstream:   func(ctx *fasthttp.RequestCtx) {},
+		FastClient: c,
+		Store: storage.NewHotStore(storage.HotConfig{
+			MaxBytes:  1 << 20,
+			NumShards: 2,
+		}),
+		FetchTimeout: 5 * time.Second,
+	})
+	c.deadlineSeen = &gotDeadline
+
+	req := testCtx("GET", "http://example.com/spy")
+	res := h.doFetch(req)
+	require.Nil(t, res.Err)
+	require.True(t, gotDeadline, "foreground fetch must use the DoDeadline path")
+}
+
+// deadlineSpyClient records whether DoDeadline was invoked.
+type deadlineSpyClient struct {
+	handler      fasthttp.RequestHandler
+	deadlineSeen *bool
+}
+
+func (c *deadlineSpyClient) Do(_ context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
+	rctx := &fasthttp.RequestCtx{}
+	req.CopyTo(&rctx.Request)
+	c.handler(rctx)
+	rctx.Response.CopyTo(resp)
+	return nil
+}
+
+func (c *deadlineSpyClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	if deadline.IsZero() {
+		return fasthttp.ErrTimeout
+	}
+	*c.deadlineSeen = true
+	return c.Do(context.Background(), req, resp)
+}
+
 func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
 	t.Parallel()
 	// If the timeout started before semaphore acquire, the queueing

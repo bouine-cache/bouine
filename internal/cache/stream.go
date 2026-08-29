@@ -302,7 +302,11 @@ func (h *Handler) isResponseCacheableBytes(sf *streamFetchResult, ri RequestInfo
 		return h.isResponseCacheable(sf, ri, sf.Header.ToMap())
 	}
 
-	respCC := ParseCacheControlBytes(hdr.Peek(header.CacheControl))
+	// Multiple Cache-Control field lines combine per RFC 9110 §5.2;
+	// the joined value lives in a stack buffer when it fits.
+	var ccBuf [512]byte
+	ccVal := joinedCacheControlBytes(hdr, &ccBuf)
+	respCC := ParseCacheControlBytes(ccVal)
 	if h.isBytesBlocked(hdr, respCC, ri, status) {
 		return false
 	}
@@ -350,8 +354,10 @@ func (h *Handler) isBlockedByDirectives(hdr *fasthttp.ResponseHeader, respCC Dir
 		return true
 	}
 	// Vary: * — "always fails to match" (RFC 9111 §4.1); bouine refuses
-	// to store such responses.
-	if varyContainsStarBytes(hdr.Peek(header.Vary)) {
+	// to store such responses. Multiple Vary field lines combine per
+	// RFC 9110 §5.2, so a "*" on any line must be visible.
+	var varyBuf [512]byte
+	if varyContainsStarBytes(joinedVaryBytes(hdr, &varyBuf)) {
 		return true
 	}
 	// Set-Cookie: the handler gate is stricter than isBlockedBySetCookie —
@@ -399,6 +405,56 @@ func (h *Handler) hasBytesFreshness(hdr *fasthttp.ResponseHeader, respCC Directi
 	// Operator default-TTL fallback: only heuristically-cacheable
 	// statuses qualify (mirrors isCacheableWithDefault).
 	return h.defaultTTL > 0 && isHeuristicStatus(status)
+}
+
+// joinedCacheControlBytes returns the effective Cache-Control value from
+// a raw response header: all Cache-Control field lines joined with ", "
+// per RFC 9110 §5.2 (multiple field lines are equivalent to a single
+// comma-separated list). The common single-line case returns fasthttp's
+// zero-copy Peek; only multi-line headers materialize a joined copy,
+// which is stored in buf (stack-allocated by the caller when small).
+func joinedCacheControlBytes(hdr *fasthttp.ResponseHeader, buf *[512]byte) []byte {
+	all := hdr.PeekAll(header.CacheControl)
+	switch len(all) {
+	case 0:
+		return nil
+	case 1:
+		return all[0]
+	}
+	// RFC 9110 §5.2: multiple field lines combine into one list. The
+	// first line may be empty (e.g. "Cache-Control:" followed by a
+	// second line); it still contributes a (empty) list element.
+	joined := buf[:0]
+	joined = append(joined, all[0]...)
+	for _, v := range all[1:] {
+		joined = append(joined, ',', ' ')
+		joined = append(joined, v...)
+	}
+	return joined
+}
+
+// joinedVaryBytes returns the effective Vary value from a raw response
+// header: all Vary field lines joined with ", " per RFC 9110 §5.2, so a
+// "Vary: *" on any line is visible to varyContainsStarBytes. Single-line
+// Vary (the common case) is the zero-copy Peek.
+func joinedVaryBytes(hdr *fasthttp.ResponseHeader, buf *[512]byte) []byte {
+	all := hdr.PeekAll(header.Vary)
+	switch len(all) {
+	case 0:
+		return nil
+	case 1:
+		return all[0]
+	}
+	// RFC 9110 §5.2 join; the first line may be empty ("Vary:" then a
+	// second line carrying the real tokens) and must not short-circuit
+	// the join.
+	joined := buf[:0]
+	joined = append(joined, all[0]...)
+	for _, v := range all[1:] {
+		joined = append(joined, ',', ' ')
+		joined = append(joined, v...)
+	}
+	return joined
 }
 
 // varyContainsStarBytes reports whether a raw Vary header value contains

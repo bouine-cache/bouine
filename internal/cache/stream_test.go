@@ -624,3 +624,81 @@ func TestServeRequest_CacheKeyGatedByLogging(t *testing.T) {
 	require.True(t, ok2, "cacheKey must be stored when LogCacheKeys is true")
 	require.False(t, k.IsZero())
 }
+
+// TestIsResponseCacheableBytes_MultiLineHeaders pins the RFC 9110 §5.2
+// joins: multiple Cache-Control or Vary field lines must combine so the
+// byte path agrees with the Map path (GetAll joins; Peek alone returns
+// only the first line). fasthttp's Add writes repeated headers as
+// separate field lines, which map-based headers cannot express.
+func TestIsResponseCacheableBytes_MultiLineHeaders(t *testing.T) {
+	t.Parallel()
+
+	type tc struct {
+		name      string
+		lines     [][2]string
+		cacheable bool
+	}
+	cases := []tc{
+		{
+			"cc no-cache qualified on line 1, max-age on line 2",
+			[][2]string{{"Cache-Control", `no-cache="a"`}, {"Cache-Control", "max-age=3600"}},
+			true,
+		},
+		{
+			"vary empty on line 1, star on line 2",
+			[][2]string{{"Vary", ""}, {"Vary", "*"}, {"Cache-Control", "max-age=3600"}},
+			false,
+		},
+		{
+			"vary tokens on line 1, star on line 2",
+			[][2]string{{"Vary", "Accept"}, {"Vary", "*"}, {"Cache-Control", "max-age=3600"}},
+			false,
+		},
+		{
+			"cc no-store on line 2",
+			[][2]string{{"Cache-Control", "max-age=3600"}, {"Cache-Control", "no-store"}},
+			false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := func(ctx *fasthttp.RequestCtx) {
+				for _, kv := range c.lines {
+					ctx.Response.Header.Add(kv[0], kv[1])
+				}
+				ctx.SetStatusCode(200)
+				_, _ = ctx.WriteString("body")
+			}
+			store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+			defer store.Close(context.Background())
+			h := NewHandler(HandlerConfig{
+				Upstream:   upstream,
+				FastClient: &testFastClient{handler: upstream},
+				Store:      store,
+			})
+
+			ctx := testCtx("GET", "http://example.com/multiline")
+			ri := requestInfoFromCtx(ctx)
+
+			fc := &testFastClient{handler: upstream}
+			req := fasthttp.AcquireRequest()
+			req.SetRequestURI("http://example.com/multiline")
+			resp := fasthttp.AcquireResponse()
+			require.NoError(t, fc.Do(context.Background(), req, resp))
+			sf := &streamFetchResult{resp: resp, Header: fromFastHTTPHeader(&resp.Header)}
+
+			gotBytes := h.isResponseCacheableBytes(sf, ri)
+			gotMap := h.isResponseCacheable(sf, ri, header.FromFastHTTP(&resp.Header))
+
+			require.Equal(t, c.cacheable, gotBytes,
+				"byte path disagrees with expectation for multi-line headers %v", c.lines)
+			require.Equal(t, gotMap, gotBytes,
+				"byte and Map cacheability paths disagree for multi-line headers %v", c.lines)
+
+			fasthttp.ReleaseRequest(req)
+			fasthttp.ReleaseResponse(resp)
+		})
+	}
+}

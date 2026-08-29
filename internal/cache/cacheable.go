@@ -277,7 +277,11 @@ func isBlockedByPragma(respCC Directives, h header.Map) bool {
 }
 
 func hasVaryStar(h header.Map) bool {
-	return varyContainsStar(h.Get(header.Vary))
+	// GetAll, not Get: multiple Vary field lines combine per RFC 9110
+	// §5.2, so a "*" on any line must block storage. Get returns only
+	// the first value and missed "Vary: Accept" + "Vary: *" split across
+	// lines (caught by cache-tests vary-syntax-empty-star-lines).
+	return varyContainsStar(h.GetAll(header.Vary))
 }
 
 func isBlockedBySetCookie(respCC Directives, h header.Map) bool {

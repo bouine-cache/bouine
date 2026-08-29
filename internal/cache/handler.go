@@ -204,10 +204,13 @@ type Handler struct {
 	// or when reserveVariantSlot detects the primary key has been evicted
 	// by SIEVE and resets the set.
 	// Protected by variantMu.
-	variantSets    map[api.Key]map[api.Key]struct{}
-	refreshSem     chan struct{}
-	done           chan struct{}
-	fetchSem       chan struct{} // bounds concurrent foreground origin fetches
+	variantSets map[api.Key]map[api.Key]struct{}
+	refreshSem  chan struct{}
+	done        chan struct{}
+	fetchSem    chan struct{} // bounds concurrent foreground origin fetches
+	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
+	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
+	logCacheKeys   bool
 	scheduler      *RefreshScheduler
 	refreshLimiter *refreshRateLimiter
 	// ownerFn returns the peer that owns a cache key and whether the key
@@ -218,7 +221,12 @@ type Handler struct {
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
 	// the done channel and serve the buffered result.
-	inflightStreams         sync.Map // map[api.Key]*inflightStream
+	// Sharded by key hash: a sync.Map's read-map misses under high miss
+	// rates allocate an entry node per miss and funnel all miss
+	// goroutines through its internal locks; sharded maps do a direct
+	// map insert under a per-shard mutex (0 allocs) with far less
+	// contention.
+	inflightStreams         inflightTable
 	routeName               string
 	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
 	refreshWg               sync.WaitGroup
@@ -381,6 +389,11 @@ type HandlerConfig struct {
 	// StayinAlive enables emergency stale mode: serve cached objects
 	// indefinitely when the upstream is unreachable or returning 5xx.
 	StayinAlive bool
+	// LogCacheKeys gates the SetUserValue("cacheKey") store on the
+	// miss/revalidate/bypass paths. The value is only read by the
+	// access-log sampler; when no access logger is configured the store
+	// is a wasted per-request allocation (api.Key boxed into any).
+	LogCacheKeys bool
 	// RefreshBeforeExpiry enables proactive background conditional
 	// revalidation. A background timer fires at TTL - margin.
 	RefreshBeforeExpiry bool
@@ -435,6 +448,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		negativeTTL:             cfg.NegativeTTL,
 		jitterPercent:           cfg.JitterPercent,
 		stayinAlive:             cfg.StayinAlive,
+		logCacheKeys:            cfg.LogCacheKeys,
 		defaultTTL:              cfg.DefaultTTL,
 		overrideTTL:             cfg.OverrideTTL,
 		defaultSWR:              cfg.DefaultSWR,
@@ -512,6 +526,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 
 	h.revalSem = make(chan struct{}, defaultRevalConcurrency)
+	h.inflightStreams = newInflightTable()
 
 	return h
 }
@@ -939,11 +954,15 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 			h.triggerBgRevalidate(ctx, ri, key, disp.Object)
 		}
 	case Miss:
-		ctx.SetUserValue("cacheKey", key)
+		if h.logCacheKeys {
+			ctx.SetUserValue("cacheKey", key)
+		}
 		ri := requestInfoFromCtx(ctx)
 		h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
 	case Revalidate:
-		ctx.SetUserValue("cacheKey", key)
+		if h.logCacheKeys {
+			ctx.SetUserValue("cacheKey", key)
+		}
 		if !h.isOwnerOrUnmanaged(key) {
 			ri := requestInfoFromCtx(ctx)
 			h.handleCacheMiss(ctx, primaryKey, key, obj, now, src, ri)
@@ -952,7 +971,9 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		ri := requestInfoFromCtx(ctx)
 		h.revalidate(ctx, primaryKey, key, disp.Object, now, src, ri)
 	case Bypass:
-		ctx.SetUserValue("cacheKey", key)
+		if h.logCacheKeys {
+			ctx.SetUserValue("cacheKey", key)
+		}
 		h.handleBypass(ctx)
 	}
 }
@@ -1341,9 +1362,9 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 	// Try to become the streaming leader for this key.
 	// If another request is already streaming, wait for its buffered result.
 	inflight := &inflightStream{done: make(chan struct{})}
-	if actual, loaded := h.inflightStreams.LoadOrStore(lookupKey, inflight); loaded {
+	if actual, loaded := h.inflightStreams.loadOrStore(lookupKey, inflight); loaded {
 		// Follower: wait for the leader's buffered result.
-		existing := actual.(*inflightStream)
+		existing := actual
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
@@ -1357,7 +1378,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 		return
 	}
 	// Leader: remove from inflight map when done.
-	defer h.inflightStreams.Delete(lookupKey)
+	defer h.inflightStreams.delete(lookupKey)
 	h.streamMiss(ctx, primaryKey, ri, inflight)
 }
 
@@ -2139,8 +2160,14 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	}
 	// Stamp internal headers for ban predicate matching. These are
 	// stripped before serving to clients (see serveObject).
-	obj.Header.Set(header.XBouinePath, ri.GetPath())
-	obj.Header.Set(header.XBouineHost, ri.GetHost())
+	// SetEntryRaw skips interning: paths and hosts are unique per object,
+	// so the intern lookup never hits, costs an allocation per attempt,
+	// and serializes all miss goroutines on the global intern-table
+	// mutex. The strings are freshly materialized by GetPath/GetHost
+	// (string conversions owned by this object) and only read after
+	// storage.
+	obj.Header.SetEntryRaw(header.XBouinePath, ri.GetPath())
+	obj.Header.SetEntryRaw(header.XBouineHost, ri.GetHost())
 	// Set-Cookie is always stripped from cached objects: joining multiple
 	// Set-Cookie values with ", " is non-conformant per RFC 9110 §5.2,
 	// and serving stale cookies to a different client is a security risk.

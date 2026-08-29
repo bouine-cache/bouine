@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
@@ -491,4 +492,135 @@ func TestStreamMissNonCacheable_ServesBody(t *testing.T) {
 	require.Equal(t, 200, respCode(ctx))
 	require.Equal(t, "MISS", respHeader(ctx, header.XCache))
 	require.Equal(t, payload, respBody(ctx))
+}
+
+// TestIsResponseCacheableBytes_Equivalence walks the cacheability matrix
+// through both the byte-level pre-check and the Map-based path and asserts
+// they agree. This pins the mirror-contract of isResponseCacheableBytes:
+// any divergence between the two paths is a correctness bug (RFC 9111
+// decisions must not depend on which representation the headers are in).
+func TestIsResponseCacheableBytes_Equivalence(t *testing.T) {
+	t.Parallel()
+
+	type tc struct {
+		name    string
+		headers map[string]string
+		status  int
+		authReq bool
+	}
+	cases := []tc{
+		{"no-store", map[string]string{"Cache-Control": "no-store"}, 200, false},
+		{"no-store case-insensitive", map[string]string{"Cache-Control": "NO-STORE"}, 200, false},
+		{"private", map[string]string{"Cache-Control": "private"}, 200, false},
+		{"private with max-age", map[string]string{"Cache-Control": "private, max-age=60"}, 200, false},
+		{"plain max-age", map[string]string{"Cache-Control": "max-age=60"}, 200, false},
+		{"s-maxage", map[string]string{"Cache-Control": "s-maxage=60"}, 200, false},
+		{"no cc no freshness", map[string]string{}, 200, false},
+		{"expires valid", map[string]string{"Expires": "Mon, 01 Jan 2035 00:00:00 GMT"}, 200, false},
+		{"expires invalid", map[string]string{"Expires": "not-a-date"}, 200, false},
+		{"last-modified 200", map[string]string{"Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"}, 200, false},
+		{"last-modified 502", map[string]string{"Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"}, 502, false},
+		{"vary star", map[string]string{"Vary": "*", "Cache-Control": "max-age=60"}, 200, false},
+		{"vary star spaced", map[string]string{"Vary": "Accept, *", "Cache-Control": "max-age=60"}, 200, false},
+		{"vary normal", map[string]string{"Vary": "Accept-Encoding", "Cache-Control": "max-age=60"}, 200, false},
+		{"set-cookie", map[string]string{"Set-Cookie": "a=b", "Cache-Control": "max-age=60"}, 200, false},
+		{"pragma no-cache", map[string]string{"Pragma": "no-cache"}, 200, false},
+		{"pragma no-cache + max-age", map[string]string{"Pragma": "no-cache", "Cache-Control": "max-age=60"}, 200, false},
+		{"404 no negative ttl", map[string]string{}, 404, false},
+		{"503 not heuristic", map[string]string{}, 503, false},
+		{"authorization no opt-in", map[string]string{"Cache-Control": "max-age=60"}, 200, true},
+		{"authorization public", map[string]string{"Cache-Control": "public, max-age=60"}, 200, true},
+		{"must-understand no-store", map[string]string{"Cache-Control": "no-store, must-understand"}, 200, false},
+		{"cdn-cc max-age", map[string]string{"Cdn-Cache-Control": "max-age=60"}, 200, false},
+		{"cdn-cc no-store over cc", map[string]string{"Cdn-Cache-Control": "no-store", "Cache-Control": "max-age=60"}, 200, false},
+	}
+
+	upstreamBody := "body"
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			upstream := func(ctx *fasthttp.RequestCtx) {
+				for k, v := range c.headers {
+					ctx.Response.Header.Set(k, v)
+				}
+				ctx.SetStatusCode(c.status)
+				_, _ = ctx.WriteString(upstreamBody)
+			}
+			store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+			defer store.Close(context.Background())
+			h := NewHandler(HandlerConfig{
+				Upstream:   upstream,
+				FastClient: &testFastClient{handler: upstream},
+				Store:      store,
+			})
+
+			ctx := testCtx("GET", "http://example.com/equiv")
+			if c.authReq {
+				ctx.Request.Header.Set(header.Authorization, "Bearer x")
+			}
+			ri := requestInfoFromCtx(ctx)
+
+			// Byte-level path (what streamMiss now uses).
+			fc := &testFastClient{handler: upstream}
+			req := fasthttp.AcquireRequest()
+			req.SetRequestURI("http://example.com/equiv")
+			resp := fasthttp.AcquireResponse()
+			if c.authReq {
+				req.Header.Set(header.Authorization, "Bearer x")
+			}
+			require.NoError(t, fc.Do(context.Background(), req, resp))
+			sf := &streamFetchResult{resp: resp, Header: fromFastHTTPHeader(&resp.Header)}
+			gotBytes := h.isResponseCacheableBytes(sf, ri)
+
+			// Map-based path (reference).
+			resMap := header.FromFastHTTP(&resp.Header)
+			gotMap := h.isResponseCacheable(sf, ri, resMap)
+
+			require.Equal(t, gotMap, gotBytes,
+				"byte and Map cacheability paths disagree for %s: headers=%v status=%d auth=%v",
+				c.name, c.headers, c.status, c.authReq)
+
+			fasthttp.ReleaseRequest(req)
+			fasthttp.ReleaseResponse(resp)
+		})
+	}
+}
+
+// TestServeRequest_CacheKeyGatedByLogging pins the LogCacheKeys gate:
+// the cacheKey user value is stored only when access-log key sampling
+// needs it. The value is read exclusively by the access-log sampler
+// (DataPlaneMetrics.shouldLogAccess); when logging is off, storing it
+// is a wasted per-request allocation.
+func TestServeRequest_CacheKeyGatedByLogging(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "no-store")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("x")
+	}
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	defer store.Close(context.Background())
+
+	h := NewHandler(HandlerConfig{
+		Upstream:   upstream,
+		FastClient: &testFastClient{handler: upstream},
+		Store:      store,
+	})
+
+	ctx := testCtx("GET", "http://example.com/gated")
+	serveRequest(h, ctx)
+	_, ok := ctx.UserValue("cacheKey").(api.Key)
+	require.False(t, ok, "cacheKey must not be stored when LogCacheKeys is false")
+
+	h2 := NewHandler(HandlerConfig{
+		Upstream:     upstream,
+		FastClient:   &testFastClient{handler: upstream},
+		Store:        store,
+		LogCacheKeys: true,
+	})
+	ctx2 := testCtx("GET", "http://example.com/gated")
+	serveRequest(h2, ctx2)
+	k, ok2 := ctx2.UserValue("cacheKey").(api.Key)
+	require.True(t, ok2, "cacheKey must be stored when LogCacheKeys is true")
+	require.False(t, k.IsZero())
 }

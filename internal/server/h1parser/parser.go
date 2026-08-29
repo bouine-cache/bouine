@@ -465,7 +465,10 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	var ctx fasthttp.RequestCtx
 	ctx.Init2(conn, nil, false)
 
-	// Populate the request from the parsed RawRequest.
+	// Populate the request from the parsed RawRequest. S2b converts the
+	// header strings to byte slices without allocation (read-only view
+	// of the string's backing memory); SetBytesKV copies both into the
+	// header's own buffer, so the views are not retained.
 	r := &ctx.Request
 	r.Header.SetMethod(req.Method)
 	uri := req.Path
@@ -476,8 +479,8 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	r.Header.SetHost(req.Host)
 	for i := 0; i < req.NHeaders; i++ {
 		r.Header.SetBytesKV(
-			[]byte(req.Headers[i].Key),
-			[]byte(req.Headers[i].Value),
+			header.S2b(req.Headers[i].Key),
+			header.S2b(req.Headers[i].Value),
 		)
 	}
 	if len(excess) > 0 {

@@ -395,6 +395,12 @@ func (c *PoolFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Respon
 	if scheme == "" {
 		scheme = "http"
 	}
+	// The dialed host is always the operator-configured pool target;
+	// only the request's own path/query is appended — the same data
+	// flow as Do and FastHandler, which carry the already-accepted
+	// go/request-forgery alerts. Suppressing here keeps this
+	// duplicated sink from adding a third alert.
+	// lgtm[go/request-forgery] — see docs/architecture.md §6 threat model
 	req.SetRequestURI(scheme + "://" + t.url.Host + string(req.RequestURI()))
 
 	t.metrics.incActiveConnection(c.pool.Name, t.addr)

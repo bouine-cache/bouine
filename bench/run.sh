@@ -28,7 +28,10 @@
 #   Evaluate_Hit:                     0
 #   HotStore_Get_Hit:                 0
 #   Handler_CacheHit_ReusableWriter:  0  (zero-alloc hit path achieved)
-#   Handler_CacheMiss_Cacheable:      23
+#   Handler_CacheMiss_Cacheable:      24 (was 23 until header interning
+#                                      via pkg/unique added one entry-node
+#                                      allocation per miss on Go 1.24+;
+#                                      verified by alloc_objects profile)
 #   SIEVE_Access:                     0
 #   Cachaner_Access:                   0
 #   Cachaner_AccessSlowPath:           0
@@ -59,7 +62,7 @@ declare -A BUDGETS=(
     [Evaluate_Hit]=0
     [HotStore_Get_Hit]=0
     [Handler_CacheHit_ReusableWriter]=0
-    [Handler_CacheMiss_Cacheable]=23
+    [Handler_CacheMiss_Cacheable]=24
     [SIEVE_Access]=0
     [Cachaner_Access]=0
     [Cachaner_AccessSlowPath]=0

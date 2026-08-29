@@ -10,6 +10,29 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- Hit-path tail latency: the h1parser allocated a ~4KB request struct
+  per request (99.3% of allocation volume under load), driving ~63 GC
+  cycles/s. Requests now reuse a per-connection scratch struct —
+  measured allocation drop of ~466× and GC cycles from 1074 to 5 per
+  load window, p99 −10%.
+- Data race in streaming singleflight: followers could read the
+  leader's response headers while the pooled fasthttp response was
+  being reset for reuse (visible in the chaos suite under `-race`).
+- Data race in stale-while-revalidate: the background revalidation
+  goroutine read request method/URI/host bytes from the connection's
+  recycled request buffers after the handler returned.
+- Integration driver: cross-node tests failed with `lookup testhost:
+  no such host` — the driver dialed the Host-header override instead
+  of only overriding the header.
+
+### Changed
+- Benchmark gate `H1Parse_Get` now exercises the full production parse
+  path so per-request allocations fail the zero-alloc budget.
+- The `Handler_CacheMiss_Cacheable` allocation budget is 24 (was 23):
+  the `pkg/unique` header interning added one entry-node allocation per
+  miss; attributed via allocation profile.
+
 ## [0.5.1] - 2026-08-26
 
 ### Added

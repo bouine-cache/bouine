@@ -43,6 +43,15 @@ on pre-resolved shared Prometheus children. A microbenchmark showed
 `request_duration_seconds` histogram also pays native-histogram
 sparse-bucket math (`NativeHistogramBucketFactor: 1.1`).
 
+**Caveat on what was measured**: in the default production wiring
+(`NewFastPathHandlerFromStore`, cmd/bouine/cmd/engine.go) the fast-path
+handler carries no route name, so `lookupRouteMetrics("")` misses and
+every fast-path hit takes the `WithLabelValues` fallback — the *slower*
+path (hash lookup plus three child acquisitions on shared children).
+The A/B below measured that path, so the rejection holds a fortiori.
+Side effect worth fixing separately: fast-path hits attribute to
+`route=""` in dashboards.
+
 **Why rejected**: an end-to-end A/B (metrics hook wired vs
 `WithMetricsHook(nil)`, two alternating rounds, 32 conns, 1.8M reqs per
 run) measured **no difference** — p99 542–547µs in both configurations.

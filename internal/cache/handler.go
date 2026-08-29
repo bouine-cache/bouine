@@ -917,7 +917,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		h.serveObject(ctx, disp.Object, now, cacheRes, src)
 		if disp.Decision == StaleHit && disp.Object.StaleWhileRevalidate > 0 && h.isOwnerOrUnmanaged(key) {
 			ri := requestInfoFromCtx(ctx)
-			h.triggerBgRevalidate(ctx, ri, key, disp.Object)
+			h.triggerBgRevalidate(ri, key, disp.Object)
 		}
 	case Miss:
 		ctx.SetUserValue("cacheKey", key)
@@ -1500,7 +1500,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 // stale-while-revalidate response. revalSem prevents goroutine explosion.
 // The goroutine is tracked by revalWg so Close can drain it before
 // store.Close, preventing use-after-close panics.
-func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, ri RequestInfo, key api.Key, stale *api.Object) {
+func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Object) {
 	// Bail out early if the handler is already shutting down.
 	select {
 	case <-h.done:
@@ -1516,7 +1516,14 @@ func (h *Handler) triggerBgRevalidate(ctx *fasthttp.RequestCtx, ri RequestInfo, 
 	// Detach from the client's context so the background fetch is not
 	// cancelled when the response is sent, but wrap it in a cancellable
 	// context so Close can signal shutdown.
-	bgCtx, bgCancel := context.WithCancel(context.WithoutCancel(ctx))
+	//
+	// Use context.Background, not context.WithoutCancel(ctx): the
+	// RequestCtx is handed back to fasthttp's worker the moment our
+	// handler returns and is Reset for the next request. Retaining it
+	// as a context parent keeps a live reference whose Value lookups
+	// race with that reset (SpanFromContext on the derived context
+	// walks into the RequestCtx's userdata map).
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	bgReq := ri
 	h.revalWg.Add(1)
 	go func() {

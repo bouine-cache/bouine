@@ -10,6 +10,38 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- H1 fast path (experimental.h1_fast_path): five latent correctness
+  gaps closed, then enabled in the loadtest configuration — every
+  previous nginx/varnish/envoy comparison had accidentally measured
+  the slow middleware path with the zero-alloc hit parser unused.
+  - Fast-path StaleHit now triggers stale-while-revalidate background
+    revalidation (an `onStale` hook wired by the engine); previously
+    stale objects served via the fast path never refreshed.
+  - Fall-through request bodies are no longer truncated when they span
+    multiple TCP reads: the fallback handler re-parses the request
+    from a buffered prefix + the live socket with full framing
+    (Content-Length, chunked, trailers, Expect: 100-continue).
+  - Bytes pipelined after a cache-hit request are consumed by the
+    fallback handler instead of being silently discarded.
+  - Requests with headers larger than the 16 KiB parser buffer are
+    served via the fallback handler instead of being dropped.
+  - Ambiguous framing (Content-Length + Transfer-Encoding, duplicate
+    Content-Length) is rejected with 400 and connection close per
+    RFC 9110 §6.6.2 instead of being served.
+- h1parser keep-alive idle timeout raised from 10s to 120s to match
+  the fasthttp listener (visible in k6 as elevated reconnection time).
+- Fast-path hits report `route=_default` in Prometheus labels (was the
+  empty string, taking the slow WithLabelValues fallback path).
+- h1parser clock now uses `platform.CoarseNow` on Linux, matching the
+  dataplane middleware (~2-4ns vs ~25-40ns per call).
+
+### Changed
+- `bench/loadtest/config/bouine.yaml` enables
+  `experimental.h1_fast_path` so proxy comparisons exercise the
+  production hit path. Nightly loadtest results from 0.5.2 and earlier
+  were measured without it and are not comparable.
+
 ## [0.5.2] - 2026-08-30
 
 ### Added

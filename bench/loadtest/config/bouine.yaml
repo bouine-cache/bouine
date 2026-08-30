@@ -11,6 +11,13 @@ admin:
 storage:
   hot_max_bytes: 1GiB
 
+# The H1 fast path serves cache hits from a zero-allocation HTTP/1.1
+# parser, bypassing the fasthttp middleware chain. Benchmarks comparing
+# against nginx/varnish/envoy must exercise it — all previous rounds
+# accidentally measured the slow middleware path.
+experimental:
+  h1_fast_path: true
+
 upstream_pools:
   - name: origin
     targets:

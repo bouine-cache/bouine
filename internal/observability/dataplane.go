@@ -877,6 +877,15 @@ func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx,
 // counters for a fast-path hit without going through the middleware
 // chain. Called by the h1parser after serving a cache hit.
 func (m *DataPlaneMetrics) RecordHit(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+	if route == "" {
+		// The engine-level fast path carries no route name (the store is
+		// shared across routes), so hits arrive with route="". Dashboards
+		// and the middleware use "_default" for unlabelled traffic;
+		// mapping here keeps fast-path hits on the pre-resolved array
+		// path instead of the WithLabelValues fallback, and keeps the
+		// label set consistent with miss-path metrics.
+		route = "_default"
+	}
 	dur := duration.Seconds()
 	if rm, ok := m.lookupRouteMetrics(route); ok {
 		mi := methodIndex(method)

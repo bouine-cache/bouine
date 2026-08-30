@@ -45,6 +45,7 @@ const maxFastPathHeaderBytes = 8 * 1024
 type FastPathHandler struct {
 	store          storage.Store
 	policy         *KeyPolicy // nil = no query/header policy
+	onStale        func(req *api.RawRequest, key api.Key, stale *api.Object)
 	cachedDate     atomic.Pointer[string]
 	routeName      string
 	cachedDateUnix atomic.Int64
@@ -58,6 +59,17 @@ func NewFastPathHandler(h *Handler) *FastPathHandler {
 		routeName: h.routeName,
 		policy:    h.policy,
 	}
+}
+
+// WithOnStale sets the callback invoked after a fast-path StaleHit is
+// served, so the wired Handler can trigger stale-while-revalidate
+// background revalidation (RFC 5861 §3). The callback runs on the
+// h1parser goroutine: it must not block and must not retain the
+// RawRequest (its fields alias the connection's read buffer) without
+// copying.
+func (f *FastPathHandler) WithOnStale(fn func(req *api.RawRequest, key api.Key, stale *api.Object)) *FastPathHandler {
+	f.onStale = fn
+	return f
 }
 
 // NewFastPathHandlerFromStore creates a FastPathHandler directly from a
@@ -91,6 +103,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	}
 
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
+	lookupKey := key
 	if vary := obj.VaryValue; vary != "" {
 		vk := variantKeyFromRaw(key, vary, req, f.policy)
 		if vk != key {
@@ -100,6 +113,7 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 			}
 			obj = vobj
 			src = vsrc
+			lookupKey = vk
 		}
 	}
 
@@ -115,6 +129,13 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 		resp := f.serializeResponse(req, obj, src, now, "STALE")
 		if resp == nil {
 			return nil, false
+		}
+		// Stale-while-revalidate: the miss-path handler triggers a
+		// background refresh after serving a stale object (RFC 5861
+		// §3, handler.go triggerBgRevalidate). Without this the fast
+		// path would serve stale objects that never refresh.
+		if f.onStale != nil && obj.StaleWhileRevalidate > 0 {
+			f.onStale(req, lookupKey, obj)
 		}
 		return resp, true
 	default:

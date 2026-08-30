@@ -774,9 +774,10 @@ func TestParser_Serve_DeadlineRefresh(t *testing.T) {
 		"deadline should be refreshed at least once, got %d calls", callCount)
 }
 
-// TestParser_Serve_FallThroughWithConnectionClose verifies the
-// fallThrough path (parseRequest returns fallThrough=true) with
-// Connection: close, covering the close return at line 147-148.
+// TestParser_Serve_FallThroughWithConnectionClose verifies that a
+// smuggling attempt (CL+TE, RFC 9110 §6.6.2) is rejected with 400 and
+// the connection closed — the fallback handler must never see the
+// ambiguously framed request.
 func TestParser_Serve_FallThroughWithConnectionClose(t *testing.T) {
 	t.Parallel()
 
@@ -803,7 +804,7 @@ func TestParser_Serve_FallThroughWithConnectionClose(t *testing.T) {
 	}()
 
 	_ = p.Serve(server)
-	assert.True(t, handlerCalled, "handler should be called for fallthrough")
+	assert.False(t, handlerCalled, "handler must not be called for a smuggling attempt")
 }
 
 // TestParser_Serve_HitWriteError_ClosedConn verifies the serveHit error
@@ -1013,10 +1014,11 @@ func TestAppendHeader_NoColon(t *testing.T) {
 	assert.Equal(t, 0, req.NHeaders, "header without colon should be skipped")
 }
 
-// TestParser_Serve_FallThroughKeepAlive verifies the fallThrough path
-// (smuggling detection) without Connection: close — the loop should
-// re-arm the deadline and continue to the next request.
-func TestParser_Serve_FallThroughKeepAlive(t *testing.T) {
+// TestParser_Serve_SmugglingRejected400ClosesConnection verifies that a
+// smuggling attempt without Connection: close is still rejected with
+// 400 — the connection is closed because the ambiguously framed body
+// cannot be safely delimited for keep-alive reuse (RFC 9110 §6.6.2).
+func TestParser_Serve_SmugglingRejected400ClosesConnection(t *testing.T) {
 	t.Parallel()
 
 	var handlerCalled int
@@ -1033,22 +1035,18 @@ func TestParser_Serve_FallThroughKeepAlive(t *testing.T) {
 
 	go func() {
 		reader := bufio.NewReader(client)
-		// Request 1: smuggling attempt triggers fallThrough=true,
-		// but no Connection: close → keep-alive.
+		// Smuggling attempt triggers fallThrough=true and must be
+		// rejected with 400; the connection must be closed.
 		_, _ = client.Write([]byte(
 			"GET / HTTP/1.1\r\nHost: localhost\r\n" +
 				"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"))
 		resp := &fasthttp.Response{}
 		_ = resp.Read(reader)
-		// Request 2: normal request, should be served on same connection.
-		_, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
-		_ = resp.Read(reader)
-		_ = server.Close()
 	}()
 
 	_ = p.Serve(server)
-	assert.GreaterOrEqual(t, handlerCalled, 2,
-		"both requests should be served on the same connection")
+	assert.Equal(t, 0, handlerCalled,
+		"the smuggling attempt must be rejected before the fallback handler")
 }
 
 // TestHandleFallThrough_WithQueryString verifies that the query string

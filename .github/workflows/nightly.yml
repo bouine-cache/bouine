@@ -408,7 +408,24 @@ jobs:
         run: |
           mkdir -p $HOME/.kube
           if [ -n "$STRESS_KUBECONFIG" ]; then
-            echo "$STRESS_KUBECONFIG" | base64 -d > $HOME/.kube/config
+            # The secret may be base64-encoded or raw YAML. Try base64
+            # first; if the decode fails (or yields something that is not
+            # a kubeconfig), treat the secret as raw content. This job
+            # previously hard-failed with "base64: invalid input" every
+            # night because the stored secret was raw YAML.
+            if echo "$STRESS_KUBECONFIG" | base64 -d > "$HOME/.kube/config" 2>/dev/null \
+              && grep -q "apiVersion: v1" "$HOME/.kube/config"; then
+              echo "kubeconfig written from base64-encoded secret"
+            else
+              printf '%s' "$STRESS_KUBECONFIG" > "$HOME/.kube/config"
+              if grep -q "apiVersion: v1" "$HOME/.kube/config"; then
+                echo "kubeconfig written from raw secret"
+              else
+                echo "::error::STRESS_KUBECONFIG is neither valid base64 nor a kubeconfig (no 'apiVersion: v1' found). Fix the secret."
+                exit 1
+              fi
+            fi
+            chmod 600 "$HOME/.kube/config"
           else
             echo "STRESS_KUBECONFIG secret not set — using runner default kubeconfig"
           fi

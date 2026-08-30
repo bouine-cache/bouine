@@ -4,7 +4,9 @@ package integration
 
 import (
 	"crypto/tls"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/testutil/poll"
 	"github.com/bouine-cache/bouine/internal/testutil/tlsutil"
 	"github.com/bouine-cache/bouine/test/integration/driver"
 )
@@ -171,4 +174,61 @@ func TestTLS_MinVersionEnforced(t *testing.T) {
 	// (e.g., connection refused if the node had crashed).
 	assert.Contains(t, err.Error(), "tls",
 		"error should be a TLS handshake rejection, got: %v", err)
+}
+
+// TestTLS_GracefulShutdownStopsNewRequests verifies the node stops
+// accepting new requests after graceful shutdown. This intent was
+// previously covered by the HTTP/2 test, which was deleted with the
+// fasthttp migration: the data plane is HTTP/1.1-only (ADR-0034), so
+// a multiplexing test cannot pass by design. The shutdown behavior
+// itself is protocol-independent and stays covered — here over TLS.
+func TestTLS_GracefulShutdownStopsNewRequests(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := tlsutil.WriteCertFiles(t, dir, "localhost")
+
+	stack := driver.BootCluster(t, driver.ClusterOptions{
+		Mode:          "strong",
+		NoAutoCleanup: true,
+		TLS: driver.TLSOptions{
+			Enabled:  true,
+			CertFile: certPath,
+			KeyFile:  keyPath,
+		},
+	})
+	defer stack.Down()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
+		},
+	}
+
+	url := stack.Nodes[0].HTTPSAddr + "/hit"
+	resp, err := client.Get(url)
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Initiate graceful shutdown by killing node 0.
+	stack.KillNode(t, 0)
+
+	// Poll until the server stops accepting new connections.
+	poll.Eventually(t, 5*time.Second, 50*time.Millisecond, func() bool {
+		r, err := client.Get(url)
+		if err != nil {
+			return true
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		return false
+	})
+
+	// Final assertion: the server must reject new requests.
+	resp, err = client.Get(url)
+	if resp != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	assert.Error(t, err, "server should reject new requests after shutdown")
 }

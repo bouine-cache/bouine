@@ -31,6 +31,14 @@ import (
 // this fall through to the fallback handler.
 const readBufferSize = 16 * 1024
 
+// writeRefreshThreshold is the minimum remaining write-deadline window
+// below which serveHit re-arms the safety-net write deadline. Mirrors
+// the read-deadline refresh strategy in Serve: one setsockopt per
+// threshold interval instead of one per request. Each hit response is
+// guaranteed at least this much write budget, and the full safety-net
+// window (p.writeTime, 5 minutes) is far larger.
+const writeRefreshThreshold = time.Minute
+
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to the fasthttp.RequestHandler.
 type Parser struct {
@@ -113,6 +121,17 @@ func (p *Parser) Serve(conn net.Conn) error {
 
 	var readBuf [readBufferSize]byte
 
+	// scratch is the per-connection request struct, reset and refilled by
+	// every parseRequest call. Allocating a fresh RawRequest per request
+	// (the struct embeds a [100]RawHeader array, ~4 KB) was the dominant
+	// allocation on the hit path — 99.3% of bytes allocated under load —
+	// driving ~63 GC cycles/s and stealing CPU from request goroutines as
+	// mark-assist. The header strings alias readBuf, which is already
+	// overwritten by the next request, so reusing the struct keeps the
+	// same lifetime semantics: nothing may retain a request beyond its
+	// iteration, which the fall-through contract already required.
+	var scratch api.RawRequest
+
 	// Set the initial read deadline once. The deadline is refreshed
 	// lazily: only when the remaining time drops below the refresh
 	// threshold, avoiding a setsockopt syscall on every request.
@@ -121,6 +140,14 @@ func (p *Parser) Serve(conn net.Conn) error {
 		return err
 	}
 	const refreshThreshold = 2 * time.Second
+
+	// writeDeadline mirrors the read-deadline refresh strategy for the
+	// hit-path write safety net. The zero value means "not armed" — the
+	// first hit arms it, and it is re-armed only when the remaining
+	// window drops below writeRefreshThreshold. Fall-through paths
+	// clear and set the OS write deadline themselves, so the tracker is
+	// reset to zero after each fall-through.
+	var writeDeadline time.Time
 
 	for {
 		// Refresh the deadline only when the remaining window is too
@@ -134,7 +161,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			}
 		}
 
-		req, fallThrough, excess, err := p.parseRequest(conn, &readBuf)
+		req, fallThrough, excess, err := p.parseRequest(conn, &readBuf, &scratch)
 		if err != nil {
 			return err
 		}
@@ -154,6 +181,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			if err := conn.SetReadDeadline(deadline); err != nil {
 				return err
 			}
+			writeDeadline = time.Time{}
 			continue
 		}
 
@@ -162,7 +190,7 @@ func (p *Parser) Serve(conn net.Conn) error {
 			now := p.nowFunc()
 			resp, hit := p.fastPath.TryHit(req, now)
 			if hit && resp != nil {
-				if err := p.serveHit(conn, resp, now); err != nil {
+				if err := p.serveHit(conn, resp, now, &writeDeadline); err != nil {
 					p.fastPath.Release(resp)
 					return err
 				}
@@ -189,11 +217,18 @@ func (p *Parser) Serve(conn net.Conn) error {
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return err
 		}
+		// handleFallThrough cleared the OS write deadline so the fallback
+		// handler could manage its own timeouts; reset the tracker so the
+		// next hit re-arms it.
+		writeDeadline = time.Time{}
 	}
 }
 
 // parseRequest reads and parses a single HTTP/1.1 request from conn.
-func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*api.RawRequest, bool, []byte, error) {
+// scratch is the caller's reusable RawRequest; the returned request
+// aliases it and is valid only until the next parseRequest call on the
+// same connection (the header strings alias readBuf).
+func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, error) {
 	buf := readBuf[:0]
 
 	headerEnd := -1
@@ -217,7 +252,8 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte) (*ap
 		}
 	}
 
-	req := &api.RawRequest{Scheme: p.scheme}
+	req := scratch
+	*req = api.RawRequest{Scheme: p.scheme}
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
 	}
@@ -387,11 +423,19 @@ func appendHeader(req *api.RawRequest, line []byte) {
 }
 
 // serveHit writes the fast path response to the connection via
-// net.Buffers.WriteTo (single writev syscall). The caller is
-// responsible for calling Release on resp after this returns.
-func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time) error {
-	if err := conn.SetWriteDeadline(now.Add(p.writeTime)); err != nil {
-		return err
+// net.Buffers.WriteTo (single writev syscall). The write deadline is
+// armed lazily via wd: it is set only on the first hit and re-armed
+// when the remaining window drops below writeRefreshThreshold — one
+// setsockopt per threshold interval instead of one per request. Each
+// hit write is guaranteed at least min(writeTime, writeRefreshThreshold)
+// of budget. The caller is responsible for calling Release on resp
+// after this returns.
+func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Time, wd *time.Time) error {
+	if wd.IsZero() || wd.Sub(now) < writeRefreshThreshold {
+		*wd = now.Add(p.writeTime)
+		if err := conn.SetWriteDeadline(*wd); err != nil {
+			return err
+		}
 	}
 	_, err := resp.Buffers.WriteTo(conn)
 	return err
@@ -421,7 +465,10 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	var ctx fasthttp.RequestCtx
 	ctx.Init2(conn, nil, false)
 
-	// Populate the request from the parsed RawRequest.
+	// Populate the request from the parsed RawRequest. S2b converts the
+	// header strings to byte slices without allocation (read-only view
+	// of the string's backing memory); SetBytesKV copies both into the
+	// header's own buffer, so the views are not retained.
 	r := &ctx.Request
 	r.Header.SetMethod(req.Method)
 	uri := req.Path
@@ -432,8 +479,8 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	r.Header.SetHost(req.Host)
 	for i := 0; i < req.NHeaders; i++ {
 		r.Header.SetBytesKV(
-			[]byte(req.Headers[i].Key),
-			[]byte(req.Headers[i].Value),
+			header.S2b(req.Headers[i].Key),
+			header.S2b(req.Headers[i].Value),
 		)
 	}
 	if len(excess) > 0 {

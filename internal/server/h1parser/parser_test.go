@@ -4,8 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 )
 
 func TestParseRequestLine(t *testing.T) {
@@ -96,14 +98,85 @@ func TestRawRequest_Header(t *testing.T) {
 	assert.Equal(t, "", v)
 }
 
+// repeatReader is an io.Reader that yields raw endlessly, simulating a
+// keep-alive connection delivering back-to-back requests.
+type repeatReader struct {
+	buf []byte
+	off int
+}
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	n := copy(p, r.buf[r.off:])
+	r.off += n
+	if r.off >= len(r.buf) {
+		r.off = 0
+	}
+	return n, nil
+}
+
+// BenchmarkGate_H1Parse_Get measures the full production parse path:
+// parseRequest on a keep-alive stream, including the scratch RawRequest
+// reset. The gate budget is 0 allocs/op — this benchmark exists
+// precisely so that a per-request allocation in parseRequest (e.g. a
+// heap-allocated RawRequest, which once dominated hit-path GC pressure
+// at ~4 KB/request) fails CI instead of hiding behind a benchmark that
+// pre-allocates outside the loop.
 func BenchmarkGate_H1Parse_Get(b *testing.B) {
 	raw := []byte("GET /api/v1/users/42 HTTP/1.1\r\nHost: example.com\r\nAccept: application/json\r\nUser-Agent: Bouine-Test/1.0\r\nX-Forwarded-For: 10.0.0.1\r\n\r\n")
+	parser := New(nil, nil)
+	conn := &mockConn{r: &repeatReader{buf: raw}}
+	var readBuf [readBufferSize]byte
+	var scratch api.RawRequest
+
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		req := &api.RawRequest{}
-		_ = findHeaderEnd(raw)
-		_ = parseRequestLine(raw, req)
-		_ = parseHeaders(raw, req)
+		req, fallThrough, _, err := parser.parseRequest(conn, &readBuf, &scratch)
+		if err != nil {
+			b.Fatalf("parseRequest: %v", err)
+		}
+		if fallThrough {
+			b.Fatal("parseRequest fell through unexpectedly")
+		}
+		if req.Method != "GET" {
+			b.Fatalf("method = %q", req.Method)
+		}
+	}
+}
+
+// BenchmarkH1Parse_FallThroughHeaderCopy measures the per-header cost
+// of populating fasthttp request headers from the parsed RawRequest —
+// the conversion handleFallThrough performs on every miss. Tracked for
+// allocation regressions on the miss path.
+func BenchmarkH1Parse_FallThroughHeaderCopy(b *testing.B) {
+	req := &api.RawRequest{
+		Method:   "GET",
+		Path:     "/api/v1/users/42",
+		Host:     "example.com",
+		NHeaders: 4,
+		Headers: [api.MaxRawHeaders]api.RawHeader{
+			{Key: "Host", Value: "example.com"},
+			{Key: "Accept", Value: "application/json"},
+			{Key: "User-Agent", Value: "Bouine-Test/1.0"},
+			{Key: "X-Forwarded-For", Value: "10.0.0.1"},
+		},
+	}
+
+	var ctx fasthttp.RequestCtx
+	ctx.Init2(&mockConn{}, nil, false)
+	r := &ctx.Request
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		r.Reset()
+		r.Header.SetMethod(req.Method)
+		r.Header.SetHost(req.Host)
+		for i := 0; i < req.NHeaders; i++ {
+			r.Header.SetBytesKV(
+				header.S2b(req.Headers[i].Key),
+				header.S2b(req.Headers[i].Value),
+			)
+		}
 	}
 }

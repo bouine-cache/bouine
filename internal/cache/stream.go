@@ -308,9 +308,12 @@ func (h *Handler) streamMissBuffered(
 		body = takeResponseBody(sf.resp)
 	}
 
+	// Owned header.Map: followers read res.Header after close(done),
+	// concurrently with releaseStreamFetch returning the pooled response
+	// to its sync.Pool (see teeStreamToClient for the same fix).
 	res := fetchResult{
 		StatusCode: sf.StatusCode,
-		Header:     sf.Header,
+		Header:     fromHeaderMap(sf.Header.ToMap()),
 		Body:       body,
 	}
 	inflight.res = res
@@ -483,9 +486,16 @@ func (h *Handler) teeStreamToClient(
 	bodyCopy := make([]byte, buf.Len())
 	copy(bodyCopy, buf.Bytes())
 
+	// Followers read inflight.res.Header after close(inflight.done),
+	// concurrently with our releaseStreamFetch(sf) below, which returns
+	// the pooled *fasthttp.Response to its sync.Pool (where another
+	// goroutine may Reset it). Publishing sf.Header — a live pointer
+	// into that pooled response — raced with the pool release. Convert
+	// to an owned header.Map before publishing so followers never touch
+	// the pooled object. The conversion cost is miss-path only.
 	inflight.res = fetchResult{
 		StatusCode: sf.StatusCode,
-		Header:     sf.Header,
+		Header:     fromHeaderMap(sf.Header.ToMap()),
 		Body:       bodyCopy,
 	}
 	close(inflight.done)
@@ -523,9 +533,12 @@ func (h *Handler) streamMissNoCache(
 		if writeErr != nil {
 			h.logger.Debug("stream miss: body copy error (no cache)", "error", writeErr)
 		}
+		// Owned header.Map — releaseStreamFetch below returns the pooled
+		// response to its sync.Pool while followers may still read the
+		// published result (see teeStreamToClient for the same fix).
 		inflight.res = fetchResult{
 			StatusCode: sf.StatusCode,
-			Header:     sf.Header,
+			Header:     fromHeaderMap(sf.Header.ToMap()),
 		}
 		close(inflight.done)
 		releaseStreamFetch(sf)

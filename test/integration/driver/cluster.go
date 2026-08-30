@@ -528,8 +528,13 @@ func doGet(url, host string) (*Response, error) {
 	defer fasthttp.ReleaseResponse(resp)
 	req.SetRequestURI(url)
 	if host != "" {
+		// UseHostHeader keeps the dial target from the URL while the
+		// Host header is overridden. The header must be set via
+		// req.Header.SetHost — req.SetHost overwrites the URI host and
+		// the client would dial the override value (e.g. "testhost",
+		// which resolves to nothing).
 		req.UseHostHeader = true
-		req.SetHost(host)
+		req.Header.SetHost(host)
 	}
 	if err := fasthttp.Do(req, resp); err != nil {
 		return nil, err
@@ -545,8 +550,9 @@ func doGetWithClient(client *fasthttp.Client, url, host string) (*Response, erro
 	defer fasthttp.ReleaseResponse(resp)
 	req.SetRequestURI(url)
 	if host != "" {
+		// Same as doGet: override the Host header, not the dial target.
 		req.UseHostHeader = true
-		req.SetHost(host)
+		req.Header.SetHost(host)
 	}
 	if err := client.Do(req, resp); err != nil {
 		return nil, err

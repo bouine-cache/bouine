@@ -10,6 +10,20 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-30
+
+### Added
+- `fetch_timeout` is now actually enforced in production: the previous
+  context-based timer never reached the transport, so every origin
+  fetch ran under a fixed 60s fallback regardless of configuration.
+  Foreground and streaming fetches now use kernel-level connection
+  deadlines; background fetches use a deadline context so shutdown
+  cancellation still works.
+- `make bump-go-stamp` updates the GO_VERSION_STAMP that keys the CI
+  prek cache (see below).
+- Integration test for graceful shutdown over TLS (the protocol-
+  independent intent previously covered by the deleted HTTP/2 test).
+
 ### Fixed
 - Hit-path tail latency: the h1parser allocated a ~4KB request struct
   per request (99.3% of allocation volume under load), driving ~63 GC
@@ -25,13 +39,41 @@ the curated, human-readable summary.
 - Integration driver: cross-node tests failed with `lookup testhost:
   no such host` — the driver dialed the Host-header override instead
   of only overriding the header.
+- `Vary: *` on any field line now blocks storage: the Map-based check
+  read only the first header value and missed stars on later lines
+  (caught by cache-tests vary-syntax-empty-star-lines).
+- Multi-line `Cache-Control` and `Vary` response headers now combine
+  per RFC 9110 §5.2 in the miss-path cacheability check.
+- Prometheus label classification: the middleware fallback path now
+  reports the real HTTP method instead of squashing it to "OTHER".
+- Nightly stress test (k8s): the kubeconfig step hard-failed with
+  `base64: invalid input` when the secret was stored as raw YAML; it
+  now accepts either encoding and fails with an actionable message.
+- False-positive goleak failures from fasthttp background goroutines.
+- Deleted the accidentally resurrected HTTP/2 integration tests: the
+  data plane is HTTP/1.1-only by ADR-0034, so multiplexing and h2c
+  tests cannot pass by design.
 
 ### Changed
+- MISS-path allocation cuts (measured on the cacheable-miss benchmark:
+  24 → 13 allocs/op, −30% CPU; no-store miss −14%; Vary miss −13%;
+  data-plane middleware 4 → 0 allocs/op with access logging off):
+  transient origin bodies are transferred by buffer ownership instead
+  of a full-body copy; non-cacheable misses no longer build a header
+  map (byte-level cacheability precheck); unique per-object header
+  values (X-Bouine-Path/Host) skip global interning; the singleflight
+  leader table is sharded instead of a sync.Map; the access-log-only
+  cacheKey user value is stored only when key logging is enabled.
 - Benchmark gate `H1Parse_Get` now exercises the full production parse
   path so per-request allocations fail the zero-alloc budget.
-- The `Handler_CacheMiss_Cacheable` allocation budget is 24 (was 23):
-  the `pkg/unique` header interning added one entry-node allocation per
-  miss; attributed via allocation profile.
+- The `Handler_CacheMiss_Cacheable` allocation budget is 13 (was 23
+  pre-optimization; briefly 24 while `pkg/unique` header interning
+  added an entry-node allocation per miss).
+- CI prek hook-environment cache re-enabled: its cache key is now
+  Go-version-stamped via `.pre-commit-config.yaml`, so a Go bump can
+  no longer serve a stale golangci-lint binary (the failure that
+  originally forced the cache off). A new prek hook enforces the
+  stamp stays in sync with go.mod.
 
 ## [0.5.1] - 2026-08-26
 
@@ -605,7 +647,11 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.6.0...HEAD
+
+[0.6.0]: https://github.com/bouine-cache/bouine/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/bouine-cache/bouine/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/bouine-cache/bouine/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.3
 [0.4.2]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.2
 [0.4.1]: https://github.com/bouine-cache/bouine/releases/tag/v0.4.1

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,6 +197,103 @@ func TestFastPathHandler_StaleHit(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "STALE", resp.CacheResult)
 	fp.Release(resp)
+}
+
+// TestFastPathHandler_StaleHitTriggersSWR verifies the fast-path SWR
+// hook: a StaleHit on an object with a stale-while-revalidate window
+// must invoke onStale with the lookup key, so the engine-wired handler
+// can trigger background revalidation. Without this, fast-path stale
+// objects would never refresh (the miss path revalidates; the fast
+// path previously only serialized).
+func TestFastPathHandler_StaleHitTriggersSWR(t *testing.T) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+
+	var mu sync.Mutex
+	var gotKey api.Key
+	var gotObj *api.Object
+	var callCount int
+	fp := NewFastPathHandlerFromStore(store).WithOnStale(func(_ *api.RawRequest, key api.Key, obj *api.Object) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+		gotKey = key
+		gotObj = obj
+	})
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:                  key,
+		StatusCode:           200,
+		Header:               headerMap("Content-Type", "text/html", "Content-Length", "5"),
+		Body:                 []byte("stale"),
+		BodySize:             5,
+		StoredAt:             time.Now().Add(-10 * time.Second),
+		TTL:                  1 * time.Second,
+		StaleWhileRevalidate: 60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	req := &api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	fp.Release(resp)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, callCount, "StaleHit within the SWR window must fire onStale exactly once")
+	assert.Equal(t, key, gotKey, "the lookup (variant) key must be passed")
+	assert.Same(t, obj, gotObj)
+}
+
+// TestFastPathHandler_HitDoesNotTriggerSWR verifies the onStale hook
+// fires only on StaleHit, not on fresh HITs.
+func TestFastPathHandler_HitDoesNotTriggerSWR(t *testing.T) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+
+	var mu sync.Mutex
+	var calls int
+	fp := NewFastPathHandlerFromStore(store).WithOnStale(func(_ *api.RawRequest, _ api.Key, _ *api.Object) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+	})
+
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET",
+		Path:   "/",
+		Host:   "example.com",
+		Scheme: "http",
+	}, nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "5"),
+		Body:       []byte("fresh"),
+		BodySize:   5,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	req := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
+	resp, ok := fp.TryHit(req, time.Now())
+	require.True(t, ok)
+	fp.Release(resp)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, calls, "a fresh HIT must not fire onStale")
 }
 
 func BenchmarkGate_FastPath_Hit(b *testing.B) {

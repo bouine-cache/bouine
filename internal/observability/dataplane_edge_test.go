@@ -6,6 +6,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDataPlaneMetrics_IncrementSmugglingRejected(t *testing.T) {
@@ -189,4 +190,38 @@ func TestDataPlaneMetrics_RequestQueueDepth(t *testing.T) {
 		}
 	}
 	assert.Fail(t, "request_queue_depth not found")
+}
+
+// TestFastPath_RecordHit_EmptyRouteMapsToDefault verifies that
+// fast-path hits arriving with route="" (the engine-level fast path
+// carries no route name) are recorded on the pre-resolved _default
+// route metrics instead of falling through to WithLabelValues, and
+// that the route label is normalized to _default.
+func TestFastPath_RecordHit_EmptyRouteMapsToDefault(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.PreResolveRoutes(nil)
+
+	m.RecordHit("GET", "", "HIT", "hot", 200, 1024, 5*time.Millisecond)
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, fam := range families {
+		if fam.GetName() != "bouine_requests_total" {
+			continue
+		}
+		for _, met := range fam.GetMetric() {
+			labels := met.GetLabel()
+			route := ""
+			for _, l := range labels {
+				if l.GetName() == "route" {
+					route = l.GetValue()
+				}
+			}
+			if route == "" {
+				t.Errorf("fast-path hit with empty route must be labelled _default, got route=\"\"")
+			}
+		}
+	}
 }

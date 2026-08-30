@@ -1063,6 +1063,51 @@ func (h *Handler) isOwnerOrUnmanaged(key api.Key) bool {
 	return isLocal
 }
 
+// TriggerBgRevalidateFromFastPath serves as the fast-path StaleHit SWR
+// hook: it materializes the RawRequest fields (which alias the h1parser
+// connection's read buffer and are invalidated as soon as this request's
+// iteration ends) into an owned RequestInfo, then triggers the same
+// background revalidation the miss path uses (triggerBgRevalidate).
+// Non-blocking: the refresh limit / revalSem backpressure inside
+// triggerBgRevalidate applies unchanged.
+func (h *Handler) TriggerBgRevalidateFromFastPath(req *api.RawRequest, key api.Key, stale *api.Object) {
+	if !h.isOwnerOrUnmanaged(key) {
+		return
+	}
+	// Materialize before the request buffer is reused by the next
+	// keep-alive request on the same connection.
+	ri := requestInfoFromRaw(req)
+	h.triggerBgRevalidate(ri, key, stale)
+}
+
+// requestInfoFromRaw builds an owned RequestInfo from a RawRequest.
+// The RawRequest's string fields alias the h1parser read buffer, so all
+// strings are copied into owned memory — the fast-path equivalent of
+// the materialize-before-escape rule the SWR goroutine follows in
+// triggerBgRevalidate.
+func requestInfoFromRaw(req *api.RawRequest) RequestInfo {
+	uri := req.Path
+	if req.Query != "" {
+		uri += "?" + req.Query
+	}
+	method := req.Method
+	if method == "HEAD" {
+		method = "GET"
+	}
+	ri := RequestInfo{
+		Method: method,
+		URI:    uri,
+		Host:   req.Host,
+		Path:   req.Path,
+		TLS:    req.Scheme == "https",
+	}
+	ri.Header = header.NewMap(req.NHeaders)
+	for i := 0; i < req.NHeaders; i++ {
+		ri.Header.Set(req.Headers[i].Key, req.Headers[i].Value)
+	}
+	return ri
+}
+
 // forwardToOwnerIfRemote forwards obj to its owner via the write-to-owner
 // RPC when this node is a non-owner. Used in strong mode so a non-owner
 // that fetches from origin (after a peer-fetch miss) delivers the object

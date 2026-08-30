@@ -913,7 +913,18 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 
 	var fastPathHandler api.FastPathHandler
 	if e.cfg.Experimental.H1FastPath && rs.store != nil {
-		fastPathHandler = cache.NewFastPathHandlerFromStore(rs.store)
+		fp := cache.NewFastPathHandlerFromStore(rs.store)
+		// Wire SWR background revalidation: without this the fast path
+		// would serve stale objects that never refresh. Any
+		// refresh-enabled handler can schedule refreshes — the store is
+		// shared across routes.
+		for _, ch := range rs.handlers {
+			if ch.RefreshEnabled() {
+				fp.WithOnStale(ch.TriggerBgRevalidateFromFastPath)
+				break
+			}
+		}
+		fastPathHandler = fp
 		e.logger.Info("H1 fast path enabled", "experimental", true)
 	}
 

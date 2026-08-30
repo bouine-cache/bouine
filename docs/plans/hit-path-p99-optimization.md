@@ -77,6 +77,69 @@ requires an event-loop connection multiplexer in h1parser — a large
 rewrite with real risk. Land the cheap wins first; re-measure on the
 Linux runner before considering.
 
+## 2026-08-30 follow-up: the fast path was never enabled in benchmarks
+
+Auditing the loadtest configuration found that **every committed
+nginx/varnish/envoy comparison ran with `experimental.h1_fast_path`
+absent from `bench/loadtest/config/bouine.yaml`** — the flag defaults
+to false, so all rounds (baseline through v3) measured the slow
+middleware chain (tracing → metrics → router, ~550ns/request of
+middleware plus the fasthttp worker machinery) while the 183ns/0-alloc
+hit path sat unused. The nightly runner (4 dedicated CPUs per proxy)
+is the environment where the gap to nginx actually lives; it now runs
+with the fast path on.
+
+Enabling it required closing five correctness gaps in the h1parser and
+fast path first (each would have been a silent behavioral regression
+vs the middleware path):
+
+1. **SWR never refreshed via fast path** — fast-path StaleHit served
+   stale objects but never triggered background revalidation, so stale
+   content would stay stale forever under pure-hit traffic. Fixed with
+   an `onStale` hook on `FastPathHandler` wired by the engine to a
+   refresh-enabled handler's `TriggerBgRevalidateFromFastPath`
+   (handler.go), which materializes the RawRequest fields (they alias
+   the connection read buffer) before the goroutine escapes.
+2. **Fall-through body truncation** — `handleFallThrough` copied only
+   the bytes already buffered in `readBuf` into the RequestCtx
+   (`SetBodyRaw`), silently truncating bodies that spanned multiple
+   TCP reads. Fixed by replaying the rebuilt request head through a
+   `prefixConn` and letting fasthttp re-parse the request from the
+   live socket with full body framing (CL, chunked, trailers,
+   Expect: 100-continue).
+3. **Pipelined bytes after a hit were discarded** — the Serve loop
+   overwrote `readBuf` on the next iteration, dropping any bytes the
+   client pipelined past a hit's header block. The hit path now hands
+   excess bytes to the fallback handler.
+4. **Oversize headers were dropped** — requests with >16 KiB of
+   headers returned nothing. They now fall through to the fallback
+   handler via the same prefix mechanism.
+5. **Smuggling was served, not rejected** — CL+TE / duplicate-CL
+   requests fell through to fasthttp, which served them normally.
+   The parser now rejects with 400 + connection close per RFC 9110
+   §6.6.2 (two pre-existing tests asserted the served behavior and
+   were updated to assert the 400).
+
+Also fixed while here:
+
+- h1parser idle timeout was 10s vs fasthttp's 120s (nginx: 65s) —
+  visible as elevated `http_req_connecting` in k6 results (k6
+  reconnects when keep-alives die). Now 120s, matching the fasthttp
+  listener.
+- The h1parser clock is now `platform.CoarseNow` on Linux (~2-4ns vs
+  ~25-40ns per call; the dataplane middleware already used it).
+- Fast-path hits carried `route=""` in Prometheus labels and took the
+  `WithLabelValues` fallback path; `RecordHit` now maps empty route to
+  `_default` (pre-resolved array path, consistent with dashboards).
+
+Verification: full `go test -race` suite green, `bench/run.sh gate`
+PASS (FastPath_Hit 177-188ns, 0 allocs), cache-tests conformance with
+`BOUINE_FAST_PATH=true` shows **zero regressions vs the fast-path-off
+baseline** (337 vs 340 pass — the 3 extra baseline passes are flaky
+setup entries, not fast-path failures; diff of per-test results
+confirms no test passes without and fails with the fast path),
+`make integration` green.
+
 ## Benchmark hygiene
 
 - `BenchmarkGate_H1Parse_Get` now drives the full `parseRequest`

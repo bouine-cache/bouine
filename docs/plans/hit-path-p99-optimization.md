@@ -140,6 +140,51 @@ setup entries, not fast-path failures; diff of per-test results
 confirms no test passes without and fails with the fast path),
 `make integration` green.
 
+## Rejected: fasthttp Prefork
+
+**Candidate**: `fasthttp/prefork` forks the daemon into one child per
+core with SO_REUSEPORT, claiming throughput and p99 gains by letting
+each core own a private GC and scheduler ("Go doesn't have to share
+and manage memory between cores"). nginx itself uses this model.
+
+**Why rejected**: the prefork model is fundamentally incompatible with
+a daemon that *is* shared state:
+
+- **The hot store is process memory.** Prefork children inherit
+  copy-on-write memory at fork time; cache fills in child A are
+  invisible to children B..N. A node becomes N independent 1/N caches:
+  hit rate collapses, and a purge/ban lands in one child while the
+  others serve the invalidated object until their own TTL expires —
+  a correctness violation of the invalidation contract. fasthttp's own
+  README carries the warning: "using prefork prevents the use of any
+  global state! Things like in-memory caches won't work."
+- **The Engine cannot start in a child.** Each child re-executes the
+  process; the admin listener and the memberlist gossip UDP/TCP ports
+  are bound once, so every child after the first fails EADDRINUSE.
+  Cluster mode, the graceful-drain `Close(ctx)` contract (AGENTS.md
+  §11), rolling restarts, and the shutdown sequencer all assume a
+  single process.
+- **Warm tier and WAL would be opened N times** — the mmap'd warm tier,
+  eviction accounting, async fsync (ADR-0024), and the tombstone drain
+  goroutine (ADR-0029) would race across processes with no locks.
+- **The claimed benefit is 2019-era** (go1.13.6, 2017 MacBook, a
+  `time.Sleep(100ms)` handler): +7.5% RPS, p99 15ms vs 75ms — a pure
+  goroutine park/unpark scheduling artifact. Go 1.27's scheduler has
+  reclaimed most of that, and bouine already has the modern
+  equivalents: cgroup-quota-aware GOMAXPROCS (engine.go), the
+  zero-alloc hit path (GC 63/s → ~0.3/s, no cross-core GC pressure),
+  sharded hot store + sharded singleflight, and SO_REUSEPORT with
+  N accept loops on Linux (listener.go serveMulti) — the same
+  kernel-level accept distribution prefork buys, without the fork.
+- **The hit path bypasses `fasthttp.Server.Serve` anyway** — the
+  h1parser accepts connections directly (fp_conn.go), so a Prefork
+  wrapper would not touch the path this effort optimizes.
+
+**Revisit if**: none foreseeable. If accept/worker contention shows up
+on the Linux runner, extend `serveMultiFastPath` (per-CPU accept loops
+already exist) or the event-loop multiplexer above — both keep the
+cache in one process.
+
 ## Benchmark hygiene
 
 - `BenchmarkGate_H1Parse_Get` now drives the full `parseRequest`

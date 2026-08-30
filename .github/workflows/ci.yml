@@ -56,9 +56,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
+      # cache: true — the prek environment cache. Its key is derived from
+      # the hash of .pre-commit-config.yaml, so the GO_VERSION_STAMP in
+      # that file (enforced by the go-version-stamp hook + make
+      # bump-go-stamp) invalidates the cache on every Go toolchain bump.
+      # Without the stamp this cache served a stale golangci-lint binary
+      # after the Go 1.27 bump and had to be disabled (commit 024819b);
+      # the stamp is what makes re-enabling safe.
       - uses: j178/prek-action@v3.0.0
         with:
-          cache: false
+          cache: true
 
   govulncheck:
     name: govulncheck

@@ -178,6 +178,17 @@ hooks: ## Install prek hooks (commit + commit-msg + pre-push).
 	prek install --hook-type pre-push
 	@echo "prek hooks installed."
 
+.PHONY: bump-go-stamp
+bump-go-stamp: ## Update GO_VERSION_STAMP in .pre-commit-config.yaml from go.mod.
+## The stamp keys the CI prek cache (see .pre-commit-config.yaml header);
+## run this after any Go toolchain bump so the cached hook environments
+## (golangci-lint & friends) are rebuilt with the new toolchain instead
+## of failing with a stale-binary error.
+	@set -euo pipefail; \
+	go_version=$$(sed -n 's/^go //p' go.mod | tr -d '[:space:]'); \
+	sed -i '' "s|^# GO_VERSION_STAMP: .*|# GO_VERSION_STAMP: $$go_version|" .pre-commit-config.yaml; \
+	echo "GO_VERSION_STAMP updated to $$go_version"
+
 .PHONY: setup-dev
 setup-dev: ## Install all development tools and hooks. Run this once after cloning.
 	@echo ">>> Installing Go development tools..."

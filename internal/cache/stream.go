@@ -529,10 +529,21 @@ func (h *Handler) streamMissBuffered(
 
 	// Owned header.Map: followers read res.Header after close(done),
 	// concurrently with releaseStreamFetch returning the pooled response
-	// to its sync.Pool (see teeStreamToClient for the same fix).
+	// to its sync.Pool (see teeStreamToClient for the same fix). On the
+	// cacheable path resMap is already an owned Map built by streamMiss
+	// (ToMap detaches from the pooled response) — reuse it instead of a
+	// second FromFastHTTP conversion. Non-cacheable misses arrive with a
+	// zero Map (streamMiss skipped the build), so build one here: it is
+	// only 2 allocs and only on the never-stored path, but followers
+	// still read it after close(done) and must not touch the pooled
+	// response.
+	owned := resMap
+	if owned.Len() == 0 {
+		owned = sf.Header.ToMap()
+	}
 	res := fetchResult{
 		StatusCode: sf.StatusCode,
-		Header:     fromHeaderMap(sf.Header.ToMap()),
+		Header:     fromHeaderMap(owned),
 		Body:       body,
 	}
 	inflight.res = res

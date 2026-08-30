@@ -7,6 +7,10 @@ admin:
   # root) to rotate this token without editing a committed file.
   # CI: inject via a repository secret → BOUINE_ADMIN_TOKEN env var.
   token: "loadtest-token"
+  # Enabled for the PGO capture legs (bench/pgo/run.sh) and general
+  # profiling under load. The admin port is not published beyond
+  # localhost:9000 in this topology.
+  pprof_enabled: true
 
 storage:
   hot_max_bytes: 1GiB

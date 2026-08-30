@@ -62,3 +62,11 @@ field to `Superseded by ADR-NNNN`.
 | 0031   | Pluggable eviction framework                         | Accepted |
 | 0032   | Changelog automation                                 | Accepted |
 | 0033   | RPS-based HPA autoscaling                            | Proposed |
+| 0034   | Reverse ADR-0006, adopt fasthttp as the sole HTTP stack | Accepted |
+| 0035   | Peer wire protocol is HTTP/1.1 over mTLS              | Accepted |
+| 0036   | Header type migration — local canonicalHeaderKey      | Accepted |
+| 0037   | Zero-copy origin response capture via fasthttp pooled response | Accepted |
+| 0038   | Streaming origin responses                           | Accepted |
+| 0039   | Peer pipelining                                      | Accepted |
+| 0040   | prek cache keyed by GO_VERSION_STAMP                 | Accepted |
+| 0041   | Profile-guided optimization via committed default.pgo | Accepted |

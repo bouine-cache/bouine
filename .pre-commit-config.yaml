@@ -1,5 +1,16 @@
 # prek configuration for bouine.
 #
+# GO_VERSION_STAMP: 1.27.0
+#
+# The stamp above is load-bearing, not a decoration. prek-action's CI
+# cache key is the hash of this file (plus OS/arch/python), so stamping
+# the Go version here invalidates the cached hook environments —
+# including the golangci-lint binary built with that toolchain — the
+# moment go.mod's version changes. Without it, a Go bump leaves a stale
+# binary in the cache (the exact failure that forced disabling the cache
+# in commit 024819b). scripts/check-go-version-stamp.sh enforces that
+# the stamp stays in sync; `make bump-go-stamp` updates it.
+#
 # This file is the local mirror of CI's first stage. Every contributor
 # (human or AI) MUST run these hooks before each commit. Bypassing is
 # forbidden (AGENTS.md §2.11).
@@ -41,6 +52,21 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=1024]
         exclude: ^testdata/
+
+  # ---------------------------------------------------------------------
+  # GO_VERSION_STAMP guard: fail if the stamp comment at the top of this
+  # file does not match go.mod. The stamp keys the CI prek cache (see the
+  # comment above); drift would resurrect the stale-golangci-lint failure
+  # the cache was originally disabled for (commit 024819b).
+  # ---------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: go-version-stamp
+        name: check GO_VERSION_STAMP matches go.mod
+        entry: bash scripts/check-go-version-stamp.sh
+        language: system
+        files: ^(go\.mod|\.pre-commit-config\.yaml)$
+        pass_filenames: false
 
   # ---------------------------------------------------------------------
   # Go: format, vet, tests, golangci-lint, mod tidy.

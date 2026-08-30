@@ -94,6 +94,22 @@ bench-gate: ## Run the gating benchmark suite and compare against the committed 
 bench-all: ## Run every benchmark in cache/storage/h1parser (slow — for deep analysis, not the gate).
 	bash bench/run.sh all
 
+.PHONY: pgo-capture
+pgo-capture: ## Capture CPU profiles from the three PGO traffic legs (hit/miss/mixed).
+	bash bench/pgo/run.sh capture
+
+.PHONY: pgo-merge
+pgo-merge: ## Merge captured leg profiles into ./default.pgo (run after pgo-capture).
+	bash bench/pgo/run.sh merge
+
+.PHONY: pgo-refresh
+pgo-refresh: ## Capture + merge + sanity-check the committed default.pgo (used by CI).
+	bash bench/pgo/run.sh refresh
+
+.PHONY: pgo-verify
+pgo-verify: ## Build with/without default.pgo and compare binary sizes (sanity, not a gate).
+	bash bench/pgo/run.sh verify
+
 .PHONY: conformance
 conformance: build ## Run the http-tests/cache-tests conformance harness.
 	bash test/cachetests/run.sh

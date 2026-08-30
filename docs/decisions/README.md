@@ -60,6 +60,7 @@ field to `Superseded by ADR-NNNN`.
 | 0029   | Dedicated tombstone drain goroutine                  | Accepted |
 | 0030   | 128-bit cache key via XXH128                         | Accepted |
 | 0031   | Pluggable eviction framework                         | Accepted |
+| 0031   | Pluggable eviction framework                         | Accepted |
 | 0032   | Decouple hot SIEVE eviction from warm tombstone     | Accepted |
 | 0033   | RPS-based HPA autoscaling                           | Proposed |
 | 0034   | Reverse ADR-0006, adopt fasthttp as the sole HTTP stack | Accepted |
@@ -81,3 +82,4 @@ field to `Superseded by ADR-NNNN`.
 | 0051   | Bucket Accept-Encoding in the variant key, paired with canonical origin forwarding | Accepted |
 | 0057   | Key the collapsing flight on the declared variation dimensions | Accepted |
 | 0058   | Purge and signal on Vary-declaration drift at revalidation | Accepted |
+| 0060   | Profile-guided optimization via committed default.pgo | Accepted |

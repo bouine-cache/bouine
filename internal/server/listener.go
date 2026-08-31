@@ -119,11 +119,16 @@ type ListenerConfig struct {
 	TLSConfig      *tls.Config
 	Addr           string
 	Scheme         string
+	Name           string
 	MaxConnections int
 	IdleTimeout    time.Duration
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
+	// H1Reactor enables the single-goroutine epoll hit-path event loop
+	// (Linux only; experimental). When true but unavailable, the
+	// listener logs a warning and uses the blocking parser path.
+	H1Reactor bool
 }
 
 // Listener wraps a fasthttp.Server with lifecycle methods matching
@@ -144,6 +149,7 @@ type Listener struct {
 	tcpFastOpen    bool
 	tcpDeferAccept bool
 	reusePort      bool
+	h1Reactor      bool
 }
 
 // DefaultIdleTimeout is the keep-alive idle timeout for data-plane
@@ -189,6 +195,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		tcpFastOpen:    cfg.TCPFastOpen,
 		tcpDeferAccept: cfg.TCPDeferAccept,
 		reusePort:      cfg.ReusePort,
+		h1Reactor:      cfg.H1Reactor,
 		fastPath:       cfg.FastPath,
 		fastMetrics:    cfg.FastMetrics,
 		scheme:         cfg.Scheme,

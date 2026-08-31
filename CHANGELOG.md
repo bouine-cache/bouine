@@ -95,6 +95,19 @@ the curated, human-readable summary.
 - h1parser clock now uses `platform.CoarseNow` on Linux, matching the
   dataplane middleware (~2-4ns vs ~25-40ns per call).
 
+### Added
+- Experimental epoll reactor for batch cache-hit serving
+  (`experimental.h1_reactor`, Linux only, requires `h1_fast_path`,
+  default off; ADR-0041). One goroutine per listener multiplexes all
+  hit-path connections — one `epoll_wait` wakeup serves a batch
+  instead of one goroutine park/unpark per request, which is the
+  residual structural gap to nginx's worker event loop. Misses,
+  conditional requests, ranges, pipelined bodies, and oversize
+  headers hand off to the existing blocking parser path unchanged.
+  Not yet enabled for benchmarks: the nightly runner first establishes
+  blocking-path numbers with the fast path on, then the flag flips as
+  a one-line measured increment.
+
 ### Changed
 - `bench/loadtest/config/bouine.yaml` enables
   `experimental.h1_fast_path` so proxy comparisons exercise the
@@ -109,6 +122,10 @@ the curated, human-readable summary.
   ServiceMonitor, whose default scrape interval relaxed from 15s to
   60s; default topologySpreadConstraints now use ScheduleAnyway with
   both zone and hostname keys.
+- `request_duration_seconds` no longer enables Prometheus
+  native-histogram bucketing: the sparse-bucket math cost per Observe
+  was called out in the hit-path plan, and no dashboard queries native
+  histograms (all PromQL uses classic `_bucket` series).
 
 ## [0.5.2] - 2026-08-30
 

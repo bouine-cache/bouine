@@ -33,6 +33,38 @@ All four were fixed on this branch. Measured combined result
 | GC cycles     | ~63/s       | ~0.3/s      | ~-200× |
 | allocs/15s    | 7.29GB      | ~9KB        | ~-99.9%|
 
+## 2026-08-30 follow-up 2: native histogram off + the epoll reactor
+
+Two changes land after the fast-path-enabling audit:
+
+1. **`NativeHistogramBucketFactor` dropped from
+   `request_duration_seconds`** — the plan's own revisit note above
+   ("no dashboard uses native histogram queries; all PromQL uses
+   classic `_bucket` series") plus the per-Observe sparse-bucket math
+   cost on the hit path's duration histogram. Classic buckets are
+   unchanged; dashboards unaffected.
+
+2. **epoll reactor for batch hit serving** (ADR-0041,
+   `experimental.h1_reactor`, Linux, default off, requires
+   `h1_fast_path`). This attacks the "Known remaining gap" below
+   directly: one goroutine per listener multiplexes all hit-path
+   connections via `epoll_wait` — one wakeup per batch instead of one
+   per request, no goroutine park/unpark, no Go runtime poller on the
+   hit path. Everything that is not a plain hit (miss, conditional,
+   range, pipelined body, oversize headers, malformed) hands off to a
+   per-connection goroutine running the existing blocking Parser with
+   the buffered bytes replayed, so all correctness semantics stay
+   shared. Verified: portable state-machine unit tests (12), Linux
+   epoll end-to-end tests (4) under `-race`, a 0-alloc
+   `BenchmarkGate_Reactor_Hit` (370-405ns on the Linux runner), and a
+   live-daemon smoke (1 MISS handoff + 29 keep-alive HITs on one
+   connection).
+
+The reactor is NOT enabled for benchmarks in this change: the nightly
+runner must first establish the blocking-path numbers with the fast
+path on (PR #563), then flipping `h1_reactor: true` in
+`bench/loadtest/config/bouine.yaml` is a one-line measured increment.
+
 ## Rejected: sharding the hot Prometheus metrics tuple
 
 **Candidate**: `RecordHit` updates

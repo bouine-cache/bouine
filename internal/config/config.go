@@ -69,6 +69,14 @@ type ExperimentalConfig struct {
 	// zero-alloc serving. See ADR-0034 and issue #521 for the full
 	// migration plan. Default false.
 	FasthttpMigration bool `yaml:"fasthttp_migration,omitempty" json:"fasthttp_migration,omitempty"`
+
+	// H1Reactor enables the single-goroutine epoll event loop that
+	// batch-serves cache hits without per-request goroutine park/unpark
+	// (Linux only; see docs/decisions/0041-h1-epoll-reactor.md). Requires
+	// h1_fast_path. When true but unavailable (non-Linux, epoll
+	// failure), the listener logs a warning and uses the blocking
+	// parser path. Default false.
+	H1Reactor bool `yaml:"h1_reactor,omitempty" json:"h1_reactor,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

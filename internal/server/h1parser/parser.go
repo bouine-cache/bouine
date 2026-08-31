@@ -368,6 +368,21 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scra
 		}
 	}
 
+	req, fallThrough, excess, err := p.parseBuffer(buf, headerEnd, scratch)
+	if err != nil || fallThrough {
+		return req, fallThrough, excess, err
+	}
+	return req, false, excess, nil
+}
+
+// parseBuffer parses one request from a fully-read header block. It is
+// the parser half of parseRequest, shared with the reactor: the reactor
+// accumulates bytes itself (raw non-blocking reads) and calls this once
+// the header terminator is present. headerEnd is the index just past
+// the \r\n\r\n terminator, or -1 when the buffer ended at EOF without
+// one. The returned request aliases scratch and buf and is valid only
+// until the next parse call.
+func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, error) {
 	req := scratch
 	*req = api.RawRequest{Scheme: p.scheme}
 	if err := parseRequestLine(buf, req); err != nil {

@@ -181,6 +181,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: listen.idle_timeout must be >= 0, got %v", c.Listen.IdleTimeout)
 	}
 
+	// The reactor multiplexes fast-path hit serving; without the fast
+	// path it has nothing to serve and would silently no-op. The
+	// listener wiring also gates on H1FastPath, so reject the
+	// combination early at load time instead of logging a warning at
+	// startup.
+	if c.Experimental.H1Reactor && !c.Experimental.H1FastPath {
+		return errors.New("config: experimental.h1_reactor requires experimental.h1_fast_path")
+	}
+
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other
 	// than -1 are meaningless.

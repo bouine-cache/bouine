@@ -226,9 +226,9 @@ govulncheck: ## Run govulncheck.
 ci: lint test-short build hooks-run ## Run the CI gate locally (lint, test, build, hooks).
 
 .PHONY: test-k8s-setup
-test-k8s-setup: build ## Build images and deploy bouine + test origin on Kubernetes.
-	docker build -t bouine:dev .
-	docker build -t bouine-test-origin:dev test/integration/origin/
+test-k8s-setup: build ensure-buildx ## Build images and deploy bouine + test origin on Kubernetes.
+	DOCKER_BUILDKIT=1 docker build -t bouine:dev .
+	DOCKER_BUILDKIT=1 docker build -t bouine-test-origin:dev test/integration/origin/
 	-kubectl create namespace bouine-test 2>/dev/null
 	-kubectl -n bouine-test delete pod origin --force 2>/dev/null
 	-kubectl -n bouine-test delete svc origin 2>/dev/null
@@ -297,10 +297,33 @@ RESULTS_DIR  := $(LOADTEST_DIR)/results
 CHARTS_DIR   := $(RESULTS_DIR)/charts
 PYTHON       ?= python3
 
+# BUILDX_VERSION pins the docker buildx CLI plugin that loadtest-setup
+# installs on demand. The load-test runner image ships docker without
+# the plugin, and the legacy builder cannot expand the $BUILDPLATFORM /
+# TARGETOS / TARGETARCH ARGs the main Dockerfile relies on — it fails
+# with "failed to parse platform : '' is an invalid OS component".
+BUILDX_VERSION := v0.30.0
+
+# ensure-buildx installs the docker buildx CLI plugin to the invoking
+# user's plugin directory (~/.docker/cli-plugins — no sudo needed) when
+# `docker buildx` is unavailable. Idempotent: a no-op once installed.
+.PHONY: ensure-buildx
+ensure-buildx:
+	@if docker buildx version >/dev/null 2>&1; then \
+		echo "buildx plugin present"; \
+	else \
+		echo "installing docker buildx $(BUILDX_VERSION) to ~/.docker/cli-plugins"; \
+		mkdir -p "$$HOME/.docker/cli-plugins"; \
+		curl -fsSL "https://github.com/docker/buildx/releases/download/$(BUILDX_VERSION)/buildx-$(BUILDX_VERSION).linux-$$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')" \
+			-o "$$HOME/.docker/cli-plugins/docker-buildx"; \
+		chmod +x "$$HOME/.docker/cli-plugins/docker-buildx"; \
+		docker buildx version; \
+	fi
+
 .PHONY: loadtest-setup
-loadtest-setup: build ## Build all TUT images + origin for load testing.
-	docker build -t bouine:loadtest .
-	docker build -t bouine-test-origin:loadtest test/integration/origin/
+loadtest-setup: build ensure-buildx ## Build all TUT images + origin for load testing.
+	DOCKER_BUILDKIT=1 docker build -t bouine:loadtest .
+	DOCKER_BUILDKIT=1 docker build -t bouine-test-origin:loadtest test/integration/origin/
 	@echo "bouine:loadtest and bouine-test-origin:loadtest images built."
 	@echo "Pull NGINX/Varnish/Envoy base images:"
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml pull nginx varnish envoy 2>/dev/null || true

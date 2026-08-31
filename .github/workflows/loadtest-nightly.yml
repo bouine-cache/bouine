@@ -76,8 +76,6 @@ jobs:
         run: make loadtest-setup
 
       - name: Run §3.1–§3.6
-        env:
-          DOCKER_BUILDKIT: "1"
         run: make loadtest-single
 
       - name: Generate charts + report

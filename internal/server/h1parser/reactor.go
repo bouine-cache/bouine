@@ -71,6 +71,14 @@ var errAgain = errors.New("reactor: would block")
 // net.Conn.Read/Write — those park the goroutine on EAGAIN via the
 // Go runtime poller, which is exactly what the reactor exists to
 // avoid).
+// reactorConn is the per-connection state machine. Exactly one
+// reactor goroutine owns it; after handoff nobody may touch it.
+//
+// The I/O is injected (read/write funcs over the raw fd, never
+// net.Conn.Read/Write — those park the goroutine on EAGAIN via the
+// Go runtime poller, which is exactly what the reactor exists to
+// avoid).
+//
 // interleave the value-typed bulk (16 KiB readBuf, ~4 KiB scratch) with
 // the hot scalar fields to save 40 bytes of padding on a struct that is
 // allocated once per connection; keeping the hot state in the leading
@@ -82,12 +90,38 @@ type reactorConn struct {
 	conn     net.Conn
 	readFn   func([]byte) (int, error)
 	writeFn  func([]byte) (int, error)
-	writeBuf []byte // pooled; serialized hit response
-	state    rcState
-	rLen     int
-	writeLen int
-	lastRead time.Time
-	scratch  api.RawRequest
+	fd       int // raw fd, cached at accept; -1 when unknown
+	writeBuf []byte
+	// writeVec holds the fast-path response's net.Buffers slices for
+	// zero-copy writev flushing (writeBuf alone is used for the small
+	// header-serialized case and for tests via writeFn).
+	writeVec [][]byte
+	// writeVecOffs tracks the per-slice flushed offset when writev
+	// completes partially.
+	writeVecOffs []int
+	// retainResp/retainFP hold the fast-path response and its owning
+	// handler between parsed() and the completed flush: writev aliases
+	// the cache object body, so the response must not return to the
+	// pool until every byte is on the socket. The handler (not a
+	// method value — assigning fp.Release boxes the receiver and costs
+	// an allocation per hit) is stored to call Release at completion.
+	retainResp *api.FastPathResponse
+	retainFP   api.FastPathHandler
+	// writeVecFn, when non-nil, flushes the retained response buffers
+	// zero-copy (the Linux transport wires unix.Writev). Nil in tests
+	// and on non-Linux — the state machine then uses the writeBuf +
+	// writeFn path.
+	writeVecFn func([][]byte) (int, error)
+	state      rcState
+	rLen       int
+	writeLen   int
+	// epollInterest is the currently-armed readiness mask (0 = read,
+	// i.e. the registration default). mod() skips the epoll_ctl when
+	// the interest is unchanged — one syscall per hit saved in the
+	// common full-flush case.
+	epollInterest uint32
+	lastRead      time.Time
+	scratch       api.RawRequest
 
 	// readBuf sits last: the 16 KiB inline array dominates the struct;
 	// the bulk value fields trail the pointer and scalar fields so the
@@ -103,11 +137,17 @@ func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int,
 		parser:   p,
 		readFn:   readFn,
 		writeFn:  writeFn,
+		fd:       -1,
 		state:    rcReading,
 		lastRead: p.nowFunc(),
 		writeBuf: (*reactorWritePool.Get().(*[]byte))[:0],
 		scratch:  api.RawRequest{Scheme: p.scheme},
 	}
+	// Pre-size the writev backing array (3 slots: status line, header
+	// block, body — the FastPathResponse layout) so parsed() never
+	// grows it mid-hit.
+	rc.writeVec = make([][]byte, 0, 3)
+	rc.writeVecOffs = make([]int, 0, 3)
 	return rc
 }
 
@@ -150,6 +190,9 @@ func (rc *reactorConn) advance() rcAction {
 // advanceReading drains socket bytes into readBuf; once a full header
 // block is buffered it parses, tries the fast path, and on a hit
 // serializes the response into writeBuf for flushing.
+// advanceReading drains socket bytes into readBuf; once a full header
+// block is buffered it parses, tries the fast path, and on a hit
+// serializes the response into writeBuf for flushing.
 func (rc *reactorConn) advanceReading() rcAction {
 	for {
 		n, err := rc.readFn(rc.readBuf[rc.rLen:])
@@ -166,13 +209,22 @@ func (rc *reactorConn) advanceReading() rcAction {
 			}
 			continue
 		}
-		if err != nil && !errors.Is(err, errAgain) {
+		if err != nil {
+			if errors.Is(err, errAgain) {
+				return actWaitRead
+			}
 			return actClose
 		}
-		return actWaitRead
+		// n == 0, err == nil: the raw-fd read contract reports peer EOF
+		// this way. Treating it as want-read would busy-spin the loop
+		// on level-triggered readiness; close instead.
+		return actClose
 	}
 }
 
+// parsed handles a complete header block at idx: parse, qualify, and
+// either serve the hit inline or hand off. Split from advanceReading
+// to stay under the complexity/funlen gates.
 // parsed handles a complete header block at idx: parse, qualify, and
 // either serve the hit inline or hand off. Split from advanceReading
 // to stay under the complexity/funlen gates.
@@ -201,21 +253,37 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 		return actHandoff
 	}
 
-	rc.writeBuf = rc.writeBuf[:0]
-	for _, b := range resp.Buffers {
-		rc.writeBuf = append(rc.writeBuf, b...)
+	if rc.writeVecFn != nil {
+		// Zero-copy path (Linux transport): retain the response's
+		// net.Buffers slices for writev. Release is deferred until the
+		// flush completes — Buffers[2] is the cache object body, so
+		// copying it would cost a full-body memcpy per hit.
+		rc.writeVec = append(rc.writeVec[:0], resp.Buffers...)
+		rc.writeVecOffs = rc.writeVecOffs[:0]
+		rc.retainResp = resp
+		rc.retainFP = fp
+		rc.writeBuf = rc.writeBuf[:0]
+	} else {
+		// No transport writev (tests, non-Linux stubs): copy into the
+		// pooled buffer and release immediately.
+		rc.writeBuf = rc.writeBuf[:0]
+		for _, b := range resp.Buffers {
+			rc.writeBuf = append(rc.writeBuf, b...)
+		}
+		rc.retainResp = nil
+		rc.retainFP = nil
 	}
+	rc.writeLen = 0
+
 	if hook := rc.parser.metricsHook; hook != nil {
 		dur := rc.parser.nowFunc().Sub(now)
 		hook(req.Method, resp.Route, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
 	}
-	fp.Release(resp)
 
 	// Reset for the next request on this connection.
 	rc.rLen = 0
 	rc.scratch = api.RawRequest{Scheme: rc.parser.scheme}
-	rc.writeLen = 0
 	rc.state = rcWriting
 	return rc.advanceWriting()
 }
@@ -224,7 +292,19 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 // back to reading. Partial writes keep the connection in rcWriting
 // with write readiness re-armed — the reactor finishes every response
 // it started (handoff mid-write is not allowed).
+// advanceWriting flushes the response; on completion the connection
+// goes back to reading. When the transport supplied a writev func
+// (writeVecFn) and the response was retained as buffers, the flush is
+// zero-copy writev; otherwise it falls back to the single-buffer
+// writeBuf + writeFn path. Partial writes keep the connection in
+// rcWriting with write readiness re-armed — the reactor finishes
+// every response it started (handoff mid-write is not allowed), and
+// the retained fast-path response is released only after the last
+// byte is written.
 func (rc *reactorConn) advanceWriting() rcAction {
+	if rc.writeVecFn != nil && len(rc.writeVec) > 0 {
+		return rc.advanceWritingVec()
+	}
 	for rc.writeLen < len(rc.writeBuf) {
 		n, err := rc.writeFn(rc.writeBuf[rc.writeLen:])
 		rc.writeLen += n
@@ -238,10 +318,81 @@ func (rc *reactorConn) advanceWriting() rcAction {
 			return actWaitWrite
 		}
 	}
+	rc.finishWrite()
+	return actWaitRead
+}
+
+// advanceWritingVec flushes the retained response buffers via the
+// transport's writev func. Completion is tracked by writeLen against
+// the total response size: a partial writev resumes from the exact
+// unflushed byte, and the retained response is released only when
+// every byte is on the socket.
+func (rc *reactorConn) advanceWritingVec() rcAction {
+	total := 0
+	for _, b := range rc.writeVec {
+		total += len(b)
+	}
+	for rc.writeLen < total {
+		iov := rc.pendingVec()
+		n, err := rc.writeVecFn(iov)
+		rc.writeLen += n
+		if err != nil {
+			if errors.Is(err, errAgain) {
+				return actWaitWrite
+			}
+			return actClose
+		}
+		if n == 0 {
+			return actWaitWrite
+		}
+	}
+	rc.finishWrite()
+	return actWaitRead
+}
+
+// pendingVec returns the unflushed portion of the response as an iov
+// slice. Rebuilt from writeLen each call: fully flushed slices are
+// dropped, the straddling slice is re-sliced at its intra-slice
+// offset. No allocation — the backing array is writeVec itself.
+func (rc *reactorConn) pendingVec() [][]byte {
+	if rc.writeLen == 0 {
+		// Common case: nothing flushed yet — the full iov, no copy.
+		return rc.writeVec
+	}
+	remaining := rc.writeLen
+	i := 0
+	for i < len(rc.writeVec) && remaining >= len(rc.writeVec[i]) {
+		remaining -= len(rc.writeVec[i])
+		i++
+	}
+	if i >= len(rc.writeVec) {
+		return nil
+	}
+	if remaining == 0 {
+		// Slice-boundary resume: still no copy.
+		return rc.writeVec[i:]
+	}
+	// Straddling slice: one small allocation (partial-resume only —
+	// the hot full-flush path never lands here).
+	iov := make([][]byte, 0, len(rc.writeVec)-i)
+	iov = append(iov, rc.writeVec[i][remaining:])
+	return append(iov, rc.writeVec[i+1:]...)
+}
+
+// finishWrite completes a flush: release the retained fast-path
+// response (its body bytes were aliased by writev), reset the write
+// state, and return the connection to reading.
+func (rc *reactorConn) finishWrite() {
+	if rc.retainFP != nil && rc.retainResp != nil {
+		rc.retainFP.Release(rc.retainResp)
+		rc.retainResp = nil
+		rc.retainFP = nil
+	}
+	rc.writeVec = rc.writeVec[:0]
+	rc.writeVecOffs = rc.writeVecOffs[:0]
 	rc.writeBuf = rc.writeBuf[:0]
 	rc.writeLen = 0
 	rc.state = rcReading
-	return actWaitRead
 }
 
 // handoffConn wraps the connection with the buffered bytes so the

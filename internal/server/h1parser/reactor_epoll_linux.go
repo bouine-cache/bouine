@@ -63,7 +63,7 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 	}
 	r = &reactorEpoll{
 		epfd:     epfd,
-		events:   make([]unix.EpollEvent, 256),
+		events:   make([]unix.EpollEvent, 1024),
 		p:        p,
 		conns:    make(map[int32]*reactorConn),
 		acceptLn: ln,
@@ -171,21 +171,40 @@ func (r *reactorEpoll) register(fd int, wantWrite bool, rc *reactorConn) error {
 	return nil
 }
 
-// mod switches a connection's readiness interest.
+// mod switches a connection's readiness interest. The epoll_ctl is
+// skipped when the interest is unchanged — in the common full-flush
+// case the interest stays EPOLLIN from registration, so this saves
+// one syscall per hit. rc.epollInterest tracks the armed mask (0 is
+// the registration default: read interest).
 func (r *reactorEpoll) mod(rc *reactorConn, events uint32) {
-	fd := connFD(rc.conn)
+	if rc.epollInterest == events {
+		return
+	}
+	fd := r.connFd(rc)
 	err := unix.EpollCtl(r.epfd, unix.EPOLL_CTL_MOD, fd, &unix.EpollEvent{
 		Events: events,
 		Fd:     int32(fd),
 	})
 	if err != nil {
 		r.drop(rc)
+		return
 	}
+	rc.epollInterest = events
+}
+
+// connFd returns the raw fd, preferring the transport-cached value
+// (set at accept) over the SyscallConn dance — one closure call saved
+// per mod/drop on the hot path.
+func (r *reactorEpoll) connFd(rc *reactorConn) int {
+	if rc.fd >= 0 {
+		return rc.fd
+	}
+	return connFD(rc.conn)
 }
 
 // drop removes and closes a connection.
 func (r *reactorEpoll) drop(rc *reactorConn) {
-	fd := connFD(rc.conn)
+	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, fd, nil)
 	delete(r.conns, int32(fd))
 	r.nconns.Store(int32(len(r.conns)))
@@ -197,7 +216,7 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 // the blocking parser goroutine. The prefixConn replay is built here;
 // ownership of the net.Conn transfers to that goroutine.
 func (r *reactorEpoll) handoff(rc *reactorConn) {
-	fd := connFD(rc.conn)
+	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, fd, nil)
 	delete(r.conns, int32(fd))
 	r.nconns.Store(int32(len(r.conns)))
@@ -251,7 +270,12 @@ func (r *reactorEpoll) acceptLoop() {
 			_ = conn.Close()
 			continue
 		}
+		// TCP_QUICKACK parity with the blocking path (the accept-time
+		// ACK heuristic matters for keep-alive request pipelining).
+		_ = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_QUICKACK, 1)
 		rc := newReactorConn(conn, r.p, rawRead(fd), rawWrite(fd))
+		rc.fd = fd
+		rc.writeVecFn = rawWritev(fd)
 		select {
 		case r.pending <- rc:
 			r.wake()
@@ -289,6 +313,21 @@ func (r *reactorEpoll) drainPending() {
 func rawRead(fd int) func([]byte) (int, error) {
 	return func(b []byte) (int, error) {
 		n, err := unix.Read(fd, b)
+		if err != nil {
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+				return 0, errAgain
+			}
+			return 0, err
+		}
+		return n, nil
+	}
+}
+
+// rawWritev returns a non-blocking writev func over fd — the
+// zero-copy flush for the retained fast-path response buffers.
+func rawWritev(fd int) func([][]byte) (int, error) {
+	return func(iovs [][]byte) (int, error) {
+		n, err := unix.Writev(fd, iovs)
 		if err != nil {
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
 				return 0, errAgain

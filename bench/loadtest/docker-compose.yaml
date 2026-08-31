@@ -25,8 +25,10 @@ services:
 
   # ── Origin ──────────────────────────────────────────────────────────────
   origin:
-    build:
-      context: ../../test/integration/origin
+    # Image built by `make loadtest-setup` (bouine-test-origin:loadtest);
+    # pinned for the same stale-project-image reason as the bouine service.
+    image: bouine-test-origin:loadtest
+    pull_policy: never
     networks: [lb-net]
     restart: "no"
     healthcheck:
@@ -38,7 +40,15 @@ services:
   # ── Proxies ─────────────────────────────────────────────────────────────
   bouine:
     <<: [*proxy-common, *proxy-limits]
-    build: { context: ../.. }
+    # Image built by `make loadtest-setup` (bouine:loadtest). Named here
+    # so compose uses exactly that image: with only `build:` and no
+    # `image:`, compose tags its own loadtest-bouine:latest and happily
+    # reuses a stale one from a previous run instead of the freshly
+    # built image — the stack then runs a pre-PR binary that rejects
+    # new config fields. pull_policy: never keeps it from trying the
+    # registry for an image that only exists locally.
+    image: bouine:loadtest
+    pull_policy: never
     # The image CMD is already "serve --config /etc/bouine/config.yaml";
     # no override needed — the volume provides the load-test specific config.
     volumes:
@@ -133,11 +143,19 @@ services:
   # load-gen.Dockerfile. `make loadtest-setup` builds and tags it
   # bouine-load-gen:bash; the k6 version stays pinned inside the
   # Dockerfile's FROM digest.
+  #
+  # No entrypoint: the base image's k6 entrypoint would swallow the
+  # compose-run command as a k6 subcommand ("unknown command 'bash'
+  # for 'k6'"). An empty entrypoint makes compose exec the command
+  # directly — `docker compose run load-gen bash script` then runs
+  # bash on the script. (The previous ["sh"] form turned the same
+  # invocation into "sh bash script", which BusyBox sh rejects with
+  # "sh: can't open 'bash'" — it treats "bash" as a filename.)
   load-gen:
     <<: *proxy-common
     image: bouine-load-gen:bash
-    entrypoint: ["sh"]
-    command: ["-c", "sleep infinity"]
+    entrypoint: []
+    command: ["sleep", "infinity"]
     volumes:
       - ./scenarios:/scenarios:ro
       - ${RESULTS_DIR:-./results}:/results

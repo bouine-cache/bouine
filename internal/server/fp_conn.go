@@ -47,6 +47,20 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		if loop, ok := h1parser.NewReactorLoop(parser, ln); ok {
 			s.logger.Info("H1 reactor enabled (epoll batch hit serving)",
 				"name", s.name, "addr", ln.Addr().String())
+			// Publish the handle before Run: Shutdown (called from the
+			// shutdown sequencer, possibly before ctx cancellation)
+			// must find it and drain the reactor.
+			s.reactorLoopOnce.Do(func() { s.reactorLoop = loop })
+			// Shutdown wiring: ctx cancellation closes the listener
+			// (killing the accept loop) and stops the reactor loop, which
+			// then drains in-flight handed-off requests before Serve
+			// returns — the supervised group's Wait is what the shutdown
+			// sequencer blocks on, so Serve must not outlive ctx.
+			go func() {
+				<-ctx.Done()
+				_ = ln.Close()
+				loop.Close()
+			}()
 			loop.Run()
 			return nil
 		}

@@ -209,10 +209,44 @@ func (f *FastPathHandler) getCachedDate(now time.Time) string {
 }
 
 // serializeResponse builds a FastPathResponse from a cached object.
-// It writes the status line + pre-serialized static headers + dynamic
-// headers (Age, X-Cache, X-Cache-Source, Warning, Date) into a pooled
-// buffer and sets up net.Buffers for writev.
+// The composed head — status line + static headers + dynamic headers
+// (Age, X-Cache, X-Cache-Source, Warning, Date) for the current second
+// and this cacheResult/source/close-conn combination — is cached on
+// the object: every input is constant within one wall-clock second,
+// so hits inside a cached second reuse the exact bytes and skip
+// per-hit header appends entirely.
+//
+// When the request asked for Connection: close (RFC 9110 §9.6), the
+// composed head ends with "Connection: close" and the response
+// carries CloseConn so the writer closes the connection after the
+// flush instead of reusing it.
 func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) *api.FastPathResponse {
+	closeConn := req.ConnectionClose
+	if head, statusEnd := obj.ComposedHeadFor(now, cacheResult, src, closeConn); head != nil {
+		return responseFromComposedHead(obj, head, statusEnd, req, cacheResult, src, f.routeName, closeConn)
+	}
+
+	resp := f.composeResponse(req, obj, src, now, cacheResult, closeConn)
+	if resp == nil {
+		return nil
+	}
+
+	// Cache the composed bytes for the rest of this second. The bytes
+	// are copied out of the pooled buffer: the composed head must
+	// outlive the pool round-trip (it stays aliased by the object while
+	// the pooled buffer is reused for the next miss compose).
+	composed := make([]byte, len(resp.HeaderBuf))
+	copy(composed, resp.HeaderBuf)
+	obj.StoreComposedHead(now, cacheResult, src, closeConn, resp.StatusEnd, composed)
+	return resp
+}
+
+// composeResponse serializes the full response head into a pooled
+// buffer: status line + static headers (from serializedHead, falling
+// back to on-the-fly serialization) + dynamic headers. Returns nil
+// when the head exceeds maxFastPathHeaderBytes (the pool buffer is
+// already returned then).
+func (f *FastPathHandler) composeResponse(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string, closeConn bool) *api.FastPathResponse {
 	bufPtr := fastPathHeaderPool.Get().(*[]byte)
 	hbuf := (*bufPtr)[:0]
 
@@ -226,13 +260,12 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 	} else {
 		// Fallback: serialize headers on-the-fly (serialization failed
 		// or headers exceed maxFastPathHeaderBytes).
-		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now))
-		return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
+		hbuf = appendResponseHeaders(hbuf, obj, src, now, cacheResult, f.getCachedDate(now), closeConn)
 	}
 
 	// Append dynamic headers (Age, X-Cache, X-Cache-Source, Warning, Date).
 	dateStr := f.getCachedDate(now)
-	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn)
 
 	if cap(hbuf) > maxFastPathHeaderBytes {
 		*bufPtr = hbuf
@@ -240,7 +273,7 @@ func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object
 		return nil
 	}
 
-	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName)
+	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName, closeConn)
 }
 
 // getOrComputeSerializedHead returns the lazily-computed serialized
@@ -268,7 +301,7 @@ func (f *FastPathHandler) getOrComputeSerializedHead(obj *api.Object) []byte {
 // into hbuf, then appends dynamic headers via appendDynamicHeaders.
 // Used as a fallback when SerializedHead is not available (warm-tier
 // objects loaded from disk without pre-serialization).
-func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string) []byte {
+func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
 	var noCacheFields map[string]bool
 	if obj.CacheControl != "" {
 		noCacheFields = parseNoCacheFieldNames(obj.CacheControl)
@@ -285,7 +318,7 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 		hbuf = append(hbuf, '\r', '\n')
 	}
 
-	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr)
+	hbuf = appendDynamicHeaders(hbuf, obj, src, now, cacheResult, dateStr, closeConn)
 	return hbuf
 }
 
@@ -293,7 +326,9 @@ func appendResponseHeaders(hbuf []byte, obj *api.Object, src api.Source, now tim
 // X-Cache, X-Cache-Source, Warning, Connection) plus the trailing \r\n
 // that terminates the HTTP header block. Called after either the
 // pre-serialized static headers or the fallback header iteration.
-func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string) []byte {
+// The Connection trailer reflects the request's own token (RFC 9110
+// §9.6): "close" when the client requested close, keep-alive otherwise.
+func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time.Time, cacheResult string, dateStr string, closeConn bool) []byte {
 	// Date: preserve the origin's Date header (RFC 9110 §6.6.1 — Date
 	// represents when the message was originated, not when the cache served
 	// it). Only synthesize a Date when the stored object has none.
@@ -327,7 +362,11 @@ func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time
 		hbuf = append(hbuf, ": 110 - \"Response is Stale\"\r\n"...)
 	}
 
-	hbuf = append(hbuf, "Connection: keep-alive\r\n"...)
+	if closeConn {
+		hbuf = append(hbuf, "Connection: close\r\n"...)
+	} else {
+		hbuf = append(hbuf, "Connection: keep-alive\r\n"...)
+	}
 	hbuf = append(hbuf, '\r', '\n')
 	return hbuf
 }
@@ -335,8 +374,10 @@ func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time
 // buildFastPathResponse splits hbuf into status line + header block and
 // creates the FastPathResponse with net.Buffers for writev. The response
 // is obtained from fastPathRespPool with a pre-allocated Buffers slice,
-// eliminating per-hit allocations.
-func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, routeName string) *api.FastPathResponse {
+// eliminating per-hit allocations. req is used only for the HEAD body
+// elision; it may be nil when the caller handles the body itself (the
+// composed-head path).
+func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, routeName string, closeConn bool) *api.FastPathResponse {
 	statusEnd := 0
 	for statusEnd < len(hbuf)-1 && (hbuf[statusEnd] != '\r' || hbuf[statusEnd+1] != '\n') {
 		statusEnd++
@@ -347,7 +388,7 @@ func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *ap
 	headerBlock := hbuf[statusEnd:]
 
 	body := obj.Body
-	if req.Method == "HEAD" {
+	if req != nil && req.Method == "HEAD" {
 		body = nil
 	}
 
@@ -359,12 +400,43 @@ func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *ap
 	resp.Source = string(src)
 	resp.Route = routeName
 	resp.BytesOut = len(body)
+	resp.StatusEnd = statusEnd
+	resp.CloseConn = closeConn
 
 	// Rebuild Buffers from the fixed-size backing array. net.Buffers.WriteTo
 	// consumes the slice (advancing past the backing array), so we cannot
 	// reuse the Buffers slice across hits — we must reset it from buffersArr.
 	resp.BuffersArr[0] = statusLine
 	resp.BuffersArr[1] = headerBlock
+	resp.BuffersArr[2] = body
+	resp.Buffers = resp.BuffersArr[:3]
+	return resp
+}
+
+// responseFromComposedHead builds a response from a cached composed
+// head without any per-hit header serialization: the head bytes are
+// sliced into status line + header block, the body aliased, and only
+// the pooled FastPathResponse wrapper is allocated. No pool header
+// buffer is consumed (the composed head owns its bytes).
+func responseFromComposedHead(obj *api.Object, head []byte, statusEnd int, req *api.RawRequest, cacheResult string, src api.Source, routeName string, closeConn bool) *api.FastPathResponse {
+	body := obj.Body
+	if req.Method == "HEAD" {
+		body = nil
+	}
+
+	resp := fastPathRespPool.Get().(*api.FastPathResponse)
+	resp.HeaderBuf = nil
+	resp.BufPtr = nil
+	resp.StatusCode = obj.StatusCode
+	resp.CacheResult = cacheResult
+	resp.Source = string(src)
+	resp.Route = routeName
+	resp.BytesOut = len(body)
+	resp.StatusEnd = statusEnd
+	resp.CloseConn = closeConn
+
+	resp.BuffersArr[0] = head[:statusEnd]
+	resp.BuffersArr[1] = head[statusEnd:]
 	resp.BuffersArr[2] = body
 	resp.Buffers = resp.BuffersArr[:3]
 	return resp
@@ -392,10 +464,12 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 	resp.BuffersArr = [3][]byte{}
 	resp.Buffers = nil
 	resp.StatusCode = 0
+	resp.StatusEnd = 0
 	resp.CacheResult = ""
 	resp.Source = ""
 	resp.Route = ""
 	resp.BytesOut = 0
+	resp.CloseConn = false
 	fastPathRespPool.Put(resp)
 }
 

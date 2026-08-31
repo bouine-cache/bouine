@@ -60,10 +60,33 @@ Two changes land after the fast-path-enabling audit:
    live-daemon smoke (1 MISS handoff + 29 keep-alive HITs on one
    connection).
 
-The reactor is NOT enabled for benchmarks in this change: the nightly
-runner must first establish the blocking-path numbers with the fast
-path on (PR #563), then flipping `h1_reactor: true` in
-`bench/loadtest/config/bouine.yaml` is a one-line measured increment.
+The reactor is now enabled for benchmarks (`h1_reactor: true` in
+`bench/loadtest/config/bouine.yaml`): the nightly runner established
+the blocking-path numbers with the fast path on (PR #563), and this is
+the measured increment — if the nightly numbers don't move, the flag
+goes back off.
+
+Post-review hardening (the PR-567 review round) fixed: the handoff fd
+leak (the blocking-parser goroutine now closes the conn on exit),
+shutdown wiring (loop.Close from ctx cancellation and
+Listener.Shutdown, with handoff-goroutine draining via a WaitGroup —
+previously the reactor loop spun forever after ctx cancel and the
+shutdown sequencer closed the store under in-flight handoffs), the
+slowloris hole (idle is measured per request from its first byte, not
+from the last byte received), Connection: close on hits (the fast path
+now emits the close trailer and both transports close after the
+flush), the idle sweep killing slow writers (writers are skipped; the
+write safety net governs them), the first-hit epoll_ctl elision that
+was not actually elided (register now records the armed mask), and the
+two theater tests in reactor_epoll_test.go (a broken keep-alive loop
+and an assert-nothing miss-handoff stub), which now assert real
+behavior. The dead writeVecOffs field was deleted and the redundant
+~4 KiB scratch re-zero per hit removed (parseBuffer already resets it
+on the next parse). A per-second composed-head cache was added to the
+fast path: the fully serialized response header block (status line +
+static + dynamic headers) is a pure function of the object, the unix
+second, and the composition inputs, so hits inside a cached second
+skip all header appends.
 
 ## Rejected: sharding the hot Prometheus metrics tuple
 

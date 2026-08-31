@@ -104,9 +104,48 @@ the curated, human-readable summary.
   residual structural gap to nginx's worker event loop. Misses,
   conditional requests, ranges, pipelined bodies, and oversize
   headers hand off to the existing blocking parser path unchanged.
-  Not yet enabled for benchmarks: the nightly runner first establishes
-  blocking-path numbers with the fast path on, then the flag flips as
-  a one-line measured increment.
+  Enabled in the loadtest configuration as the measured increment on
+  top of the blocking-path fast-path numbers the nightly runner
+  established; if nightly numbers don't move, the flag goes back off.
+
+### Fixed (reactor review round)
+- Handed-off connections no longer leak their fd: the blocking-parser
+  goroutine spawned at handoff now closes the connection when Serve
+  returns (previously every miss/handoff pinned its fd in CLOSE_WAIT
+  forever, burning the fd table at miss-heavy traffic).
+- Reactor shutdown is wired: ctx cancellation closes the listener and
+  stops the loop, Listener.Shutdown drains in-flight handed-off
+  requests via a WaitGroup, and the accept loop survives transient
+  Accept errors (EMFILE, ECONNABORTED) instead of dying permanently —
+  previously the loop spun forever after cancellation and the shutdown
+  sequencer closed the store under live handed-off requests.
+- The reactor's idle budget is now per-request (measured from the
+  request's first byte), closing the slowloris hole where a client
+  dribbling one byte per interval kept resetting a last-byte-based
+  clock forever.
+- The idle sweep no longer kills connections that are mid-flush to a
+  slow client: writers are governed by the write safety net, not the
+  read idle budget.
+- `Connection: close` on a cache hit is honored: the fast path emits
+  the close trailer (RFC 9110 §9.6) and both the blocking parser and
+  the reactor close the connection after the response instead of
+  parking it for the full 120s idle window.
+- The reactor's first hit no longer pays a redundant `epoll_ctl MOD`:
+  registration records the armed interest mask, so the common
+  full-flush case issues zero `epoll_ctl` syscalls per request, as the
+  code comments always claimed.
+- Fast-path hits reuse a per-second composed response head cached on
+  the object: status line + static + dynamic headers are a pure
+  function of the object, unix second, and composition inputs, so hits
+  inside a cached second skip per-hit header appends entirely (the
+  last real per-hit CPU in the fast path after the parser work).
+- The reactor's per-hit scratch re-zero (~4 KiB copy per request,
+  duplicating the reset parseBuffer already does) and a dead
+  never-read `writeVecOffs` field were removed.
+- The two broken epoll tests were fixed or deleted: the keep-alive
+  test actually serves two hits on one connection now, and the
+  miss-handoff test that asserted nothing is replaced by one that
+  proves the handoff serves the miss and closes the connection.
 
 ### Changed
 - `bench/loadtest/config/bouine.yaml` enables

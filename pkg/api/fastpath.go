@@ -22,6 +22,13 @@ type RawRequest struct {
 	Scheme      string // "http" or "https" — set by the listener
 	HTTPVersion string
 	NHeaders    int
+	// ConnectionClose reports whether the request carried a
+	// "Connection: close" token (RFC 9110 §7.6.1). The parser sets it
+	// once while scanning headers; the fast path reads it to emit
+	// "Connection: close" on the response (§9.6) and its callers to
+	// close the connection after the hit instead of re-scanning
+	// headers. False for the zero value.
+	ConnectionClose bool
 }
 
 // MaxRawHeaders caps the number of headers the h1parser can store inline.
@@ -108,6 +115,12 @@ type FastPathHandlerCtx interface {
 // leaving Buffers with len=0, cap=0. Rebuilding Buffers from buffersArr on
 // every TryHit avoids allocating a new [][]byte backing array on pool reuse.
 //
+// CloseConn, when true, tells the writer the response header block ends
+// with "Connection: close" (RFC 9110 §9.6): the connection must not be
+// reused for another request after this response. Set by the fast path
+// when the request requested close; the h1parser and the reactor both
+// read it to terminate their keep-alive loops after the flush.
+//
 // Unstable.
 type FastPathResponse struct {
 	BufPtr      *[]byte // original pool pointer for HeaderBuf, used by Release
@@ -118,7 +131,13 @@ type FastPathResponse struct {
 	Buffers     net.Buffers
 	HeaderBuf   []byte
 	StatusCode  int
-	BytesOut    int
+	// StatusEnd splits BuffersArr[0] (status line) from [1] (header
+	// block): the offset of the first header byte inside HeaderBuf or
+	// the composed head. Stored so the composed-head cache can slice a
+	// cached head without rescanning for the \r\n.
+	StatusEnd int
+	BytesOut  int
+	CloseConn bool
 }
 
 // EqualFold compares two ASCII strings case-insensitively without

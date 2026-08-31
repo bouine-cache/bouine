@@ -32,14 +32,23 @@ func NewReactorLoop(p *Parser, ln net.Listener) (r *ReactorLoop, ok bool) {
 }
 
 // Run drives the reactor until the listener is closed. Blocks.
+// Unreachable on non-Linux: NewReactorLoop never returns ok=true here.
 func (r *reactorEpoll) Run() {}
 
-// The portable state machine's handoff path and the connection cap are
-// Linux-only at runtime but part of the shared contract — reference
-// them here so the non-Linux build compiles with the same symbols.
+// Close stops the loop and drains in-flight handoffs. Unreachable on
+// non-Linux (see Run); exists so the listener wiring compiles against
+// the same contract on every platform.
+func (r *reactorEpoll) Close() {}
+
+// The portable state machine's handoff path, the connection cap, and
+// the shutdown-drain symbols are Linux-only at runtime but part of the
+// shared contract — reference them here so the non-Linux build (and
+// the unused linter) sees the same symbols as Linux.
 var (
 	_ = (*reactorConn).handoff
 	_ = reactorMaxConns
+	_ = handoffDrainGrace
+	_ = (*handoffTracker).drainForceClose
 	// epollInterest is the Linux transport's mod()-skip mask tracker;
 	// reference the field so the non-Linux build keeps the shared
 	// struct definition identical.

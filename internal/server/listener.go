@@ -16,6 +16,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/platform"
+	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/pkg/api"
 
 	"github.com/valyala/fasthttp"
@@ -135,21 +136,31 @@ type ListenerConfig struct {
 // the supervised-group contract. Each protocol has its own instance.
 //
 // Stable.
+// state); the tool's interleaved order saves 8 bytes on a cold struct.
+//
+//nolint:govet // fieldalignment: grouped by role (deps, config, runtime
 type Listener struct {
-	logger         observability.Logger
-	resolved       atomic.Value // stores string
-	fastPath       api.FastPathHandler
-	fastMetrics    api.FastPathMetrics
-	inner          *fasthttp.Server
-	addr           string
-	name           string
-	scheme         string
-	maxConns       int
-	idleTimeout    time.Duration
-	tcpFastOpen    bool
-	tcpDeferAccept bool
-	reusePort      bool
-	h1Reactor      bool
+	logger      observability.Logger
+	inner       *fasthttp.Server
+	fastPath    api.FastPathHandler
+	fastMetrics api.FastPathMetrics
+	resolved    atomic.Value // stores string
+	// reactorLoop is the H1 reactor handle when the reactor started
+	// (Linux + h1Reactor + fast path). Shutdown drains it so
+	// in-flight handed-off requests finish before the shutdown
+	// sequencer closes the store. Set once by serveFastPath before
+	// Serve's reactor branch; read by Shutdown.
+	reactorLoop     *h1parser.ReactorLoop
+	reactorLoopOnce sync.Once
+	addr            string
+	name            string
+	scheme          string
+	maxConns        int
+	idleTimeout     time.Duration
+	tcpFastOpen     bool
+	tcpDeferAccept  bool
+	reusePort       bool
+	h1Reactor       bool
 }
 
 // DefaultIdleTimeout is the keep-alive idle timeout for data-plane
@@ -397,8 +408,16 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 }
 
 // Shutdown gracefully stops the listener, waiting for in-flight
-// requests to complete. Safe to call concurrently with Serve.
+// requests to complete. Safe to call concurrently with Serve. When
+// the H1 reactor is running, its Close drains in-flight handed-off
+// blocking-parser goroutines first — the fasthttp Shutdown below does
+// not know about them (they bypass fasthttp entirely).
 func (s *Listener) Shutdown(_ context.Context) error {
+	s.reactorLoopOnce.Do(func() {
+		if s.reactorLoop != nil {
+			s.reactorLoop.Close()
+		}
+	})
 	return s.inner.Shutdown()
 }
 

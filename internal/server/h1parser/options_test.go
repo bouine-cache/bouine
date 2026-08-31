@@ -105,13 +105,20 @@ func (m *mockFastPathHandler) Release(_ *api.FastPathResponse) {}
 
 type mockFastPathHit struct{}
 
-func (m *mockFastPathHit) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+func (m *mockFastPathHit) TryHit(req *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	trailer := "Connection: keep-alive\r\n"
+	if req.ConnectionClose {
+		// Mirror the real handler's contract (RFC 9110 §9.6): the hit
+		// response ends with Connection: close and carries CloseConn.
+		trailer = "Connection: close\r\n"
+	}
 	resp := &api.FastPathResponse{
 		BuffersArr: [3][]byte{
 			[]byte("HTTP/1.1 200 OK\r\n"),
-			[]byte("Content-Length: 5\r\nContent-Type: text/plain\r\n\r\n"),
+			[]byte("Content-Length: 5\r\nContent-Type: text/plain\r\n" + trailer + "\r\n"),
 			[]byte("hello"),
 		},
+		CloseConn: req.ConnectionClose,
 	}
 	resp.Buffers = resp.BuffersArr[:]
 	return resp, true

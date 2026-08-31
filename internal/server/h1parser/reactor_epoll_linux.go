@@ -51,12 +51,17 @@ const maxEPollFD = int32(1) << 30
 
 // reactorEpoll is the Linux reactor: one goroutine, one epoll fd, all
 // hit-path connections of one listener.
-// reachable — every field is 8-byte aligned and the struct has zero
-// padding in this order (verified: 24+24+16+8+8+8+8+8+8+8 = 120B).
+//
+// Field order keeps every field 8-byte aligned with zero padding in
+// this order (verified: 24+24+16+8+8+8+8+8+8+8+8 = 128B). The pointer
+// group comes first (lastSweep's time.Time carries a pointer and
+// groups with the map/slice state); the scalar descriptors follow.
 // Keeping the pointer group together mirrors the loop's ownership
 // model (epoll/map state vs. descriptors).
 //
-//nolint:govet // fieldalignment: the reported "optimal" ordering is not
+// the verified layout above wins.
+//
+//nolint:govet // fieldalignment: the tool's "optimal" ordering is not padding-free;
 type reactorEpoll struct {
 	// Pointer-bearing fields first (fieldalignment): lastSweep's
 	// time.Time carries a pointer, so it groups with the rest before
@@ -70,6 +75,12 @@ type reactorEpoll struct {
 	// done is closed by Close (any goroutine) to stop the loop;
 	// reading a closed channel is race-free from any goroutine.
 	done chan struct{}
+	// handoffs owns the blocking-parser goroutines spawned at handoff
+	// (fd-close on exit + bounded drain at shutdown — see handoffTracker).
+	// handoffsDone is closed once the loop goroutine has fully exited, so
+	// Close's drain cannot race handoffs spawned by a still-running loop.
+	handoffs     handoffTracker
+	handoffsDone chan struct{}
 
 	epfd  int
 	wakeR int
@@ -89,18 +100,19 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		return nil, false
 	}
 	r = &reactorEpoll{
-		epfd:      epfd,
-		events:    make([]unix.EpollEvent, 1024),
-		p:         p,
-		conns:     make(map[int32]*reactorConn),
-		acceptLn:  ln,
-		wakeR:     wakeFds[0],
-		wakeW:     wakeFds[1],
-		pending:   make(chan *reactorConn, 1024),
-		lastSweep: p.nowFunc(),
-		done:      make(chan struct{}),
+		epfd:         epfd,
+		events:       make([]unix.EpollEvent, 1024),
+		p:            p,
+		conns:        make(map[int32]*reactorConn),
+		acceptLn:     ln,
+		wakeR:        wakeFds[0],
+		wakeW:        wakeFds[1],
+		pending:      make(chan *reactorConn, 1024),
+		lastSweep:    p.nowFunc(),
+		done:         make(chan struct{}),
+		handoffsDone: make(chan struct{}),
 	}
-	if err := r.register(asEpollFD(r.wakeR), false, nil); err != nil {
+	if err := r.register(asEpollFD(r.wakeR), nil); err != nil {
 		r.cleanup()
 		return nil, false
 	}
@@ -110,6 +122,7 @@ func (r *reactorEpoll) run() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer r.cleanup()
+	defer close(r.handoffsDone)
 	go r.acceptLoop()
 	for {
 		select {
@@ -147,14 +160,23 @@ func (r *reactorEpoll) run() {
 // so the loop wakes at least this often even with zero traffic.
 const reactorSweepInterval = time.Second
 
-// sweepIdle closes connections whose idle budget expired without read
-// progress. Idle connections generate no readiness events, so the
+// sweepIdle closes reading connections whose per-request idle budget
+// expired. Idle connections generate no readiness events, so the
 // per-dispatch idle check alone would never fire for them — this sweep
 // is what bounds a reactor full of parked keep-alive clients, mirroring
 // the blocking parser's 120s read deadline. Runs on the loop goroutine
 // at most once per reactorSweepInterval; O(tracked conns).
+//
+// Writers are skipped: a connection flushing a hit to a slow client
+// makes no read progress by definition, and the blocking path's
+// safety net for that case is the write deadline (5 minutes), not the
+// idle budget. Cutting a response mid-flush at 120s would corrupt
+// framing the reactor promised to finish.
 func (r *reactorEpoll) sweepIdle(now time.Time) {
 	for fd, rc := range r.conns {
+		if rc.state != rcReading {
+			continue
+		}
 		if rc.idleExpired(now) {
 			// Close, not handoff: an idle conn has no in-flight
 			// request to serve, and the blocking parser would itself
@@ -173,9 +195,10 @@ func (r *reactorEpoll) dispatch(rc *reactorConn, events uint32, now time.Time) {
 		r.drop(rc)
 		return
 	}
-	if rc.idleExpired(now) {
-		// The idle budget expired without read progress; the blocking
-		// path would hit its read deadline and close, so drop here.
+	if rc.state == rcReading && rc.idleExpired(now) {
+		// The per-request idle budget expired; the blocking path would
+		// hit its read deadline and close, so drop here. Writers are
+		// governed by the write safety net, not the idle budget.
 		r.drop(rc)
 		return
 	}
@@ -186,36 +209,39 @@ func (r *reactorEpoll) dispatch(rc *reactorConn, events uint32, now time.Time) {
 		r.mod(rc, unix.EPOLLOUT)
 	case actHandoff:
 		r.handoff(rc)
-	case actClose:
+	case actClose, actCloseAfterFlush:
 		r.drop(rc)
 	}
 }
 
-// register adds an fd to the epoll set. rc nil means an internal
-// descriptor (wakeup pipe) without a state machine.
-func (r *reactorEpoll) register(fd epollFD, wantWrite bool, rc *reactorConn) error {
-	events := unix.EPOLLIN | unix.EPOLLRDHUP
-	if wantWrite {
-		events = unix.EPOLLOUT
-	}
+// register adds an fd to the epoll set with read interest (the state
+// machine always starts reading). rc nil means an internal descriptor
+// (wakeup pipe) without a state machine.
+func (r *reactorEpoll) register(fd epollFD, rc *reactorConn) error {
+	events := uint32(unix.EPOLLIN | unix.EPOLLRDHUP)
 	err := unix.EpollCtl(r.epfd, unix.EPOLL_CTL_ADD, int(fd), &unix.EpollEvent{
-		Events: uint32(events),
+		Events: events,
 		Fd:     fd,
 	})
 	if err != nil {
 		return err
 	}
 	if rc != nil {
+		// Record the armed mask so the first hit's mod() to the same
+		// read interest is recognized as unchanged and skipped — one
+		// epoll_ctl per first hit saved.
+		rc.epollInterest = events
 		r.conns[fd] = rc
 	}
 	return nil
 }
 
 // mod switches a connection's readiness interest. The epoll_ctl is
-// skipped when the interest is unchanged — in the common full-flush
-// case the interest stays EPOLLIN from registration, so this saves
-// one syscall per hit. rc.epollInterest tracks the armed mask (0 is
-// the registration default: read interest).
+// skipped when the interest is unchanged — registration arms read
+// interest (EPOLLIN|EPOLLRDHUP) and rc.epollInterest records it, so
+// the common full-flush case (back to read interest) issues zero
+// syscalls. Only a partial write (EPOLLOUT re-arm, then back to read)
+// pays two epoll_ctl calls per request.
 func (r *reactorEpoll) mod(rc *reactorConn, events uint32) {
 	if rc.epollInterest == events {
 		return
@@ -253,13 +279,15 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 
 // handoff releases a connection from the reactor and queues it for
 // the blocking parser goroutine. The prefixConn replay is built here;
-// ownership of the net.Conn transfers to that goroutine.
+// ownership of the net.Conn transfers to that goroutine (which closes
+// it on exit). Tracked by the handoff tracker so Close drains
+// in-flight handed-off requests, then force-closes keep-alive parkers.
 func (r *reactorEpoll) handoff(rc *reactorConn) {
 	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
 	delete(r.conns, fd)
 	rc.release()
-	rc.handoff()
+	rc.handoff(&r.handoffs)
 }
 
 // drainWake consumes the wakeup pipe bytes and processes accepted
@@ -287,13 +315,19 @@ var wakeByte = [1]byte{1}
 // acceptLoop runs on its own goroutine: accepts connections, sets
 // them non-blocking, and parks them on the pending channel for the
 // loop goroutine to register. All epoll/map state stays owned by the
-// loop goroutine — this goroutine never touches it. Exits when Accept
-// fails (listener closed).
+// loop goroutine — this goroutine never touches it. Exits only when
+// Accept returns net.ErrClosed (listener closed for shutdown);
+// transient errors (EMFILE, ENFILE, ECONNABORTED, ENOMEM) are skipped
+// like the blocking path's accept loop — one failed accept must not
+// permanently kill the listener.
 func (r *reactorEpoll) acceptLoop() {
 	for {
 		conn, err := r.acceptLn.Accept()
 		if err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
 		}
 		if tcp, ok := conn.(*net.TCPConn); ok {
 			_ = tcp.SetKeepAlive(true)
@@ -320,7 +354,7 @@ func (r *reactorEpoll) acceptLoop() {
 		default:
 			// Pending queue full: don't hold the connection hostage —
 			// the blocking parser serves it.
-			rc.handoff()
+			rc.handoff(&r.handoffs)
 		}
 	}
 }
@@ -333,10 +367,10 @@ func (r *reactorEpoll) drainPending() {
 		case rc := <-r.pending:
 			if len(r.conns) >= reactorMaxConns {
 				// Over cap: the blocking parser owns it.
-				rc.handoff()
+				rc.handoff(&r.handoffs)
 				continue
 			}
-			if err := r.register(asEpollFD(connFD(rc.conn)), false, rc); err != nil {
+			if err := r.register(asEpollFD(connFD(rc.conn)), rc); err != nil {
 				rc.release()
 				_ = rc.conn.Close()
 			}
@@ -435,7 +469,9 @@ func connFD(conn net.Conn) int {
 	return fd
 }
 
-// cleanup drops all tracked connections at loop exit.
+// cleanup drops all tracked connections at loop exit. In-flight
+// handed-off requests are not force-killed here: Close gives them
+// the handoffDrainGrace window first (see Close).
 func (r *reactorEpoll) cleanup() {
 	for _, rc := range r.conns {
 		rc.release()
@@ -446,11 +482,6 @@ func (r *reactorEpoll) cleanup() {
 	_ = unix.Close(r.wakeW)
 	_ = unix.Close(r.epfd)
 }
-
-// ensure the reactor runs with the caller's expectations documented:
-// the listener wiring pins the loop goroutine to one OS thread
-// (runtime.LockOSThread) so the hot maps and buffers stay core-local.
-var _ = time.Second
 
 // ReactorLoop is the platform reactor handle returned by
 // NewReactorLoop.
@@ -463,9 +494,13 @@ func NewReactorLoop(p *Parser, ln net.Listener) (r *ReactorLoop, ok bool) {
 	return newReactorLoop(p, ln)
 }
 
-// Close stops the loop goroutine (idempotent). Called by the listener
-// wiring when the serve context is cancelled, alongside closing the
-// listener (Accept failure also terminates run()).
+// Close stops the loop goroutine (idempotent), then drains the
+// handed-off blocking-parser goroutines with a bounded grace window:
+// in-flight requests finish on their own, and after handoffDrainGrace
+// any keep-alive-parked conns are force-closed so Serve's read loop
+// exits instead of waiting out the 120s idle deadline. This is what
+// lets the shutdown sequencer close the store without live handoffs
+// underneath it — and what lets Serve return at all.
 func (r *reactorEpoll) Close() {
 	select {
 	case <-r.done:
@@ -474,6 +509,25 @@ func (r *reactorEpoll) Close() {
 		close(r.done)
 	}
 	r.wake()
+
+	// Wait for the loop to exit first: a still-running loop can spawn
+	// new handoffs (misses in its final batch), which must drain too.
+	<-r.handoffsDone
+
+	drained := make(chan struct{})
+	go func() {
+		r.handoffs.wg.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		// All handoffs finished on their own within the grace window.
+	case <-time.After(handoffDrainGrace):
+		// Keep-alive parkers remain: force-close their conns to unpark
+		// Serve (it exits on the read error like a client reset).
+		r.handoffs.drainForceClose()
+		<-drained
+	}
 }
 
 // Run drives the reactor until the listener is closed. Blocks.

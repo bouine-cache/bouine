@@ -30,6 +30,14 @@ type Object struct {
 	// Not serialized to disk (json:"-"). Warm-tier loads leave this nil.
 	// Accessed via atomic.Pointer for race-safe lazy initialization.
 	serializedHead atomic.Pointer[[]byte] `json:"-"`
+	// composedHead is the per-second fully serialized fast-path response
+	// head (status line + static + dynamic headers), keyed by unix second
+	// and the per-request composition inputs (cacheResult, source,
+	// Connection trailer). See composedHead's doc. Not serialized to
+	// disk; loads leave it nil. atomic.Pointer for race-safe lazy
+	// init, same pattern as serializedHead. Entries are immutable once
+	// stored — updates replace the pointer, never mutate in place.
+	composedHeadPtr atomic.Pointer[composedHead] `json:"-"`
 	// ETag is the strong or weak entity tag from the origin.
 	ETag string `json:"etag,omitempty"`
 	// VaryKey is the secondary key derived from Vary headers. Empty
@@ -116,6 +124,62 @@ func (o *Object) StoreSerializedHead(head []byte) {
 	o.serializedHead.Store(&head)
 }
 
+// composedHead is the fast-path's per-second composed response header
+// block: status line + static headers + dynamic headers (Age, Date,
+// X-Cache, X-Cache-Source, Warning, Connection trailer). Every input
+// is constant within one wall-clock second, so the fully serialized
+// bytes are a pure function of (object, unix second, cacheResult,
+// source, closeConn). A hit inside a cached second reuses the bytes
+// instead of re-appending them per request.
+//
+// The head lives in a dedicated heap buffer owned by the object —
+// never a pool buffer — because it is aliased by every response
+// served from it during the second and retained by the object
+// afterwards; pooled bytes would be overwritten under live readers.
+// Immutable once stored: concurrent composers race benignly (same
+// content), and a new second or variant replaces the pointer.
+// the head slice ahead of the identity scalars it is keyed by; this
+// one-entry-per-object cache is cold relative to the hit path, and
+// 8 bytes of padding is not worth obscuring the layout.
+//
+//nolint:govet // fieldalignment: the reported "optimal" order would move
+type composedHead struct {
+	unix        int64
+	statusEnd   int
+	cacheResult string
+	src         Source
+	closeConn   bool
+	head        []byte
+}
+
+// ComposedHeadFor returns the composed response head for the given
+// second and composition inputs, or nil when nothing matching is
+// cached. The returned statusEnd splits the status line from the
+// header block (Buffers layout [0]=status, [1]=headers). Thread-safe.
+func (o *Object) ComposedHeadFor(now time.Time, cacheResult string, src Source, closeConn bool) (head []byte, statusEnd int) {
+	c := o.composedHeadPtr.Load()
+	if c == nil || c.unix != now.Unix() || c.cacheResult != cacheResult ||
+		c.src != src || c.closeConn != closeConn {
+		return nil, 0
+	}
+	return c.head, c.statusEnd
+}
+
+// StoreComposedHead caches the composed response head. Thread-safe;
+// concurrent stores for identical inputs write identical content, so
+// the race is benign. A store for different inputs (new second or
+// variant) replaces the previous entry.
+func (o *Object) StoreComposedHead(now time.Time, cacheResult string, src Source, closeConn bool, statusEnd int, head []byte) {
+	o.composedHeadPtr.Store(&composedHead{
+		unix:        now.Unix(),
+		cacheResult: cacheResult,
+		src:         src,
+		closeConn:   closeConn,
+		statusEnd:   statusEnd,
+		head:        head,
+	})
+}
+
 // CloneForReturn returns a shallow copy of o with Body replaced by
 // the given body slice. The clone does not share the original's
 // atomic.Pointer, avoiding copylocks violations from shallow-copying
@@ -156,6 +220,9 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
+	}
+	if c := o.composedHeadPtr.Load(); c != nil {
+		clone.composedHeadPtr.Store(c)
 	}
 	if v := o.FastHeader.Load(); v != nil {
 		clone.FastHeader.Store(v)

@@ -652,7 +652,7 @@
         },
         "interval": {
           "type": "string",
-          "default": "15s"
+          "default": "60s"
         },
         "scrapeTimeout": {
           "type": "string",
@@ -690,7 +690,7 @@
         },
         "interval": {
           "type": "string",
-          "default": "15s"
+          "default": "60s"
         },
         "scrapeTimeout": {
           "type": "string",

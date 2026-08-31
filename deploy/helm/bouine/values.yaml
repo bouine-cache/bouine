@@ -316,7 +316,7 @@ networkPolicy:
 serviceMonitor:
   enabled: false
   labels: {}
-  interval: 15s
+  interval: 60s
   scrapeTimeout: ""  # uses default
   relabelings: []
   metricRelabelings: []
@@ -327,7 +327,7 @@ serviceMonitor:
 podMonitor:
   enabled: false
   labels: {}
-  interval: 15s
+  interval: 60s
   scrapeTimeout: ""  # uses default
   relabelings: []
   metricRelabelings: []

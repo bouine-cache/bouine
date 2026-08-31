@@ -9,21 +9,25 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// ioEOF is a hard read/write error for fakeIO.failNext.
+// errFakeClosed is a hard read/write error for fakeIO.failNext.
 var errFakeClosed = errors.New("connection closed")
 
 // fakeIO simulates a non-blocking socket: a queued read payload and a
-// write buffer, with controllable would-block and error injection.
-// A drained read source behaves like an empty socket: EAGAIN, not EOF
-// (the reactor treats EOF-with-no-bytes as a peer waiting state).
+// write buffer, with controllable would-block, EOF, and error
+// injection. A drained read source behaves like an empty socket
+// (EAGAIN); an explicit eofNext returns the raw-fd EOF contract
+// (0, nil), which the state machine treats as close.
 type fakeIO struct {
 	readSrc    *bytes.Reader
 	written    bytes.Buffer
 	againRead  bool // when true, next read returns errAgain
 	againWrite bool // when true, next write returns errAgain
 	failNext   error
+	eofNext    bool // when true, next read returns (0, nil) — raw-fd EOF
 }
 
 func (f *fakeIO) read(b []byte) (int, error) {
@@ -31,6 +35,10 @@ func (f *fakeIO) read(b []byte) (int, error) {
 		err := f.failNext
 		f.failNext = nil
 		return 0, err
+	}
+	if f.eofNext {
+		f.eofNext = false
+		return 0, nil
 	}
 	if f.againRead {
 		f.againRead = false
@@ -250,3 +258,122 @@ func (m *mockIOConn) RemoteAddr() net.Addr             { return mockAddr{} }
 func (m *mockIOConn) SetDeadline(time.Time) error      { return nil }
 func (m *mockIOConn) SetReadDeadline(time.Time) error  { return nil }
 func (m *mockIOConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestReactor_ZeroCopyWritevRetainsRelease asserts the writev flush
+// path: the response buffers are retained (not copied), flushed as one
+// iov, and the fast-path Release is called only after the flush.
+func TestReactor_ZeroCopyWritevRetainsRelease(t *testing.T) {
+	t.Parallel()
+	p := New(&mockFastPathHit{}, noopHandler, WithScheme("http"))
+	fio := &fakeIO{readSrc: bytes.NewReader([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))}
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	t.Cleanup(rc.release)
+
+	released := false
+	rc.retainResp = &api.FastPathResponse{}
+	rc.retainFP = &releaseSpyFP{onRelease: func() { released = true }}
+
+	var iovSeen [][]byte
+	rc.writeVecFn = func(iovs [][]byte) (int, error) {
+		// Concatenate like the kernel would; no copy of the response.
+		iovSeen = iovs
+		total := 0
+		for _, b := range iovs {
+			total += len(b)
+		}
+		return total, nil
+	}
+
+	rc.state = rcWriting
+	rc.writeVec = [][]byte{[]byte("HTTP/1.1 200 OK\r\n"), []byte("Content-Length: 5\r\n\r\n"), []byte("hello")}
+	rc.writeVecOffs = []int{0, 0, 0}
+	require.Equal(t, actWaitRead, rc.advance())
+	assert.True(t, released, "Release must fire after the flush completes")
+	require.Len(t, iovSeen, 3, "all three buffers flushed as one iov, zero-copy")
+}
+
+// TestReactor_EofClosesNotSpins asserts the raw-fd read contract: a
+// zero-byte read with no error means peer EOF — the machine must close
+// the connection, never return want-read (which would busy-spin the
+// loop on level-triggered epoll).
+func TestReactor_EofClosesNotSpins(t *testing.T) {
+	t.Parallel()
+	p := New(&mockFastPathHit{}, noopHandler, WithScheme("http"))
+	fio := &fakeIO{} // no read source: read returns (0, errAgain)? No — drained => EAGAIN per fakeIO
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	t.Cleanup(rc.release)
+
+	// A real EOF per the raw-fd contract: (0, nil).
+	fio.readSrc = nil
+	fio.eofNext = true
+	require.Equal(t, actClose, rc.advance(), "EOF (0-byte read, no error) must close, not want-read")
+}
+
+// TestReactor_WritevPartialFlush asserts a partial writev is resumed
+// from the exact intra-buffer offset: the second flush must start with
+// the unwritten bytes, and Release fires only after completion.
+func TestReactor_WritevPartialFlush(t *testing.T) {
+	t.Parallel()
+	p := New(&mockFastPathHit{}, noopHandler, WithScheme("http"))
+	fio := &fakeIO{}
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	t.Cleanup(rc.release)
+
+	released := false
+	rc.retainResp = &api.FastPathResponse{}
+	rc.retainFP = &releaseSpyFP{onRelease: func() { released = true }}
+
+	var written bytes.Buffer
+	calls := 0
+	rc.writeVecFn = func(iovs [][]byte) (int, error) {
+		calls++
+		if calls == 1 {
+			// First call: write only 10 bytes.
+			n := 0
+			for _, b := range iovs {
+				take := min(len(b), 10-n)
+				written.Write(b[:take])
+				n += take
+				if n == 10 {
+					break
+				}
+			}
+			return n, nil
+		}
+		if calls == 2 {
+			// Immediate retry in the same advance: socket full.
+			return 0, errAgain
+		}
+		// Write-readiness arrived: flush the remainder byte-exactly.
+		n := 0
+		for _, b := range iovs {
+			written.Write(b)
+			n += len(b)
+		}
+		return n, nil
+	}
+	rc.state = rcWriting
+	rc.writeVec = [][]byte{[]byte("HTTP/1.1 200 OK\r\n"), []byte("hello")}
+	rc.writeVecOffs = []int{0, 0}
+
+	require.Equal(t, actWaitWrite, rc.advance(), "partial writev must re-arm write readiness")
+	assert.False(t, released, "no release mid-flush")
+	require.Equal(t, actWaitRead, rc.advance(), "resume must complete the flush")
+	assert.True(t, released, "release after full flush")
+	assert.Equal(t, "HTTP/1.1 200 OK\r\nhello", written.String(), "byte-exact continuation")
+}
+
+// releaseSpyFP is a fast-path stub whose Release fires a callback.
+type releaseSpyFP struct {
+	onRelease func()
+}
+
+func (f *releaseSpyFP) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	return nil, false
+}
+
+func (f *releaseSpyFP) Release(_ *api.FastPathResponse) {
+	if f.onRelease != nil {
+		f.onRelease()
+	}
+}

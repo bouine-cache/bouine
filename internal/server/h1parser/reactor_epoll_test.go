@@ -20,6 +20,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/pkg/api"
+
 	"github.com/valyala/fasthttp"
 )
 
@@ -197,3 +199,112 @@ func readOneResponse(t *testing.T, conn net.Conn) string {
 	}
 	return sb.String()
 }
+
+// TestEpollReactor_PeerCloseNoSpin asserts a client that closes its
+// connection does not busy-spin the loop: the reactor must drop the
+// connection (raw-fd EOF contract) and stay responsive to a new
+// connection immediately after.
+func TestEpollReactor_PeerCloseNoSpin(t *testing.T) {
+	addr := startReactorListener(t)
+
+	// Open and abruptly close a connection without sending anything.
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	_ = conn.Close()
+
+	// A fresh connection must still be served — the loop is alive.
+	served, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer served.Close()
+	_ = served.SetDeadline(time.Now().Add(5 * time.Second))
+	_, err = served.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+	buf := make([]byte, 256)
+	var have []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(string(have), "hello") {
+		require.False(t, time.Now().After(deadline), "reactor stalled after peer close: got %q", have)
+		n, rerr := served.Read(buf)
+		have = append(have, buf[:n]...)
+		if rerr != nil {
+			break
+		}
+	}
+	assert.True(t, strings.Contains(string(have), "hello"), "new connection must be served after a peer close")
+}
+
+// TestEpollReactor_LargeBodyZeroCopyHit asserts a large cached body
+// (writev path, no full-body copy) is served intact: content-length
+// must match the bytes received.
+func TestEpollReactor_LargeBodyZeroCopyHit(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	// bigHit serves a 256 KiB body to exercise writev over the body slice.
+	const bodySize = 256 * 1024
+	body := strings.Repeat("x", bodySize)
+	resp := &api.FastPathResponse{
+		BuffersArr: [3][]byte{
+			[]byte("HTTP/1.1 200 OK\r\n"),
+			[]byte(fmt.Sprintf("Content-Length: %d\r\nContent-Type: text/plain\r\n\r\n", bodySize)),
+			[]byte(body),
+		},
+		CacheResult: "HIT",
+	}
+	resp.Buffers = resp.BuffersArr[:3]
+	fp := &staticFastPath{resp: resp}
+
+	p := New(fp, noopHandler)
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok)
+	go loop.Run()
+	t.Cleanup(loop.Close)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+
+	received := 0
+	head := make([]byte, 0, 1024)
+	buf := make([]byte, 32*1024)
+	inBody := false
+	cl := 0
+	for received < bodySize {
+		n, rerr := conn.Read(buf)
+		if !inBody {
+			head = append(head, buf[:n]...)
+			if i := strings.Index(string(head), "\r\n\r\n"); i >= 0 {
+				for _, line := range strings.Split(string(head[:i]), "\r\n") {
+					if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+						fmt.Sscanf(line, "Content-Length: %d", &cl)
+					}
+				}
+				received = len(head) - (i + 4)
+				inBody = true
+			}
+		} else {
+			received += n
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	assert.Equal(t, bodySize, cl, "Content-Length must match the served body")
+	assert.Equal(t, bodySize, received, "writev must deliver the full body byte-exact")
+}
+
+// staticFastPath always returns one pre-built response.
+type staticFastPath struct {
+	resp *api.FastPathResponse
+}
+
+func (f *staticFastPath) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	return f.resp, true
+}
+
+func (f *staticFastPath) Release(_ *api.FastPathResponse) {}

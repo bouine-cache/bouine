@@ -64,11 +64,21 @@ func BenchmarkGate_Reactor_Hit(b *testing.B) {
 		return n, nil
 	}
 
+	// Wire the writev path exactly like the Linux transport: the
+	// response flush is zero-copy over the retained buffers.
+	rc.writeVecFn = func(iovs [][]byte) (int, error) {
+		total := 0
+		for _, b := range iovs {
+			total += len(b)
+		}
+		return total, nil
+	}
+
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
 		// Simulate the socket delivering a full request: reset the
-		// source, advance the machine through parse→hit→flush.
+		// source, advance the machine through parse→hit→writev-flush.
 		src.buf = reqBytes
 		src.off = 0
 		rc.rLen = 0

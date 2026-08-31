@@ -22,11 +22,15 @@ import (
 // one, change the other.
 const maxFetchTimeout = 5 * time.Minute
 
-// maxFetchWaitTimeout is the upper bound for fetch_wait_timeout. A wait
-// bound exists to keep request goroutines from piling up on the fetch
-// semaphore (issue #562); a value this large defeats its purpose while
-// still technically bounding the wait.
-const maxFetchWaitTimeout = 60 * time.Second
+// maxFetchWaitTimeout is the upper bound for fetch_wait_timeout. The
+// wait bound exists to absorb sub-second fetch-queue bursts, not to
+// queue through a sustained overload: when arrival rate exceeds the
+// semaphore's drain rate, no finite wait drains the queue, so a longer
+// bound only holds goroutines (and their connections) longer before
+// shedding them (issue #562). 1s keeps the fetch-queue shed binding
+// before the cruder connection-limit shed at realistic pod rates, and
+// stays coherent with the Retry-After: 1 sent to shed clients.
+const maxFetchWaitTimeout = 1 * time.Second
 
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even

@@ -32,6 +32,12 @@ config:
     https: ":443"
     admin: ":9000"
     cluster: ":8443"
+    # max_connections caps simultaneously open data-plane connections.
+    # Under HTTP/1.1 a request holds its connection, so this bounds the
+    # in-flight request pile a slow origin can cause (issue #562);
+    # over-limit connections get 503 + close at accept. Idle keep-alive
+    # connections hold a slot too — size for your client population.
+    max_connections: 4096
   tls:
     certs: []
     # Provide via a Secret mounted at /etc/bouine/tls/.

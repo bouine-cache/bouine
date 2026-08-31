@@ -463,8 +463,8 @@ type RouteCache struct {
 	MaxResponseBytes ByteSize `yaml:"max_response_bytes,omitempty" json:"max_response_bytes,omitempty"`
 	// MaxFetchConcurrency bounds the number of concurrent foreground
 	// origin fetches per route. When the limit is reached, additional
-	// fetches block until a slot frees or the request context is
-	// cancelled. Zero (default) applies a safe built-in limit (32).
+	// fetches wait up to fetch_wait_timeout for a slot and then shed.
+	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the client receives
@@ -479,6 +479,14 @@ type RouteCache struct {
 	// during the origin fetch, aborting the client connection before the
 	// fetch completes.
 	FetchTimeout time.Duration `yaml:"fetch_timeout,omitempty" json:"fetch_timeout,omitempty"`
+	// FetchWaitTimeout bounds how long a foreground miss may wait for an
+	// origin-fetch semaphore slot (max_fetch_concurrency) before shedding
+	// (503 + Retry-After when no stale object exists, stale content when
+	// one does). Zero (default) applies a safe built-in default (100ms).
+	// Negative values are rejected by validation. Independent of
+	// fetch_timeout, which bounds the fetch itself and starts only after
+	// the slot is acquired.
+	FetchWaitTimeout time.Duration `yaml:"fetch_wait_timeout,omitempty" json:"fetch_wait_timeout,omitempty"`
 	// MaxStreamingBufferBytes caps the total bytes held in live streaming
 	// tee buffers across all concurrent miss-fetches on this route. When
 	// exceeded, new cacheable misses fall back to synchronous buffering

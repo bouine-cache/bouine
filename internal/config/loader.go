@@ -22,6 +22,12 @@ import (
 // one, change the other.
 const maxFetchTimeout = 5 * time.Minute
 
+// maxFetchWaitTimeout is the upper bound for fetch_wait_timeout. A wait
+// bound exists to keep request goroutines from piling up on the fetch
+// semaphore (issue #562); a value this large defeats its purpose while
+// still technically bounding the wait.
+const maxFetchWaitTimeout = 60 * time.Second
+
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even
 // with an empty config file.
@@ -398,6 +404,14 @@ func validateRouteCache(i int, rc RouteCache) error {
 	}
 	if rc.FetchTimeout >= maxFetchTimeout {
 		return fmt.Errorf("config: route %d fetch_timeout must be < %v (data plane safety-net WriteTimeout), got %v", i, maxFetchTimeout, rc.FetchTimeout)
+	}
+	if rc.FetchWaitTimeout < 0 {
+		return fmt.Errorf("config: route %d fetch_wait_timeout must be >= 0, got %v", i, rc.FetchWaitTimeout)
+	}
+	// An unbounded wait recreates the goroutine pileup this knob exists
+	// to prevent (issue #562): every handler parks holding a connection.
+	if rc.FetchWaitTimeout > maxFetchWaitTimeout {
+		return fmt.Errorf("config: route %d fetch_wait_timeout must be <= %v, got %v", i, maxFetchWaitTimeout, rc.FetchWaitTimeout)
 	}
 	if err := validateRouteKey(i, rc.Key); err != nil {
 		return err

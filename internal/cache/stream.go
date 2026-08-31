@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -43,9 +44,8 @@ type streamFetchResult struct {
 // wait for the leader's body to be fully buffered and then serve
 // the buffered result instead of issuing a duplicate origin fetch.
 type inflightStream struct {
-	err  error         // set by leader on fetch error
-	done chan struct{} // closed when body is fully buffered
-	res  fetchResult   // set by leader before closing done
+	done chan struct{} // closed when the fetch finished or shed
+	res  fetchResult   // set by leader before closing done; Err set on failure/shed
 }
 
 // doFetchStream starts an origin fetch with response body streaming
@@ -63,14 +63,11 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	if h.fastClient == nil {
 		return nil, fmt.Errorf("no fast client configured")
 	}
-	bgCtx := context.Background()
-	spanCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
+	spanCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
 
-	select {
-	case h.fetchSem <- struct{}{}:
-	case <-spanCtx.Done():
+	if err := h.acquireFetchSlot(); err != nil {
 		span.End()
-		return nil, fmt.Errorf("origin fetch semaphore: %w", spanCtx.Err())
+		return nil, err
 	}
 
 	req := fasthttp.AcquireRequest()
@@ -149,6 +146,10 @@ func releaseStreamFetch(sf *streamFetchResult) {
 func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	sf, err := h.doFetchStream(ctx)
 	if err != nil {
+		if errors.Is(err, ErrFetchShed) {
+			h.writeShed503(ctx, xCacheHeader)
+			return
+		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
 		return
@@ -205,9 +206,12 @@ func (h *Handler) streamMiss(
 ) {
 	sf, err := h.doFetchStream(ctx)
 	if err != nil {
-		inflight.err = err
 		inflight.res = fetchResult{Err: err}
 		close(inflight.done)
+		if errors.Is(err, ErrFetchShed) {
+			h.writeShed503(ctx, "MISS")
+			return
+		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))

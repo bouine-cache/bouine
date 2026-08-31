@@ -1925,6 +1925,10 @@ func TestDoFetchTimeoutStartsAfterSemaphore(t *testing.T) {
 	h.fetchSem = make(chan struct{}, 1)
 	h.fetchSem <- struct{}{} // pre-fill the only slot
 	h.fetchTimeout = 50 * time.Millisecond
+	// The acquire is now bounded by fetchWaitTimeout (issue #562): raise
+	// it above the 100ms slot-hold below so the wait bound never fires
+	// and the test keeps proving the fetch_timeout contract.
+	h.fetchWaitTimeout = 5 * time.Second
 	req := testCtx("GET", "http://example.com/")
 	go func() {
 		time.Sleep(100 * time.Millisecond)

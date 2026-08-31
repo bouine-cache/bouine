@@ -50,6 +50,24 @@ import (
 // through singleflight.
 var ErrAbortHandler = errors.New("abort handler")
 
+// ErrFetchShed is returned when a foreground origin fetch gave up waiting
+// for a fetch-semaphore slot after fetchWaitTimeout. Callers map it to
+// stale-on-shed (RFC 5861-style) when a stale object is in scope, or to
+// 503 + Retry-After otherwise — distinct from the 502 origin-failure
+// mapping. The wait bound is the fix for the goroutine-pileup livelock
+// (issue #562): previously the foreground paths parked on the semaphore
+// with a dead cancellation arm and nothing ever un-parked them.
+var ErrFetchShed = errors.New("origin fetch queue wait timeout")
+
+// defaultFetchWaitTimeout bounds how long a foreground miss may wait for
+// a fetch-semaphore slot before shedding. It is deliberately independent
+// of fetch_timeout, which starts only after the slot is acquired (pinned
+// by TestDoFetchTimeoutStartsAfterSemaphore): the wait bound exists to
+// keep request goroutines from piling up when origin latency inflates
+// concurrent fetch demand far above the semaphore size (issue #562).
+// 100ms sheds the excess while still absorbing short queueing bursts.
+const defaultFetchWaitTimeout = 100 * time.Millisecond
+
 // headerFromCtx extracts request headers as header.Map from a fasthttp RequestCtx.
 func headerFromCtx(ctx *fasthttp.RequestCtx) header.Map {
 	hm := header.NewMap(ctx.Request.Header.Len())
@@ -179,10 +197,13 @@ type Handler struct {
 	// back to synchronous buffering because the streaming memory cap
 	// was exceeded; nil-safe.
 	StreamingFallbackInc interface{ Inc() }
-	store                storage.Store
-	flight               singleflight.Group
-	logger               observability.Logger
-	fastClient           FastClient
+	// FetchShedInc is incremented when a foreground origin fetch sheds
+	// after waiting fetchWaitTimeout for a fetch-semaphore slot; nil-safe.
+	FetchShedInc interface{ Inc() }
+	store        storage.Store
+	flight       singleflight.Group
+	logger       observability.Logger
+	fastClient   FastClient
 	// StreamingBufferBytesSet updates the streaming buffer bytes gauge;
 	// nil-safe. Polled by the engine's background metrics loop.
 	StreamingBufferBytesSet interface{ Set(float64) }
@@ -252,6 +273,7 @@ type Handler struct {
 	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires when > 0
 	refreshMinHits       int
 	fetchTimeout         time.Duration // bounds total origin fetch time; 0 = defaultFetchTimeout
+	fetchWaitTimeout     time.Duration // bounds the fetch-semaphore wait; 0 = defaultFetchWaitTimeout
 	negativeTTL          time.Duration
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
@@ -270,8 +292,11 @@ type HandlerConfig struct {
 	// miss falls back to synchronous buffering because the streaming
 	// memory cap was exceeded.
 	StreamingFallback interface{ Inc() }
-	Store             storage.Store
-	Logger            observability.Logger
+	// FetchShed, if non-nil, is incremented when a foreground origin fetch
+	// sheds after waiting fetch_wait_timeout for a fetch-semaphore slot.
+	FetchShed interface{ Inc() }
+	Store     storage.Store
+	Logger    observability.Logger
 	// FastClient is used by doFetch to fetch from the origin via
 	// fasthttp. The response is captured directly in a pooled
 	// *fasthttp.Response, eliminating intermediate header.Map and
@@ -321,8 +346,9 @@ type HandlerConfig struct {
 	// Zero (default) applies a safe built-in limit (64 MiB).
 	MaxStreamingBufferBytes int64
 	// MaxFetchConcurrency bounds the number of concurrent foreground
-	// origin fetches. When the limit is reached, additional fetches
-	// block until a slot frees or the request context is cancelled.
+	// origin fetches. When the limit is reached, additional fetches wait
+	// up to FetchWaitTimeout for a slot and then shed (503 + Retry-After,
+	// or stale content when a stale object exists).
 	// Zero (default) applies a safe built-in limit (32).
 	MaxFetchConcurrency int
 	// MaxResponseBytes is a hard limit on the amount of response body
@@ -379,6 +405,13 @@ type HandlerConfig struct {
 	// a fetchResult error. Zero (default) applies a safe built-in limit
 	// (60s). This replaces the blanket WriteTimeout on the data plane.
 	FetchTimeout time.Duration
+	// FetchWaitTimeout bounds how long a foreground miss may wait for
+	// an origin-fetch semaphore slot before shedding. On expiry the
+	// request serves stale when a stale object exists, or returns 503
+	// with Retry-After. Zero (default) applies a safe built-in limit
+	// (100ms). Negative values are rejected by config validation.
+	// Like fetch_timeout, this is a route-level cache setting.
+	FetchWaitTimeout time.Duration
 	// RefreshMaxRPS caps background refresh fetches per second per route.
 	// Zero means no limit.
 	RefreshMaxRPS int
@@ -424,6 +457,38 @@ type FastClient interface {
 	DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error
 }
 
+// acquireFetchSlot takes a fetch-semaphore slot on the foreground miss
+// path, bounded by fetchWaitTimeout. The happy path is a non-blocking
+// send (zero allocs — the miss-path alloc budget must not move); the
+// timer is created only when the semaphore is momentarily full. When
+// the bound expires the fetch sheds with ErrFetchShed and the caller
+// maps it to stale-on-shed or 503 + Retry-After (issue #562). The
+// previous shape parked here forever with a dead cancellation arm
+// (context.Background never fires), so a slow-origin event piled
+// goroutines without bound.
+//
+// Fetch_timeout deliberately still starts after this returns: it bounds
+// the fetch itself, not the queue (pinned by
+// TestDoFetchTimeoutStartsAfterSemaphore).
+func (h *Handler) acquireFetchSlot() error {
+	select {
+	case h.fetchSem <- struct{}{}:
+		return nil
+	default:
+	}
+	timer := time.NewTimer(h.fetchWaitTimeout)
+	defer timer.Stop()
+	select {
+	case h.fetchSem <- struct{}{}:
+		return nil
+	case <-timer.C:
+		if h.FetchShedInc != nil {
+			h.FetchShedInc.Inc()
+		}
+		return fmt.Errorf("origin fetch queue wait exceeded %s: %w", h.fetchWaitTimeout, ErrFetchShed)
+	}
+}
+
 // doFastFetch invokes the fast client with the handler's fetch
 // timeout as an absolute deadline. When no timeout is configured
 // (only possible via direct Handler field mutation — NewHandler
@@ -457,6 +522,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		VaryCapHits:             cfg.VaryCapHits,
 		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
 		StreamingFallbackInc:    cfg.StreamingFallback,
+		FetchShedInc:            cfg.FetchShed,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
 		peerPut:                 cfg.PeerPut,
@@ -489,6 +555,10 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	h.fetchTimeout = cfg.FetchTimeout
 	if h.fetchTimeout <= 0 {
 		h.fetchTimeout = defaultFetchTimeout
+	}
+	h.fetchWaitTimeout = cfg.FetchWaitTimeout
+	if h.fetchWaitTimeout <= 0 {
+		h.fetchWaitTimeout = defaultFetchWaitTimeout
 	}
 
 	// Wire refresh-before-expiry.
@@ -1413,6 +1483,10 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
+			if errors.Is(res.Err, ErrFetchShed) {
+				h.writeShed503(ctx, "MISS")
+				return
+			}
 			ctx.Error("upstream error", fasthttp.StatusBadGateway)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
@@ -1425,6 +1499,17 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 	// Leader: remove from inflight map when done.
 	defer h.inflightStreams.delete(lookupKey)
 	h.streamMiss(ctx, primaryKey, ri, inflight)
+}
+
+// writeShed503 writes the 503 + Retry-After response for a shed request
+// (the fetch-semaphore wait bound expired and no stale object is in
+// scope). Distinct from the 502 origin-failure mapping: the origin was
+// never contacted, so clients should retry shortly (issue #562). No
+// X-Cache-Source is set — the origin was never reached.
+func (h *Handler) writeShed503(ctx *fasthttp.RequestCtx, xCache string) {
+	ctx.Error("origin fetch queue full", fasthttp.StatusServiceUnavailable)
+	ctx.Response.Header.SetCanonical(header.S2b(header.RetryAfter), header.S2b("1"))
+	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCache))
 }
 
 // fetchAndStoreStayinAlive is like fetchAndStore but falls back to
@@ -1463,8 +1548,16 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 	res := h.collapsedFetch(ctx, lookupKey)
 	defer releaseFetchResult(res)
 	if res.Err != nil {
-		h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
-			"error", res.Err, "key", lookupKey)
+		if errors.Is(res.Err, ErrFetchShed) {
+			// Shed — the fetch queue was full for fetchWaitTimeout. The
+			// shed counter (incremented at the shed point) carries the
+			// signal; keep this at Debug so a shed storm cannot INFO-spam.
+			h.logger.Debug("stayin-alive: fetch wait timeout, serving stale",
+				"key", lookupKey)
+		} else {
+			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
+				"error", res.Err, "key", lookupKey)
+		}
 		h.serveObject(ctx, stale, now, cacheStale, src)
 		return
 	}
@@ -2098,18 +2191,13 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	if h.fastClient == nil {
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
-	// Use context.Background() as the base because *fasthttp.RequestCtx.Done()
-	// panics when the ctx was created manually (not by a real fasthttp server).
-	bgCtx := context.Background()
-	fetchCtx, span := tracing.StartSpan(bgCtx, "bouine.origin")
+	fetchCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
 	defer span.End()
 
-	select {
-	case h.fetchSem <- struct{}{}:
-		defer func() { <-h.fetchSem }()
-	case <-fetchCtx.Done():
-		return fetchResult{Err: fmt.Errorf("origin fetch semaphore: %w", fetchCtx.Err())}
+	if err := h.acquireFetchSlot(); err != nil {
+		return fetchResult{Err: err}
 	}
+	defer func() { <-h.fetchSem }()
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)

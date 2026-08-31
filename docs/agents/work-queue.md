@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — release 0.5.2 (changelog, chart bump) + nightly fixes (h2-test resurrection, stress-test kubeconfig decode) — started: 2026-08-30 — ETA: same day
+- [WIP] crush — release 0.5.3 (changelog curation + promotion, chart bump) — started: 2026-08-31 — ETA: same day
 
 ## fasthttp migration — phase claims
 

@@ -88,6 +88,18 @@ resources:
     cpu: 4
     memory: 8Gi
 
+# Optional pod metadata and scheduling controls.
+podAnnotations: {}
+podLabels: {}
+affinity: {}
+# Raw pod anti-affinity rules. Explicit affinity takes precedence.
+podAntiAffinity: {}
+nodeSelector: {}
+tolerations: []
+priorityClassName: ""
+dnsPolicy: ""
+dnsConfig: {}
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65534
@@ -109,7 +121,10 @@ podDisruptionBudget:
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: topology.kubernetes.io/zone
-    whenUnsatisfiable: DoNotSchedule
+    whenUnsatisfiable: ScheduleAnyway
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
 
 terminationGracePeriodSeconds: 40
 
@@ -118,7 +133,9 @@ terminationGracePeriodSeconds: 40
 # clusters where peers join via gossip concurrently).
 # maxUnavailable controls rolling update concurrency — set to 1 to
 # roll one pod at a time while allowing parallel initial boot.
+podManagementPolicy: Parallel
 updateStrategy:
+  type: RollingUpdate
   maxUnavailable: 1
 
 # Seconds after a pod becomes Ready before it enters Service endpoints.
@@ -265,6 +282,15 @@ warmVolume:
   enabled: true
   size: 50Gi
   storageClass: ""
+  annotations: {}
+  labels: {}
+
+# PVC retention is disabled by default for compatibility with older clusters.
+# When enabled, Retain preserves warm-tier data across StatefulSet changes.
+persistentVolumeClaimRetentionPolicy:
+  enabled: false
+  whenScaled: Retain
+  whenDeleted: Retain
 
 # Ingress for the data-plane HTTP/HTTPS ports.
 # Disabled by default — create one if you need external traffic.
@@ -292,6 +318,8 @@ serviceMonitor:
   labels: {}
   interval: 15s
   scrapeTimeout: ""  # uses default
+  relabelings: []
+  metricRelabelings: []
 
 # PodMonitor for Prometheus scraping (alternative to ServiceMonitor).
 # Some Prometheus Operator setups prefer PodMonitor when there is no dedicated
@@ -301,6 +329,8 @@ podMonitor:
   labels: {}
   interval: 15s
   scrapeTimeout: ""  # uses default
+  relabelings: []
+  metricRelabelings: []
 
 # PrometheusRule CRD with alerting rules for bouine SLOs.
 # Requires the Prometheus Operator. Disabled by default.

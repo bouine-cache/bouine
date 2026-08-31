@@ -180,8 +180,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 1g
+          # k6 at the scenario rates (10k-100k RPS, up to 20k VUs) buffers
+          # multi-GiB of iteration state; 1g OOM-killed every scenario
+          # run (exit 137) the moment the nightly finally reached them.
+          cpus: "4.0"
+          memory: 8g
 
   # ── Prometheus scrape (optional) ───────────────────────────────────────
   prometheus:

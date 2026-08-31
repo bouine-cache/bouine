@@ -40,7 +40,10 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),
 	)
 
-	if s.h1Reactor {
+	// The reactor raw-reads the socket fd and parses plaintext HTTP/1.1
+	// — TLS listeners (https) would feed it ciphertext. Never route
+	// encrypted listeners through the reactor (ADR-0041).
+	if s.h1Reactor && s.name != "https" {
 		if loop, ok := h1parser.NewReactorLoop(parser, ln); ok {
 			s.logger.Info("H1 reactor enabled (epoll batch hit serving)",
 				"name", s.name, "addr", ln.Addr().String())

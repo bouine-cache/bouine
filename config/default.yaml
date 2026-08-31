@@ -4,6 +4,13 @@
 listen:
   http: ":80"
   admin: ":9000"
+  # max_connections caps simultaneously open data-plane connections.
+  # Under HTTP/1.1 a request holds its connection, so this also bounds
+  # in-flight requests and the goroutine pile a slow origin can cause
+  # (issue #562). Over-limit connections get 503 + close at accept.
+  # Note: idle keep-alive connections hold a slot too — size for your
+  # client population, not just peak concurrency.
+  max_connections: 4096
 
 storage:
   hot_max_bytes: 512MiB

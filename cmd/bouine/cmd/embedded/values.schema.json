@@ -83,7 +83,7 @@
       "type": "object",
       "properties": {
         "listen": {
-          "description": "Listen addresses for the data, admin, and cluster ports.",
+          "description": "Listen addresses and connection limits for the data, admin, and cluster ports.",
           "type": "object",
           "properties": {
             "http": {
@@ -101,6 +101,12 @@
             "cluster": {
               "type": "string",
               "default": ":8443"
+            },
+            "max_connections": {
+              "description": "Cap on simultaneously open data-plane connections. Under HTTP/1.1 this bounds in-flight requests; over-limit connections receive 503 + close. Idle keep-alive connections hold a slot. 0 disables the limit.",
+              "type": "integer",
+              "minimum": 0,
+              "default": 4096
             }
           }
         },

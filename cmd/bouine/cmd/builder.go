@@ -267,11 +267,13 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
 			FetchTimeout:            rc.Cache.FetchTimeout,
+			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
 			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
 			VaryCapHits:             rs.dpMetrics.VaryCapHits,
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
+			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
@@ -357,11 +359,13 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
 			FetchTimeout:            rc.Cache.FetchTimeout,
+			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
 			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
 			VaryCapHits:             rs.dpMetrics.VaryCapHits,
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
+			FetchShed:               rs.dpMetrics.FetchShedTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
 		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {

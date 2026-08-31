@@ -9,6 +9,8 @@ config:
     https: ":443"
     admin: ":9000"
     cluster: ":8443"
+    # Bounds the in-flight request pile under HTTP/1.1 (issue #562).
+    max_connections: 8192
   storage:
     hot_max_bytes: 4GiB
     warm_max_bytes: 100GiB

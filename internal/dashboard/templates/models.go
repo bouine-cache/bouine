@@ -833,6 +833,9 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 	if rc.Cache.MaxFetchConcurrency > 0 {
 		rows = append(rows, ConfigRow{Key: "max_fetch_concurrency", Value: strconv.Itoa(rc.Cache.MaxFetchConcurrency), Kind: "number"})
 	}
+	if rc.Cache.FetchWaitTimeout > 0 {
+		rows = append(rows, ConfigRow{Key: "fetch_wait_timeout", Value: rc.Cache.FetchWaitTimeout.String(), Kind: "dur"})
+	}
 	if rc.Cache.MaxStreamingBufferBytes > 0 {
 		rows = append(rows, ConfigRow{Key: "max_streaming_buffer_bytes", Value: rc.Cache.MaxStreamingBufferBytes.String(), Kind: "size"})
 	}

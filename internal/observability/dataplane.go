@@ -27,6 +27,10 @@ type DataPlaneMetrics struct {
 	// Cloudflare token rotation metrics.
 	CFTokenRotated         prometheus.Counter
 	StreamingFallbackTotal prometheus.Counter
+	// FetchShedTotal counts foreground origin fetches that shed after
+	// waiting fetch_wait_timeout for a fetch-semaphore slot (issue #562).
+	// A non-zero rate means miss demand exceeds max_fetch_concurrency.
+	FetchShedTotal prometheus.Counter
 	// Streaming miss buffer metrics. The gauge tracks total bytes held
 	// in live SetBodyStreamWriter tee buffers; the counter tracks how
 	// many cacheable misses fell back to the synchronous buffered path
@@ -193,6 +197,11 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "metrics_reset_total",
 		Help:      "Metrics re-initialization events. Non-zero indicates the process restarted or metrics were re-registered, explaining histogram count discontinuities.",
 	})
+	m.FetchShedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "fetch_shed_total",
+		Help:      "Foreground origin fetches shed after waiting fetch_wait_timeout for a fetch-semaphore slot. Non-zero rate means miss demand exceeds max_fetch_concurrency; shed requests serve stale when possible, else 503 + Retry-After.",
+	})
 	m.RequestQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "bouine",
 		Name:      "request_queue_depth",
@@ -219,7 +228,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
-		m.StreamingBufferBytes, m.StreamingFallbackTotal)
+		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal)
 	return m
 }
 

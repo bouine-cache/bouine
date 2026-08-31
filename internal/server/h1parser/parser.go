@@ -253,23 +253,33 @@ func (p *Parser) Serve(conn net.Conn) error {
 		}
 
 		// Miss path: call the fallback handler with a fasthttp.RequestCtx.
-		close, ftErr := p.handleFallThrough(conn, req, excess)
-		if ftErr != nil {
-			return ftErr
-		}
-		if close {
-			return nil
-		}
-		// Re-arm the read deadline for the next keep-alive request.
-		deadline = p.nowFunc().Add(p.idleRead)
-		if err := conn.SetReadDeadline(deadline); err != nil {
+		if res, err := p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline); res == serveClose || err != nil {
 			return err
 		}
-		// handleFallThrough cleared the OS write deadline so the fallback
-		// handler could manage its own timeouts; reset the tracker so the
-		// next hit re-arms it.
-		writeDeadline = time.Time{}
 	}
+}
+
+// serveFastMiss runs the blocking fallback for a request the fast path
+// declined, then re-arms the parser's deadline ownership for the next
+// keep-alive request. Returns serveClose when the connection ends.
+func (p *Parser) serveFastMiss(conn net.Conn, req *api.RawRequest, excess []byte, deadline *time.Time, wd *time.Time) (serveResult, error) {
+	close, ftErr := p.handleFallThrough(conn, req, excess)
+	if ftErr != nil {
+		return serveClose, ftErr
+	}
+	if close {
+		return serveClose, nil
+	}
+	// Re-arm the read deadline for the next keep-alive request.
+	*deadline = p.nowFunc().Add(p.idleRead)
+	if err := conn.SetReadDeadline(*deadline); err != nil {
+		return serveClose, err
+	}
+	// handleFallThrough cleared the OS write deadline so the fallback
+	// handler could manage its own timeouts; reset the tracker so the
+	// next hit re-arms it.
+	*wd = time.Time{}
+	return serveContinue, nil
 }
 
 // serveFastHit attempts the fast path for a parsed request. A hit serves

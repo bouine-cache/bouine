@@ -7,20 +7,31 @@ metadata:
 spec:
   serviceName: {{ include "bouine.fullname" . }}-headless
   replicas: {{ .Values.replicaCount }}
-  podManagementPolicy: Parallel
+  podManagementPolicy: {{ .Values.podManagementPolicy | default "Parallel" }}
   minReadySeconds: {{ .Values.minReadySeconds | default 30 }}
   updateStrategy:
-    type: RollingUpdate
+    type: {{ .Values.updateStrategy.type | default "RollingUpdate" }}
+    {{- if eq (.Values.updateStrategy.type | default "RollingUpdate") "RollingUpdate" }}
     rollingUpdate:
       maxUnavailable: {{ .Values.updateStrategy.maxUnavailable | default 1 }}
+    {{- end }}
   selector:
     matchLabels:
       {{- include "bouine.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.podLabels }}
+      labels:
+        {{- toYaml . | nindent 8 }}
+        {{- include "bouine.selectorLabels" $ | nindent 8 }}
+      {{- else }}
       labels:
         {{- include "bouine.selectorLabels" . | nindent 8 }}
+      {{- end }}
       annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       {{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
@@ -31,8 +42,34 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.dnsPolicy }}
+      dnsPolicy: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if .Values.podAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          {{- toYaml .Values.podAntiAffinity | nindent 10 }}
+      {{- end }}
       {{- if .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
@@ -125,6 +162,14 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: warm
+        {{- with .Values.warmVolume.labels }}
+        labels:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.warmVolume.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
       spec:
         accessModes: ["ReadWriteOnce"]
         {{- if .Values.warmVolume.storageClass }}
@@ -133,4 +178,9 @@ spec:
         resources:
           requests:
             storage: {{ .Values.warmVolume.size }}
+  {{- if .Values.persistentVolumeClaimRetentionPolicy.enabled }}
+  persistentVolumeClaimRetentionPolicy:
+    whenScaled: {{ .Values.persistentVolumeClaimRetentionPolicy.whenScaled | default "Retain" }}
+    whenDeleted: {{ .Values.persistentVolumeClaimRetentionPolicy.whenDeleted | default "Retain" }}
+  {{- end }}
   {{- end }}

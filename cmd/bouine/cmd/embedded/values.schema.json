@@ -343,6 +343,54 @@
         }
       }
     },
+    "podAnnotations": {
+      "description": "Annotations applied to bouine pods.",
+      "type": "object",
+      "default": {}
+    },
+    "podLabels": {
+      "description": "Additional labels applied to bouine pods.",
+      "type": "object",
+      "default": {}
+    },
+    "affinity": {
+      "description": "Kubernetes affinity rules for bouine pods.",
+      "type": "object",
+      "default": {}
+    },
+    "podAntiAffinity": {
+      "description": "Raw Kubernetes pod anti-affinity rules. Explicit affinity takes precedence.",
+      "type": "object",
+      "default": {}
+    },
+    "nodeSelector": {
+      "description": "Node labels required for bouine pods.",
+      "type": "object",
+      "default": {}
+    },
+    "tolerations": {
+      "description": "Taints tolerated by bouine pods.",
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "default": []
+    },
+    "priorityClassName": {
+      "description": "PriorityClass assigned to bouine pods.",
+      "type": "string",
+      "default": ""
+    },
+    "dnsPolicy": {
+      "description": "DNS policy for bouine pods.",
+      "type": "string",
+      "default": ""
+    },
+    "dnsConfig": {
+      "description": "Custom DNS configuration for bouine pods.",
+      "type": "object",
+      "default": {}
+    },
     "podSecurityContext": {
       "description": "Pod-level security context.",
       "type": "object"
@@ -368,8 +416,45 @@
       "description": "Topology spread constraints to distribute pods across zones.",
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "maxSkew": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "topologyKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "whenUnsatisfiable": {
+            "type": "string",
+            "enum": ["DoNotSchedule", "ScheduleAnyway"]
+          },
+          "labelSelector": {
+            "type": "object"
+          },
+          "matchLabelKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "nodeAffinityPolicy": {
+            "type": "string",
+            "enum": ["Honor", "Ignore"]
+          },
+          "nodeTaintsPolicy": {
+            "type": "string",
+            "enum": ["Honor", "Ignore"]
+          }
+        }
       }
+    },
+    "podManagementPolicy": {
+      "description": "StatefulSet pod management policy.",
+      "type": "string",
+      "enum": ["OrderedReady", "Parallel"],
+      "default": "Parallel"
     },
     "terminationGracePeriodSeconds": {
       "description": "Grace period before the pod is force-killed.",
@@ -380,8 +465,14 @@
       "description": "StatefulSet rolling update strategy.",
       "type": "object",
       "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["RollingUpdate", "OnDelete"],
+          "default": "RollingUpdate"
+        },
         "maxUnavailable": {
           "type": "integer",
+          "minimum": 0,
           "default": 1
         }
       }
@@ -506,6 +597,34 @@
         "storageClass": {
           "type": "string",
           "default": ""
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
+        },
+        "labels": {
+          "type": "object",
+          "default": {}
+        }
+      }
+    },
+    "persistentVolumeClaimRetentionPolicy": {
+      "description": "Optional StatefulSet PVC retention policy. Requires Kubernetes 1.27 or newer.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "whenScaled": {
+          "type": "string",
+          "enum": ["Retain", "Delete"],
+          "default": "Retain"
+        },
+        "whenDeleted": {
+          "type": "string",
+          "enum": ["Retain", "Delete"],
+          "default": "Retain"
         }
       }
     },
@@ -538,6 +657,22 @@
         "scrapeTimeout": {
           "type": "string",
           "default": ""
+        },
+        "relabelings": {
+          "description": "Prometheus relabeling rules applied before scraping.",
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
+        },
+        "metricRelabelings": {
+          "description": "Prometheus metric relabeling rules applied after scraping.",
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
         }
       }
     },
@@ -560,6 +695,22 @@
         "scrapeTimeout": {
           "type": "string",
           "default": ""
+        },
+        "relabelings": {
+          "description": "Prometheus relabeling rules applied before scraping.",
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
+        },
+        "metricRelabelings": {
+          "description": "Prometheus metric relabeling rules applied after scraping.",
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "default": []
         }
       }
     },

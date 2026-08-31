@@ -10,7 +10,32 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-31
+
+### Added
+- Slow-origin overload shedding (issue #562): foreground misses that
+  cannot acquire an origin-fetch slot within the new
+  `fetch_wait_timeout` (default 100ms, validated max 1s) shed instead of
+  parking without bound — a stale object in scope is served stale
+  (RFC 5861-style), otherwise the client gets 503 + `Retry-After: 1`,
+  distinct from the 502 origin-failure mapping. Singleflight and
+  inflight-stream followers un-park with the leader's shed result. The
+  new `bouine_fetch_shed_total` counter exposes the shed rate for
+  alerting.
+- Helm: expanded StatefulSet controls — pod annotations/labels,
+  affinity and raw podAntiAffinity, nodeSelector, tolerations,
+  priorityClassName, dnsPolicy/dnsConfig, updateStrategy.type,
+  podManagementPolicy, warm-volume-claim labels/annotations, optional
+  persistentVolumeClaimRetentionPolicy, and ServiceMonitor
+  relabelings/metricRelabelings.
+
 ### Fixed
+- Slow-origin livelock (issue #562): foreground miss paths parked on
+  the per-route origin-fetch semaphore with a dead cancellation arm
+  (`context.Background()`), so arrival rate above drain rate piled
+  request goroutines without bound until the pod entered a
+  non-recovering livelock. Slot acquisition now tries non-blocking
+  first (zero allocs), then a timer-bounded wait before shedding.
 - H1 fast path (experimental.h1_fast_path): five latent correctness
   gaps closed, then enabled in the loadtest configuration — every
   previous nginx/varnish/envoy comparison had accidentally measured
@@ -41,6 +66,15 @@ the curated, human-readable summary.
   `experimental.h1_fast_path` so proxy comparisons exercise the
   production hit path. Nightly loadtest results from 0.5.2 and earlier
   were measured without it and are not comparable.
+- `listen.max_connections` now ships enabled (4096 default config,
+  8192 production / 16384 HA Helm values): under HTTP/1.1 a parked
+  handler holds its connection, so the cap puts a hard ceiling on the
+  goroutine pile even if parking is ever reintroduced. Idle keep-alive
+  connections hold a slot too.
+- Helm: the duplicate PodMonitor was removed in favor of the
+  ServiceMonitor, whose default scrape interval relaxed from 15s to
+  60s; default topologySpreadConstraints now use ScheduleAnyway with
+  both zone and hostname keys.
 
 ## [0.5.2] - 2026-08-30
 
@@ -679,7 +713,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.3
 
 [0.5.2]: https://github.com/bouine-cache/bouine/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bouine-cache/bouine/compare/v0.5.0...v0.5.1

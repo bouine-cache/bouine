@@ -290,7 +290,7 @@ jobs:
           cd dist
           sha256sum bouine-* > SHA256SUMS
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0.24.0
+        uses: anchore/sbom-action@v0.24.2
         with:
           path: ./
           format: spdx-json

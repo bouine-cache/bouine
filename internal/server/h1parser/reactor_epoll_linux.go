@@ -28,23 +28,52 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// epollFD is the integer epoll identifies registered descriptors by.
+// Linux fds are kernel table indices — non-negative and far below
+// math.MaxInt32 under any real RLIMIT_NOFILE — so the narrowing
+// conversions funnel through one audited helper instead of scattered
+// int32 casts (gosec G115).
+type epollFD = int32
+
+// asEpollFD narrows a descriptor for epoll registration and map keys.
+// Returns -1 for out-of-range values, which callers treat as
+// unregisterable (close).
+func asEpollFD(fd int) epollFD {
+	if fd < 0 || int64(fd) > int64(maxEPollFD) {
+		return -1
+	}
+	return epollFD(fd)
+}
+
+// maxEPollFD bounds valid descriptors; real systems cap far below this
+// via RLIMIT_NOFILE (Linux itself stores fds as int internally).
+const maxEPollFD = int32(1) << 30
+
 // reactorEpoll is the Linux reactor: one goroutine, one epoll fd, all
 // hit-path connections of one listener.
+// reachable — every field is 8-byte aligned and the struct has zero
+// padding in this order (verified: 24+24+16+8+8+8+8+8+8+8 = 120B).
+// Keeping the pointer group together mirrors the loop's ownership
+// model (epoll/map state vs. descriptors).
+//
+//nolint:govet // fieldalignment: the reported "optimal" ordering is not
 type reactorEpoll struct {
-	epfd   int
-	events []unix.EpollEvent
-	p      *Parser
-	conns  map[int32]*reactorConn
-
-	acceptLn net.Listener
-	wakeR    int
-	wakeW    int
-	pending  chan *reactorConn
-	// lastSweep paces the idle sweep (loop goroutine only).
+	// Pointer-bearing fields first (fieldalignment): lastSweep's
+	// time.Time carries a pointer, so it groups with the rest before
+	// the scalar descriptors.
+	events    []unix.EpollEvent
+	p         *Parser
+	conns     map[epollFD]*reactorConn
+	acceptLn  net.Listener
+	pending   chan *reactorConn
 	lastSweep time.Time
 	// done is closed by Close (any goroutine) to stop the loop;
 	// reading a closed channel is race-free from any goroutine.
 	done chan struct{}
+
+	epfd  int
+	wakeR int
+	wakeW int
 }
 
 // newReactorLoop builds the Linux reactor. ok=false (and a nil loop)
@@ -71,7 +100,7 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		lastSweep: p.nowFunc(),
 		done:      make(chan struct{}),
 	}
-	if err := r.register(r.wakeR, false, nil); err != nil {
+	if err := r.register(asEpollFD(r.wakeR), false, nil); err != nil {
 		r.cleanup()
 		return nil, false
 	}
@@ -100,11 +129,11 @@ func (r *reactorEpoll) run() {
 			r.lastSweep = now
 			r.sweepIdle(now)
 		}
-		for i := int32(0); i < int32(n); i++ {
+		for i := 0; i < n; i++ {
 			ev := &r.events[i]
 			rc, isConn := r.conns[ev.Fd]
 			switch {
-			case !isConn && ev.Fd == int32(r.wakeR):
+			case !isConn && ev.Fd == asEpollFD(r.wakeR):
 				r.drainWake()
 				r.drainPending()
 			case isConn:
@@ -162,22 +191,22 @@ func (r *reactorEpoll) dispatch(rc *reactorConn, events uint32, now time.Time) {
 	}
 }
 
-// register adds an fd to the epoll set. conn nil means an internal
-// fd (wakeup pipe) without a state machine.
-func (r *reactorEpoll) register(fd int, wantWrite bool, rc *reactorConn) error {
+// register adds an fd to the epoll set. rc nil means an internal
+// descriptor (wakeup pipe) without a state machine.
+func (r *reactorEpoll) register(fd epollFD, wantWrite bool, rc *reactorConn) error {
 	events := unix.EPOLLIN | unix.EPOLLRDHUP
 	if wantWrite {
 		events = unix.EPOLLOUT
 	}
-	err := unix.EpollCtl(r.epfd, unix.EPOLL_CTL_ADD, fd, &unix.EpollEvent{
+	err := unix.EpollCtl(r.epfd, unix.EPOLL_CTL_ADD, int(fd), &unix.EpollEvent{
 		Events: uint32(events),
-		Fd:     int32(fd),
+		Fd:     fd,
 	})
 	if err != nil {
 		return err
 	}
 	if rc != nil {
-		r.conns[int32(fd)] = rc
+		r.conns[fd] = rc
 	}
 	return nil
 }
@@ -192,9 +221,9 @@ func (r *reactorEpoll) mod(rc *reactorConn, events uint32) {
 		return
 	}
 	fd := r.connFd(rc)
-	err := unix.EpollCtl(r.epfd, unix.EPOLL_CTL_MOD, fd, &unix.EpollEvent{
+	err := unix.EpollCtl(r.epfd, unix.EPOLL_CTL_MOD, int(fd), &unix.EpollEvent{
 		Events: events,
-		Fd:     int32(fd),
+		Fd:     fd,
 	})
 	if err != nil {
 		r.drop(rc)
@@ -206,18 +235,18 @@ func (r *reactorEpoll) mod(rc *reactorConn, events uint32) {
 // connFd returns the raw fd, preferring the transport-cached value
 // (set at accept) over the SyscallConn dance — one closure call saved
 // per mod/drop on the hot path.
-func (r *reactorEpoll) connFd(rc *reactorConn) int {
+func (r *reactorEpoll) connFd(rc *reactorConn) epollFD {
 	if rc.fd >= 0 {
-		return rc.fd
+		return asEpollFD(rc.fd)
 	}
-	return connFD(rc.conn)
+	return asEpollFD(connFD(rc.conn))
 }
 
 // drop removes and closes a connection.
 func (r *reactorEpoll) drop(rc *reactorConn) {
 	fd := r.connFd(rc)
-	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, fd, nil)
-	delete(r.conns, int32(fd))
+	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
+	delete(r.conns, fd)
 	rc.release()
 	_ = rc.conn.Close()
 }
@@ -227,8 +256,8 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 // ownership of the net.Conn transfers to that goroutine.
 func (r *reactorEpoll) handoff(rc *reactorConn) {
 	fd := r.connFd(rc)
-	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, fd, nil)
-	delete(r.conns, int32(fd))
+	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
+	delete(r.conns, fd)
 	rc.release()
 	rc.handoff()
 }
@@ -307,7 +336,7 @@ func (r *reactorEpoll) drainPending() {
 				rc.handoff()
 				continue
 			}
-			if err := r.register(connFD(rc.conn), false, rc); err != nil {
+			if err := r.register(asEpollFD(connFD(rc.conn)), false, rc); err != nil {
 				rc.release()
 				_ = rc.conn.Close()
 			}
@@ -354,7 +383,7 @@ func rawWritev(fd int) func([][]byte) (int, error) {
 			iovec = append(iovec, v)
 		}
 		n, _, errno := unix.Syscall(unix.SYS_WRITEV, uintptr(fd),
-			uintptr(unsafe.Pointer(&iovec[0])), uintptr(len(iovec)))
+			uintptr(unsafe.Pointer(&iovec[0])), uintptr(len(iovec))) //nolint:gosec // G103: the iovec aliases slices owned by this connection; they outlive the writev and are never mutated concurrently (loop-goroutine only)
 		if errno != 0 {
 			err := error(errno)
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {

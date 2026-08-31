@@ -56,7 +56,7 @@
       },
       "targets": [
         {
-          "expr": "bouine_cluster_peers{pod=~\"$pod\"}",
+          "expr": "bouine_cluster_peers{namespace=~\"$namespace\",pod=~\"$pod\"}",
           "legendFormat": "Active peers",
           "type": "prometheus"
         }
@@ -103,7 +103,7 @@
       },
       "targets": [
         {
-          "expr": "bouine_cluster_mode_info",
+          "expr": "bouine_cluster_mode_info{namespace=~\"$namespace\",pod=~\"$pod\"}",
           "legendFormat": "Cluster mode",
           "type": "prometheus"
         }
@@ -150,7 +150,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_cluster_protocol_mismatch_total)",
+          "expr": "sum(bouine_cluster_protocol_mismatch_total{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Protocol mismatches",
           "type": "prometheus"
         }
@@ -197,7 +197,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_cluster_broadcast_failures_total)",
+          "expr": "sum(bouine_cluster_broadcast_failures_total{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Broadcast failures",
           "type": "prometheus"
         }
@@ -266,12 +266,12 @@
       },
       "targets": [
         {
-          "expr": "rate(bouine_peer_fetch_hits_total{pod=~\"$pod\"}[1m])",
+          "expr": "rate(bouine_peer_fetch_hits_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "hits {{pod}}",
           "type": "prometheus"
         },
         {
-          "expr": "rate(bouine_peer_fetch_misses_total{pod=~\"$pod\"}[1m])",
+          "expr": "rate(bouine_peer_fetch_misses_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "misses {{pod}}",
           "type": "prometheus"
         }
@@ -327,7 +327,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(bouine_peer_fetch_duration_seconds_bucket{pod=~\"$pod\"}[5m])) by (le, pod))",
+          "expr": "histogram_quantile(0.99, sum(rate(bouine_peer_fetch_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\"}[5m])) by (le, pod))",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -396,7 +396,7 @@
       },
       "targets": [
         {
-          "expr": "bouine_cluster_peers{pod=~\"$pod\"}",
+          "expr": "bouine_cluster_peers{namespace=~\"$namespace\",pod=~\"$pod\"}",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -463,6 +463,6 @@
     "to": "now"
   },
   "timepicker": {},
-  "title": "bouine — Cluster dashboard",
+  "title": "bouine \u2014 Cluster dashboard",
   "uid": "bouine-cluster"
 }

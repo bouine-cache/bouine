@@ -56,7 +56,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_hot_store_bytes)",
+          "expr": "sum(bouine_hot_store_bytes{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Hot tier bytes",
           "type": "prometheus"
         }
@@ -103,7 +103,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_hot_store_entries)",
+          "expr": "sum(bouine_hot_store_entries{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Hot tier entries",
           "type": "prometheus"
         }
@@ -150,7 +150,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_warm_store_bytes)",
+          "expr": "sum(bouine_warm_store_bytes{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Warm tier bytes",
           "type": "prometheus"
         }
@@ -197,7 +197,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_warm_store_entries)",
+          "expr": "sum(bouine_warm_store_entries{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Warm tier entries",
           "type": "prometheus"
         }
@@ -253,7 +253,7 @@
       },
       "targets": [
         {
-          "expr": "bouine_hot_store_bytes{pod=~\"$pod\"}",
+          "expr": "bouine_hot_store_bytes{namespace=~\"$namespace\",pod=~\"$pod\"}",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -309,7 +309,7 @@
       },
       "targets": [
         {
-          "expr": "bouine_warm_store_bytes{pod=~\"$pod\"}",
+          "expr": "bouine_warm_store_bytes{namespace=~\"$namespace\",pod=~\"$pod\"}",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -378,7 +378,7 @@
       },
       "targets": [
         {
-          "expr": "rate(bouine_hot_store_evictions_total{pod=~\"$pod\"}[1m])",
+          "expr": "rate(bouine_hot_store_evictions_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -434,7 +434,7 @@
       },
       "targets": [
         {
-          "expr": "time() - bouine_wal_last_sync_timestamp{pod=~\"$pod\"}",
+          "expr": "time() - bouine_wal_last_sync_timestamp{namespace=~\"$namespace\",pod=~\"$pod\"}",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -481,7 +481,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_wal_dropped_entries_total)",
+          "expr": "sum(bouine_wal_dropped_entries_total{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "WAL dropped entries",
           "type": "prometheus"
         }
@@ -528,7 +528,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_warm_store_self_heals_total)",
+          "expr": "sum(bouine_warm_store_self_heals_total{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "Warm self-heals",
           "type": "prometheus"
         }
@@ -595,6 +595,6 @@
     "to": "now"
   },
   "timepicker": {},
-  "title": "bouine — Storage dashboard",
+  "title": "bouine \u2014 Storage dashboard",
   "uid": "bouine-storage"
 }

@@ -65,7 +65,7 @@
       },
       "targets": [
         {
-          "expr": "rate(bouine_purge_total{pod=~\"$pod\"}[1m])",
+          "expr": "rate(bouine_purge_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -121,7 +121,7 @@
       },
       "targets": [
         {
-          "expr": "rate(bouine_ban_total{pod=~\"$pod\"}[1m])",
+          "expr": "rate(bouine_ban_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -181,7 +181,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_cf_purge_total)",
+          "expr": "sum(bouine_cf_purge_total{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "CF purge total",
           "type": "prometheus"
         }
@@ -228,7 +228,7 @@
       },
       "targets": [
         {
-          "expr": "sum(bouine_cf_purge_skipped_total)",
+          "expr": "sum(bouine_cf_purge_skipped_total{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "CF purge skipped",
           "type": "prometheus"
         }
@@ -284,7 +284,7 @@
       },
       "targets": [
         {
-          "expr": "rate(bouine_cf_purge_duration_seconds_sum[1m]) / rate(bouine_cf_purge_duration_seconds_count[1m])",
+          "expr": "rate(bouine_cf_purge_duration_seconds_sum{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]) / rate(bouine_cf_purge_duration_seconds_count{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "avg",
           "type": "prometheus"
         }
@@ -353,7 +353,7 @@
       },
       "targets": [
         {
-          "expr": "rate(bouine_admin_requests_total{pod=~\"$pod\"}[1m])",
+          "expr": "rate(bouine_admin_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])",
           "legendFormat": "{{pod}}",
           "type": "prometheus"
         }
@@ -420,6 +420,6 @@
     "to": "now"
   },
   "timepicker": {},
-  "title": "bouine — Ops dashboard",
+  "title": "bouine \u2014 Ops dashboard",
   "uid": "bouine-ops"
 }

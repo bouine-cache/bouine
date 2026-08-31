@@ -56,7 +56,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(bouine_requests_total[1m]))",
+          "expr": "sum(rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "rps",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -112,7 +112,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(bouine_requests_total{cache_result=\"HIT\"}[1m])) / sum(rate(bouine_requests_total[1m]))",
+          "expr": "sum(rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"HIT\"}[1m])) / sum(rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "__auto",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -169,7 +169,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(rate(bouine_requests_total{status=~\"5..\"}[1m])) / sum(rate(bouine_requests_total[1m]))) or vector(0)",
+          "expr": "(sum(rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",status=~\"5..\"}[1m])) / sum(rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))) or vector(0)",
           "legendFormat": "__auto",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -273,7 +273,7 @@
       },
       "targets": [
         {
-          "expr": "max by (mode) (bouine_cluster_mode_info == 1)",
+          "expr": "max by (mode) (bouine_cluster_mode_info{namespace=~\"$namespace\",pod=~\"$pod\"} == 1)",
           "legendFormat": "{{mode}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -325,7 +325,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(bouine_peer_fetch_hits_total[1m])) / (sum(rate(bouine_peer_fetch_hits_total[1m])) + sum(rate(bouine_peer_fetch_misses_total[1m])))",
+          "expr": "sum(rate(bouine_peer_fetch_hits_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])) / (sum(rate(bouine_peer_fetch_hits_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])) + sum(rate(bouine_peer_fetch_misses_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])))",
           "legendFormat": "__auto",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -374,7 +374,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (cache_result) (rate(bouine_requests_total[1m]))",
+          "expr": "sum by (cache_result) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "{{cache_result}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -423,7 +423,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pod) (rate(bouine_requests_total[1m]))",
+          "expr": "sum by (pod) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "{{pod}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -515,7 +515,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (route) (rate(bouine_requests_total{status=~\"5..\"}[1m]))",
+          "expr": "sum by (route) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",status=~\"5..\"}[1m]))",
           "legendFormat": "{{route}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -565,7 +565,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (status) (rate(bouine_requests_total{status=~\"[45]..\"}[1m])) / sum(rate(bouine_requests_total[1m]))",
+          "expr": "sum by (status) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",status=~\"[45]..\"}[1m])) / sum(rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "HTTP {{status}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -675,19 +675,19 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"HIT\"}[1m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"HIT\"}[1m])))",
           "legendFormat": "p50",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"HIT\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"HIT\"}[1m])))",
           "legendFormat": "p99",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "histogram_quantile(0.999, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"HIT\"}[1m])))",
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"HIT\"}[1m])))",
           "legendFormat": "p999",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -736,19 +736,19 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"MISS\"}[1m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"MISS\"}[1m])))",
           "legendFormat": "MISS p50",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"MISS\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"MISS\"}[1m])))",
           "legendFormat": "MISS p99",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"REVALIDATED\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"REVALIDATED\"}[1m])))",
           "legendFormat": "REVAL p99",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -797,7 +797,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(bouine_request_duration_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])))",
           "legendFormat": "{{route}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -859,7 +859,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (cache_result) (rate(bouine_requests_total[1m]))",
+          "expr": "sum by (cache_result) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "{{cache_result}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -908,7 +908,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pod) (rate(bouine_response_bytes_total[1m]))",
+          "expr": "sum by (pod) (rate(bouine_response_bytes_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "{{pod}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -957,19 +957,19 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(bouine_peer_fetch_hits_total[1m]))",
+          "expr": "sum(rate(bouine_peer_fetch_hits_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "hits",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "sum(rate(bouine_peer_fetch_misses_total[1m]))",
+          "expr": "sum(rate(bouine_peer_fetch_misses_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "misses",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "sum(rate(bouine_peer_fetch_hop_limit_hits_total[1m]))",
+          "expr": "sum(rate(bouine_peer_fetch_hop_limit_hits_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "hop_limit",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -1018,7 +1018,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_peer_fetch_duration_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_peer_fetch_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])))",
           "legendFormat": "p99",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -1103,7 +1103,7 @@
           "uid": "ffof63uiushz4c"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{cache_result=\"HIT\"}[1m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\",cache_result=\"HIT\"}[1m])))",
           "legendFormat": "HIT p99",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -1351,7 +1351,7 @@
       },
       "targets": [
         {
-          "expr": "max by (pod) (bouine_hot_store_bytes)",
+          "expr": "max by (pod) (bouine_hot_store_bytes{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "{{pod}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -1397,7 +1397,7 @@
       },
       "targets": [
         {
-          "expr": "max by (pod) (bouine_hot_store_entries)",
+          "expr": "max by (pod) (bouine_hot_store_entries{namespace=~\"$namespace\",pod=~\"$pod\"})",
           "legendFormat": "{{pod}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -1460,7 +1460,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(bouine_hot_store_evictions_total[1m]))",
+          "expr": "sum(rate(bouine_hot_store_evictions_total{namespace=~\"$namespace\",pod=~\"$pod\"}[1m]))",
           "legendFormat": "evictions/s",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
@@ -1544,6 +1544,6 @@
     "to": "now"
   },
   "timepicker": {},
-  "title": "bouine — RED dashboard",
+  "title": "bouine \u2014 RED dashboard",
   "uid": "bouine-red"
 }

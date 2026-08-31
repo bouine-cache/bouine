@@ -296,6 +296,12 @@ LOADTEST_DIR := bench/loadtest
 RESULTS_DIR  := $(LOADTEST_DIR)/results
 CHARTS_DIR   := $(RESULTS_DIR)/charts
 PYTHON       ?= python3
+# Nightly single-node scenario list. 3.1's high-rate legs are the
+# default casualty of the 120-min job budget: they duplicate 3.2's
+# sustained 50k measurement at 8 extra minutes. Override on demand:
+#   make loadtest-scenarios SCENARIOS="3.4_working_set_overflow 3.2_hit_only"
+SCENARIOS    ?= 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
+                3.5_vary_blowup 3.6_mixed_realistic
 
 # BUILDX_VERSION pins the docker buildx CLI plugin that loadtest-setup
 # installs on demand. The load-test runner image ships docker without
@@ -359,7 +365,7 @@ loadtest-clean: ## Remove load-test result files and charts.
 .PHONY: loadtest-scenarios
 loadtest-scenarios: ## Run the §3.1–§3.6 single-node scenarios against the compose stack.
 	@mkdir -p $(RESULTS_DIR)
-	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
+	docker compose --progress quiet -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
 	@echo "Waiting for services to be healthy..."
 	@sleep 5
 	@# A scenario's k6 thresholds run against whichever TUT the loop is
@@ -370,14 +376,19 @@ loadtest-scenarios: ## Run the §3.1–§3.6 single-node scenarios against the c
 	@# and all four TUTs' results land in $(RESULTS_DIR). Regression
 	@# gating on bouine is the nightly workflow's own p99 check on these
 	@# files — not the k6 exit code.
-	@for scenario in 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
-	                  3.4_working_set_overflow 3.5_vary_blowup 3.6_mixed_realistic; do \
+	@#
+	@# 3.4_working_set_overflow is deliberately absent from the nightly
+	@# default (SCENARIOS): 20 minutes of storage-eviction pressure that
+	@# no report verdict reads and that nothing in this suite gates on.
+	@# Run it on demand when touching storage/eviction:
+	@#   make loadtest-scenarios SCENARIOS=3.4_working_set_overflow
+	@for scenario in $(SCENARIOS); do \
 		echo "--- Running $$scenario ---"; \
-		docker compose -f $(LOADTEST_DIR)/docker-compose.yaml run --rm load-gen \
+		docker compose --progress quiet -f $(LOADTEST_DIR)/docker-compose.yaml run --rm load-gen \
 			bash /scenarios/$$scenario/run.sh || \
-			echo "WARNING: $$scenario exited non-zero (see output above); continuing"; \
+		echo "WARNING: $$scenario exited non-zero (details in its results log); continuing"; \
 	done
-	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml down
+	docker compose --progress quiet -f $(LOADTEST_DIR)/docker-compose.yaml down
 
 .PHONY: loadtest-report
 loadtest-report: ## Generate charts and REPORT.md from existing load-test results.

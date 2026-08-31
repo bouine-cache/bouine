@@ -362,11 +362,20 @@ loadtest-scenarios: ## Run the §3.1–§3.6 single-node scenarios against the c
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
 	@echo "Waiting for services to be healthy..."
 	@sleep 5
+	@# A scenario's k6 thresholds run against whichever TUT the loop is
+	@# driving — including nginx/varnish/envoy, whose revalidation and
+	@# timeout semantics legitimately differ (the 3.6 script itself notes
+	@# varnish counts grace-served hits differently). One competitor
+	@# crossing a threshold must not kill the suite: every scenario runs
+	@# and all four TUTs' results land in $(RESULTS_DIR). Regression
+	@# gating on bouine is the nightly workflow's own p99 check on these
+	@# files — not the k6 exit code.
 	@for scenario in 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
 	                  3.4_working_set_overflow 3.5_vary_blowup 3.6_mixed_realistic; do \
 		echo "--- Running $$scenario ---"; \
 		docker compose -f $(LOADTEST_DIR)/docker-compose.yaml run --rm load-gen \
-			bash /scenarios/$$scenario/run.sh; \
+			bash /scenarios/$$scenario/run.sh || \
+			echo "WARNING: $$scenario exited non-zero (see output above); continuing"; \
 	done
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml down
 

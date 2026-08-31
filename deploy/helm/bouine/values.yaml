@@ -321,17 +321,6 @@ serviceMonitor:
   relabelings: []
   metricRelabelings: []
 
-# PodMonitor for Prometheus scraping (alternative to ServiceMonitor).
-# Some Prometheus Operator setups prefer PodMonitor when there is no dedicated
-# Service or when using pod-level scraping.
-podMonitor:
-  enabled: false
-  labels: {}
-  interval: 60s
-  scrapeTimeout: ""  # uses default
-  relabelings: []
-  metricRelabelings: []
-
 # PrometheusRule CRD with alerting rules for bouine SLOs.
 # Requires the Prometheus Operator. Disabled by default.
 # Thresholds are overridable — adjust to match your traffic patterns and

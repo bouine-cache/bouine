@@ -676,44 +676,6 @@
         }
       }
     },
-    "podMonitor": {
-      "description": "Prometheus PodMonitor for scraping metrics (alternative to ServiceMonitor). Disabled by default.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false
-        },
-        "labels": {
-          "type": "object",
-          "default": {}
-        },
-        "interval": {
-          "type": "string",
-          "default": "60s"
-        },
-        "scrapeTimeout": {
-          "type": "string",
-          "default": ""
-        },
-        "relabelings": {
-          "description": "Prometheus relabeling rules applied before scraping.",
-          "type": "array",
-          "items": {
-            "type": "object"
-          },
-          "default": []
-        },
-        "metricRelabelings": {
-          "description": "Prometheus metric relabeling rules applied after scraping.",
-          "type": "array",
-          "items": {
-            "type": "object"
-          },
-          "default": []
-        }
-      }
-    },
     "ingress": {
       "description": "Ingress for the data-plane HTTP/HTTPS ports. Disabled by default.",
       "type": "object",

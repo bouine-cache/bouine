@@ -15,6 +15,14 @@ concurrency:
   group: loadtest-nightly
   cancel-in-progress: false   # never cancel a running load test mid-stream
 
+# issues:write lets the regression-gate step open a tracking issue with
+# the job's GITHUB_TOKEN — without this block the default token on
+# self-hosted runners is read-only and that step fails with
+# "Resource not accessible by integration" on top of the real failure.
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   # -------------------------------------------------------------------------
   # §3.1–§3.6 single-node scenarios (Docker Compose, self-hosted runner)
@@ -40,13 +48,29 @@ jobs:
       - name: Install k6
         run: |
           if ! command -v k6 &>/dev/null; then
+            # The load-test runner container runs as uid 1001 (runner),
+            # and /usr/local/bin is root-owned: the plain tar -C there
+            # fails with "Permission denied" (nightly red since Aug 9).
+            # sudo is available NOPASSWD in runner-dind; use it for the
+            # /usr/local/bin install and keep the file runner-owned so
+            # later steps can manage it.
             curl -fsSL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
-              | tar -xz --strip-components=1 -C /usr/local/bin k6-v0.54.0-linux-amd64/k6
+              | sudo tar -xz --strip-components=1 -C /usr/local/bin k6-v0.54.0-linux-amd64/k6
+            sudo chown "$(id -u):$(id -g)" /usr/local/bin/k6
           fi
           k6 version
 
       - name: Install Python deps
-        run: pip install -q plotly kaleido
+        run: |
+          # Ubuntu 24.04 (PEP 668) blocks system-wide pip installs and the
+          # runner image ships python3 without pip — provision both, then
+          # install to the user site so no sudo is needed for the deps.
+          if ! python3 -m pip --version &>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-pip
+          fi
+          python3 -m pip install -q --user --break-system-packages plotly kaleido
+          python3 -c "import plotly, kaleido; print('python deps OK')"
 
       - name: Build images
         run: make loadtest-setup
@@ -159,9 +183,25 @@ jobs:
       - name: Install k6
         run: |
           if ! command -v k6 &>/dev/null; then
+            # See the single-node job: the runner user cannot write
+            # /usr/local/bin without sudo.
             curl -fsSL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz \
-              | tar -xz --strip-components=1 -C /usr/local/bin k6-v0.54.0-linux-amd64/k6
+              | sudo tar -xz --strip-components=1 -C /usr/local/bin k6-v0.54.0-linux-amd64/k6
+            sudo chown "$(id -u):$(id -g)" /usr/local/bin/k6
           fi
+
+      - name: Check runner prerequisites
+        run: |
+          # The load-test-k8s runner image has historically missed
+          # build tooling (make) — fail with a clear message at the top
+          # instead of an opaque "make: command not found" in whatever
+          # step needs it first.
+          for tool in make docker kubectl; do
+            if ! command -v "$tool" &>/dev/null; then
+              echo "::error::The load-test-k8s runner image is missing '$tool'. Bake it into the image (or install it here) before running cluster scenarios."
+              exit 1
+            fi
+          done
 
       - name: Build + push images
         env:

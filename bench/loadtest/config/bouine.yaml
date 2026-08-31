@@ -15,8 +15,13 @@ storage:
 # parser, bypassing the fasthttp middleware chain. Benchmarks comparing
 # against nginx/varnish/envoy must exercise it — all previous rounds
 # accidentally measured the slow middleware path.
+#
+# h1_reactor: the epoll batch-serving event loop (ADR-0041), the measured
+# increment on top of the blocking-path fast-path numbers the nightly
+# runner established. If the nightly numbers don't move, it goes back off.
 experimental:
   h1_fast_path: true
+  h1_reactor: true
 
 upstream_pools:
   - name: origin

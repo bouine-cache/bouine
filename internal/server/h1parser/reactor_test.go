@@ -214,19 +214,37 @@ func TestReactor_ReadErrorCloses(t *testing.T) {
 	require.Equal(t, actClose, rc.advance())
 }
 
-// TestReactor_IdleExpired asserts the idle budget trips handoff after
-// the timeout with no read progress.
+// TestReactor_IdleExpired asserts the per-request idle budget: the
+// clock runs from when the request began, not from the last byte —
+// a dribbling client must not reset it.
 func TestReactor_IdleExpired(t *testing.T) {
 	t.Parallel()
 	req := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
 	rc, _ := newTestReactorConn(t, req)
 	require.Equal(t, actWaitRead, rc.advance())
 
-	stale := rc.lastRead.Add(-reactorIdleTimeout - time.Second)
-	assert.True(t, rc.idleExpired(rc.lastRead.Add(reactorIdleTimeout+time.Second)),
-		"now beyond lastRead + budget must expire")
-	assert.False(t, rc.idleExpired(rc.lastRead), "now at lastRead must not expire")
-	_ = stale
+	assert.True(t, rc.idleExpired(rc.reqStart.Add(reactorIdleTimeout+time.Second)),
+		"now beyond reqStart + budget must expire")
+	assert.False(t, rc.idleExpired(rc.reqStart), "now at reqStart must not expire")
+}
+
+// TestReactor_IdleDribbleDoesNotReset asserts a slowloris-style client
+// dribbling bytes cannot extend its window: idleExpired is measured
+// from reqStart, so bytes arriving after the budget started do not
+// refresh it. The sweep's dispatch check would drop the connection.
+func TestReactor_IdleDribbleDoesNotReset(t *testing.T) {
+	t.Parallel()
+	// First half of the request arrives fresh; the machine wants more.
+	partial := []byte("GET / HTTP/1.1\r\nHost: loc")
+	rc, fio := newTestReactorConn(t, partial)
+	require.Equal(t, actWaitRead, rc.advance())
+
+	// Backdate the request start past the budget; more bytes arrive
+	// (the dribble). The connection must still read as expired.
+	rc.reqStart = rc.reqStart.Add(-reactorIdleTimeout - time.Second)
+	fio.readSrc = bytes.NewReader([]byte("alhost\r\n\r\n"))
+	assert.True(t, rc.idleExpired(rc.parser.nowFunc()),
+		"dribbled bytes must not reset the idle window")
 }
 
 // TestReactor_HandoffPrefixReplay asserts the handoff conn replays the
@@ -286,7 +304,6 @@ func TestReactor_ZeroCopyWritevRetainsRelease(t *testing.T) {
 
 	rc.state = rcWriting
 	rc.writeVec = [][]byte{[]byte("HTTP/1.1 200 OK\r\n"), []byte("Content-Length: 5\r\n\r\n"), []byte("hello")}
-	rc.writeVecOffs = []int{0, 0, 0}
 	require.Equal(t, actWaitRead, rc.advance())
 	assert.True(t, released, "Release must fire after the flush completes")
 	require.Len(t, iovSeen, 3, "all three buffers flushed as one iov, zero-copy")
@@ -354,7 +371,6 @@ func TestReactor_WritevPartialFlush(t *testing.T) {
 	}
 	rc.state = rcWriting
 	rc.writeVec = [][]byte{[]byte("HTTP/1.1 200 OK\r\n"), []byte("hello")}
-	rc.writeVecOffs = []int{0, 0}
 
 	require.Equal(t, actWaitWrite, rc.advance(), "partial writev must re-arm write readiness")
 	assert.False(t, released, "no release mid-flush")
@@ -376,4 +392,24 @@ func (f *releaseSpyFP) Release(_ *api.FastPathResponse) {
 	if f.onRelease != nil {
 		f.onRelease()
 	}
+}
+
+// TestReactor_ConnectionCloseAfterFlush asserts a hit whose request
+// carried Connection: close fully flushes and then signals the
+// transport to close (actCloseAfterFlush) instead of returning to
+// read readiness — the state-machine half of RFC 9110 §9.6.
+func TestReactor_ConnectionCloseAfterFlush(t *testing.T) {
+	t.Parallel()
+	req := []byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+	p := New(&mockFastPathHit{}, noopHandler, WithScheme("http"))
+	fio := &fakeIO{readSrc: bytes.NewReader(req)}
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	t.Cleanup(rc.release)
+
+	require.Equal(t, actCloseAfterFlush, rc.advance(),
+		"close-request hit must finish the flush, then close")
+	resp := fio.written.Bytes()
+	assert.True(t, bytes.HasPrefix(resp, []byte("HTTP/1.1 200 OK\r\n")),
+		"response must be fully flushed before close")
+	assert.Contains(t, string(resp), "hello", "body must be flushed")
 }

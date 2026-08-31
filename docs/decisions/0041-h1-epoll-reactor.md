@@ -60,9 +60,18 @@ Linux only). Per listener:
   Ps. This bounds both the fd set and the single-threaded parse
   capacity.
 
-The flag defaults to off. It is not enabled for benchmarks yet: the
-nightly runner must first confirm the blocking-path numbers with the
-fast path on (PR #563), then this lands as a measured increment.
+The flag defaults to off in general configs but is enabled in the
+loadtest configuration (`bench/loadtest/config/bouine.yaml`): the
+nightly runner confirmed the blocking-path numbers with the fast path
+on (PR #563), and the reactor is now the measured increment — if the
+nightly numbers don't move, the flag goes back off.
+
+Without `reuse_port`, one reactor loop serves the whole listener's hit
+traffic on a single core: the 4096-connection cap does not add
+parallelism, it only moves overflow to the blocking path. The intended
+deployment is `reuse_port` with N listeners (serveMultiFastPath
+spawns one reactor per listener), matching nginx's worker-per-core
+model.
 
 ## Consequences
 

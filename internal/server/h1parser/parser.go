@@ -32,17 +32,17 @@ import (
 // this fall through to the fallback handler.
 const readBufferSize = 16 * 1024
 
-// writeRefreshThreshold is the minimum remaining write-deadline window
-// below which serveHit re-arms the safety-net write deadline. Mirrors
-// the read-deadline refresh strategy in Serve: one setsockopt per
-// threshold interval instead of one per request. Each hit response is
-// guaranteed at least this much write budget, and the full safety-net
-// window (p.writeTime, 5 minutes) is far larger.
 // refreshThreshold is the minimum remaining read-deadline window below
 // which Serve re-arms the read deadline: one setsockopt per interval
 // instead of one per request.
 const refreshThreshold = 2 * time.Second
 
+// writeRefreshThreshold is the minimum remaining write-deadline window
+// below which serveHit re-arms the safety-net write deadline. Mirrors
+// the read-deadline refresh strategy: one setsockopt per threshold
+// interval instead of one per request. Each hit response is guaranteed
+// at least this much write budget, and the full safety-net window
+// (p.writeTime, 5 minutes) is far larger.
 const writeRefreshThreshold = time.Minute
 
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
@@ -304,7 +304,14 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 		p.metricsHook(req.Method, resp.Route, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
 	}
+	closeConn := resp.CloseConn
 	p.fastPath.Release(resp)
+	if closeConn {
+		// The request asked for Connection: close (RFC 9110 §9.6) and
+		// the serialized response ended with "Connection: close" — the
+		// connection must not be reused after this response.
+		return serveClose, nil
+	}
 	if len(excess) == 0 {
 		return serveContinue, nil
 	}
@@ -503,7 +510,31 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 		}
 	}
 
+	// Connection: close detection (RFC 9110 §7.6.1/§9.6): the request
+	// asked to terminate the connection after the response. Folded into
+	// the same scan pattern as the Host lookup; the flag is read by the
+	// fast path (Connection trailer + CloseConn) and by Serve to leave
+	// its keep-alive loop after a hit.
+	req.ConnectionClose = connectionCloseToken(req)
+
 	return nil
+}
+
+// connectionCloseToken reports whether the request's Connection header
+// contains a "close" token (case-insensitive, comma-separated list per
+// RFC 9110 §7.6.1). Zero allocation — tokens are subslices of the
+// header value, which itself aliases the read buffer.
+func connectionCloseToken(req *api.RawRequest) bool {
+	val := req.Header(header.Connection)
+	if val == "" {
+		return false
+	}
+	for _, token := range splitHeaderTokens(val) {
+		if api.EqualFold(token, "close") {
+			return true
+		}
+	}
+	return false
 }
 
 // skipRequestLine advances past the first \r\n in buf.
@@ -582,14 +613,6 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Ti
 	return err
 }
 
-// handleFallThrough serves a miss-path request via the fallback
-// fasthttp.RequestHandler. It constructs a *fasthttp.RequestCtx from
-// the parsed RawRequest, calls the handler, and writes the response
-// to the connection.
-//
-// Returns (close, err). When close is true the caller should return
-// from the keep-alive loop — the client requested Connection: close
-// or the response indicates the connection should be closed.
 // handleFallThrough serves a miss-path request via the fallback
 // fasthttp.RequestHandler. Instead of copying pre-buffered bytes into the
 // ctx and truncating bodies that span multiple TCP reads, it replays the
@@ -702,23 +725,6 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	return clientClose || ctx.Response.Header.ConnectionClose(), nil
 }
 
-// handleFallThroughRaw serves a request whose headers exceeded the
-// fast parser's 16 KiB read buffer: buffered holds the bytes already
-// consumed from the socket; the rest of the request (headers and body)
-// is still on the wire. The fallback handler parses the complete request
-// via fasthttp with proper framing. Because the fallback owns the
-// connection's read state afterwards, this connection is closed after
-// the response (HTTP/1.1 pipelining across the boundary is not safe).
-// handleFallThroughRaw serves a request whose headers exceeded the
-// fast parser's 16 KiB read buffer: buffered holds the bytes already
-// consumed from the socket; the rest of the request (headers and body)
-// is still on the wire. The fallback handler parses the complete request
-// via fasthttp with proper framing. Because the fallback owns the
-// connection's read state afterwards, the connection is always closed
-// after the response (HTTP/1.1 pipelining across the boundary is not
-// safe). The returned error is always nil: every failure path is a
-// per-connection outcome the caller already handles as close.
-//
 // handleFallThroughRaw serves a request whose headers exceeded the
 // fast parser's 16 KiB read buffer: buffered holds the bytes already
 // consumed from the socket; the rest of the request (headers and body)

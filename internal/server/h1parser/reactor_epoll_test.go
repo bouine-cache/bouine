@@ -47,8 +47,8 @@ func startReactorListener(t *testing.T) (addr string) {
 }
 
 // TestEpollReactor_HitOverRealTCP drives one keep-alive connection
-// through the reactor: the hit must arrive intact, and a second hit on
-// the same connection must also be served (keep-alive works through
+// through the reactor: the hit must arrive intact, and a second hit
+// on the same connection must also be served (keep-alive works through
 // the loop).
 func TestEpollReactor_HitOverRealTCP(t *testing.T) {
 	addr := startReactorListener(t)
@@ -58,17 +58,13 @@ func TestEpollReactor_HitOverRealTCP(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		_, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
 		require.NoError(t, err)
-		resp, err := bufio.NewReader(conn).ReadString('\n')
-		require.NoError(t, err)
+		resp := readOneResponse(t, conn)
 		assert.True(t, strings.HasPrefix(resp, "HTTP/1.1 200"),
-			"reactor must serve the hit, got: %q", resp)
-		// Drain headers + body of this response.
-		reader := bufio.NewReader(conn)
-		_ = reader
-		break
+			"hit %d must be served, got: %q", i+1, resp)
+		assert.Contains(t, resp, "hello", "hit %d body must be intact", i+1)
 	}
 }
 
@@ -120,26 +116,37 @@ func TestEpollReactor_ManyConnectionsBatchServed(t *testing.T) {
 	}
 }
 
-// TestEpollReactor_MissHandsOffToBlocking asserts a miss request goes
-// through the reactor handoff into the blocking parser and is served
-// by the fallback handler.
-func TestEpollReactor_MissHandsOffToBlocking(t *testing.T) {
-	addr := startReactorListener(t)
+// TestEpollReactor_ConnectionCloseClosesAfterHit asserts a hit whose
+// request carried Connection: close is fully served and then the
+// connection is closed by the reactor (the next request gets EOF, not
+// a stale keep-alive) — RFC 9110 §9.6.
+func TestEpollReactor_ConnectionCloseClosesAfterHit(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
 
-	conn, err := net.Dial("tcp", addr)
+	p := New(&mockFastPathHit{}, noopHandler)
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok)
+	go loop.Run()
+	t.Cleanup(loop.Close)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
 	require.NoError(t, err)
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// Hit first: proves the connection is reactor-owned.
-	_, err = conn.Write([]byte("GET /hit HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 	require.NoError(t, err)
-	resp1 := readOneResponse(t, conn)
-	assert.Contains(t, resp1, "HTTP/1.1 200", "first request must be a hit")
+	resp := readOneResponse(t, conn)
+	assert.True(t, strings.HasPrefix(resp, "HTTP/1.1 200"), "hit must be fully served, got: %q", resp)
+	assert.Contains(t, resp, "hello", "body must be intact")
 
-	// The mockFastPathHit always hits, so for a miss-path exercise the
-	// mock must be a miss. This test uses a reactor with a miss-only
-	// fast path instead — see below.
+	// The reactor must close the connection: the next read returns EOF,
+	// not a hang or a stale response.
+	buf := make([]byte, 64)
+	_, rerr := conn.Read(buf)
+	assert.ErrorIs(t, rerr, io.EOF, "connection must be closed after Connection: close response")
 }
 
 // TestEpollReactor_MissPathServedViaBlocking boots a reactor whose
@@ -329,9 +336,9 @@ func TestEpollReactor_IdleSweepExpiresConnections(t *testing.T) {
 	defer freshC.Close()
 
 	idleRC := newReactorConn(idleS, p, nil, nil)
-	idleRC.lastRead = p.nowFunc().Add(-reactorIdleTimeout - time.Second)
+	idleRC.reqStart = p.nowFunc().Add(-reactorIdleTimeout - time.Second)
 	freshRC := newReactorConn(freshS, p, nil, nil)
-	freshRC.lastRead = p.nowFunc()
+	freshRC.reqStart = p.nowFunc()
 	r.conns[1] = idleRC
 	r.conns[2] = freshRC
 
@@ -347,4 +354,114 @@ func TestEpollReactor_IdleSweepExpiresConnections(t *testing.T) {
 	// The fresh connection survives.
 	require.Contains(t, r.conns, int32(2), "fresh conn must survive the sweep")
 	_ = freshC
+}
+
+// missOnceFastPath hits exactly once (the first request), then misses
+// — used to exercise a real hit→handoff transition on one connection.
+type missOnceFastPath struct {
+	serve bool
+	resp  *api.FastPathResponse
+}
+
+func (m *missOnceFastPath) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	if m.serve {
+		return m.resp, true
+	}
+	return nil, false
+}
+
+func (m *missOnceFastPath) Release(_ *api.FastPathResponse) {}
+
+// TestEpollReactor_HandoffClosesConnOnExit asserts the handoff goroutine
+// closes the connection when the blocking parser finishes: a miss handed
+// off with Connection: close must leave zero fds leaked (regression: the
+// handoff goroutine used to return without closing, pinning every
+// handed-off fd in CLOSE_WAIT forever).
+func TestEpollReactor_HandoffClosesConnOnExit(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	fp := &missOnceFastPath{serve: false}
+	p := New(fp, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("blocked-miss")
+		ctx.SetStatusCode(200)
+	})
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok)
+	go loop.Run()
+	t.Cleanup(loop.Close)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// A miss with Connection: close — the blocking parser serves it and
+	// exits; the handoff goroutine must close the socket after.
+	_, err = conn.Write([]byte("GET /whatever HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+	require.NoError(t, err)
+	resp := readOneResponse(t, conn)
+	assert.Contains(t, resp, "HTTP/1.1 200", "miss must be served by the blocking fallback")
+	assert.Contains(t, resp, "blocked-miss")
+
+	// The definitive proof: the server side of the socket was closed, so
+	// the client sees EOF (not a silently parked half-open connection).
+	buf := make([]byte, 64)
+	_, rerr := conn.Read(buf)
+	assert.ErrorIs(t, rerr, io.EOF, "handoff goroutine must close the conn after Serve")
+}
+
+// TestEpollReactor_CloseDrainsInFlightHandoff asserts Close waits for a
+// handed-off request still being served by the blocking parser: after
+// Close returns, no handoff goroutine may still be running (regression:
+// Close used to leave the loop spinning and handoffs unowned).
+func TestEpollReactor_CloseDrainsInFlightHandoff(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	fallbackStarted := make(chan struct{})
+	release := make(chan struct{})
+	p := New(&mockFastPathHandler{}, func(ctx *fasthttp.RequestCtx) {
+		close(fallbackStarted)
+		<-release // hold the handed-off request open until the test says
+		ctx.SetBodyString("slow-miss")
+		ctx.SetStatusCode(200)
+	})
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok)
+	go loop.Run()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_, err = conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+
+	select {
+	case <-fallbackStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fallback never started — handoff did not fire")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		loop.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a handed-off request was still in flight")
+	case <-time.After(300 * time.Millisecond):
+		// Close is correctly still waiting for the in-flight handoff.
+	}
+
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the in-flight handoff completed")
+	}
+	_ = conn.Close()
 }

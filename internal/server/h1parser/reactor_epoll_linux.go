@@ -21,9 +21,9 @@ import (
 	"errors"
 	"net"
 	"runtime"
-	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -40,10 +40,8 @@ type reactorEpoll struct {
 	wakeR    int
 	wakeW    int
 	pending  chan *reactorConn
-	// nconns tracks the connection count atomically: the accept
-	// goroutine reads it for capacity checks while the loop goroutine
-	// owns the conns map — neither touches the other's state.
-	nconns atomic.Int32
+	// lastSweep paces the idle sweep (loop goroutine only).
+	lastSweep time.Time
 	// done is closed by Close (any goroutine) to stop the loop;
 	// reading a closed channel is race-free from any goroutine.
 	done chan struct{}
@@ -62,15 +60,16 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		return nil, false
 	}
 	r = &reactorEpoll{
-		epfd:     epfd,
-		events:   make([]unix.EpollEvent, 1024),
-		p:        p,
-		conns:    make(map[int32]*reactorConn),
-		acceptLn: ln,
-		wakeR:    wakeFds[0],
-		wakeW:    wakeFds[1],
-		pending:  make(chan *reactorConn, 1024),
-		done:     make(chan struct{}),
+		epfd:      epfd,
+		events:    make([]unix.EpollEvent, 1024),
+		p:         p,
+		conns:     make(map[int32]*reactorConn),
+		acceptLn:  ln,
+		wakeR:     wakeFds[0],
+		wakeW:     wakeFds[1],
+		pending:   make(chan *reactorConn, 1024),
+		lastSweep: p.nowFunc(),
+		done:      make(chan struct{}),
 	}
 	if err := r.register(r.wakeR, false, nil); err != nil {
 		r.cleanup()
@@ -78,13 +77,6 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 	}
 	return r, true
 }
-
-// run drives the loop until the listener is closed: accept new
-// connections (non-blocking), batch-serve ready events, and hand off
-// everything that is not a plain hit. Blocks; the caller runs it in a
-// goroutine and aborts by closing the listener (Accept fails, run
-// exits). The loop goroutine is pinned to one OS thread so the hot
-// maps and buffers stay core-local.
 func (r *reactorEpoll) run() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -104,27 +96,45 @@ func (r *reactorEpoll) run() {
 			return
 		}
 		now := r.p.nowFunc()
+		if now.Sub(r.lastSweep) >= reactorSweepInterval {
+			r.lastSweep = now
+			r.sweepIdle(now)
+		}
 		for i := int32(0); i < int32(n); i++ {
 			ev := &r.events[i]
 			rc, isConn := r.conns[ev.Fd]
 			switch {
 			case !isConn && ev.Fd == int32(r.wakeR):
 				r.drainWake()
+				r.drainPending()
 			case isConn:
 				r.dispatch(rc, ev.Events, now)
 			}
 		}
-		// Handoffs queued during dispatch (miss traffic) start here,
-		// off the hot path of the event loop.
-		for {
-			select {
-			case rc := <-r.pending:
-				rc.handoff()
-			default:
-				goto waited
-			}
+	}
+}
+
+// reactorSweepInterval paces the idle sweep. The epoll timeout is 1s,
+// so the loop wakes at least this often even with zero traffic.
+const reactorSweepInterval = time.Second
+
+// sweepIdle closes connections whose idle budget expired without read
+// progress. Idle connections generate no readiness events, so the
+// per-dispatch idle check alone would never fire for them — this sweep
+// is what bounds a reactor full of parked keep-alive clients, mirroring
+// the blocking parser's 120s read deadline. Runs on the loop goroutine
+// at most once per reactorSweepInterval; O(tracked conns).
+func (r *reactorEpoll) sweepIdle(now time.Time) {
+	for fd, rc := range r.conns {
+		if rc.idleExpired(now) {
+			// Close, not handoff: an idle conn has no in-flight
+			// request to serve, and the blocking parser would itself
+			// time it out — a handoff goroutine would be pure churn.
+			_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
+			delete(r.conns, fd)
+			rc.release()
+			_ = rc.conn.Close()
 		}
-	waited:
 	}
 }
 
@@ -135,7 +145,9 @@ func (r *reactorEpoll) dispatch(rc *reactorConn, events uint32, now time.Time) {
 		return
 	}
 	if rc.idleExpired(now) {
-		r.handoff(rc)
+		// The idle budget expired without read progress; the blocking
+		// path would hit its read deadline and close, so drop here.
+		r.drop(rc)
 		return
 	}
 	switch rc.advance() {
@@ -166,7 +178,6 @@ func (r *reactorEpoll) register(fd int, wantWrite bool, rc *reactorConn) error {
 	}
 	if rc != nil {
 		r.conns[int32(fd)] = rc
-		r.nconns.Store(int32(len(r.conns)))
 	}
 	return nil
 }
@@ -207,7 +218,6 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, fd, nil)
 	delete(r.conns, int32(fd))
-	r.nconns.Store(int32(len(r.conns)))
 	rc.release()
 	_ = rc.conn.Close()
 }
@@ -219,7 +229,6 @@ func (r *reactorEpoll) handoff(rc *reactorConn) {
 	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, fd, nil)
 	delete(r.conns, int32(fd))
-	r.nconns.Store(int32(len(r.conns)))
 	rc.release()
 	rc.handoff()
 }
@@ -293,7 +302,7 @@ func (r *reactorEpoll) drainPending() {
 	for {
 		select {
 		case rc := <-r.pending:
-			if int(r.nconns.Load()) >= reactorMaxConns {
+			if len(r.conns) >= reactorMaxConns {
 				// Over cap: the blocking parser owns it.
 				rc.handoff()
 				continue
@@ -326,15 +335,34 @@ func rawRead(fd int) func([]byte) (int, error) {
 // rawWritev returns a non-blocking writev func over fd — the
 // zero-copy flush for the retained fast-path response buffers.
 func rawWritev(fd int) func([][]byte) (int, error) {
+	// x/sys's exported Writev allocates an Iovec slice per call
+	// (readv_unix.go builds `make([]Iovec, 0, minIovec)` every time) —
+	// one heap allocation per hit. Build the iovec once per connection
+	// and reuse the backing array across requests (the fast-path
+	// response is always 3 slices: status line, header block, body),
+	// then hit SYS_WRITEV directly — the same call x/sys makes
+	// internally, minus the allocation.
+	iovec := make([]unix.Iovec, 0, 4)
 	return func(iovs [][]byte) (int, error) {
-		n, err := unix.Writev(fd, iovs)
-		if err != nil {
+		iovec = iovec[:0]
+		for _, b := range iovs {
+			var v unix.Iovec
+			v.SetLen(len(b))
+			if len(b) > 0 {
+				v.Base = &b[0]
+			}
+			iovec = append(iovec, v)
+		}
+		n, _, errno := unix.Syscall(unix.SYS_WRITEV, uintptr(fd),
+			uintptr(unsafe.Pointer(&iovec[0])), uintptr(len(iovec)))
+		if errno != 0 {
+			err := error(errno)
 			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
 				return 0, errAgain
 			}
 			return 0, err
 		}
-		return n, nil
+		return int(n), nil
 	}
 }
 

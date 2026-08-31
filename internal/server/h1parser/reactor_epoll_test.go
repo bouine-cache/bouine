@@ -308,3 +308,43 @@ func (f *staticFastPath) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathRe
 }
 
 func (f *staticFastPath) Release(_ *api.FastPathResponse) {}
+
+// TestEpollReactor_IdleSweepExpiresConnections asserts the sweep drops
+// connections past the idle budget and keeps fresh ones. sweepIdle runs
+// on the loop goroutine in production; this test drives it directly
+// with a hand-built loop so the map access stays single-owner.
+func TestEpollReactor_IdleSweepExpiresConnections(t *testing.T) {
+	p := New(&mockFastPathHit{}, noopHandler)
+	r := &reactorEpoll{
+		p:       p,
+		conns:   make(map[int32]*reactorConn),
+		pending: make(chan *reactorConn, 8),
+		done:    make(chan struct{}),
+	}
+
+	// One idle (backdated) and one fresh connection.
+	idleC, idleS := net.Pipe()
+	defer idleC.Close()
+	freshC, freshS := net.Pipe()
+	defer freshC.Close()
+
+	idleRC := newReactorConn(idleS, p, nil, nil)
+	idleRC.lastRead = p.nowFunc().Add(-reactorIdleTimeout - time.Second)
+	freshRC := newReactorConn(freshS, p, nil, nil)
+	freshRC.lastRead = p.nowFunc()
+	r.conns[1] = idleRC
+	r.conns[2] = freshRC
+
+	r.sweepIdle(p.nowFunc())
+
+	// The idle connection was closed by the sweep: its pipe peer sees EOF.
+	idleC.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 8)
+	_, err := idleC.Read(buf)
+	require.Error(t, err, "idle conn must be closed by the sweep")
+	assert.NotContains(t, r.conns, int32(1), "idle conn removed from the map")
+
+	// The fresh connection survives.
+	require.Contains(t, r.conns, int32(2), "fresh conn must survive the sweep")
+	_ = freshC
+}

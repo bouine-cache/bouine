@@ -152,15 +152,17 @@ func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int,
 }
 
 // release returns the pooled write buffer. Called exactly once, when
-// the connection leaves the reactor (close or handoff).
+// the connection leaves the reactor (close or handoff). Nothing may
+// touch rc.writeBuf after the Put — the pool may hand the buffer to
+// another connection's newReactorConn immediately on another goroutine
+// (release runs on the loop goroutine, accept on the accept
+// goroutine), so the pointer is nulled before Put, never after.
 func (rc *reactorConn) release() {
-	if rc.writeBuf != nil {
-		if cap(rc.writeBuf) <= reactorWriteCap {
-			ptr := &rc.writeBuf
-			*ptr = rc.writeBuf[:0]
-			reactorWritePool.Put(ptr)
-		}
-		rc.writeBuf = nil
+	buf := rc.writeBuf
+	rc.writeBuf = nil
+	if buf != nil && cap(buf) <= reactorWriteCap {
+		buf = buf[:0]
+		reactorWritePool.Put(&buf)
 	}
 }
 

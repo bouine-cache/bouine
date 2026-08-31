@@ -127,10 +127,15 @@ services:
       retries: 15
 
   # ── Load generator ────────────────────────────────────────────────────
+  # The scenario drivers are bash scripts (indirect expansion ${!ADDR},
+  # uppercase ${TUT^^}); the stock k6 image is Alpine sh-only, so the
+  # image is derived from the pinned k6 digest plus bash via
+  # load-gen.Dockerfile. `make loadtest-setup` builds and tags it
+  # bouine-load-gen:bash; the k6 version stays pinned inside the
+  # Dockerfile's FROM digest.
   load-gen:
     <<: *proxy-common
-    # Pinned tag + digest for reproducible k6 version across runs.
-    image: grafana/k6:0.54.0@sha256:1f40432b1cbe7234e977f96c362c9bc550a2d2b583d014dd8669fe40d3e9e755
+    image: bouine-load-gen:bash
     entrypoint: ["sh"]
     command: ["-c", "sleep infinity"]
     volumes:

@@ -324,7 +324,8 @@ ensure-buildx:
 loadtest-setup: build ensure-buildx ## Build all TUT images + origin for load testing.
 	DOCKER_BUILDKIT=1 docker build -t bouine:loadtest .
 	DOCKER_BUILDKIT=1 docker build -t bouine-test-origin:loadtest test/integration/origin/
-	@echo "bouine:loadtest and bouine-test-origin:loadtest images built."
+	DOCKER_BUILDKIT=1 docker build -t bouine-load-gen:bash -f $(LOADTEST_DIR)/load-gen.Dockerfile $(LOADTEST_DIR)
+	@echo "bouine:loadtest, bouine-test-origin:loadtest and bouine-load-gen:bash images built."
 	@echo "Pull NGINX/Varnish/Envoy base images:"
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml pull nginx varnish envoy 2>/dev/null || true
 

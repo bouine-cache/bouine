@@ -355,8 +355,8 @@ loadtest-clean: ## Remove load-test result files and charts.
 	rm -rf $(RESULTS_DIR)
 	@echo "Load test results cleaned."
 
-.PHONY: loadtest
-loadtest: loadtest-setup ## Run single-node scenarios and generate report.
+.PHONY: loadtest-scenarios
+loadtest-scenarios: ## Run the §3.1–§3.6 single-node scenarios against the compose stack.
 	@mkdir -p $(RESULTS_DIR)
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
 	@echo "Waiting for services to be healthy..."
@@ -368,6 +368,9 @@ loadtest: loadtest-setup ## Run single-node scenarios and generate report.
 			bash /scenarios/$$scenario/run.sh; \
 	done
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml down
+
+.PHONY: loadtest-report
+loadtest-report: ## Generate charts and REPORT.md from existing load-test results.
 	@command -v $(PYTHON) >/dev/null || { echo "python3 is required"; exit 1; }
 	@$(PYTHON) -c "import plotly, kaleido" 2>/dev/null || \
 		$(PYTHON) -m pip install -q plotly kaleido
@@ -381,6 +384,9 @@ loadtest: loadtest-setup ## Run single-node scenarios and generate report.
 		--output REPORT.md
 	@echo "Report: $(LOADTEST_DIR)/REPORT.md"
 	@echo "Charts: $(CHARTS_DIR)/"
+
+.PHONY: loadtest
+loadtest: loadtest-setup loadtest-scenarios loadtest-report ## Run single-node scenarios and generate report.
 
 .PHONY: release
 release: ## Create a GitHub release. Requires TAG=v0.X.Y and a git tag on main.

@@ -40,6 +40,8 @@
 #   FastPath_Hit:                     0
 #   FastPath_HitWithWrite:             0  (includes WriteTo consumption)
 #   H1Parse_Get:                      0
+#   Reactor_Hit:                      0  (epoll reactor batch serving;
+#                                      parse+TryHit+serialize+flush)
 
 set -euo pipefail
 
@@ -72,6 +74,7 @@ declare -A BUDGETS=(
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
     [H1Parse_Get]=0
+    [Reactor_Hit]=0
     [Middleware_Miss]=11
     [Middleware_Miss_NoLog]=0
 )

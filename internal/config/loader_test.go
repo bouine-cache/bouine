@@ -857,3 +857,20 @@ storage:
 	require.NoError(t, err)
 	require.Equal(t, "cachaner", cfg.Storage.WarmEvictionAlgorithm)
 }
+
+// TestValidate_H1ReactorRequiresFastPath asserts that
+// experimental.h1_reactor without experimental.h1_fast_path is
+// rejected at load time instead of silently no-oping at startup.
+func TestValidate_H1ReactorRequiresFastPath(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Listen.HTTP = ":8080"
+	cfg.Experimental.H1Reactor = true
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "h1_reactor requires experimental.h1_fast_path")
+
+	// With the fast path on, the same config validates.
+	cfg.Experimental.H1FastPath = true
+	assert.NoError(t, cfg.Validate())
+}

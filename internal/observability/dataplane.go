@@ -133,12 +133,14 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 			Help:      "Total number of requests processed by the data plane.",
 		}, []string{"method", "status", "cache_result", "source", "route"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace:                      "bouine",
-			Name:                           "request_duration_seconds",
-			Help:                           "Histogram of request durations in seconds.",
-			Buckets:                        []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-			NativeHistogramBucketFactor:    1.1,
-			NativeHistogramMaxBucketNumber: 100,
+			Namespace: "bouine",
+			Name:      "request_duration_seconds",
+			Help:      "Histogram of request durations in seconds.",
+			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			// No NativeHistogramBucketFactor: the native-histogram sparse-
+			// bucket math cost on every Observe was called out in the
+			// hit-path plan; no dashboard uses native histogram queries
+			// (all PromQL uses classic _bucket series).
 		}, []string{"method", "status", "cache_result", "source", "route"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",

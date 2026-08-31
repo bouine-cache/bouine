@@ -15,6 +15,12 @@ import (
 // for zero-alloc cache-hit serving. On miss, the h1parser calls the
 // fallback handler (fasthttp.RequestHandler) directly — no byte
 // reconstruction or net/http handoff needed.
+//
+// When the reactor is enabled and available (Linux, epoll), the
+// accept loop hands the listener to a single-goroutine event loop
+// that batch-serves cache hits (see reactor.go); every non-hit
+// connection is handed off to the blocking path, so behavior is
+// unchanged except for how hits are scheduled.
 func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	scheme := s.scheme
 	if scheme == "" {
@@ -33,6 +39,17 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
 		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),
 	)
+
+	if s.h1Reactor {
+		if loop, ok := h1parser.NewReactorLoop(parser, ln); ok {
+			s.logger.Info("H1 reactor enabled (epoll batch hit serving)",
+				"name", s.name, "addr", ln.Addr().String())
+			loop.Run()
+			return nil
+		}
+		s.logger.Warn("h1_reactor requested but unavailable on this platform; using blocking path",
+			"name", s.name)
+	}
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)

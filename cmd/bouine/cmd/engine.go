@@ -928,6 +928,8 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 		e.logger.Info("H1 fast path enabled", "experimental", true)
 	}
 
+	h1Reactor := e.cfg.Experimental.H1Reactor && e.cfg.Experimental.H1FastPath
+
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:           e.cfg.Listen.HTTP,
@@ -941,6 +943,7 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 			FastPath:       fastPathHandler,
 			FastMetrics:    rs.dpMetrics,
 			Scheme:         "http",
+			H1Reactor:      h1Reactor,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -965,6 +968,7 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 			FastPath:       fastPathHandler,
 			FastMetrics:    rs.dpMetrics,
 			Scheme:         "https",
+			H1Reactor:      h1Reactor,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)

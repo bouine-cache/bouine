@@ -682,6 +682,7 @@ func TestQualifiesForFastPath_IfRange(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: "If-Range", Value: `"etag"`}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -691,6 +692,7 @@ func TestQualifiesForFastPath_IfMatch(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: "If-Match", Value: `"etag"`}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -700,6 +702,7 @@ func TestQualifiesForFastPath_TransferEncoding(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.TransferEncoding, Value: "chunked"}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -709,6 +712,7 @@ func TestQualifiesForFastPath_PragmaNoCache(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.Pragma, Value: "no-cache"}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }

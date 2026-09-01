@@ -53,9 +53,15 @@ type Parser struct {
 	nowFunc       func() time.Time
 	metricsHook   func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	smugglingHook func()
-	scheme        string
-	idleRead      time.Duration
-	writeTime     time.Duration
+	// metricsRing, when non-nil, redirects the reactor's hit metrics
+	// through the async SPSC ring (reactor_metrics.go). Set by the
+	// reactor transport (newReactorLoop) only — the blocking path
+	// always calls metricsHook directly, and tests that want sync
+	// observation leave it nil.
+	metricsRing *metricsRing
+	scheme      string
+	idleRead    time.Duration
+	writeTime   time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -401,7 +407,22 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scra
 // until the next parse call.
 func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, error) {
 	req := scratch
-	*req = api.RawRequest{Scheme: p.scheme}
+	// Soft reset: assign the scalar fields instead of zeroing the
+	// whole struct — the [100]RawHeader array (~3.3 KB) is not read
+	// past NHeaders by any consumer, and the struct-literal assignment
+	// would memset it plus evict ~56 cache lines the header writes
+	// immediately refill. parseHeaders re-derives every flag field, so
+	// clearing them here is unnecessary work.
+	req.Method = ""
+	req.Path = ""
+	req.Query = ""
+	req.Host = ""
+	req.HTTPVersion = ""
+	req.CacheControlRaw = ""
+	req.ScanFlags = 0
+	req.NHeaders = 0
+	req.ConnectionClose = false
+	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
 	}
@@ -423,13 +444,34 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	return req, false, excess, nil
 }
 
-// findHeaderEnd searches for \r\n\r\n in buf.
+// findHeaderEnd searches for the \r\n\r\n terminator in buf.
 func findHeaderEnd(buf []byte) int {
 	idx := bytes.Index(buf, []byte("\r\n\r\n"))
 	if idx < 0 {
 		return -1
 	}
 	return idx + 4
+}
+
+// headerTermOverlap is how far before the current buffer end a
+// terminator search must resume after a miss: a terminator that began
+// in the last len-1 bytes of the previous segment could still
+// complete in the next one. Searching from rLen-overlap is O(1)
+// resumption instead of rescanning consumed bytes per read.
+const headerTermOverlap = len("\r\n\r\n") - 1
+
+// findHeaderEndFrom searches for the \r\n\r\n terminator in buf,
+// starting at byte offset from. Callers that have already searched
+// buf[:from] pass the previously searched length so multi-segment
+// accumulation stays O(n) overall instead of O(n²) rescan per read.
+func findHeaderEndFrom(buf []byte, from int) int {
+	if from < len(buf)-1 {
+		if idx := bytes.Index(buf[from:], []byte("\r\n\r\n")); idx >= 0 {
+			return from + idx + 4
+		}
+		return -1
+	}
+	return findHeaderEnd(buf)
 }
 
 // parseRequestLine parses the first line: "METHOD SP PATH SP VERSION\r\n".
@@ -473,7 +515,13 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 	return nil
 }
 
-// parseHeaders parses header lines from buf, starting after the request line.
+// parseHeaders parses header lines from buf, starting after the
+// request line. The single pass also derives everything downstream
+// consumers need — Host (first wins), Cache-Control raw value (last
+// wins), scan flags (conditional/precondition/TE/CL/duplicate-CL/
+// Pragma: no-cache, per api.ScanFlagForHeader), and the Connection
+// close token — so no consumer re-scans the header array on the hit
+// path (the fused scan, W2 of docs/plans/h1-reactor-perf-round-4.md).
 func parseHeaders(buf []byte, req *api.RawRequest) error {
 	pos := skipRequestLine(buf)
 
@@ -503,29 +551,22 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 		pos = lineEnd + 2
 	}
 
-	for i := 0; i < req.NHeaders; i++ {
-		if api.EqualFold(req.Headers[i].Key, "Host") {
-			req.Host = req.Headers[i].Value
-			break
-		}
-	}
-
 	// Connection: close detection (RFC 9110 §7.6.1/§9.6): the request
-	// asked to terminate the connection after the response. Folded into
-	// the same scan pattern as the Host lookup; the flag is read by the
-	// fast path (Connection trailer + CloseConn) and by Serve to leave
-	// its keep-alive loop after a hit.
-	req.ConnectionClose = connectionCloseToken(req)
-
+	// asked to terminate the connection after the response. The flag is
+	// read by the fast path (Connection trailer + CloseConn) and by
+	// Serve to leave its keep-alive loop after a hit. appendHeader sets
+	// the flag when any Connection header carries a close token (the
+	// !ConnectionClose guard skips already-decided requests), so it
+	// needs no reset here; a request with no Connection header at all
+	// leaves the soft reset's false in place.
 	return nil
 }
 
-// connectionCloseToken reports whether the request's Connection header
+// connectionCloseValue reports whether a Connection header value
 // contains a "close" token (case-insensitive, comma-separated list per
 // RFC 9110 §7.6.1). Zero allocation — tokens are subslices of the
 // header value, which itself aliases the read buffer.
-func connectionCloseToken(req *api.RawRequest) bool {
-	val := req.Header(header.Connection)
+func connectionCloseValue(val string) bool {
 	if val == "" {
 		return false
 	}
@@ -547,30 +588,24 @@ func skipRequestLine(buf []byte) int {
 }
 
 // smugglingDetected checks for HTTP request smuggling indicators per
-// RFC 9110 §6.6.2 and AGENTS.md §6.
+// RFC 9110 §6.6.2 and AGENTS.md §6: CL+TE together, or a duplicate
+// Content-Length. Both facts were derived by the parser's fused scan
+// (FlagHasCL / FlagHasTE / FlagDuplicateCL); hand-built requests that
+// skip RecomputeScanFlags must call it first.
 func smugglingDetected(req *api.RawRequest) bool {
-	var hasCL, hasTE bool
-	var clCount int
-	for i := 0; i < req.NHeaders; i++ {
-		h := &req.Headers[i]
-		if api.EqualFold(h.Key, header.ContentLength) {
-			clCount++
-			hasCL = true
-		}
-		if api.EqualFold(h.Key, header.TransferEncoding) {
-			hasTE = true
-		}
-	}
-	if hasCL && hasTE {
+	f := req.ScanFlags
+	if f&api.FlagHasCL != 0 && f&api.FlagHasTE != 0 {
 		return true
 	}
-	if clCount > 1 {
-		return true
-	}
-	return false
+	return f&api.FlagDuplicateCL != 0
 }
 
-// appendHeader parses a single header line and appends it to req.
+// appendHeader parses a single header line, appends it to req, and
+// folds the scan-flag/Host/Cache-Control/Connection-close derivation
+// into the same pass (W2: no consumer re-scans the header array).
+// Header-name dispatch is length-guarded before EqualFold: every
+// matched name has a distinct length, so the common non-matching
+// header pays only a length compare, not a case-insensitive compare.
 func appendHeader(req *api.RawRequest, line []byte) {
 	colon := 0
 	for colon < len(line) && line[colon] != ':' {
@@ -592,6 +627,30 @@ func appendHeader(req *api.RawRequest, line []byte) {
 		Value: value,
 	}
 	req.NHeaders++
+
+	// Decide from the pre-merge flag state (first-Host-wins reads
+	// FlagHostSeen as "was a Host already recorded"), then merge this
+	// header's flags — merging first would make every Host look like
+	// a duplicate. Duplicate Content-Length is per-request state no
+	// single-header helper can derive: the second CL sets the flag,
+	// matching RecomputeScanFlags' saturated count (2+ duplicates are
+	// smuggling either way).
+	flags := api.ScanFlagForHeader(key, value)
+	hostSeen := req.ScanFlags&api.FlagHostSeen != 0
+	if flags&api.FlagHasCL != 0 && req.ScanFlags&api.FlagHasCL != 0 {
+		flags |= api.FlagDuplicateCL
+	}
+	req.ScanFlags |= flags
+	switch {
+	case flags&api.FlagHostSeen != 0 && !hostSeen:
+		req.Host = value
+	case api.EqualFold(key, header.CacheControl):
+		// Last Cache-Control wins, matching the pre-fusion scan
+		// (each occurrence overwrote ccRaw in header order).
+		req.CacheControlRaw = value
+	case flags&api.FlagHasConnection != 0 && !req.ConnectionClose:
+		req.ConnectionClose = connectionCloseValue(value)
+	}
 }
 
 // serveHit writes the fast path response to the connection via
@@ -790,21 +849,14 @@ func indexByte(s string, b byte) int {
 }
 
 // isConnectionClose reports whether the request contains a
-// Connection: close token (RFC 9110 §7.6.1). The Connection header
-// is a comma-separated list of tokens; "close" may appear alongside
-// other tokens like "keep-alive". This determines whether the
-// keep-alive loop should terminate after serving the response.
+// Connection: close token (RFC 9110 §7.6.1). The parser's fused header
+// scan already derived the token decision into req.ConnectionClose
+// (any Connection header carrying a close token sets it); reading
+// the flag here replaces a header-array scan per fall-through.
+// Hand-built requests that set Headers directly must derive the flag
+// themselves — tests construct ConnectionClose directly.
 func isConnectionClose(req *api.RawRequest) bool {
-	val := req.Header(header.Connection)
-	if val == "" {
-		return false
-	}
-	for _, token := range splitHeaderTokens(val) {
-		if api.EqualFold(token, "close") {
-			return true
-		}
-	}
-	return false
+	return req.ConnectionClose
 }
 
 // splitHeaderTokens splits a comma-separated header value into trimmed

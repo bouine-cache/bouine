@@ -148,41 +148,27 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 // entirely for requests that can never be served from cache.
 // Returns the parsed request Cache-Control directives so the caller can
 // pass them to evaluateFromRaw without re-parsing.
+//
+// The h1parser's fused header scan already derived the facts
+// (conditional/precondition/TE/CL presence in DisqualifyFastPath,
+// Cache-Control raw value, Pragma: no-cache) — this reads them instead
+// of re-scanning the header array. Hand-built RawRequests that set
+// Headers directly must call req.RecomputeScanFlags() first.
 func qualifiesForFastPath(req *api.RawRequest) (Directives, bool) {
 	if req.Method != "GET" && req.Method != "HEAD" {
 		return Directives{}, false
 	}
-	var reqCC Directives
-	var ccRaw string
-	var pragmaNoCache bool
-	for i := 0; i < req.NHeaders; i++ {
-		h := &req.Headers[i]
-		switch {
-		case api.EqualFold(h.Key, header.IfNoneMatch),
-			api.EqualFold(h.Key, header.IfModifiedSince),
-			api.EqualFold(h.Key, header.Range),
-			api.EqualFold(h.Key, "If-Range"),
-			api.EqualFold(h.Key, "If-Unmodified-Since"),
-			api.EqualFold(h.Key, "If-Match"):
-			return Directives{}, false
-		}
-		if api.EqualFold(h.Key, header.TransferEncoding) || api.EqualFold(h.Key, header.ContentLength) {
-			return Directives{}, false
-		}
-		if api.EqualFold(h.Key, header.CacheControl) {
-			ccRaw = h.Value
-		}
-		if api.EqualFold(h.Key, header.Pragma) && api.EqualFold(h.Value, "no-cache") {
-			pragmaNoCache = true
-		}
+	if req.ScanFlags&api.DisqualifyFastPath != 0 {
+		return Directives{}, false
 	}
-	if ccRaw != "" {
+	var reqCC Directives
+	if ccRaw := req.CacheControlRaw; ccRaw != "" {
 		reqCC = ParseCacheControl(ccRaw)
 		if reqCC.NoCache || reqCC.NoStore {
 			return Directives{}, false
 		}
 	}
-	if pragmaNoCache {
+	if req.ScanFlags&api.FlagPragmaNoCache != 0 {
 		return Directives{}, false
 	}
 	return reqCC, true

@@ -84,7 +84,17 @@ func TestPoolClient_UsesConfiguredSettings(t *testing.T) {
 	require.Equal(t, 1234*time.Millisecond, c.ResponseHeaderTimeout)
 	require.Equal(t, 1234*time.Millisecond, p.client.ReadTimeout)
 	require.Equal(t, 60*time.Second, p.client.MaxIdleConnDuration)
-	// Origin header names must reach the end client byte-for-byte, as
-	// the per-route proxy client did before the shared client existed.
-	assert.True(t, p.client.DisableHeaderNamesNormalizing)
+	// Header-name normalizing must stay enabled: the cache layer reads
+	// origin responses with canonical Peek keys, and origins commonly
+	// emit lowercase header names (see newOriginClient).
+	assert.False(t, p.client.DisableHeaderNamesNormalizing)
+}
+
+// TestPool_Close_ClosesIdleConnections pins the lifecycle contract:
+// Pool.Close must drain the shared client's idle connections so
+// rolling restarts don't leak TIME_WAIT sockets on origins.
+func TestPool_Close_ClosesIdleConnections(t *testing.T) {
+	t.Parallel()
+	p := pool(t, "127.0.0.1:1")
+	require.NoError(t, p.Close(t.Context()))
 }

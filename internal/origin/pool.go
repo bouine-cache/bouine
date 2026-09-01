@@ -227,6 +227,13 @@ func resolveDefaultInt(v, def int) int {
 // newOriginClient builds the shared fasthttp.Client for a pool from the
 // resolved connect settings. One client per pool means MaxConnsPerHost
 // is enforced per pool, not per route handler.
+//
+// Header-name normalizing must stay ENABLED: the cache layer reads
+// origin responses with canonical Peek keys (ETag, Cache-Control, ...)
+// and origins commonly emit lowercase names (Node.js does); with
+// DisableHeaderNamesNormalizing fasthttp Peek misses them and the
+// cache misclassifies freshness and conditional revalidation
+// (http-tests/cache-tests drops to 283/365).
 func newOriginClient(cc clientConfig) *fasthttp.Client {
 	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
 	return &fasthttp.Client{
@@ -234,9 +241,6 @@ func newOriginClient(cc clientConfig) *fasthttp.Client {
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
 		ReadTimeout:         cc.responseHeaderTimeout,
 		WriteTimeout:        5 * time.Minute,
-		// Preserve origin header-name bytes end to end (RFC 9110
-		// §5.1 allows any token casing); matching the peer-fetch client.
-		DisableHeaderNamesNormalizing: true,
 		Dial: func(addr string) (net.Conn, error) {
 			return dialer.Dial("tcp", addr)
 		},

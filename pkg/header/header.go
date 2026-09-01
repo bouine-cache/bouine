@@ -212,22 +212,6 @@ const (
 	// negotiation during rolling upgrades.
 	XBouineClusterVersion = "X-Bouine-Cluster-Version"
 
-	// BouineIssuer — carries the node name that issued a purge or ban
-	// event, sent as an HTTP header on peer POST endpoints.
-	BouineIssuer = "Bouine-Issuer"
-
-	// BouineSeq — carries the monotonic sequence number of a purge or
-	// ban event, sent as an HTTP header on peer POST endpoints.
-	BouineSeq = "Bouine-Seq"
-
-	// BouineIssuedAt — carries the wall-clock timestamp (RFC3339) of a
-	// purge or ban event, sent as an HTTP header on peer POST endpoints.
-	BouineIssuedAt = "Bouine-Issued-At"
-
-	// BouineMethod — carries the HTTP method of the original cached
-	// request, sent as an HTTP header on peer POST endpoints.
-	BouineMethod = "Bouine-Method"
-
 	// HXTrigger — htmx trigger header. Set on dashboard responses to
 	// tell the client to fire a client-side event (e.g. "refreshOpsLog").
 	HXTrigger = "HX-Trigger"

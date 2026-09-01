@@ -2316,7 +2316,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 		respCC = cdnCC
 		// Store CDN-Cache-Control string as the object's pre-parsed CC so
 		// Evaluate reads the CDN directives on every hit path.
-		ccHeader = mergeHeaderValues(resMap, header.CDNCacheControl)
+		ccHeader = resMap.GetAll(header.CDNCacheControl)
 	} else {
 		respCC = ParseCacheControl(ccHeader)
 	}

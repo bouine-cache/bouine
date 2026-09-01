@@ -61,14 +61,6 @@ type ExperimentalConfig struct {
 	// and non-GET/HEAD requests fall through to net/http unchanged.
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
-
-	// FasthttpMigration enables the fasthttp HTTP stack for the entire
-	// daemon (data plane, origin fetch, peer fetch, admin, dashboard).
-	// When false, the daemon uses net/http (legacy behavior). When true,
-	// the daemon uses fasthttp with the rewritten h1parser for cache-hit
-	// zero-alloc serving. See ADR-0034 and issue #521 for the full
-	// migration plan. Default false.
-	FasthttpMigration bool `yaml:"fasthttp_migration,omitempty" json:"fasthttp_migration,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

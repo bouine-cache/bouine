@@ -167,6 +167,13 @@ upstream_pools:
   - name: origin
     targets: [%q]
 routes:
+  - match:
+      path_prefix: /api/v1/
+    pool: origin
+    cache:
+      ttl_default: 60s
+    request:
+      strip_prefix: /api/v1
   - match: {}
     pool: origin
     cache:

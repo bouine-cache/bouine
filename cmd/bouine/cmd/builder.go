@@ -164,9 +164,20 @@ func listenPort(addr, defaultPort string) string {
 // forwarding to next. This is the fasthttp-native version.
 func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return func(ctx *fasthttp.RequestCtx) {
-		p := string(ctx.Path())
-		if strings.HasPrefix(p, prefix) {
-			ctx.Request.SetRequestURI(strings.TrimPrefix(p, prefix))
+		if p := string(ctx.Path()); strings.HasPrefix(p, prefix) {
+			// Strip path+query together so the query string survives;
+			// ctx.Path() alone would drop it. Boundary cases: an
+			// exact-prefix match becomes "/", "?query" keeps its "/"
+			// root, and a mid-segment match passes through unmodified.
+			rest := ctx.RequestURI()[len(prefix):]
+			switch {
+			case len(rest) == 0:
+				ctx.Request.SetRequestURI("/")
+			case rest[0] == '/':
+				ctx.Request.SetRequestURIBytes(rest)
+			case rest[0] == '?':
+				ctx.Request.SetRequestURI("/" + string(rest))
+			}
 		}
 		next(ctx)
 	}
@@ -253,20 +264,10 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		if p == nil {
 			continue
 		}
-		consecutive5xx := 0
-		for _, pc := range e.cfg.UpstreamPools {
-			if pc.Name != rc.Pool {
-				continue
-			}
-			consecutive5xx = pc.Health.Passive.Consecutive5xx
-			break
-		}
-		upstream := p.FastHandler(consecutive5xx)
-		// TODO: stripPrefix needs fasthttp-native implementation
-		_ = rc.Request.StripPrefix
 		cfg := cache.HandlerConfig{
-			Upstream:                upstream,
+			Upstream:                p.FastHandler(0),
 			FastClient:              p.FastClient(),
+			StripPrefix:             rc.Request.StripPrefix,
 			Store:                   rs.store,
 			Logger:                  e.logger,
 			NegativeTTL:             rc.Cache.NegativeTTL,

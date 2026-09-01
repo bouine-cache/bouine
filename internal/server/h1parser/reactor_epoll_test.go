@@ -532,6 +532,11 @@ func TestEpollReactor_HandoffStormConcurrentClose(t *testing.T) {
 	require.True(t, ok)
 	go loop.Run()
 
+	// Every request carries Connection: close: the blocking parser
+	// serves it and exits (no keep-alive park), so the conn's lifecycle
+	// ends with the handoff goroutine instead of the 120s idle deadline
+	// — the storm this test wants, without depending on the drain grace
+	// window for correctness.
 	const n = 48
 	conns := make([]net.Conn, 0, n)
 	for range n {
@@ -540,29 +545,49 @@ func TestEpollReactor_HandoffStormConcurrentClose(t *testing.T) {
 			break
 		}
 		conns = append(conns, conn)
-		_, _ = conn.Write([]byte("GET /storm HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+		_, _ = conn.Write([]byte("GET /storm HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
 	}
 
-	// Some handoffs must have fired before Close starts.
-	deadline := time.Now().Add(3 * time.Second)
+	// Wait until at least one handoff has been served, then close
+	// concurrently — jobs may still be spawning and queued when Close
+	// begins; that overlap is the race under test.
+	deadline := time.Now().Add(10 * time.Second)
 	for len(fallbackStarted) == 0 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	require.NotZero(t, len(fallbackStarted), "no handoff fired before Close")
 
+	// Production wiring closes the listener before the loop (see
+	// serveFastPath): acceptLoop must be dead or it would feed conns
+	// to a closed loop. The test mirrors that ordering.
+	_ = ln.Close()
 	loop.Close()
 
-	// After Close returns, every handed-off conn is closed by its
-	// blocking-parser goroutine or the force-close: the clients must
-	// observe EOF/reset rather than a parked half-open.
-	for _, conn := range conns {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		buf := make([]byte, 64)
-		for {
-			if _, rerr := conn.Read(buf); rerr != nil {
-				break
-			}
+	// After Close returns, no conn may leak: each client observes
+	// EOF/reset in parallel with a shared deadline — sequential 2s
+	// read deadlines would serialize worst-case latency to n × 2s.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for _, conn := range conns {
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 256)
+				for {
+					if _, rerr := c.Read(buf); rerr != nil {
+						return
+					}
+				}
+			}(conn)
 		}
-		_ = conn.Close()
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("half-open conns remain after Close: clients did not observe EOF within 30s")
 	}
 }

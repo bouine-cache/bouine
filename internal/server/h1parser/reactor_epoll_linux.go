@@ -212,8 +212,13 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 func (r *reactorEpoll) run() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	defer r.cleanup()
+	// Defer order is load-bearing: handoffsDone must close only after
+	// cleanup has joined the spawner (LIFO — this defer runs last).
+	// Closing it earlier would let Close pass its wait and race
+	// wg.Wait against the spawner's in-flight wg.Add for queued jobs —
+	// a data race the storm-shutdown test catches under -race.
 	defer close(r.handoffsDone)
+	defer r.cleanup()
 	if r.metricsDrainer != nil {
 		// metricsDone closes when the drainer's final drain completes;
 		// Close joins it after the loop exits (the loop is the ring's
@@ -618,13 +623,13 @@ func (r *reactorEpoll) cleanup() {
 		}
 	}
 drained:
-	// Close the spawn queue: the spawner drains any queued jobs (each
-	// wg.Add + goroutine start) and exits, closing spawnerDone. Close
-	// joins spawnerDone before waiting on the tracker's WaitGroup, so
-	// the Wait cannot race a still-pending Add from the queue.
+	// Stop the spawner: it drains any queued jobs (each wg.Add +
+	// goroutine start) before exiting, and quit makes every late
+	// spawnFromLoop a conn close instead of a send on a dead queue.
+	// handoffsDone closes only after this join, so Close's WaitGroup
+	// wait cannot race a still-pending Add.
 	if r.handoffs.spawns != nil {
-		close(r.handoffs.spawns)
-		<-r.handoffs.spawnerDone
+		r.handoffs.stopSpawner()
 	}
 	_ = unix.Close(r.wakeR)
 	_ = unix.Close(r.wakeW)
@@ -772,6 +777,11 @@ type handoffTracker struct {
 	// wg.Add happens on the spawner, so joining the spawner first
 	// guarantees no Add can race the Wait.
 	spawnerDone chan struct{}
+	// quit signals the spawner to stop accepting work. Closed exactly
+	// once by stopSpawner (loop shutdown); spawnFromLoop's select drops
+	// late jobs rather than sending on a closed channel — the channel
+	// is never closed, only quit is.
+	quit chan struct{}
 }
 
 // handoffJob is one queued blocking-parser start.
@@ -789,13 +799,46 @@ const handoffSpawnQueue = 128
 func (t *handoffTracker) startSpawner() {
 	t.spawns = make(chan handoffJob, handoffSpawnQueue)
 	t.spawnerDone = make(chan struct{})
+	t.quit = make(chan struct{})
 	go t.spawner()
+}
+
+// stopSpawner signals the spawner to finish and waits for it. Every
+// job still in the queue is spawned (blocking-parser goroutines own
+// their conns' close), so nothing parked in the queue can leak. Call
+// from the loop goroutine's cleanup path only.
+func (t *handoffTracker) stopSpawner() {
+	close(t.quit)
+	for {
+		select {
+		case job := <-t.spawns:
+			t.spawn(job.p, job.conn)
+		default:
+			<-t.spawnerDone
+			return
+		}
+	}
 }
 
 func (t *handoffTracker) spawner() {
 	defer close(t.spawnerDone)
-	for job := range t.spawns {
-		t.spawn(job.p, job.conn)
+	for {
+		select {
+		case <-t.quit:
+			// Drain the remainder here too — stopSpawner races its own
+			// drain; whichever side pops a job, it is spawned exactly
+			// once (channel receive is exclusive).
+			for {
+				select {
+				case job := <-t.spawns:
+					t.spawn(job.p, job.conn)
+				default:
+					return
+				}
+			}
+		case job := <-t.spawns:
+			t.spawn(job.p, job.conn)
+		}
 	}
 }
 
@@ -808,6 +851,12 @@ func (t *handoffTracker) spawnFromLoop(p *Parser, conn net.Conn) {
 	job := handoffJob{p: p, conn: conn}
 	select {
 	case t.spawns <- job:
+	case <-t.quit:
+		// Shutdown already started: this conn arrived after the loop's
+		// final batch (accept-side race). Nobody will serve it; close
+		// it here — the client sees a reset, which under shutdown is
+		// the honest outcome.
+		_ = conn.Close()
 	default:
 		_ = conn.Close()
 	}

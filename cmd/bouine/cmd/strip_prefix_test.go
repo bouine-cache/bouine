@@ -49,3 +49,31 @@ func TestStripPrefixFastHTTP_NoMatchPassthrough(t *testing.T) {
 	h(ctx)
 	assert.Equal(t, "/other/path", gotPath)
 }
+
+func TestStripPrefixFastHTTP_PreservesQuery(t *testing.T) {
+	t.Parallel()
+	var gotURI string
+	origin := func(ctx *fasthttp.RequestCtx) {
+		gotURI = string(ctx.RequestURI())
+	}
+	h := stripPrefixFastHTTP("/api/v1", origin)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/v1/users?q=1")
+	h(ctx)
+	assert.Equal(t, "/users?q=1", gotURI)
+}
+
+func TestStripPrefixFastHTTP_ExactPrefixBecomesRoot(t *testing.T) {
+	t.Parallel()
+	var gotURI string
+	origin := func(ctx *fasthttp.RequestCtx) {
+		gotURI = string(ctx.RequestURI())
+	}
+	h := stripPrefixFastHTTP("/api/v1", origin)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/v1?q=1")
+	h(ctx)
+	assert.Equal(t, "/?q=1", gotURI)
+}

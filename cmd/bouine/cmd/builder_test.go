@@ -1265,6 +1265,57 @@ func TestBuildRouter_WithRoute(t *testing.T) {
 	assert.Len(t, rs.handlers, 1)
 }
 
+// TestBuildRouter_StripPrefixWired is the regression test for issue
+// #595: request.strip_prefix on a proxied route must reach the cache
+// handler, so the origin sees the stripped path while cache keys keep
+// the original path.
+func TestBuildRouter_StripPrefixWired(t *testing.T) {
+	t.Parallel()
+	originSrv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=60")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		_, _ = ctx.Write(ctx.RequestURI())
+	})
+	defer originSrv.Close()
+
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "echo", Targets: []string{originSrv.Addr}},
+			},
+			Routes: []config.Route{
+				{
+					Name:    "api",
+					Pool:    "echo",
+					Request: config.RouteRequest{StripPrefix: "/api/v1"},
+				},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	rs := &runState{
+		store:     store,
+		pools:     pools,
+		dpMetrics: observability.NewDataPlaneMetrics(e.metrics.Registry),
+	}
+	router := e.buildRouter(rs)
+	require.NotNil(t, router)
+	require.Len(t, rs.handlers, 1)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.SetRequestURI("/api/v1/users")
+	router.ServeRequest(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Equal(t, "/users", string(ctx.Response.Body()),
+		"origin must receive the stripped path")
+}
+
 func TestUpdateStartupMetrics(t *testing.T) {
 	t.Parallel()
 	seq := shutdown.NewSequencer(newTestLogger())

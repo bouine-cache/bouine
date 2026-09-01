@@ -208,10 +208,10 @@ type Handler struct {
 	// nil-safe. Polled by the engine's background metrics loop.
 	StreamingBufferBytesSet interface{ Set(float64) }
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
-	VaryCapHits     interface{ Inc() }
-	refreshRegistry *refreshRegistry
-	upstream        fasthttp.RequestHandler
-	revalSem        chan struct{} // bounds concurrent SWR background goroutines
+	VaryCapHits interface{ Inc() }
+	upstream    fasthttp.RequestHandler
+	done        chan struct{}
+	revalSem    chan struct{} // bounds concurrent SWR background goroutines
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
@@ -225,19 +225,22 @@ type Handler struct {
 	// or when reserveVariantSlot detects the primary key has been evicted
 	// by SIEVE and resets the set.
 	// Protected by variantMu.
-	variantSets map[api.Key]map[api.Key]struct{}
-	refreshSem  chan struct{}
-	done        chan struct{}
-	fetchSem    chan struct{} // bounds concurrent foreground origin fetches
-	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
-	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
-	logCacheKeys   bool
-	scheduler      *RefreshScheduler
-	refreshLimiter *refreshRateLimiter
+	variantSets     map[api.Key]map[api.Key]struct{}
+	refreshSem      chan struct{}
+	refreshRegistry *refreshRegistry
+	fetchSem        chan struct{} // bounds concurrent foreground origin fetches
+	scheduler       *RefreshScheduler
+	policy          *KeyPolicy // pre-compiled cache key policy (query + Vary headers); nil = none
+	refreshLimiter  *refreshRateLimiter
 	// ownerFn returns the peer that owns a cache key and whether the key
 	// is local to this node. Nil in single-node mode.
 	ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool)
-	policy  *KeyPolicy // pre-compiled cache key policy (query + Vary headers); nil = none
+	// stripPrefix is removed from the start of the origin-bound request
+	// URI (path+query) on every fetch/revalidate/refresh. The cache key
+	// and all client-facing surfaces keep the original path. Nil means
+	// no stripping (zero cost on routes without strip_prefix).
+	stripPrefix []byte
+	routeName   string
 	// inflightStreams tracks in-progress streaming fetches for
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
@@ -248,11 +251,11 @@ type Handler struct {
 	// map insert under a per-shard mutex (0 allocs) with far less
 	// contention.
 	inflightStreams         inflightTable
-	routeName               string
-	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
 	refreshWg               sync.WaitGroup
-	refreshMargin           time.Duration
-	maxObjectSize           int64 // skip storage for responses larger than this; 0 = no limit
+	revalWg                 sync.WaitGroup // tracks in-flight SWR goroutines for shutdown
+	defaultTTL              time.Duration  // operator fallback when origin sends no freshness
+	defaultSIE              time.Duration  // operator-level stale-if-error floor
+	maxObjectSize           int64          // skip storage for responses larger than this; 0 = no limit
 	maxStreamingBufferBytes int64
 	// maxStreamingBufferBytes caps total streaming buffer memory. 0 means
 	// defaultMaxStreamingBufferBytes.
@@ -265,10 +268,9 @@ type Handler struct {
 	refreshPersistCycles int
 	refreshMinScore      int64
 	refreshTimeout       time.Duration
+	refreshMargin        time.Duration
 	defaultSWR           time.Duration // operator-level stale-while-revalidate floor
-	defaultTTL           time.Duration // operator fallback when origin sends no freshness
 	jitterPercent        int
-	defaultSIE           time.Duration // operator-level stale-if-error floor
 	maxResponseBytes     int64         // hard cap on body buffering; 0 = defaultMaxResponseBytes
 	overrideTTL          time.Duration // operator override; wins over origin max-age/Expires when > 0
 	refreshMinHits       int
@@ -278,7 +280,10 @@ type Handler struct {
 	closeOnce            sync.Once
 	variantMu            sync.Mutex
 	stayinAlive          bool
-	allowSetCookie       bool // when false (default), Set-Cookie blocks caching
+	// logCacheKeys gates SetUserValue("cacheKey") — the value is only
+	// read by the access-log sampler (DataPlaneMetrics.shouldLogAccess).
+	logCacheKeys   bool
+	allowSetCookie bool // when false (default), Set-Cookie blocks caching
 	// Refresh-before-expiry fields. When refreshBeforeExpiry is true,
 	// a background scheduler fires conditional revalidation at
 	// TTL - margin, keeping objects perpetually fresh.
@@ -302,6 +307,11 @@ type HandlerConfig struct {
 	// *fasthttp.Response, eliminating intermediate header.Map and
 	// body buffer allocations.
 	FastClient FastClient
+	// StripPrefix, when non-empty, is removed from the start of the
+	// request URI before fetching from the origin. The cache key and
+	// every client-facing surface keep the original path (see
+	// config.RouteRequest.StripPrefix). Empty means no stripping.
+	StripPrefix string
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
@@ -500,6 +510,31 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 	return h.fastClient.Do(context.Background(), req, resp)
 }
 
+// strippedURI returns uri with the route's strip_prefix removed from the
+// start. Used for origin-bound request URIs only: the cache key, ban
+// matching, and Location resolution all keep the original path (config
+// contract in config.RouteRequest.StripPrefix). Stripping only happens on
+// a path boundary: when the remainder is empty ("/" is sent instead) or
+// starts with "/" or "?". A mid-segment match ("/api/v1x" vs "/api/v1")
+// passes through unchanged rather than producing a non-absolute
+// request-line. Nil prefix returns uri unchanged.
+func (h *Handler) strippedURI(uri []byte) []byte {
+	if len(h.stripPrefix) == 0 || !bytes.HasPrefix(uri, h.stripPrefix) {
+		return uri
+	}
+	trimmed := uri[len(h.stripPrefix):]
+	switch {
+	case len(trimmed) == 0:
+		return []byte("/")
+	case trimmed[0] == '/':
+		return trimmed
+	case trimmed[0] == '?':
+		return append([]byte("/"), trimmed...)
+	default:
+		return uri
+	}
+}
+
 // NewHandler creates a caching handler.
 //
 //nolint:funlen // 81 lines: initialization is inherently sequential
@@ -508,6 +543,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	h := &Handler{
 		upstream:                cfg.Upstream,
 		fastClient:              cfg.FastClient,
+		stripPrefix:             []byte(cfg.StripPrefix),
 		store:                   cfg.Store,
 		logger:                  cfg.Logger,
 		negativeTTL:             cfg.NegativeTTL,
@@ -850,7 +886,7 @@ func (h *Handler) doBackgroundRefresh(ctx context.Context, key api.Key, stale *a
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(ri.GetMethod())
-	req.SetRequestURI(ri.GetURI())
+	req.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
 	req.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		req.Header.Set(k, v)
@@ -1579,7 +1615,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethodBytes(ctx.Method())
-	revalReq.SetRequestURIBytes(ctx.RequestURI())
+	revalReq.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
 	revalReq.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		revalReq.Header.AddBytesKV(k, v)
@@ -1746,12 +1782,13 @@ func (h *Handler) triggerBgRevalidate(ri RequestInfo, key api.Key, stale *api.Ob
 
 // doBackgroundRevalidate fetches a fresh copy of stale and stores it.
 // Uses the collapse group to deduplicate concurrent SWR triggers for
-// the same key.
+// the same key. The stored/registry URI stays original; only the
+// origin-bound request URI is stripped.
 func (h *Handler) doBackgroundRevalidate(ctx context.Context, ri RequestInfo, key api.Key, stale *api.Object) {
 	revalReq := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(revalReq)
 	revalReq.Header.SetMethod(ri.GetMethod())
-	revalReq.SetRequestURI(ri.GetURI())
+	revalReq.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
 	revalReq.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
 		revalReq.Header.Set(k, v)
@@ -1969,7 +2006,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	defer fasthttp.ReleaseResponse(resp)
 
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(ctx.RequestURI())
+	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
@@ -2210,7 +2247,7 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	// Populate the request from *fasthttp.RequestCtx.
 	// Use *Bytes variants to avoid string([]byte) conversions.
 	req.Header.SetMethodBytes(ctx.Method())
-	req.SetRequestURIBytes(ctx.RequestURI())
+	req.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
 	req.Header.SetHostBytes(ctx.Host())
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)

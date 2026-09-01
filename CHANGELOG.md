@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- Helm chart: the HPA rendered `behavior.scaleDown.stabilizationSeconds`,
+  a field that does not exist in the `autoscaling/v2` API, so the API
+  server rejected the HPA at apply time for any install with
+  `autoscaling.enabled: true` (present since chart 0.1.2, issue #582).
+  The template now renders `stabilizationWindowSeconds`; the
+  `autoscaling.scaleDownStabilizationSeconds` values key is unchanged
+  but its default is lowered from 300 to 120 for faster scale-down
+  reaction.
+  Rendered chart manifests are now validated against Kubernetes strict
+  schemas (kubeconform) on every commit that touches the chart.
+
 ## [0.5.3] - 2026-08-31
 
 ### Added

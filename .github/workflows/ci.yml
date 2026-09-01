@@ -56,6 +56,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
+      # kubeconform backs the helm-kubeconform prek hook (ADR-0041). It
+      # must be on PATH before prek runs, otherwise the hook warns and
+      # skips — a schema gate that silently skips is no gate at all.
+      - run: go install github.com/yannh/kubeconform/cmd/kubeconform@latest
       # cache: true — the prek environment cache. Its key is derived from
       # the hash of .pre-commit-config.yaml, so the GO_VERSION_STAMP in
       # that file (enforced by the go-version-stamp hook + make

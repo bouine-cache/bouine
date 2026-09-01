@@ -138,6 +138,19 @@ repos:
         pass_filenames: false
         stages: [pre-commit, pre-push]
 
+      # Validates rendered manifests against Kubernetes strict schemas
+      # (see ADR-0041). helm template must include autoscaling.enabled=true
+      # because the HPA template does not render with default values —
+      # this exact gap let an invalid autoscaling/v2 field ship from
+      # chart 0.1.2 (eb9c3ab) through 0.5.3.
+      - id: helm-kubeconform
+        name: kubeconform on rendered chart (autoscaling enabled)
+        entry: scripts/helm-kubeconform.sh
+        language: system
+        files: ^deploy/helm/bouine/
+        pass_filenames: false
+        stages: [pre-commit, pre-push]
+
       - id: schema-sync-check
         name: embedded schema sync check
         entry: make schema-check

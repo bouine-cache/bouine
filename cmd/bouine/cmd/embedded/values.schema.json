@@ -578,7 +578,7 @@
         "scaleDownStabilizationSeconds": {
           "type": "integer",
           "minimum": 0,
-          "default": 300
+          "default": 120
         }
       }
     },

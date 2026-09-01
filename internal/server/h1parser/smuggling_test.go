@@ -19,6 +19,7 @@ func TestSmugglingDetected_CLPlusTE(t *testing.T) {
 		},
 		NHeaders: 3,
 	}
+	req.RecomputeScanFlags()
 	assert.True(t, smugglingDetected(req))
 }
 
@@ -31,6 +32,7 @@ func TestSmugglingDetected_DuplicateCL(t *testing.T) {
 		},
 		NHeaders: 3,
 	}
+	req.RecomputeScanFlags()
 	assert.True(t, smugglingDetected(req))
 }
 
@@ -42,6 +44,7 @@ func TestSmugglingDetected_NoSmuggling(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
+	req.RecomputeScanFlags()
 	assert.False(t, smugglingDetected(req))
 }
 
@@ -53,6 +56,7 @@ func TestSmugglingDetected_OnlyTE(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
+	req.RecomputeScanFlags()
 	assert.False(t, smugglingDetected(req))
 }
 
@@ -64,6 +68,7 @@ func TestSmugglingDetected_OnlyCL(t *testing.T) {
 		},
 		NHeaders: 2,
 	}
+	req.RecomputeScanFlags()
 	assert.False(t, smugglingDetected(req))
 }
 

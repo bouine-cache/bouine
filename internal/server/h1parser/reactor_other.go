@@ -40,15 +40,23 @@ func (r *reactorEpoll) Run() {}
 // the same contract on every platform.
 func (r *reactorEpoll) Close() {}
 
-// The portable state machine's handoff path, the connection cap, and
-// the shutdown-drain symbols are Linux-only at runtime but part of the
-// shared contract — reference them here so the non-Linux build (and
-// the unused linter) sees the same symbols as Linux.
+// MetricsDropped reports async-metrics ring overflow. Unreachable on
+// non-Linux (see Run); exists so the listener wiring compiles against
+// the same contract on every platform.
+func (r *reactorEpoll) MetricsDropped() uint64 { return 0 }
+
+// The portable state machine's handoff-prefix replay and the idle
+// budget are shared across platforms — reference them here so the
+// non-Linux build (and the unused linter) sees the same symbols as
+// Linux. The blocking-spawn tracker itself is Linux-only (nothing on
+// a non-Linux build can construct a reactor transport to call it).
 var (
-	_ = (*reactorConn).handoff
+	_ = (*reactorConn).handoffConn
+	_ = (*reactorConn).idleExpired
 	_ = reactorMaxConns
-	_ = handoffDrainGrace
-	_ = (*handoffTracker).drainForceClose
+	_ = reactorIdleTimeout
+	_ = (*metricsRing).droppedTotal
+	_ = methodIndexForRecord
 	// epollInterest is the Linux transport's mod()-skip mask tracker;
 	// reference the field so the non-Linux build keeps the shared
 	// struct definition identical.

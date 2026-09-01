@@ -13,7 +13,15 @@ import (
 // must copy any strings it needs to retain beyond the TryHit call.
 //
 // Unstable.
+//
+// same allocator size class (3456), and the field order keeps the
+// per-request hot string group contiguous ahead of the scalar tail.
+//
+//nolint:govet // fieldalignment: the reported 8-byte saving is inside the
 type RawRequest struct {
+	// Headers is the bulk array (readers iterate [0:NHeaders) only); it
+	// leads the struct so the scalar tail stays in the final cache
+	// lines, matching the h1parser's per-request access pattern.
 	Headers     [MaxRawHeaders]RawHeader
 	Method      string
 	Path        string
@@ -21,15 +29,67 @@ type RawRequest struct {
 	Host        string
 	Scheme      string // "http" or "https" — set by the listener
 	HTTPVersion string
-	NHeaders    int
+	// CacheControlRaw is the last-seen raw Cache-Control header value
+	// captured during the header scan. The fast path parses it via
+	// ParseCacheControl only when non-empty, avoiding a re-scan of the
+	// header array. Empty string means the request carried none.
+	CacheControlRaw string
+	ScanFlags       RequestScanFlags
+	NHeaders        int
 	// ConnectionClose reports whether the request carried a
 	// "Connection: close" token (RFC 9110 §7.6.1). The parser sets it
 	// once while scanning headers; the fast path reads it to emit
 	// "Connection: close" on the response (§9.6) and its callers to
 	// close the connection after the hit instead of re-scanning
 	// headers. False for the zero value.
+	//
+	// ScanFlags is the single-pass header scan result: a bitmask of
+	// RequestScanFlag bits (conditional/precondition headers, TE/CL
+	// presence, duplicate CL count saturated at 2, Pragma: no-cache).
+	// Populated by the h1parser while appending headers; consumers
+	// (fast-path qualification, smuggling detection) read flags
+	// instead of re-scanning the header array. Zero value = none set.
+	// Hand-built RawRequests that set Headers without ScanFlags must
+	// call req.RecomputeScanFlags() first (see its doc).
 	ConnectionClose bool
 }
+
+// RequestScanFlags is the bitmask of single-pass header scan results
+// carried on RawRequest.ScanFlags. Bit values must never change
+// (consumers persist none of them, but the zero-cost contract of the
+// fused scan depends on the layout staying stable across packages).
+type RequestScanFlags uint32
+
+// RequestScanFlag bits. DisqualifyFastPath is a derived composite bit:
+// the parser sets it directly when any conditional/precondition,
+// Transfer-Encoding, or Content-Length header is seen, so the fast path
+// can bail with one test in the common case.
+const (
+	// FlagHasCL: a Content-Length header is present.
+	FlagHasCL RequestScanFlags = 1 << iota
+	// FlagHasTE: a Transfer-Encoding header is present.
+	FlagHasTE
+	// FlagDuplicateCL: more than one Content-Length header (saturated;
+	// 2+ duplicates are smuggling either way).
+	FlagDuplicateCL
+	// FlagPragmaNoCache: a "Pragma: no-cache" header is present
+	// (case-insensitive value comparison per RFC 9110 §16.2 legacy use).
+	FlagPragmaNoCache
+	// FlagHostSeen: at least one Host header is present. The first
+	// occurrence's value is in Host; duplicates do not overwrite it.
+	FlagHostSeen
+	// FlagHasConnection: a Connection header is present; its value is
+	// re-read from the header array only when token scanning is needed.
+	FlagHasConnection
+
+	// DisqualifyFastPath is set when any conditional (If-None-Match,
+	// If-Modified-Since, If-Range, If-Unmodified-Since, If-Match),
+	// Range, Transfer-Encoding, or Content-Length header is present:
+	// the request can never be served by the plain-hit fast path.
+	// Qualification checks that would otherwise scan headers become a
+	// single bit test.
+	DisqualifyFastPath RequestScanFlags = 1 << 24
+)
 
 // MaxRawHeaders caps the number of headers the h1parser can store inline.
 // Requests exceeding this fall through to net/http.
@@ -159,6 +219,69 @@ func EqualFold(a, b string) bool {
 		}
 	}
 	return true
+}
+
+// RecomputeScanFlags rebuilds ScanFlags and CacheControlRaw from the
+// Headers array [0,NHeaders). The parser populates both during its
+// single-pass scan, so production callers never need this; it exists
+// for hand-built RawRequests (tests, admin purge paths) that set
+// Headers directly and then call a consumer that reads the flags. It
+// must stay in sync with the parser's scan — a drift here is a
+// correctness bug in every flag consumer, so the parser's fused scan
+// and this function share the same flag-assignment rules, including
+// the duplicate-Content-Length count (FlagDuplicateCL), which is
+// per-request state no single-header helper can derive.
+func (r *RawRequest) RecomputeScanFlags() {
+	var flags RequestScanFlags
+	var ccRaw string
+	clSeen := false
+	for i := 0; i < r.NHeaders; i++ {
+		h := &r.Headers[i]
+		flags |= ScanFlagForHeader(h.Key, h.Value)
+		if EqualFold(h.Key, "Content-Length") {
+			if clSeen {
+				flags |= FlagDuplicateCL
+			}
+			clSeen = true
+		}
+		if EqualFold(h.Key, "Cache-Control") {
+			ccRaw = h.Value
+		}
+	}
+	r.ScanFlags = flags
+	r.CacheControlRaw = ccRaw
+}
+
+// ScanFlagForHeader maps one header key/value to its scan flags. It is
+// the single source of truth shared by the parser's fused scan and
+// RecomputeScanFlags — both must call it with identical semantics:
+// first Host wins (caller checks FlagHostSeen before assigning r.Host),
+// last Cache-Control wins (caller overwrites on every occurrence),
+// duplicate CL saturates.
+func ScanFlagForHeader(key, value string) RequestScanFlags {
+	var flags RequestScanFlags
+	switch {
+	case EqualFold(key, "Host"):
+		flags |= FlagHostSeen
+	case EqualFold(key, "If-None-Match"),
+		EqualFold(key, "If-Modified-Since"),
+		EqualFold(key, "If-Range"),
+		EqualFold(key, "If-Unmodified-Since"),
+		EqualFold(key, "If-Match"),
+		EqualFold(key, "Range"):
+		flags |= DisqualifyFastPath
+	case EqualFold(key, "Transfer-Encoding"):
+		flags |= FlagHasTE | DisqualifyFastPath
+	case EqualFold(key, "Content-Length"):
+		flags |= FlagHasCL | DisqualifyFastPath
+	case EqualFold(key, "Pragma"):
+		if EqualFold(value, "no-cache") {
+			flags |= FlagPragmaNoCache | DisqualifyFastPath
+		}
+	case EqualFold(key, "Connection"):
+		flags |= FlagHasConnection
+	}
+	return flags
 }
 
 // FastPathMetrics is implemented by the observability layer (L7) to

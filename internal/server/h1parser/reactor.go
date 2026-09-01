@@ -95,8 +95,13 @@ type reactorConn struct {
 	writeBuf []byte
 	// writeVec holds the fast-path response's net.Buffers slices for
 	// zero-copy writev flushing (writeBuf alone is used for the small
-	// header-serialized case and for tests via writeFn).
+	// header-serialized case and for tests via writeFn). Backed by the
+	// inlined writeVecArr so newReactorConn never allocates it.
 	writeVec [][]byte
+	// writeVecArr is the fixed backing for writeVec (3 slots: status
+	// line, header block, body — the FastPathResponse layout; cap 4
+	// leaves spare slack).
+	writeVecArr [4][]byte
 	// retainResp/retainFP hold the fast-path response and its owning
 	// handler between parsed() and the completed flush: writev aliases
 	// the cache object body, so the response must not return to the
@@ -113,6 +118,11 @@ type reactorConn struct {
 	state      rcState
 	rLen       int
 	writeLen   int
+	// scanned is how far advanceReading has already searched for the
+	// header terminator in readBuf[:rLen]: findHeaderEnd resumes from
+	// here instead of rescanning consumed bytes, making multi-segment
+	// header accumulation O(n) instead of O(n²).
+	scanned int
 	// closeAfterFlush marks a hit whose response ended with
 	// Connection: close (RFC 9110 §9.6): the flush completes, then the
 	// transport drops the connection instead of returning to reading.
@@ -151,20 +161,30 @@ func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int,
 		writeBuf: (*reactorWritePool.Get().(*[]byte))[:0],
 		scratch:  api.RawRequest{Scheme: p.scheme},
 	}
-	// Pre-size the writev backing array (3 slots: status line, header
-	// block, body — the FastPathResponse layout) so parsed() never
-	// grows it mid-hit.
-	rc.writeVec = make([][]byte, 0, 3)
+	// Pre-size the writev slice over the inlined backing array (3
+	// slots: status line, header block, body — the FastPathResponse
+	// layout) so parsed() never grows it mid-hit.
+	rc.writeVec = rc.writeVecArr[:0]
 	return rc
 }
 
-// release returns the pooled write buffer. Called exactly once, when
-// the connection leaves the reactor (close or handoff). Nothing may
+// release returns the connection's pooled write buffer and any
+// retained fast-path response. Called exactly once, when the
+// connection leaves the reactor (close, sweep drop, or handoff); every
+// exit path funnels through here, so a connection dropped mid-flush
+// (stuck-writer sweep, EPOLLERR) still returns its retained response
+// to the handler's pool — the handler's contract (Release after every
+// TryHit) has no "except when the socket died" clause. Nothing may
 // touch rc.writeBuf after the Put — the pool may hand the buffer to
 // another connection's newReactorConn immediately on another goroutine
 // (release runs on the loop goroutine, accept on the accept
 // goroutine), so the pointer is nulled before Put, never after.
 func (rc *reactorConn) release() {
+	if rc.retainFP != nil && rc.retainResp != nil {
+		rc.retainFP.Release(rc.retainResp)
+		rc.retainResp = nil
+		rc.retainFP = nil
+	}
 	buf := rc.writeBuf
 	rc.writeBuf = nil
 	if buf != nil && cap(buf) <= reactorWriteCap {
@@ -204,9 +224,15 @@ func (rc *reactorConn) advanceReading() rcAction {
 		n, err := rc.readFn(rc.readBuf[rc.rLen:])
 		rc.rLen += n
 		if n > 0 {
-			if idx := findHeaderEnd(rc.readBuf[:rc.rLen]); idx >= 0 {
+			if idx := findHeaderEndFrom(rc.readBuf[:rc.rLen], rc.scanned); idx >= 0 {
 				return rc.parsed(idx)
 			}
+			// Resume the next search at the oldest position where a
+			// terminator could still begin: four bytes back from the
+			// current end, clamped at zero (three bytes back would miss a
+			// terminator straddling segment boundaries; four keeps the
+			// reasoning simple and the cost is one extra byte probe).
+			rc.scanned = max(0, rc.rLen-headerTermOverlap)
 			if rc.rLen >= len(rc.readBuf) {
 				// Headers exceed the 16 KiB buffer: the blocking path
 				// serves these via handleFallThroughRaw.
@@ -282,8 +308,26 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 
 	if hook := rc.parser.metricsHook; hook != nil {
 		dur := rc.parser.nowFunc().Sub(now)
-		hook(req.Method, resp.Route, resp.CacheResult,
-			resp.Source, resp.StatusCode, resp.BytesOut, dur)
+		if rc.parser.metricsRing != nil {
+			// Async path (W3): push a fixed-size record; the loop's
+			// drainer goroutine applies the hook. Route/CacheResult/
+			// Source are stable handler-owned strings (see
+			// reactor_metrics.go for the retain-safety argument);
+			// the method string aliases the read buffer, so it is
+			// captured as an index. Never blocks: overflow drops.
+			rc.parser.metricsRing.pushHit(hitMetricsRecord{
+				route:       resp.Route,
+				cacheResult: resp.CacheResult,
+				source:      resp.Source,
+				durNs:       dur.Nanoseconds(),
+				bytesOut:    resp.BytesOut,
+				status:      resp.StatusCode,
+				methodIdx:   methodIndexForRecord(req.Method),
+			})
+		} else {
+			hook(req.Method, resp.Route, resp.CacheResult,
+				resp.Source, resp.StatusCode, resp.BytesOut, dur)
+		}
 	}
 
 	// Reset for the next request on this connection. The scratch struct
@@ -291,6 +335,7 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 	// of the next parse, and zeroing the ~4 KiB [100]RawHeader array
 	// twice per request costs a copy the compiler cannot elide.
 	rc.rLen = 0
+	rc.scanned = 0
 	rc.state = rcWriting
 	return rc.advanceWriting()
 }
@@ -414,19 +459,6 @@ func (rc *reactorConn) handoffConn() net.Conn {
 	return &prefixConn{Conn: rc.conn, prefix: rc.readBuf[:rc.rLen]}
 }
 
-// handoff starts the blocking Parser on a goroutine, replaying the
-// buffered bytes. Called by the transport on actHandoff. The transport
-// owns the goroutine: it tracks the conn, closes it when Serve returns,
-// and force-closes it during shutdown drain after the grace window to
-// unpark Serve's keep-alive read loop (Serve never closes the conn
-// itself — the blocking path's caller does, which is the transport).
-func (rc *reactorConn) handoff(tracker *handoffTracker) net.Conn {
-	conn := rc.handoffConn()
-	rc.state = rcHandoff
-	tracker.spawn(rc.parser, conn)
-	return conn
-}
-
 // idleExpired reports whether the current request exceeded the
 // reactor idle budget without completing. Measured from reqStart
 // (when this request began), not from the last byte received: a
@@ -459,63 +491,3 @@ var reactorWritePool = sync.Pool{
 // reactorWriteCap is the pooled-buffer retention cap; larger
 // serialized responses are dropped rather than pinned in the pool.
 const reactorWriteCap = 64 * 1024
-
-// handoffTracker owns the blocking-parser goroutines spawned at handoff.
-// Each goroutine closes its conn on exit (Serve never closes it), so an
-// fd can never leak. The set is keyed by conn pointer: register before
-// the goroutine starts, unregister in its defer, so drainForceClose
-// always sees the exact set of live handoffs.
-//
-// drain waits for in-flight handed-off requests up to the grace window,
-// then force-closes any conns still held by blocking parsers: after a
-// request finishes, Serve's keep-alive loop parks on the read deadline
-// (120s), and shutdown must not wait that out. A force-close unparks it
-// — Serve treats the read error as connection termination, exactly like
-// a client reset, and the goroutine's own conn close follows.
-// 32-byte report is the price of naming the three concerns.
-//
-//nolint:govet // fieldalignment: wg/mu/conns is the ownership order; the
-type handoffTracker struct {
-	wg    sync.WaitGroup
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-}
-
-func (t *handoffTracker) spawn(p *Parser, conn net.Conn) {
-	t.wg.Add(1)
-	t.mu.Lock()
-	if t.conns == nil {
-		t.conns = make(map[net.Conn]struct{})
-	}
-	t.conns[conn] = struct{}{}
-	t.mu.Unlock()
-	go func() {
-		defer t.wg.Done()
-		defer t.unregister(conn)
-		defer func() { _ = conn.Close() }()
-		_ = p.Serve(conn)
-	}()
-}
-
-func (t *handoffTracker) unregister(conn net.Conn) {
-	t.mu.Lock()
-	delete(t.conns, conn)
-	t.mu.Unlock()
-}
-
-// drainForceClose force-closes every live handed-off conn. Used after
-// the grace window during shutdown; the goroutine's deferred close is
-// idempotent at the syscall layer, so double-close is harmless.
-func (t *handoffTracker) drainForceClose() {
-	t.mu.Lock()
-	for conn := range t.conns {
-		_ = conn.Close()
-	}
-	t.mu.Unlock()
-}
-
-// handoffDrainGrace is how long Close waits for in-flight handed-off
-// requests to finish on their own before force-closing. Generous for a
-// full miss fetch (bounded by fetch_timeout), short enough that
-// shutdown does not stall behind it.
-const handoffDrainGrace = 5 * time.Second

@@ -705,6 +705,16 @@ func TestIsConnectionClose(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			// isConnectionClose reads the parser-derived flag; derive it
+			// from the hand-built header array exactly as the fused scan
+			// would (the token scan is part of the derivation).
+			tt.req.ConnectionClose = false
+			for i := 0; i < tt.req.NHeaders; i++ {
+				if api.EqualFold(tt.req.Headers[i].Key, "Connection") {
+					tt.req.ConnectionClose = connectionCloseValue(tt.req.Headers[i].Value)
+					break
+				}
+			}
 			assert.Equal(t, tt.want, isConnectionClose(tt.req))
 		})
 	}

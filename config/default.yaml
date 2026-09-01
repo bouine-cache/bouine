@@ -11,6 +11,14 @@ listen:
   # Note: idle keep-alive connections hold a slot too — size for your
   # client population, not just peak concurrency.
   max_connections: 4096
+  # idle_timeout is the keep-alive idle timeout for data-plane
+  # connections (default 120s). Lower it when a front-end proxies to
+  # bouine so IT closes idle connections first, and keep it above your
+  # clients' idle behaviour. With an nginx front-end, keep nginx's
+  # keepalive_timeout below this value — otherwise bouine can close a
+  # connection nginx is about to reuse and nginx logs
+  # "upstream prematurely closed connection".
+  # idle_timeout: 120s
 
 storage:
   hot_max_bytes: 512MiB

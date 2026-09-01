@@ -15,6 +15,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/cluster"
 	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/internal/origin"
 	"github.com/bouine-cache/bouine/internal/platform"
@@ -197,19 +198,33 @@ func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 func (e *engine) buildPools(metrics *origin.Metrics) (map[string]*origin.Pool, error) {
 	pools := make(map[string]*origin.Pool, len(e.cfg.UpstreamPools))
 	for _, pc := range e.cfg.UpstreamPools {
-		p, err := origin.NewPool(origin.PoolConfig{
-			Name:           pc.Name,
-			Targets:        pc.Targets,
-			Logger:         e.logger,
-			Consecutive5xx: pc.Health.Passive.Consecutive5xx,
-			Metrics:        metrics,
-		})
+		p, err := origin.NewPool(buildPoolConfig(pc, e.logger, metrics))
 		if err != nil {
 			return nil, err
 		}
 		pools[pc.Name] = p
 	}
 	return pools, nil
+}
+
+// buildPoolConfig maps an upstream pool's config into the origin pool
+// constructor, including the connect policy (dial timeout, TCP
+// keep-alive, per-host connection cap, idle duration, response header
+// timeout). Zero values are resolved to built-in defaults inside
+// origin.NewPool.
+func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metrics *origin.Metrics) origin.PoolConfig {
+	return origin.PoolConfig{
+		Name:                  pc.Name,
+		Targets:               pc.Targets,
+		Logger:                logger,
+		Consecutive5xx:        pc.Health.Passive.Consecutive5xx,
+		Metrics:               metrics,
+		DialTimeout:           pc.Connect.Timeout,
+		KeepAlive:             pc.Connect.KeepAlive,
+		MaxConnsPerHost:       pc.Connect.MaxConnections,
+		MaxIdleConnDuration:   pc.Connect.MaxIdleConnDuration,
+		ResponseHeaderTimeout: pc.Connect.ResponseHeaderTimeout,
+	}
 }
 
 // buildRouter constructs the pipeline.Router by iterating over the route table

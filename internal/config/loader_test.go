@@ -312,7 +312,9 @@ func TestValidate_PoolDurations_NegativeRejected(t *testing.T) {
 		{"health.passive.eject_for", func(p *UpstreamPool) { p.Health.Passive.EjectFor = -1 }},
 		{"connect.timeout", func(p *UpstreamPool) { p.Connect.Timeout = -1 }},
 		{"connect.keep_alive", func(p *UpstreamPool) { p.Connect.KeepAlive = -1 }},
+		{"connect.max_idle_conn_duration", func(p *UpstreamPool) { p.Connect.MaxIdleConnDuration = -1 }},
 		{"connect.response_header_timeout", func(p *UpstreamPool) { p.Connect.ResponseHeaderTimeout = -1 }},
+		{"connect.max_connections", func(p *UpstreamPool) { p.Connect.MaxConnections = -1 }},
 		{"connect.hedge_timeout", func(p *UpstreamPool) { p.Connect.HedgeTimeout = -1 }},
 	}
 	for _, tc := range cases {
@@ -329,6 +331,18 @@ func TestValidate_PoolDurations_NegativeRejected(t *testing.T) {
 				t.Fatalf("error %q does not mention field %q", err, tc.name)
 			}
 		})
+	}
+}
+
+func TestValidate_ListenIdleTimeout_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000", IdleTimeout: -1}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative listen.idle_timeout")
+	}
+	if !strings.Contains(err.Error(), "listen.idle_timeout") {
+		t.Fatalf("error %q does not mention listen.idle_timeout", err)
 	}
 }
 

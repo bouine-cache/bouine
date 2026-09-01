@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/server/h1parser"
@@ -29,7 +28,7 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		// CoarseNow: ~2-4ns vs ~25-40ns for time.Now on Linux. The 1ms
 		// clock resolution is sufficient — deadlines are second-scale.
 		h1parser.WithNowFunc(platform.CoarseNow),
-		h1parser.WithIdleReadTimeout(120*time.Second),
+		h1parser.WithIdleReadTimeout(s.idleTimeout),
 		h1parser.WithWriteTimeout(safetyNetWriteTimeout),
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
 		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),

@@ -107,6 +107,12 @@
               "type": "integer",
               "minimum": 0,
               "default": 4096
+            },
+            "idle_timeout": {
+              "description": "Keep-alive idle timeout for data-plane connections (default 120s). Keep an nginx front-end's keepalive_timeout BELOW this so nginx closes idle connections first; otherwise bouine may close a connection mid-reuse and nginx logs 'upstream prematurely closed connection'.",
+              "type": "string",
+              "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+              "default": "120s"
             }
           }
         },
@@ -190,7 +196,54 @@
           "description": "Upstream origin pools. See the bouine configuration documentation for the full schema.",
           "type": "array",
           "items": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "Pool name, referenced by routes[].pool.",
+                "type": "string"
+              },
+              "targets": {
+                "description": "Origin target addresses.",
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "connect": {
+                "description": "Connection policy for origin targets. Zero/empty values apply built-in defaults.",
+                "type": "object",
+                "properties": {
+                  "timeout": {
+                    "description": "TCP dial timeout. Default 10s.",
+                    "type": "string",
+                    "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
+                  },
+                  "keep_alive": {
+                    "description": "TCP keep-alive probe interval. Default 30s.",
+                    "type": "string",
+                    "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
+                  },
+                  "max_connections": {
+                    "description": "Max concurrent connections per origin host. Default 64.",
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "max_idle_conn_duration": {
+                    "description": "Idle pooled-connection lifetime. Default 90s. Keep below any LB idle timeout in the path (AWS NLB: 350s).",
+                    "type": "string",
+                    "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
+                  },
+                  "response_header_timeout": {
+                    "description": "Max wait for origin response headers. Default 30s.",
+                    "type": "string",
+                    "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
+                  },
+                  "hedge_timeout": {
+                    "description": "Fire a duplicate request after this duration; first response wins. Empty disables.",
+                    "type": "string",
+                    "pattern": "^$|^[0-9]+(ns|us|ms|s|m|h)$"
+                  }
+                }
+              }
+            }
           },
           "default": []
         },

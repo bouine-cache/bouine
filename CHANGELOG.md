@@ -14,9 +14,9 @@ the curated, human-readable summary.
 - `listen.idle_timeout` (default 120s): one knob for the client-facing
   keep-alive idle timeout, replacing the hard-coded 120s literals
   duplicated across the fasthttp listeners and the H1 fast-path parser
-  (which remain as zero-value fallbacks). With an nginx front-end,
-  keep nginx's `keepalive_timeout` below this value so nginx closes idle
-  connections first.
+  (which remain as zero-value fallbacks). With an upstream proxy or LB
+  in front, keep its keep-alive idle timeout below this value so it
+  closes idle connections first.
 - `upstream_pools[].connect.max_idle_conn_duration` (default 90s): how long
   idle pooled origin connections are kept. Keep it below any LB idle
   timeout between bouine and the origin (e.g. AWS NLB 350s).

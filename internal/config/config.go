@@ -96,12 +96,13 @@ type Listen struct {
 	// kept open before bouine closes it. It applies to both the
 	// fasthttp listener and the H1 fast-path parser so the two stay in
 	// sync (previously a hard-coded 120s duplicated in three places).
-	// Zero applies a 120s built-in default. When an nginx front-end
-	// proxies to bouine, keep nginx's keepalive_timeout below this so
-	// nginx closes idle connections first; otherwise bouine may close
-	// a connection mid-reuse and nginx logs
-	// "upstream prematurely closed connection". Note that idle
-	// keep-alive connections still hold a Listen.MaxConnections slot.
+	// Zero applies a 120s built-in default. When an upstream proxy or
+	// LB sits in front of bouine, keep its keep-alive idle timeout
+	// below this so the upstream closes idle connections first;
+	// otherwise bouine may close a connection mid-reuse and the
+	// upstream logs "upstream prematurely closed connection". Note
+	// that idle keep-alive connections still hold a
+	// Listen.MaxConnections slot.
 	IdleTimeout time.Duration `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
 }
 

@@ -39,9 +39,9 @@ config:
     # connections hold a slot too — size for your client population.
     max_connections: 4096
     # Keep-alive idle timeout for data-plane connections (default 120s).
-    # Keep an nginx front-end's keepalive_timeout BELOW this so nginx
-    # closes idle connections first; otherwise bouine may close a
-    # connection mid-reuse and nginx logs
+    # Keep an upstream proxy/LB's keep-alive idle timeout BELOW this so
+    # the upstream closes idle connections first; otherwise bouine may
+    # close a connection mid-reuse and the upstream logs
     # "upstream prematurely closed connection".
     # idle_timeout: 120s
   tls:

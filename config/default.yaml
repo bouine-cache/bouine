@@ -14,10 +14,9 @@ listen:
   # idle_timeout is the keep-alive idle timeout for data-plane
   # connections (default 120s). Lower it when a front-end proxies to
   # bouine so IT closes idle connections first, and keep it above your
-  # clients' idle behaviour. With an nginx front-end, keep nginx's
-  # keepalive_timeout below this value — otherwise bouine can close a
-  # connection nginx is about to reuse and nginx logs
-  # "upstream prematurely closed connection".
+  # clients' idle behaviour. With an upstream proxy in front, keep its
+  # keep-alive idle timeout below this value — otherwise bouine can
+  # close a connection the upstream is about to reuse.
   # idle_timeout: 120s
 
 storage:

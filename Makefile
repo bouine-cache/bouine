@@ -196,6 +196,7 @@ setup-dev: ## Install all development tools and hooks. Run this once after cloni
 	@command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@latest
 	@command -v gitleaks >/dev/null || go install github.com/gitleaks/gitleaks@latest
 	@command -v templ >/dev/null || go install github.com/a-h/templ/cmd/templ@latest
+	@command -v kubeconform >/dev/null || go install github.com/yannh/kubeconform/cmd/kubeconform@latest
 	@echo ">>> Downloading Go module dependencies..."
 	go mod download
 	@echo ">>> Installing prek hooks..."

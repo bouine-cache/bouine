@@ -63,7 +63,7 @@ secondary.
 - Added `rpsTrigger` block rendering a `type: Pods` metric with
   configurable `metricName` (default `bouine_requests_per_second`)
   and `averageValue` (default `100`).
-- Added `scaleUp` behavior with `stabilizationSeconds` and
+- Added `scaleUp` behavior with `stabilizationWindowSeconds` and
   `selectPolicy: Min` to prevent rapid scale-up on transient spikes.
   The `scaleUpStabilizationSeconds` value was already defined in
   values but never rendered by the template.

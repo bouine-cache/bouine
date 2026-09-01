@@ -20,7 +20,9 @@ package h1parser
 import (
 	"errors"
 	"net"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -227,19 +229,50 @@ func (r *reactorEpoll) run() {
 		go r.metricsDrainer.run(r.done, r.metricsDone)
 	}
 	go r.acceptLoop()
+
+	// Adaptive busy-poll: after serving a batch, poll readiness with a
+	// zero timeout for up to reactorSpinBudget before parking in the
+	// timed wait. Why: parking the locked OS thread and re-acquiring a
+	// P through the scheduler costs tens of microseconds (futex wake,
+	// findRunnable) — paid per *request* at low concurrency, where
+	// batches are size one, and measured as an ~8x p50 RTT gap versus
+	// the blocking path on a single client (see
+	// BenchmarkSingle_Reactor_KeepAliveRTT and its controls in
+	// reactor_bench_linux_test.go). Spinning for 80 µs after activity
+	// serves back-to-back requests on the same connection without the
+	// park/wake; the budget only spends while traffic keeps arriving,
+	// so true idle parks after one spin window — the loop does not
+	// become a busy loop. Sustained high load never parks regardless
+	// (batches keep arriving), so the spin is free where it matters.
+	spin := 0
 	for {
 		select {
 		case <-r.done:
 			return
 		default:
 		}
-		n, err := unix.EpollWait(r.epfd, r.events, 1000)
+		var timeout int
+		if spin < reactorSpinBudget {
+			timeout = 0 // non-blocking poll while spin budget remains
+			spin++
+		} else {
+			timeout = 1000
+		}
+		n, err := unix.EpollWait(r.epfd, r.events, timeout)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
 			}
 			return
 		}
+		if n == 0 {
+			// Nothing ready yet; the spin budget spends one unit per
+			// poll (spin++ above), so an idle window simply runs out
+			// and the next iteration parks. Sustained traffic keeps
+			// returning batches, which reset the budget.
+			continue
+		}
+		spin = 0
 		now := r.p.nowFunc()
 		if now.Sub(r.lastSweep) >= reactorSweepInterval {
 			r.lastSweep = now
@@ -257,6 +290,27 @@ func (r *reactorEpoll) run() {
 			}
 		}
 	}
+}
+
+// reactorSpinBudget bounds the zero-timeout epoll polls after a served
+// batch (see run). Each poll costs ~1 µs, so the window is ~80 µs of
+// spin; any event batch resets it. 80 µs covers a client's
+// response-parse → next-request round-trip on loopback and typical
+// intra-DC keep-alive reuse, without keeping a core hot when traffic
+// has actually stopped.
+//
+// Overridable to 0 via BOUINE_REACTOR_SPIN_BUDGET for operators who
+// would rather pay the park/wake (and for the spin-vs-no-spin A/B in
+// the RTT benchmarks): 0 disables the busy-poll entirely.
+var reactorSpinBudget = spinBudgetFromEnv()
+
+func spinBudgetFromEnv() int {
+	if v := os.Getenv("BOUINE_REACTOR_SPIN_BUDGET"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 10_000 {
+			return n
+		}
+	}
+	return 80
 }
 
 // reactorSweepInterval paces the idle sweep. The epoll timeout is 1s,

@@ -93,6 +93,51 @@ The review of the full stack found and fixed:
    batch would send on a closed spawn queue. Shutdown is now
    quit-channel based with dual-drain completion before the Wait.
 
+## Post-merge follow-up: user-standpoint RTT analysis (2026-09-01)
+
+The gates measure loop CPU; users feel request→response RTT. Three new
+BenchmarkSingle_ arms plus two controls isolated the gap
+(reactor_bench_linux_test.go, Docker arm64 loopback, count=10):
+
+| path                          | p50     | p99      |
+|-------------------------------|---------|----------|
+| echo floor (control)          | 4.8 µs  | 5.8 µs   |
+| blocking parser + fast path    | 5.3 µs  | 11–14 µs |
+| reactor keep-alive (before)   | 41.7 µs | 62–95 µs |
+| reactor keep-alive (after)    | 10.2 µs | 62–93 µs |
+| reactor 4 clients (before)    | 75–78 µs| 127 µs   |
+| reactor 4 clients (after)     | 45–58 µs| 131 µs   |
+
+CPU profiling of sustained RTT traffic showed the serving machinery
+was not the cost: parser <1% of samples, 50% Syscall6 (epoll/read/
+writev), 29% futex, findRunnable 40% cum. The blocking-parser control
+proved the wake path, not the work, was the gap — the locked OS thread
+parking in epoll_wait after every low-concurrency batch (batch size 1)
+and re-acquiring a P through the scheduler, exactly the park/wake the
+reactor amortizes only when batches are large. A concurrency sweep
+(1/4/16 clients) refuted the amortization-at-scale theory: RTT
+*worsened* with concurrency on the serialized single loop.
+
+Fix: bounded adaptive busy-poll in the loop — after a served batch,
+poll epoll_wait(timeout=0) up to reactorSpinBudget (80) times before
+parking in the 1 s wait. Back-to-back requests on a warm connection
+(the client's parse→next-write window is ~10 µs) are served without the
+park/wake. Idle is untouched: once no readiness arrives within the
+spin window, the loop parks (measured 0 CPU ticks over a 2 s quiet
+window) — it is not a busy loop. Result: keep-alive p50 −75%, uniform
+improvement at 1/4/16 clients, all gates and conformance unchanged.
+
+The p99 tail is flat (scheduler/GC jitter beyond the spin window);
+extending the spin trades real CPU for tail latency and is rejected
+here — the nightly runner remains the arbiter for that trade-off.
+
+Under sustained load (16 clients, 6 s, /proc CPU sampling): spin ON
+160k RPS at 4.18 core-seconds/s; spin OFF 138k RPS at 4.26 — the spin
+delivers +16% throughput at equal CPU (it parks *less often*, and each
+park/wake it avoids is scheduler work the whole process pays). The
+budget is operator-overridable (BOUINE_REACTOR_SPIN_BUDGET=0 disables)
+for the A/B and for field rollback; default 80.
+
 ## Where the reactor stands
 
 Rounds 1–3 (commits 9ec05a7, 4453b43, 867531f) plus the hardening round

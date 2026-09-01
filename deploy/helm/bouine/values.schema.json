@@ -109,7 +109,7 @@
               "default": 4096
             },
             "idle_timeout": {
-              "description": "Keep-alive idle timeout for data-plane connections (default 120s). Keep an nginx front-end's keepalive_timeout BELOW this so nginx closes idle connections first; otherwise bouine may close a connection mid-reuse and nginx logs 'upstream prematurely closed connection'.",
+              "description": "Keep-alive idle timeout for data-plane connections (default 120s). Keep an upstream proxy or LB's keepalive timeout BELOW this so it closes idle connections first; otherwise bouine may close a connection mid-reuse and the upstream logs 'upstream prematurely closed connection'.",
               "type": "string",
               "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
               "default": "120s"

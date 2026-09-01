@@ -38,6 +38,12 @@ config:
     # over-limit connections get 503 + close at accept. Idle keep-alive
     # connections hold a slot too — size for your client population.
     max_connections: 4096
+    # Keep-alive idle timeout for data-plane connections (default 120s).
+    # Keep an nginx front-end's keepalive_timeout BELOW this so nginx
+    # closes idle connections first; otherwise bouine may close a
+    # connection mid-reuse and nginx logs
+    # "upstream prematurely closed connection".
+    # idle_timeout: 120s
   tls:
     certs: []
     # Provide via a Secret mounted at /etc/bouine/tls/.
@@ -54,6 +60,18 @@ config:
     join: []  # populated from headless service DNS
   # admin:
   #   drain_duration: 10s  # /drain endpoint block time (preStop hook)
+  # Upstream origin pools. Example with connect policy:
+  # upstream_pools:
+  #   - name: app
+  #     targets: [app.default.svc:8080]
+  #     connect:
+  #       timeout: 10s                  # TCP dial timeout (default 10s)
+  #       keep_alive: 30s               # TCP keep-alive probe interval (default 30s)
+  #       max_connections: 64           # per origin host (default 64)
+  #       max_idle_conn_duration: 90s   # idle pooled-connection lifetime (default 90s);
+  #                                     # keep below any LB idle timeout in the path (AWS NLB: 350s)
+  #       response_header_timeout: 30s  # wait for origin response headers (default 30s)
+  #       hedge_timeout: 50ms           # fire a duplicate request after this delay
   upstream_pools: []
   routes: []
   # Cloudflare Cache API invalidation propagation.

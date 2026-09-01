@@ -10,6 +10,17 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+- `listen.idle_timeout` (default 120s): one knob for the client-facing
+  keep-alive idle timeout, replacing the hard-coded 120s literals
+  duplicated across the fasthttp listeners and the H1 fast-path parser
+  (which remain as zero-value fallbacks). With an nginx front-end,
+  keep nginx's `keepalive_timeout` below this value so nginx closes idle
+  connections first.
+- `upstream_pools[].connect.max_idle_conn_duration` (default 90s): how long
+  idle pooled origin connections are kept. Keep it below any LB idle
+  timeout between bouine and the origin (e.g. AWS NLB 350s).
+
 ### Fixed
 - Helm chart: the HPA rendered `behavior.scaleDown.stabilizationSeconds`,
   a field that does not exist in the `autoscaling/v2` API, so the API
@@ -21,6 +32,17 @@ the curated, human-readable summary.
   reaction.
   Rendered chart manifests are now validated against Kubernetes strict
   schemas (kubeconform) on every commit that touches the chart.
+- The `upstream_pools[].connect.*` settings (`timeout`, `keep_alive`,
+  `max_connections`, `response_header_timeout`) were validated but silently
+  ignored by the origin client (issue #579; `hedge_timeout` remains
+  reserved for future use). They now flow into the shared origin fasthttp
+  client. Zero values keep the previous hard-coded defaults (10s dial,
+  30s keep-alive, 64 conns/host, 30s response header), so no config
+  change is needed.
+- Origin connections are now pooled per upstream pool instead of per route
+  handler: `connect.max_connections` is enforced once per origin host even
+  when several routes share a pool, and repeated handler construction no
+  longer replaces the pool's client.
 
 ## [0.5.3] - 2026-08-31
 

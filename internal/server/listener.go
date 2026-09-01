@@ -108,6 +108,9 @@ func setSocketOptions(log observability.Logger, fastOpen, deferAccept, reusePort
 // data-plane connections. Excess connections are accepted then
 // immediately closed with a 503 response, preventing FD exhaustion
 // under slowloris or connection-flood attacks.
+// IdleTimeout is the keep-alive idle timeout; zero applies
+// DefaultIdleTimeout. The same value drives the H1 fast-path parser's
+// idle read deadline so the two never drift apart.
 type ListenerConfig struct {
 	Logger         observability.Logger
 	FastPath       api.FastPathHandler
@@ -117,6 +120,7 @@ type ListenerConfig struct {
 	Addr           string
 	Scheme         string
 	MaxConnections int
+	IdleTimeout    time.Duration
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
@@ -136,9 +140,24 @@ type Listener struct {
 	name           string
 	scheme         string
 	maxConns       int
+	idleTimeout    time.Duration
 	tcpFastOpen    bool
 	tcpDeferAccept bool
 	reusePort      bool
+}
+
+// DefaultIdleTimeout is the keep-alive idle timeout for data-plane
+// listeners: how long a connection with no in-flight request stays open.
+// Mirrors h1parser's default; listen.idle_timeout overrides both.
+const DefaultIdleTimeout = 120 * time.Second
+
+// resolveIdleTimeout applies the built-in default when the operator has
+// not configured listen.idle_timeout.
+func resolveIdleTimeout(v time.Duration) time.Duration {
+	if v == 0 {
+		return DefaultIdleTimeout
+	}
+	return v
 }
 
 // NewHTTP creates a plaintext HTTP/1.1 listener.
@@ -146,12 +165,13 @@ type Listener struct {
 // Stable.
 func NewHTTP(cfg ListenerConfig) *Listener {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
+	idle := resolveIdleTimeout(cfg.IdleTimeout)
 
 	srv := &fasthttp.Server{
 		Handler:               cfg.Handler,
 		ReadTimeout:           30 * time.Second,
 		WriteTimeout:          safetyNetWriteTimeout,
-		IdleTimeout:           120 * time.Second,
+		IdleTimeout:           idle,
 		ReadBufferSize:        64 << 10,
 		Concurrency:           maxServerConcurrency,
 		NoDefaultServerHeader: true,
@@ -165,6 +185,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		name:           "http",
 		logger:         cfg.Logger,
 		maxConns:       cfg.MaxConnections,
+		idleTimeout:    idle,
 		tcpFastOpen:    cfg.TCPFastOpen,
 		tcpDeferAccept: cfg.TCPDeferAccept,
 		reusePort:      cfg.ReusePort,
@@ -188,7 +209,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		Handler:               cfg.Handler,
 		ReadTimeout:           30 * time.Second,
 		WriteTimeout:          safetyNetWriteTimeout,
-		IdleTimeout:           120 * time.Second,
+		IdleTimeout:           resolveIdleTimeout(cfg.IdleTimeout),
 		ReadBufferSize:        64 << 10,
 		Concurrency:           maxServerConcurrency,
 		NoDefaultServerHeader: true,
@@ -203,6 +224,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		name:           "https",
 		logger:         cfg.Logger,
 		maxConns:       cfg.MaxConnections,
+		idleTimeout:    resolveIdleTimeout(cfg.IdleTimeout),
 		tcpFastOpen:    cfg.TCPFastOpen,
 		tcpDeferAccept: cfg.TCPDeferAccept,
 		reusePort:      cfg.ReusePort,

@@ -751,6 +751,61 @@ func TestBuildPools_InvalidTarget(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestBuildPools_WiresConnectPolicy(t *testing.T) {
+	t.Parallel()
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{
+					Name:    "wired",
+					Targets: []string{"127.0.0.1:0"},
+					Connect: config.ConnectPolicy{
+						Timeout:               3 * time.Second,
+						KeepAlive:             7 * time.Second,
+						MaxConnections:        12,
+						ResponseHeaderTimeout: 45 * time.Second,
+						MaxIdleConnDuration:   60 * time.Second,
+					},
+				},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	m := origin.RegisterMetrics(e.metrics.Registry)
+	pools, err := e.buildPools(m)
+	require.NoError(t, err)
+	p := pools["wired"]
+	require.NotNil(t, p)
+	c := p.ResolvedClientConfig()
+	require.Equal(t, 3*time.Second, c.DialTimeout)
+	require.Equal(t, 7*time.Second, c.KeepAlive)
+	require.Equal(t, 12, c.MaxConnsPerHost)
+	require.Equal(t, 45*time.Second, c.ResponseHeaderTimeout)
+	require.Equal(t, 60*time.Second, c.MaxIdleConnDuration)
+}
+
+func TestBuildPools_DefaultsWhenUnset(t *testing.T) {
+	t.Parallel()
+	e := &engine{
+		cfg: &config.Config{
+			UpstreamPools: []config.UpstreamPool{
+				{Name: "defaults", Targets: []string{"127.0.0.1:0"}},
+			},
+		},
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	pools, err := e.buildPools(origin.RegisterMetrics(e.metrics.Registry))
+	require.NoError(t, err)
+	c := pools["defaults"].ResolvedClientConfig()
+	require.Equal(t, 10*time.Second, c.DialTimeout)
+	require.Equal(t, 30*time.Second, c.KeepAlive)
+	require.Equal(t, 64, c.MaxConnsPerHost)
+	require.Equal(t, 30*time.Second, c.ResponseHeaderTimeout)
+	require.Equal(t, 90*time.Second, c.MaxIdleConnDuration)
+}
+
 func TestBuildStore_HotOnly(t *testing.T) {
 	t.Parallel()
 	e := &engine{

@@ -123,3 +123,26 @@ func TestHTTPS_ListenAndServe(t *testing.T) {
 	serveErr := <-errCh
 	require.NoError(t, serveErr, "serve")
 }
+
+func TestListenerIdleTimeout_Default(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: echo200(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.Equal(t, 120*time.Second, srv.idleTimeout)
+	require.Equal(t, 120*time.Second, srv.inner.IdleTimeout)
+}
+
+func TestListenerIdleTimeout_Configured(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTPS(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		IdleTimeout: 200 * time.Second,
+	})
+	require.Equal(t, 200*time.Second, srv.idleTimeout)
+	require.Equal(t, 200*time.Second, srv.inner.IdleTimeout)
+}

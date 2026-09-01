@@ -33,6 +33,11 @@ type Pool struct {
 	targets []*Target
 	next    atomic.Uint64
 	mu      sync.RWMutex
+
+	// clientConfig holds the resolved connect settings the shared
+	// client was built with. Kept after the pointer/lock fields to
+	// preserve the struct's pointer-heavy layout (fieldalignment).
+	clientConfig clientConfig
 }
 
 // Target is a single upstream endpoint.
@@ -120,6 +125,19 @@ func (t *Target) recordProbeSuccess(threshold int, logger observability.Logger, 
 // when the operator has not configured connect.response_header_timeout.
 const DefaultResponseHeaderTimeout = 30 * time.Second
 
+// DefaultMaxIdleConnDuration is how long an idle pooled origin connection
+// is kept before closing. Used as the fallback when the operator has not
+// configured connect.max_idle_conn_duration.
+const DefaultMaxIdleConnDuration = 90 * time.Second
+
+// defaultDialTimeout bounds the TCP dial to an origin target. Fallback
+// for connect.timeout.
+const defaultDialTimeout = 10 * time.Second
+
+// defaultKeepAlive is the TCP keep-alive probe interval on origin
+// connections. Fallback for connect.keep_alive.
+const defaultKeepAlive = 30 * time.Second
+
 // classifyConnError maps an origin connection error to a short reason
 // string for the bouine_origin_connection_errors_total metric label.
 // Uses string matching on the error message to avoid platform-specific
@@ -147,6 +165,17 @@ func classifyConnError(err error) string {
 // for traffic growth while bounding FD usage.
 const defaultOriginMaxConnsPerHost = 64
 
+// clientConfig holds the resolved (defaults applied) origin client
+// settings. Produced once at pool construction and shared by every
+// handler/client built from the pool.
+type clientConfig struct {
+	dialTimeout           time.Duration
+	keepAlive             time.Duration
+	maxConnsPerHost       int
+	maxIdleConnDuration   time.Duration
+	responseHeaderTimeout time.Duration
+}
+
 // PoolConfig configures a Pool at construction time.
 type PoolConfig struct {
 	Logger observability.Logger
@@ -158,8 +187,60 @@ type PoolConfig struct {
 	// Passive health: eject after this many consecutive 5xx.
 	// Zero disables passive health.
 	Consecutive5xx int
-	// DialTimeout bounds the TCP dial.
+	// DialTimeout bounds the TCP dial. Zero applies a 10s default.
 	DialTimeout time.Duration
+	// KeepAlive is the TCP keep-alive probe interval. Zero applies a
+	// 30s default.
+	KeepAlive time.Duration
+	// MaxConnsPerHost caps concurrent connections per origin host.
+	// Zero applies a 64 default.
+	MaxConnsPerHost int
+	// MaxIdleConnDuration is how long idle pooled connections are kept.
+	// Zero applies a 90s default.
+	MaxIdleConnDuration time.Duration
+	// ResponseHeaderTimeout bounds the wait for origin response headers.
+	// Zero applies a 30s default.
+	ResponseHeaderTimeout time.Duration
+}
+
+// resolveDefault returns def when v is zero, v otherwise. Zero
+// configuration always yields the built-in default so existing configs
+// keep today's behaviour.
+func resolveDefault(v, def time.Duration) time.Duration {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
+// resolveDefaultInt returns def when v is not positive, v otherwise.
+// Zero configuration always yields the built-in default so existing
+// configs keep today's behaviour; negatives are rejected by the loader
+// but clamped here too so a raw PoolConfig can't disable the cap.
+func resolveDefaultInt(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
+}
+
+// newOriginClient builds the shared fasthttp.Client for a pool from the
+// resolved connect settings. One client per pool means MaxConnsPerHost
+// is enforced per pool, not per route handler.
+func newOriginClient(cc clientConfig) *fasthttp.Client {
+	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
+	return &fasthttp.Client{
+		MaxConnsPerHost:     cc.maxConnsPerHost,
+		MaxIdleConnDuration: cc.maxIdleConnDuration,
+		ReadTimeout:         cc.responseHeaderTimeout,
+		WriteTimeout:        5 * time.Minute,
+		// Preserve origin header-name bytes end to end (RFC 9110
+		// §5.1 allows any token casing); matching the peer-fetch client.
+		DisableHeaderNamesNormalizing: true,
+		Dial: func(addr string) (net.Conn, error) {
+			return dialer.Dial("tcp", addr)
+		},
+	}
 }
 
 // NewPool constructs a pool from config. Returns an error if no
@@ -173,7 +254,15 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 	p := &Pool{
 		Name:   cfg.Name,
 		logger: cfg.Logger,
+		clientConfig: clientConfig{
+			dialTimeout:           resolveDefault(cfg.DialTimeout, defaultDialTimeout),
+			keepAlive:             resolveDefault(cfg.KeepAlive, defaultKeepAlive),
+			maxConnsPerHost:       resolveDefaultInt(cfg.MaxConnsPerHost, defaultOriginMaxConnsPerHost),
+			maxIdleConnDuration:   resolveDefault(cfg.MaxIdleConnDuration, DefaultMaxIdleConnDuration),
+			responseHeaderTimeout: resolveDefault(cfg.ResponseHeaderTimeout, DefaultResponseHeaderTimeout),
+		},
 	}
+	p.client = newOriginClient(p.clientConfig)
 
 	for _, addr := range cfg.Targets {
 		t, err := newTarget(addr)
@@ -223,20 +312,9 @@ func (p *Pool) pick() *Target {
 
 // FastHandler returns a fasthttp.RequestHandler that reverse-proxies
 // to this pool. The handler picks a target per request via round-robin
-// and forwards through a pooled fasthttp.Client. Passive health
-// checking (consecutive-5xx ejection) is applied on response.
+// and forwards through the pool's shared fasthttp.Client. Passive
+// health checking (consecutive-5xx ejection) is applied on response.
 func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	p.client = &fasthttp.Client{
-		MaxConnsPerHost:               defaultOriginMaxConnsPerHost,
-		MaxIdleConnDuration:           90 * time.Second,
-		ReadTimeout:                   DefaultResponseHeaderTimeout,
-		WriteTimeout:                  5 * time.Minute,
-		DisableHeaderNamesNormalizing: true,
-		Dial: func(addr string) (net.Conn, error) {
-			return dialer.Dial("tcp", addr)
-		},
-	}
 	conc5xx := consecutive5xx
 
 	return func(ctx *fasthttp.RequestCtx) {
@@ -277,8 +355,10 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 
 		// Use DoTimeout directly because *fasthttp.RequestCtx.Done()
 		// panics when the ctx was created manually (not by a real
-		// fasthttp server).
-		if err := p.client.DoTimeout(req, resp, DefaultResponseHeaderTimeout); err != nil {
+		// fasthttp server). Bound by connect.response_header_timeout:
+		// on this proxied (never-cached) path it doubles as the total
+		// fetch bound, covering headers and body.
+		if err := p.client.DoTimeout(req, resp, p.clientConfig.responseHeaderTimeout); err != nil {
 			p.logger.Warn("upstream error",
 				"pool", p.Name,
 				"target", t.addr,
@@ -320,24 +400,38 @@ func (p *Pool) FastHandler(consecutive5xx int) fasthttp.RequestHandler {
 	}
 }
 
+// ClientSettings exposes the pool's resolved origin client settings
+// (defaults applied) for observability and wiring tests.
+type ClientSettings struct {
+	DialTimeout           time.Duration
+	KeepAlive             time.Duration
+	MaxConnsPerHost       int
+	MaxIdleConnDuration   time.Duration
+	ResponseHeaderTimeout time.Duration
+}
+
+// ResolvedClientConfig returns the connect settings this pool's shared
+// fasthttp.Client was built with, after zero-value defaults were
+// applied. Stable.
+func (p *Pool) ResolvedClientConfig() ClientSettings {
+	return ClientSettings{
+		DialTimeout:           p.clientConfig.dialTimeout,
+		KeepAlive:             p.clientConfig.keepAlive,
+		MaxConnsPerHost:       p.clientConfig.maxConnsPerHost,
+		MaxIdleConnDuration:   p.clientConfig.maxIdleConnDuration,
+		ResponseHeaderTimeout: p.clientConfig.responseHeaderTimeout,
+	}
+}
+
 // FastClient returns a cache.FastClient that fetches from this pool
 // using fasthttp instead of httputil.ReverseProxy. Each Do() call
 // selects a healthy target via round-robin, rewrites the request URI,
-// and sends via a pooled fasthttp.Client. When no healthy target is
-// available, returns an error.
+// and sends via the pool's shared fasthttp.Client. When no healthy
+// target is available, returns an error.
 func (p *Pool) FastClient() *PoolFastClient {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return &PoolFastClient{
-		pool: p,
-		client: &fasthttp.Client{
-			MaxConnsPerHost:     defaultOriginMaxConnsPerHost,
-			MaxIdleConnDuration: 90 * time.Second,
-			ReadTimeout:         DefaultResponseHeaderTimeout,
-			WriteTimeout:        5 * time.Minute,
-			Dial: func(addr string) (net.Conn, error) {
-				return dialer.Dial("tcp", addr)
-			},
-		},
+		pool:   p,
+		client: p.client,
 	}
 }
 
@@ -486,8 +580,6 @@ func (p *Pool) MarkHealthy(addr string) {
 // contract so that rolling restarts don't leak TIME_WAIT sockets on
 // origins.
 func (p *Pool) Close(_ context.Context) error {
-	// fasthttp.Client doesn't expose CloseIdleConnections directly;
-	// the GC will reclaim idle connections when the Client is
-	// dereferenced.
+	p.client.CloseIdleConnections()
 	return nil
 }

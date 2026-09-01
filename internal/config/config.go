@@ -83,12 +83,26 @@ type Listen struct {
 	// N parallel accept loops (one per GOMAXPROCS) for better connection
 	// distribution under high load. nil defaults to true on Linux, false
 	// on other platforms (macOS/BSD have different SO_REUSEPORT semantics).
-	ReusePort      *bool  `yaml:"reuse_port,omitempty" json:"reuse_port,omitempty"`
-	HTTP           string `yaml:"http,omitempty" json:"http,omitempty"`
-	HTTPS          string `yaml:"https,omitempty" json:"https,omitempty"`
-	Admin          string `yaml:"admin,omitempty" json:"admin,omitempty"`
-	Cluster        string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
-	MaxConnections int    `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	ReusePort *bool  `yaml:"reuse_port,omitempty" json:"reuse_port,omitempty"`
+	HTTP      string `yaml:"http,omitempty" json:"http,omitempty"`
+	HTTPS     string `yaml:"https,omitempty" json:"https,omitempty"`
+	Admin     string `yaml:"admin,omitempty" json:"admin,omitempty"`
+	Cluster   string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
+	// MaxConnections caps simultaneously open data-plane connections.
+	// Zero disables the limit.
+	MaxConnections int `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// IdleTimeout is the keep-alive idle timeout for data-plane
+	// connections: how long a connection with no in-flight request is
+	// kept open before bouine closes it. It applies to both the
+	// fasthttp listener and the H1 fast-path parser so the two stay in
+	// sync (previously a hard-coded 120s duplicated in three places).
+	// Zero applies a 120s built-in default. When an nginx front-end
+	// proxies to bouine, keep nginx's keepalive_timeout below this so
+	// nginx closes idle connections first; otherwise bouine may close
+	// a connection mid-reuse and nginx logs
+	// "upstream prematurely closed connection". Note that idle
+	// keep-alive connections still hold a Listen.MaxConnections slot.
+	IdleTimeout time.Duration `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are
@@ -321,18 +335,28 @@ type PassiveHealthCheck struct {
 	EjectFor       time.Duration `yaml:"eject_for,omitempty" json:"eject_for,omitempty"`
 }
 
-// ConnectPolicy bounds dial behaviour.
+// ConnectPolicy bounds dial behaviour and origin connection lifetimes.
 type ConnectPolicy struct {
-	Timeout   time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Timeout bounds the TCP dial to an origin target. Zero applies a
+	// 10s built-in default.
+	Timeout time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// KeepAlive is the TCP keep-alive probe interval on origin
+	// connections. Zero applies a 30s built-in default.
 	KeepAlive time.Duration `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
-	// MaxConnections caps the number of concurrent connections per upstream
-	// host (http.Transport.MaxConnsPerHost). Zero means unlimited — the
-	// default, which preserves existing behaviour. Set this to bound FD
-	// consumption under high miss ratios with hedged requests. Note: this
-	// is per-host, not per-pool; a pool with N targets gets N × MaxConnections.
-	// This is distinct from Listen.MaxConnections, which caps total TCP
-	// connections to the data plane.
+	// MaxConnections caps the number of concurrent connections per
+	// upstream host (fasthttp.Client.MaxConnsPerHost). Zero applies a
+	// 64 built-in default. This is per-host, not per-pool: a pool with
+	// N targets gets N × MaxConnections. This is distinct from
+	// Listen.MaxConnections, which caps total TCP connections to the
+	// data plane.
 	MaxConnections int `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// MaxIdleConnDuration is how long an idle pooled origin connection
+	// is kept before closing (fasthttp.Client.MaxIdleConnDuration).
+	// Zero applies a 90s built-in default. Keep this below any LB idle
+	// timeout between bouine and the origin (e.g. AWS NLB 350s) so
+	// bouine closes the connection first and never reuses one the LB
+	// has already dropped.
+	MaxIdleConnDuration time.Duration `yaml:"max_idle_conn_duration,omitempty" json:"max_idle_conn_duration,omitempty"`
 	// ResponseHeaderTimeout bounds the time waiting for the origin's
 	// response headers after the request is fully sent. Zero applies a
 	// safe built-in default (30s). This is the primary defence against

@@ -177,6 +177,10 @@ func (c *Config) Validate() error {
 		return errors.New("config: listen.reuse_port is only supported on Linux")
 	}
 
+	if c.Listen.IdleTimeout < 0 {
+		return fmt.Errorf("config: listen.idle_timeout must be >= 0, got %v", c.Listen.IdleTimeout)
+	}
+
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other
 	// than -1 are meaningless.
@@ -505,8 +509,14 @@ func validatePoolDurations(p *UpstreamPool) error {
 	if p.Connect.KeepAlive < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.keep_alive must be >= 0, got %v", p.Name, p.Connect.KeepAlive)
 	}
+	if p.Connect.MaxIdleConnDuration < 0 {
+		return fmt.Errorf("config: upstream pool %q connect.max_idle_conn_duration must be >= 0, got %v", p.Name, p.Connect.MaxIdleConnDuration)
+	}
 	if p.Connect.ResponseHeaderTimeout < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
+	}
+	if p.Connect.MaxConnections < 0 {
+		return fmt.Errorf("config: upstream pool %q connect.max_connections must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
 	}
 	if p.Connect.HedgeTimeout < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.hedge_timeout must be >= 0, got %v", p.Name, p.Connect.HedgeTimeout)

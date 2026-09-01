@@ -8,7 +8,7 @@ Release notes for tagged versions are also generated from
 [Conventional Commits](https://www.conventionalcommits.org/); this file is
 the curated, human-readable summary.
 
-## [Unreleased]
+## [0.5.4] - 2026-09-01
 
 ### Added
 - `listen.idle_timeout` (default 120s): one knob for the client-facing
@@ -747,7 +747,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/bouine-cache/bouine/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.3
 
 [0.5.2]: https://github.com/bouine-cache/bouine/compare/v0.5.1...v0.5.2

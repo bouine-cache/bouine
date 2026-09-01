@@ -62,6 +62,14 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 				loop.Close()
 			}()
 			loop.Run()
+			if dropped := loop.MetricsDropped(); dropped > 0 {
+				// Async hit-metrics ring overflow (reactor_metrics.go):
+				// the drainer could not keep up and that many hit
+				// records were not counted. Zero in steady state; see
+				// docs/runbook for the failure mode.
+				s.logger.Warn("H1 reactor dropped hit-metric records",
+					"name", s.name, "dropped", dropped)
+			}
 			return nil
 		}
 		s.logger.Warn("h1_reactor requested but unavailable on this platform; using blocking path",

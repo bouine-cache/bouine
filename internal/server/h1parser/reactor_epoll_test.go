@@ -253,7 +253,7 @@ func TestEpollReactor_LargeBodyZeroCopyHit(t *testing.T) {
 	resp := &api.FastPathResponse{
 		BuffersArr: [3][]byte{
 			[]byte("HTTP/1.1 200 OK\r\n"),
-			[]byte(fmt.Sprintf("Content-Length: %d\r\nContent-Type: text/plain\r\n\r\n", bodySize)),
+			fmt.Appendf(nil, "Content-Length: %d\r\nContent-Type: text/plain\r\n\r\n", bodySize),
 			[]byte(body),
 		},
 		CacheResult: "HIT",
@@ -324,7 +324,6 @@ func TestEpollReactor_IdleSweepExpiresConnections(t *testing.T) {
 	p := New(&mockFastPathHit{}, noopHandler)
 	r := &reactorEpoll{
 		p:       p,
-		conns:   make(map[int32]*reactorConn),
 		pending: make(chan *reactorConn, 8),
 		done:    make(chan struct{}),
 	}
@@ -339,8 +338,8 @@ func TestEpollReactor_IdleSweepExpiresConnections(t *testing.T) {
 	idleRC.reqStart = p.nowFunc().Add(-reactorIdleTimeout - time.Second)
 	freshRC := newReactorConn(freshS, p, nil, nil)
 	freshRC.reqStart = p.nowFunc()
-	r.conns[1] = idleRC
-	r.conns[2] = freshRC
+	r.connAdd(1, idleRC)
+	r.connAdd(2, freshRC)
 
 	r.sweepIdle(p.nowFunc())
 
@@ -349,10 +348,10 @@ func TestEpollReactor_IdleSweepExpiresConnections(t *testing.T) {
 	buf := make([]byte, 8)
 	_, err := idleC.Read(buf)
 	require.Error(t, err, "idle conn must be closed by the sweep")
-	assert.NotContains(t, r.conns, int32(1), "idle conn removed from the map")
+	assert.Nil(t, r.connAt(1), "idle conn removed from the table")
 
 	// The fresh connection survives.
-	require.Contains(t, r.conns, int32(2), "fresh conn must survive the sweep")
+	require.NotNil(t, r.connAt(2), "fresh conn must survive the sweep")
 	_ = freshC
 }
 
@@ -464,4 +463,106 @@ func TestEpollReactor_CloseDrainsInFlightHandoff(t *testing.T) {
 		t.Fatal("Close did not return after the in-flight handoff completed")
 	}
 	_ = conn.Close()
+}
+
+// TestEpollReactor_SweepDropsStuckWriter asserts the W7 safety net: a
+// connection parked in rcWriting whose flush never completes (client
+// stopped reading) is dropped once the write budget expires, instead of
+// consuming the reactor connection budget forever. A fresh writer must
+// survive the same sweep. No sleeps: the budget is exercised through
+// the state machine's own clock (reqStart backdating), like the idle
+// test above.
+func TestEpollReactor_SweepDropsStuckWriter(t *testing.T) {
+	p := New(&mockFastPathHit{}, noopHandler)
+	r := &reactorEpoll{
+		p:       p,
+		pending: make(chan *reactorConn, 8),
+		done:    make(chan struct{}),
+	}
+
+	stuckC, stuckS := net.Pipe()
+	defer stuckC.Close()
+	freshC, freshS := net.Pipe()
+	defer freshC.Close()
+
+	stuckRC := newReactorConn(stuckS, p, nil, nil)
+	stuckRC.state = rcWriting
+	stuckRC.reqStart = p.nowFunc().Add(-reactorWriteTimeout - time.Second)
+
+	freshRC := newReactorConn(freshS, p, nil, nil)
+	freshRC.state = rcWriting
+	freshRC.reqStart = p.nowFunc()
+
+	r.connAdd(3, stuckRC)
+	r.connAdd(4, freshRC)
+
+	r.sweepIdle(p.nowFunc())
+
+	stuckC.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 8)
+	_, err := stuckC.Read(buf)
+	require.Error(t, err, "stuck writer must be closed by the sweep")
+	assert.Nil(t, r.connAt(3), "stuck writer removed from the table")
+	require.NotNil(t, r.connAt(4), "fresh writer must survive the sweep")
+}
+
+// TestEpollReactor_HandoffStormConcurrentClose asserts W4's spawner
+// lifecycle under pressure: a burst of miss connections queues handoff
+// jobs while Close runs concurrently. After Close returns, no spawner
+// or blocking-parser goroutine may still exist, and no conn may leak
+// (the queue drain must close every queued conn's lifecycle owner).
+// Regression guard for the spawn-queue refactor: the spawner joins
+// before the WaitGroup wait, so a queued-but-unspawned job can never be
+// orphaned mid-shutdown.
+func TestEpollReactor_HandoffStormConcurrentClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	fallbackStarted := make(chan struct{}, 64)
+	p := New(&mockFastPathHandler{}, func(ctx *fasthttp.RequestCtx) {
+		select {
+		case fallbackStarted <- struct{}{}:
+		default:
+		}
+		ctx.SetBodyString("storm-miss")
+		ctx.SetStatusCode(200)
+	})
+
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok)
+	go loop.Run()
+
+	const n = 48
+	conns := make([]net.Conn, 0, n)
+	for range n {
+		conn, derr := net.Dial("tcp", ln.Addr().String())
+		if derr != nil {
+			break
+		}
+		conns = append(conns, conn)
+		_, _ = conn.Write([]byte("GET /storm HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	}
+
+	// Some handoffs must have fired before Close starts.
+	deadline := time.Now().Add(3 * time.Second)
+	for len(fallbackStarted) == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	require.NotZero(t, len(fallbackStarted), "no handoff fired before Close")
+
+	loop.Close()
+
+	// After Close returns, every handed-off conn is closed by its
+	// blocking-parser goroutine or the force-close: the clients must
+	// observe EOF/reset rather than a parked half-open.
+	for _, conn := range conns {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 64)
+		for {
+			if _, rerr := conn.Read(buf); rerr != nil {
+				break
+			}
+		}
+		_ = conn.Close()
+	}
 }

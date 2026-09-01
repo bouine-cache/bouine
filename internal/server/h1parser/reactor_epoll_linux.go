@@ -21,6 +21,8 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -68,7 +70,8 @@ type reactorEpoll struct {
 	// the scalar descriptors.
 	events    []unix.EpollEvent
 	p         *Parser
-	conns     map[epollFD]*reactorConn
+	connTable [reactorFDTableCap]*reactorConn // dense fd-indexed fast table
+	overflow  map[epollFD]*reactorConn        // conns beyond the table cap
 	acceptLn  net.Listener
 	pending   chan *reactorConn
 	lastSweep time.Time
@@ -81,10 +84,78 @@ type reactorEpoll struct {
 	// Close's drain cannot race handoffs spawned by a still-running loop.
 	handoffs     handoffTracker
 	handoffsDone chan struct{}
+	// metricsDrainer, when the parser has a metrics hook, drains the
+	// async hit-metrics ring (reactor_metrics.go). Started by run() and
+	// joined by Close via metricsDone after a final full drain — no
+	// record survives shutdown uncounted.
+	metricsDrainer *metricsDrainer
+	metricsDone    chan struct{}
+	// ntracked is the number of tracked connections (table + overflow).
+	// Kept as a scalar so the reactorMaxConns admission check is one
+	// compare instead of a map length walk.
+	ntracked int
 
 	epfd  int
 	wakeR int
 	wakeW int
+	// pendingWake coalesces wakeup-pipe writes (see wake).
+	pendingWake atomic.Bool
+}
+
+// reactorFDTableCap is the dense connection-table capacity: fds are
+// kernel table indices and real deployments run far below this under
+// any RLIMIT_NOFILE, so the table turns every readiness dispatch into
+// an array load instead of a map hash+probe. Power of two.
+const reactorFDTableCap = 1 << 16
+
+// connAt returns the connection tracked for fd, or nil. Loop-goroutine
+// only.
+func (r *reactorEpoll) connAt(fd epollFD) *reactorConn {
+	if fd >= 0 && int(fd) < reactorFDTableCap {
+		return r.connTable[fd]
+	}
+	return r.overflow[fd]
+}
+
+// connAdd tracks rc under fd. Loop-goroutine only.
+func (r *reactorEpoll) connAdd(fd epollFD, rc *reactorConn) {
+	if fd >= 0 && int(fd) < reactorFDTableCap {
+		r.connTable[fd] = rc
+	} else {
+		if r.overflow == nil {
+			r.overflow = make(map[epollFD]*reactorConn)
+		}
+		r.overflow[fd] = rc
+	}
+	r.ntracked++
+}
+
+// connDel untracks fd. Loop-goroutine only.
+func (r *reactorEpoll) connDel(fd epollFD) {
+	if fd >= 0 && int(fd) < reactorFDTableCap {
+		r.connTable[fd] = nil
+	} else {
+		delete(r.overflow, fd)
+	}
+	r.ntracked--
+}
+
+// eachConn yields every tracked connection to fn once. Used by the idle
+// sweep and shutdown cleanup. Loop-goroutine only. Ranges over the
+// table as a slice — range-over-array would copy the whole 64 Ki-entry
+// array (512 KB) on every call. The slice range reads elements lazily,
+// so a connDel (nil store) at the current index inside the callback is
+// safe; deleting other conns inside the callback is not (sweepIdle
+// only deletes the yielded one).
+func (r *reactorEpoll) eachConn(fn func(fd epollFD, rc *reactorConn)) {
+	for fd, rc := range r.connTable[:] {
+		if rc != nil {
+			fn(epollFD(fd), rc)
+		}
+	}
+	for fd, rc := range r.overflow {
+		fn(fd, rc)
+	}
 }
 
 // newReactorLoop builds the Linux reactor. ok=false (and a nil loop)
@@ -103,7 +174,6 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		epfd:         epfd,
 		events:       make([]unix.EpollEvent, 1024),
 		p:            p,
-		conns:        make(map[int32]*reactorConn),
 		acceptLn:     ln,
 		wakeR:        wakeFds[0],
 		wakeW:        wakeFds[1],
@@ -112,6 +182,27 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		done:         make(chan struct{}),
 		handoffsDone: make(chan struct{}),
 	}
+	// connTable is a dense value field (~512 KB): zero-initialized by the
+	// struct literal above at no measurable cost relative to the loop's
+	// lifetime; overflow stays nil until an fd beyond the table arrives.
+	r.overflow = nil
+	// Async metrics (W3): the hook's CPU is serial loop time; move it
+	// to a drainer goroutine via the SPSC ring. The ring is created
+	// here, on the loop's Parser, before Run — the blocking-path share
+	// of this Parser (handoffs) never sees it (handoff conns serve
+	// misses, not hits).
+	if p.metricsHook != nil {
+		ring := &metricsRing{}
+		p.metricsRing = ring
+		r.metricsDrainer = &metricsDrainer{ring: ring, hook: p.metricsHook}
+	}
+	// The spawner goroutine starts here, not in run(): acceptLoop can
+	// enqueue handoffs (pending-queue overflow) the moment Run is
+	// called, and a handoff arriving before run()'s body executes
+	// would dereference a nil spawn channel. Construction is the only
+	// synchronization-free point where both accept and loop paths are
+	// guaranteed to come after.
+	r.handoffs.startSpawner()
 	if err := r.register(asEpollFD(r.wakeR), nil); err != nil {
 		r.cleanup()
 		return nil, false
@@ -123,6 +214,13 @@ func (r *reactorEpoll) run() {
 	defer runtime.UnlockOSThread()
 	defer r.cleanup()
 	defer close(r.handoffsDone)
+	if r.metricsDrainer != nil {
+		// metricsDone closes when the drainer's final drain completes;
+		// Close joins it after the loop exits (the loop is the ring's
+		// only producer, so no record can be pushed after handoffsDone).
+		r.metricsDone = make(chan struct{})
+		go r.metricsDrainer.run(r.done, r.metricsDone)
+	}
 	go r.acceptLoop()
 	for {
 		select {
@@ -142,14 +240,14 @@ func (r *reactorEpoll) run() {
 			r.lastSweep = now
 			r.sweepIdle(now)
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			ev := &r.events[i]
-			rc, isConn := r.conns[ev.Fd]
+			rc := r.connAt(ev.Fd)
 			switch {
-			case !isConn && ev.Fd == asEpollFD(r.wakeR):
+			case rc == nil && ev.Fd == asEpollFD(r.wakeR):
 				r.drainWake()
 				r.drainPending()
-			case isConn:
+			case rc != nil:
 				r.dispatch(rc, ev.Events, now)
 			}
 		}
@@ -160,33 +258,46 @@ func (r *reactorEpoll) run() {
 // so the loop wakes at least this often even with zero traffic.
 const reactorSweepInterval = time.Second
 
-// sweepIdle closes reading connections whose per-request idle budget
-// expired. Idle connections generate no readiness events, so the
-// per-dispatch idle check alone would never fire for them — this sweep
-// is what bounds a reactor full of parked keep-alive clients, mirroring
-// the blocking parser's 120s read deadline. Runs on the loop goroutine
-// at most once per reactorSweepInterval; O(tracked conns).
+// sweepIdle closes connections whose per-request budgets expired:
+// reading connections past the idle budget, and writing connections
+// whose flush exceeded the write safety net. Idle connections generate
+// no readiness events, so the per-dispatch idle check alone would never
+// fire for them — this sweep is what bounds a reactor full of parked
+// keep-alive clients, mirroring the blocking parser's 120s read
+// deadline. Runs on the loop goroutine at most once per
+// reactorSweepInterval; O(tracked conns).
 //
-// Writers are skipped: a connection flushing a hit to a slow client
-// makes no read progress by definition, and the blocking path's
-// safety net for that case is the write deadline (5 minutes), not the
-// idle budget. Cutting a response mid-flush at 120s would corrupt
-// framing the reactor promised to finish.
+// Writers are governed by the write safety net, not the idle budget:
+// a connection flushing a hit to a slow client makes no read progress
+// by definition. But raw-fd writes arm no OS deadline, so without this
+// check a client that stops reading mid-response would park the
+// connection in rcWriting forever, silently consuming the reactor
+// connection budget. reactorWriteTimeout (5 minutes) mirrors the
+// blocking path's SetWriteDeadline safety net; dropping mid-flush at
+// that point is the same outcome the blocking path produces on its
+// deadline — a cut response to a dead client, not a leaked one.
 func (r *reactorEpoll) sweepIdle(now time.Time) {
-	for fd, rc := range r.conns {
-		if rc.state != rcReading {
-			continue
+	r.eachConn(func(fd epollFD, rc *reactorConn) {
+		switch rc.state {
+		case rcReading:
+			if !rc.idleExpired(now) {
+				return
+			}
+		case rcWriting:
+			if !rc.writeStuckExpired(now) {
+				return
+			}
+		default:
+			return
 		}
-		if rc.idleExpired(now) {
-			// Close, not handoff: an idle conn has no in-flight
-			// request to serve, and the blocking parser would itself
-			// time it out — a handoff goroutine would be pure churn.
-			_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
-			delete(r.conns, fd)
-			rc.release()
-			_ = rc.conn.Close()
-		}
-	}
+		// Close, not handoff: an expired connection has no in-flight
+		// request worth serving, and the blocking parser would itself
+		// time it out — a handoff goroutine would be pure churn.
+		_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
+		r.connDel(fd)
+		rc.release()
+		_ = rc.conn.Close()
+	})
 }
 
 // dispatch advances one connection for the reported readiness events.
@@ -231,7 +342,7 @@ func (r *reactorEpoll) register(fd epollFD, rc *reactorConn) error {
 		// read interest is recognized as unchanged and skipped — one
 		// epoll_ctl per first hit saved.
 		rc.epollInterest = events
-		r.conns[fd] = rc
+		r.connAdd(fd, rc)
 	}
 	return nil
 }
@@ -272,7 +383,7 @@ func (r *reactorEpoll) connFd(rc *reactorConn) epollFD {
 func (r *reactorEpoll) drop(rc *reactorConn) {
 	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
-	delete(r.conns, fd)
+	r.connDel(fd)
 	rc.release()
 	_ = rc.conn.Close()
 }
@@ -285,28 +396,39 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 func (r *reactorEpoll) handoff(rc *reactorConn) {
 	fd := r.connFd(rc)
 	_ = unix.EpollCtl(r.epfd, unix.EPOLL_CTL_DEL, int(fd), nil)
-	delete(r.conns, fd)
+	r.connDel(fd)
 	rc.release()
 	rc.handoff(&r.handoffs)
 }
 
 // drainWake consumes the wakeup pipe bytes and processes accepted
-// connections.
+// connections. The pending flag is cleared after the drain so a
+// racing wake() (flag set, byte in flight) re-arms: a stray extra
+// byte is harmless, a suppressed wakeup would park the loop.
 func (r *reactorEpoll) drainWake() {
 	buf := [64]byte{}
 	for {
 		n, err := unix.Read(r.wakeR, buf[:])
 		if n <= 0 || err != nil {
+			r.pendingWake.Store(false)
 			return
 		}
 		if n < len(buf) {
+			r.pendingWake.Store(false)
 			return
 		}
 	}
 }
 
-// wake writes a byte to the wakeup pipe so EpollWait returns.
+// wake writes a byte to the wakeup pipe so EpollWait returns. The
+// write is coalesced: pendingWake tracks an undrained byte, so a burst
+// of accepted connections costs one pipe write per drain cycle instead
+// of one per accept. The flag is set before the write; drainWake clears
+// it after draining, so the lose-side of the race is a redundant byte.
 func (r *reactorEpoll) wake() {
+	if r.pendingWake.Swap(true) {
+		return
+	}
 	_, _ = unix.Write(r.wakeW, wakeByte[:])
 }
 
@@ -365,12 +487,12 @@ func (r *reactorEpoll) drainPending() {
 	for {
 		select {
 		case rc := <-r.pending:
-			if len(r.conns) >= reactorMaxConns {
+			if r.ntracked >= reactorMaxConns {
 				// Over cap: the blocking parser owns it.
 				rc.handoff(&r.handoffs)
 				continue
 			}
-			if err := r.register(asEpollFD(connFD(rc.conn)), rc); err != nil {
+			if err := r.register(asEpollFD(rc.fd), rc); err != nil {
 				rc.release()
 				_ = rc.conn.Close()
 			}
@@ -473,11 +595,37 @@ func connFD(conn net.Conn) int {
 // handed-off requests are not force-killed here: Close gives them
 // the handoffDrainGrace window first (see Close).
 func (r *reactorEpoll) cleanup() {
-	for _, rc := range r.conns {
+	r.eachConn(func(_ epollFD, rc *reactorConn) {
 		rc.release()
 		_ = rc.conn.Close()
+	})
+	r.overflow = nil
+	// Drain the pending queue: connections the accept goroutine parked
+	// but the loop never registered are owned by nobody else — without
+	// this drain they leak as half-open sockets past shutdown (the
+	// storm-shutdown test catches exactly this). The listener is closed
+	// before Close in every production wiring, so acceptLoop has
+	// already exited and cannot push concurrently; the channel is
+	// left non-nil so a late (buggy) push blocks on select-default
+	// instead of panicking on a nil send.
+	for {
+		select {
+		case rc := <-r.pending:
+			rc.release()
+			_ = rc.conn.Close()
+		default:
+			goto drained
+		}
 	}
-	r.conns = nil
+drained:
+	// Close the spawn queue: the spawner drains any queued jobs (each
+	// wg.Add + goroutine start) and exits, closing spawnerDone. Close
+	// joins spawnerDone before waiting on the tracker's WaitGroup, so
+	// the Wait cannot race a still-pending Add from the queue.
+	if r.handoffs.spawns != nil {
+		close(r.handoffs.spawns)
+		<-r.handoffs.spawnerDone
+	}
 	_ = unix.Close(r.wakeR)
 	_ = unix.Close(r.wakeW)
 	_ = unix.Close(r.epfd)
@@ -514,6 +662,14 @@ func (r *reactorEpoll) Close() {
 	// new handoffs (misses in its final batch), which must drain too.
 	<-r.handoffsDone
 
+	// Join the metrics drainer: the loop has exited, so the ring can no
+	// longer grow; the drainer applies every buffered record before
+	// metricsDone closes (shutdown metrics stay complete, not "mostly
+	// complete").
+	if r.metricsDone != nil {
+		<-r.metricsDone
+	}
+
 	drained := make(chan struct{})
 	go func() {
 		r.handoffs.wg.Wait()
@@ -532,3 +688,166 @@ func (r *reactorEpoll) Close() {
 
 // Run drives the reactor until the listener is closed. Blocks.
 func (r *reactorEpoll) Run() { r.run() }
+
+// MetricsDropped returns how many hit-metric records the async ring
+// dropped because the drainer could not keep up (see
+// reactor_metrics.go). Zero unless the loop was saturated. Called by
+// the listener wiring after Run returns, to surface the overflow at
+// shutdown; steady-state operation should see zero.
+func (r *reactorEpoll) MetricsDropped() uint64 {
+	if r.metricsDrainer != nil {
+		return r.metricsDrainer.ring.droppedTotal()
+	}
+	return 0
+}
+
+// handoff starts the blocking Parser on the spawner goroutine,
+// replaying the buffered bytes. Called by the transport on actHandoff.
+// The tracker owns the blocking goroutine: it tracks the conn, closes
+// it when Serve returns, and force-closes it during shutdown drain
+// after the grace window to unpark Serve's keep-alive read loop (Serve
+// never closes the conn itself — the blocking path's caller does,
+// which is the tracker). The prefixConn allocation stays on the loop
+// goroutine: the readBuf it aliases is loop-owned and must not be
+// freed before the handoff escapes the loop — the job's channel send
+// is exactly the ownership boundary.
+func (rc *reactorConn) handoff(tracker *handoffTracker) net.Conn {
+	conn := rc.handoffConn()
+	rc.state = rcHandoff
+	tracker.spawnFromLoop(rc.parser, conn)
+	return conn
+}
+
+// writeStuckExpired reports whether a write phase has exceeded the
+// safety-net write budget without completing. Mirrors the blocking
+// parser's SetWriteDeadline safety net (Parser.writeTime, 5 minutes)
+// for connections the raw-fd transport never arms one on: without it,
+// a client that stops reading mid-response parks the connection in
+// rcWriting forever, silently consuming the reactor connection budget.
+func (rc *reactorConn) writeStuckExpired(now time.Time) bool {
+	return now.Sub(rc.reqStart) > reactorWriteTimeout
+}
+
+// reactorWriteTimeout is the stuck-writer safety net: a connection
+// whose flush has not completed within this budget is dropped by the
+// idle sweep. The blocking path enforces the same bound via
+// SetWriteDeadline (fp_conn.go wires WithWriteTimeout(5 * time.Minute));
+// the two constants must stay in sync.
+const reactorWriteTimeout = 5 * time.Minute
+
+// handoffTracker owns the blocking-parser goroutines spawned at handoff.
+// Each goroutine closes its conn on exit (Serve never closes it), so an
+// fd can never leak. The set is keyed by conn pointer: register before
+// the goroutine starts, unregister in its defer, so drainForceClose
+// always sees the exact set of live handoffs.
+//
+// The spawn work (mutex, map insert, `go` statement — ~1-2 µs) runs on
+// the spawner goroutine, not the reactor loop goroutine: under missy
+// traffic every one of those microseconds is serial latency added to
+// every hit multiplexed on the same listener. The loop's part of a
+// handoff is only the ownership-critical epoll/map work plus a
+// non-blocking channel send; wg.Add happens on the spawner before the
+// blocking-parser goroutine starts, which is the ordering the WaitGroup
+// contract requires — the spawner serializes Add against the spawn
+// queue, and Close only Waits after the loop has exited and the queue
+// has been drained and joined, so no Add can race the Wait.
+//
+// drain waits for in-flight handed-off requests up to the grace window,
+// then force-closes any conns still held by blocking parsers: after a
+// request finishes, Serve's keep-alive loop parks on the read deadline
+// (120s), and shutdown must not wait that out. A force-close unparks it
+// — Serve treats the read error as connection termination, exactly like
+// a client reset, and the goroutine's own conn close follows.
+type handoffTracker struct {
+	wg    sync.WaitGroup
+	mu    sync.Mutex
+	conns map[net.Conn]struct{}
+	// spawns feeds the spawner goroutine. Buffered: the loop never
+	// blocks on a full queue (a full queue means the spawner is
+	// backed up, and the alternative — stalling the loop's hits —
+	// costs more than the overflow policy below).
+	spawns chan handoffJob
+	// spawnerDone closes after the spawner has drained the queue and
+	// exited. The WaitGroup wait must be ordered after this: every
+	// wg.Add happens on the spawner, so joining the spawner first
+	// guarantees no Add can race the Wait.
+	spawnerDone chan struct{}
+}
+
+// handoffJob is one queued blocking-parser start.
+type handoffJob struct {
+	p    *Parser
+	conn net.Conn
+}
+
+// handoffSpawnQueue is the per-tracker spawn queue capacity.
+const handoffSpawnQueue = 128
+
+// startSpawner boots the tracker's spawner goroutine. Must be called
+// before the first spawnFromLoop; the goroutine exits when spawns
+// closes (at loop shutdown, in cleanup).
+func (t *handoffTracker) startSpawner() {
+	t.spawns = make(chan handoffJob, handoffSpawnQueue)
+	t.spawnerDone = make(chan struct{})
+	go t.spawner()
+}
+
+func (t *handoffTracker) spawner() {
+	defer close(t.spawnerDone)
+	for job := range t.spawns {
+		t.spawn(job.p, job.conn)
+	}
+}
+
+// spawnFromLoop enqueues a blocking-parser start from the reactor loop
+// goroutine. Non-blocking: when the queue is full the conn is closed
+// instead of served — the client sees a reset, which for a miss under
+// spawner saturation is the honest outcome, and infinitely better than
+// parking every hit on the listener.
+func (t *handoffTracker) spawnFromLoop(p *Parser, conn net.Conn) {
+	job := handoffJob{p: p, conn: conn}
+	select {
+	case t.spawns <- job:
+	default:
+		_ = conn.Close()
+	}
+}
+
+func (t *handoffTracker) spawn(p *Parser, conn net.Conn) {
+	t.wg.Add(1)
+	t.mu.Lock()
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+	}
+	t.conns[conn] = struct{}{}
+	t.mu.Unlock()
+	go func() {
+		defer t.wg.Done()
+		defer t.unregister(conn)
+		defer func() { _ = conn.Close() }()
+		_ = p.Serve(conn)
+	}()
+}
+
+func (t *handoffTracker) unregister(conn net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, conn)
+	t.mu.Unlock()
+}
+
+// drainForceClose force-closes every live handed-off conn. Used after
+// the grace window during shutdown; the goroutine's deferred close is
+// idempotent at the syscall layer, so double-close is harmless.
+func (t *handoffTracker) drainForceClose() {
+	t.mu.Lock()
+	for conn := range t.conns {
+		_ = conn.Close()
+	}
+	t.mu.Unlock()
+}
+
+// handoffDrainGrace is how long Close waits for in-flight handed-off
+// requests to finish on their own before force-closing. Generous for a
+// full miss fetch (bounded by fetch_timeout), short enough that
+// shutdown does not stall behind it.
+const handoffDrainGrace = 5 * time.Second

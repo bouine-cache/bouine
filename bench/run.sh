@@ -75,9 +75,17 @@ declare -A BUDGETS=(
     [FastPath_HitWithWrite]=0
     [H1Parse_Get]=0
     [Reactor_Hit]=0
+    [Reactor_Hit_Metrics]=0
     [Middleware_Miss]=11
     [Middleware_Miss_NoLog]=0
 )
+# Reactor_Dispatch exercises the Linux-only epoll transport (it gates the
+# dispatch machinery over the transport's own connection table); it only
+# compiles and runs where the reactor exists. Budget it per-platform so
+# the stale-budget check stays honest on darwin.
+if [ "$(go env GOOS)" = "linux" ]; then
+    BUDGETS[Reactor_Dispatch]=0
+fi
 
 run_bench() {
     local bench_pattern="$1"

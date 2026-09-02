@@ -300,3 +300,59 @@ type FastPathMetrics interface {
 	// obs-fold). The implementation increments a Prometheus counter.
 	IncrementSmugglingRejected()
 }
+
+// ReactorMetrics is an optional capability that FastPathMetrics
+// implementations may also satisfy: when the H1 reactor (the
+// single-goroutine epoll hit loop) is active, the h1parser reports
+// loop lifecycle events through it. Without these counters an
+// operator cannot tell how much traffic the reactor actually serves
+// versus the blocking path — the gap that hid the starved-reactor
+// regression under mixed hit/miss workloads.
+//
+// Every method is a plain counter increment (a single atomic add); the
+// h1parser calls them from the reactor loop goroutine, so none may do
+// table lookups or allocation.
+//
+// Unstable.
+type ReactorMetrics interface {
+	// IncrementReactorConnRegistered is called when a connection joins
+	// the reactor's epoll set (at accept, or when the blocking parser
+	// returns a connection after serving a miss).
+	IncrementReactorConnRegistered()
+	// IncrementReactorHit is called for every cache hit served inline
+	// by the reactor loop.
+	IncrementReactorHit()
+	// IncrementReactorHandoff is called when a connection leaves the
+	// reactor for the blocking parser. reason is one of the
+	// ReactorHandoff* constants.
+	IncrementReactorHandoff(reason string)
+	// IncrementReactorReturn is called when the blocking parser hands a
+	// keep-alive connection back to the reactor after serving a miss.
+	IncrementReactorReturn()
+	// IncrementReactorDrop is called when the reactor closes a
+	// connection (error, idle expiry, stuck writer, shutdown overflow).
+	IncrementReactorDrop()
+}
+
+// Handoff reasons reported via ReactorMetrics.IncrementReactorHandoff.
+// The set is closed: the label's cardinality budget depends on it
+// staying fixed.
+const (
+	// ReactorHandoffMiss: the request qualified for the fast path but
+	// TryHit declined (no local object) — the blocking path serves it
+	// (origin fetch or peer fetch).
+	ReactorHandoffMiss = "miss"
+	// ReactorHandoffDisqualified: the request cannot take the fast path
+	// (conditional headers, range, body framing, non-GET/HEAD method).
+	ReactorHandoffDisqualified = "disqualified"
+	// ReactorHandoffMalformed: the request failed parsing or tripped
+	// smuggling detection; the blocking path writes the 400 and closes.
+	ReactorHandoffMalformed = "malformed"
+	// ReactorHandoffOversize: the header block exceeded the reactor's
+	// 16 KiB read buffer.
+	ReactorHandoffOversize = "oversize"
+	// ReactorHandoffOverflow: the accept-side pending queue was full.
+	ReactorHandoffOverflow = "overflow"
+	// ReactorHandoffCap: the reactor's connection cap was reached.
+	ReactorHandoffCap = "cap"
+)

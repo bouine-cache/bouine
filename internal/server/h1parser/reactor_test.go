@@ -138,16 +138,182 @@ func TestReactor_MissHandsOff(t *testing.T) {
 	require.Equal(t, rcHandoff, rc.state)
 }
 
-// TestReactor_PipelinedBytesHandOff asserts bytes after the header
-// terminator (body or next request) force a handoff — the reactor must
-// not discard them.
-func TestReactor_PipelinedBytesHandOff(t *testing.T) {
+// TestReactor_PipelinedBytesAfterHit asserts bytes pipelined after a
+// hit request's header block are served, not discarded and not forced
+// through a handoff: the hit flushes inline, the partial next request
+// stays buffered, and its bytes are consumed once the rest arrives.
+func TestReactor_PipelinedBytesAfterHit(t *testing.T) {
 	t.Parallel()
-	payload := []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\nGET /next HTTP/1.1\r\nHost: localhost\r\n")
-	rc, _ := newTestReactorConn(t, payload)
+	first := "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	second := "GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	rc, fio := newTestReactorConn(t, []byte(first+second[:20]))
 
-	require.Equal(t, actHandoff, rc.advance(), "pipelined second request must hand off, not be dropped")
+	require.Equal(t, actWaitRead, rc.advance(),
+		"hit must flush inline; the partial pipelined request must wait for the rest")
+	resp := fio.written.Bytes()
+	assert.True(t, bytes.HasPrefix(resp, []byte("HTTP/1.1 200 OK\r\n")),
+		"first response must be the serialized hit, got: %q", resp)
+	assert.Len(t, bytes.Split(resp, []byte("HTTP/1.1 200 OK\r\n")), 2,
+		"exactly one response so far")
+
+	fio.readSrc = bytes.NewReader([]byte(second[20:]))
+	require.Equal(t, actWaitRead, rc.advance(), "second hit must be served inline")
+	assert.Len(t, bytes.Split(fio.written.Bytes(), []byte("HTTP/1.1 200 OK\r\n")), 3,
+		"both hits served on the reactor, no handoff")
+	assert.Equal(t, rcReading, rc.state)
 }
+
+// TestReactor_PipelinedHitsServedInOnePass feeds two complete pipelined
+// hit requests in a single read: one advance() call must serve both —
+// the flush of the first transitions internally (actFlushed) and the
+// preloaded second request is parsed before any socket read.
+func TestReactor_PipelinedHitsServedInOnePass(t *testing.T) {
+	t.Parallel()
+	first := "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	second := "GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	rc, fio := newTestReactorConn(t, []byte(first+second))
+
+	require.Equal(t, actWaitRead, rc.advance())
+	assert.Len(t, bytes.Split(fio.written.Bytes(), []byte("HTTP/1.1 200 OK\r\n")), 3,
+		"both pipelined hits served inline by one advance")
+	assert.Equal(t, rcReading, rc.state)
+}
+
+// TestReactor_PipelinedMissHandsOffWithReplay asserts a complete
+// pipelined miss after a hit: the hit is served inline, then the miss
+// hands off with the pipelined request's bytes in the replay prefix.
+func TestReactor_PipelinedMissHandsOffWithReplay(t *testing.T) {
+	t.Parallel()
+	first := "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	second := "GET /miss HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	p := New(&mockSelectiveFastPath{}, noopHandler, WithScheme("http"))
+	fio := &fakeIO{readSrc: bytes.NewReader([]byte(first + second))}
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	t.Cleanup(rc.release)
+
+	require.Equal(t, actHandoff, rc.advance(), "pipelined miss must hand off")
+	require.Equal(t, rcHandoff, rc.state)
+	assert.True(t, bytes.HasPrefix(fio.written.Bytes(), []byte("HTTP/1.1 200 OK\r\n")),
+		"the first (hit) response must still have been served inline")
+	assert.Equal(t, second, string(rc.handoffConn().(*prefixConn).prefix),
+		"the replay prefix must hold the pipelined miss request, not the served hit")
+}
+
+// TestReactor_PipelinedConnectionCloseDiscards asserts a hit whose
+// response ends with Connection: close drops the connection after the
+// flush even when pipelined bytes followed (RFC 9110 §9.6: the client
+// promised no further requests).
+func TestReactor_PipelinedConnectionCloseDiscards(t *testing.T) {
+	t.Parallel()
+	first := "GET /close HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+	second := "GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	rc, fio := newTestReactorConn(t, []byte(first+second))
+	rc.parser = New(&mockConnCloseFastPathHit{}, noopHandler, WithScheme("http"))
+
+	require.Equal(t, actCloseAfterFlush, rc.advance())
+	assert.Len(t, bytes.Split(fio.written.Bytes(), []byte("HTTP/1.1 200 OK\r\n")), 2,
+		"exactly one response; the pipelined bytes are discarded with the close")
+}
+
+// TestReactor_PipelinedFillThenOversizeHandsOff asserts the oversize
+// path still works when the buffer fills across a preloaded pipelined
+// batch: the hit is served, the partial next request waits, and once
+// reads fill the buffer without a terminator the connection hands off
+// instead of misreading an empty raw-fd read slice as EOF.
+func TestReactor_PipelinedFillThenOversizeHandsOff(t *testing.T) {
+	t.Parallel()
+	first := "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	payload := append([]byte(first), bytes.Repeat([]byte("X"), readBufferSize-len(first))...)
+	rc, fio := newTestReactorConn(t, payload)
+
+	require.Equal(t, actWaitRead, rc.advance(),
+		"hit served inline; the unterminated pipelined bytes wait for more")
+	assert.True(t, bytes.HasPrefix(fio.written.Bytes(), []byte("HTTP/1.1 200 OK\r\n")))
+
+	fio.readSrc = bytes.NewReader(bytes.Repeat([]byte("X"), 64))
+	require.Equal(t, actHandoff, rc.advance(),
+		"buffer full without a second terminator must hand off (oversize), not close")
+}
+
+// TestReactor_TelemetryCounts verifies the reactor lifecycle counters:
+// inline hits and handoff reasons are reported to the injected
+// api.ReactorMetrics sink.
+func TestReactor_TelemetryCounts(t *testing.T) {
+	t.Parallel()
+	rec := &fakeReactorMetrics{}
+	p := New(&mockSelectiveFastPath{}, noopHandler, WithScheme("http"), WithReactorMetrics(rec))
+	fio := &fakeIO{readSrc: bytes.NewReader(nil)}
+	rc := newReactorConn(&mockIOConn{fio: fio}, p, fio.read, fio.write)
+	t.Cleanup(rc.release)
+
+	// Hit request, then a miss request, pipelined in one read.
+	hit := "GET /hit HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	miss := "GET /miss HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	fio.readSrc = bytes.NewReader([]byte(hit + miss))
+	require.Equal(t, actHandoff, rc.advance())
+
+	assert.Equal(t, uint64(1), rec.hits, "one inline hit reported")
+	assert.Equal(t, uint64(1), rec.handoffs[api.ReactorHandoffMiss], "one miss handoff reported")
+	assert.Empty(t, rec.connsRegistered, "registration is the transport's job, not the state machine's")
+}
+
+// mockConnCloseFastPathHit always serves a Connection: close hit.
+type mockConnCloseFastPathHit struct{}
+
+func (m *mockConnCloseFastPathHit) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	resp := &api.FastPathResponse{
+		BuffersArr: [3][]byte{
+			[]byte("HTTP/1.1 200 OK\r\n"),
+			[]byte("Content-Length: 5\r\nConnection: close\r\n\r\n"),
+			[]byte("hello"),
+		},
+		CloseConn: true,
+	}
+	resp.Buffers = resp.BuffersArr[:]
+	return resp, true
+}
+
+func (m *mockConnCloseFastPathHit) Release(_ *api.FastPathResponse) {}
+
+// mockSelectiveFastPath hits every path except "/miss".
+type mockSelectiveFastPath struct{}
+
+func (m *mockSelectiveFastPath) TryHit(req *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	if req.Path == "/miss" {
+		return nil, false
+	}
+	resp := &api.FastPathResponse{
+		BuffersArr: [3][]byte{
+			[]byte("HTTP/1.1 200 OK\r\n"),
+			[]byte("Content-Length: 5\r\n\r\n"),
+			[]byte("hello"),
+		},
+	}
+	resp.Buffers = resp.BuffersArr[:]
+	return resp, true
+}
+
+func (m *mockSelectiveFastPath) Release(_ *api.FastPathResponse) {}
+
+// fakeReactorMetrics records api.ReactorMetrics calls for assertions.
+type fakeReactorMetrics struct {
+	hits            uint64
+	handoffs        map[string]uint64
+	returns         uint64
+	connsRegistered uint64
+	drops           uint64
+}
+
+func (f *fakeReactorMetrics) IncrementReactorConnRegistered() { f.connsRegistered++ }
+func (f *fakeReactorMetrics) IncrementReactorHit()            { f.hits++ }
+func (f *fakeReactorMetrics) IncrementReactorHandoff(reason string) {
+	if f.handoffs == nil {
+		f.handoffs = make(map[string]uint64)
+	}
+	f.handoffs[reason]++
+}
+func (f *fakeReactorMetrics) IncrementReactorReturn() { f.returns++ }
+func (f *fakeReactorMetrics) IncrementReactorDrop()   { f.drops++ }
 
 // TestReactor_SmugglingHandOff asserts CL+TE smuggling hands off to
 // the blocking path (which writes the 400 and closes).

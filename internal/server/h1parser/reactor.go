@@ -45,6 +45,33 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
+// noteReactorHit reports an inline-served hit to the telemetry sink.
+// A plain counter increment (one atomic add on the loop goroutine) —
+// safe for the hit path, unlike the full RecordHit hook (see
+// reactor_metrics.go for why that one is drained asynchronously).
+func (p *Parser) noteReactorHit() {
+	if p.reactorMetrics != nil {
+		p.reactorMetrics.IncrementReactorHit()
+	}
+}
+
+// noteReactorHandoff reports a handoff decision (with its reason) to
+// the telemetry sink. Called on the loop goroutine at each decision
+// site, exactly once per handoff.
+func (p *Parser) noteReactorHandoff(reason string) {
+	if p.reactorMetrics != nil {
+		p.reactorMetrics.IncrementReactorHandoff(reason)
+	}
+}
+
+// noteReactorDrop reports a reactor-initiated connection close to the
+// telemetry sink.
+func (p *Parser) noteReactorDrop() {
+	if p.reactorMetrics != nil {
+		p.reactorMetrics.IncrementReactorDrop()
+	}
+}
+
 // rcState is the per-connection state machine state.
 type rcState uint8
 
@@ -63,6 +90,11 @@ const (
 	actHandoff                         // start blocking parser with buffered bytes
 	actClose                           // close the connection
 	actCloseAfterFlush                 // finish the in-flight response, then close
+	// actFlushed is internal to advance(): a completed flush. advance
+	// loops straight back to reading, where pipelined bytes preloaded
+	// by parsed() are consumed before any socket read. The transport
+	// never sees it.
+	actFlushed
 )
 
 // errAgain is returned by the injected I/O functions when the socket
@@ -193,51 +225,82 @@ func (rc *reactorConn) release() {
 	}
 }
 
-// advance drives the state machine one step. It never blocks: all
-// reads/writes go through the injected non-blocking funcs.
+// advance drives the state machine until it produces an action the
+// transport must handle (arm readiness, hand off, close). A completed
+// flush is an internal transition (actFlushed): finishWrite has
+// already moved the machine back to reading, and the loop immediately
+// consumes any pipelined bytes preloaded by parsed() — iteratively, so
+// a batch of pipelined hits costs one advance() call, not one stack
+// frame per request. It never blocks: all reads/writes go through the
+// injected non-blocking funcs.
 func (rc *reactorConn) advance() rcAction {
-	switch rc.state {
-	case rcReading:
-		act := rc.advanceReading()
-		if act == actHandoff {
+	for {
+		var act rcAction
+		switch rc.state {
+		case rcReading:
+			act = rc.advanceReading()
+		case rcWriting:
+			act = rc.advanceWriting()
+		default:
+			return actClose
+		}
+		switch act {
+		case actFlushed:
+			if rc.rLen == 0 {
+				// No pipelined bytes buffered: arm read readiness without
+				// a speculative read attempt — the epoll wakeup delivers
+				// the next request, and an extra EAGAIN read would cost one
+				// syscall per hit (measured +15% on Gate_Reactor_Hit).
+				return actWaitRead
+			}
+			// Pipelined bytes are buffered: consume them before waiting.
+			continue
+		case actHandoff:
 			// Terminal for the reactor: mark before the transport reads
 			// state (tests and idle checks rely on it).
 			rc.state = rcHandoff
+			return act
+		default:
+			return act
 		}
-		return act
-	case rcWriting:
-		act := rc.advanceWriting()
-		if act == actHandoff {
-			rc.state = rcHandoff
-		}
-		return act
-	default:
-		return actClose
 	}
 }
 
-// advanceReading drains socket bytes into readBuf; once a full header
-// block is buffered it parses, tries the fast path, and on a hit
-// serializes the response into writeBuf for flushing.
+// advanceReading consumes bytes toward a full header block: any
+// preloaded pipelined bytes first, then socket reads. Once a full
+// header block is buffered it parses, tries the fast path, and on a
+// hit serializes the response into writeBuf for flushing.
 func (rc *reactorConn) advanceReading() rcAction {
 	for {
-		n, err := rc.readFn(rc.readBuf[rc.rLen:])
-		rc.rLen += n
-		if n > 0 {
+		if rc.rLen > 0 {
+			// Buffered bytes (a preloaded pipelined request, or a partial
+			// request carried across a wait): try to complete the parse
+			// before reading more. rLen == 0 skips the search — a fresh
+			// dispatch pays the terminator scan only after its first read,
+			// matching the pre-pipelining cost model.
 			if idx := findHeaderEndFrom(rc.readBuf[:rc.rLen], rc.scanned); idx >= 0 {
 				return rc.parsed(idx)
 			}
-			// Resume the next search at the oldest position where a
-			// terminator could still begin: four bytes back from the
-			// current end, clamped at zero (three bytes back would miss a
-			// terminator straddling segment boundaries; four keeps the
-			// reasoning simple and the cost is one extra byte probe).
-			rc.scanned = max(0, rc.rLen-headerTermOverlap)
-			if rc.rLen >= len(rc.readBuf) {
-				// Headers exceed the 16 KiB buffer: the blocking path
-				// serves these via handleFallThroughRaw.
-				return actHandoff
-			}
+		}
+		// No terminator in the buffered bytes: resume the next search
+		// at the oldest position where a terminator could still begin:
+		// four bytes back from the current end, clamped at zero (three
+		// bytes back would miss a terminator straddling segment
+		// boundaries; four keeps the reasoning simple and the cost is
+		// one extra byte probe). Updated only after a failed search, so
+		// the next search still sees the bytes where a terminator could
+		// have started before the pending read.
+		rc.scanned = max(0, rc.rLen-headerTermOverlap)
+		if rc.rLen >= len(rc.readBuf) {
+			// Headers exceed the 16 KiB buffer (accumulated reads or a
+			// full preloaded pipelined batch): the blocking path serves
+			// these via handleFallThroughRaw.
+			rc.parser.noteReactorHandoff(api.ReactorHandoffOversize)
+			return actHandoff
+		}
+		n, err := rc.readFn(rc.readBuf[rc.rLen:])
+		rc.rLen += n
+		if n > 0 {
 			continue
 		}
 		if err != nil {
@@ -249,9 +312,9 @@ func (rc *reactorConn) advanceReading() rcAction {
 		// n == 0, err == nil: the raw-fd read contract reports peer EOF
 		// this way. Treating it as want-read would busy-spin the loop
 		// on level-triggered readiness; close instead. A complete header
-		// block cannot be pending here: every n > 0 read returns through
-		// parsed() as soon as the terminator is buffered, so at this
-		// point the buffer holds only a partial request.
+		// block cannot be pending here: the loop-start check returns
+		// through parsed() as soon as the terminator is buffered, so at
+		// this point the buffer holds only a partial request.
 		return actClose
 	}
 }
@@ -259,30 +322,42 @@ func (rc *reactorConn) advanceReading() rcAction {
 // parsed handles a complete header block at idx: parse, qualify, and
 // either serve the hit inline or hand off. Split from advanceReading
 // to stay under the complexity/funlen gates.
+//
+// A hit with pipelined bytes after its header block is served inline:
+// the excess (always the next request — qualifying requests carry no
+// body) is preloaded into readBuf and consumed by advance's
+// post-flush reading pass, instead of forcing a handoff. This is what
+// keeps batch-writing clients (a load generator writing many requests
+// per connection) on the reactor instead of permanently exiling the
+// connection to the blocking path after one pipelined request.
 func (rc *reactorConn) parsed(idx int) rcAction {
 	req, fallThrough, excess, err := rc.parser.parseBuffer(
 		rc.readBuf[:rc.rLen], idx, &rc.scratch)
-	if err != nil || fallThrough {
-		// Malformed request line/headers, or smuggling detection: the
-		// blocking path re-reads the buffered bytes and writes the
-		// error/400/fallback response.
+	if err != nil {
+		// Malformed request line/headers: the blocking path re-reads the
+		// buffered bytes and writes the 400.
+		rc.parser.noteReactorHandoff(api.ReactorHandoffMalformed)
 		return actHandoff
 	}
-	if len(excess) > 0 {
-		// Pipelined bytes past the header block (body or next request):
-		// the blocking path consumes them with full framing.
+	if fallThrough {
+		// Smuggling detection, or a request the fast path cannot serve
+		// (conditional, range, body framing, non-GET/HEAD).
+		rc.parser.noteReactorHandoff(api.ReactorHandoffDisqualified)
 		return actHandoff
 	}
 
 	fp := rc.parser.fastPath
 	if fp == nil {
+		rc.parser.noteReactorHandoff(api.ReactorHandoffMiss)
 		return actHandoff
 	}
 	now := rc.parser.nowFunc()
 	resp, hit := fp.TryHit(req, now)
 	if !hit || resp == nil {
+		rc.parser.noteReactorHandoff(api.ReactorHandoffMiss)
 		return actHandoff
 	}
+	rc.parser.noteReactorHit()
 	rc.closeAfterFlush = resp.CloseConn
 
 	if rc.writeVecFn != nil {
@@ -334,18 +409,28 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 	// twice per request costs a copy the compiler cannot elide.
 	rc.rLen = 0
 	rc.scanned = 0
+	if len(excess) > 0 {
+		// Pipelined bytes past this hit's header block: keep them
+		// buffered (memmove to the front — the excess aliases the tail
+		// of the same array) for advance's post-flush reading pass.
+		// copy is overlap-safe; the response buffers alias the cache
+		// object, never readBuf, so nothing else references these bytes.
+		copy(rc.readBuf[:], excess)
+		rc.rLen = len(excess)
+	}
 	rc.state = rcWriting
 	return rc.advanceWriting()
 }
 
-// advanceWriting flushes the response; on completion the connection goes
-// back to reading — unless the response ended with Connection: close,
-// in which case the transport is told to close after the flush. Partial
-// writes keep the connection in rcWriting with write readiness re-armed
-// — the reactor finishes every response it started (handoff mid-write
-// is not allowed). When the transport supplied a writev func and the
-// response was retained as buffers, the flush is zero-copy writev;
-// otherwise it uses the single-buffer writeBuf + writeFn path.
+// advanceWriting flushes the response; on completion the connection
+// transitions back to reading (actFlushed — advance consumes it)
+// unless the response ended with Connection: close, in which case the
+// transport is told to close after the flush. Partial writes keep the
+// connection in rcWriting with write readiness re-armed — the reactor
+// finishes every response it started (handoff mid-write is not
+// allowed). When the transport supplied a writev func and the response
+// was retained as buffers, the flush is zero-copy writev; otherwise it
+// uses the single-buffer writeBuf + writeFn path.
 func (rc *reactorConn) advanceWriting() rcAction {
 	if rc.writeVecFn != nil && len(rc.writeVec) > 0 {
 		return rc.advanceWritingVec()
@@ -367,7 +452,7 @@ func (rc *reactorConn) advanceWriting() rcAction {
 	if rc.closeAfterFlush {
 		return actCloseAfterFlush
 	}
-	return actWaitRead
+	return actFlushed
 }
 
 // advanceWritingVec flushes the retained response buffers via the
@@ -398,7 +483,7 @@ func (rc *reactorConn) advanceWritingVec() rcAction {
 	if rc.closeAfterFlush {
 		return actCloseAfterFlush
 	}
-	return actWaitRead
+	return actFlushed
 }
 
 // pendingVec returns the unflushed portion of the response as an iov

@@ -29,6 +29,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/bouine-cache/bouine/pkg/api"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -208,6 +210,11 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		p.metricsRing = ring
 		r.metricsDrainer = &metricsDrainer{ring: ring, hook: p.metricsHook}
 	}
+	// Return-to-reactor hook: the blocking parser calls this after
+	// finishing a request instead of parking on the next keep-alive
+	// read, so a miss no longer strands the connection on the blocking
+	// path for its lifetime (see returnFromBlocking).
+	p.reactorReturn = r.returnFromBlocking
 	// The spawner goroutine starts here, not in run(): acceptLoop can
 	// enqueue handoffs (pending-queue overflow) the moment Run is
 	// called, and a handoff arriving before run()'s body executes
@@ -367,6 +374,9 @@ func (r *reactorEpoll) sweepIdle(now time.Time) {
 		r.connDel(fd)
 		rc.release()
 		_ = rc.conn.Close()
+		if m := r.p.reactorMetrics; m != nil {
+			m.IncrementReactorDrop()
+		}
 	})
 }
 
@@ -456,6 +466,9 @@ func (r *reactorEpoll) drop(rc *reactorConn) {
 	r.connDel(fd)
 	rc.release()
 	_ = rc.conn.Close()
+	if m := r.p.reactorMetrics; m != nil {
+		m.IncrementReactorDrop()
+	}
 }
 
 // handoff releases a connection from the reactor and queues it for
@@ -547,25 +560,79 @@ func (r *reactorEpoll) acceptLoop() {
 		default:
 			// Pending queue full: don't hold the connection hostage —
 			// the blocking parser serves it.
+			r.p.noteReactorHandoff(api.ReactorHandoffOverflow)
 			rc.handoff(&r.handoffs)
 		}
 	}
 }
 
-// drainPending registers connections parked by the accept goroutine.
-// Runs on the loop goroutine only.
+// returnFromBlocking takes a keep-alive connection back from the
+// blocking parser after it finished a request, re-registering it with
+// the reactor's epoll set. Called from the blocking parser goroutine
+// via Parser.reactorReturn (Serve hands over ownership on a true
+// return — the spawner then skips the conn close).
+//
+// The fd is already non-blocking (set at accept) and registered with
+// the Go runtime poller, so both the blocking parser's conn.Read and
+// the reactor's raw-fd reads work on it; the reactor's epoll
+// registration is additive. The blocking parser's OS read deadline is
+// cleared — the reactor governs idleness with its own sweep, and a
+// stale poller timer would otherwise poison a later re-handoff's
+// first conn.Read.
+//
+// Pushing onto the accept path's pending queue means the loop
+// goroutine alone registers epoll/map state. Failure (queue full,
+// unextractable fd) returns false and the blocking parser simply
+// continues serving the connection itself — a missed return costs
+// scheduling efficiency, never correctness.
+//
+// Shutdown safety: every pusher is a handoff-tracker goroutine, and
+// Close's final pending drain runs only after all of them have exited
+// (handoffs.wg.Wait), so a pushed connection is always closed by
+// exactly one of: the loop's cleanup drain, or Close's final drain.
+func (r *reactorEpoll) returnFromBlocking(conn net.Conn) bool {
+	fd := connFD(conn)
+	if fd < 0 {
+		return false
+	}
+	// Clear the blocking parser's deadline ownership (see comment).
+	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
+	rc := newReactorConn(conn, r.p, rawRead(fd), rawWrite(fd))
+	rc.fd = fd
+	rc.writeVecFn = rawWritev(fd)
+	select {
+	case r.pending <- rc:
+		r.wake()
+		if m := r.p.reactorMetrics; m != nil {
+			m.IncrementReactorReturn()
+		}
+		return true
+	default:
+		// Pending queue full: accept-side traffic has priority — a
+		// returned connection already has a serving owner (the blocking
+		// parser), a fresh accept does not.
+		return false
+	}
+}
+
+// drainPending registers connections parked by the accept goroutine or
+// returned by the blocking parser. Runs on the loop goroutine only.
 func (r *reactorEpoll) drainPending() {
 	for {
 		select {
 		case rc := <-r.pending:
 			if r.ntracked >= reactorMaxConns {
 				// Over cap: the blocking parser owns it.
+				r.p.noteReactorHandoff(api.ReactorHandoffCap)
 				rc.handoff(&r.handoffs)
 				continue
 			}
 			if err := r.register(asEpollFD(rc.fd), rc); err != nil {
 				rc.release()
 				_ = rc.conn.Close()
+			} else if m := r.p.reactorMetrics; m != nil {
+				m.IncrementReactorConnRegistered()
 			}
 		default:
 			return
@@ -762,6 +829,23 @@ func (r *reactorEpoll) Close() {
 		r.handoffs.drainForceClose()
 		<-drained
 	}
+
+	// Final pending drain: every return-to-reactor pusher is a
+	// handoff goroutine (Serve calls the hook before returning), and
+	// they have all exited by the time the wg wait above completes —
+	// so the queue can no longer grow. A connection returned between
+	// the loop's own cleanup drain and this point would otherwise leak
+	// as an unowned socket. Exclusive channel receives make the
+	// double drain (cleanup + here) safe.
+	for {
+		select {
+		case rc := <-r.pending:
+			rc.release()
+			_ = rc.conn.Close()
+		default:
+			return
+		}
+	}
 }
 
 // Run drives the reactor until the listener is closed. Blocks.
@@ -928,8 +1012,10 @@ func (t *handoffTracker) spawnFromLoop(p *Parser, conn net.Conn) {
 		// final batch (accept-side race). Nobody will serve it; close
 		// it here — the client sees a reset, which under shutdown is
 		// the honest outcome.
+		p.noteReactorDrop()
 		_ = conn.Close()
 	default:
+		p.noteReactorDrop()
 		_ = conn.Close()
 	}
 }
@@ -945,8 +1031,19 @@ func (t *handoffTracker) spawn(p *Parser, conn net.Conn) {
 	go func() {
 		defer t.wg.Done()
 		defer t.unregister(conn)
-		defer func() { _ = conn.Close() }()
-		_ = p.Serve(conn)
+		// errReactorReturned means Serve transferred the conn back to
+		// the reactor loop (return-to-reactor): the reactor now owns its
+		// close, and closing here would yank the fd out from under a
+		// registered reactorConn. Every other exit path (including
+		// panics, where returned stays false) keeps the close here.
+		returned := false
+		defer func() {
+			if !returned {
+				_ = conn.Close()
+			}
+		}()
+		err := p.Serve(conn)
+		returned = errors.Is(err, errReactorReturned)
 	}()
 }
 

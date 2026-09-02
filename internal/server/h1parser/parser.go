@@ -59,9 +59,20 @@ type Parser struct {
 	// always calls metricsHook directly, and tests that want sync
 	// observation leave it nil.
 	metricsRing *metricsRing
-	scheme      string
-	idleRead    time.Duration
-	writeTime   time.Duration
+	// reactorReturn, when non-nil, is the reactor transport's
+	// return-from-blocking hook: Serve calls it after finishing a
+	// request instead of parking on the next keep-alive read. A true
+	// return means ownership of the conn moved back to the reactor loop
+	// and Serve must exit without closing it (errReactorReturned). Set
+	// by newReactorLoop; nil on the plain blocking path.
+	reactorReturn func(net.Conn) bool
+	// reactorMetrics, when non-nil, receives the reactor loop's
+	// lifecycle counters (api.ReactorMetrics). Injected by the listener
+	// wiring; nil disables telemetry (tests).
+	reactorMetrics api.ReactorMetrics
+	scheme         string
+	idleRead       time.Duration
+	writeTime      time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -115,6 +126,20 @@ func WithMetricsHook(fn func(pool, cacheResult, source string, status, bytesOut 
 func WithSmugglingHook(fn func()) Option {
 	return func(p *Parser) { p.smugglingHook = fn }
 }
+
+// WithReactorMetrics sets the reactor telemetry sink (api.ReactorMetrics).
+// The listener injects the data-plane metrics when they implement the
+// capability; nil (the default) leaves reactor telemetry off.
+func WithReactorMetrics(m api.ReactorMetrics) Option {
+	return func(p *Parser) { p.reactorMetrics = m }
+}
+
+// errReactorReturned is returned by Serve when the connection's
+// ownership moved back to the reactor loop (return-to-reactor path):
+// the caller must NOT close the conn — the reactor now owns it. It is
+// a control-flow sentinel, not a failure: only reachable when the
+// parser was constructed by a reactor transport (reactorReturn set).
+var errReactorReturned = errors.New("h1parser: connection returned to reactor")
 
 // serveResult tells the Serve keep-alive loop what to do next.
 type serveResult int
@@ -189,6 +214,14 @@ func (p *Parser) serveFallThroughRequest(conn net.Conn, req *api.RawRequest, exc
 // fallback handler. The connection stays alive across both hits
 // and misses until the client sends Connection: close, the parser
 // hits a read error, or the idle deadline expires.
+//
+// When the parser was built by a reactor transport (reactorReturn
+// set), Serve hands the connection back to the reactor loop after
+// each finished request instead of parking on the next keep-alive
+// read: mixed hit/miss traffic then keeps the reactor engaged — a
+// miss no longer strands the connection on the blocking path for its
+// lifetime. Serve reports the transfer with errReactorReturned; the
+// spawner that owns this goroutine skips the conn close on it.
 func (p *Parser) Serve(conn net.Conn) error {
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetKeepAlive(true)
@@ -237,31 +270,39 @@ func (p *Parser) Serve(conn net.Conn) error {
 		if err != nil {
 			return err
 		}
-		if fallThrough {
-			res, err := p.serveFallThroughRequest(conn, req, excess, &deadline, &writeDeadline)
-			if res == serveClose || err != nil {
-				return err
-			}
-			continue
-		}
 
-		// Try the fast path.
-		if p.fastPath != nil {
-			res, err := p.serveFastHit(conn, req, excess, &deadline, &writeDeadline)
-			switch {
-			case err != nil:
-				return err
-			case res == serveClose:
-				return nil
-			case res == serveContinue:
-				continue
-			}
+		var res serveResult
+		switch {
+		case fallThrough:
+			res, err = p.serveFallThroughRequest(conn, req, excess, &deadline, &writeDeadline)
+		case p.fastPath != nil:
+			// serveFastHit serves hits inline and runs the fallback for
+			// declines (fastPathMissResult), so the loop's miss branch
+			// below is only reached when no fast path is configured.
+			res, err = p.serveFastHit(conn, req, excess, &deadline, &writeDeadline)
+		default:
+			res, err = p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline)
 		}
-
-		// Miss path: call the fallback handler with a fasthttp.RequestCtx.
-		if res, err := p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline); res == serveClose || err != nil {
+		if res == serveClose || err != nil {
 			return err
 		}
+		if p.reactorReturn != nil && p.reactorReturn(stripPrefixConn(conn)) {
+			return errReactorReturned
+		}
+	}
+}
+
+// stripPrefixConn unwraps prefixConn layers down to the real net.Conn.
+// The reactor's return hook needs the underlying conn (raw fd, close
+// ownership); handoff wraps the conn at most once per reactor cycle, so
+// the loop terminates immediately in practice.
+func stripPrefixConn(conn net.Conn) net.Conn {
+	for {
+		pc, ok := conn.(*prefixConn)
+		if !ok {
+			return conn
+		}
+		conn = pc.Conn
 	}
 }
 

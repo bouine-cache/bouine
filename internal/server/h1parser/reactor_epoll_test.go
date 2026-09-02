@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -843,4 +844,172 @@ func headerMapOf(kvs ...string) header.Map {
 		m.Set(kvs[i], kvs[i+1])
 	}
 	return m
+}
+
+// end-to-end tests: the loop goroutine and blocking-parser goroutines
+// increment while the test goroutine reads.
+type atomicReactorMetrics struct {
+	registered atomic.Uint64
+	hits       atomic.Uint64
+	returns    atomic.Uint64
+	drops      atomic.Uint64
+	// handoffCounts is indexed by reasonIndex; slot 6 collects
+	// unknown reasons so a bug surfaces as a non-zero "other" bucket
+	// instead of a panic.
+	handoffCounts [7]atomic.Uint64
+}
+
+func reasonIndex(reason string) int {
+	switch reason {
+	case api.ReactorHandoffMiss:
+		return 0
+	case api.ReactorHandoffDisqualified:
+		return 1
+	case api.ReactorHandoffMalformed:
+		return 2
+	case api.ReactorHandoffOversize:
+		return 3
+	case api.ReactorHandoffOverflow:
+		return 4
+	case api.ReactorHandoffCap:
+		return 5
+	}
+	return 6
+}
+
+func (a *atomicReactorMetrics) IncrementReactorConnRegistered() { a.registered.Add(1) }
+func (a *atomicReactorMetrics) IncrementReactorHit()            { a.hits.Add(1) }
+func (a *atomicReactorMetrics) IncrementReactorHandoff(reason string) {
+	a.handoffCounts[reasonIndex(reason)].Add(1)
+}
+func (a *atomicReactorMetrics) IncrementReactorReturn() { a.returns.Add(1) }
+func (a *atomicReactorMetrics) IncrementReactorDrop()   { a.drops.Add(1) }
+
+// compile-time: the atomic recorder satisfies the capability interface.
+var _ api.ReactorMetrics = (*atomicReactorMetrics)(nil)
+
+// startSelectiveReactorListener boots the reactor with a fast path that
+// hits everything except /miss, plus a telemetry recorder. Returns the
+// address and the recorder.
+func startSelectiveReactorListener(t *testing.T) (addr string, rec *atomicReactorMetrics) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	rec = &atomicReactorMetrics{}
+	p := New(&mockSelectiveFastPath{}, func(ctx *fasthttp.RequestCtx) {
+		ctx.SetBodyString("miss:" + string(ctx.Path()))
+		ctx.SetStatusCode(200)
+	}, WithReactorMetrics(rec))
+
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok, "epoll reactor must be available on Linux")
+	go loop.Run()
+	t.Cleanup(loop.Close)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String(), rec
+}
+
+// TestEpollReactor_ReturnAfterMissServesLaterHits is the mixed-traffic
+// end-to-end: a miss hands the connection to the blocking parser, the
+// blocking parser returns it to the reactor (return-to-reactor), and a
+// following hit on the SAME connection is served inline by the reactor
+// loop — the starvation gap this path exists to close. Without it, the
+// first miss exiles the connection to the blocking path for life.
+func TestEpollReactor_ReturnAfterMissServesLaterHits(t *testing.T) {
+	addr, rec := startSelectiveReactorListener(t)
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// 1. Miss: served by the blocking parser via handoff.
+	_, err = conn.Write([]byte("GET /miss HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+	resp := readOneResponse(t, conn)
+	assert.Contains(t, resp, "miss:/miss", "miss must be served by the fallback, got: %q", resp)
+
+	// The return happens after the response; give the loop a moment to
+	// register the returned connection before sending the hit.
+	require.Eventually(t, func() bool {
+		return rec.returns.Load() >= 1
+	}, 5*time.Second, 5*time.Millisecond, "the blocking parser must return the conn to the reactor")
+	require.Eventually(t, func() bool {
+		return rec.registered.Load() >= 2
+	}, 5*time.Second, 5*time.Millisecond, "the returned conn must re-register with the reactor (accept + return)")
+
+	// 2. Hit on the same connection: served inline by the reactor loop.
+	_, err = conn.Write([]byte("GET /hit HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	require.NoError(t, err)
+	resp = readOneResponse(t, conn)
+	assert.Contains(t, resp, "hello", "hit after return must be served on the same conn, got: %q", resp)
+
+	require.Eventually(t, func() bool {
+		return rec.hits.Load() >= 1
+	}, 5*time.Second, 5*time.Millisecond, "the post-return hit must be served by the reactor loop, not the blocking path")
+	assert.Equal(t, uint64(1), rec.handoffCounts[reasonIndex(api.ReactorHandoffMiss)].Load(),
+		"exactly one miss handoff on the connection")
+}
+
+// TestEpollReactor_PipelinedHitsOverRealTCP writes two complete hit
+// requests in a single write: both must be served inline by the reactor
+// (preload + internal flush loop), with zero handoffs.
+func TestEpollReactor_PipelinedHitsOverRealTCP(t *testing.T) {
+	addr, rec := startSelectiveReactorListener(t)
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	pipelined := "GET /hit HTTP/1.1\r\nHost: localhost\r\n\r\n" +
+		"GET /hit2 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+	_, err = conn.Write([]byte(pipelined))
+	require.NoError(t, err)
+
+	// One shared reader: both responses may land in a single TCP read,
+	// and a per-response reader would buffer (and discard) the second
+	// response's bytes.
+	reader := bufio.NewReader(conn)
+	resp1 := readOneResponseReader(t, reader)
+	assert.Contains(t, resp1, "hello")
+	resp2 := readOneResponseReader(t, reader)
+	assert.Contains(t, resp2, "hello", "both pipelined hits must be served inline, got: %q", resp2)
+
+	require.Eventually(t, func() bool {
+		return rec.hits.Load() >= 2
+	}, 5*time.Second, 5*time.Millisecond, "both hits served by the reactor loop")
+	var total uint64
+	for i := range rec.handoffCounts {
+		total += rec.handoffCounts[i].Load()
+	}
+	assert.Equal(t, uint64(0), total, "pipelined hits must not hand off")
+}
+
+// readOneResponseReader is readOneResponse over a caller-owned reader,
+// for tests that read multiple responses whose bytes may arrive in one
+// TCP segment (pipelining).
+func readOneResponseReader(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	var sb strings.Builder
+	contentLength := 0
+	for {
+		line, err := reader.ReadString('\n')
+		require.NoError(t, err)
+		sb.WriteString(line)
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+			_, _ = fmt.Sscanf(strings.TrimSpace(line), "Content-Length: %d", &contentLength)
+		}
+	}
+	if contentLength > 0 {
+		body := make([]byte, contentLength)
+		_, err := io.ReadFull(reader, body)
+		require.NoError(t, err)
+		sb.Write(body)
+	}
+	return sb.String()
 }

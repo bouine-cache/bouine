@@ -56,7 +56,27 @@ the curated, human-readable summary.
   header time with `ErrStreamUnshareable` and each follower fetches
   its own response outside singleflight (ADR-0042).
 
+### Changed
+- **H1 reactor engagement under mixed traffic** (ADR-0042; requires
+  `experimental.h1_reactor`): the blocking parser now hands keep-alive
+  connections back to the reactor loop after serving each request
+  (return-to-reactor), so a miss no longer strands a connection on the
+  blocking path for its lifetime — cluster peer-fetch and origin-miss
+  traffic keeps cycling connections back to batch hit serving.
+- **Pipelined hits served inline by the reactor**: a cache hit followed
+  by pipelined bytes on the same connection is served inline and the
+  next buffered request is parsed immediately after the flush, instead
+  of forcing a handoff (batch-writing clients stay on the reactor).
+
 ### Added
+- **H1 reactor telemetry**: `bouine_h1_reactor_conns_registered_total`,
+  `bouine_h1_reactor_hits_total`,
+  `bouine_h1_reactor_handoffs_total{reason}` (closed set: miss,
+  disqualified, malformed, oversize, overflow, cap),
+  `bouine_h1_reactor_returns_total`, and
+  `bouine_h1_reactor_conns_dropped_total` make the reactor's actual
+  engagement observable without pprof (previously invisible — the gap
+  that hid the starved-reactor regression under mixed workloads).
 - Data-integrity regression net for the hot-store ownership bug class
   (bouine#611): a slow-client body-lifetime race on the standard
   fasthttp hit path (`ServeRequest` — the path that kept corrupting

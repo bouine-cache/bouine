@@ -874,3 +874,65 @@ func TestValidate_H1ReactorRequiresFastPath(t *testing.T) {
 	cfg.Experimental.H1FastPath = true
 	assert.NoError(t, cfg.Validate())
 }
+
+// TestValidate_PeerIdleBelowAdminIdle asserts the idle-timeout ordering
+// between the peer-fetch client and the admin server: the client must
+// close idle peer connections before the admin server reaps them, or
+// the first peer RPC on a reaped connection fails with EOF/broken pipe.
+func TestValidate_PeerIdleBelowAdminIdle(t *testing.T) {
+	t.Parallel()
+
+	// Explicit inversion must be rejected.
+	cfg := Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Cluster.PeerMaxIdleConnDuration = 60 * time.Second
+	cfg.Admin.IdleTimeout = 30 * time.Second
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
+
+	// Equal values must also be rejected (strict ordering).
+	cfg.Cluster.PeerMaxIdleConnDuration = 30 * time.Second
+	require.Error(t, cfg.Validate())
+
+	// Client below server must validate.
+	cfg.Cluster.PeerMaxIdleConnDuration = 20 * time.Second
+	cfg.Admin.IdleTimeout = 30 * time.Second
+	require.NoError(t, cfg.Validate())
+
+	// Client set against the built-in 30s server default must enforce
+	// the ordering too.
+	cfg = Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Cluster.PeerMaxIdleConnDuration = 45 * time.Second
+	require.Error(t, cfg.Validate())
+
+	// Unset client idle uses the built-in 20s default and validates.
+	cfg = Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Admin.IdleTimeout = 30 * time.Second
+	require.NoError(t, cfg.Validate())
+}
+
+// TestValidate_AdminIdleTimeout_NegativeRejected asserts negative
+// admin.idle_timeout values are rejected at load time.
+func TestValidate_AdminIdleTimeout_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Admin.IdleTimeout = -1
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "admin.idle_timeout")
+}
+
+// TestValidate_PeerIdleNegativeRejected asserts negative
+// cluster.peer_max_idle_conn_duration values are rejected.
+func TestValidate_PeerIdleNegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Cluster.PeerMaxIdleConnDuration = -1 * time.Second
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
+}

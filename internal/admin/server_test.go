@@ -567,3 +567,28 @@ func TestPprof_AuthStillEnforcedOnOtherEndpoints(t *testing.T) {
 	s.Handler()(ctx)
 	require.Equal(t, fasthttp.StatusUnauthorized, ctx.Response.StatusCode())
 }
+
+// TestAdminIdleTimeout_DefaultAndOverride asserts the admin server
+// applies DefaultAdminIdleTimeout when admin.idle_timeout is unset and
+// honors an explicit value otherwise. Cluster peer RPCs ride the admin
+// server, so peer clients must keep their idle timeout below this
+// value; the resolver is what keeps that contract testable.
+func TestAdminIdleTimeout_DefaultAndOverride(t *testing.T) {
+	t.Parallel()
+
+	// Zero applies the built-in default.
+	s := New(Config{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil))})
+	require.Equal(t, DefaultAdminIdleTimeout, s.inner.IdleTimeout)
+
+	// Explicit value is honored.
+	s = New(Config{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), IdleTimeout: 45 * time.Second})
+	require.Equal(t, 45*time.Second, s.inner.IdleTimeout)
+
+	// Negative also falls back to the default.
+	s = New(Config{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), IdleTimeout: -1 * time.Second})
+	require.Equal(t, DefaultAdminIdleTimeout, s.inner.IdleTimeout)
+
+	// NewMinimal keeps the default too.
+	m := NewMinimal("", nil, nil, nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	require.Equal(t, DefaultAdminIdleTimeout, m.inner.IdleTimeout)
+}

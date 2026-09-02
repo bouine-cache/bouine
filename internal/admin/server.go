@@ -61,6 +61,11 @@ type Config struct {
 	FaviconHandler     fasthttp.RequestHandler
 	Addr               string
 	Token              string
+	// IdleTimeout is the keep-alive idle timeout for admin connections.
+	// Zero applies DefaultAdminIdleTimeout (30s). Cluster peer RPCs ride
+	// this server, so peer clients must keep their idle timeout strictly
+	// below it (config validation enforces the ordering).
+	IdleTimeout        time.Duration
 	RateLimitPerSecond int
 	MaxBodyBytes       int
 	MaxBatchSize       int
@@ -99,6 +104,21 @@ type Server struct {
 	cfg      Config
 }
 
+// DefaultAdminIdleTimeout is the keep-alive idle timeout for admin
+// server connections when admin.idle_timeout is not set. Cluster peer
+// RPCs ride the admin server, so peer clients must keep their idle
+// timeout strictly below this value (see config.AdminConfig.IdleTimeout).
+const DefaultAdminIdleTimeout = 30 * time.Second
+
+// resolveAdminIdleTimeout applies the default when the operator has
+// not configured admin.idle_timeout.
+func resolveAdminIdleTimeout(v time.Duration) time.Duration {
+	if v <= 0 {
+		return DefaultAdminIdleTimeout
+	}
+	return v
+}
+
 // NewMinimal creates an admin server with only healthz, readyz, version,
 // and drain routes.
 func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Condition, drainFn func(), logger observability.Logger) *Server {
@@ -118,7 +138,7 @@ func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Conditio
 		Handler:               sh.ServeRequest,
 		ReadTimeout:           5 * time.Second,
 		WriteTimeout:          5 * time.Second,
-		IdleTimeout:           30 * time.Second,
+		IdleTimeout:           DefaultAdminIdleTimeout,
 		NoDefaultServerHeader: true,
 	}
 	return s
@@ -143,7 +163,7 @@ func New(cfg Config) *Server {
 		Handler:               handler,
 		ReadTimeout:           5 * time.Second,
 		WriteTimeout:          5 * time.Second,
-		IdleTimeout:           30 * time.Second,
+		IdleTimeout:           resolveAdminIdleTimeout(cfg.IdleTimeout),
 		NoDefaultServerHeader: true,
 	}
 	if cfg.PprofEnabled {

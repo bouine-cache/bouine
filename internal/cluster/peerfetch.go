@@ -74,7 +74,14 @@ const maxPeerFetchBytes int64 = 64 << 20
 // Default pipelining configuration (issue #521, Phase 6.4).
 const (
 	defaultPeerMaxConnsPerHost = 8
-	defaultPeerMaxIdleConnDur  = 120 * time.Second
+	// defaultPeerMaxIdleConnDur must stay below the peer's admin-server
+	// idle timeout (30s, internal/admin/server.go). The client must
+	// close idle connections before the server reaps them, otherwise
+	// the first request on a reaped connection fails with EOF or
+	// broken pipe and the fetch falls back to origin
+	// (internal/config/config.go documents the same invariant for
+	// listen.idle_timeout).
+	defaultPeerMaxIdleConnDur = 20 * time.Second
 	// peerMaxPendingRequests is the maximum number of pending pipelined
 	// requests per connection. With 8 connections × 16 pending = 128
 	// concurrent peer fetches per peer, matching the old HTTP/2 capacity.
@@ -165,7 +172,7 @@ func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, log
 
 // NewPeerFetcherWithConfig creates a PeerFetcher with full pipelining
 // configuration. MaxConnsPerHost and MaxIdleConnDuration default to 8
-// and 120s respectively when zero.
+// and 20s respectively when zero.
 func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, logger observability.Logger) *PeerFetcher {
 	hopLimit := cfg.HopLimit
 	if hopLimit <= 0 {

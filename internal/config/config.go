@@ -296,8 +296,12 @@ type Cluster struct {
 	// capacity. Set to 1 to disable pipelining.
 	PeerMaxConnsPerHost int `yaml:"peer_max_conns_per_host,omitempty" json:"peer_max_conns_per_host,omitempty"`
 	// PeerMaxIdleConnDuration controls how long idle peer connections
-	// are kept before closing. Default 120s (longer than fasthttp's
-	// 10s default) to keep connections warm between peer fetch bursts.
+	// are kept before closing. Default 20s. This MUST stay below the
+	// peer's admin-server idle timeout (30s): the client must close
+	// idle connections before the server reaps them, otherwise the
+	// first request on a reaped connection fails with EOF or broken
+	// pipe and the fetch falls back to origin. validatePeerFetchConfig
+	// enforces the ordering against admin.idle_timeout.
 	PeerMaxIdleConnDuration time.Duration `yaml:"peer_max_idle_conn_duration,omitempty" json:"peer_max_idle_conn_duration,omitempty"`
 }
 
@@ -778,6 +782,14 @@ type AdminConfig struct {
 	// returning. Used by the K8s preStop httpGet hook to keep the pod
 	// alive while kube-proxy deregisters it. Zero defaults to 10s.
 	DrainDuration time.Duration `yaml:"drain_duration,omitempty" json:"drain_duration,omitempty"`
+	// IdleTimeout is the keep-alive idle timeout for admin-server
+	// connections, including cluster peer RPCs (/v1/peer/*). Zero
+	// defaults to 30s. Peer clients MUST configure
+	// cluster.peer_max_idle_conn_duration below this value so they
+	// close idle connections first; otherwise the first peer RPC on a
+	// server-reaped connection fails with EOF or broken pipe.
+	// validatePeerFetchConfig enforces the ordering.
+	IdleTimeout time.Duration `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
 }
 
 // ByteSize is a typed size in bytes, parsed from strings like "2Go"

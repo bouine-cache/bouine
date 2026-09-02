@@ -161,24 +161,16 @@ func listenPort(addr, defaultPort string) string {
 //     ring buffers, and merged structured access log.
 
 // stripPrefixFastHTTP strips the given prefix from the request path before
-// forwarding to next. This is the fasthttp-native version.
+// forwarding to next. Used by static routes; proxied routes are stripped
+// inside cache.Handler. Both share cache.StripRequestURI so boundary
+// semantics (exact match → "/", "?query" keeps its "/" root, mid-segment
+// pass-through) are defined in exactly one place.
 func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	prefixBytes := []byte(prefix)
 	return func(ctx *fasthttp.RequestCtx) {
-		if p := string(ctx.Path()); strings.HasPrefix(p, prefix) {
-			// Strip path+query together so the query string survives;
-			// ctx.Path() alone would drop it. Boundary cases: an
-			// exact-prefix match becomes "/", "?query" keeps its "/"
-			// root, and a mid-segment match passes through unmodified.
-			rest := ctx.RequestURI()[len(prefix):]
-			switch {
-			case len(rest) == 0:
-				ctx.Request.SetRequestURI("/")
-			case rest[0] == '/':
-				ctx.Request.SetRequestURIBytes(rest)
-			case rest[0] == '?':
-				ctx.Request.SetRequestURI("/" + string(rest))
-			}
-		}
+		// When no strip applies, StripRequestURI returns the URI
+		// unchanged, so re-setting it is a no-op.
+		ctx.Request.SetRequestURIBytes(cache.StripRequestURI(prefixBytes, ctx.RequestURI()))
 		next(ctx)
 	}
 }

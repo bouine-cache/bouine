@@ -199,11 +199,21 @@ const (
 	// dashboard.
 	XBouinePath = "X-Bouine-Path"
 
-	// XBouineRoute — route attribution key. The data-plane router sets
-	// it as a fasthttp UserValue (not a wire header) so the observability
-	// middleware can attribute the request to a configured route label;
-	// an inbound header of this name is stripped as attacker input.
+	// XBouineRoute — dashboard attribution key. The data-plane router
+	// sets the matched route's label under this name as a fasthttp
+	// UserValue (not a wire header) so the dashboard rings can attribute
+	// per-route traffic; an inbound header of this name is stripped as
+	// attacker input. Prometheus metrics carry upstream_pool instead:
+	// route cardinality scales with the number of proxy rules, while
+	// pools are a small config-bounded set.
 	XBouineRoute = "X-Bouine-Route"
+
+	// XBouinePool — Prometheus attribution key. The data-plane router
+	// sets the serving route's upstream pool under this name as a
+	// fasthttp UserValue (not a wire header); the observability
+	// middleware uses it as the upstream_pool metric label. Also
+	// stripped as attacker input like every X-Bouine-* header.
+	XBouinePool = "X-Bouine-Pool"
 
 	// BouineHop — carries the current peer-fetch hop count for cluster
 	// loop detection.

@@ -3,7 +3,7 @@ package h1parser
 // reactor_metrics.go — the async metrics path for the reactor loop
 // (W3 of docs/plans/h1-reactor-perf-round-4.md).
 //
-// The metrics hook (DataPlaneMetrics.RecordHit: route-table lookup,
+// The metrics hook (DataPlaneMetrics.RecordHit: pool-table lookup,
 // index switches, counter increments, one histogram Observe) costs
 // CPU that produces no cache work. On the blocking path that cost is
 // spread across per-connection goroutines; on the reactor it is
@@ -13,7 +13,7 @@ package h1parser
 // loop applies the hook.
 //
 // Which strings may be retained? The hook's arguments come from the
-// FastPathResponse (Route: the handler's stable routeName field,
+// FastPathResponse (Pool: the handler's stable poolName field,
 // CacheResult: "HIT"/"STALE" literals, Source: api.Source constants)
 // — none alias the connection read buffer. The one read-buffer-derived
 // argument, req.Method, is captured as an index (only GET/HEAD can
@@ -44,7 +44,7 @@ import (
 // through the ring. Strings are stable handler-owned values; see the
 // file comment for the Method exception.
 type hitMetricsRecord struct {
-	route       string
+	pool        string
 	cacheResult string
 	source      string
 	durNs       int64
@@ -113,7 +113,7 @@ func (r *metricsRing) droppedTotal() uint64 { return r.dropped.Load() }
 // Owned by the reactor transport; one per loop with a metrics hook.
 type metricsDrainer struct {
 	ring *metricsRing
-	hook func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	hook func(method, pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
 }
 
 // metricsDrainBatch is the drainer's pop batch size; draining loops
@@ -131,7 +131,7 @@ func (d *metricsDrainer) drainOnce() bool {
 		if rec.methodIdx >= 0 && int(rec.methodIdx) < len(metricsMethods) {
 			method = metricsMethods[rec.methodIdx]
 		}
-		d.hook(method, rec.route, rec.cacheResult, rec.source,
+		d.hook(method, rec.pool, rec.cacheResult, rec.source,
 			rec.status, rec.bytesOut, time.Duration(rec.durNs))
 	}
 	return n == len(batch)

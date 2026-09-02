@@ -47,7 +47,7 @@ type FastPathHandler struct {
 	policy         *KeyPolicy // nil = no query/header policy
 	onStale        func(req *api.RawRequest, key api.Key, stale *api.Object)
 	cachedDate     atomic.Pointer[string]
-	routeName      string
+	poolName       string
 	cachedDateUnix atomic.Int64
 }
 
@@ -55,9 +55,9 @@ type FastPathHandler struct {
 // The Handler must be fully initialized before calling this.
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
-		store:     h.store,
-		routeName: h.routeName,
-		policy:    h.policy,
+		store:    h.store,
+		poolName: h.poolName,
+		policy:   h.policy,
 	}
 }
 
@@ -209,7 +209,7 @@ func (f *FastPathHandler) getCachedDate(now time.Time) string {
 func (f *FastPathHandler) serializeResponse(req *api.RawRequest, obj *api.Object, src api.Source, now time.Time, cacheResult string) *api.FastPathResponse {
 	closeConn := req.ConnectionClose
 	if head, statusEnd := obj.ComposedHeadFor(now, cacheResult, src, closeConn); head != nil {
-		return responseFromComposedHead(obj, head, statusEnd, req, cacheResult, src, f.routeName, closeConn)
+		return responseFromComposedHead(obj, head, statusEnd, req, cacheResult, src, f.poolName, closeConn)
 	}
 
 	resp := f.composeResponse(req, obj, src, now, cacheResult, closeConn)
@@ -259,7 +259,7 @@ func (f *FastPathHandler) composeResponse(req *api.RawRequest, obj *api.Object, 
 		return nil
 	}
 
-	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.routeName, closeConn)
+	return buildFastPathResponse(hbuf, bufPtr, obj, req, cacheResult, src, f.poolName, closeConn)
 }
 
 // getOrComputeSerializedHead returns the lazily-computed serialized
@@ -363,7 +363,7 @@ func appendDynamicHeaders(hbuf []byte, obj *api.Object, src api.Source, now time
 // eliminating per-hit allocations. req is used only for the HEAD body
 // elision; it may be nil when the caller handles the body itself (the
 // composed-head path).
-func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, routeName string, closeConn bool) *api.FastPathResponse {
+func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *api.RawRequest, cacheResult string, src api.Source, poolName string, closeConn bool) *api.FastPathResponse {
 	statusEnd := 0
 	for statusEnd < len(hbuf)-1 && (hbuf[statusEnd] != '\r' || hbuf[statusEnd+1] != '\n') {
 		statusEnd++
@@ -384,7 +384,7 @@ func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *ap
 	resp.StatusCode = obj.StatusCode
 	resp.CacheResult = cacheResult
 	resp.Source = string(src)
-	resp.Route = routeName
+	resp.Pool = poolName
 	resp.BytesOut = len(body)
 	resp.StatusEnd = statusEnd
 	resp.CloseConn = closeConn
@@ -404,7 +404,7 @@ func buildFastPathResponse(hbuf []byte, bufPtr *[]byte, obj *api.Object, req *ap
 // sliced into status line + header block, the body aliased, and only
 // the pooled FastPathResponse wrapper is allocated. No pool header
 // buffer is consumed (the composed head owns its bytes).
-func responseFromComposedHead(obj *api.Object, head []byte, statusEnd int, req *api.RawRequest, cacheResult string, src api.Source, routeName string, closeConn bool) *api.FastPathResponse {
+func responseFromComposedHead(obj *api.Object, head []byte, statusEnd int, req *api.RawRequest, cacheResult string, src api.Source, poolName string, closeConn bool) *api.FastPathResponse {
 	body := obj.Body
 	if req.Method == "HEAD" {
 		body = nil
@@ -416,7 +416,7 @@ func responseFromComposedHead(obj *api.Object, head []byte, statusEnd int, req *
 	resp.StatusCode = obj.StatusCode
 	resp.CacheResult = cacheResult
 	resp.Source = string(src)
-	resp.Route = routeName
+	resp.Pool = poolName
 	resp.BytesOut = len(body)
 	resp.StatusEnd = statusEnd
 	resp.CloseConn = closeConn
@@ -453,7 +453,7 @@ func (f *FastPathHandler) Release(resp *api.FastPathResponse) {
 	resp.StatusEnd = 0
 	resp.CacheResult = ""
 	resp.Source = ""
-	resp.Route = ""
+	resp.Pool = ""
 	resp.BytesOut = 0
 	resp.CloseConn = false
 	fastPathRespPool.Put(resp)

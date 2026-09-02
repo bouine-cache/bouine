@@ -26,6 +26,7 @@ type routeEntry struct {
 	pathPrefix string
 	label      string
 	labelVal   string
+	pool       string
 }
 
 // RouterMetrics are the data-plane counters exposed by the router.
@@ -54,8 +55,12 @@ func NewRouter(cfg RouterConfig) *Router {
 }
 
 // AddRoute registers a route entry. When methods is non-empty, only
-// requests whose HTTP method is in the set match this route.
-func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, handler fasthttp.RequestHandler) {
+// requests whose HTTP method is in the set match this route. pool is the
+// upstream pool serving this route; the metrics middleware uses it as the
+// attribution label because route cardinality scales with the number of
+// proxy rules (potentially hundreds), while pools are a small config-bounded
+// set that still answers the operator question "which upstream is slow".
+func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []string, handler fasthttp.RequestHandler) {
 	if label == "" {
 		switch {
 		case host != "":
@@ -79,6 +84,7 @@ func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, han
 		methods:    mset,
 		label:      label,
 		labelVal:   label,
+		pool:       pool,
 		handler:    handler,
 	})
 }
@@ -128,11 +134,15 @@ func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 		if re.methods != nil && !re.methods[string(ctx.Method())] { //nolint:staticcheck // SA6001: method is used once per iteration, not worth inlining
 			continue
 		}
-		// The metrics middleware reads the route from the UserValue
-		// (issue #607 phase 0). The old request-header form is gone:
-		// nothing read it, and the origin pool forwards request headers
-		// verbatim, so it leaked internal route names upstream.
+		// The observability middleware reads attribution from the
+		// UserValues. The old request-header form is gone: nothing read
+		// it, and the origin pool forwards request headers verbatim, so
+		// it leaked internal route names upstream. UserValues are
+		// process-local and never touch the wire. Prometheus metrics
+		// carry the upstream pool (small config-bounded label set);
+		// the dashboard rings keep the per-route label.
 		ctx.SetUserValue(header.XBouineRoute, re.labelVal)
+		ctx.SetUserValue(header.XBouinePool, re.pool)
 		re.handler(ctx)
 		return
 	}

@@ -69,6 +69,7 @@ func TestFastHTTPMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
 	ctx.Request.SetRequestURI("/nonexistent")
 	ctx.Request.Header.SetMethod("GET")
 	ctx.Request.Header.Set(header.XBouineRoute, "evil-route-12345")
+	ctx.Request.Header.Set(header.XBouinePool, "evil-pool-12345")
 	h(ctx)
 
 	got, err := reg.Gather()
@@ -79,15 +80,17 @@ func TestFastHTTPMiddleware_SpoofedRouteHeader_OnNoMatch(t *testing.T) {
 			continue
 		}
 		for _, metric := range mf.GetMetric() {
-			route := labelValue(metric, "route")
-			assert.NotEqual(t, "evil-route-12345", route,
-				"spoofed X-Bouine-Route header must not appear as route label")
-			if route == "_default" {
+			pool := labelValue(metric, "upstream_pool")
+			assert.NotEqual(t, "evil-route-12345", pool,
+				"spoofed X-Bouine-Route header must not appear as upstream_pool label")
+			assert.NotEqual(t, "evil-pool-12345", pool,
+				"spoofed X-Bouine-Pool header must not appear as upstream_pool label")
+			if pool == "_default" {
 				foundDefault = true
 			}
 		}
 	}
-	assert.True(t, foundDefault, "route label must be _default on no-match, not empty or spoofed")
+	assert.True(t, foundDefault, "upstream_pool label must be _default on no-match, not empty or spoofed")
 }
 
 func TestFastHTTPMiddleware_SpoofedRouteHeader_StrippedBeforeHandler(t *testing.T) {
@@ -110,13 +113,13 @@ func TestFastHTTPMiddleware_SpoofedRouteHeader_StrippedBeforeHandler(t *testing.
 		"handler must not see attacker-supplied X-Bouine-Route header")
 }
 
-func TestFastHTTPMiddleware_RouterSetsRouteLabel(t *testing.T) {
+func TestFastHTTPMiddleware_RouterSetsPoolLabel(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
 	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
-		ctx.SetUserValue(header.XBouineRoute, "my-route")
+		ctx.SetUserValue(header.XBouinePool, "app")
 		ctx.Response.Header.Set(header.XCache, "MISS")
 		ctx.SetStatusCode(200)
 	})
@@ -125,6 +128,7 @@ func TestFastHTTPMiddleware_RouterSetsRouteLabel(t *testing.T) {
 	ctx.Request.SetRequestURI("/api/v1/foo")
 	ctx.Request.Header.SetMethod("GET")
 	ctx.Request.Header.Set(header.XBouineRoute, "spoofed")
+	ctx.Request.Header.Set(header.XBouinePool, "spoofed")
 	h(ctx)
 
 	got, err := reg.Gather()
@@ -136,17 +140,17 @@ func TestFastHTTPMiddleware_RouterSetsRouteLabel(t *testing.T) {
 			continue
 		}
 		for _, metric := range mf.GetMetric() {
-			route := labelValue(metric, "route")
-			if route == "my-route" {
+			pool := labelValue(metric, "upstream_pool")
+			if pool == "app" {
 				found = true
 			}
-			if route == "spoofed" {
+			if pool == "spoofed" {
 				spoofedFound = true
 			}
 		}
 	}
-	assert.True(t, found, "route label must be 'my-route' (set by router, not spoofed)")
-	assert.False(t, spoofedFound, "spoofed route label must not appear in metrics")
+	assert.True(t, found, "upstream_pool label must be 'app' (set by router, not spoofed)")
+	assert.False(t, spoofedFound, "spoofed pool label must not appear in metrics")
 }
 
 func TestFastHTTPMiddleware_UnknownCacheResultMapsToUnknown(t *testing.T) {
@@ -299,10 +303,12 @@ func TestMethodIndex(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, 0, methodIndex("GET"))
 	assert.Equal(t, 1, methodIndex("HEAD"))
-	// Non-GET/HEAD methods take the WithLabelValues fallback so the
-	// exact token is preserved on requests_total (issue #607 phase 1.1).
-	assert.Equal(t, -1, methodIndex("POST"))
-	assert.Equal(t, -1, methodIndex(""))
+	// The method set is closed: POST gets its own slot and every other
+	// token aggregates to OTHER, so no metric label can be
+	// attacker-controlled.
+	assert.Equal(t, 2, methodIndex("POST"))
+	assert.Equal(t, 3, methodIndex("PUT"))
+	assert.Equal(t, 3, methodIndex(""))
 }
 
 func TestStatusIndex(t *testing.T) {

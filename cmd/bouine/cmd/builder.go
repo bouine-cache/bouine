@@ -177,13 +177,14 @@ func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.R
 
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
-	routeNames := make([]string, 0, len(e.cfg.Routes))
-	for _, rc := range e.cfg.Routes {
-		if rc.Name != "" {
-			routeNames = append(routeNames, rc.Name)
-		}
+	// The metrics middleware attributes traffic by upstream pool: pool
+	// names are a small config-bounded label set, unlike route names
+	// which scale with the number of proxy rules.
+	poolNames := make([]string, 0, len(e.cfg.UpstreamPools))
+	for _, pc := range e.cfg.UpstreamPools {
+		poolNames = append(poolNames, pc.Name)
 	}
-	rs.dpMetrics.PreResolveRoutes(routeNames)
+	rs.dpMetrics.PreResolveRoutes(poolNames)
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 
 	// Native fasthttp middleware chain: tracing → metrics → router.
@@ -284,6 +285,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
+			PoolName:                rc.Pool,
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
@@ -315,7 +317,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached.ServeRequest)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest)
 	}
 	return router
 }
@@ -410,11 +412,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	// When cache is not enabled, wire the staticfile handler's native
 	// fasthttp ServeRequest method directly — no adaptor needed.
 	if !cacheEnabled {
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, sh.ServeRequest)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, sh.ServeRequest)
 		return
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, handler)
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler)
 }
 
 // buildKeyPolicy compiles the route's cache key config into a

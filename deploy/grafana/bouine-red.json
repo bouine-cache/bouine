@@ -515,13 +515,13 @@
       },
       "targets": [
         {
-          "expr": "sum by (route) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",status=~\"5..\"}[1m]))",
-          "legendFormat": "{{route}}",
+          "expr": "sum by (upstream_pool) (rate(bouine_requests_total{namespace=~\"$namespace\",pod=~\"$pod\",status=~\"5..\"}[1m]))",
+          "legendFormat": "{{upstream_pool}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         }
       ],
-      "title": "5xx rate by route",
+      "title": "5xx rate by upstream pool",
       "type": "timeseries"
     },
     {
@@ -797,13 +797,13 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le, route) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])))",
-          "legendFormat": "{{route}}",
+          "expr": "histogram_quantile(0.99, sum by (le, upstream_pool) (rate(bouine_request_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\"}[1m])))",
+          "legendFormat": "{{upstream_pool}}",
           "type": "prometheus",
           "uid": "ffof63uiushz4c"
         }
       ],
-      "title": "p99 by route",
+      "title": "p99 by upstream pool",
       "type": "timeseries"
     },
     {

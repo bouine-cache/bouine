@@ -307,7 +307,7 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 	}
 	if p.metricsHook != nil {
 		dur := p.nowFunc().Sub(now)
-		p.metricsHook(req.Method, resp.Route, resp.CacheResult,
+		p.metricsHook(req.Method, resp.Pool, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
 	}
 	closeConn := resp.CloseConn

@@ -186,11 +186,15 @@ type FastPathResponse struct {
 	BufPtr      *[]byte // original pool pointer for HeaderBuf, used by Release
 	CacheResult string
 	Source      string
-	Route       string
-	BuffersArr  [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
-	Buffers     net.Buffers
-	HeaderBuf   []byte
-	StatusCode  int
+	// Pool is the upstream pool serving the hit, consumed by the
+	// metrics hook as the upstream_pool label. A small config-bounded
+	// set by construction: it comes from the route's pool config, not
+	// from request input.
+	Pool       string
+	BuffersArr [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
+	Buffers    net.Buffers
+	HeaderBuf  []byte
+	StatusCode int
 	// StatusEnd splits BuffersArr[0] (status line) from [1] (header
 	// block): the offset of the first header byte inside HeaderBuf or
 	// the composed head. Stored so the composed-head cache can slice a

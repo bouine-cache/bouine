@@ -80,13 +80,13 @@ func TestFastPathResponse_Fields(t *testing.T) {
 		StatusCode:  200,
 		CacheResult: "hit",
 		Source:      "hot",
-		Route:       "api",
+		Pool:        "api",
 		BytesOut:    1024,
 	}
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "hit", resp.CacheResult)
 	assert.Equal(t, "hot", resp.Source)
-	assert.Equal(t, "api", resp.Route)
+	assert.Equal(t, "api", resp.Pool)
 	assert.Equal(t, 1024, resp.BytesOut)
 }
 

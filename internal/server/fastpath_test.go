@@ -202,7 +202,7 @@ func TestRouter_WithMetrics(t *testing.T) {
 			NoRouteTotal:  &counterFunc{f: func() { noRoute++ }},
 		},
 	})
-	rt.AddRoute("", "/api", "api", nil, ok200("api"))
+	rt.AddRoute("", "/api", "api", "", nil, ok200("api"))
 	ctx := serveRoute(t, rt, "GET", "example.com", "/api/v1")
 	assert.Equal(t, "api", string(ctx.Response.Body()))
 	assert.Equal(t, 1, reqCount)

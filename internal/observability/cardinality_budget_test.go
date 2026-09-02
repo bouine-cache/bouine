@@ -14,7 +14,7 @@ import (
 )
 
 // gatherHistogramTuples returns the set of active label tuples for
-// bouine_request_duration_seconds, formatted "statusClass|cache_result|source|route".
+// bouine_request_duration_seconds, formatted "statusClass|cache_result|upstream_pool".
 func gatherHistogramTuples(t *testing.T, reg *prometheus.Registry) map[string]int {
 	t.Helper()
 	mfs, err := reg.Gather()
@@ -29,8 +29,8 @@ func gatherHistogramTuples(t *testing.T, reg *prometheus.Registry) map[string]in
 			for _, l := range met.GetLabel() {
 				labels[l.GetName()] = l.GetValue()
 			}
-			key := fmt.Sprintf("%s|%s|%s|%s",
-				labels["status"], labels["cache_result"], labels["source"], labels["route"])
+			key := fmt.Sprintf("%s|%s|%s",
+				labels["status"], labels["cache_result"], labels["upstream_pool"])
 			out[key]++
 		}
 	}
@@ -38,52 +38,53 @@ func gatherHistogramTuples(t *testing.T, reg *prometheus.Registry) map[string]in
 }
 
 // TestMetricCardinalityBudget pins the AGENTS.md §9 cardinality budget:
-// a realistic mixed workload over the maximum configured routes must keep
+// a realistic mixed workload over the maximum configured pools must keep
 // bouine_request_duration_seconds under 10k series (target < 5k), and idle
-// routes must cost zero series (lazy pre-resolution).
+// pools must cost zero series (lazy pre-resolution).
 func TestMetricCardinalityBudget(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	const routes = 33 // 32 capped routes + _default
-	names := make([]string, routes-1)
+	const pools = 33 // maxUpstreamPools capped pools + _default
+	names := make([]string, pools-1)
 	for i := range names {
-		names[i] = fmt.Sprintf("route-%02d", i)
+		names[i] = fmt.Sprintf("pool-%02d", i)
 	}
 	m.PreResolveRoutes(names)
 
 	middleware := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {})
 	hits := []struct {
-		method, route, cacheResult, source string
-		status                             int
+		method, pool, cacheResult, source string
+		status                            int
 	}{
-		// Hot tuples across every route.
+		// Hot tuples across every pool.
 		{"GET", "_default", "HIT", "hot", 200},
 		{"GET", "_default", "MISS", "origin", 200},
-		{"GET", "route-00", "HIT", "hot", 200},
-		{"GET", "route-00", "MISS", "origin", 200},
-		{"GET", "route-00", "STALE", "warm", 200},
-		{"GET", "route-01", "HIT", "hot", 200},
-		{"HEAD", "route-01", "HIT", "hot", 200},
+		{"GET", "pool-00", "HIT", "hot", 200},
+		{"GET", "pool-00", "MISS", "origin", 200},
+		{"GET", "pool-00", "STALE", "warm", 200},
+		{"GET", "pool-01", "HIT", "hot", 200},
+		{"HEAD", "pool-01", "HIT", "hot", 200},
+		{"POST", "pool-01", "BYPASS", "origin", 200},
 		// Fast-path hits.
-		{"GET", "route-02", "HIT", "hot", 200},
+		{"GET", "pool-02", "HIT", "hot", 200},
 		// Error classes.
-		{"GET", "route-03", "MISS", "origin", 404},
-		{"GET", "route-03", "MISS", "origin", 500},
-		{"GET", "route-03", "MISS", "origin", 503},
+		{"GET", "pool-03", "MISS", "origin", 404},
+		{"GET", "pool-03", "MISS", "origin", 500},
+		{"GET", "pool-03", "MISS", "origin", 503},
 	}
-	for i, h := range hits {
-		route := h.route
-		if route == "_default" {
-			route = ""
+	for _, h := range hits {
+		pool := h.pool
+		if pool == "_default" {
+			pool = ""
 		}
-		m.RecordHit(h.method, route, h.cacheResult, h.source, h.status, 100, 1234567)
-		_ = i
+		m.RecordHit(h.method, pool, h.cacheResult, h.source, h.status, 100, 1234567)
 	}
 
-	// Middleware path: 404 no-route traffic with an arbitrary method token
-	// (the unbounded-label attack shape from the issue).
+	// Middleware path: 404 no-route traffic with an arbitrary method
+	// token; the closed method set must aggregate it to OTHER, not mint
+	// a per-token series.
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/x")
 	ctx.Request.Header.SetMethod("PROPFIND")
@@ -92,19 +93,20 @@ func TestMetricCardinalityBudget(t *testing.T) {
 
 	tuples := gatherHistogramTuples(t, reg)
 
-	// Every configured route must exist once observed...
-	assert.Contains(t, tuples, "2xx|HIT|hot|route-00", "observed route must have series")
-	// ...but idle routes cost nothing.
-	for i := 4; i < routes-1; i++ {
+	// Every configured pool must exist once observed...
+	assert.Contains(t, tuples, "2xx|HIT|pool-00", "observed pool must have series")
+	// ...but idle pools cost nothing.
+	for i := 4; i < pools-1; i++ {
 		for key := range tuples {
-			assert.NotContains(t, key, fmt.Sprintf("route-%02d", i),
-				"idle route route-%02d must have zero series", i)
+			assert.NotContains(t, key, fmt.Sprintf("pool-%02d", i),
+				"idle pool pool-%02d must have zero series", i)
 		}
 	}
-	// 11 observations collapse to 9 histogram tuples: 500 and 503 share
-	// the 5xx class, and HEAD shares GET's tuple (no method dimension) —
-	// that collapsing is the phase-1.2 win. Plus the middleware 404 tuple.
-	assert.Len(t, tuples, 10, "one tuple per observed class combination, no more")
+	// 12 observations collapse to 11 histogram tuples: 500 and 503 share
+	// the 5xx class, HEAD and POST share GET's 2xx/HIT tuple shape where
+	// applicable (no method dimension) — that collapsing is the win.
+	// Plus the middleware 404 tuple.
+	assert.Len(t, tuples, 11, "one tuple per observed class combination, no more")
 
 	total := 0
 	for _, n := range tuples {
@@ -112,12 +114,12 @@ func TestMetricCardinalityBudget(t *testing.T) {
 	}
 	// 16 series per tuple (13 buckets + +Inf + _sum + _count).
 	assert.Less(t, total*16, 10000, "AGENTS.md §9: histogram series must stay under 10k")
-	assert.Less(t, total*16, 5000, "issue #607 acceptance: histogram series under 5k")
+	assert.Less(t, total*16, 5000, "histogram series must stay under the 5k target")
 }
 
-// TestMetricCardinalityBudget_IdleRoutesZeroSeries is the explicit lazy
+// TestMetricCardinalityBudget_IdlePoolsZeroSeries is the explicit lazy
 // pre-resolution proof: PreResolveRoutes must not create a single series.
-func TestMetricCardinalityBudget_IdleRoutesZeroSeries(t *testing.T) {
+func TestMetricCardinalityBudget_IdlePoolsZeroSeries(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
@@ -126,26 +128,27 @@ func TestMetricCardinalityBudget_IdleRoutesZeroSeries(t *testing.T) {
 	tuples := gatherHistogramTuples(t, reg)
 	assert.Empty(t, tuples, "pre-resolution must be lazy: no series before the first observation")
 
-	// Observing one tuple on route "a" creates exactly one tuple; "b"/"c"/"d" stay empty.
+	// Observing one tuple on pool "a" creates exactly one tuple; "b"/"c"/"d" stay empty.
 	m.RecordHit("GET", "a", "HIT", "hot", 200, 10, 1_000_000)
 	tuples = gatherHistogramTuples(t, reg)
 	assert.Len(t, tuples, 1, "exactly one tuple after one observation")
-	assert.Contains(t, tuples, "2xx|HIT|hot|a")
+	assert.Contains(t, tuples, "2xx|HIT|a")
 }
 
-// TestMetricCardinalityBudget_RouteCap pins the config cap: 32 routes.
-func TestMetricCardinalityBudget_RouteCap(t *testing.T) {
+// TestMetricCardinalityBudget_PoolCap pins the config cap: 32 upstream
+// pools. The cap exists because pool names are the upstream_pool metric
+// label; the label set must stay config-bounded.
+func TestMetricCardinalityBudget_PoolCap(t *testing.T) {
 	t.Parallel()
 	newCfg := func(n int) *config.Config {
-		pool := config.UpstreamPool{Name: "app", Targets: []string{"a:1"}}
-		routes := make([]config.Route, n)
-		for i := range routes {
-			routes[i] = config.Route{Pool: "app", Match: config.RouteMatch{PathPrefix: fmt.Sprintf("/r%02d", i)}}
+		pools := make([]config.UpstreamPool, n)
+		for i := range pools {
+			pools[i] = config.UpstreamPool{Name: fmt.Sprintf("p%02d", i), Targets: []string{"a:1"}}
 		}
-		return &config.Config{Listen: config.Listen{Admin: ":9000"}, UpstreamPools: []config.UpstreamPool{pool}, Routes: routes}
+		return &config.Config{Listen: config.Listen{Admin: ":9000"}, UpstreamPools: pools}
 	}
-	require.NoError(t, newCfg(32).Validate(), "32 routes must validate")
+	require.NoError(t, newCfg(32).Validate(), "32 pools must validate")
 	err := newCfg(33).Validate()
-	require.Error(t, err, "33 routes must be rejected")
-	assert.Contains(t, err.Error(), "routes")
+	require.Error(t, err, "33 pools must be rejected")
+	assert.Contains(t, err.Error(), "upstream pools")
 }

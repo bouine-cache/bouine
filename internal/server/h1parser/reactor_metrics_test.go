@@ -16,11 +16,11 @@ func TestMetricsRing_PushDrainRoundTrip(t *testing.T) {
 	t.Parallel()
 	r := &metricsRing{}
 	require.True(t, r.pushHit(hitMetricsRecord{
-		route: "default", cacheResult: "HIT", source: "hot",
+		pool: "default", cacheResult: "HIT", source: "hot",
 		durNs: 1234, bytesOut: 56, status: 200, methodIdx: 0,
 	}))
 	require.True(t, r.pushHit(hitMetricsRecord{
-		route: "default", cacheResult: "STALE", source: "warm",
+		pool: "default", cacheResult: "STALE", source: "warm",
 		durNs: 99, bytesOut: 7, status: 200, methodIdx: 1,
 	}))
 
@@ -68,11 +68,11 @@ func TestMetricsDrainer_AppliesRecordsThroughHook(t *testing.T) {
 	ring := &metricsRing{}
 	var mu sync.Mutex
 	var got []hitMetricsRecord
-	hook := func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+	hook := func(method, pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, hitMetricsRecord{
-			route: route, cacheResult: cacheResult, source: source,
+			pool: pool, cacheResult: cacheResult, source: source,
 			durNs: duration.Nanoseconds(), bytesOut: bytesOut,
 			status: status, methodIdx: methodIndexForRecord(method),
 		})
@@ -80,11 +80,11 @@ func TestMetricsDrainer_AppliesRecordsThroughHook(t *testing.T) {
 	d := &metricsDrainer{ring: ring, hook: hook}
 
 	require.True(t, ring.pushHit(hitMetricsRecord{
-		route: "default", cacheResult: "HIT", source: "hot",
+		pool: "default", cacheResult: "HIT", source: "hot",
 		durNs: 42, bytesOut: 100, status: 200, methodIdx: 0,
 	}))
 	require.True(t, ring.pushHit(hitMetricsRecord{
-		route: "default", cacheResult: "STALE", source: "warm",
+		pool: "default", cacheResult: "STALE", source: "warm",
 		durNs: 7, bytesOut: 200, status: 200, methodIdx: 1,
 	}))
 

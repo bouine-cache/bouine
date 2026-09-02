@@ -316,7 +316,7 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 			// the method string aliases the read buffer, so it is
 			// captured as an index. Never blocks: overflow drops.
 			rc.parser.metricsRing.pushHit(hitMetricsRecord{
-				route:       resp.Route,
+				pool:        resp.Pool,
 				cacheResult: resp.CacheResult,
 				source:      resp.Source,
 				durNs:       dur.Nanoseconds(),
@@ -325,7 +325,7 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 				methodIdx:   methodIndexForRecord(req.Method),
 			})
 		} else {
-			hook(req.Method, resp.Route, resp.CacheResult,
+			hook(req.Method, resp.Pool, resp.CacheResult,
 				resp.Source, resp.StatusCode, resp.BytesOut, dur)
 		}
 	}

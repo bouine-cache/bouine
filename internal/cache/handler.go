@@ -273,6 +273,7 @@ type Handler struct {
 	// no stripping (zero cost on routes without strip_prefix).
 	stripPrefix []byte
 	routeName   string
+	poolName    string
 	// inflightStreams tracks in-progress streaming fetches for
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
@@ -376,6 +377,10 @@ type HandlerConfig struct {
 	RefreshMetrics *observability.RefreshMetrics
 	// RouteName labels refresh metrics. Set from the route's config name.
 	RouteName string
+	// PoolName is the route's upstream pool name, stamped onto fast-path
+	// hit responses for the metrics middleware's upstream_pool label. A
+	// small config-bounded set by construction.
+	PoolName string
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
@@ -590,6 +595,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshMinScore:         cfg.RefreshMinScore,
 		refreshReactiveFirst:    cfg.RefreshReactiveFirst,
 		routeName:               cfg.RouteName,
+		poolName:                cfg.PoolName,
 		done:                    make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {

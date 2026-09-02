@@ -12,9 +12,10 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// TestRequestDuration_LabelSpaceBounded pins the phase-1 label contract
-// (issue #607): the histogram carries status classes and no method
-// dimension, and the spoofed inbound X-Bouine-Route header never reaches it.
+// TestRequestDuration_LabelSpaceBounded pins the label contract: the
+// histogram carries status classes and no method or source dimension,
+// and the spoofed inbound X-Bouine-Route/X-Bouine-Pool headers never
+// reach it.
 func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
@@ -30,6 +31,7 @@ func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 	ctx.Request.SetRequestURI("/api/x")
 	ctx.Request.Header.SetMethod("PROPFIND")
 	ctx.Request.Header.Set(header.XBouineRoute, "spoofed-route-99999")
+	ctx.Request.Header.Set(header.XBouinePool, "spoofed-pool-99999")
 	h(ctx)
 
 	mfs, err := reg.Gather()
@@ -45,21 +47,74 @@ func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 				names = append(names, l.GetName())
 			}
 			assert.NotContains(t, names, "method",
-				"histogram must not carry a method label (issue #607 phase 1.1)")
+				"histogram must not carry a method label")
+			assert.NotContains(t, names, "source",
+				"histogram must not carry a source label")
 			for _, l := range met.GetLabel() {
 				if l.GetName() == "status" {
 					assert.Equal(t, "4xx", l.GetValue(),
 						"histogram status must be the response class")
 				}
-				if l.GetName() == "route" {
-					assert.NotEqual(t, "spoofed-route-99999", l.GetValue(),
-						"spoofed route header must not appear on the histogram")
+				if l.GetName() == "route" || l.GetName() == "upstream_pool" {
+					assert.NotContains(t, l.GetValue(), "spoofed",
+						"spoofed route/pool header must not appear on the histogram")
 				}
 			}
 		}
 		return
 	}
 	t.Fatal("bouine_request_duration_seconds not gathered")
+}
+
+// TestRequestsTotal_MethodSetClosed pins the closed method label set:
+// arbitrary method tokens aggregate to OTHER instead of minting a
+// per-token series, so no metric label can be attacker-controlled.
+func TestRequestsTotal_MethodSetClosed(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.PreResolveRoutes([]string{"api"})
+
+	h := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.XCache, "MISS")
+		ctx.SetStatusCode(404)
+	})
+	for _, method := range []string{"PROPFIND", "TRACK", "X9"} {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Request.SetRequestURI("/api/x")
+		ctx.Request.Header.SetMethod(method)
+		h(ctx)
+	}
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	methods := map[string]bool{}
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_requests_total" {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			for _, l := range met.GetLabel() {
+				if l.GetName() == "method" {
+					methods[l.GetValue()] = true
+				}
+			}
+		}
+	}
+	assert.Equal(t, map[string]bool{"OTHER": true}, methods,
+		"arbitrary method tokens must collapse to OTHER")
+}
+
+// TestMethodIndex_ClosedSet pins the method classification.
+func TestMethodIndex_ClosedSet(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, 0, methodIndex("GET"))
+	assert.Equal(t, 1, methodIndex("HEAD"))
+	assert.Equal(t, 2, methodIndex("POST"))
+	assert.Equal(t, 3, methodIndex("PUT"))
+	assert.Equal(t, 3, methodIndex("DELETE"))
+	assert.Equal(t, 3, methodIndex("PROPFIND"))
+	assert.Equal(t, 3, methodIndex(""))
 }
 
 // TestStatusClassString pins the zero-alloc status-class table.

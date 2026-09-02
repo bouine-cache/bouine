@@ -8,6 +8,86 @@ Release notes for tagged versions are also generated from
 [Conventional Commits](https://www.conventionalcommits.org/); this file is
 the curated, human-readable summary.
 
+## [Unreleased]
+
+## [0.5.5] - 2026-09-02
+
+### Added
+- **H1 epoll reactor** (`experimental.h1_reactor`, Linux-only, requires
+  `experimental.h1_fast_path`, default off; ADR-0041): a
+  single-goroutine event loop per plaintext listener that serves
+  batches of cache hits from one `epoll_wait` wakeup — parse, cache
+  lookup, and `writev` flush inline on raw fds, with no goroutine
+  park/unpark per request. Gate benchmark: 370–405 ns and 0 allocs/op
+  per reactor hit. Non-hit traffic (miss, conditional, range, pipelined
+  bodies, oversize headers, malformed input) hands off *before any
+  response byte is written* to the existing blocking parser with the
+  buffered bytes replayed, so fall-through framing, smuggling 400s, and
+  SWR semantics are shared, not reimplemented. Bounded by design: 4096
+  connections per loop (overflow falls back to the blocking path), a
+  bounded handoff-spawn queue, and the loop goroutine as sole owner of
+  the epoll set. TLS listeners are never reactor-served. Config
+  validation rejects `h1_reactor` without `h1_fast_path` at load time.
+  The reactor is enabled in the nightly load-test configuration, so
+  benchmark numbers from 0.5.4 and earlier are not comparable.
+- Reactor steady-state safety nets, each observable per runbook
+  `docs/runbook/51-h1-reactor.md`: a 5-minute write-timeout sweep drops
+  clients that stop reading mid-response (they would otherwise pin the
+  per-loop connection budget); an idle sweep closes keep-alive
+  connections at `listen.idle_timeout` parity with the blocking path;
+  async hit metrics use a per-loop ring (drop-newest on overflow,
+  counted and logged at shutdown) so the metric hook is never serial
+  loop time; and stuck-writer, spawner-saturation, and shutdown-storm
+  regression tests pin the contracts.
+
+### Fixed
+- `request.strip_prefix` on proxied routes was parsed and validated but
+  never applied since the fasthttp-native migration (v0.5.0): origins
+  received the full prefixed path (issue #595). The stripped URI is now
+  written at every origin-bound request site (foreground and streaming
+  miss, bypass, foreground and SWR-background revalidation,
+  refresh-before-expiry, POST invalidation), while cache keys, ban
+  matching, `X-Bouine-Path`, and `Location` keep the original path per
+  the documented contract. `stripPrefixFastHTTP` (static routes) now
+  strips path and query together, fixing a dropped query string; the
+  boundary rules live in one exported helper shared by both sites.
+- Nightly load-test runner: the k6 install had failed with "Permission
+  denied" on every nightly since Aug 9 (23 consecutive red runs, no
+  performance baseline since the fast path landed) because the container
+  runs as uid 1001 against a root-owned `/usr/local/bin`. The install
+  now uses sudo and hands ownership to the runner user; a prerequisites
+  check fails fast with a clear message.
+- Nightly load-test suite reliability: the load-gen container needed
+  bash for its scenario drivers, its memory limit OOM-killed every k6
+  scenario, it could not write to the `/results` bind mount, and
+  compose reused stale per-project images instead of the built ones —
+  all now fixed; the restored origin Dockerfile needed its fasthttp
+  dependency.
+
+### Changed
+- Reactor loop cost work (all measured, gates and cache-tests
+  conformance unchanged): hit responses flush via one zero-copy,
+  zero-alloc `writev` over the fast path's `net.Buffers` with
+  exact-offset resume on partial writes (previously a full-body memcpy
+  per hit); redundant `epoll_ctl` re-arming is elided by tracking
+  per-connection interest; four O(NHeaders) header re-scans and the
+  ~3.3 KB per-request struct memset collapse into a fused header-parse
+  pass with a ScanFlags bitmask; hits within a cached wall-clock second
+  reuse a fully serialized response head stored on the object.
+  FastPath_Hit gate: 181→129 ns (−29%, benchstat p=0.002).
+- Reactor keep-alive RTT: a bounded adaptive busy-poll after each
+  served batch cut single-client keep-alive p50 from 41.7 to 10.2 µs
+  (−75%) and lifted sustained 16-client throughput from 138k to 160k
+  RPS (+16%) at equal CPU, with measured zero CPU ticks over an idle
+  2 s window (not a busy loop). The spin budget defaults to 80 and is
+  operator-overridable via `BOUINE_REACTOR_SPIN_BUDGET` (0 disables) for
+  A/B and field rollback.
+- The nightly scenario set is trimmed to fit the job budget: the
+  20-minute `3.4_working_set_overflow` eviction scenario and the
+  duplicated 50k/100k ramp legs are cut from the nightly default
+  (restorable ad hoc via `SCENARIOS`/`RATES_OVERRIDE`), and a
+  competitor's k6 threshold no longer fails the suite.
+
 ## [0.5.4] - 2026-09-01
 
 ### Added
@@ -803,7 +883,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/bouine-cache/bouine/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/bouine-cache/bouine/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.3
 

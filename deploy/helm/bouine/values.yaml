@@ -25,6 +25,10 @@ serviceAccount:
 nameOverride: ""
 fullnameOverride: ""
 
+# Global labels and annotations applied to every resource the charts renders.
+commonLabels: {}
+commonAnnotations: {}
+
 # bouine config. Rendered into a ConfigMap and mounted at /etc/bouine/.
 config:
   listen:
@@ -93,6 +97,25 @@ service:
   httpPort: 80
   httpsPort: 443
   adminPort: 9000
+  annotations: {}
+  labels: {}
+  # Restrict ingress CIDRs when type: LoadBalancer.
+  #   - 10.0.0.0/8
+  loadBalancerSourceRanges: []
+  # "Local" preserves the client source IP and avoids a second node hop;
+  # the LB health check then targets ready pods only.
+  externalTrafficPolicy: ""
+
+# Dedicated admin (management plane) Service. ClusterIP by default so
+# the admin surface (metrics, pprof, /drain, admin API) is never exposed
+# by a data-plane LoadBalancer.
+adminService:
+  type: ClusterIP
+  # Service port for the admin plane. Defaults to service.adminPort when
+  # empty.
+  port: ""
+  annotations: {}
+  labels: {}
 
 headlessService:
   # Headless service for gossip peer discovery.
@@ -109,6 +132,10 @@ resources:
 # Optional pod metadata and scheduling controls.
 podAnnotations: {}
 podLabels: {}
+# StatefulSet-level metadata. Wins over commonLabels/commonAnnotations
+# on key collision.
+statefulsetAnnotations: {}
+statefulsetLabels: {}
 affinity: {}
 # Raw pod anti-affinity rules. Explicit affinity takes precedence.
 podAntiAffinity: {}
@@ -132,6 +159,7 @@ containerSecurityContext:
 
 podDisruptionBudget:
   enabled: true
+  annotations: {}
   # minAvailable: 2 ensures at least 2 pods remain during rollout on a
   # 3-replica StatefulSet, satisfying SLO DP-5 (zero 5xx on rolling restart).
   minAvailable: 2
@@ -286,8 +314,12 @@ livenessProbe:
 
 # Horizontal Pod Autoscaler. CPU-only.
 # Disabled by default. Enable in per-environment values.
+# When enabled, spec.replicas is NOT rendered on the StatefulSet — the
+# HPA owns the replica count. GitOps users (e.g. ArgoCD) should also
+# add an ignoreDifferences entry for /spec/replicas on the StatefulSet.
 autoscaling:
   enabled: false
+  annotations: {}
   minReplicas: 3
   maxReplicas: 6
   cpuTrigger:
@@ -330,9 +362,11 @@ ingress:
 
 networkPolicy:
   enabled: false
+  annotations: {}
 
 serviceMonitor:
   enabled: false
+  annotations: {}
   labels: {}
   interval: 60s
   scrapeTimeout: ""  # uses default
@@ -345,6 +379,7 @@ serviceMonitor:
 # origin characteristics. See docs/operations/slo.md for the reference SLOs.
 prometheusRule:
   enabled: false
+  annotations: {}
   labels: {}
   rules:
     hitLatencyThreshold: 0.002      # seconds (SLO DP-1: hit p99 > 2ms)

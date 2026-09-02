@@ -5,6 +5,7 @@ metadata:
   name: {{ include "bouine.fullname" . }}
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+  {{- include "bouine.annotations" (list . .Values.podDisruptionBudget.annotations) | nindent 2 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:

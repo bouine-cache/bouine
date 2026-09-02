@@ -4,9 +4,15 @@ metadata:
   name: {{ include "bouine.fullname" . }}
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+    {{- with .Values.statefulsetLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- include "bouine.annotations" (list . .Values.statefulsetAnnotations) | nindent 2 }}
 spec:
   serviceName: {{ include "bouine.fullname" . }}-headless
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   podManagementPolicy: {{ .Values.podManagementPolicy | default "Parallel" }}
   minReadySeconds: {{ .Values.minReadySeconds | default 30 }}
   updateStrategy:
@@ -20,19 +26,17 @@ spec:
       {{- include "bouine.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podLabels }}
       labels:
-        {{- toYaml . | nindent 8 }}
-        {{- include "bouine.selectorLabels" $ | nindent 8 }}
-      {{- else }}
-      labels:
-        {{- include "bouine.selectorLabels" . | nindent 8 }}
-      {{- end }}
-      annotations:
-        {{- with .Values.podAnnotations }}
+        {{- with .Values.commonLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- include "bouine.selectorLabels" . | nindent 8 }}
+      {{- /* The computed checksum must never be clobbered by user values. */}}
+      {{- $podAnnotations := mergeOverwrite (dict) .Values.podAnnotations (dict "checksum/config" (include (print $.Template.BasePath "/configmap.yaml") . | sha256sum)) }}
+      {{- include "bouine.annotations" (list . $podAnnotations) | nindent 6 }}
     spec:
       {{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
       serviceAccountName: {{ .Values.serviceAccount.name | default (include "bouine.fullname" .) }}
@@ -162,14 +166,15 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: warm
+        {{- with .Values.commonLabels }}
+        labels:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         {{- with .Values.warmVolume.labels }}
         labels:
           {{- toYaml . | nindent 10 }}
         {{- end }}
-        {{- with .Values.warmVolume.annotations }}
-        annotations:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
+        {{- include "bouine.annotations" (list . .Values.warmVolume.annotations) | nindent 8 }}
       spec:
         accessModes: ["ReadWriteOnce"]
         {{- if .Values.warmVolume.storageClass }}

@@ -21,11 +21,33 @@ app.kubernetes.io/name: {{ include "bouine.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Values.commonLabels }}
+{{ toYaml . }}
 {{- end }}
+{{- end -}}
+
+{{/* Render common annotations with resource-specific values taking precedence. */}}
+{{- define "bouine.annotations" -}}
+{{- $ctx := index . 0 -}}
+{{- $resourceAnnotations := index . 1 -}}
+{{- $annotations := mergeOverwrite (dict) $ctx.Values.commonAnnotations $resourceAnnotations -}}
+{{- with $annotations }}
+annotations:
+  {{- toYaml . | nindent 2 }}
+{{- end -}}
+{{- end -}}
 
 {{- define "bouine.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "bouine.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+bouine.adminServiceName returns the name of the dedicated admin
+(management plane) Service.
+*/}}
+{{- define "bouine.adminServiceName" -}}
+{{ include "bouine.fullname" . }}-admin
 {{- end }}
 
 {{/*

@@ -59,6 +59,38 @@ var ErrAbortHandler = errors.New("abort handler")
 // with a dead cancellation arm and nothing ever un-parked them.
 var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 
+// StripRequestURI removes prefix from the start of uri on a path boundary:
+// an exact-prefix match ("/api/v1") yields "/", a remainder starting with
+// "/" passes trimmed, a "?query" remainder keeps its "/" root, and a
+// mid-segment match ("/api/v1x" vs "/api/v1") passes through unchanged
+// rather than producing a non-absolute request-line. A nil or empty prefix
+// returns uri unchanged. Allocation-free for the common (trimmed or
+// unchanged) cases.
+//
+// This is the single definition of strip-prefix boundary semantics for the
+// whole binary: the cache handler applies it to origin-bound request URIs
+// (cache keys, ban matching, X-Bouine-Path, and Location resolution keep
+// the original path — config.RouteRequest.StripPrefix contract), and
+// cmd/bouine/cmd's stripPrefixFastHTTP applies it when lowering
+// static-route requests before the cache layer sees them.
+// Stable.
+func StripRequestURI(prefix, uri []byte) []byte {
+	if len(prefix) == 0 || !bytes.HasPrefix(uri, prefix) {
+		return uri
+	}
+	trimmed := uri[len(prefix):]
+	switch {
+	case len(trimmed) == 0:
+		return []byte("/")
+	case trimmed[0] == '/':
+		return trimmed
+	case trimmed[0] == '?':
+		return append([]byte("/"), trimmed...)
+	default:
+		return uri
+	}
+}
+
 // defaultFetchWaitTimeout bounds how long a foreground miss may wait for
 // a fetch-semaphore slot before shedding. It is deliberately independent
 // of fetch_timeout, which starts only after the slot is acquired (pinned
@@ -510,29 +542,13 @@ func (h *Handler) doFastFetch(req *fasthttp.Request, resp *fasthttp.Response) er
 	return h.fastClient.Do(context.Background(), req, resp)
 }
 
-// strippedURI returns uri with the route's strip_prefix removed from the
+// strippedURI returns uri with the route's strip prefix removed from the
 // start. Used for origin-bound request URIs only: the cache key, ban
 // matching, and Location resolution all keep the original path (config
-// contract in config.RouteRequest.StripPrefix). Stripping only happens on
-// a path boundary: when the remainder is empty ("/" is sent instead) or
-// starts with "/" or "?". A mid-segment match ("/api/v1x" vs "/api/v1")
-// passes through unchanged rather than producing a non-absolute
-// request-line. Nil prefix returns uri unchanged.
+// contract in config.RouteRequest.StripPrefix). Boundary semantics live
+// in StripRequestURI.
 func (h *Handler) strippedURI(uri []byte) []byte {
-	if len(h.stripPrefix) == 0 || !bytes.HasPrefix(uri, h.stripPrefix) {
-		return uri
-	}
-	trimmed := uri[len(h.stripPrefix):]
-	switch {
-	case len(trimmed) == 0:
-		return []byte("/")
-	case trimmed[0] == '/':
-		return trimmed
-	case trimmed[0] == '?':
-		return append([]byte("/"), trimmed...)
-	default:
-		return uri
-	}
+	return StripRequestURI(h.stripPrefix, uri)
 }
 
 // NewHandler creates a caching handler.

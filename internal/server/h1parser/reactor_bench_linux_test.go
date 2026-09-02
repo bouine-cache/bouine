@@ -162,9 +162,6 @@ func startReactorBenchListener(b *testing.B) {
 	b.ReportMetric(float64(elapsed.Nanoseconds())/float64(samples), "conn-ns")
 }
 
-// coarseNowBench is a cheap clock for the E2E loop.
-func coarseNowBench() time.Time { return time.Now() }
-
 // BenchmarkSingle_Reactor_KeepAliveRTT measures the user-standpoint
 // latency of the hit path: request write → response read, round-tripped
 // over one established keep-alive connection through the real epoll
@@ -497,9 +494,6 @@ func measureReactorRTTConcurrent(b *testing.B, clients int) {
 	fp.resp = resp
 
 	const perClient = 2000
-	type result struct {
-		rtts []time.Duration
-	}
 	results := make(chan []time.Duration, clients)
 	var wg sync.WaitGroup
 	for range clients {

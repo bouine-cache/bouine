@@ -92,6 +92,15 @@ type reactorEpoll struct {
 	// record survives shutdown uncounted.
 	metricsDrainer *metricsDrainer
 	metricsDone    chan struct{}
+	// acceptDone is closed by acceptLoop on exit. cleanup joins it
+	// before draining the pending queue: a conn accepted just before
+	// the listener closed can still be parked on pending after
+	// cleanup's drain ran — joining first guarantees every accepted
+	// conn has an owner (tracked, handed off, or closed by the drain).
+	// acceptStarted gates the join: cleanup also runs on the
+	// constructor's error path, where acceptLoop never started.
+	acceptStarted atomic.Bool
+	acceptDone    chan struct{}
 	// ntracked is the number of tracked connections (table + overflow).
 	// Kept as a scalar so the reactorMaxConns admission check is one
 	// compare instead of a map length walk.
@@ -183,6 +192,7 @@ func newReactorLoop(p *Parser, ln net.Listener) (r *reactorEpoll, ok bool) {
 		lastSweep:    p.nowFunc(),
 		done:         make(chan struct{}),
 		handoffsDone: make(chan struct{}),
+		acceptDone:   make(chan struct{}),
 	}
 	// connTable is a dense value field (~512 KB): zero-initialized by the
 	// struct literal above at no measurable cost relative to the loop's
@@ -229,6 +239,7 @@ func (r *reactorEpoll) run() {
 		go r.metricsDrainer.run(r.done, r.metricsDone)
 	}
 	go r.acceptLoop()
+	r.acceptStarted.Store(true)
 
 	// Adaptive busy-poll: after serving a batch, poll readiness with a
 	// zero timeout for up to reactorSpinBudget before parking in the
@@ -502,6 +513,7 @@ var wakeByte = [1]byte{1}
 // like the blocking path's accept loop — one failed accept must not
 // permanently kill the listener.
 func (r *reactorEpoll) acceptLoop() {
+	defer close(r.acceptDone)
 	for {
 		conn, err := r.acceptLn.Accept()
 		if err != nil {
@@ -659,14 +671,21 @@ func (r *reactorEpoll) cleanup() {
 		_ = rc.conn.Close()
 	})
 	r.overflow = nil
-	// Drain the pending queue: connections the accept goroutine parked
-	// but the loop never registered are owned by nobody else — without
-	// this drain they leak as half-open sockets past shutdown (the
-	// storm-shutdown test catches exactly this). The listener is closed
-	// before Close in every production wiring, so acceptLoop has
-	// already exited and cannot push concurrently; the channel is
-	// left non-nil so a late (buggy) push blocks on select-default
-	// instead of panicking on a nil send.
+	// Join the accept loop before draining the pending queue: the
+	// listener may already be closed (production wiring closes it
+	// before Close), but a conn accepted just before that close can
+	// still be parked on pending after this point — without the join
+	// it would leak as a half-open socket past shutdown (the
+	// storm-shutdown test catches exactly this). Closing the listener
+	// here too makes Close safe regardless of caller ordering; the
+	// double close is a no-op error.
+	_ = r.acceptLn.Close()
+	if r.acceptStarted.Load() {
+		<-r.acceptDone
+	}
+	// Drain the pending queue: connections the accept goroutine
+	// parked but the loop never registered are owned by nobody else —
+	// without this drain they leak as half-open sockets past shutdown.
 	for {
 		select {
 		case rc := <-r.pending:
@@ -770,11 +789,10 @@ func (r *reactorEpoll) MetricsDropped() uint64 {
 // goroutine: the readBuf it aliases is loop-owned and must not be
 // freed before the handoff escapes the loop — the job's channel send
 // is exactly the ownership boundary.
-func (rc *reactorConn) handoff(tracker *handoffTracker) net.Conn {
+func (rc *reactorConn) handoff(tracker *handoffTracker) {
 	conn := rc.handoffConn()
 	rc.state = rcHandoff
 	tracker.spawnFromLoop(rc.parser, conn)
-	return conn
 }
 
 // writeStuckExpired reports whether a write phase has exceeded the
@@ -818,8 +836,6 @@ const reactorWriteTimeout = 5 * time.Minute
 // — Serve treats the read error as connection termination, exactly like
 // a client reset, and the goroutine's own conn close follows.
 type handoffTracker struct {
-	wg    sync.WaitGroup
-	mu    sync.Mutex
 	conns map[net.Conn]struct{}
 	// spawns feeds the spawner goroutine. Buffered: the loop never
 	// blocks on a full queue (a full queue means the spawner is
@@ -836,6 +852,8 @@ type handoffTracker struct {
 	// late jobs rather than sending on a closed channel — the channel
 	// is never closed, only quit is.
 	quit chan struct{}
+	wg   sync.WaitGroup
+	mu   sync.Mutex
 }
 
 // handoffJob is one queued blocking-parser start.

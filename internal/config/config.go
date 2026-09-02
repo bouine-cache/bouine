@@ -296,10 +296,10 @@ type Cluster struct {
 	// capacity. Set to 1 to disable pipelining.
 	PeerMaxConnsPerHost int `yaml:"peer_max_conns_per_host,omitempty" json:"peer_max_conns_per_host,omitempty"`
 	// PeerMaxIdleConnDuration controls how long idle peer connections
-	// are kept before closing. Default 20s. This MUST stay below the
-	// peer's admin-server idle timeout (30s): the client must close
-	// idle connections before the server reaps them, otherwise the
-	// first request on a reaped connection fails with EOF or broken
+	// are kept before closing. Default 120s. This MUST stay below the
+	// peer's admin-server idle timeout (default 300s): the client must
+	// close idle connections before the server reaps them, otherwise
+	// the first request on a reaped connection fails with EOF or broken
 	// pipe and the fetch falls back to origin. validatePeerFetchConfig
 	// enforces the ordering against admin.idle_timeout.
 	PeerMaxIdleConnDuration time.Duration `yaml:"peer_max_idle_conn_duration,omitempty" json:"peer_max_idle_conn_duration,omitempty"`
@@ -784,7 +784,8 @@ type AdminConfig struct {
 	DrainDuration time.Duration `yaml:"drain_duration,omitempty" json:"drain_duration,omitempty"`
 	// IdleTimeout is the keep-alive idle timeout for admin-server
 	// connections, including cluster peer RPCs (/v1/peer/*). Zero
-	// defaults to 30s. Peer clients MUST configure
+	// defaults to 300s so idle peer connections survive quiet periods.
+	// Peer clients MUST configure
 	// cluster.peer_max_idle_conn_duration below this value so they
 	// close idle connections first; otherwise the first peer RPC on a
 	// server-reaped connection fails with EOF or broken pipe.

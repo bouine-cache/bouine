@@ -62,7 +62,7 @@ type Config struct {
 	Addr               string
 	Token              string
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
-	// Zero applies DefaultAdminIdleTimeout (30s). Cluster peer RPCs ride
+	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride
 	// this server, so peer clients must keep their idle timeout strictly
 	// below it (config validation enforces the ordering).
 	IdleTimeout        time.Duration
@@ -105,10 +105,12 @@ type Server struct {
 }
 
 // DefaultAdminIdleTimeout is the keep-alive idle timeout for admin
-// server connections when admin.idle_timeout is not set. Cluster peer
-// RPCs ride the admin server, so peer clients must keep their idle
-// timeout strictly below this value (see config.AdminConfig.IdleTimeout).
-const DefaultAdminIdleTimeout = 30 * time.Second
+// server connections when admin.idle_timeout is not set. It is long
+// (300s) so idle peer connections survive quiet periods. Cluster peer
+// RPCs ride the admin server, so peer clients must still keep their
+// idle timeout strictly below this value (see
+// config.AdminConfig.IdleTimeout).
+const DefaultAdminIdleTimeout = 300 * time.Second
 
 // resolveAdminIdleTimeout applies the default when the operator has
 // not configured admin.idle_timeout.

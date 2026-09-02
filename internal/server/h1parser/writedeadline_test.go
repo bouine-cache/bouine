@@ -103,15 +103,24 @@ func TestServeHit_WriteDeadlineReArmsAfterThreshold(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		buf := make([]byte, 512)
+		have := make([]byte, 0, 512)
 		for i := range 2 {
 			_, err := client.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
 			require.NoError(t, err)
-			buf := make([]byte, 256)
-			read := 0
-			for read < len("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello") {
+			// Read the full response: status + headers + body, until the
+			// "hello" body terminator arrives. The exact byte count is not
+			// pinned — the mock's Connection trailer is part of the header
+			// block, and leaving response bytes unread would turn the
+			// client's graceful close into an RST.
+			have = have[:0]
+			for {
 				n, err := client.Read(buf)
 				require.NoError(t, err)
-				read += n
+				have = append(have, buf[:n]...)
+				if len(have) >= 5 && string(have[len(have)-5:]) == "hello" {
+					break
+				}
 			}
 			// Advance past the threshold: the remaining window after the
 			// first hit is now < writeRefreshThreshold.

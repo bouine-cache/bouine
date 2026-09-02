@@ -32,6 +32,11 @@ const maxFetchTimeout = 5 * time.Minute
 // stays coherent with the Retry-After: 1 sent to shed clients.
 const maxFetchWaitTimeout = 1 * time.Second
 
+// defaultAdminIdleTimeout mirrors admin.DefaultAdminIdleTimeout (30s).
+// Duplicated because config is a leaf package and cannot import
+// internal/admin. If you change one, change the other.
+const defaultAdminIdleTimeout = 30 * time.Second
+
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even
 // with an empty config file.
@@ -604,8 +609,29 @@ func (c *Config) validatePeerFetchConfig() error {
 			c.Cluster.PeerMaxConnsPerHost)
 	}
 	if c.Cluster.PeerMaxIdleConnDuration < 0 {
-		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 120s), got %v",
+		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 20s), got %v",
 			c.Cluster.PeerMaxIdleConnDuration)
+	}
+	if c.Admin.IdleTimeout < 0 {
+		return fmt.Errorf("config: admin.idle_timeout must be >= 0 (0 = default 30s), got %v",
+			c.Admin.IdleTimeout)
+	}
+	// The peer client must close idle connections before the admin
+	// server reaps them; otherwise the first peer RPC on a
+	// server-reaped connection fails with EOF or broken pipe and the
+	// fetch falls back to origin. Only enforced when both values are
+	// explicitly set: the built-in defaults (20s client / 30s server)
+	// already satisfy the ordering.
+	if id := c.Cluster.PeerMaxIdleConnDuration; id > 0 {
+		adminIdle := c.Admin.IdleTimeout
+		if adminIdle <= 0 {
+			adminIdle = defaultAdminIdleTimeout
+		}
+		if id >= adminIdle {
+			return fmt.Errorf(
+				"config: cluster.peer_max_idle_conn_duration (%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
+				id, adminIdle)
+		}
 	}
 	return nil
 }

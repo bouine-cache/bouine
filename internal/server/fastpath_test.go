@@ -170,8 +170,7 @@ func TestHandleTLSFastPath_PlainConn(t *testing.T) {
 	// Close the server side immediately to trigger a clean exit (peek returns 0 bytes).
 	_, server := net.Pipe()
 	_ = server.Close()
-	errCh := make(chan error, 2)
-	srv.handleFastPathConn(server, nil, errCh)
+	srv.handleFastPathConn(server, nil)
 }
 
 func TestLogReusePortStart_WithFastPath(t *testing.T) {
@@ -325,8 +324,7 @@ func TestHandleFastPathConn_Cleartext(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 
-	errCh := make(chan error, 2)
 	// Close the server side immediately to trigger a clean exit from handleCleartextFastPath.
 	_ = server.Close()
-	srv.handleFastPathConn(server, nil, errCh)
+	srv.handleFastPathConn(server, nil)
 }

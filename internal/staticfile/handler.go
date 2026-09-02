@@ -203,11 +203,6 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	h.streamFastFile(ctx, f, servedPath)
 }
 
-// ServeHTTP implements http.Handler. Retained for cache-handler upstream
-// compatibility until the cache handler is fully migrated to fasthttp.
-//
-//nolint:depguard // net/http required for cache-handler upstream interface
-
 // isPathContained checks whether the cleaned path, when joined with
 // root, stays within the root directory.
 func (h *Handler) isPathContained(cleaned string) bool {
@@ -346,7 +341,7 @@ func (h *Handler) streamFastFile(ctx *fasthttp.RequestCtx, f *os.File, cleanedPa
 //
 // The already-opened file f is used for hashing to avoid a redundant
 // open syscall. The file offset is advanced to EOF after hashing;
-// ServeHTTP resets it to 0 before any body streaming.
+// ServeRequest resets it to 0 before any body streaming.
 //
 // Returns an empty string if the content hash cannot be computed
 // (seek/read error). Per ADR-0017 §7, a missing ETag is strictly safer
@@ -435,9 +430,9 @@ const (
 // into a single 206 response. We serve the first range only.
 //
 // The already-opened file f is reused from resolveFile — no second
-// open syscall. The file offset must be at 0 when handleRange is called
-// (guaranteed by ServeHTTP's Seek(0) after setHeaders, or by
-// resolveFile opening a fresh handle on cache hit). When handleRange
+// open syscall. The file offset must be at 0 when handleFastRange is
+// called (guaranteed by ServeRequest's Seek(0) after setHeaders, or by
+// resolveFile opening a fresh handle on cache hit). When handleFastRange
 // returns false (rangeInvalid), it must NOT have called Seek on f, so
 // the caller can safely fall through to streamFile which reads from
 // offset 0.

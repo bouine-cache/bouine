@@ -28,7 +28,8 @@ for fasthttp-native callers.
 ## Consequences
 
 - `pkg/header` no longer depends on `net/http` for canonicalization.
-- The `FromHTTP`/`WriteTo` methods remain until the cache handler is
-  fully migrated to fasthttp-native types (future phase).
+- Complete: the `FromHTTP`/`WriteTo` net/http shims were removed once the
+  cache handler migrated to fasthttp-native types; the fasthttp-native
+  `FromFastHTTP`/`WriteToFastHTTP` pair is the only remaining surface.
 - Header key canonicalization is identical to `net/http` — verified by
-  existing tests that compare against `http.CanonicalHeaderKey`.
+  tests that compare against the same canonicalization rules.

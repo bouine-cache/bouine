@@ -35,7 +35,6 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	)
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 4)
 
 	go func() {
 		<-ctx.Done()
@@ -54,24 +53,18 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		wg.Add(1)
 		go func(c net.Conn) { //nolint:contextcheck // parser manages its own deadlines
 			defer wg.Done()
-			s.handleFastPathConn(c, parser, errCh)
+			s.handleFastPathConn(c, parser)
 		}(conn)
 	}
 
 	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			return err
-		}
-	}
 	return nil
 }
 
 // handleFastPathConn routes a single accepted connection to the h1parser.
 // For TLS connections, the handshake is performed first. All connections
 // go to the h1parser — HTTP/2 is not supported.
-func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, errCh chan<- error) {
+func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser) {
 	defer func() { _ = conn.Close() }()
 
 	if parser == nil {
@@ -84,47 +77,24 @@ func (s *Listener) handleFastPathConn(conn net.Conn, parser *h1parser.Parser, er
 		}
 	}
 
-	if err := parser.Serve(conn); err != nil { //nolint:contextcheck // parser manages its own deadlines
-		reportFastPathError(err, errCh)
-	}
+	// Errors from the parser are per-connection: EOF, closed, malformed
+	// request, timeout, smuggling detection, write failure. None are
+	// listener-level failures.
+	_ = parser.Serve(conn) //nolint:contextcheck // parser manages its own deadlines
 }
-
-// reportFastPathError handles errors from parser.Serve. All errors from
-// the parser are per-connection: EOF, closed, malformed request, timeout,
-// smuggling detection, write failure. None are listener-level failures.
-func reportFastPathError(_ error, _ chan<- error) {}
 
 // serveMultiFastPath runs the fast-path accept loop across multiple
 // SO_REUSEPORT listeners. Called from serveMulti when the fast path is enabled.
 func (s *Listener) serveMultiFastPath(ctx context.Context, listeners []net.Listener) error {
-	multiCtx, multiCancel := context.WithCancel(ctx)
-	defer multiCancel()
-
-	errCh := make(chan error, len(listeners))
 	var wg sync.WaitGroup
 	for _, ln := range listeners {
 		wg.Add(1)
 		go func(l net.Listener) {
 			defer wg.Done()
-			if err := s.serveFastPath(multiCtx, l); err != nil && !errors.Is(err, net.ErrClosed) {
-				errCh <- err
-			}
+			_ = s.serveFastPath(ctx, l)
 		}(ln)
 	}
 
-	var firstErr error
-	select {
-	case <-ctx.Done():
-	case firstErr = <-errCh:
-		multiCancel()
-	}
-
 	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return nil
 }

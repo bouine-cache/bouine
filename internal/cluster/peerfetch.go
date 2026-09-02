@@ -144,25 +144,6 @@ func (f *PeerFetcher) Close(_ context.Context) error {
 	return nil
 }
 
-// NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
-// mTLS credentials. If nil a plain HTTP client is used (test-only).
-// reg, if non-nil, receives Prometheus metric registration.
-// hopLimit caps the number of peers a request may traverse; 0 uses MaxHops.
-func NewPeerFetcher(tlsCfg *tls.Config, reg prometheus.Registerer, hopLimit int) *PeerFetcher {
-	return NewPeerFetcherWithConfig(PeerFetcherConfig{
-		TLSConfig: tlsCfg,
-		HopLimit:  hopLimit,
-	}, reg, nil)
-}
-
-// NewPeerFetcherWithLogger creates a PeerFetcher with a structured logger.
-func NewPeerFetcherWithLogger(tlsCfg *tls.Config, reg prometheus.Registerer, logger observability.Logger, hopLimit int) *PeerFetcher {
-	return NewPeerFetcherWithConfig(PeerFetcherConfig{
-		TLSConfig: tlsCfg,
-		HopLimit:  hopLimit,
-	}, reg, logger)
-}
-
 // NewPeerFetcherWithConfig creates a PeerFetcher with full pipelining
 // configuration. MaxConnsPerHost and MaxIdleConnDuration default to 8
 // and 120s respectively when zero.

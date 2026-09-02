@@ -885,32 +885,32 @@ func TestValidate_PeerIdleBelowAdminIdle(t *testing.T) {
 	// Explicit inversion must be rejected.
 	cfg := Defaults()
 	cfg.Listen.Cluster = ":8443"
-	cfg.Cluster.PeerMaxIdleConnDuration = 60 * time.Second
-	cfg.Admin.IdleTimeout = 30 * time.Second
+	cfg.Cluster.PeerMaxIdleConnDuration = 360 * time.Second
+	cfg.Admin.IdleTimeout = 300 * time.Second
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
 
 	// Equal values must also be rejected (strict ordering).
-	cfg.Cluster.PeerMaxIdleConnDuration = 30 * time.Second
+	cfg.Cluster.PeerMaxIdleConnDuration = 300 * time.Second
 	require.Error(t, cfg.Validate())
 
 	// Client below server must validate.
-	cfg.Cluster.PeerMaxIdleConnDuration = 20 * time.Second
-	cfg.Admin.IdleTimeout = 30 * time.Second
+	cfg.Cluster.PeerMaxIdleConnDuration = 120 * time.Second
+	cfg.Admin.IdleTimeout = 300 * time.Second
 	require.NoError(t, cfg.Validate())
 
-	// Client set against the built-in 30s server default must enforce
+	// Client set against the built-in 300s server default must enforce
 	// the ordering too.
 	cfg = Defaults()
 	cfg.Listen.Cluster = ":8443"
-	cfg.Cluster.PeerMaxIdleConnDuration = 45 * time.Second
+	cfg.Cluster.PeerMaxIdleConnDuration = 360 * time.Second
 	require.Error(t, cfg.Validate())
 
-	// Unset client idle uses the built-in 20s default and validates.
+	// Unset client idle uses the built-in 120s default and validates.
 	cfg = Defaults()
 	cfg.Listen.Cluster = ":8443"
-	cfg.Admin.IdleTimeout = 30 * time.Second
+	cfg.Admin.IdleTimeout = 300 * time.Second
 	require.NoError(t, cfg.Validate())
 }
 

@@ -1,4 +1,4 @@
-# H1 reactor: stuck writers, dropped hit metrics, spawner saturation
+# H1 reactor: stuck writers, dropped hit metrics, spawner saturation, starved loop
 
 ## Symptoms
 
@@ -24,17 +24,42 @@
   while hit-path latency stays flat. This is deliberate: the
   alternative would stall every cache hit multiplexed on that
   listener.
+- **Starved loop** (diagnose with the telemetry below, not pprof): if
+  `bouine_h1_reactor_hits_total` is flat while
+  `bouine_requests_total{cache_result="HIT"}` climbs, the reactor is
+  running but not serving. Before the return-to-reactor path
+  (ADR-0042) a single miss exiled a connection to the blocking parser
+  for its lifetime; mixed hit/miss workloads (cluster peer fetch,
+  origin misses) left the reactor with ~zero connections. If it
+  recurs, check `bouine_h1_reactor_returns_total` — a low return rate
+  with high `handoffs_total{reason="miss"}` means connections are not
+  coming back (pending-queue saturation or a regression in the return
+  path).
 
 ## Diagnosis
 
 1. Check `bouine_requests_total{cache_result="HIT"}` continuity across
    the restart window; the "dropped" log line quantifies exactly the
    gap for reactor-served hits.
-2. If drops recur (not just at shutdown): capture `pprof` CPU on the
+2. Reactor engagement (ADR-0042 telemetry):
+   - `bouine_h1_reactor_conns_registered_total` vs
+     `bouine_h1_reactor_handoffs_total` — how much of the connection
+     population the loop actually holds.
+   - `bouine_h1_reactor_handoffs_total{reason}` — why connections
+     leave: `miss` (no local object; peer/origin fetch), `disqualified`
+     (conditional, range, body framing, non-GET/HEAD), `malformed`,
+     `oversize` (>16 KiB headers), `overflow` (accept queue full),
+     `cap` (reactor at 4096 conns).
+   - `bouine_h1_reactor_returns_total` — blocking-parser hand-backs;
+     this is what keeps mixed-traffic connections cycling back to the
+     loop.
+   - `bouine_h1_reactor_conns_dropped_total` — reactor-initiated
+     closes (errors, idle expiry, stuck writers).
+3. If drops recur (not just at shutdown): capture `pprof` CPU on the
    instance — the drainer goroutine (20 ms poll) being starved points
    to CPU saturation on the node, not a reactor defect. The drop
    counter is a symptom of node pressure, same class as GC throttle.
-3. For stuck writers: no action is normally required (the sweep is the
+4. For stuck writers: no action is normally required (the sweep is the
    fix). If clients legitimately stream responses slower than
    5 minutes, raise the blocking-path write timeout and
    `reactorWriteTimeout` together — they must stay in sync (both are
@@ -56,3 +81,6 @@
   and W7 (stuck-writer safety net) rationale and contracts.
 - `internal/server/h1parser/reactor_metrics.go` — ring semantics;
   drop-newest policy.
+- `docs/decisions/0042-h1-epoll-reactor-return-path.md` —
+  return-to-reactor, pipelined-inline hits, and the telemetry
+  counters.

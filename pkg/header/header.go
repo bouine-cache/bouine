@@ -199,9 +199,10 @@ const (
 	// dashboard.
 	XBouinePath = "X-Bouine-Path"
 
-	// XBouineRoute — set by the data-plane router so downstream
-	// observability middleware can attribute the request to a configured
-	// route label.
+	// XBouineRoute — route attribution key. The data-plane router sets
+	// it as a fasthttp UserValue (not a wire header) so the observability
+	// middleware can attribute the request to a configured route label;
+	// an inbound header of this name is stripped as attacker input.
 	XBouineRoute = "X-Bouine-Route"
 
 	// BouineHop — carries the current peer-fetch hop count for cluster

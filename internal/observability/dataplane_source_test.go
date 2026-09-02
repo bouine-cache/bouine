@@ -299,8 +299,10 @@ func TestMethodIndex(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, 0, methodIndex("GET"))
 	assert.Equal(t, 1, methodIndex("HEAD"))
-	assert.Equal(t, 2, methodIndex("POST"))
-	assert.Equal(t, 2, methodIndex(""))
+	// Non-GET/HEAD methods take the WithLabelValues fallback so the
+	// exact token is preserved on requests_total (issue #607 phase 1.1).
+	assert.Equal(t, -1, methodIndex("POST"))
+	assert.Equal(t, -1, methodIndex(""))
 }
 
 func TestStatusIndex(t *testing.T) {

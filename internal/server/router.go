@@ -128,7 +128,11 @@ func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 		if re.methods != nil && !re.methods[string(ctx.Method())] { //nolint:staticcheck // SA6001: method is used once per iteration, not worth inlining
 			continue
 		}
-		ctx.Request.Header.Set(header.XBouineRoute, re.labelVal)
+		// The metrics middleware reads the route from the UserValue
+		// (issue #607 phase 0). The old request-header form is gone:
+		// nothing read it, and the origin pool forwards request headers
+		// verbatim, so it leaked internal route names upstream.
+		ctx.SetUserValue(header.XBouineRoute, re.labelVal)
 		re.handler(ctx)
 		return
 	}

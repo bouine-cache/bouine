@@ -108,19 +108,25 @@ type DataPlaneMetrics struct {
 	// layering rule (observability cannot import internal/platform).
 	nowFunc          func() time.Time
 	ResponseBytesOut *prometheus.CounterVec
-	// routeTable holds pre-resolved Prometheus collectors indexed by route
-	// ID, eliminating per-request WithLabelValues hash lookups for common
-	// label tuples. nil when PreResolveRoutes has not been called (tests,
-	// minimal configs). When nil, the middleware falls back to
-	// WithLabelValues for all requests.
+	// routeTable holds per-route slot tables indexed by route ID. Slots
+	// fill lazily on first observation (issue #607 phase 1.4): an idle
+	// route costs zero series, and after the first fill the middleware
+	// uses direct array indexing instead of WithLabelValues hash lookups.
+	// nil when PreResolveRoutes has not been called (tests, minimal
+	// configs); when nil, the middleware falls back to WithLabelValues
+	// for all requests.
 	routeTable []*routeMetrics
+	// fallbackCount tracks requests whose label tuple missed the lazy
+	// slot path (uncommon method/status). Exposed via FallbackCount for
+	// verifying slot coverage in prod; a sustained nonzero rate is a
+	// cardinality smell, not a correctness bug.
+	fallbackCount atomic.Uint64
 	// accessSampleRate is the 1-in-N sampling rate for Info-level access
 	// log entries. 0 means always log (no sampling). The cache key is
 	// used for deterministic sampling so the same key is always logged
 	// or always skipped.
 	accessSampleRate uint64
 	accessCounter    atomic.Uint64
-	fallbackCount    atomic.Uint64
 }
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
@@ -130,18 +136,18 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		RequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "requests_total",
-			Help:      "Total number of requests processed by the data plane.",
+			Help:      "Total number of requests processed by the data plane. Carries the exact HTTP method and status code; the duration histogram carries the status class instead (issue #607).",
 		}, []string{"method", "status", "cache_result", "source", "route"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "bouine",
 			Name:      "request_duration_seconds",
-			Help:      "Histogram of request durations in seconds.",
+			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no method dimension (issue #607 phase 1); use bouine_requests_total for exact codes and methods. All consumers aggregate by cache_result/route only.",
 			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 			// No NativeHistogramBucketFactor: the native-histogram sparse-
 			// bucket math cost on every Observe was called out in the
 			// hit-path plan; no dashboard uses native histogram queries
 			// (all PromQL uses classic _bucket series).
-		}, []string{"method", "status", "cache_result", "source", "route"}),
+		}, []string{"status", "cache_result", "source", "route"}),
 		ResponseBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "response_bytes_total",
@@ -262,22 +268,39 @@ func (m *DataPlaneMetrics) SetNowFunc(fn func() time.Time) {
 
 // Label dimension sizes for the pre-resolved metrics array.
 const (
-	metricMethodSlots = 3 // GET=0, HEAD=1, other=2
-	metricStatusSlots = 8 // 200=0,206=1,304=2,301=3,302=4,404=5,500=6,other=7
-	metricResultSlots = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
-	metricSourceSlots = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,NONE=4
+	// metricMethodSlots bounds the method axis to GET/HEAD; every other
+	// method token takes the WithLabelValues fallback (bounded label cost
+	// on requests_total, and the histogram has no method dimension).
+	metricMethodSlots = 2 // GET=0, HEAD=1
+	metricStatusSlots = 7 // 200=0,206=1,304=2,301=3,302=4,404=5,500=6
+	// metricStatusClassSlots is the histogram status axis: response
+	// classes instead of exact codes (issue #607 phase 1.2).
+	metricStatusClassSlots = 6 // 2xx=0,3xx=1,4xx=2,5xx=3,1xx=4,other=5
+	metricResultSlots      = 5 // HIT=0,MISS=1,STALE=2,REVALIDATED=3,BYPASS=4
+	metricSourceSlots      = 5 // HOT=0,WARM=1,PEER=2,ORIGIN=3,NONE=4
 )
 
-// routeMetrics holds pre-resolved Prometheus collectors for a single route,
-// indexed by [method][status][cacheResult][source]. This eliminates the
-// per-request WithLabelValues hash lookup for common label tuples.
+// metricMethodLabels decodes a method axis index back to the exact label
+// for bouine_requests_total.
+var metricMethodLabels = [metricMethodSlots]string{"GET", "HEAD"}
+
+// routeMetrics holds per-route collectors indexed by
+// [method][status][cacheResult][source] (the histogram drops the method
+// axis and collapses status to the class axis). Slots fill lazily on first
+// observation (issue #607 phase 1.4): an idle route costs zero series, and
+// after the first fill the steady-state path is a lock-free atomic load.
+// Concurrent first-touch of one slot is benign: WithLabelValues returns
+// the same child for the same label tuple, so both goroutines store the
+// same pointer.
 type routeMetrics struct {
-	requestsTotal   [metricMethodSlots][metricStatusSlots][metricResultSlots][metricSourceSlots]prometheus.Counter
-	requestDuration [metricMethodSlots][metricStatusSlots][metricResultSlots][metricSourceSlots]prometheus.Observer
-	responseBytes   [metricMethodSlots][metricResultSlots][metricSourceSlots]prometheus.Counter
+	requestsTotal   [metricMethodSlots][metricStatusSlots][metricResultSlots][metricSourceSlots]atomic.Pointer[prometheus.Counter]
+	requestDuration [metricStatusClassSlots][metricResultSlots][metricSourceSlots]atomic.Pointer[prometheus.Observer]
+	responseBytes   [metricMethodSlots][metricResultSlots][metricSourceSlots]atomic.Pointer[prometheus.Counter]
 }
 
-// methodIndex maps HTTP methods to array indices.
+// methodIndex maps HTTP methods to array indices. Returns -1 for methods
+// outside the pre-resolved axis: they take the WithLabelValues fallback so
+// the exact method token is preserved on requests_total.
 func methodIndex(method string) int {
 	switch method {
 	case "GET":
@@ -285,7 +308,7 @@ func methodIndex(method string) int {
 	case "HEAD":
 		return 1
 	default:
-		return 2
+		return -1
 	}
 }
 
@@ -298,8 +321,37 @@ func methodIndexBytes(method []byte) int {
 	case "HEAD":
 		return 1
 	default:
-		return 2
+		return -1
 	}
+}
+
+// statusClassStrings maps statusClassIndex to the histogram status label.
+var statusClassStrings = [metricStatusClassSlots]string{"2xx", "3xx", "4xx", "5xx", "1xx", "0"}
+
+// statusClassIndex maps an HTTP status code to the histogram's class
+// axis (issue #607 phase 1.2). Always in range: codes outside 100-599
+// map to the unknown slot, matching the legacy "0" label.
+func statusClassIndex(code int) int {
+	switch {
+	case code >= 200 && code < 300:
+		return 0
+	case code >= 300 && code < 400:
+		return 1
+	case code >= 400 && code < 500:
+		return 2
+	case code >= 500 && code < 600:
+		return 3
+	case code >= 100 && code < 200:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// statusClassString returns the histogram's status label for an HTTP
+// status code, zero-alloc (table lookup).
+func statusClassString(code int) string {
+	return statusClassStrings[statusClassIndex(code)]
 }
 
 // statusIndex maps common HTTP status codes to array indices. Returns -1
@@ -400,62 +452,30 @@ func sourceIndexBytes(s []byte) int {
 	}
 }
 
-// PreResolveRoutes builds the pre-resolved metrics array for the given route
-// names. Each route gets its own set of pre-resolved counters, observers, and
-// byte counters for all common (method, status, cacheResult, source) tuples.
-// Uncommon tuples fall back to WithLabelValues at runtime.
+// PreResolveRoutes builds the route table for the given route names. Each
+// route gets an empty slot table; slots fill on first observation (issue
+// #607 phase 1.4), so routes that never receive traffic cost zero series.
+// Pre-resolution only allocates the slot array, not Prometheus children.
 func (m *DataPlaneMetrics) PreResolveRoutes(routeNames []string) {
 	m.routeIDs = make(map[string]int, len(routeNames)+1)
 	m.routeTable = make([]*routeMetrics, 0, len(routeNames)+1)
 
-	// Index 0 is the _default route (used when no route header is set).
+	// Index 0 is the _default route (used when no route UserValue is set).
 	m.routeIDs["_default"] = 0
-	m.routeTable = append(m.routeTable, m.buildRouteMetrics("_default"))
+	m.routeTable = append(m.routeTable, &routeMetrics{})
 
 	for _, name := range routeNames {
 		if name == "" || name == "_default" {
 			continue
 		}
 		m.routeIDs[name] = len(m.routeTable)
-		m.routeTable = append(m.routeTable, m.buildRouteMetrics(name))
+		m.routeTable = append(m.routeTable, &routeMetrics{})
 	}
 }
 
-// buildRouteMetrics pre-resolves all counter/observer instances for a single
-// route by calling WithLabelValues once per tuple at init time. Subsequent
-// requests use direct array indexing instead of hash lookups.
-func (m *DataPlaneMetrics) buildRouteMetrics(route string) *routeMetrics {
-	rm := &routeMetrics{}
-	methods := []string{"GET", "HEAD", ""}
-	statuses := []string{"200", "206", "304", "301", "302", "404", "500", "0"}
-	results := []string{"HIT", "MISS", "STALE", "REVALIDATED", "BYPASS"}
-	sources := []string{
-		string(api.SourceHot), string(api.SourceWarm),
-		string(api.SourcePeer), string(api.SourceOrigin), "",
-	}
-	for mi := range methods {
-		for si := range statuses {
-			for ri := range results {
-				for src := range sources {
-					rm.requestsTotal[mi][si][ri][src] =
-						m.RequestsTotal.WithLabelValues(methods[mi], statuses[si], results[ri], sources[src], route)
-					rm.requestDuration[mi][si][ri][src] =
-						m.RequestDuration.WithLabelValues(methods[mi], statuses[si], results[ri], sources[src], route)
-				}
-			}
-		}
-	}
-	// ResponseBytesOut has 4 labels (no status).
-	for mi := range methods {
-		for ri := range results {
-			for src := range sources {
-				rm.responseBytes[mi][ri][src] =
-					m.ResponseBytesOut.WithLabelValues(methods[mi], results[ri], sources[src], route)
-			}
-		}
-	}
-	return rm
-}
+// buildRouteMetrics is gone: pre-resolution is lazy (issue #607 phase
+// 1.4). PreResolveRoutes allocates empty slot tables and the slotX
+// helpers fill children on first observation.
 
 // SetAccessLog configures the access logger and sampling rate for the the
 // merged middleware. logger receives Warn for non-200 responses (always)
@@ -727,15 +747,6 @@ func init() {
 	}
 }
 
-// Middleware wraps an http.Handler and records RED metrics + structured
-// access log for every request. Metrics are always recorded; the access
-// log entry is sampled at the logger's configured rate (1-in-N for 200
-// OK, always for non-200).
-//
-// This merged middleware replaces the former separate accesslog + metrics
-// middleware pair, halving the ResponseWriter pool acquires and wrapper
-// layers on the Write path from two to one.
-
 // FastHTTPMiddleware wraps a fasthttp.RequestHandler and records RED
 // metrics + structured access log for every request. This is the
 // fasthttp-native middleware, wired into the data-plane handler chain.
@@ -835,29 +846,70 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 	}
 }
 
+// slotCounter resolves the requests_total slot at [mi][si][ri][src],
+// creating the child on first touch via WithLabelValues. Concurrent first
+// touches of one slot are benign: WithLabelValues returns the same child
+// for the same tuple, so both stores write the same pointer.
+func (m *DataPlaneMetrics) slotCounter(rm *routeMetrics, mi, si, ri, src int, method, status, cacheResult, source, route string) prometheus.Counter {
+	slot := &rm.requestsTotal[mi][si][ri][src]
+	if c := slot.Load(); c != nil {
+		return *c
+	}
+	c := m.RequestsTotal.WithLabelValues(method, status, cacheResult, source, route)
+	slot.Store(&c)
+	return c
+}
+
+// slotObserver resolves the request_duration slot at [sci][ri][src]. The
+// histogram's status axis carries the response class, not the exact code,
+// and has no method dimension (issue #607 phase 1).
+func (m *DataPlaneMetrics) slotObserver(rm *routeMetrics, sci, ri, src int, statusClass, cacheResult, source, route string) prometheus.Observer {
+	slot := &rm.requestDuration[sci][ri][src]
+	if o := slot.Load(); o != nil {
+		return *o
+	}
+	o := m.RequestDuration.WithLabelValues(statusClass, cacheResult, source, route)
+	slot.Store(&o)
+	return o
+}
+
+// slotBytesCounter resolves the response_bytes slot at [mi][ri][src].
+func (m *DataPlaneMetrics) slotBytesCounter(rm *routeMetrics, mi, ri, src int, method, cacheResult, source, route string) prometheus.Counter {
+	slot := &rm.responseBytes[mi][ri][src]
+	if c := slot.Load(); c != nil {
+		return *c
+	}
+	c := m.ResponseBytesOut.WithLabelValues(method, cacheResult, source, route)
+	slot.Store(&c)
+	return c
+}
+
 // recordFastHTTPMetrics increments the RED counters. The method is
 // passed as []byte and classified with methodIndexBytes (zero-alloc on
-// the pre-resolved path). The fallback passes the real method string —
-// WithLabelValues allocates there anyway, and squashing uncommon
-// methods to "OTHER" would destroy the method dimension exactly where
-// it matters most.
+// the pre-resolved path). RequestsTotal keeps the exact method and
+// status code (1 series per extra code, no buckets); the duration
+// histogram drops the method dimension and collapses status to the
+// response class, so the fallback path stays bounded even for arbitrary
+// method tokens (issue #607 phase 1.1/1.2).
 func (m *DataPlaneMetrics) recordFastHTTPMetrics(method []byte, code int, status, route, cacheResult, source string, dur, bytesOut float64) {
 	mi := methodIndexBytes(method)
 	if rm, ok := m.lookupRouteMetrics(route); ok {
 		si := statusIndex(code)
 		ri := cacheResultIndex(cacheResult)
 		src := sourceIndex(source)
-		if si >= 0 && ri >= 0 && src >= 0 {
-			rm.requestsTotal[mi][si][ri][src].Inc()
-			rm.requestDuration[mi][si][ri][src].Observe(dur)
-			rm.responseBytes[mi][ri][src].Add(bytesOut)
+		if mi >= 0 && si >= 0 && ri >= 0 && src >= 0 {
+			methodLabel := metricMethodLabels[mi]
+			m.slotCounter(rm, mi, si, ri, src, methodLabel, status, cacheResult, source, route).Inc()
+			m.slotObserver(rm, statusClassIndex(code), ri, src,
+				statusClassString(code), cacheResult, source, route).Observe(dur)
+			m.slotBytesCounter(rm, mi, ri, src, methodLabel, cacheResult, source, route).Add(bytesOut)
 			return
 		}
 		m.fallbackCount.Add(1)
 	}
 	label := string(method)
 	m.RequestsTotal.WithLabelValues(label, status, cacheResult, source, route).Inc()
-	m.RequestDuration.WithLabelValues(label, status, cacheResult, source, route).Observe(dur)
+	m.RequestDuration.WithLabelValues(statusClassString(code), cacheResult, source, route).Observe(dur)
 	m.ResponseBytesOut.WithLabelValues(label, cacheResult, source, route).Add(bytesOut)
 }
 
@@ -878,11 +930,10 @@ func (m *DataPlaneMetrics) buildFastHTTPAccessLogAttrs(ctx *fasthttp.RequestCtx,
 	return attrs
 }
 
-// recordMetrics increments the RED counters using pre-resolved labels when
-// available, falling back to WithLabelValues for uncommon tuples.
-
-// observeDuration records the request duration on the given observer,
-// attaching a trace exemplar when a valid span context is available.
+// FallbackCount returns the number of requests whose label tuple missed
+// the lazy slot path and took the WithLabelValues route. Read by tests
+// and the dashboard insights engine.
+func (m *DataPlaneMetrics) FallbackCount() uint64 { return m.fallbackCount.Load() }
 
 // RecordHit implements api.FastPathMetrics. It increments the RED
 // counters for a fast-path hit without going through the middleware
@@ -903,16 +954,18 @@ func (m *DataPlaneMetrics) RecordHit(method, route, cacheResult, source string, 
 		si := statusIndex(status)
 		ri := cacheResultIndex(cacheResult)
 		src := sourceIndex(source)
-		if si >= 0 && ri >= 0 && src >= 0 {
-			rm.requestsTotal[mi][si][ri][src].Inc()
-			rm.requestDuration[mi][si][ri][src].Observe(dur)
-			rm.responseBytes[mi][ri][src].Add(float64(bytesOut))
+		if mi >= 0 && si >= 0 && ri >= 0 && src >= 0 {
+			methodLabel := metricMethodLabels[mi]
+			m.slotCounter(rm, mi, si, ri, src, methodLabel, strconv.Itoa(status), cacheResult, source, route).Inc()
+			m.slotObserver(rm, statusClassIndex(status), ri, src,
+				statusClassString(status), cacheResult, source, route).Observe(dur)
+			m.slotBytesCounter(rm, mi, ri, src, methodLabel, cacheResult, source, route).Add(float64(bytesOut))
 			return
 		}
 		m.fallbackCount.Add(1)
 	}
 	m.RequestsTotal.WithLabelValues(method, strconv.Itoa(status), cacheResult, source, route).Inc()
-	m.RequestDuration.WithLabelValues(method, strconv.Itoa(status), cacheResult, source, route).Observe(dur)
+	m.RequestDuration.WithLabelValues(statusClassString(status), cacheResult, source, route).Observe(dur)
 	m.ResponseBytesOut.WithLabelValues(method, cacheResult, source, route).Add(float64(bytesOut))
 }
 
@@ -983,11 +1036,6 @@ func accessLogMessage(cacheResult string, status int) string {
 		return "served response (unknown cache status)"
 	}
 }
-
-// buildAccessLogAttrs constructs the structured-log attribute slice for
-// an access log entry. Called only when the sampling decision is positive
-// or the status is non-200, so the 20-element []any allocation is avoided
-// for the vast majority of hit requests.
 
 // shouldLogAccess returns true when this request should emit an Info-level
 // access log entry. Uses key-based deterministic sampling when a cache key

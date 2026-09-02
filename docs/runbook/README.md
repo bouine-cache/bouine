@@ -15,4 +15,5 @@ code change that introduces a new failure mode.
 | [`30-rolling-restart.md`](30-rolling-restart.md) | Rolling restarts and cluster operations. |
 | [`40-memory-accounting.md`](40-memory-accounting.md) | Memory accounting and tuning. |
 | [`50-warm-disk-exhaustion.md`](50-warm-disk-exhaustion.md) | Warm-disk exhaustion and incident response. |
+| [`60-pgo-profile-refresh.md`](60-pgo-profile-refresh.md) | PGO profile refresh and custom-profile builds. |
 | [`static-files.md`](static-files.md) | Static file serving. |

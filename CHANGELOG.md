@@ -110,6 +110,21 @@ the curated, human-readable summary.
   60s; default topologySpreadConstraints now use ScheduleAnyway with
   both zone and hostname keys.
 
+### Added
+- Profile-Guided Optimization: a committed `cmd/bouine/default.pgo`
+  profile is now picked up by every build of the main package
+  (ADR-0041). The profile is a
+  composite captured from three load-test traffic legs (hit-only,
+  miss-storm, mixed-realistic) via the admin pprof endpoints, so both
+  hit-heavy and miss-heavy deployments are represented. `make
+  pgo-refresh` re-captures and merges it; the `release-pgo.yml`
+  workflow pushes a freshly captured profile onto every
+  `chore(release): prepare vX.Y.Z` PR before the tag is cut. The
+  load-test config now enables `admin.pprof_enabled: true`. Allocs/op
+  budgets are unaffected (PGO changes inlining, not allocation shape).
+- `bench/pgo/run.sh` + Make targets `pgo-capture`, `pgo-merge`,
+  `pgo-refresh`, `pgo-verify` manage the profile lifecycle.
+
 ## [0.5.2] - 2026-08-30
 
 ### Added

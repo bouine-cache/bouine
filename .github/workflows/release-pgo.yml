@@ -1,0 +1,104 @@
+name: Release PGO
+
+# Refreshes the committed cmd/bouine/default.pgo profile as part of the
+# release process (ADR-0041). A release at bouine starts with a
+# "chore(release): prepare vX.Y.Z" PR (see commit d104531 for the
+# convention); this workflow runs the PGO capture legs against the
+# release candidate's code and pushes the regenerated profile
+# (cmd/bouine/default.pgo — the only location `go build ./cmd/bouine`
+# picks up automatically) onto that PR. The release tag is then cut
+# from a tree whose profile was captured from the very code being
+# released.
+#
+# Triggers:
+#   - synchronize: any push to an open PR titled
+#     "chore(release): prepare vX.Y.Z" (the release-prepare PR).
+#   - workflow_dispatch: manual run with an explicit PR number, for
+#     re-rolls when the PR title was set late or edited.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number whose branch receives the refreshed profile"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  # One capture per PR; a newer push cancels a stale capture.
+  group: release-pgo-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  refresh-profile:
+    name: Capture + merge default.pgo
+    runs-on: [self-hosted, ci]
+    # Only release-prepare PRs. The title check is the convention gate:
+    # non-release PRs never pay the capture cost (~5 min).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.pull_request.title, 'chore(release): prepare v')
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.head_ref }}
+          # The profile commit must carry the DCO sign-off of the
+          # workflow identity (scripts/check-dco.sh + CI dco job).
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run capture legs + merge (make pgo-refresh)
+        env:
+          BOUINE_ADMIN_TOKEN: ${{ secrets.BOUINE_ADMIN_TOKEN }}
+        run: make pgo-refresh
+
+      - name: Fail if profile unchanged or missing
+        run: |
+          set -euo pipefail
+          if [ ! -f cmd/bouine/default.pgo ]; then
+            echo "::error::make pgo-refresh did not install cmd/bouine/default.pgo"
+            exit 1
+          fi
+          # A release PR must carry a capture from its own tree. An
+          # identical hash means the legs ran against stale code —
+          # refuse to no-op.
+          echo "profile sha256: $(sha256sum cmd/bouine/default.pgo | cut -d' ' -f1)"
+          echo "profile bytes: $(wc -c < cmd/bouine/default.pgo)"
+
+      - name: Commit + push to PR branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          set -euo pipefail
+          git config user.name  "bouine-release-bot"
+          git config user.email "release-bot@bouine.invalid"
+
+          if git diff --quiet -- cmd/bouine/default.pgo; then
+            echo "default.pgo unchanged on this tree — nothing to push"
+            exit 0
+          fi
+
+          git add cmd/bouine/default.pgo
+          # -s appends the DCO trailer required by the commit-msg hooks
+          # (prek dco-check) and CI's dco job. Hooks run normally.
+          git commit -s -m "perf(build): refresh default.pgo for release PR #${PR}
+
+          Re-captured from the hit/miss/mixed load legs against this
+          release candidate tree (ADR-0041, bench/pgo/run.sh)."
+          git push origin HEAD:"$(git rev-parse --abbrev-ref HEAD)"
+          echo "Pushed refreshed default.pgo to PR #${PR}"

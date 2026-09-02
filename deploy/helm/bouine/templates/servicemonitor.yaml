@@ -8,14 +8,18 @@ metadata:
     {{- with .Values.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+  {{- include "bouine.annotations" (list . .Values.serviceMonitor.annotations) | nindent 2 }}
 spec:
   selector:
     matchLabels:
       {{- include "bouine.selectorLabels" . | nindent 6 }}
+      # Scrape via the dedicated admin Service (it carries the plane
+      # label); the data-plane Service does not expose an admin port.
+      bouine-cache.io/plane: management
   endpoints:
     - port: admin
       path: /metrics
-      interval: {{ .Values.serviceMonitor.interval | default "15s" }}
+      interval: {{ .Values.serviceMonitor.interval | default "60s" }}
       {{- if .Values.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
       {{- end }}

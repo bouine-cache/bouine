@@ -74,9 +74,19 @@
       "default": ""
     },
     "fullnameOverride": {
-      "description": "Override the fully qualified resource name.",
+      "description": "Override the fully qualified resource names.",
       "type": "string",
       "default": ""
+    },
+    "commonLabels": {
+      "description": "Global labels applied to every rendered resource, the pod template, and volume claim templates. Never place selector-relevant keys here: spec.selector is built from selectorLabels only.",
+      "type": "object",
+      "default": {}
+    },
+    "commonAnnotations": {
+      "description": "Global annotations applied to every rendered resource. Resource-specific annotations win over these on key collision.",
+      "type": "object",
+      "default": {}
     },
     "config": {
       "description": "bouine configuration rendered into a ConfigMap mounted at /etc/bouine/.",
@@ -328,7 +338,7 @@
       }
     },
     "service": {
-      "description": "ClusterIP Service exposing the data and admin ports.",
+      "description": "Data-plane Service exposing the HTTP/HTTPS ports.",
       "type": "object",
       "properties": {
         "type": {
@@ -353,6 +363,52 @@
           "minimum": 1,
           "maximum": 65535,
           "default": 9000
+        },
+        "annotations": {
+          "description": "Annotations applied to the data-plane Service (e.g. cloud LB annotations). Wins over commonAnnotations on key collision.",
+          "type": "object",
+          "default": {}
+        },
+        "loadBalancerSourceRanges": {
+          "description": "CIDRs allowed to reach the Service when type is LoadBalancer.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "externalTrafficPolicy": {
+          "description": "External traffic policy for the Service. 'Local' preserves the client source IP at the cost of uneven load distribution.",
+          "type": "string",
+          "enum": ["", "Cluster", "Local"],
+          "default": ""
+        }
+      }
+    },
+    "adminService": {
+      "description": "Dedicated admin (management plane) Service. ClusterIP by default so the admin surface is never exposed by a data-plane LoadBalancer.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+          "default": "ClusterIP"
+        },
+        "port": {
+          "description": "Service port for the admin plane. Defaults to service.adminPort when empty.",
+          "type": ["integer", "string"],
+          "default": ""
+        },
+        "annotations": {
+          "description": "Annotations applied to the admin Service. Wins over commonAnnotations on key collision.",
+          "type": "object",
+          "default": {}
+        },
+        "labels": {
+          "description": "Additional labels applied to the admin Service.",
+          "type": "object",
+          "default": {}
         }
       }
     },
@@ -403,6 +459,16 @@
     },
     "podLabels": {
       "description": "Additional labels applied to bouine pods.",
+      "type": "object",
+      "default": {}
+    },
+    "statefulsetAnnotations": {
+      "description": "Annotations applied to the StatefulSet object. Wins over commonAnnotations on key collision.",
+      "type": "object",
+      "default": {}
+    },
+    "statefulsetLabels": {
+      "description": "Additional labels applied to the StatefulSet object. Wins over commonLabels on key collision.",
       "type": "object",
       "default": {}
     },
@@ -459,6 +525,10 @@
         "enabled": {
           "type": "boolean",
           "default": true
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
         },
         "minAvailable": {
           "type": "integer"
@@ -602,6 +672,10 @@
           "type": "boolean",
           "default": false
         },
+        "annotations": {
+          "type": "object",
+          "default": {}
+        },
         "minReplicas": {
           "type": "integer",
           "minimum": 1,
@@ -688,6 +762,10 @@
         "enabled": {
           "type": "boolean",
           "default": false
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
         }
       }
     },
@@ -698,6 +776,10 @@
         "enabled": {
           "type": "boolean",
           "default": false
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
         },
         "labels": {
           "type": "object",
@@ -787,6 +869,10 @@
         "enabled": {
           "type": "boolean",
           "default": false
+        },
+        "annotations": {
+          "type": "object",
+          "default": {}
         },
         "labels": {
           "type": "object",

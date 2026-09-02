@@ -4,8 +4,20 @@ metadata:
   name: {{ include "bouine.fullname" . }}
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+    {{- with .Values.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    bouine-cache.io/plane: data
+  {{- include "bouine.annotations" (list . .Values.service.annotations) | nindent 2 }}
 spec:
   type: {{ .Values.service.type }}
+  {{- with .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   ports:
     - name: http
       port: {{ .Values.service.httpPort }}
@@ -15,8 +27,27 @@ spec:
       port: {{ .Values.service.httpsPort }}
       targetPort: https
       protocol: TCP
+  selector:
+    {{- include "bouine.selectorLabels" . | nindent 4 }}
+---
+# Dedicated admin (management plane) Service. ClusterIP by default so the
+# admin surface is never exposed by a data-plane LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bouine.adminServiceName" . }}
+  labels:
+    {{- include "bouine.labels" . | nindent 4 }}
+    {{- with .Values.adminService.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    bouine-cache.io/plane: management
+  {{- include "bouine.annotations" (list . .Values.adminService.annotations) | nindent 2 }}
+spec:
+  type: {{ .Values.adminService.type | default "ClusterIP" }}
+  ports:
     - name: admin
-      port: {{ .Values.service.adminPort }}
+      port: {{ .Values.adminService.port | default .Values.service.adminPort }}
       targetPort: admin
       protocol: TCP
   selector:
@@ -29,6 +60,8 @@ metadata:
   name: {{ include "bouine.fullname" . }}-headless
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+    bouine-cache.io/plane: control
+  {{- include "bouine.annotations" (list . (dict)) | nindent 2 }}
 spec:
   clusterIP: None
   ports:

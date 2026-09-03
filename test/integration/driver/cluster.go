@@ -73,6 +73,9 @@ type ClusterStack struct {
 	errChs    [3]chan error
 	paused    [3]atomic.Bool // per-node application-level pause gate
 	configDir string
+	// hotMaxBytes retains the per-node hot-tier budget so RestartNode
+	// rebuilds the same config BootCluster originally wrote.
+	hotMaxBytes string
 }
 
 // ClusterOptions configures BootCluster.
@@ -80,6 +83,10 @@ type ClusterOptions struct {
 	Mode          string
 	NoAutoCleanup bool
 	TLS           TLSOptions
+	// HotMaxBytes overrides each node's storage.hot_max_bytes (e.g. "2MiB"
+	// to force constant SIEVE eviction in eviction-pressure scenarios).
+	// Empty keeps the driver default (128MiB).
+	HotMaxBytes string
 }
 
 // TLSOptions configures data-plane TLS for the cluster. When Enabled is
@@ -131,15 +138,16 @@ func formatCertEntry(certFile, keyFile string, sni []string) string {
 // YAML config file. It is shared by BootCluster, RestartNode, and
 // RestartNodeWithTLS to keep the config template in one place.
 type nodeConfigParams struct {
-	name       string
-	mode       string
-	httpPort   int
-	httpsPort  int // 0 when TLS is not configured
-	adminPort  int
-	gossipPort int
-	seedList   string
-	originAddr string
-	tls        *TLSOptions // nil when TLS is not configured
+	name        string
+	mode        string
+	httpPort    int
+	httpsPort   int // 0 when TLS is not configured
+	adminPort   int
+	gossipPort  int
+	seedList    string
+	originAddr  string
+	hotMaxBytes string
+	tls         *TLSOptions // nil when TLS is not configured
 }
 
 // buildNodeConfig renders the YAML config for a single bouine node.
@@ -157,7 +165,7 @@ func buildNodeConfig(p nodeConfigParams) string {
 admin:
   token: %s
 storage:
-  hot_max_bytes: 128MiB
+  hot_max_bytes: %s
 cluster:
   node_name: %s
   mode: %s
@@ -179,7 +187,7 @@ routes:
     cache:
       ttl_default: 60s
 `,
-		p.adminPort, p.gossipPort, IntegrationToken, p.name, p.mode, p.seedList,
+		p.adminPort, p.gossipPort, IntegrationToken, hotMaxBytesOrDefault(p.hotMaxBytes), p.name, p.mode, p.seedList,
 		p.originAddr)
 
 	if p.tls != nil {
@@ -194,6 +202,15 @@ routes:
 		}
 	}
 	return b.String()
+}
+
+// hotMaxBytesOrDefault renders the hot-tier budget for a node config,
+// defaulting to the pre-option 128MiB when unset.
+func hotMaxBytesOrDefault(v string) string {
+	if v == "" {
+		return "128MiB"
+	}
+	return v
 }
 
 // BootCluster starts a 3-node in-process bouine cluster with a fasthttp origin.
@@ -233,11 +250,12 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 		t.Fatalf("create config dir: %v", err)
 	}
 	s := &ClusterStack{
-		Mode:      opts.Mode,
-		OriginURL: origin.url,
-		origin:    origin,
-		originCtl: originCtl,
-		configDir: configDir,
+		Mode:        opts.Mode,
+		OriginURL:   origin.url,
+		origin:      origin,
+		originCtl:   originCtl,
+		configDir:   configDir,
+		hotMaxBytes: opts.HotMaxBytes,
 	}
 
 	// Write configs and start each node.
@@ -250,15 +268,16 @@ func BootCluster(t *testing.T, opts ClusterOptions) *ClusterStack {
 			tlsOpts = &opts.TLS
 		}
 		cfg := buildNodeConfig(nodeConfigParams{
-			name:       name,
-			mode:       opts.Mode,
-			httpPort:   p.http,
-			httpsPort:  p.https,
-			adminPort:  p.admin,
-			gossipPort: p.gossip,
-			seedList:   seedList,
-			originAddr: origin.addr,
-			tls:        tlsOpts,
+			name:        name,
+			mode:        opts.Mode,
+			httpPort:    p.http,
+			httpsPort:   p.https,
+			adminPort:   p.admin,
+			gossipPort:  p.gossip,
+			seedList:    seedList,
+			originAddr:  origin.addr,
+			hotMaxBytes: opts.HotMaxBytes,
+			tls:         tlsOpts,
 		})
 
 		cfgPath := filepath.Join(s.configDir, name+".yaml")
@@ -408,15 +427,16 @@ func (s *ClusterStack) restartNode(t *testing.T, n int, tlsOpts *TLSOptions) {
 	}
 
 	cfg := buildNodeConfig(nodeConfigParams{
-		name:       name,
-		mode:       s.Mode,
-		httpPort:   httpPort,
-		httpsPort:  httpsPort,
-		adminPort:  adminPort,
-		gossipPort: gossipPort,
-		seedList:   seedList,
-		originAddr: s.origin.addr,
-		tls:        tlsOpts,
+		name:        name,
+		mode:        s.Mode,
+		httpPort:    httpPort,
+		httpsPort:   httpsPort,
+		adminPort:   adminPort,
+		gossipPort:  gossipPort,
+		seedList:    seedList,
+		originAddr:  s.origin.addr,
+		hotMaxBytes: s.hotMaxBytes,
+		tls:         tlsOpts,
 	})
 
 	suffix := "-restart"

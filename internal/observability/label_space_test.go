@@ -101,18 +101,12 @@ func TestRequestsTotal_NoMethodLabel(t *testing.T) {
 	}
 }
 
-// TestStatusClassString pins the zero-alloc status-class table.
+// TestStatusClassString pins the zero-alloc status-class table's
+// out-of-range edges; the in-range classes are covered end-to-end by
+// the histogram status assertions above.
 func TestStatusClassString(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "2xx", statusClassString(200))
-	assert.Equal(t, "2xx", statusClassString(299))
-	assert.Equal(t, "3xx", statusClassString(301))
-	assert.Equal(t, "4xx", statusClassString(404))
-	assert.Equal(t, "5xx", statusClassString(500))
-	assert.Equal(t, "5xx", statusClassString(599))
 	assert.Equal(t, "0", statusClassString(0))
 	assert.Equal(t, "0", statusClassString(99))
 	assert.Equal(t, "0", statusClassString(600))
-	assert.Equal(t, "1xx", statusClassString(100))
-	assert.Equal(t, "1xx", statusClassString(199))
 }

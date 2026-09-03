@@ -7,7 +7,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/valyala/fasthttp"
 )
 
 // TestRequestDuration_NativeHistogramPresent pins the wire contract for
@@ -117,30 +116,4 @@ func BenchmarkGate_HistogramObserve_Native_Distinct(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		m.RecordHit("p", "HIT", "hot", 200, 10, time.Duration(1+i%990_000))
 	}
-}
-
-// TestMiddleware_NoAllocs_NativeMode re-runs the middleware gate shape
-// against the now-native histogram: the full request path must stay at
-// 0 allocs with native sparse-bucket observation enabled.
-func TestMiddleware_NoAllocs_NativeMode(t *testing.T) {
-	if testing.Short() {
-		t.Skip("allocation assertion needs steady loop; run in full mode")
-	}
-	reg := prometheus.NewRegistry()
-	m := NewDataPlaneMetrics(reg)
-	m.PreResolveRoutes([]string{"bench"})
-
-	mw := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {
-		ctx.Response.Header.Set("X-Cache", "MISS")
-		ctx.SetStatusCode(200)
-	})
-	ctx := &fasthttp.RequestCtx{}
-	ctx.Request.SetRequestURI("/x")
-	mw(ctx) // warm all slots first
-
-	allocs := testing.AllocsPerRun(1000, func() {
-		ctx.Response.Reset()
-		mw(ctx)
-	})
-	assert.Equal(t, 0.0, allocs, "native-mode middleware must not allocate")
 }

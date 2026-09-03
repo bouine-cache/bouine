@@ -85,6 +85,8 @@ declare -A BUDGETS=(
     [Reactor_Hit_Metrics]=0
     [Middleware_Miss]=11
     [Middleware_Miss_NoLog]=0
+    [HistogramObserve_Native]=0
+    [HistogramObserve_Native_Distinct]=0
 )
 # Reactor_Dispatch exercises the Linux-only epoll transport (it gates the
 # dispatch machinery over the transport's own connection table); it only

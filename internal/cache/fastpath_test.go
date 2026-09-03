@@ -253,7 +253,13 @@ func TestFastPathHandler_StaleHitTriggersSWR(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, 1, callCount, "StaleHit within the SWR window must fire onStale exactly once")
 	assert.Equal(t, key, gotKey, "the lookup (variant) key must be passed")
-	assert.Same(t, obj, gotObj)
+	// Get returns a cache-owned copy of the stored object (never the
+	// caller's Put pointer), so assert the stale content, not identity.
+	require.NotNil(t, gotObj)
+	assert.Equal(t, obj.Key, gotObj.Key)
+	assert.Equal(t, obj.Body, gotObj.Body)
+	assert.Equal(t, obj.StatusCode, gotObj.StatusCode)
+	assert.Equal(t, obj.StaleWhileRevalidate, gotObj.StaleWhileRevalidate)
 }
 
 // TestFastPathHandler_HitDoesNotTriggerSWR verifies the onStale hook

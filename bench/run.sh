@@ -28,11 +28,18 @@
 #   Evaluate_Hit:                     0
 #   HotStore_Get_Hit:                 0
 #   Handler_CacheHit_ReusableWriter:  0  (zero-alloc hit path achieved)
-#   Handler_CacheMiss_Cacheable:      13  (batch2: raw-header precheck, no
+#   Handler_CacheMiss_Cacheable:      18  (batch2: raw-header precheck, no
 #                                      unique-key interning, sharded singleflight;
 #                                      main was at 24 after pkg/unique interning
 #                                      added an entry-node alloc per miss on
-#                                      Go 1.24+ — verified by alloc profile)
+#                                      Go 1.24+ — verified by alloc profile.
+#                                      13→14 drift pre-dates the storage
+#                                      ownership fix (measured 14 on Go 1.27
+#                                      darwin before it); +4 is the deliberate
+#                                      CloneForStorage cost — Object clone,
+#                                      body copy, header entries+values — so
+#                                      stored bodies are cache-owned and hit
+#                                      writevs cannot alias caller buffers)
 #   SIEVE_Access:                     0
 #   Cachaner_Access:                   0
 #   Cachaner_AccessSlowPath:           0
@@ -66,7 +73,7 @@ declare -A BUDGETS=(
     [Evaluate_Hit]=0
     [HotStore_Get_Hit]=0
     [Handler_CacheHit_ReusableWriter]=0
-    [Handler_CacheMiss_Cacheable]=13
+    [Handler_CacheMiss_Cacheable]=18
     [SIEVE_Access]=0
     [Cachaner_Access]=0
     [Cachaner_AccessSlowPath]=0

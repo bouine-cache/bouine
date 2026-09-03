@@ -189,10 +189,8 @@ func (o *Object) StoreComposedHead(now time.Time, cacheResult string, src Source
 // the clone via a new atomic.Pointer so the fast path does not
 // re-compute it on every hit.
 //
-// Used by the hot store slab path in two contexts:
-//   - Get (detachBody): heap-copied body, safe from concurrent eviction.
-//   - Put (CloneForStorage): slab-backed body, stored in the shard entry
-//     without mutating the caller's *Object.
+// Used by the hot store slab path on Get (detachBody): heap-copied
+// body, safe from concurrent eviction.
 func (o *Object) CloneForReturn(body []byte) *Object {
 	clone := &Object{
 		Key:                  o.Key,
@@ -227,6 +225,31 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 	if v := o.FastHeader.Load(); v != nil {
 		clone.FastHeader.Store(v)
 	}
+	return clone
+}
+
+// CloneForStorage returns a copy of o that the cache owns outright, for
+// storing in a shard entry: a deep-cloned header map and a body the
+// caller can no longer reach.
+//
+// When body is non-nil it must already be cache-owned and filled (e.g.
+// a slab allocation); when nil, o.Body is copied to a fresh heap slice.
+// The header map is deep-cloned in both cases because the serialized
+// response head served on every fast-path hit is built from the stored
+// headers — a caller mutating or reusing its map after Put returns must
+// never change what the cache serves.
+//
+// This is the ownership boundary of the hot store: objects returned by
+// Get alias cache-owned, immutable-after-store bytes, so an in-flight
+// hit writev (which zero-copy aliases obj.Body) stays valid regardless
+// of eviction, Put-overwrite, or caller buffer reuse.
+func (o *Object) CloneForStorage(body []byte) *Object {
+	if body == nil {
+		body = make([]byte, len(o.Body))
+		copy(body, o.Body)
+	}
+	clone := o.CloneForReturn(body)
+	clone.Header = o.Header.Clone()
 	return clone
 }
 

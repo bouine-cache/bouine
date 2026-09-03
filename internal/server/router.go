@@ -56,10 +56,12 @@ func NewRouter(cfg RouterConfig) *Router {
 
 // AddRoute registers a route entry. When methods is non-empty, only
 // requests whose HTTP method is in the set match this route. pool is the
-// upstream pool serving this route; the metrics middleware uses it as the
-// attribution label because route cardinality scales with the number of
-// proxy rules (potentially hundreds), while pools are a small config-bounded
-// set that still answers the operator question "which upstream is slow".
+// upstream pool serving this route ("" for routes without one, e.g.
+// static-file routes); the metrics middleware attributes Prometheus
+// metrics by it and falls back to "_default" when empty, so the
+// upstream_pool label set stays bounded by the pool configuration no
+// matter how many routes exist. The dashboard rings keep the per-route
+// label.
 func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []string, handler fasthttp.RequestHandler) {
 	if label == "" {
 		switch {
@@ -138,11 +140,14 @@ func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 		// UserValues. The old request-header form is gone: nothing read
 		// it, and the origin pool forwards request headers verbatim, so
 		// it leaked internal route names upstream. UserValues are
-		// process-local and never touch the wire. Prometheus metrics
-		// carry the upstream pool (small config-bounded label set);
-		// the dashboard rings keep the per-route label.
+		// process-local and never touch the wire. The pool UserValue is
+		// only set for routes with a pool, so the middleware's _default
+		// fallback applies to static routes; route labels never feed the
+		// upstream_pool metric label.
 		ctx.SetUserValue(header.XBouineRoute, re.labelVal)
-		ctx.SetUserValue(header.XBouinePool, re.pool)
+		if re.pool != "" {
+			ctx.SetUserValue(header.XBouinePool, re.pool)
+		}
 		re.handler(ctx)
 		return
 	}

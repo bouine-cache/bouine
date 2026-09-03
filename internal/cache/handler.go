@@ -378,8 +378,8 @@ type HandlerConfig struct {
 	// RouteName labels refresh metrics. Set from the route's config name.
 	RouteName string
 	// PoolName is the route's upstream pool name, stamped onto fast-path
-	// hit responses for the metrics middleware's upstream_pool label. A
-	// small config-bounded set by construction.
+	// hit responses for the metrics middleware's upstream_pool label.
+	// Empty for routes without a pool (static-file routes).
 	PoolName string
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.

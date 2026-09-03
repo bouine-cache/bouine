@@ -177,9 +177,9 @@ func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.R
 
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
-	// The metrics middleware attributes traffic by upstream pool: pool
-	// names are a small config-bounded label set, unlike route names
-	// which scale with the number of proxy rules.
+	// The metrics middleware attributes traffic by upstream pool: the
+	// pool label set stays bounded by the pool configuration, unlike
+	// route names which scale with the number of proxy rules.
 	poolNames := make([]string, 0, len(e.cfg.UpstreamPools))
 	for _, pc := range e.cfg.UpstreamPools {
 		poolNames = append(poolNames, pc.Name)

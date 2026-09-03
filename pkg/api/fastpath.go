@@ -187,9 +187,8 @@ type FastPathResponse struct {
 	CacheResult string
 	Source      string
 	// Pool is the upstream pool serving the hit, consumed by the
-	// metrics hook as the upstream_pool label. A small config-bounded
-	// set by construction: it comes from the route's pool config, not
-	// from request input.
+	// metrics hook as the upstream_pool label. It comes from the
+	// route's pool config, never from request input.
 	Pool       string
 	BuffersArr [3][]byte // fixed-size backing for Buffers; rebuilt every TryHit
 	Buffers    net.Buffers
@@ -295,7 +294,7 @@ func ScanFlagForHeader(key, value string) RequestScanFlags {
 //
 // Unstable.
 type FastPathMetrics interface {
-	RecordHit(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	RecordHit(method, pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	// IncrementSmugglingRejected is called when the h1parser detects an
 	// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
 	// obs-fold). The implementation increments a Prometheus counter.

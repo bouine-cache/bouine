@@ -842,15 +842,18 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 }
 
 // attribution resolves the metric/ring labels from the UserValues the
-// router sets. pool drives the Prometheus upstream_pool label (a small
-// config-bounded set); route drives the dashboard rings. Both fall back
-// to the middleware defaults when the router did not match a route.
+// router sets. The two axes travel through separate UserValues and never
+// fall back to each other: pool drives the Prometheus upstream_pool label
+// and is sourced exclusively from the route's configured pool (plus the
+// _default fallback), so the label set stays bounded by the pool
+// configuration no matter how many routes exist; route drives the
+// dashboard rings only.
 func attribution(ctx *fasthttp.RequestCtx) (pool, route string) {
 	pool = "_default"
+	route = "_default"
 	if rv := ctx.UserValue(header.XBouineRoute); rv != nil {
-		if ps, ok := rv.(string); ok {
-			pool = ps
-			route = ps
+		if rs, ok := rv.(string); ok && rs != "" {
+			route = rs
 		}
 	}
 	if rv := ctx.UserValue(header.XBouinePool); rv != nil {

@@ -46,7 +46,7 @@ func TestMetricCardinalityBudget(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 
-	const pools = 33 // maxUpstreamPools capped pools + _default
+	const pools = 33 // configured pools + _default
 	names := make([]string, pools-1)
 	for i := range names {
 		names[i] = fmt.Sprintf("pool-%02d", i)
@@ -135,10 +135,12 @@ func TestMetricCardinalityBudget_IdlePoolsZeroSeries(t *testing.T) {
 	assert.Contains(t, tuples, "2xx|HIT|a")
 }
 
-// TestMetricCardinalityBudget_PoolCap pins the config cap: 32 upstream
-// pools. The cap exists because pool names are the upstream_pool metric
-// label; the label set must stay config-bounded.
-func TestMetricCardinalityBudget_PoolCap(t *testing.T) {
+// TestMetricCardinalityBudget_ManyPoolsValidate is the flip side of the
+// budget: pool count is deliberately uncapped in config validation. The
+// upstream_pool label set is bounded by how many pools actually receive
+// traffic (lazy slot fill), not by a config cap, so a pool-heavy topology
+// stays a valid configuration.
+func TestMetricCardinalityBudget_ManyPoolsValidate(t *testing.T) {
 	t.Parallel()
 	newCfg := func(n int) *config.Config {
 		pools := make([]config.UpstreamPool, n)
@@ -147,8 +149,5 @@ func TestMetricCardinalityBudget_PoolCap(t *testing.T) {
 		}
 		return &config.Config{Listen: config.Listen{Admin: ":9000"}, UpstreamPools: pools}
 	}
-	require.NoError(t, newCfg(32).Validate(), "32 pools must validate")
-	err := newCfg(33).Validate()
-	require.Error(t, err, "33 pools must be rejected")
-	assert.Contains(t, err.Error(), "upstream pools")
+	require.NoError(t, newCfg(64).Validate(), "64 pools must validate: no pool-count cap")
 }

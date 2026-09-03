@@ -193,6 +193,16 @@ jobs:
             sudo chown "$(id -u):$(id -g)" /usr/local/bin/k6
           fi
 
+      - name: Install make if missing
+        run: |
+          # Self-heal for the load-test-k8s runner image, which has
+          # historically missed build tooling: install make here so the
+          # nightly stays green until the image is rebuilt with it baked
+          # in (then this step becomes a no-op and can be dropped).
+          if ! command -v make &>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends make
+          fi
+
       - name: Check runner prerequisites
         run: |
           # The load-test-k8s runner image has historically missed
@@ -252,6 +262,14 @@ jobs:
 
       - name: Install k6
         run: command -v k6 || pip install k6 2>/dev/null || true
+
+      - name: Install make if missing
+        run: |
+          # Same self-heal as the cluster job: the load-test-k8s runner
+          # image has historically missed make.
+          if ! command -v make &>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends make
+          fi
 
       - name: Run §5.6a–d
         env:

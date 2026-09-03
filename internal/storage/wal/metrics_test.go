@@ -152,7 +152,10 @@ func TestLog_WriteDurationObservedOnSync(t *testing.T) {
 	l.SetMetrics(m)
 
 	require.NoError(t, l.Enqueue(Entry{Op: opPut}))
-	time.Sleep(100 * time.Millisecond) // wait for sync loop to drain
+	// Sync() closes its done channel only after the drain observed the
+	// write duration, so the histogram is guaranteed populated — no race
+	// with the 20ms ticker.
+	require.NoError(t, l.Sync())
 
 	families, err := reg.Gather()
 	require.NoError(t, err)

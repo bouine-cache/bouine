@@ -300,8 +300,10 @@ PYTHON       ?= python3
 # default casualty of the 120-min job budget: they duplicate 3.2's
 # sustained 50k measurement at 8 extra minutes. Override on demand:
 #   make loadtest-scenarios SCENARIOS="3.4_working_set_overflow 3.2_hit_only"
+# 3.7 stays in the nightly: it is the only scenario validating payload
+# bytes (data-integrity net), not just status codes and latency.
 SCENARIOS    ?= 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
-                3.5_vary_blowup 3.6_mixed_realistic
+                3.5_vary_blowup 3.6_mixed_realistic 3.7_payload_integrity
 
 # BUILDX_VERSION pins the docker buildx CLI plugin that loadtest-setup
 # installs on demand. The load-test runner image ships docker without

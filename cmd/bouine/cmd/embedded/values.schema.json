@@ -477,11 +477,6 @@
       "type": "object",
       "default": {}
     },
-    "podAntiAffinity": {
-      "description": "Raw Kubernetes pod anti-affinity rules. Explicit affinity takes precedence.",
-      "type": "object",
-      "default": {}
-    },
     "nodeSelector": {
       "description": "Node labels required for bouine pods.",
       "type": "object",

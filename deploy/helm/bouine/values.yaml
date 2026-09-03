@@ -137,8 +137,6 @@ podLabels: {}
 statefulsetAnnotations: {}
 statefulsetLabels: {}
 affinity: {}
-# Raw pod anti-affinity rules. Explicit affinity takes precedence.
-podAntiAffinity: {}
 nodeSelector: {}
 tolerations: []
 priorityClassName: ""

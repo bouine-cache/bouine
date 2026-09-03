@@ -66,17 +66,13 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.affinity }}
+      {{- with .Values.affinity }}
       affinity:
-        {{- toYaml .Values.affinity | nindent 8 }}
-      {{- else if .Values.podAntiAffinity }}
-      affinity:
-        podAntiAffinity:
-          {{- toYaml .Values.podAntiAffinity | nindent 10 }}
+        {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.topologySpreadConstraints }}
+      {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
-        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: bouine
@@ -177,8 +173,8 @@ spec:
         {{- include "bouine.annotations" (list . .Values.warmVolume.annotations) | nindent 8 }}
       spec:
         accessModes: ["ReadWriteOnce"]
-        {{- if .Values.warmVolume.storageClass }}
-        storageClassName: {{ .Values.warmVolume.storageClass }}
+        {{- with .Values.warmVolume.storageClass }}
+        storageClassName: {{ . }}
         {{- end }}
         resources:
           requests:

@@ -20,8 +20,8 @@ spec:
     - port: admin
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval | default "60s" }}
-      {{- if .Values.serviceMonitor.scrapeTimeout }}
-      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
       {{- end }}
       {{- with .Values.serviceMonitor.relabelings }}
       relabelings:

@@ -10,6 +10,47 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-09-03
+
+### Added
+- Helm chart metadata controls (PR #602): global `commonLabels` /
+  `commonAnnotations` applied to every rendered resource, and
+  resource-specific labels/annotations for the data-plane Service
+  (plus `loadBalancerSourceRanges` and `externalTrafficPolicy` when
+  `type: LoadBalancer`), StatefulSet, HPA, NetworkPolicy, PDB,
+  PrometheusRule, ServiceMonitor, Ingress, and ServiceAccount. A new
+  dedicated `adminService` (ClusterIP by default) splits the admin
+  plane (metrics, pprof, `/drain`, admin API) off the data-plane
+  Service, so exposing the data plane via LoadBalancer can never
+  expose the admin surface. With `autoscaling.enabled: true` the
+  StatefulSet no longer renders `spec.replicas` — the HPA owns the
+  replica count; GitOps users (e.g. ArgoCD) should add an
+  `ignoreDifferences` entry for `/spec/replicas`.
+- `admin.idle_timeout` (default 300s, PR #606): keep-alive idle
+  timeout for admin-server connections, including cluster peer RPCs
+  (`/v1/peer/*`). Previously a hard-coded 30s.
+
+### Fixed
+- Cluster peer RPC stale-connection failures (PR #606): the admin
+  server's 30s idle timeout reaped keep-alive connections while peer
+  clients still held them pooled, so the next peer-fetch/peer-put
+  failed with EOF or broken pipe ("error in PipelineClient: EOF" in
+  preprod) and fell back to origin, spiking latency and wasting origin
+  bandwidth; `fasthttp.PipelineClient` does not retry requests that
+  die on a pooled connection. The fix orders the timeouts instead of
+  papering over them with retries: the peer client idle default stays
+  at 120s, the admin server default rises to 300s so idle peer
+  connections survive quiet periods, and config validation rejects any
+  explicit `cluster.peer_max_idle_conn_duration >= admin.idle_timeout`
+  at load time (plus negative values for either) so operator overrides
+  cannot reintroduce the race.
+
+### Changed
+- Helm: the `podAntiAffinity` values key (added in 0.5.3) is removed
+  in favor of the raw `affinity` values (explicit affinity takes
+  precedence); templates are normalized on `with` statements instead
+  of mixed `if`/`with` logic.
+
 ## [0.5.5] - 2026-09-02
 
 ### Added
@@ -883,7 +924,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.6
 [0.5.5]: https://github.com/bouine-cache/bouine/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/bouine-cache/bouine/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.3

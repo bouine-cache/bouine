@@ -10,9 +10,12 @@ package h1parser
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +24,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/cache"
+	"github.com/bouine-cache/bouine/internal/storage"
+	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
 )
@@ -654,4 +661,186 @@ func TestEpollReactor_IdleParksNotSpins(t *testing.T) {
 		}
 	}
 	assert.Contains(t, string(have), "hello", "loop must serve after the idle window")
+}
+
+// reactorPayloadBody mirrors the deterministic payload used by the cache
+// package's body-lifetime tests: every 8-byte block encodes its own
+// offset, so any mutation, truncation, or cross-object mixing of the
+// served bytes is detectable by regenerating the pattern.
+func reactorPayloadBody(size int) []byte {
+	body := make([]byte, size)
+	var counter [8]byte
+	for off := 0; off < size; off += 8 {
+		binary.LittleEndian.PutUint64(counter[:], uint64(off))
+		copy(body[off:], counter[:])
+	}
+	return body
+}
+
+// slowReadResponse reads one Content-Length-delimited response from conn
+// in small chunks with a delay between them, invoking onChunk after every
+// chunk so a test can race the cache while the response tail is still
+// being written. Returns the header block and body separately.
+func slowReadResponse(t *testing.T, conn net.Conn, chunkSize int, delay time.Duration, onChunk func(totalRead int)) (head string, body []byte) {
+	t.Helper()
+	var raw bytes.Buffer
+	buf := make([]byte, chunkSize)
+	var headEnd int
+	for headEnd == 0 {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			raw.Write(buf[:n])
+			if onChunk != nil {
+				onChunk(raw.Len())
+			}
+		}
+		require.NoError(t, err, "read response head")
+		if i := bytes.Index(raw.Bytes(), []byte("\r\n\r\n")); i >= 0 {
+			headEnd = i + 4
+		} else if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+	head = string(raw.Bytes()[:headEnd])
+	contentLength := 0
+	for _, line := range bytes.Split(raw.Bytes()[:headEnd-4], []byte("\r\n")) {
+		if len(line) > 16 && bytes.EqualFold(line[:16], []byte("Content-Length: ")) {
+			contentLength, _ = strconv.Atoi(string(bytes.TrimSpace(line[16:])))
+		}
+	}
+	total := headEnd + contentLength
+	for raw.Len() < total {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			raw.Write(buf[:n])
+			if onChunk != nil {
+				onChunk(raw.Len())
+			}
+		}
+		require.NoError(t, err, "read response body")
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+	return head, raw.Bytes()[headEnd:total]
+}
+
+// TestEpollReactor_HitBodyStableUnderSlowClientAndEviction is the
+// reactor-path twin of the cache package's body-lifetime tests: a
+// slow-reading client (receive buffer clamped so the kernel cannot
+// absorb the 2 MiB body) holds an in-flight reactor hit writev while
+// the origin path reuses its buffer, Put-overwrites the same key, and
+// SIEVE eviction churns the shard. The reactor retains the response
+// until every byte is flushed (finishWrite); the storage ownership fix
+// guarantees the retained body cannot change underneath it. The client
+// must receive the exact stored bytes.
+
+func TestEpollReactor_HitBodyStableUnderSlowClientAndEviction(t *testing.T) {
+	const bodySize = 16 << 20 // 16 MiB, beyond any kernel socket buffer on loopback
+
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 128 << 20, NumShards: 4})
+	fp := cache.NewFastPathHandlerFromStore(store)
+
+	key := cache.BuildKeyFromURL("http://example.com/page", nil)
+
+	body := reactorPayloadBody(bodySize)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     headerMapOf("Content-Type", "application/json", "Content-Length", strconv.Itoa(bodySize)),
+		Body:       body,
+		BodySize:   int64(bodySize),
+		StoredAt:   time.Now(),
+		TTL:        10 * time.Minute,
+	}
+	require.NoError(t, store.Put(context.Background(), key, obj), "put")
+
+	p := New(fp, func(ctx *fasthttp.RequestCtx) {}, WithWriteTimeout(60*time.Second))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	loop, ok := NewReactorLoop(p, ln)
+	require.True(t, ok, "epoll reactor must be available on Linux")
+	go loop.Run()
+	t.Cleanup(loop.Close)
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+	// Clamp the receive buffer so the client's unread window (and thus
+	// the server's in-flight writev) cannot absorb the whole body: the
+	// mutation below is guaranteed to land while bytes are unwritten.
+	require.NoError(t, conn.(*net.TCPConn).SetReadBuffer(32*1024))
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+
+	_, err = conn.Write([]byte("GET /page HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"))
+	require.NoError(t, err)
+
+	raced := false
+	var wg sync.WaitGroup
+	head, gotBody := slowReadResponse(t, conn, 64*1024, time.Millisecond, func(totalRead int) {
+		if raced || totalRead < 512*1024 {
+			return
+		}
+		raced = true
+		wg.Add(2)
+
+		// Origin-side buffer reuse after handing the object to the cache.
+		go func() {
+			defer wg.Done()
+			copy(body, reactorPayloadBody(len(body)))
+			for i := range body {
+				body[i] ^= 0xFF
+			}
+		}()
+
+		// Concurrent refresh of the same key plus neighbor churn that
+		// forces SIEVE evictions in the same shard.
+		go func() {
+			defer wg.Done()
+			refreshed := &api.Object{
+				Key:        key,
+				StatusCode: 200,
+				Header:     headerMapOf("Content-Length", "16"),
+				Body:       reactorPayloadBody(16),
+				BodySize:   16,
+				StoredAt:   time.Now(),
+				TTL:        10 * time.Minute,
+			}
+			_ = store.Put(context.Background(), key, refreshed)
+			for i := 0; i < 8; i++ {
+				nk := testkey.Key(uint64(1000 + i))
+				neighbor := &api.Object{
+					Key:        nk,
+					StatusCode: 200,
+					Header:     headerMapOf("Content-Length", "8"),
+					Body:       reactorPayloadBody(512 * 1024),
+					BodySize:   512 * 1024,
+					StoredAt:   time.Now(),
+					TTL:        10 * time.Minute,
+				}
+				_ = store.Put(context.Background(), nk, neighbor)
+			}
+		}()
+	})
+
+	require.True(t, raced, "test must have raced the in-flight reactor writev (head=%q bodyLen=%d)", head, len(gotBody))
+	wg.Wait()
+
+	assert.Contains(t, head, "HTTP/1.1 200 OK", "status line")
+	require.Len(t, gotBody, bodySize, "body must be complete, not truncated")
+	require.True(t, bytes.Equal(gotBody, reactorPayloadBody(bodySize)),
+		"body served through the reactor to a slow mid-response client must be the exact stored bytes")
+}
+
+// headerMapOf builds a header.Map from key-value pairs (test-local
+// helper; the cache package's equivalent is not importable from here).
+func headerMapOf(kvs ...string) header.Map {
+	m := header.NewMap(len(kvs) / 2)
+	for i := 0; i+1 < len(kvs); i += 2 {
+		m.Set(kvs[i], kvs[i+1])
+	}
+	return m
 }

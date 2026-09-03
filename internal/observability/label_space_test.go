@@ -14,7 +14,7 @@ import (
 
 // TestRequestDuration_LabelSpaceBounded pins the label contract: the
 // histogram carries status classes and no method or source dimension,
-// and the spoofed inbound X-Bouine-Route/X-Bouine-Pool headers never
+// and spoofed inbound X-Bouine-Route/X-Bouine-Pool headers never
 // reach it.
 func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 	t.Parallel()
@@ -67,8 +67,8 @@ func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 }
 
 // TestRequestsTotal_NoMethodLabel pins the label contract: the metrics
-// carry no method axis at all, so arbitrary or exotic method tokens
-// cannot mint or alter any label value.
+// carry no method axis, so arbitrary or exotic method tokens cannot
+// mint or alter any label value.
 func TestRequestsTotal_NoMethodLabel(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()

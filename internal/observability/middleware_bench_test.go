@@ -13,7 +13,7 @@ import (
 func BenchmarkGate_Middleware_Miss(b *testing.B) {
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	// Production always pre-resolves the route table (engine wiring);
+	// Production always pre-resolves the pool table (engine wiring);
 	// the benchmark must measure that shape, not the WithLabelValues
 	// fallback.
 	m.PreResolveRoutes([]string{"bench"})

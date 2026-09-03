@@ -177,9 +177,8 @@ func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.R
 
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
-	// The metrics middleware attributes traffic by upstream pool: the
-	// pool label set stays bounded by the pool configuration, unlike
-	// route names which scale with the number of proxy rules.
+	// The metrics middleware attributes by upstream pool: the label set
+	// stays bounded by the pool configuration, unlike route names.
 	poolNames := make([]string, 0, len(e.cfg.UpstreamPools))
 	for _, pc := range e.cfg.UpstreamPools {
 		poolNames = append(poolNames, pc.Name)
@@ -231,7 +230,7 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 	}
 }
 
-// buildRouter constructs the pipeline.Router by iterating over the route table
+// buildRouter constructs the server.Router by iterating over the route table
 // and wiring each route to its upstream pool and cache handler. For every route
 // it resolves connection settings (dial timeout, keep-alive, optional hedge
 // transport) from the matching upstream pool config, then builds a

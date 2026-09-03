@@ -310,11 +310,10 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 		dur := rc.parser.nowFunc().Sub(now)
 		if rc.parser.metricsRing != nil {
 			// Async path (W3): push a fixed-size record; the loop's
-			// drainer goroutine applies the hook. Route/CacheResult/
-			// Source are stable handler-owned strings (see
-			// reactor_metrics.go for the retain-safety argument);
-			// the method string aliases the read buffer, so it is
-			// captured as an index. Never blocks: overflow drops.
+			// drainer goroutine applies the hook. All record strings
+			// are stable handler-owned values (see reactor_metrics.go
+			// for the retain-safety argument); no request-derived
+			// string is retained. Never blocks: overflow drops.
 			rc.parser.metricsRing.pushHit(hitMetricsRecord{
 				pool:        resp.Pool,
 				cacheResult: resp.CacheResult,
@@ -322,10 +321,9 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 				durNs:       dur.Nanoseconds(),
 				bytesOut:    resp.BytesOut,
 				status:      resp.StatusCode,
-				methodIdx:   methodIndexForRecord(req.Method),
 			})
 		} else {
-			hook(req.Method, resp.Pool, resp.CacheResult,
+			hook(resp.Pool, resp.CacheResult,
 				resp.Source, resp.StatusCode, resp.BytesOut, dur)
 		}
 	}

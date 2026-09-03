@@ -299,18 +299,6 @@ func labelValue(m *dto.Metric, name string) string {
 	return ""
 }
 
-func TestMethodIndex(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, 0, methodIndex("GET"))
-	assert.Equal(t, 1, methodIndex("HEAD"))
-	// The method set is closed: POST gets its own slot and every other
-	// token aggregates to OTHER, so no metric label can be
-	// attacker-controlled.
-	assert.Equal(t, 2, methodIndex("POST"))
-	assert.Equal(t, 3, methodIndex("PUT"))
-	assert.Equal(t, 3, methodIndex(""))
-}
-
 func TestStatusIndex(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, 0, statusIndex(200))

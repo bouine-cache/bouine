@@ -51,7 +51,7 @@ type Parser struct {
 	fastPath      api.FastPathHandler
 	fallback      fasthttp.RequestHandler
 	nowFunc       func() time.Time
-	metricsHook   func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	metricsHook   func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	smugglingHook func()
 	// metricsRing, when non-nil, redirects the reactor's hit metrics
 	// through the async SPSC ring (reactor_metrics.go). Set by the
@@ -106,7 +106,7 @@ func WithScheme(scheme string) Option {
 }
 
 // WithMetricsHook sets a callback invoked after each fast-path hit.
-func WithMetricsHook(fn func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)) Option {
+func WithMetricsHook(fn func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)) Option {
 	return func(p *Parser) { p.metricsHook = fn }
 }
 
@@ -307,7 +307,7 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 	}
 	if p.metricsHook != nil {
 		dur := p.nowFunc().Sub(now)
-		p.metricsHook(req.Method, resp.Pool, resp.CacheResult,
+		p.metricsHook(resp.Pool, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
 	}
 	closeConn := resp.CloseConn

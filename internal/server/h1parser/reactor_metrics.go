@@ -15,10 +15,9 @@ package h1parser
 // Which strings may be retained? The hook's arguments come from the
 // FastPathResponse (Pool: the handler's stable poolName field,
 // CacheResult: "HIT"/"STALE" literals, Source: api.Source constants)
-// — none alias the connection read buffer. The one read-buffer-derived
-// argument, req.Method, is captured as an index (only GET/HEAD can
-// reach a hit; qualifiesForFastPath rejects everything else) and
-// decoded back to the canonical constant, so no buffer memory escapes.
+// — none alias the connection read buffer. No request-derived string
+// is retained at all: the metrics carry no method axis, so req.Method
+// is never needed here.
 //
 // Concurrency contract: single producer (the loop goroutine, via
 // pushHit), single consumer (the drainer). The ring is an array of
@@ -41,8 +40,7 @@ import (
 )
 
 // hitMetricsRecord is one fast-path hit observation, value-copied
-// through the ring. Strings are stable handler-owned values; see the
-// file comment for the Method exception.
+// through the ring. Strings are stable handler-owned values.
 type hitMetricsRecord struct {
 	pool        string
 	cacheResult string
@@ -50,12 +48,7 @@ type hitMetricsRecord struct {
 	durNs       int64
 	bytesOut    int
 	status      int
-	methodIdx   int8 // 0=GET 1=HEAD; -1 cannot occur (hits are GET/HEAD only)
 }
-
-// metricsMethods decodes methodIdx back to the canonical method
-// constant for the hook call.
-var metricsMethods = [2]string{"GET", "HEAD"}
 
 // metricsRingCap is the SPSC ring capacity, a power of two. 2048
 // slots cover ~100k RPS of hits against the 20ms drain interval —
@@ -113,7 +106,7 @@ func (r *metricsRing) droppedTotal() uint64 { return r.dropped.Load() }
 // Owned by the reactor transport; one per loop with a metrics hook.
 type metricsDrainer struct {
 	ring *metricsRing
-	hook func(method, pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	hook func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
 }
 
 // metricsDrainBatch is the drainer's pop batch size; draining loops
@@ -127,11 +120,7 @@ func (d *metricsDrainer) drainOnce() bool {
 	n := d.ring.drain(batch[:])
 	for i := range n {
 		rec := &batch[i]
-		method := ""
-		if rec.methodIdx >= 0 && int(rec.methodIdx) < len(metricsMethods) {
-			method = metricsMethods[rec.methodIdx]
-		}
-		d.hook(method, rec.pool, rec.cacheResult, rec.source,
+		d.hook(rec.pool, rec.cacheResult, rec.source,
 			rec.status, rec.bytesOut, time.Duration(rec.durNs))
 	}
 	return n == len(batch)
@@ -162,18 +151,3 @@ func (d *metricsDrainer) run(stop <-chan struct{}, drainDone chan<- struct{}) {
 // scrapes are 15-30s), at 50 wakeups/s — negligible next to the loop's
 // own activity under load.
 const metricsDrainInterval = 20 * time.Millisecond
-
-// methodIndexForRecord maps a hit request's method to the record's
-// compact index. Hits are always GET or HEAD (qualifiesForFastPath
-// rejects other methods before TryHit), so the read-buffer-aliased
-// method string never has to be retained; -1 is defensive for a state
-// the fast path cannot produce.
-func methodIndexForRecord(method string) int8 {
-	switch method {
-	case "GET":
-		return 0
-	case "HEAD":
-		return 1
-	}
-	return -1
-}

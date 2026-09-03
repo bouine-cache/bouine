@@ -17,11 +17,11 @@ func TestMetricsRing_PushDrainRoundTrip(t *testing.T) {
 	r := &metricsRing{}
 	require.True(t, r.pushHit(hitMetricsRecord{
 		pool: "default", cacheResult: "HIT", source: "hot",
-		durNs: 1234, bytesOut: 56, status: 200, methodIdx: 0,
+		durNs: 1234, bytesOut: 56, status: 200,
 	}))
 	require.True(t, r.pushHit(hitMetricsRecord{
 		pool: "default", cacheResult: "STALE", source: "warm",
-		durNs: 99, bytesOut: 7, status: 200, methodIdx: 1,
+		durNs: 99, bytesOut: 7, status: 200,
 	}))
 
 	var buf [4]hitMetricsRecord
@@ -29,9 +29,7 @@ func TestMetricsRing_PushDrainRoundTrip(t *testing.T) {
 	require.Equal(t, 2, n)
 	assert.Equal(t, "HIT", buf[0].cacheResult)
 	assert.EqualValues(t, 1234, buf[0].durNs)
-	assert.Equal(t, int8(0), buf[0].methodIdx)
 	assert.Equal(t, "STALE", buf[1].cacheResult)
-	assert.EqualValues(t, 1, buf[1].methodIdx)
 
 	// Fully drained: no phantom records.
 	assert.Equal(t, 0, r.drain(buf[:]))
@@ -68,24 +66,24 @@ func TestMetricsDrainer_AppliesRecordsThroughHook(t *testing.T) {
 	ring := &metricsRing{}
 	var mu sync.Mutex
 	var got []hitMetricsRecord
-	hook := func(method, pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+	hook := func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, hitMetricsRecord{
 			pool: pool, cacheResult: cacheResult, source: source,
 			durNs: duration.Nanoseconds(), bytesOut: bytesOut,
-			status: status, methodIdx: methodIndexForRecord(method),
+			status: status,
 		})
 	}
 	d := &metricsDrainer{ring: ring, hook: hook}
 
 	require.True(t, ring.pushHit(hitMetricsRecord{
 		pool: "default", cacheResult: "HIT", source: "hot",
-		durNs: 42, bytesOut: 100, status: 200, methodIdx: 0,
+		durNs: 42, bytesOut: 100, status: 200,
 	}))
 	require.True(t, ring.pushHit(hitMetricsRecord{
 		pool: "default", cacheResult: "STALE", source: "warm",
-		durNs: 7, bytesOut: 200, status: 200, methodIdx: 1,
+		durNs: 7, bytesOut: 200, status: 200,
 	}))
 
 	stop := make(chan struct{})
@@ -98,7 +96,7 @@ func TestMetricsDrainer_AppliesRecordsThroughHook(t *testing.T) {
 	defer mu.Unlock()
 	require.Len(t, got, 2, "both records must reach the hook after stop")
 	assert.Equal(t, "HIT", got[0].cacheResult)
-	assert.Equal(t, "GET", metricsMethods[got[0].methodIdx])
+	assert.Equal(t, "hot", got[0].source)
 	assert.EqualValues(t, 42, got[0].durNs)
 	assert.Equal(t, "STALE", got[1].cacheResult)
 	assert.EqualValues(t, 7, got[1].durNs)
@@ -112,7 +110,7 @@ func TestMetricsDrainer_TickerDrainsWithoutStop(t *testing.T) {
 	t.Parallel()
 	ring := &metricsRing{}
 	var count atomic.Int64
-	d := &metricsDrainer{ring: ring, hook: func(string, string, string, string, int, int, time.Duration) {
+	d := &metricsDrainer{ring: ring, hook: func(string, string, string, int, int, time.Duration) {
 		count.Add(1)
 	}}
 	stop := make(chan struct{})
@@ -129,13 +127,4 @@ func TestMetricsDrainer_TickerDrainsWithoutStop(t *testing.T) {
 	close(stop)
 	<-done
 	require.GreaterOrEqual(t, count.Load(), int64(2), "ticker must drain records while running")
-}
-
-// TestMethodIndexForRecord pins the method-index mapping the ring uses
-// to avoid retaining the read-buffer-aliased method string.
-func TestMethodIndexForRecord(t *testing.T) {
-	t.Parallel()
-	assert.EqualValues(t, 0, methodIndexForRecord("GET"))
-	assert.EqualValues(t, 1, methodIndexForRecord("HEAD"))
-	assert.EqualValues(t, -1, methodIndexForRecord("POST"))
 }

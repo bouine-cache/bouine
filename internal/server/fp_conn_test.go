@@ -343,6 +343,6 @@ func (m *mockFastPathHandler) Release(resp *api.FastPathResponse) {}
 
 type mockFastPathMetrics struct{}
 
-func (m *mockFastPathMetrics) RecordHit(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+func (m *mockFastPathMetrics) RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
 }
 func (m *mockFastPathMetrics) IncrementSmugglingRejected() {}

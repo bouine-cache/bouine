@@ -10,6 +10,20 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+- Data-integrity regression net for the hot-store ownership bug class
+  (bouine#611): a slow-client body-lifetime race on the standard
+  fasthttp hit path (`ServeRequest` — the path that kept corrupting
+  after the fast path was disabled) and on the Linux epoll reactor hit
+  path; a chaos scenario that validates every payload byte under SIEVE
+  eviction churn with a buffer-reusing origin (working set over a 2 MiB
+  hot budget, `ClusterOptions.HotMaxBytes` knob added to the driver);
+  and load-test scenario §3.7 (payload integrity under eviction churn,
+  50k deterministic 64 KiB payloads, per-request boundary/rotating-probe
+  checks plus sampled full byte compares, zero-tolerance threshold)
+  registered in the nightly suite. All integrity layers verified
+  red-capable: reverting the CloneForStorage fix makes each fail.
+
 ## [0.5.7] - 2026-09-03
 
 ### Fixed

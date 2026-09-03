@@ -55,36 +55,34 @@ func TestMetricCardinalityBudget(t *testing.T) {
 
 	middleware := m.FastHTTPMiddleware(func(ctx *fasthttp.RequestCtx) {})
 	hits := []struct {
-		method, pool, cacheResult, source string
-		status                            int
+		pool, cacheResult, source string
+		status                    int
 	}{
 		// Hot tuples across every pool.
-		{"GET", "_default", "HIT", "hot", 200},
-		{"GET", "_default", "MISS", "origin", 200},
-		{"GET", "pool-00", "HIT", "hot", 200},
-		{"GET", "pool-00", "MISS", "origin", 200},
-		{"GET", "pool-00", "STALE", "warm", 200},
-		{"GET", "pool-01", "HIT", "hot", 200},
-		{"HEAD", "pool-01", "HIT", "hot", 200},
-		{"POST", "pool-01", "BYPASS", "origin", 200},
+		{"_default", "HIT", "hot", 200},
+		{"_default", "MISS", "origin", 200},
+		{"pool-00", "HIT", "hot", 200},
+		{"pool-00", "MISS", "origin", 200},
+		{"pool-00", "STALE", "warm", 200},
+		{"pool-01", "HIT", "hot", 200},
+		{"pool-01", "BYPASS", "origin", 200},
 		// Fast-path hits.
-		{"GET", "pool-02", "HIT", "hot", 200},
+		{"pool-02", "HIT", "hot", 200},
 		// Error classes.
-		{"GET", "pool-03", "MISS", "origin", 404},
-		{"GET", "pool-03", "MISS", "origin", 500},
-		{"GET", "pool-03", "MISS", "origin", 503},
+		{"pool-03", "MISS", "origin", 404},
+		{"pool-03", "MISS", "origin", 500},
+		{"pool-03", "MISS", "origin", 503},
 	}
 	for _, h := range hits {
 		pool := h.pool
 		if pool == "_default" {
 			pool = ""
 		}
-		m.RecordHit(h.method, pool, h.cacheResult, h.source, h.status, 100, 1234567)
+		m.RecordHit(pool, h.cacheResult, h.source, h.status, 100, 1234567)
 	}
 
-	// Middleware path: 404 no-route traffic with an arbitrary method
-	// token; the closed method set must aggregate it to OTHER, not mint
-	// a per-token series.
+	// Middleware path: 404 no-route traffic. No method axis exists, so
+	// arbitrary method tokens cannot influence the label space at all.
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.SetRequestURI("/x")
 	ctx.Request.Header.SetMethod("PROPFIND")
@@ -102,7 +100,7 @@ func TestMetricCardinalityBudget(t *testing.T) {
 				"idle pool pool-%02d must have zero series", i)
 		}
 	}
-	// 12 observations collapse to 11 histogram tuples: 500 and 503 share
+	// 11 observations collapse to 11 histogram tuples: 500 and 503 share
 	// the 5xx class, HEAD and POST share GET's 2xx/HIT tuple shape where
 	// applicable (no method dimension) — that collapsing is the win.
 	// Plus the middleware 404 tuple.
@@ -129,7 +127,7 @@ func TestMetricCardinalityBudget_IdlePoolsZeroSeries(t *testing.T) {
 	assert.Empty(t, tuples, "pre-resolution must be lazy: no series before the first observation")
 
 	// Observing one tuple on pool "a" creates exactly one tuple; "b"/"c"/"d" stay empty.
-	m.RecordHit("GET", "a", "HIT", "hot", 200, 10, 1_000_000)
+	m.RecordHit("a", "HIT", "hot", 200, 10, 1_000_000)
 	tuples = gatherHistogramTuples(t, reg)
 	assert.Len(t, tuples, 1, "exactly one tuple after one observation")
 	assert.Contains(t, tuples, "2xx|HIT|a")

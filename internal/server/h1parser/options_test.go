@@ -40,10 +40,10 @@ func TestWithScheme(t *testing.T) {
 func TestWithMetricsHook(t *testing.T) {
 	t.Parallel()
 	var called bool
-	fn := func(_, _, _, _ string, _, _ int, _ time.Duration) { called = true }
+	fn := func(_, _, _ string, _, _ int, _ time.Duration) { called = true }
 	p := New(nil, noopHandler, WithMetricsHook(fn))
 	require.NotNil(t, p.metricsHook)
-	p.metricsHook("GET", "/", "HIT", "hot", 200, 100, 5*time.Millisecond)
+	p.metricsHook("/", "HIT", "hot", 200, 100, 5*time.Millisecond)
 	assert.True(t, called)
 }
 
@@ -129,7 +129,7 @@ func (m *mockFastPathHit) Release(_ *api.FastPathResponse) {}
 func TestParser_Serve_FastPathHit(t *testing.T) {
 	t.Parallel()
 	fp := &mockFastPathHit{}
-	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
+	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _ string, _, _ int, _ time.Duration) {}))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -208,7 +208,7 @@ func TestParser_Serve_LargeHeaders(t *testing.T) {
 func TestParser_Serve_KeepAliveAfterHit(t *testing.T) {
 	t.Parallel()
 	fp := &mockFastPathHit{}
-	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
+	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _ string, _, _ int, _ time.Duration) {}))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -1117,7 +1117,7 @@ func TestParser_Serve_MetricsHookOnHit(t *testing.T) {
 	t.Parallel()
 
 	var hookCalled bool
-	hook := func(_, _, _, _ string, _, _ int, _ time.Duration) {
+	hook := func(_, _, _ string, _, _ int, _ time.Duration) {
 		hookCalled = true
 	}
 

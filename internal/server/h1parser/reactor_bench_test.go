@@ -98,8 +98,8 @@ func BenchmarkGate_Reactor_Hit(b *testing.B) {
 // cost behind it is profiled live.
 func BenchmarkGate_Reactor_Hit_Metrics(b *testing.B) {
 	p := New(nil, noopHandler, WithScheme("http"),
-		WithMetricsHook(func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration) {
-			_ = method + route + cacheResult + source
+		WithMetricsHook(func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration) {
+			_ = pool + cacheResult + source
 		}))
 	p.metricsRing = &metricsRing{}
 	fp := &hitFastPath{}

@@ -294,7 +294,7 @@ func ScanFlagForHeader(key, value string) RequestScanFlags {
 //
 // Unstable.
 type FastPathMetrics interface {
-	RecordHit(method, pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	RecordHit(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	// IncrementSmugglingRejected is called when the h1parser detects an
 	// HTTP smuggling attempt (CL+TE conflict, duplicate Content-Length,
 	// obs-fold). The implementation increments a Prometheus counter.

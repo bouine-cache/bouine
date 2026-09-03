@@ -66,10 +66,10 @@ func TestRequestDuration_LabelSpaceBounded(t *testing.T) {
 	t.Fatal("bouine_request_duration_seconds not gathered")
 }
 
-// TestRequestsTotal_MethodSetClosed pins the closed method label set:
-// arbitrary method tokens aggregate to OTHER instead of minting a
-// per-token series, so no metric label can be attacker-controlled.
-func TestRequestsTotal_MethodSetClosed(t *testing.T) {
+// TestRequestsTotal_NoMethodLabel pins the label contract: the metrics
+// carry no method axis at all, so arbitrary or exotic method tokens
+// cannot mint or alter any label value.
+func TestRequestsTotal_NoMethodLabel(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
@@ -79,7 +79,7 @@ func TestRequestsTotal_MethodSetClosed(t *testing.T) {
 		ctx.Response.Header.Set(header.XCache, "MISS")
 		ctx.SetStatusCode(404)
 	})
-	for _, method := range []string{"PROPFIND", "TRACK", "X9"} {
+	for _, method := range []string{"GET", "PROPFIND", "TRACK", "X9"} {
 		ctx := &fasthttp.RequestCtx{}
 		ctx.Request.SetRequestURI("/api/x")
 		ctx.Request.Header.SetMethod(method)
@@ -88,33 +88,17 @@ func TestRequestsTotal_MethodSetClosed(t *testing.T) {
 
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
-	methods := map[string]bool{}
 	for _, mf := range mfs {
 		if mf.GetName() != "bouine_requests_total" {
 			continue
 		}
 		for _, met := range mf.GetMetric() {
 			for _, l := range met.GetLabel() {
-				if l.GetName() == "method" {
-					methods[l.GetValue()] = true
-				}
+				assert.NotEqual(t, "method", l.GetName(),
+					"no metric may carry a method label")
 			}
 		}
 	}
-	assert.Equal(t, map[string]bool{"OTHER": true}, methods,
-		"arbitrary method tokens must collapse to OTHER")
-}
-
-// TestMethodIndex_ClosedSet pins the method classification.
-func TestMethodIndex_ClosedSet(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, 0, methodIndex("GET"))
-	assert.Equal(t, 1, methodIndex("HEAD"))
-	assert.Equal(t, 2, methodIndex("POST"))
-	assert.Equal(t, 3, methodIndex("PUT"))
-	assert.Equal(t, 3, methodIndex("DELETE"))
-	assert.Equal(t, 3, methodIndex("PROPFIND"))
-	assert.Equal(t, 3, methodIndex(""))
 }
 
 // TestStatusClassString pins the zero-alloc status-class table.

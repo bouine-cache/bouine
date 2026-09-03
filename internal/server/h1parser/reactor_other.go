@@ -56,7 +56,6 @@ var (
 	_ = reactorMaxConns
 	_ = reactorIdleTimeout
 	_ = (*metricsRing).droppedTotal
-	_ = methodIndexForRecord
 	// epollInterest is the Linux transport's mod()-skip mask tracker;
 	// reference the field so the non-Linux build keeps the shared
 	// struct definition identical.

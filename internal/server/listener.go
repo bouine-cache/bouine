@@ -18,6 +18,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/platform"
 	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
 )
@@ -43,6 +44,28 @@ const maxServerConcurrency = 256 * 1024
 // layering rules (L1 and L2 cannot depend on each other) prevent a
 // shared import. If you change one, change the other.
 const safetyNetWriteTimeout = 5 * time.Minute
+
+// sseWriteTimeout is the per-request write deadline fasthttp applies to
+// requests that announced SSE intent (Accept: text/event-stream) when the
+// data plane runs without the H1 fast path (inner.Serve mode). The default
+// safetyNetWriteTimeout is absolute for the whole response write, which
+// would cut every event stream after 5 minutes. fasthttp offers no idle
+// re-arm seam on this path, so the deadline is simply extended to an hour
+// (a bound, not unbounded — SSE clients reconnect on stream end per the
+// WHATWG contract). The H1 fast path does not need this: its fall-through
+// write re-arms the deadline per Write (h1parser.idleWriteConn).
+const sseWriteTimeout = time.Hour
+
+// sseHeaderReceived is the fasthttp.Server HeaderReceived hook: requests
+// that announced SSE intent get the extended write deadline; every other
+// request keeps the server defaults (a zero RequestConfig field falls
+// back to the server-level value).
+func sseHeaderReceived(h *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	if header.AcceptsEventStream(h.Peek(header.Accept)) {
+		return fasthttp.RequestConfig{WriteTimeout: sseWriteTimeout}
+	}
+	return fasthttp.RequestConfig{}
+}
 
 // quickAckListener wraps a net.Listener so that each accepted connection
 // gets TCP_QUICKACK set immediately. This tells the kernel to ACK
@@ -195,6 +218,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		NoDefaultContentType:  true,
 		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
+		HeaderReceived:        sseHeaderReceived,
 	}
 	return &Listener{
 		inner:          srv,
@@ -235,6 +259,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
 		TLSConfig:             cfg.TLSConfig,
+		HeaderReceived:        sseHeaderReceived,
 	}
 	return &Listener{
 		inner:          srv,

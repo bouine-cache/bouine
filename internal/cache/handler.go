@@ -1043,7 +1043,7 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 // and all others to the cache lookup pipeline.
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if isInvalidatingBytes(ctx.Method()) {
-		h.invalidateAndProxy(ctx)
+		h.serveInvalidating(ctx)
 		return
 	}
 
@@ -1059,6 +1059,17 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	// the api.Key→any boxing allocation (1 alloc) on the hit path.
 	// Access logging handles a missing cacheKey gracefully (zero-value key).
 	disp := evaluateFast(ctx, obj, now)
+
+	// SSE intent (Accept: text/event-stream, WHATWG §9.2.2 client
+	// contract) changes how the origin is fetched and the response
+	// delivered: live unbuffered stream, never cached, never collapsed
+	// (see handleSSE). It never applies to a stored hit — a cached
+	// response is complete and is served normally — so the hit path
+	// pays nothing.
+	if disp.Decision != Hit && disp.Decision != StaleHit && h.sseIntent(ctx) {
+		h.handleSSE(ctx)
+		return
+	}
 
 	switch disp.Decision {
 	case Hit, StaleHit:
@@ -1104,6 +1115,26 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 		}
 		h.handleBypass(ctx)
 	}
+}
+
+// sseIntent reports whether the request announced Server-Sent Events
+// intent via Accept: text/event-stream. Zero allocations: Peek returns
+// the raw header bytes and the matcher walks them in place. A bare "*/*"
+// never matches — every ordinary browser request carries it.
+func (h *Handler) sseIntent(ctx *fasthttp.RequestCtx) bool {
+	return header.AcceptsEventStream(ctx.Request.Header.Peek(header.Accept))
+}
+
+// serveInvalidating handles cache-invalidating methods (POST/PUT/DELETE).
+// POST-style SSE (AI streaming APIs) must not take the buffered proxy
+// path: an endless body would stall the request until fetch_timeout and
+// fail with 502, so hinted requests are streamed live instead.
+func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
+	if h.sseIntent(ctx) {
+		h.handleSSE(ctx)
+		return
+	}
+	h.invalidateAndProxy(ctx)
 }
 
 // handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then

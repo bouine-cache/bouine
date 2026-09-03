@@ -80,6 +80,17 @@ func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, e
 	for k, v := range ctx.Request.Header.All() {
 		req.Header.AddBytesKV(k, v)
 	}
+	// Forward the request body (POST-style SSE carries the prompt/payload
+	// in the body). The pooled request outlives the handler on streaming
+	// paths (released inside the body-stream writer), so the body is
+	// copied into a request-owned slice instead of aliasing the ctx's
+	// buffer, which the server reuses for the next request on the conn.
+	// GET/HEAD requests carry no body and skip the copy.
+	if body := ctx.Request.Body(); len(body) > 0 {
+		bodyCopy := make([]byte, len(body))
+		copy(bodyCopy, body)
+		req.SetBodyRaw(bodyCopy)
+	}
 	tracing.InjectFastHTTP(spanCtx, req)
 
 	// Deadline-based fetch via doFastFetch (FastClient.DoDeadline): no
@@ -137,7 +148,55 @@ func releaseStreamFetch(sf *streamFetchResult) {
 		fasthttp.ReleaseRequest(sf.req)
 		fasthttp.ReleaseResponse(sf.resp)
 	}
-	<-sf.sem
+	if sf.sem != nil {
+		<-sf.sem
+	}
+}
+
+// releaseFetchSlotEarly returns the fetch-semaphore slot while the origin
+// connection stays open for a long-lived stream (SSE). A live stream
+// buffers nothing after the headers, so it no longer needs the memory the
+// slot bounds (concurrency × maxResponseBytes); holding it for the
+// stream's lifetime would let a few dozen concurrent streams starve every
+// other request on the route. releaseStreamFetch skips the already
+// released slot via the nil guard.
+func (h *Handler) releaseFetchSlotEarly(sf *streamFetchResult) {
+	if sf.sem != nil {
+		<-sf.sem
+		sf.sem = nil
+	}
+}
+
+// streamChunkSize is the copy granularity for unbuffered body streaming.
+// SSE events are small (tens to hundreds of bytes), so each read returns
+// whatever is available and is flushed immediately; the 32 KiB cap only
+// bounds the per-stream scratch allocation.
+const streamChunkSize = 32 * 1024
+
+// streamCopyFlush copies r into w in chunks, flushing after every write so
+// each event (or chunk) crosses the SetBodyStreamWriter pipe as soon as it
+// is read. Without the per-write flush, small events accumulate in the
+// 4 KiB bufio pipe buffer and the client sees them in multi-kilobyte
+// batches — or only at stream end.
+func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
+	buf := make([]byte, streamChunkSize)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
 }
 
 // streamBypass fetches the origin response and streams it directly to
@@ -184,11 +243,12 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 		return
 	}
 
-	// Stream the origin body directly to the client.
+	// Stream the origin body directly to the client. Flush per chunk so
+	// events (SSE) and small streamed bodies are delivered immediately
+	// instead of batching in the 4 KiB bufio pipe buffer.
 	bodyStream := sf.resp.BodyStream()
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
-		_, writeErr := io.Copy(w, bodyStream)
-		if writeErr != nil {
+		if writeErr := streamCopyFlush(w, bodyStream); writeErr != nil {
 			h.logger.Debug("stream bypass: body copy error", "error", writeErr)
 		}
 		releaseStreamFetch(sf)
@@ -229,6 +289,18 @@ func (h *Handler) streamMiss(
 	ctx.SetStatusCode(sf.StatusCode)
 
 	isHEAD := bytes.Equal(ctx.Method(), []byte("HEAD"))
+
+	// SSE without the request hint (client did not announce Accept:
+	// text/event-stream): stream it unbuffered rather than let the buffered
+	// fallback read an endless body to EOF (which stalls the request until
+	// fetch_timeout). Best-effort — the origin connection's read deadline
+	// was armed before the headers arrived, so these streams remain bounded
+	// by fetch_timeout; the supported configuration is the Accept hint
+	// (ADR-0042).
+	if !sf.buffered && !isHEAD && header.IsEventStreamContentType(sf.resp.Header.Peek(header.ContentType)) {
+		h.streamMissNoCache(ctx, sf, inflight)
+		return
+	}
 
 	// Determine cacheability before streaming — and before building the
 	// header.Map. The pre-check reads the raw fasthttp response headers
@@ -755,7 +827,9 @@ func (h *Handler) teeStreamToClient(
 }
 
 // streamMissNoCache streams the origin response to the client without
-// buffering for cache storage. Used when variant cap is exceeded.
+// buffering for cache storage. Used when variant cap is exceeded and for
+// uncacheable-by-nature streams (SSE). The body copy flushes per chunk so
+// events reach the client as they arrive.
 func (h *Handler) streamMissNoCache(
 	ctx *fasthttp.RequestCtx,
 	sf *streamFetchResult,
@@ -763,8 +837,7 @@ func (h *Handler) streamMissNoCache(
 ) {
 	bodyStream := sf.resp.BodyStream()
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
-		_, writeErr := io.Copy(w, bodyStream)
-		if writeErr != nil {
+		if writeErr := streamCopyFlush(w, bodyStream); writeErr != nil {
 			h.logger.Debug("stream miss: body copy error (no cache)", "error", writeErr)
 		}
 		// Owned header.Map — releaseStreamFetch below returns the pooled

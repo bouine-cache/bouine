@@ -16,7 +16,7 @@ func TestDataPlaneMetrics_IncrementSmugglingRejected(t *testing.T) {
 	m.IncrementSmugglingRejected()
 }
 
-func TestDataPlaneMetrics_RecordHit_NoRouteTable(t *testing.T) {
+func TestDataPlaneMetrics_RecordHit_NoPoolTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)

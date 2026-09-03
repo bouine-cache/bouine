@@ -55,13 +55,11 @@ func NewRouter(cfg RouterConfig) *Router {
 }
 
 // AddRoute registers a route entry. When methods is non-empty, only
-// requests whose HTTP method is in the set match this route. pool is the
-// upstream pool serving this route ("" for routes without one, e.g.
-// static-file routes); the metrics middleware attributes Prometheus
-// metrics by it and falls back to "_default" when empty, so the
-// upstream_pool label set stays bounded by the pool configuration no
-// matter how many routes exist. The dashboard rings keep the per-route
-// label.
+// requests whose HTTP method is in the set match this route. pool is
+// the route's upstream pool ("" for pool-less routes, e.g. static
+// files): the metrics middleware uses it as the upstream_pool label and
+// falls back to "_default" when empty, so that label set stays bounded
+// by the pool configuration. The label still feeds the dashboard rings.
 func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []string, handler fasthttp.RequestHandler) {
 	if label == "" {
 		switch {
@@ -136,14 +134,11 @@ func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 		if re.methods != nil && !re.methods[string(ctx.Method())] { //nolint:staticcheck // SA6001: method is used once per iteration, not worth inlining
 			continue
 		}
-		// The observability middleware reads attribution from the
-		// UserValues. The old request-header form is gone: nothing read
-		// it, and the origin pool forwards request headers verbatim, so
-		// it leaked internal route names upstream. UserValues are
-		// process-local and never touch the wire. The pool UserValue is
-		// only set for routes with a pool, so the middleware's _default
-		// fallback applies to static routes; route labels never feed the
-		// upstream_pool metric label.
+		// Attribution travels as UserValues, not request headers: the
+		// old header form was forwarded verbatim upstream, leaking
+		// internal route names. The pool UserValue is set only for
+		// pool-bearing routes, so the middleware's _default fallback
+		// applies to static routes.
 		ctx.SetUserValue(header.XBouineRoute, re.labelVal)
 		if re.pool != "" {
 			ctx.SetUserValue(header.XBouinePool, re.pool)

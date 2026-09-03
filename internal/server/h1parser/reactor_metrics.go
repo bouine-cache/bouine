@@ -14,10 +14,8 @@ package h1parser
 //
 // Which strings may be retained? The hook's arguments come from the
 // FastPathResponse (Pool: the handler's stable poolName field,
-// CacheResult: "HIT"/"STALE" literals, Source: api.Source constants)
-// — none alias the connection read buffer. No request-derived string
-// is retained at all: the metrics carry no method axis, so req.Method
-// is never needed here.
+// CacheResult: "HIT"/"STALE" literals, Source: api.Source constants) —
+// none alias the connection read buffer.
 //
 // Concurrency contract: single producer (the loop goroutine, via
 // pushHit), single consumer (the drainer). The ring is an array of

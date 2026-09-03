@@ -101,8 +101,7 @@ func TestMetricCardinalityBudget(t *testing.T) {
 		}
 	}
 	// 11 observations collapse to 11 histogram tuples: 500 and 503 share
-	// the 5xx class, HEAD and POST share GET's 2xx/HIT tuple shape where
-	// applicable (no method dimension) — that collapsing is the win.
+	// the 5xx class, and identical (class, result, pool) shapes merge.
 	// Plus the middleware 404 tuple.
 	assert.Len(t, tuples, 11, "one tuple per observed class combination, no more")
 

@@ -10,6 +10,20 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- Data race on shutdown caught by the nightly -race integration run
+  (TestTLS_CertRotation): `PeerFetcher.Close` swapped the bare
+  `pipelineClients` sync.Map field while concurrent Fetch/Put goroutines
+  read it. The client map now lives behind an `atomic.Pointer`;
+  `Close` drops it atomically and post-Close RPCs fail fast with a
+  "fetcher closed" error (callers already fall back to origin).
+  Regression-tested with concurrent Close/Fetch/Put under -race.
+- Nightly conformance job failed on GitHub's transient unauthenticated
+  clone rate limit ("temporarily limiting some unauthenticated
+  downloads"): the cache-tests clone now uses `gh` when available
+  (authenticated, as on Actions runners) and retries plain git up to 3
+  times with a 30s gap.
+
 ### Added
 - Data-integrity regression net for the hot-store ownership bug class
   (bouine#611): a slow-client body-lifetime race on the standard

@@ -110,9 +110,11 @@ func TestMetricCardinalityBudget(t *testing.T) {
 	for _, n := range tuples {
 		total += n
 	}
-	// 16 series per tuple (13 buckets + +Inf + _sum + _count).
-	assert.Less(t, total*16, 10000, "AGENTS.md §9: histogram series must stay under 10k")
-	assert.Less(t, total*16, 5000, "histogram series must stay under the 5k target")
+	// 13 series per tuple (10 buckets + +Inf + _sum + _count); the
+	// 2.5/5/10s tail buckets were dropped — hung-fetch tails surface as
+	// 5xx counts on requests_total, not histogram resolution.
+	assert.Less(t, total*13, 10000, "AGENTS.md §9: histogram series must stay under 10k")
+	assert.Less(t, total*13, 5000, "histogram series must stay under the 5k target")
 }
 
 // TestMetricCardinalityBudget_IdlePoolsZeroSeries is the explicit lazy

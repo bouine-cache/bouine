@@ -136,8 +136,8 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "bouine",
 			Name:      "request_duration_seconds",
-			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no source dimension; use bouine_requests_total for exact codes. Every consumer aggregates by cache_result/upstream_pool only, so the extra axes would only buy cardinality.",
-			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no source dimension; use bouine_requests_total for exact codes. Every consumer aggregates by cache_result/upstream_pool only, so the extra axes would only buy cardinality. The top bucket is 1s: a cache should never be slow, so hung-fetch tails are tracked as 5xx counts on bouine_requests_total, not as sub-second histogram resolution — the dropped 2.5/5/10s buckets saved a sixth of the metric's series.",
+			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
 			// No NativeHistogramBucketFactor: the native-histogram sparse-
 			// bucket math cost on every Observe was called out in the
 			// hit-path plan; no dashboard uses native histogram queries

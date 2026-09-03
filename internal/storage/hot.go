@@ -385,13 +385,17 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 	return ret, api.SourceHot, nil
 }
 
-// detachBody returns a copy of obj with Body on the Go heap, safe for
-// the caller to use after the shard lock is released. When slab is
-// disabled (the default), it returns obj as-is — zero allocations on
-// the hit path. When slab is enabled, it copies Body to the heap and
-// returns a new Object to avoid use-after-free: the stored entry's
-// slab-backed Body can be freed by concurrent eviction after the lock
-// is released.
+// detachBody returns an object whose Body the caller can safely alias
+// from an in-flight hit writev after the shard lock is released. When
+// slab is disabled (the default), it returns obj as-is — zero
+// allocations on the hit path, and safe because Put stores a
+// cache-owned clone (CloneForStorage): the stored body is
+// immutable-after-store and GC-pinned for as long as a hit holds it,
+// so eviction and Put-overwrite cannot change the bytes mid-write.
+// When slab is enabled, it copies Body to the heap and returns a new
+// Object to avoid use-after-free: the stored entry's slab-backed Body
+// is returned to the slab free list by concurrent eviction after the
+// lock is released and can be overwritten by the next Alloc.
 //
 // MUST be called while holding at least a read lock on the shard —
 // the body copy reads slab memory that eviction (which holds the write
@@ -477,21 +481,25 @@ func (h *HotStore) Put(_ context.Context, key api.Key, obj *api.Object) error {
 
 	// Move the body off the Go heap before acquiring the shard lock so
 	// the per-region mutex in slab.Alloc doesn't extend shard lock hold
-	// time. If the slab is full or unavailable, the stored entry keeps
-	// the Go-heap body — no crash, just no GC optimization.
+	// time. A nil slab (disabled by default, or unavailable) or a failed
+	// Alloc falls back to a heap-copied body — no crash, just no GC
+	// optimization.
 	//
-	// We clone obj so the caller's *api.Object is not mutated: the
-	// caller (TieredStore.Put) may still read obj.Body for warm-tier
-	// encoding, and mutating it in place would cause a use-after-free
-	// if the slab slot is later evicted before encoding finishes.
-	stored := obj
+	// The stored object is always a cache-owned clone (body and headers)
+	// so the caller cannot mutate what the cache serves after Put
+	// returns: the caller (TieredStore.Put, revalidation, peer promote)
+	// may still read obj.Body for warm-tier encoding, and origin paths
+	// commonly reuse their response buffers. The fast-path hit writev
+	// zero-copy aliases the stored body, so any post-Put aliasing would
+	// serve the caller's reused bytes to in-flight clients.
+	var ownedBody []byte // nil → CloneForStorage heap-copies obj.Body
 	if h.slab != nil && len(obj.Body) > 0 {
-		slabBuf := h.slab.Alloc(len(obj.Body))
-		if slabBuf != nil {
+		if slabBuf := h.slab.Alloc(len(obj.Body)); slabBuf != nil {
 			copy(slabBuf, obj.Body)
-			stored = obj.CloneForReturn(slabBuf)
+			ownedBody = slabBuf
 		}
 	}
+	stored := obj.CloneForStorage(ownedBody)
 
 	var logs []evictionLog
 	var slabFrees [][]byte

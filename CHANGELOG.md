@@ -10,6 +10,22 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- Hot-store entries aliased the caller's body and header buffers when
+  the slab was disabled (the default): `Put` stored the caller's
+  `*Object` as-is, so any post-Put mutation or buffer reuse on the
+  origin/revalidation/peer-promote paths changed the bytes an in-flight
+  fast-path hit writev was serving — clients received well-framed 200
+  responses with mutated or reused body bytes (the preprod front-office
+  `Cannot read properties of undefined (reading 'forEach')` 500s on
+  `/content/page/*`). `Put` now always stores a cache-owned clone
+  (`Object.CloneForStorage`: copied body, deep-cloned header map), so
+  every body a hit can alias is immutable-after-store and GC-pinned
+  for the life of the write. The hit path stays zero-allocation; the
+  copy lands on the miss path only. Regression-tested with a
+  slow-reading client racing concurrent Put-overwrite, SIEVE eviction
+  pressure, and caller buffer reuse.
+
 ## [0.5.6] - 2026-09-03
 
 ### Added

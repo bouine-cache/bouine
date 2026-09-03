@@ -58,6 +58,53 @@ func TestHotStore_PutGet(t *testing.T) {
 	require.Equal(t, api.SourceHot, src)
 }
 
+func TestHotStore_PutOwnsCallerBody(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+
+	k := testkey.Hash([]byte("owns-caller-body"))
+	body := []byte("original body bytes")
+	o := obj(k, 0)
+	o.Body = body
+	o.BodySize = int64(len(body))
+
+	err := s.Put(context.Background(), k, o)
+	require.NoError(t, err, "put")
+
+	// The caller is free to reuse or mutate its buffers once Put has
+	// returned — the cache must own the bytes it serves, otherwise a
+	// later Get hands back whatever the caller's slice currently holds.
+	copy(body, "MUTATED!!!")
+
+	got, src, err := s.Get(context.Background(), k)
+	require.NoError(t, err, "get")
+	require.NotNil(t, got)
+	require.Equal(t, api.SourceHot, src)
+	require.Equal(t, "original body bytes", string(got.Body), "stored body must be cache-owned, not aliased to the caller's slice")
+}
+
+func TestHotStore_PutOwnsCallerHeaders(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+
+	k := testkey.Hash([]byte("owns-caller-headers"))
+	o := obj(k, 16)
+	o.Header = headerMap("X-Original", "yes")
+
+	err := s.Put(context.Background(), k, o)
+	require.NoError(t, err, "put")
+
+	// Mutating the caller's header map after Put must not change what
+	// the cache serves: the serialized response head is built from the
+	// stored headers on every hit.
+	o.Header.Set("X-Original", "mutated")
+
+	got, _, err := s.Get(context.Background(), k)
+	require.NoError(t, err, "get")
+	require.NotNil(t, got)
+	require.Equal(t, "yes", got.Header.Get("X-Original"), "stored headers must be cache-owned, not aliased to the caller's map")
+}
+
 func TestHotStore_Miss(t *testing.T) {
 	t.Parallel()
 	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})

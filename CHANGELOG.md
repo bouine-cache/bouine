@@ -23,6 +23,12 @@ the curated, human-readable summary.
   downloads"): the cache-tests clone now uses `gh` when available
   (authenticated, as on Actions runners) and retries plain git up to 3
   times with a 30s gap.
+- Nightly cluster and dashboard-under-load jobs failed because the
+  self-hosted load-test-k8s runner image is missing `make`: both jobs
+  now self-heal by installing it when absent (the runner user has
+  sudo), keeping the nightly green until the runner image is rebuilt
+  with make baked in — after which the steps become no-ops and can be
+  dropped.
 
 ### Added
 - Data-integrity regression net for the hot-store ownership bug class

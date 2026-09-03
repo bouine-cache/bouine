@@ -119,8 +119,13 @@ type PeerFetcher struct {
 	putSem    chan struct{}
 	tlsConfig *tls.Config
 	fetchSem  chan struct{}
-	// pipelineClients caches one PipelineClient per peer address.
-	pipelineClients sync.Map // map[string]*fasthttp.PipelineClient
+	// pipelineClients caches one PipelineClient per peer address. Held
+	// behind an atomic.Pointer so Close can drop the whole map without
+	// racing concurrent Fetch/Put lookups: swapping a bare sync.Map field
+	// is a non-atomic struct write against readers (data race caught by
+	// the nightly -race integration run, TestTLS_CertRotation). nil means
+	// the fetcher is closed — callers fail fast and fall back to origin.
+	pipelineClients atomic.Pointer[sync.Map] // map[string]*fasthttp.PipelineClient
 	latSumMs        atomic.Int64
 	maxBodyBytes    int64
 	// pipelining configuration (Phase 6.4).
@@ -139,15 +144,15 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 	return f.hits.Load(), f.misses.Load(), f.hopLimitHits.Load(), f.latN.Load(), f.latSumMs.Load()
 }
 
-// Close drains idle cluster connections. Should be called during shutdown
-// so that rolling restarts don't leave TIME_WAIT sockets on peers.
+// Close drops the pipeline client map so idle cluster connections are
+// collected. Should be called during shutdown so that rolling restarts
+// don't leave TIME_WAIT sockets on peers. Race-free against concurrent
+// Fetch/Put: the map pointer is swapped atomically and later lookups see
+// nil (closed) instead of torn sync.Map state. In-flight RPCs that
+// already loaded the old map complete on their own goroutines; the
+// PipelineClients' own idle timeouts reclaim their sockets.
 func (f *PeerFetcher) Close(_ context.Context) error {
-	f.pipelineClients.Range(func(_, v any) bool {
-		// PipelineClient has no CloseIdleConnections method.
-		// Dropping the reference allows GC to collect idle connections.
-		return true
-	})
-	f.pipelineClients = sync.Map{} // prevent new lookups
+	f.pipelineClients.Store(nil)
 	return nil
 }
 
@@ -197,6 +202,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		maxIdleConnDuration: maxIdle,
 		tlsConfig:           cfg.TLSConfig,
 	}
+	f.pipelineClients.Store(&sync.Map{})
 	if reg != nil {
 		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine", Name: "peer_fetch_hits_total",
@@ -225,13 +231,18 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	return f
 }
 
-// getPipelineClient returns a PipelineClient for the given peer address,
-// creating one on first use. Each PipelineClient maintains a small pool
+// getPipelineClient returns the PipelineClient for the given peer
+// address, creating one on first use, or nil once the fetcher is closed
+// (Close dropped the map). Each PipelineClient maintains a small pool
 // of pipelined connections (default 8) that can handle up to 16
 // concurrent in-flight requests per connection, matching the old HTTP/2
 // capacity with ~85% less connection pool memory.
 func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
-	if v, ok := f.pipelineClients.Load(addr); ok {
+	clients := f.pipelineClients.Load()
+	if clients == nil {
+		return nil // closed during shutdown
+	}
+	if v, ok := clients.Load(addr); ok {
 		return v.(*fasthttp.PipelineClient)
 	}
 	pc := &fasthttp.PipelineClient{
@@ -251,7 +262,7 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 			}).Dial("tcp", addr)
 		},
 	}
-	actual, _ := f.pipelineClients.LoadOrStore(addr, pc)
+	actual, _ := clients.LoadOrStore(addr, pc)
 	return actual.(*fasthttp.PipelineClient)
 }
 
@@ -325,6 +336,9 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 
 	start := time.Now()
 	pc := f.getPipelineClient(peerAddr(peer))
+	if pc == nil {
+		return nil, fmt.Errorf("peer fetch %s: fetcher closed during shutdown", peer.Addr)
+	}
 	if err := transport.PipelineDo(ctx, pc, httpReq, resp); err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
@@ -510,7 +524,11 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	if err := transport.PipelineDo(ctx, f.getPipelineClient(peerAddr(peer)), req, resp); err != nil {
+	putClient := f.getPipelineClient(peerAddr(peer))
+	if putClient == nil {
+		return fmt.Errorf("peer put %s: fetcher closed during shutdown", peer.Addr)
+	}
+	if err := transport.PipelineDo(ctx, putClient, req, resp); err != nil {
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
 	if resp.StatusCode() != fasthttp.StatusOK {

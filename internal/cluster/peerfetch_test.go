@@ -528,3 +528,64 @@ func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 		}
 	}
 }
+
+// TestPeerFetcher_CloseConcurrentWithFetchAndPut pins the shutdown
+// race the nightly -race integration run caught in TestTLS_CertRotation:
+// Close swapped the bare pipelineClients sync.Map field while concurrent
+// Fetch/Put goroutines read it. The map now lives behind an
+// atomic.Pointer; under -race this test fails on any unsynchronized
+// access, and it also asserts the post-Close behavior: RPCs fail fast
+// with a "fetcher closed" error instead of touching a torn map.
+func TestPeerFetcher_CloseConcurrentWithFetchAndPut(t *testing.T) {
+	t.Parallel()
+
+	key := testkey.Key(9)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("concurrent-close"),
+	}
+	obj.Header = header.NewMap(1)
+
+	srv := fasthttptest.NewServer(t, NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+		key: obj,
+	}}, 0).Handle)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	peer := api.PeerInfo{AdminAddr: srv.Addr}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: key})
+				_ = f.Put(context.Background(), peer, obj)
+			}
+		}()
+	}
+
+	// Race Close against the RPC workers: before the atomic.Pointer fix
+	// this plain-field swap tripped the race detector against the
+	// workers' map lookups.
+	for range 20 {
+		require.NoError(t, f.Close(context.Background()))
+	}
+	close(stop)
+	wg.Wait()
+
+	// After Close every RPC must fail fast with the closed error rather
+	// than consulting a (torn) client map.
+	_, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: key})
+	require.ErrorContains(t, err, "fetcher closed")
+	err = f.Put(context.Background(), peer, obj)
+	require.ErrorContains(t, err, "fetcher closed")
+}

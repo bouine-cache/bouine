@@ -43,6 +43,8 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — internal/cache, internal/server/h1parser, internal/origin, pkg/header — SSE support: hinted dispatch, live unbuffered streaming, idle read/write deadlines, per-event flush, tests (ADR-0042) — 2026-09-03
+
 - [DONE] crush — internal/observability, internal/cache, pkg/header — MISS-path batch 2: middleware byte classification, ToMap skip, non-interning SetEntryRaw, sharded singleflight, cacheKey logging gate (PR pending) — 2026-08-29
 
 - [DONE] crush — internal/cache (miss-path fetch), internal/origin (PoolFastClient) — MISS-path alloc reduction: SwapBody body ownership + deadline-based fetch timeout (PR #556) — 2026-08-29

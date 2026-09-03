@@ -771,11 +771,21 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 		ctx.Response.Header.SetConnectionClose()
 	}
 
-	// Write the response to the connection.
+	// Write the response to the connection. Streamed responses (body
+	// set via SetBodyStreamWriter — SSE, unbuffered passthrough) manage
+	// their own lifetime: an absolute write deadline would cut every
+	// long-lived stream at p.writeTime. Wrap the conn so each Write
+	// re-arms the deadline instead (idle semantics): a stream that keeps
+	// writing lives as long as it flows; a client that stops reading is
+	// still dropped after one idle budget, preserving the slowloris net.
+	writeConn := conn
+	if ctx.Response.IsBodyStream() {
+		writeConn = &idleWriteConn{Conn: conn, budget: p.writeTime}
+	}
 	if err := conn.SetWriteDeadline(p.nowFunc().Add(p.writeTime)); err != nil {
 		return false, err
 	}
-	if _, err := ctx.Response.WriteTo(conn); err != nil {
+	if _, err := ctx.Response.WriteTo(writeConn); err != nil {
 		return false, err
 	}
 
@@ -816,8 +826,38 @@ func (p *Parser) handleFallThroughRaw(conn net.Conn, buffered []byte) {
 	p.fallback(&ctx)
 	ctx.Response.Header.SetConnectionClose()
 
+	// Streamed responses re-arm the write deadline per Write (see
+	// handleFallThrough); this connection always closes after the
+	// response either way (the fallback owned the read state).
+	writeConn := conn
+	if ctx.Response.IsBodyStream() {
+		writeConn = &idleWriteConn{Conn: conn, budget: p.writeTime}
+	}
 	_ = conn.SetWriteDeadline(p.nowFunc().Add(p.writeTime))
-	_, _ = ctx.Response.WriteTo(conn)
+	_, _ = ctx.Response.WriteTo(writeConn)
+}
+
+// idleWriteConn re-arms the write deadline before every Write, turning
+// an absolute write-time budget into an idle budget. Long-lived streamed
+// responses (SSE) are cut by an absolute deadline even while actively
+// delivering events; with per-Write re-arming they survive as long as
+// they keep making progress, while a client that stops reading entirely
+// is dropped after one budget — the slowloris protection is preserved.
+//
+// Only the fall-through response write path uses this wrapper; the hit
+// path's zero-copy writev is untouched.
+type idleWriteConn struct {
+	net.Conn
+	budget time.Duration
+}
+
+func (c *idleWriteConn) Write(p []byte) (int, error) {
+	// SetWriteDeadline is not overridden, so the selector-free call
+	// resolves to the embedded conn; c.Conn.Write IS deliberate — Write is
+	// overridden here, so the embedded-field selector is required to avoid
+	// infinite recursion.
+	_ = c.SetWriteDeadline(time.Now().Add(c.budget))
+	return c.Conn.Write(p)
 }
 
 // prefixConn serves Read calls from prefix before falling through to the

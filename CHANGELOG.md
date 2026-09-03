@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-03
+
 ### Fixed
 - Hot-store entries aliased the caller's body and header buffers when
   the slab was disabled (the default): `Put` stored the caller's

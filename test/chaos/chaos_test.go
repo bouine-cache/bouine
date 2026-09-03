@@ -6,6 +6,7 @@
 package chaos_test
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -416,4 +417,95 @@ func TestChaos_NodeRejoinAfterLongPartition(t *testing.T) {
 	sc, _, err := fastGet(s.Nodes[2].HTTPAddr + "/hit?x=rejoin-after")
 	require.NoError(t, err, "node 2 after rejoin")
 	assert.Equal(t, 200, sc)
+}
+
+// fastGetBody performs a GET and returns the status code, X-Cache header,
+// and a PRIVATE COPY of the response body. Used by the data-integrity
+// scenario to validate every byte served to the client. The copy is
+// load-bearing: resp is pool-released on return, so aliasing resp.Body()
+// would hand the caller a buffer the next AcquireResponse can overwrite —
+// the exact aliasing class this scenario exists to catch in bouine.
+func fastGetBody(client *fasthttp.Client, url string) (statusCode int, xCache string, body []byte, err error) {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if err = client.Do(req, resp); err != nil {
+		return 0, "", nil, err
+	}
+	body = append([]byte(nil), resp.Body()...)
+	return resp.StatusCode(), string(resp.Header.Peek("X-Cache")), body, nil
+}
+
+// TestChaos_OriginBodyIntegrityUnderEviction is the data-integrity net
+// the preprod corruption incident slipped past: every prior chaos
+// scenario asserted status codes, never payload bytes. A working set
+// larger than the per-node hot budget (48 x 64 KiB keys against 2 MiB)
+// keeps SIEVE eviction and origin refetches churning while parallel
+// clients regenerate the deterministic expected body for every request
+// and compare byte-for-byte. A hot-store ownership or buffer-lifetime
+// regression (cache serving an origin-client buffer that was reused by
+// the next fetch, cross-object mixing, truncation) fails here no matter
+// which serve path (fast path, standard handler, peer fetch) delivered
+// the bytes.
+func TestChaos_OriginBodyIntegrityUnderEviction(t *testing.T) {
+	s := driver.BootCluster(t, driver.ClusterOptions{Mode: "strong", HotMaxBytes: "2MiB"})
+
+	const (
+		keys    = 48
+		kb      = 64
+		workers = 4
+		runFor  = 5 * time.Second
+	)
+
+	var (
+		mu         sync.Mutex
+		requests   int
+		mismatches []string
+		non200     int
+	)
+
+	var wg sync.WaitGroup
+	deadline := time.Now().Add(runFor)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			client := &fasthttp.Client{
+				ReadTimeout:  5 * time.Second,
+				WriteTimeout: 5 * time.Second,
+			}
+			for i := seed; time.Now().Before(deadline); i++ {
+				k := fmt.Sprintf("integrity-%d", i%keys)
+				sc, xCache, body, err := fastGetBody(client,
+					fmt.Sprintf("%s/payload?k=%s&kb=%d", s.Nodes[i%3].HTTPAddr, k, kb))
+				mu.Lock()
+				requests++
+				if err != nil {
+					mismatches = append(mismatches, fmt.Sprintf("k=%s err=%v", k, err))
+				} else if sc != 200 {
+					non200++
+					mismatches = append(mismatches, fmt.Sprintf("k=%s status=%d", k, sc))
+				} else {
+					expected := driver.DeterministicPayload(k, kb)
+					if !bytes.Equal(body, expected) {
+						mismatches = append(mismatches,
+							fmt.Sprintf("k=%s x-cache=%s len=%d want=%d", k, xCache, len(body), len(expected)))
+					}
+				}
+				mu.Unlock()
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	assert.Emptyf(t, mismatches,
+		"every response body must byte-match the deterministic origin payload (first failures: %.500v)", mismatches)
+	assert.Greater(t, requests, 500, "scenario must generate meaningful load")
+	t.Logf("integrity requests: %d, non-200: %d", requests, non200)
+}
+
+func newIntegrityClient() *fasthttp.Client {
+	return &fasthttp.Client{ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
 }

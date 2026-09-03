@@ -44,6 +44,15 @@ the curated, human-readable summary.
   explicit `cluster.peer_max_idle_conn_duration >= admin.idle_timeout`
   at load time (plus negative values for either) so operator overrides
   cannot reintroduce the race.
+- WAL async drain wrote one O_DSYNC `Write` syscall per entry, so
+  draining a full sync channel (4096 entries) at Close issued 4096
+  synchronous writes — slow enough on saturated disks to exceed test
+  timeouts (CI hung in `TestAsyncDropOnFull` /
+  `TestDroppedEntriesResets` cleanup) and avoidable syscall overhead in
+  production. Each drain batch is now coalesced into a single durable
+  Write on a reused ~168 KiB scratch buffer. The WAL write-duration
+  metrics test is also made deterministic via `Sync()` instead of a
+  fixed sleep racing the sync-loop ticker.
 
 ### Changed
 - Helm: the `podAntiAffinity` values key (added in 0.5.3) is removed

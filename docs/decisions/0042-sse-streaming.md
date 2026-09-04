@@ -71,7 +71,11 @@ fetching.
    buffered fallback — events flow live, but the stream remains bounded by
    `fetch_timeout` because the origin connection's deadline was armed
    before detection. Documented limitation; the Accept hint is the
-   supported configuration.
+   supported configuration. Singleflight followers of such a stream are
+   released at header time with `ErrStreamUnshareable` and fetch their own
+   response: nothing is buffered, so there is no result to share, and a
+   live stream cannot be replayed to a second client (the same applies to
+   the Vary variant-overflow path, which shares the mechanism).
 5. `streamBypass` and `streamMissNoCache` flush per chunk for all traffic
    (not just SSE), and `doFetchStream` now forwards request bodies
    (POST-SSE payloads previously never reached the origin).

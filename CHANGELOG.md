@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-09-04
+
 ### Fixed
 - Data race on shutdown caught by the nightly -race integration run
   (TestTLS_CertRotation): `PeerFetcher.Close` swapped the bare
@@ -29,6 +31,30 @@ the curated, human-readable summary.
   sudo), keeping the nightly green until the runner image is rebuilt
   with make baked in — after which the steps become no-ops and can be
   dropped.
+- `bouine_request_duration_seconds` minted ~9,600 idle series per
+  configured route at startup and attributed every request to
+  `_default`, because the router published the route as a request
+  header the metrics middleware never read (Grafana Cloud showed the
+  metric at ~20% of total scrape cardinality, bouine#607). Attribution
+  now rides process-local fasthttp UserValues and reports the serving
+  route's upstream pool — a small config-bounded set that still answers
+  "which upstream is slow or 5xx-ing" — with pool-less and unmatched
+  traffic landing on `_default` (a static-file route name can no longer
+  leak into the `upstream_pool` label). The duration histogram drops
+  the `source` axis (correlated with `cache_result`; no consumer
+  queries it) and the 2.5/5/10s tail buckets (a cache's latency mass
+  sits far below 1s; hung-fetch tails are already 5xx counts on
+  `bouine_requests_total`), shrinking the histogram footprint ~90%.
+  The dashboard rings keep per-route attribution, so the routes panel
+  loses nothing.
+- Singleflight followers of unbuffered streams (non-hinted SSE and
+  Vary variant-overflow responses) got a 200 with an empty body: the
+  leader streamed unbuffered but still published a body-less result,
+  so followers waited out the leader's entire stream (up to
+  `fetch_timeout`) for nothing — silent data loss for concurrent
+  clients of the same URL. The leader now releases followers at
+  header time with `ErrStreamUnshareable` and each follower fetches
+  its own response outside singleflight (ADR-0042).
 
 ### Added
 - Data-integrity regression net for the hot-store ownership bug class
@@ -43,6 +69,46 @@ the curated, human-readable summary.
   checks plus sampled full byte compares, zero-tolerance threshold)
   registered in the nightly suite. All integrity layers verified
   red-capable: reverting the CloneForStorage fix makes each fail.
+- Server-Sent Events now stream end to end. Requests announcing
+  `Accept: text/event-stream` (the WHATWG client contract) are served
+  as live unbuffered streams — never cached, never singleflight-
+  collapsed, fetch slot released at header time, each event flushed
+  as it arrives — including POST-based SSE (the dominant AI API
+  shape), whose invalidation semantics are preserved (purge at header
+  time on 2xx/3xx). A dedicated origin-pool client converts the
+  absolute read deadline into per-read idle semantics (10-minute
+  budget) and the H1 fall-through write path re-arms its write
+  deadline per Write, so live streams survive indefinitely while
+  dead peers and stalled clients are still cut. Non-hinted SSE
+  responses stream unbuffered too but stay bounded by `fetch_timeout`
+  (ADR-0042). Also fixes two latent bugs the work surfaced:
+  `doFetchStream` dropped request bodies entirely, and `streamBypass`
+  delivered streamed bodies in 4 KiB batches.
+- The request-duration histogram is exposed natively (client_golang
+  dual representation): classic `_bucket` series stay for
+  layout-agnostic consumers, while the sparse-bucket native form lets
+  Grafana Cloud / Mimir `histogram_quantile` work without
+  materializing bucket series server-side. Resolution factor 1.1,
+  capped at 80 sparse buckets with a 1h minimum reset window
+  (adversarially probed: 10k distinct latencies hold the spread at 44
+  buckets). The runbook documents the `metric_relabel_configs` recipe
+  that drops the classic bucket series from scrapes and the one-field
+  rollback. Zero-alloc gates `BenchmarkGate_HistogramObserve_Native`
+  and `..._Distinct` pin 0 allocs/op; enabling the feature exposed a
+  pre-existing `strconv.Itoa` per hit in `RecordHit`, now replaced by
+  the existing statusStrings table.
+
+### Changed
+- The `method` label is gone from the data-plane RED metrics: no
+  dashboard or SLO query used it, response bytes and status already
+  answer everything consumers plot, and dropping the axis shrinks the
+  pre-resolved slot table (the reactor metrics ring record is now
+  entirely stable handler-owned strings). The access log keeps the
+  method: logs are per-request, not label spaces.
+- Go toolchain bumped from 1.27.0 to 1.27.1 (go.mod, CI workflow
+  envs, digest-pinned `golang:1.27.1-bookworm` build image, prek
+  GO_VERSION_STAMP refreshed) and all direct and indirect dependencies
+  rolled forward.
 
 ## [0.5.7] - 2026-09-03
 
@@ -985,7 +1051,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.8
 [0.5.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.6
 [0.5.5]: https://github.com/bouine-cache/bouine/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/bouine-cache/bouine/compare/v0.5.3...v0.5.4

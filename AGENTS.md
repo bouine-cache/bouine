@@ -5,7 +5,7 @@ contributing to `bouine`. It is binding. **Read [`docs/architecture.md`](docs/ar
 file, then start work. If anything in this file conflicts with `docs/architecture.md`,
 `docs/architecture.md` wins for *what* to build; this file wins for *how* to build it.
 
-> One-line summary: build a horizontally-scalable, observability-first HTTP/1.1+2+3
+> One-line summary: build a horizontally-scalable, observability-first HTTP/1.1-only
 > reverse-proxy cache in Go 1.27 that matches Varnish on
 > [`http-tests/cache-tests`](https://github.com/http-tests/cache-tests),
 > never regresses on benchmarks, and stays maintainable across many phases
@@ -32,9 +32,8 @@ file, then start work. If anything in this file conflicts with `docs/architectur
 15. Multi-Agent Coordination
 16. Working Loop (mandatory per task)
 17. Pull Request Checklist
-18. Anti-Patterns & Common Mistakes
-19. Escalation & Stop Conditions
-20. Glossary
+18. Escalation & Stop Conditions
+19. Glossary
 
 ---
 
@@ -65,12 +64,9 @@ These rules override autonomy. Break them and the change must be reverted.
 
 1. **Never violate the layer boundaries** defined in `docs/architecture.md §2`. A package
    may only depend on packages in lower layers, through declared interfaces.
-   A reverse import (e.g. `storage` importing `cache`) is a build error.
-2. **One HTTP stack only: `fasthttp`.** The admin
-   surface uses `fasthttp.Server` with `fasthttpadaptor` for
-   `net/http/pprof` and `promhttp.Handler()`. The data plane uses
-   `fasthttp.Server` (H1 only). HTTP/2 and HTTP/3 are not supported.
-   See ADR-0034.
+   A reverse import (e.g. `storage` importing `cache`) fails `depguard` in CI.
+2. **One HTTP stack only: `fasthttp`** — admin and data plane, H1 only
+   (HTTP/2 and HTTP/3 are not supported). See ADR-0034.
 3. **Never add a global variable** for mutable state. The daemon is a single
    `Engine` struct. Configuration, clocks, randomness, and metrics are
    injected.
@@ -79,7 +75,7 @@ These rules override autonomy. Break them and the change must be reverted.
 5. **Never weaken the cache-tests score.** A PR that regresses any test must
    either fix the regression or be rejected.
 6. **Never bypass the benchmark gate.** `bench/` results are required for
-   any change that touches `internal/{listener,pipeline,cache,storage,origin,cluster}`.
+   any change that touches `internal/{server,cache,storage,origin,cluster}`.
 7. **Never commit secrets, tokens, customer data, or production hostnames.**
    Use `testdata/` fixtures with synthetic values.
 8. **Never push to remote** unless the user explicitly says so. Don't open
@@ -136,8 +132,8 @@ L1 → L7, /pkg/api
 ## 4. Coding Standards (Go 1.27)
 
 - **Toolchain pinned** in `go.mod` (`go 1.27.X`). Never bump unilaterally.
-- **Formatting**: `gofmt -s` and `goimports`. Lines wrap at 100 columns
-  except generated code.
+- **Formatting**: `gofmt -s` (enforced by prek; see `.pre-commit-config.yaml`).
+  Lines wrap at 100 columns except generated code.
 - **templ**: dashboard HTML lives in `internal/dashboard/templates/*.templ`.
   After editing any `.templ` file run `go generate ./internal/dashboard/templates/`
   (or `templ generate`). Commit both the `.templ` source and the generated
@@ -145,10 +141,13 @@ L1 → L7, /pkg/api
   the next `go generate`. The `templ` binary (v0.3.x) must be on `PATH`;
   install once with `go install github.com/a-h/templ/cmd/templ@latest` or
   download the release binary from GitHub.
-- **Linters**: `golangci-lint` with `govet`, `staticcheck`, `errcheck`,
-  `gocritic`, `revive`, `bodyclose`, `contextcheck`, `noctx`, `nilerr`,
-  `forbidigo` (banning `fmt.Println`, `panic`, `os.Exit` outside `main`),
-  `gosec`, `gocyclo` (complexity ≤ 15), `funlen` (≤ 80 lines), `lll`.
+- **Linters**: `golangci-lint`. The enforced linter set and thresholds
+  live in `.golangci.yaml` (single source of truth — do not restate the
+  list here; restated lists drift). Key floors: `gosec` zero findings,
+  complexity ≤ 15, functions ≤ 80 lines.
+- **Never run `golangci-lint run --fix` directly**: the `fieldalignment`
+  auto-fix strips ALL comments from struct fields. Use `make lint-fix`
+  (disables `fieldalignment` for the fix pass); reorder fields manually.
 - **Naming**: idiomatic Go — short receivers (1–2 chars), no Hungarian
   notation, exported identifiers documented with a sentence starting with
   the identifier name.
@@ -222,8 +221,10 @@ L1 → L7, /pkg/api
 - **Buffers**: pool 4 KiB and 64 KiB sizes via `sync.Pool`. Always reset on
   put.
 - **Hashing**: xxhash64 for keys. Never use `crypto/sha*` on the hit path.
-- **Goroutines**: max two per request (reader + writer). Background work
-  uses bounded worker pools sized at boot.
+- **Goroutines**: the h1 reactor (ADR-0041) owns the connection/
+  goroutine model — one event-loop goroutine multiplexes many
+  connections; never reintroduce goroutine-per-connection. Background
+  work uses bounded worker pools sized at boot.
 - **Atomics over mutexes** where contention is observed. Document why with
   a benchmark in the PR.
 - **Profiling**: every perf-sensitive PR includes `go test -bench`,
@@ -252,19 +253,22 @@ L1 → L7, /pkg/api
   cache, storage, cluster, or server layers.
 - **Unit tests** ship in the same package, `_test.go`. Table-driven.
   `-race` always on in CI.
-- **Coverage gates** per package: ≥ 85% default, ≥ 95% for
-  `internal/cache` and `internal/storage`. CI reports per-package coverage
-  and fails on regression.
+- **Coverage targets** per package: ≥ 85% default, ≥ 95% for
+  `internal/cache` and `internal/storage`. CI reports coverage (Codecov)
+  but does not yet fail on regression; targets are enforced by review
+  until a per-package gate is wired into CI.
 - **Fuzz tests** for: header parsing, `Cache-Control` tokenizer, `Vary`
-  canonicalization, URL normalization, VCL parser. At least one corpus
-  per fuzzer committed under `testdata/fuzz/`.
+  canonicalization, URL normalization. At least one corpus
+  per fuzzer committed under `testdata/fuzz/`. Fuzzing runs nightly,
+  not per-PR.
 - **Conformance**: `test/cachetests` runs the upstream
   `http-tests/cache-tests` harness against a real `bouine` instance. CI
   publishes the score as a JSON badge and blocks regressions.
 - **Integration**: `test/integration` boots a 3-node bouine cluster + an
-  origin via `docker compose`. Scenarios listed in `docs/architecture.md §12`.
+  origin in-process. Scenarios listed in `docs/architecture.md §12`.
 - **Chaos**: kill a peer, drop packets, slow the disk. Lives under
-  `test/chaos`, runs nightly, not on every PR.
+  `test/chaos`. TODO: settle the run cadence — CI currently runs it on
+  every PR (`ci.yml`), the original intent was nightly-only.
 - **Benchmarks**: `bench/` runs on a pinned self-hosted runner with CPU
   affinity. `benchstat` compares HEAD vs `main`, N ≥ 10. Benchmark
   naming convention:
@@ -281,8 +285,9 @@ L1 → L7, /pkg/api
     `make bench-all` only.
 - **No flaky tests.** A test that flakes twice in a week is quarantined
   (`-skip` with a tracking issue) within one business day.
-- **Determinism**: no `time.Now()` in tests; use the injected clock. No
-  random ports; use `:0` and read back.
+- **Determinism**: no `time.Now()` and no sleeps in tests; use the
+  injected clock or synchronization primitives. No random ports; use
+  `:0` and read back.
 - **Assertions**: use `testify` (`require` + `assert` only). See
   ADR-0028 for the require-vs-assert convention and the `time.Time`
   comparison exception. `suite`/`mock`/`httpmock` are not approved.
@@ -307,8 +312,8 @@ Observability is a product feature, not an afterthought.
   in committed code.
 - **Access log** — sampled by default (1:100), always-on for errors. Fields:
   ts, request-id, route, method, status, cache_result, upstream_pool,
-  bytes_in, bytes_out, dur_ns, peer_hop.
-- **Self-check endpoints**: `/healthz`, `/readyz`, `/debug/cachecheck`,
+  bytes_in, bytes_out, dur_ns, peer_hops.
+- **Self-check endpoints**: `/healthz`, `/readyz`, `/v1/debug/cachecheck`,
   `/debug/pprof/*`. All bound to the admin port; never to the data port.
 - **Cardinality tests** — a unit test inspects registered metrics and
   enforces the budget.
@@ -328,6 +333,9 @@ Observability is a product feature, not an afterthought.
   surface.
 - README stays a quickstart. Deep content lives under `docs/`.
 - Diagrams use Mermaid in Markdown; no binary images committed.
+- TODO (doc-lint): add a CI check that fails when any file path, `make`
+  target, ADR number, or `§` reference cited in this file no longer
+  resolves. Until it exists, references here are verified by review only.
 
 ---
 
@@ -346,7 +354,7 @@ Observability is a product feature, not an afterthought.
   consumer never closes.
 - **Locks**: prefer `sync.RWMutex` only when read-heavy is *proven* by
   bench; otherwise `sync.Mutex`. Always defer-unlock in the same function
-  it was taken.
+  it was taken. Never hold a lock across an I/O call.
 - **Atomics**: use `sync/atomic` typed variants (`atomic.Int64`, etc.). No
   raw `uintptr` tricks.
 - **Race detector**: CI runs `go test -race` on Linux amd64 + arm64.
@@ -361,7 +369,7 @@ Observability is a product feature, not an afterthought.
 - Never log + return — pick one. The boundary handler logs; lower layers
   return.
 - HTTP error mapping happens at one place per surface (data plane in
-  `internal/server/router.go`, admin in `internal/admin/errors.go`).
+  `internal/server/router.go`, admin in `internal/admin/server.go`).
 - Stack traces only on `error` level. PII never appears in errors.
 
 ---
@@ -373,8 +381,9 @@ Observability is a product feature, not an afterthought.
   no JSON-Schema emitter; the Go structs are the contract.
 - Config changes that break compatibility require a major version bump and
   a migration guide.
-- VCL shim supports the subset defined in `docs/architecture.md §16.4`. Unsupported
-  constructs are reported, never silently ignored.
+- VCL shim is deferred (`internal/vcl` does not exist yet); when it lands
+  it will support the subset defined in `docs/architecture.md` §16 item 4.
+  Unsupported constructs are reported, never silently ignored.
 - The Go SDK (`pkg/bouineapi`) follows semver. Wire types in `pkg/api` are
   additive — add fields, never remove or rename in the same major.
 - Feature flags for experimental work live under `experimental:` in
@@ -386,32 +395,21 @@ Observability is a product feature, not an afterthought.
 
 ### 14.1 Commands
 
+Run `make help` for the full, always-current list. Targets with contract
+semantics:
+
 ```
-make setup-dev       # install all dev tools (golangci-lint, govulncheck, gitleaks, templ), hooks, verify build + tests
-make build           # binary to ./bin/bouine
-make test            # go test -race ./...
-make test-short      # go test -race -short ./... (prek)
-make lint            # golangci-lint run
-make lint-fix        # golangci-lint --fix (disables fieldalignment to protect comments)
-make vet             # go vet ./...
-make bench-gate      # gating benchmarks, enforces alloc budgets, diffs baseline
-make bench-all       # full benchmarks (no gates), diffs baseline
-make conformance     # run http-tests/cache-tests, write report
-make integration     # cluster integration suite (alias: test-integration-cluster)
-make chaos           # chaos scenarios (alias: test-chaos)
-make soak            # long-running soak against a live cluster
-make govulncheck     # govulncheck ./...
-make ci              # lint + test-short + build + hooks-run (CI gate)
-make templ           # go generate ./internal/dashboard/templates/ (requires templ CLI)
-make hooks           # install prek hooks into .git/hooks
-make install         # install binary to PREFIX (default /usr/local); honors DESTDIR
-make uninstall       # remove binary from PREFIX; honors DESTDIR
+make bench-gate      # gating benchmarks; alloc budgets enforced (BUDGETS in bench/run.sh)
+make ci              # lint + test-short + build + hooks-run — the local CI gate
+make hooks           # install prek hooks (required before committing; see §14.4)
 ```
 
-> There is no JSON-schema generator or in-repo docs-site build: config is
-> validated in Go (`config.Validate`), and the documentation site lives in
-> the separate `bouine-documentation` repo. Do not reference `make schema`
-> or `make docs`.
+> There is no config JSON-schema generator or in-repo docs-site build:
+> config is validated in Go (`config.Validate`), and the documentation
+> site lives in the separate `bouine-documentation` repo. Do not
+> reference `make schema` or `make docs`. (`make schema-sync` /
+> `schema-check` are unrelated: they sync the embedded Kubernetes Helm
+> chart schema.)
 
 ### 14.2 CI pipeline (stages)
 
@@ -419,13 +417,16 @@ make uninstall       # remove binary from PREFIX; honors DESTDIR
    `govet` linter, already enabled in `.golangci.yaml`.)
 2. `unit` (with `-race`, per-OS matrix linux/amd64, linux/arm64,
    darwin/arm64).
-3. `coverage` gate.
-4. `fuzz` (short, time-boxed; long-running nightly).
-5. `conformance` (`cache-tests`), publish score.
-6. `bench-gate` on self-hosted runner, `benchstat` diff vs `main`.
-7. `integration` (3-node cluster).
-8. `release` (tagged refs only): SBOM (`syft`), provenance, signed
+3. `coverage` report (Codecov; targets enforced by review, see §8).
+4. `conformance` (`cache-tests`), publish score.
+5. `bench-gate` on self-hosted runner, `benchstat` diff vs the committed
+   baseline (`bench/run.sh`).
+6. `integration` (3-node cluster) + `chaos`.
+7. `release` (tagged refs only): SBOM (`syft`), provenance, signed
    container image (`cosign`).
+
+Fuzzing is NOT a per-PR stage: it runs nightly
+(`.github/workflows/nightly.yml`).
 
 ### 14.3 Branching & releases
 
@@ -451,61 +452,32 @@ make hooks                         # one-shot equivalent of the two above
 ```
 
 The `.pre-commit-config.yaml` at the repo root is the single source of
-truth. prek reads this file natively — no format change needed. It MUST
-register at minimum:
+truth for what runs and how; prek reads it natively. It MUST keep
+registering the following capabilities — mechanisms and tool versions
+live in the config file, not here (restating them is how this section
+drifted):
 
-- **YAML validation** — `check-yaml` from `pre-commit/pre-commit-hooks`
-  (prek runs its built-in Rust fast path for this hook automatically)
-  for every `*.yaml` / `*.yml` file (config, Helm, GitHub Actions,
-  fixtures). Multi-document files allowed where needed.
-- **Generic file hygiene** — `end-of-file-fixer`, `trailing-whitespace`,
-  `mixed-line-ending`, `check-merge-conflict`, `check-added-large-files`
-  (cap 1 MiB; testdata fixtures excluded explicitly).
-- **Go formatting** — `gofmt -s` and `goimports` via the
-  `golangci/golangci-lint` hook in `--fix` mode, or `dnephin/pre-commit-golang`
-  for `gofmt`/`goimports` standalone. (prek runs these hooks from the
-  same `.pre-commit-config.yaml`.)
-- **Go tests** — a local hook running
-  `go test -race -count=1 -short ./...`. The `-short` flag is what keeps
-  the hook usable; long benchmarks, fuzz, integration, and conformance
-  suites stay in CI / `make` targets. The full `go test -race ./...` runs
-  on the `pre-push` stage.
-- **golangci-lint** — invoked via the official hook with
-  `--new-from-rev=HEAD~` on commit (changed lines only) and
-  `--config=.golangci.yaml`. The enabled linter set MUST include at
-  least:
-  - `govet`
-  - `staticcheck`
-  - `errcheck`
-  - `gosec`
-  - `bodyclose`
-  - `contextcheck`
-  - `noctx`
-  - `nilerr`
-  - `gocritic`
-  - `revive`
-  - `forbidigo` (bans `fmt.Println`, `panic`, `os.Exit` outside `main`)
-  - `gocyclo` (complexity ≤ 15)
-  - `funlen` (≤ 80 lines)
-  - `depguard` (enforces §3.1 layer matrix)
-  - `unparam`
-  - `ineffassign`
-  - `unused`
-  - `misspell`
-- **Go module hygiene** — a local hook running `go mod tidy` and failing
-  if it produced a diff.
-- **govulncheck** — runs on `pre-push` stage only (too slow for every
-  commit, but must pass before code leaves the laptop).
-- **Secret scan** — `gitleaks` hook with the repo config; refuses
-  commits containing credentials, tokens, or production hostnames.
-- **Conventional Commits** — a `commit-msg` stage hook validating the
-  message header against the `feat|fix|chore|docs|refactor|test|perf|build|ci`
-  prefix list. Required because release notes are generated from commits.
-- **DCO sign-off** — a `commit-msg` stage hook (`scripts/check-dco.sh`)
-  requiring a `Signed-off-by:` trailer on every commit. See
+- **Config validation** — YAML/JSON/TOML checks.
+- **File hygiene** — EOF fixer, trailing whitespace, line endings,
+  merge-conflict markers, large-file cap.
+- **Go formatting** — `gofmt -s` on every commit.
+- **Go tests** — `go test -race -count=1 -short ./...` on commit; the
+  full `go test -race ./...` on the `pre-push` stage. Long benchmarks,
+  fuzz, integration, and conformance suites stay in CI / `make` targets.
+- **Lint** — golangci-lint on changed lines only; linter set and
+  thresholds live in `.golangci.yaml`.
+- **Go module hygiene** — `go mod tidy` must produce no diff.
+- **govulncheck** — `pre-push` stage only (too slow for every commit,
+  but must pass before code leaves the laptop).
+- **Secret scan** — refuses commits containing credentials, tokens, or
+  production hostnames.
+- **Conventional Commits** — commit-msg validation against the
+  `feat|fix|chore|docs|refactor|test|perf|build|ci` prefix list
+  (release notes are generated from commits).
+- **DCO sign-off** — a `Signed-off-by:` trailer on every commit; see
   `CONTRIBUTING.md § "Developer Certificate of Origin (DCO)"`. Use
-  `git commit -s` to add the trailer automatically. CI also runs a
-  separate `dco` job that checks all commits in a PR.
+  `git commit -s`. CI also runs a separate `dco` job that checks all
+  commits in a PR.
 
 **Operational rules:**
 
@@ -570,18 +542,21 @@ For every task an agent starts, execute this loop. No shortcuts.
    - Smallest reasonable change.
    - Follow patterns from neighboring code.
    - Add tests as you go, not at the end.
-4. **Verify**
-   - **All of the following must pass before a task is considered complete:**
-     - `make lint` — golangci-lint with the full linter set (§14.4).
-     - `make test` — unit tests with `-race` and `-parallel=8`.
-     - `make integration` — in-process 3-node cluster tests for all
-       consistency modes (strong, eventual, full).
-     - `make chaos` — chaos scenarios (peer kill, origin flap, slow
-       origin, rolling restart, origin down, concurrent purge, rejoin).
-   - Additionally, if touching L1–L4: `make bench-all` and compare to `main`.
-   - If touching `cache`: `make conformance`.
-   - A task with any failing gate is not done — fix or explain why
-     the failure is unrelated before reporting completion.
+4. **Verify** — required gates by change type:
+
+   | Change touches | Required gates |
+   |---|---|
+   | Anything | `make lint`, `make test` |
+   | `internal/{server,cache,storage,origin,cluster}` | + `make bench-gate`, compare to baseline |
+   | `internal/cache` logic | + `make conformance` |
+   | Clustering, origin, or server behavior | + `make integration` locally |
+   | Config schema | `config.Validate` updated, new field documented |
+   | Docs only | none |
+
+   `make integration` and `make chaos` run in CI on every PR. `make
+   bench-all` is for deep analysis, not a gate. A task with any failing
+   gate is not done — fix it or explain why the failure is unrelated
+   before reporting completion.
 5. **Document**
    - Update godoc.
    - Update `docs/runbook` and `docs/decisions` when warranted.
@@ -615,34 +590,7 @@ Before declaring a change ready:
 
 ---
 
-## 18. Anti-Patterns & Common Mistakes
-
-- ❌ Putting cache logic inside an HTTP handler.
-- ❌ Importing a third-party HTTP framework for admin endpoints.
-- ❌ Using `time.Now()` directly instead of an injected clock.
-- ❌ `panic` for control flow.
-- ❌ Logging a request body or `Authorization` header for "debugging".
-- ❌ Adding a label like `url` or `user_agent` to a Prometheus counter.
-- ❌ A new dependency without an entry in `docs/deps.md`.
-- ❌ "TODO: handle error" — handle it or return it.
-- ❌ `git commit --no-verify` or `SKIP=...`. Fix the hook instead.
-- ❌ Sleeps in tests. Use deterministic clocks or synchronization
-  primitives.
-- ❌ Holding a lock across an I/O call.
-- ❌ Buffering an entire response body into memory.
-- ❌ A goroutine without an owner or a way to stop it.
-- ❌ Catching an error and returning `nil` with a log.
-- ❌ Spec deviation ("close enough to RFC 9111").
-- ❌ Touching `docs/architecture.md` without explicit user approval.
-- ❌ Running `golangci-lint run --fix` directly. The `fieldalignment`
-  auto-fix strips ALL comments from struct fields. Use
-  `make lint-fix` instead, which disables `fieldalignment` during
-  the fix pass. Reorder struct fields manually when `fieldalignment`
-  reports a finding.
-
----
-
-## 19. Escalation & Stop Conditions
+## 18. Escalation & Stop Conditions
 
 Stop and ask the user, with a concrete proposal, when:
 
@@ -665,34 +613,26 @@ substitutes.
 
 ---
 
-## 20. Glossary
+## 19. Glossary
 
 - **Hit path** — code executed when a request finds a usable cached
   response and returns without origin fetch. The fastest path in the
   system; performance gates are strictest here.
 - **Miss path** — request not in cache; fetches from peer or origin.
-- **Revalidation** — conditional request to origin to refresh freshness.
 - **SWR / SIE** — `stale-while-revalidate` / `stale-if-error` (RFC 5861).
 - **Surrogate key** — opaque label attached to a response for grouped
   invalidation.
 - **Ban** — predicate-based invalidation, evaluated lazily on lookup.
 - **Purge** — exact-key invalidation, immediate.
 - **Refresh** — soft purge, triggers revalidation on next access.
-- **Hot tier (L0)** — sharded in-RAM map of cache objects.
-- **Warm tier (L1)** — mmap-backed segmented disk storage.
 - **Peer fetch** — owner-first cluster lookup before falling back to origin.
 - **Hop limit** — max number of peers a single request may traverse before
   going to origin.
-- **Hedged request** — duplicate fetch sent after p99 latency; first to
-  return wins.
-- **Request collapsing** — single-flight serialization of identical
-  in-flight misses.
-- **Anti-entropy** — periodic reconciliation of cluster state to repair
-  drift.
-- **VCL shim** — subset translator from Varnish Configuration Language to
-  the bouine config tree (see `docs/architecture.md §16.4`).
 - **Hit-path budget** — performance envelope for the hit path
   (see §7).
+- **VCL shim** — deferred subset translator from Varnish Configuration
+  Language to the bouine config tree (see `docs/architecture.md` §16
+  item 4).
 
 ---
 

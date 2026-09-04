@@ -1,6 +1,6 @@
 # prek configuration for bouine.
 #
-# GO_VERSION_STAMP: 1.27.0
+# GO_VERSION_STAMP: 1.27.1
 #
 # The stamp above is load-bearing, not a decoration. prek-action's CI
 # cache key is the hash of this file (plus OS/arch/python), so stamping

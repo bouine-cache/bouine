@@ -298,7 +298,12 @@ func (h *Handler) streamMiss(
 	// by fetch_timeout; the supported configuration is the Accept hint
 	// (ADR-0042).
 	if !sf.buffered && !isHEAD && header.IsEventStreamContentType(sf.resp.Header.Peek(header.ContentType)) {
-		h.streamMissNoCache(ctx, sf, inflight)
+		// Nothing is buffered, so there is no result followers can share:
+		// release them at header time with the unshareable sentinel so each
+		// fetches its own response instead of waiting for this stream to
+		// end and then receiving an empty body (see fetchAndStore).
+		publishStreamUnshareable(inflight)
+		h.streamMissNoCache(ctx, sf)
 		return
 	}
 
@@ -703,7 +708,11 @@ func (h *Handler) streamMissTee(
 		storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		if storeKey != primaryKey {
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
-				h.streamMissNoCache(ctx, sf, inflight)
+				// Variant overflow: the response streams unbuffered, so there is
+				// no buffered result to share with singleflight followers —
+				// release them at header time to fetch their own response.
+				publishStreamUnshareable(inflight)
+				h.streamMissNoCache(ctx, sf)
 				return
 			}
 		}
@@ -826,28 +835,30 @@ func (h *Handler) teeStreamToClient(
 	releaseStreamFetch(sf)
 }
 
+// publishStreamUnshareable resolves singleflight followers for a
+// response that is streamed to the leader unbuffered (non-hinted SSE,
+// Vary variant overflow): no complete body is ever buffered, so there is
+// no result to hand over. Followers are released at header time — not
+// stream end — and fetch their own response via fetchAndStore's
+// ErrStreamUnshareable branch; a live stream is per-connection by
+// design (ADR-0042).
+func publishStreamUnshareable(inflight *inflightStream) {
+	inflight.res = fetchResult{Err: ErrStreamUnshareable}
+	close(inflight.done)
+}
+
 // streamMissNoCache streams the origin response to the client without
 // buffering for cache storage. Used when variant cap is exceeded and for
 // uncacheable-by-nature streams (SSE). The body copy flushes per chunk so
-// events reach the client as they arrive.
-func (h *Handler) streamMissNoCache(
-	ctx *fasthttp.RequestCtx,
-	sf *streamFetchResult,
-	inflight *inflightStream,
-) {
+// events reach the client as they arrive. Nothing is buffered, so callers
+// must resolve singleflight followers themselves (publishStreamUnshareable)
+// before calling — there is no shareable result to publish.
+func (h *Handler) streamMissNoCache(ctx *fasthttp.RequestCtx, sf *streamFetchResult) {
 	bodyStream := sf.resp.BodyStream()
 	ctx.Response.SetBodyStreamWriter(func(w *bufio.Writer) {
 		if writeErr := streamCopyFlush(w, bodyStream); writeErr != nil {
 			h.logger.Debug("stream miss: body copy error (no cache)", "error", writeErr)
 		}
-		// Owned header.Map — releaseStreamFetch below returns the pooled
-		// response to its sync.Pool while followers may still read the
-		// published result (see teeStreamToClient for the same fix).
-		inflight.res = fetchResult{
-			StatusCode: sf.StatusCode,
-			Header:     fromHeaderMap(sf.Header.ToMap()),
-		}
-		close(inflight.done)
 		releaseStreamFetch(sf)
 	})
 }

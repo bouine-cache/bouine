@@ -251,6 +251,52 @@ func TestSSE_NonHintedOriginStream_StreamsUncached(t *testing.T) {
 	require.Equal(t, "MISS", respHeader(ctx2, header.XCache), "SSE responses are never stored")
 }
 
+// TestSSE_NonHintedFollowersFetchOwnStream pins the singleflight contract
+// for NON-hinted SSE: the leader streams unbuffered, so no body is ever
+// buffered to share. Followers must be released at header time with
+// ErrStreamUnshareable and fetch their own response — not wait for the
+// leader's stream to end and then receive a 200 with an empty body (the
+// bug this test guards against).
+func TestSSE_NonHintedFollowersFetchOwnStream(t *testing.T) {
+	t.Parallel()
+
+	var fetches atomic.Int64
+	origin := func(ctx *fasthttp.RequestCtx) {
+		if fetches.Add(1) == 1 {
+			// Hold the leader's fetch open briefly so the second request
+			// reliably parks as a singleflight follower. Escape keeps a
+			// broken run failing on assertions instead of hanging: with
+			// the fix, the follower is released at header time — after
+			// this handler returns — so the wait always ends via escape.
+			time.Sleep(300 * time.Millisecond)
+		}
+		ctx.Response.Header.Set(header.ContentType, "text/event-stream")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.WriteString("data: own-stream\n\n")
+	}
+	h := newSSEHandler(t, origin)
+
+	var wg sync.WaitGroup
+	bodies := make([]string, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := testCtx("GET", "http://example.com/follower-feed")
+			serveRequest(h, ctx)
+			bodies[i] = respBody(ctx)
+		}()
+	}
+	wg.Wait()
+
+	require.Equal(t, int64(2), fetches.Load(),
+		"the follower must fetch its own response, not share the leader's unbuffered stream")
+	for i, b := range bodies {
+		require.Equal(t, "data: own-stream\n\n", b,
+			"client %d must receive the full event body", i)
+	}
+}
+
 // TestSSE_ShedReturns503 pins the fetch-shed mapping on the SSE path: when
 // the fetch queue is full for fetchWaitTimeout, the client gets 503 +
 // Retry-After, not a hung stream.

@@ -59,6 +59,14 @@ var ErrAbortHandler = errors.New("abort handler")
 // with a dead cancellation arm and nothing ever un-parked them.
 var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 
+// ErrStreamUnshareable is published to singleflight followers when the
+// leader's response is delivered unbuffered (non-hinted SSE, Vary variant
+// overflow): nothing is ever buffered, so there is no complete result to
+// share. Followers fetch their own response instead — an unbuffered
+// stream is per-connection by design and cannot be replayed from a
+// buffer that does not exist (ADR-0042).
+var ErrStreamUnshareable = errors.New("streaming response not shareable")
+
 // StripRequestURI removes prefix from the start of uri on a path boundary:
 // an exact-prefix match ("/api/v1") yields "/", a remainder starting with
 // "/" passes trimmed, a "?query" remainder keeps its "/" root, and a
@@ -1572,6 +1580,15 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
+			if errors.Is(res.Err, ErrStreamUnshareable) {
+				// The leader's response is delivered unbuffered (SSE,
+				// variant overflow): no body was buffered to share, and
+				// the leader released us at header time. Fetch our own
+				// response — outside singleflight, since a live stream
+				// cannot be replayed to a second client (ADR-0042).
+				h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
+				return
+			}
 			if errors.Is(res.Err, ErrFetchShed) {
 				h.writeShed503(ctx, "MISS")
 				return

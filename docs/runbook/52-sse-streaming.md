@@ -15,7 +15,10 @@ endpoints (`Content-Type: text/event-stream`). Design: ADR-0042.
 - An SSE response arriving WITHOUT the request hint is streamed unbuffered
   but remains bounded by the route's `fetch_timeout` (the origin
   connection's read deadline was armed before the response was known to
-  be a stream). Fix the client, don't raise the timeout.
+  be a stream). Fix the client, don't raise the timeout. Concurrent
+  non-hinted requests for the same URL are not collapsed onto one stream:
+  each client gets its own origin fetch (nothing is buffered, so there is
+  no shareable result — `ErrStreamUnshareable`).
 
 ## Timeouts (where streams can be cut)
 

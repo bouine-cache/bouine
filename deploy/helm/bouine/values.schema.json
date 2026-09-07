@@ -123,6 +123,12 @@
               "type": "string",
               "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
               "default": "120s"
+            },
+            "read_timeout": {
+              "description": "Max time to read a single request's header and body (default 30s). Slowloris defense; raise for slow clients or large uploads. Must stay below 5 minutes.",
+              "type": "string",
+              "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+              "default": "30s"
             }
           }
         },

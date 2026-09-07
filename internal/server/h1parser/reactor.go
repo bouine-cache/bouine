@@ -127,7 +127,27 @@ const (
 	// by parsed() are consumed before any socket read. The transport
 	// never sees it.
 	actFlushed
+	// actParseMore is internal to advance(): a pipelined hit joined
+	// the coalesced writev batch and the next request's bytes are
+	// already buffered — parse the next response into the batch
+	// before flushing. The transport never sees it.
+	actParseMore
 )
+
+// maxBatchedHits caps how many pipelined hit responses one writev
+// batch carries: the inline writeVecArr slots (3 per response) and
+// retainArr are sized to it. IOV_MAX is 1024 on Linux; 5 responses x
+// 3 slots stays trivially inside, while bounding worst-case kernel
+// time per writev and the retained-response window.
+const maxBatchedHits = 5
+
+// retainEntry is one response retained across a coalesced batch: its
+// buffers are aliased by the pending writev, so it may not return to
+// the handler's pool until the batch completes.
+type retainEntry struct {
+	resp *api.FastPathResponse
+	fp   api.FastPathHandler
+}
 
 // errAgain is returned by the injected I/O functions when the socket
 // has no data (read) or no buffer space (write) right now. The Linux
@@ -162,16 +182,19 @@ type reactorConn struct {
 	// header-serialized case and for tests via writeFn). Backed by the
 	// inlined writeVecArr so newReactorConn never allocates it.
 	writeVec [][]byte
-	// writeVecArr is the fixed backing for writeVec (3 slots: status
-	// line, header block, body — the FastPathResponse layout; cap 4
-	// leaves spare slack).
-	writeVecArr [4][]byte
-	// retainResp/retainFP hold the fast-path response and its owning
-	// handler between parsed() and the completed flush: writev aliases
-	// the cache object body, so the response must not return to the
-	// pool until every byte is on the socket. The handler (not a
-	// method value — assigning fp.Release boxes the receiver and costs
-	// an allocation per hit) is stored to call Release at completion.
+	// writeVecArr is the fixed backing for writeVec (up to
+	// maxBatchedHits response layouts of 3 slots each — status line,
+	// header block, body — plus slack; see parsed's coalescing path).
+	writeVecArr [3*maxBatchedHits + 1][]byte
+	// retainArr holds the responses retained across a coalesced batch:
+	// writev aliases each cache object body, so none may return to its
+	// pool until every byte of the batch is on the socket.
+	retainArr [maxBatchedHits]retainEntry
+	// retainCount is how many retainArr slots are live.
+	retainCount int
+	// retainResp/retainFP hold the single-response fast-path state when
+	// coalescing is off or the batch overflows to a flush (kept for the
+	// legacy one-response flush path and tests).
 	retainResp *api.FastPathResponse
 	retainFP   api.FastPathHandler
 	// writeVecFn, when non-nil, flushes the retained response buffers
@@ -235,6 +258,7 @@ func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int,
 	rc.writeBuf = (*reactorWritePool.Get().(*[]byte))[:0]
 	rc.writeVec = rc.writeVecArr[:0]
 	rc.writeVecFn = nil
+	rc.retainCount = 0
 	rc.writeLen = 0
 	rc.rLen = 0
 	rc.scanned = 0
@@ -258,6 +282,15 @@ func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int,
 // (release runs on the loop goroutine, accept on the accept
 // goroutine), so the pointer is nulled before Put, never after.
 func (rc *reactorConn) release() {
+	for i := range rc.retainCount {
+		e := &rc.retainArr[i]
+		if e.fp != nil && e.resp != nil {
+			e.fp.Release(e.resp)
+			e.resp = nil
+			e.fp = nil
+		}
+	}
+	rc.retainCount = 0
 	if rc.retainFP != nil && rc.retainResp != nil {
 		rc.retainFP.Release(rc.retainResp)
 		rc.retainResp = nil
@@ -291,6 +324,48 @@ func (rc *reactorConn) advance() rcAction {
 			return actClose
 		}
 		switch act {
+		case actParseMore:
+			// A pipelined hit joined the coalesced batch and more bytes
+			// are buffered: parse the next response into the batch.
+			rc.state = rcReading
+			continue
+		case actHandoff:
+			if rc.retainCount > 0 {
+				// A coalesced batch is pending when the follower needs
+				// the blocking path (miss, disqualified, malformed,
+				// oversize): the hits already served MUST reach the
+				// socket before the handoff replays the follower's
+				// bytes — handing off now would drop every retained
+				// response. Flush the batch first; the follower's
+				// bytes stay buffered in readBuf (parsed never consumes
+				// on the non-hit paths), so the post-flush reparse
+				// re-arrives here with retainCount == 0 and the handoff
+				// proceeds.
+				rc.state = rcWriting
+				flush := rc.advanceWritingVec()
+				if flush == actFlushed {
+					// Batch fully on the socket: fall into the
+					// actFlushed handling below (reread buffered bytes).
+					act = actFlushed
+				} else {
+					// Partial write (actWaitWrite), error, or the
+					// serialized-phase transition: the transport must
+					// handle it; the buffered follower is re-parsed
+					// after the batch completes and actHandoff fires
+					// again from a clean state.
+					if flush == actClose || flush == actCloseAfterFlush {
+						return flush
+					}
+					rc.state = rcWriting
+					return flush
+				}
+			}
+			if act == actHandoff {
+				// Terminal for the reactor: mark before the transport
+				// reads state (tests and idle checks rely on it).
+				rc.state = rcHandoff
+				return act
+			}
 		case actFlushed:
 			if rc.rLen == 0 {
 				// No pipelined bytes buffered: arm read readiness without
@@ -301,11 +376,6 @@ func (rc *reactorConn) advance() rcAction {
 			}
 			// Pipelined bytes are buffered: consume them before waiting.
 			continue
-		case actHandoff:
-			// Terminal for the reactor: mark before the transport reads
-			// state (tests and idle checks rely on it).
-			rc.state = rcHandoff
-			return act
 		default:
 			return act
 		}
@@ -376,6 +446,71 @@ func (rc *reactorConn) advanceReading() rcAction {
 // keeps batch-writing clients (a load generator writing many requests
 // per connection) on the reactor instead of permanently exiling the
 // connection to the blocking path after one pipelined request.
+// recordHitMetrics reports a served hit to the metrics hook: through
+// the async ring when the loop transport wired one (the hook's CPU is
+// serial loop time otherwise), or directly. Split from parsed to keep
+// that function under the complexity gate.
+func (rc *reactorConn) recordHitMetrics(resp *api.FastPathResponse, now time.Time) {
+	hook := rc.parser.metricsHook
+	if hook == nil {
+		return
+	}
+	dur := rc.parser.nowFunc().Sub(now)
+	if rc.parser.metricsRing != nil {
+		// Async path (W3): push a fixed-size record; the loop's
+		// drainer goroutine applies the hook. All record strings are
+		// stable handler-owned values (see reactor_metrics.go for the
+		// retain-safety argument); no request-derived string is
+		// retained. Never blocks: overflow drops.
+		rc.parser.metricsRing.pushHit(hitMetricsRecord{
+			pool:        resp.Pool,
+			cacheResult: resp.CacheResult,
+			source:      resp.Source,
+			durNs:       dur.Nanoseconds(),
+			bytesOut:    resp.BytesOut,
+			status:      resp.StatusCode,
+		})
+		return
+	}
+	hook(resp.Pool, resp.CacheResult,
+		resp.Source, resp.StatusCode, resp.BytesOut, dur)
+}
+
+// stageHitResponse queues a served hit's response for flushing:
+// zero-copy into the coalesced writev batch when the transport
+// supports it and the response can join (not Connection: close, batch
+// under maxBatchedHits — a close response must be the conn's last
+// bytes and a full batch must drain before parsing further), or
+// serialized into the pooled write buffer otherwise. Retained batch
+// responses release at the batch's flush completion (writev aliases
+// each cache object body); the serialized form releases immediately
+// after its copy. Split from parsed to keep that function under the
+// complexity gate.
+func (rc *reactorConn) stageHitResponse(resp *api.FastPathResponse, fp api.FastPathHandler, closeConn bool) {
+	if rc.writeVecFn != nil && !closeConn && rc.retainCount < maxBatchedHits {
+		if rc.retainCount == 0 {
+			rc.writeVec = rc.writeVec[:0]
+			rc.writeLen = 0
+		}
+		rc.writeVec = append(rc.writeVec, resp.Buffers...)
+		rc.retainArr[rc.retainCount] = retainEntry{resp: resp, fp: fp}
+		rc.retainCount++
+		rc.closeAfterFlush = false
+		return
+	}
+	if rc.retainCount == 0 {
+		rc.writeBuf = rc.writeBuf[:0]
+		rc.writeLen = 0
+	}
+	for _, b := range resp.Buffers {
+		rc.writeBuf = append(rc.writeBuf, b...)
+	}
+	fp.Release(resp)
+	rc.retainResp = nil
+	rc.retainFP = nil
+	rc.closeAfterFlush = closeConn
+}
+
 func (rc *reactorConn) parsed(idx int) rcAction {
 	req, fallThrough, excess, err := rc.parser.parseBuffer(
 		rc.readBuf[:rc.rLen], idx, &rc.scratch)
@@ -404,50 +539,12 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 		return actHandoff
 	}
 	rc.parser.noteReactorHit()
-	rc.closeAfterFlush = resp.CloseConn
+	closeConn := resp.CloseConn
 
-	if rc.writeVecFn != nil {
-		// Zero-copy path (Linux transport): retain the response's
-		// net.Buffers slices for writev. Release is deferred until the
-		// flush completes — Buffers[2] is the cache object body, so
-		// copying it would cost a full-body memcpy per hit.
-		rc.writeVec = append(rc.writeVec[:0], resp.Buffers...)
-		rc.retainResp = resp
-		rc.retainFP = fp
-		rc.writeBuf = rc.writeBuf[:0]
-	} else {
-		// No transport writev (tests, non-Linux stubs): copy into the
-		// pooled buffer and release immediately.
-		rc.writeBuf = rc.writeBuf[:0]
-		for _, b := range resp.Buffers {
-			rc.writeBuf = append(rc.writeBuf, b...)
-		}
-		rc.retainResp = nil
-		rc.retainFP = nil
-	}
-	rc.writeLen = 0
+	rc.recordHitMetrics(resp, now)
 
-	if hook := rc.parser.metricsHook; hook != nil {
-		dur := rc.parser.nowFunc().Sub(now)
-		if rc.parser.metricsRing != nil {
-			// Async path (W3): push a fixed-size record; the loop's
-			// drainer goroutine applies the hook. All record strings
-			// are stable handler-owned values (see reactor_metrics.go
-			// for the retain-safety argument); no request-derived
-			// string is retained. Never blocks: overflow drops.
-			rc.parser.metricsRing.pushHit(hitMetricsRecord{
-				pool:        resp.Pool,
-				cacheResult: resp.CacheResult,
-				source:      resp.Source,
-				durNs:       dur.Nanoseconds(),
-				bytesOut:    resp.BytesOut,
-				status:      resp.StatusCode,
-			})
-		} else {
-			hook(resp.Pool, resp.CacheResult,
-				resp.Source, resp.StatusCode, resp.BytesOut, dur)
-		}
-	}
+	rc.stageHitResponse(resp, fp, closeConn)
+	rc.state = rcWriting
 
 	// Reset for the next request on this connection. The scratch struct
 	// is NOT re-zeroed here: parseBuffer already resets it at the start
@@ -458,13 +555,27 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 	if len(excess) > 0 {
 		// Pipelined bytes past this hit's header block: keep them
 		// buffered (memmove to the front — the excess aliases the tail
-		// of the same array) for advance's post-flush reading pass.
-		// copy is overlap-safe; the response buffers alias the cache
-		// object, never readBuf, so nothing else references these bytes.
+		// of the same array) for the next parse. copy is overlap-safe;
+		// the response buffers alias the cache object, never readBuf,
+		// so nothing else references these bytes.
 		copy(rc.readBuf[:], excess)
 		rc.rLen = len(excess)
 	}
-	rc.state = rcWriting
+
+	if rc.retainCount > 0 && rc.rLen > 0 && rc.retainCount < maxBatchedHits && !rc.closeAfterFlush && len(rc.writeBuf) == 0 {
+		// Coalesce: the next pipelined request is already buffered, the
+		// batch has room, and no serialized phase is queued — parse
+		// the next response into the same writev batch before
+		// flushing. actParseMore is internal to advance(): it loops
+		// back to reading, which consumes the buffered bytes without
+		// any socket read. A follower miss, a close hit, or a full
+		// batch flushes first on the next parsed() round
+		// (advanceWritingVec falls through to any serialized phase).
+		return actParseMore
+	}
+	if rc.retainCount > 0 {
+		return rc.advanceWritingVec()
+	}
 	return rc.advanceWriting()
 }
 
@@ -525,11 +636,41 @@ func (rc *reactorConn) advanceWritingVec() rcAction {
 			return actWaitWrite
 		}
 	}
+	// The batch is fully on the socket: release its retained
+	// responses now, then check for a serialized phase queued behind it
+	// (a Connection: close hit after a coalesced batch rides writeBuf).
+	// writeLen is reset so the writeBuf phase starts from its first
+	// byte; closeAfterFlush stays armed for whichever phase closes.
+	rc.releaseBatch()
+	rc.writeVec = rc.writeVec[:0]
+	rc.writeLen = 0
+	if len(rc.writeBuf) > 0 {
+		// Serialized phase pending: flush it via the write path. The
+		// state stays rcWriting — advanceWriting dispatches on
+		// writeVec being empty (released above) and uses writeBuf.
+		return rc.advanceWriting()
+	}
 	rc.finishWrite()
 	if rc.closeAfterFlush {
 		return actCloseAfterFlush
 	}
 	return actFlushed
+}
+
+// releaseBatch releases every response retained by the coalesced
+// writev batch. Called when the batch completes (or on connection
+// exit via release); the responses' bodies were aliased by the
+// writev and may now return to their handler's pool.
+func (rc *reactorConn) releaseBatch() {
+	for i := range rc.retainCount {
+		e := &rc.retainArr[i]
+		if e.fp != nil && e.resp != nil {
+			e.fp.Release(e.resp)
+			e.resp = nil
+			e.fp = nil
+		}
+	}
+	rc.retainCount = 0
 }
 
 // pendingVec returns the unflushed portion of the response as an iov
@@ -568,6 +709,15 @@ func (rc *reactorConn) pendingVec() [][]byte {
 // reads it after this call to decide between actWaitRead and
 // actCloseAfterFlush, and a dropped connection never parses again.
 func (rc *reactorConn) finishWrite() {
+	for i := range rc.retainCount {
+		e := &rc.retainArr[i]
+		if e.fp != nil && e.resp != nil {
+			e.fp.Release(e.resp)
+			e.resp = nil
+			e.fp = nil
+		}
+	}
+	rc.retainCount = 0
 	if rc.retainFP != nil && rc.retainResp != nil {
 		rc.retainFP.Release(rc.retainResp)
 		rc.retainResp = nil
@@ -600,6 +750,7 @@ func (rc *reactorConn) reset(now time.Time) {
 	rc.rLen = 0
 	rc.scanned = 0
 	rc.writeLen = 0
+	rc.retainCount = 0
 	rc.retainResp = nil
 	rc.retainFP = nil
 	rc.writeVec = rc.writeVec[:0]

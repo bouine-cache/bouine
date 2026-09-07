@@ -19,6 +19,19 @@ the curated, human-readable summary.
   the Helm chart values (`config.listen.read_timeout`).
 
 ### Changed
+- **Coalesced pipelined-hit writev on the H1 reactor** (requires
+  `experimental.h1_reactor`): a pipelined batch of cache hits now
+  flushes as ONE writev syscall carrying up to 5 responses (retained
+  zero-copy and released at batch completion) instead of one writev
+  per hit — batch-writing clients pay 1 write syscall per batch rather
+  than per request. Ordering and correctness guards: a Connection:
+  close follower flushes the pending batch first and rides solo as the
+  conn's last bytes; a miss/disqualified/malformed follower triggers an
+  intercepted handoff that flushes the already-served hits to the
+  socket BEFORE the blocking parser replays the follower's bytes (the
+  handoff prefix then carries exactly the follower); a batch at
+  capacity flushes before parsing further. Single-hit latency
+  unchanged (Gate_Reactor_Hit stays 0 allocs/op, ~185 ns).
 - **Reactor loop hygiene under load** (requires `experimental.h1_reactor`):
   the loop's busy-poll budget now scales with its connection count (full
   80 µs window at ≤16 conns, tapering to zero at 256+) — at saturation

@@ -146,6 +146,10 @@ type ListenerConfig struct {
 	Name           string
 	MaxConnections int
 	IdleTimeout    time.Duration
+	// ReadTimeout bounds how long reading a single request's header and
+	// body may take (fasthttp ReadTimeout); zero applies
+	// DefaultReadTimeout (30s).
+	ReadTimeout    time.Duration
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
@@ -191,11 +195,25 @@ type Listener struct {
 // Mirrors h1parser's default; listen.idle_timeout overrides both.
 const DefaultIdleTimeout = 120 * time.Second
 
+// DefaultReadTimeout bounds how long reading a single request's header
+// and body may take (fasthttp ReadTimeout). listen.read_timeout
+// overrides it.
+const DefaultReadTimeout = 30 * time.Second
+
 // resolveIdleTimeout applies the built-in default when the operator has
 // not configured listen.idle_timeout.
 func resolveIdleTimeout(v time.Duration) time.Duration {
 	if v == 0 {
 		return DefaultIdleTimeout
+	}
+	return v
+}
+
+// resolveReadTimeout applies the built-in default when the operator has
+// not configured listen.read_timeout.
+func resolveReadTimeout(v time.Duration) time.Duration {
+	if v == 0 {
+		return DefaultReadTimeout
 	}
 	return v
 }
@@ -209,7 +227,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 
 	srv := &fasthttp.Server{
 		Handler:               cfg.Handler,
-		ReadTimeout:           30 * time.Second,
+		ReadTimeout:           resolveReadTimeout(cfg.ReadTimeout),
 		WriteTimeout:          safetyNetWriteTimeout,
 		IdleTimeout:           idle,
 		ReadBufferSize:        64 << 10,
@@ -249,7 +267,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 
 	srv := &fasthttp.Server{
 		Handler:               cfg.Handler,
-		ReadTimeout:           30 * time.Second,
+		ReadTimeout:           resolveReadTimeout(cfg.ReadTimeout),
 		WriteTimeout:          safetyNetWriteTimeout,
 		IdleTimeout:           resolveIdleTimeout(cfg.IdleTimeout),
 		ReadBufferSize:        64 << 10,

@@ -37,6 +37,13 @@ const maxFetchWaitTimeout = 1 * time.Second
 // internal/admin. If you change one, change the other.
 const defaultAdminIdleTimeout = 300 * time.Second
 
+// maxReadTimeout is the upper bound for listen.read_timeout. It must
+// stay strictly below internal/server.safetyNetWriteTimeout so the
+// safety net, not the read deadline, bounds a request's total lifetime.
+// Duplicated across packages because the layering rules (config is a
+// leaf) prevent a shared import. If you change one, change the other.
+const maxReadTimeout = 5 * time.Minute
+
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even
 // with an empty config file.
@@ -184,6 +191,13 @@ func (c *Config) Validate() error {
 
 	if c.Listen.IdleTimeout < 0 {
 		return fmt.Errorf("config: listen.idle_timeout must be >= 0, got %v", c.Listen.IdleTimeout)
+	}
+
+	if c.Listen.ReadTimeout < 0 {
+		return fmt.Errorf("config: listen.read_timeout must be >= 0, got %v", c.Listen.ReadTimeout)
+	}
+	if c.Listen.ReadTimeout >= maxReadTimeout {
+		return fmt.Errorf("config: listen.read_timeout must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
 	}
 
 	// The reactor multiplexes fast-path hit serving; without the fast

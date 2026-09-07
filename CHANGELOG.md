@@ -19,6 +19,25 @@ the curated, human-readable summary.
   the Helm chart values (`config.listen.read_timeout`).
 
 ### Changed
+- **Reactor loop hygiene under load** (requires `experimental.h1_reactor`):
+  the loop's busy-poll budget now scales with its connection count (full
+  80 µs window at ≤16 conns, tapering to zero at 256+) — at saturation
+  batches arrive continuously so every spun poll was a core stolen from
+  origin/peer fetch goroutines, while at low concurrency the spin
+  remains the keep-alive RTT win. Hit telemetry is batched per loop
+  (applied via a new `IncrementReactorHitN` capability at 128-hit
+  batches, on handoffs, and at least once per second) instead of one
+  contended shared-counter add per hit, and the handoff-reason
+  counters are pre-resolved at init (no per-miss label hashing on the
+  loop goroutine). Storage lock-hold bounds: the background sweeper's
+  evict drain is capped at 64 entries per shard-lock pass and
+  re-signals itself until the overshoot drains (one oversized Put into
+  a shard of small objects previously held the write lock for the
+  entire multi-thousand-entry drain, stalling every Get on that
+  shard), and the TTL reaper's per-shard budget drops from 10 ms to
+  1 ms (Go's writer-preferring RWMutex made every reader queue behind
+  the full budget — a 10 ms hit-latency spike generator on the
+  reaped-shard fast path).
 - **Miss round-trip cost on the H1 reactor** (ADR-0043; requires
   `experimental.h1_reactor`): the spawn-per-miss handoff model is
   replaced by a bounded worker pool (dispatcher + up to 1024 workers

@@ -42,6 +42,11 @@ type DataPlaneMetrics struct {
 	ReactorConnsRegistered prometheus.Counter
 	ReactorHits            prometheus.Counter
 	ReactorHandoffs        *prometheus.CounterVec // labels: reason
+	// reactorHandoffChildren holds the pre-resolved closed-set handoff
+	// counters: IncrementReactorHandoff is called from the reactor loop
+	// goroutine, and a WithLabelValues per miss would hash labels on the
+	// serial path of every hit multiplexed on that listener.
+	reactorHandoffChildren map[string]prometheus.Counter
 	ReactorReturns         prometheus.Counter
 	ReactorDrops           prometheus.Counter
 	// accessLog receives structured access log entries. nil disables
@@ -286,6 +291,18 @@ func (m *DataPlaneMetrics) initReactorMetrics() {
 		Name:      "h1_reactor_conns_dropped_total",
 		Help:      "Connections closed by the H1 reactor (socket error, idle expiry, stuck writer, shutdown overflow).",
 	})
+	// Pre-resolve the closed-set children so the loop-side handoff call
+	// is a map load on a six-entry map created once (no Prometheus label
+	// hashing per miss); the map is populated below via WithLabelValues,
+	// which returns the same child the label lookup would.
+	m.reactorHandoffChildren = map[string]prometheus.Counter{
+		api.ReactorHandoffMiss:         m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffMiss),
+		api.ReactorHandoffDisqualified: m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffDisqualified),
+		api.ReactorHandoffMalformed:    m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffMalformed),
+		api.ReactorHandoffOversize:     m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffOversize),
+		api.ReactorHandoffOverflow:     m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffOverflow),
+		api.ReactorHandoffCap:          m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffCap),
+	}
 }
 
 // initStreamingMetrics creates the streaming buffer gauge and fallback
@@ -992,9 +1009,26 @@ func (m *DataPlaneMetrics) IncrementReactorHit() {
 	m.ReactorHits.Inc()
 }
 
+// IncrementReactorHitN implements the batched api.ReactorMetrics
+// method: the reactor loop batches hit observations and flushes them
+// here — one Add per batch instead of one contended atomic per hit
+// crossing every loop's CPU core.
+func (m *DataPlaneMetrics) IncrementReactorHitN(n uint64) {
+	m.ReactorHits.Add(float64(n))
+}
+
 // IncrementReactorHandoff implements api.ReactorMetrics. reason must be
-// one of the api.ReactorHandoff* constants (closed label set).
+// one of the api.ReactorHandoff* constants (closed label set); the
+// children are pre-resolved at init (reactorHandoffChildren) so the
+// loop-side call is a switch over the closed set, never a Prometheus
+// label map lookup.
 func (m *DataPlaneMetrics) IncrementReactorHandoff(reason string) {
+	if c, ok := m.reactorHandoffChildren[reason]; ok {
+		c.Inc()
+		return
+	}
+	// Unknown reason: fall through to the label lookup (never reached
+	// with the closed set; keeps the counter honest if the set grows).
 	m.ReactorHandoffs.WithLabelValues(reason).Inc()
 }
 

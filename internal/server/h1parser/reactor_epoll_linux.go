@@ -237,6 +237,10 @@ func (r *reactorEpoll) run() {
 	// wg.Wait against the spawner's in-flight wg.Add for queued jobs —
 	// a data race the storm-shutdown test catches under -race.
 	defer close(r.handoffsDone)
+	// Apply the batched hit counter before the loop exits: shutdown must
+	// not drop up to a second's worth of counted hits (the sweep flush
+	// would have been the next guaranteed flush point).
+	defer r.p.flushReactorHits()
 	defer r.cleanup()
 	if r.metricsDrainer != nil {
 		// metricsDone closes when the drainer's final drain completes;
@@ -249,7 +253,7 @@ func (r *reactorEpoll) run() {
 	r.acceptStarted.Store(true)
 
 	// Adaptive busy-poll: after serving a batch, poll readiness with a
-	// zero timeout for up to reactorSpinBudget before parking in the
+	// zero timeout for up to the spin budget before parking in the
 	// timed wait. Why: parking the locked OS thread and re-acquiring a
 	// P through the scheduler costs tens of microseconds (futex wake,
 	// findRunnable) — paid per *request* at low concurrency, where
@@ -260,8 +264,15 @@ func (r *reactorEpoll) run() {
 	// serves back-to-back requests on the same connection without the
 	// park/wake; the budget only spends while traffic keeps arriving,
 	// so true idle parks after one spin window — the loop does not
-	// become a busy loop. Sustained high load never parks regardless
-	// (batches keep arriving), so the spin is free where it matters.
+	// become a busy loop.
+	//
+	// The budget scales down with the loop's tracked-connection count
+	// (spinBudgetFor): at low concurrency the spin is the RTT win; at
+	// saturation the same spin is pure CPU burn — batches arrive
+	// continuously, the park/wake is never on the request path, and
+	// every spun core is stolen from fetch goroutines on the same
+	// machine. Sustained high load therefore parks immediately.
+	budget := spinBudgetFor(r.ntracked)
 	spin := 0
 	for {
 		select {
@@ -270,7 +281,7 @@ func (r *reactorEpoll) run() {
 		default:
 		}
 		var timeout int
-		if spin < reactorSpinBudget {
+		if spin < budget {
 			timeout = 0 // non-blocking poll while spin budget remains
 			spin++
 		} else {
@@ -288,6 +299,15 @@ func (r *reactorEpoll) run() {
 			// poll (spin++ above), so an idle window simply runs out
 			// and the next iteration parks. Sustained traffic keeps
 			// returning batches, which reset the budget.
+			//
+			// The timed park that follows is the batched hit counter's
+			// guaranteed flush tick: a parked loop serves no hits, so a
+			// pending batch can only age here (or at the threshold under
+			// load). Flushing on the wake keeps staleness bounded by the
+			// 1 s timeout even when no further traffic ever arrives.
+			if spin >= budget {
+				r.p.flushReactorHits()
+			}
 			continue
 		}
 		spin = 0
@@ -295,6 +315,11 @@ func (r *reactorEpoll) run() {
 		if now.Sub(r.lastSweep) >= reactorSweepInterval {
 			r.lastSweep = now
 			r.sweepIdle(now)
+			// Telemetry staleness bound: the sweep tick is the second
+			// flush point, for loops whose traffic arrives in batches more
+			// often than once per second (never parking long enough for
+			// the wake-path flush to fire).
+			r.p.flushReactorHits()
 		}
 		for i := range n {
 			ev := &r.events[i]
@@ -321,6 +346,38 @@ func (r *reactorEpoll) run() {
 // would rather pay the park/wake (and for the spin-vs-no-spin A/B in
 // the RTT benchmarks): 0 disables the busy-poll entirely.
 var reactorSpinBudget = spinBudgetFromEnv()
+
+// spinBudgetFor scales the loop's busy-poll budget by its tracked
+// connection count. Few connections ⇒ the spin pays for itself (the
+// park/wake is per-request latency); many connections ⇒ batches are
+// already continuous and every spun poll steals a core from
+// origin/peer fetch goroutines on the same machine, so the loop parks
+// immediately. The full budget is kept while ntracked is small enough
+// that one loop's spin cannot crowd out the rest of the process.
+func spinBudgetFor(ntracked int) int {
+	if ntracked <= spinBudgetFullConns {
+		return reactorSpinBudget
+	}
+	if ntracked >= spinBudgetZeroConns {
+		return 0
+	}
+	// Linear taper between the two anchors: more connections, less
+	// spin. Integer math; the taper's exact shape is unobservable.
+	ratio := (spinBudgetZeroConns - ntracked) * reactorSpinBudget /
+		(spinBudgetZeroConns - spinBudgetFullConns)
+	return ratio
+}
+
+// spinBudgetFullConns is the tracked-connection count at (and below)
+// which the loop keeps its full spin budget: at this concurrency the
+// spin is the keep-alive RTT win measured in
+// BenchmarkSingle_Reactor_KeepAliveRTT.
+const spinBudgetFullConns = 16
+
+// spinBudgetZeroConns is the tracked-connection count at (and above)
+// which the loop never spins: batches are continuous, the park/wake
+// is amortized, and a spun core is a core stolen from fetches.
+const spinBudgetZeroConns = 256
 
 func spinBudgetFromEnv() int {
 	if v := os.Getenv("BOUINE_REACTOR_SPIN_BUDGET"); v != "" {

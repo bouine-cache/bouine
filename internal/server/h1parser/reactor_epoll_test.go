@@ -879,6 +879,7 @@ func reasonIndex(reason string) int {
 
 func (a *atomicReactorMetrics) IncrementReactorConnRegistered() { a.registered.Add(1) }
 func (a *atomicReactorMetrics) IncrementReactorHit()            { a.hits.Add(1) }
+func (a *atomicReactorMetrics) IncrementReactorHitN(n uint64)   { a.hits.Add(n) }
 func (a *atomicReactorMetrics) IncrementReactorHandoff(reason string) {
 	a.handoffCounts[reasonIndex(reason)].Add(1)
 }

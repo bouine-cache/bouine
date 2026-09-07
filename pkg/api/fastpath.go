@@ -322,6 +322,12 @@ type ReactorMetrics interface {
 	// IncrementReactorHit is called for every cache hit served inline
 	// by the reactor loop.
 	IncrementReactorHit()
+	// IncrementReactorHitN is the batched form of IncrementReactorHit:
+	// the loop batches hit observations and flushes them off the hot
+	// path (see reactor_metrics.go), one add per flush. Implementations
+	// that satisfy only the legacy single-increment surface can embed
+	// ReactorHitBatcher to inherit it.
+	IncrementReactorHitN(n uint64)
 	// IncrementReactorHandoff is called when a connection leaves the
 	// reactor for the blocking parser. reason is one of the
 	// ReactorHandoff* constants.
@@ -332,6 +338,23 @@ type ReactorMetrics interface {
 	// IncrementReactorDrop is called when the reactor closes a
 	// connection (error, idle expiry, stuck writer, shutdown overflow).
 	IncrementReactorDrop()
+}
+
+// ReactorHitBatcher adapts a single-increment implementation to the
+// batched IncrementReactorHitN method: embed it in a ReactorMetrics
+// implementation whose hit counter only knows how to add one.
+type ReactorHitBatcher struct {
+	// HitOne is the single-increment implementation (one atomic add
+	// against the shared counter).
+	HitOne func()
+}
+
+// IncrementReactorHitN implements ReactorMetrics via the embedded
+// single-increment func.
+func (b ReactorHitBatcher) IncrementReactorHitN(n uint64) {
+	for ; n > 0; n-- {
+		b.HitOne()
+	}
 }
 
 // Handoff reasons reported via ReactorMetrics.IncrementReactorHandoff.

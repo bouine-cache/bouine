@@ -306,6 +306,7 @@ type fakeReactorMetrics struct {
 
 func (f *fakeReactorMetrics) IncrementReactorConnRegistered() { f.connsRegistered++ }
 func (f *fakeReactorMetrics) IncrementReactorHit()            { f.hits++ }
+func (f *fakeReactorMetrics) IncrementReactorHitN(n uint64)   { f.hits += n }
 func (f *fakeReactorMetrics) IncrementReactorHandoff(reason string) {
 	if f.handoffs == nil {
 		f.handoffs = make(map[string]uint64)

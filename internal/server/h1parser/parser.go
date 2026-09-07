@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/internal/platform"
@@ -48,6 +49,8 @@ const writeRefreshThreshold = time.Minute
 
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
 // the fast path or falls through to the fasthttp.RequestHandler.
+//
+//nolint:govet // fieldalignment: pendingReactorHits groups with the other telemetry state; the 8-byte saving is not worth splitting the lifecycle block.
 type Parser struct {
 	fastPath      api.FastPathHandler
 	fallback      fasthttp.RequestHandler
@@ -73,9 +76,13 @@ type Parser struct {
 	// lifecycle counters (api.ReactorMetrics). Injected by the listener
 	// wiring; nil disables telemetry (tests).
 	reactorMetrics api.ReactorMetrics
-	scheme         string
-	idleRead       time.Duration
-	writeTime      time.Duration
+	// pendingReactorHits batches loop-side hit increments: one atomic
+	// add per hit against this Parser-local counter, flushed in batches
+	// via IncrementReactorHitN (never a shared-counter add per hit).
+	pendingReactorHits atomic.Uint64
+	scheme             string
+	idleRead           time.Duration
+	writeTime          time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests

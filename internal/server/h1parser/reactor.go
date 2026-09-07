@@ -45,23 +45,55 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
-// noteReactorHit reports an inline-served hit to the telemetry sink.
-// A plain counter increment (one atomic add on the loop goroutine) —
-// safe for the hit path, unlike the full RecordHit hook (see
-// reactor_metrics.go for why that one is drained asynchronously).
+// pendingHitFlush is the batch threshold that applies pending hit
+// counts mid-load: at this many hits the flush (one IncrementReactorHitN
+// add against the shared counter) is amortized to ~nothing, while the
+// pending window stays far below every scrape interval.
+const pendingHitFlush = 128
+
+// noteReactorHit records an inline-served hit to the telemetry sink.
+// The hit counter is BATCHED, not immediate: ReactorHits is one
+// shared Prometheus counter, and with reuse_port every loop's CPU core
+// hammers that one cacheline per hit — under saturation the atomic
+// add dominates the loop's per-hit cost. The loop adds to a local
+// atomic and flushes via IncrementReactorHitN in batches (flush
+// points: the pendingHitFlush threshold, the 1s idle sweep, and loop
+// shutdown). Loss window: none on clean shutdown; ≤1s of hit counts
+// on a kill -9, which no scrape interval can observe.
 func (p *Parser) noteReactorHit() {
-	if p.reactorMetrics != nil {
-		p.reactorMetrics.IncrementReactorHit()
+	if p.reactorMetrics == nil {
+		return
+	}
+	p.pendingReactorHits.Add(1)
+	if p.pendingReactorHits.Load() >= pendingHitFlush {
+		p.flushReactorHits()
+	}
+}
+
+// flushReactorHandsOff applies the pending hit batch with one
+// IncrementReactorHitN call.
+func (p *Parser) flushReactorHits() {
+	if p.reactorMetrics == nil {
+		return
+	}
+	n := p.pendingReactorHits.Swap(0)
+	if n > 0 {
+		p.reactorMetrics.IncrementReactorHitN(n)
 	}
 }
 
 // noteReactorHandoff reports a handoff decision (with its reason) to
 // the telemetry sink. Called on the loop goroutine at each decision
-// site, exactly once per handoff.
+// site, exactly once per handoff. Rarer than hits (a handoff ends a
+// loop-side request cycle) and already off the pure-hit path, so the
+// batch complexity is not warranted here.
 func (p *Parser) noteReactorHandoff(reason string) {
 	if p.reactorMetrics != nil {
 		p.reactorMetrics.IncrementReactorHandoff(reason)
 	}
+	// Keep any pending hit batch moving even under heavy miss traffic
+	// (the sweep also flushes, but this bounds staleness per handoff).
+	p.flushReactorHits()
 }
 
 // noteReactorDrop reports a reactor-initiated connection close to the

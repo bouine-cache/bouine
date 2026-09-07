@@ -346,6 +346,40 @@ func TestValidate_ListenIdleTimeout_NegativeRejected(t *testing.T) {
 	}
 }
 
+func TestValidate_ListenReadTimeout_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000", ReadTimeout: -1}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative listen.read_timeout")
+	}
+	if !strings.Contains(err.Error(), "listen.read_timeout") {
+		t.Fatalf("error %q does not mention listen.read_timeout", err)
+	}
+}
+
+func TestValidate_ListenReadTimeout_AtOrAboveSafetyNetRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []time.Duration{maxReadTimeout, maxReadTimeout + time.Second} {
+		cfg := Config{Listen: Listen{Admin: ":9000", ReadTimeout: v}}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("expected error for listen.read_timeout %v", v)
+		}
+		if !strings.Contains(err.Error(), "listen.read_timeout") {
+			t.Fatalf("error %q does not mention listen.read_timeout", err)
+		}
+	}
+}
+
+func TestValidate_ListenReadTimeout_BelowSafetyNetAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000", ReadTimeout: maxReadTimeout - time.Second}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid listen.read_timeout rejected: %v", err)
+	}
+}
+
 func TestParse_TTLOverride_ValidYAML(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `

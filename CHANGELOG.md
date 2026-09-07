@@ -10,6 +10,14 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Added
+- `listen.read_timeout` config option (default 30s): bounds how long
+  reading a single request's header and body may take on data-plane
+  connections. Previously hard-coded. It is the slowloris defense —
+  raise it for slow mobile clients or large uploads. Validated to stay
+  below the 5-minute data-plane safety-net WriteTimeout, and exposed in
+  the Helm chart values (`config.listen.read_timeout`).
+
 ### Changed
 - **Miss round-trip cost on the H1 reactor** (ADR-0043; requires
   `experimental.h1_reactor`): the spawn-per-miss handoff model is

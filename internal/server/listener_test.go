@@ -146,3 +146,24 @@ func TestListenerIdleTimeout_Configured(t *testing.T) {
 	require.Equal(t, 200*time.Second, srv.idleTimeout)
 	require.Equal(t, 200*time.Second, srv.inner.IdleTimeout)
 }
+
+func TestListenerReadTimeout_Default(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTP(ListenerConfig{
+		Addr:    "127.0.0.1:0",
+		Handler: echo200(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.Equal(t, DefaultReadTimeout, srv.inner.ReadTimeout)
+}
+
+func TestListenerReadTimeout_Configured(t *testing.T) {
+	t.Parallel()
+	srv := NewHTTPS(ListenerConfig{
+		Addr:        "127.0.0.1:0",
+		Handler:     echo200(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ReadTimeout: 10 * time.Second,
+	})
+	require.Equal(t, 10*time.Second, srv.inner.ReadTimeout)
+}

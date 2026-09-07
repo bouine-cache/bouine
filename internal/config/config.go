@@ -112,6 +112,13 @@ type Listen struct {
 	// that idle keep-alive connections still hold a
 	// Listen.MaxConnections slot.
 	IdleTimeout time.Duration `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
+	// ReadTimeout bounds how long reading a single request's header and
+	// body may take, per request. It is the slowloris defense for
+	// clients that drip-feed bytes; it is NOT an end-to-end request
+	// deadline (origin fetches are bounded by fetch_timeout). Zero
+	// applies a 30s built-in default. Must be less than the data-plane
+	// safety-net WriteTimeout (5 minutes).
+	ReadTimeout time.Duration `yaml:"read_timeout,omitempty" json:"read_timeout,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are

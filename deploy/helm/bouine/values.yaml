@@ -48,6 +48,10 @@ config:
     # close a connection mid-reuse and the upstream logs
     # "upstream prematurely closed connection".
     # idle_timeout: 120s
+    # Max time to read a single request's header + body (default 30s).
+    # This is the slowloris defense; raise it for very slow mobile
+    # clients or large uploads. Must stay below 5 minutes.
+    # read_timeout: 30s
   tls:
     certs: []
     # Provide via a Secret mounted at /etc/bouine/tls/.

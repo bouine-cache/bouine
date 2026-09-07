@@ -424,6 +424,39 @@ func TestValidate_ListenReadTimeout_BelowSafetyNetAccepted(t *testing.T) {
 	}
 }
 
+// TestValidate_PoolResponseHeaderTimeout_AtOrAboveSafetyNetRejected
+// pins the ordering constraint on the pool knob that routes inherit as
+// their default origin wait: connect.response_header_timeout must stay
+// strictly below the data plane's 5-minute safety-net WriteTimeout, the
+// same rule fetch_timeout already follows.
+func TestValidate_PoolResponseHeaderTimeout_AtOrAboveSafetyNetRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []time.Duration{maxFetchTimeout, maxFetchTimeout + time.Second} {
+		cfg := Config{
+			Listen:        Listen{Admin: ":9000"},
+			UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}, Connect: ConnectPolicy{ResponseHeaderTimeout: v}}},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("expected error for connect.response_header_timeout %v", v)
+		}
+		if !strings.Contains(err.Error(), "connect.response_header_timeout") {
+			t.Fatalf("error %q does not mention connect.response_header_timeout", err)
+		}
+	}
+}
+
+func TestValidate_PoolResponseHeaderTimeout_BelowSafetyNetAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}, Connect: ConnectPolicy{ResponseHeaderTimeout: maxFetchTimeout - time.Second}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid connect.response_header_timeout rejected: %v", err)
+	}
+}
+
 func TestParse_TTLOverride_ValidYAML(t *testing.T) {
 	t.Parallel()
 	yamlSrc := `

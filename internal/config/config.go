@@ -389,9 +389,14 @@ type ConnectPolicy struct {
 	MaxIdleConnDuration time.Duration `yaml:"max_idle_conn_duration,omitempty" json:"max_idle_conn_duration,omitempty"`
 	// ResponseHeaderTimeout bounds the time waiting for the origin's
 	// response headers after the request is fully sent. Zero applies a
-	// safe built-in default (30s). This is the primary defence against
-	// slow-origin resource exhaustion now that WriteTimeout is 0 on the
-	// data plane.
+	// safe built-in default (30s). With the origin client no longer
+	// carrying a client-level read cap, this knob doubles as the
+	// per-route origin timeout default: every route on the pool that
+	// does not set its own cache.fetch_timeout inherits this value as
+	// its origin wait (header + body). It is the primary defence
+	// against slow-origin resource exhaustion now that WriteTimeout is
+	// 0 on the data plane. Must stay below the data plane's 5-minute
+	// safety-net WriteTimeout (config.maxFetchTimeout).
 	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty" json:"response_header_timeout,omitempty"`
 	// HedgeTimeout fires a duplicate request to the same pool when the
 	// primary does not respond within this duration. Zero disables hedging.
@@ -522,8 +527,14 @@ type RouteCache struct {
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the client receives
-	// a 502 (or stale content if stayin-alive is enabled). Zero applies
-	// a safe built-in default (60s). This replaces the blanket
+	// a 502 (or stale content if stayin-alive is enabled). It is the
+	// per-route origin timeout: it overrides the pool-wide
+	// connect.response_header_timeout for this route, and — since the
+	// origin client no longer applies a client-level read cap — the
+	// configured value is enforced verbatim, in either direction.
+	// Zero (unset) makes the route inherit the pool's
+	// connect.response_header_timeout (default 30s) instead of the
+	// built-in 60s fetch default. This replaces the blanket
 	// WriteTimeout on the data plane, which was the wrong tool for a
 	// caching reverse proxy.
 	//

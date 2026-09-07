@@ -248,7 +248,7 @@
                     "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
                   },
                   "response_header_timeout": {
-                    "description": "Max wait for origin response headers. Default 30s.",
+                    "description": "Max wait for origin response headers (default 30s). Also the default origin wait (header + body) inherited by every route on the pool that does not set its own cache.fetch_timeout. Keep strictly below 5m (data plane safety-net WriteTimeout).",
                     "type": "string",
                     "pattern": "^[0-9]+(ns|us|ms|s|m|h)$"
                   },

@@ -28,6 +28,18 @@ the curated, human-readable summary.
 ## [0.5.9] - 2026-09-08
 
 ### Added
+- Per-route origin timeout: `routes[].cache.fetch_timeout` is now the
+  authoritative origin-wait bound and can exceed the pool-wide
+  `connect.response_header_timeout`. Previously the origin client baked
+  `response_header_timeout` into its `ReadTimeout`, and fasthttp
+  composes the effective read deadline as `min(per-request deadline,
+  client.ReadTimeout)` — silently capping every route at the pool knob
+  (default 30s), so a slow endpoint could never be given more time
+  without raising the wait for every other route on the pool. Routes
+  without an explicit `fetch_timeout` now inherit
+  `connect.response_header_timeout` (same effective default as
+  before); the pool knob is also validated to stay below the 5-minute
+  data-plane safety net, mirroring `fetch_timeout` (ADR-0043).
 - `listen.read_timeout` config option (default 30s): bounds how long
   reading a single request's header and body may take on data-plane
   connections. Previously hard-coded. It is the slowloris defense —

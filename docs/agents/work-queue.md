@@ -43,6 +43,8 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — internal/origin, internal/config, cmd/bouine/cmd, deploy/helm — per-route origin timeout: route fetch_timeout authoritative (client ReadTimeout cap removed, pool response_header_timeout inherited as default, validation + tests + ADR-0043) — 2026-09-07
+
 - [DONE] crush — internal/cache, internal/server/h1parser, internal/origin, pkg/header — SSE support: hinted dispatch, live unbuffered streaming, idle read/write deadlines, per-event flush, tests (ADR-0042) — 2026-09-03
 
 - [DONE] crush — internal/observability, internal/cache, pkg/header — MISS-path batch 2: middleware byte classification, ToMap skip, non-interning SetEntryRaw, sharded singleflight, cacheKey logging gate (PR pending) — 2026-08-29

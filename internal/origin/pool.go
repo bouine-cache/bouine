@@ -204,7 +204,11 @@ type PoolConfig struct {
 	// Zero applies a 90s default.
 	MaxIdleConnDuration time.Duration
 	// ResponseHeaderTimeout bounds the wait for origin response headers.
-	// Zero applies a 30s default.
+	// Zero applies a 30s default. Also serves as the default origin wait
+	// inherited by every route on the pool that does not set its own
+	// fetch timeout (see cmd/bouine/cmd.resolveRouteFetchTimeout); the
+	// client no longer carries a client-level read cap, so per-request
+	// deadlines are the only bound.
 	ResponseHeaderTimeout time.Duration
 }
 
@@ -239,12 +243,22 @@ func resolveDefaultInt(v, def int) int {
 // DisableHeaderNamesNormalizing fasthttp Peek misses them and the
 // cache misclassifies freshness and conditional revalidation
 // (http-tests/cache-tests drops to 283/365).
+//
+// ReadTimeout stays 0 (unlimited): fasthttp composes the effective
+// read deadline as min(per-request deadline, client.ReadTimeout), so a
+// non-zero client-level value silently caps every route's fetch
+// timeout at the pool-wide response_header_timeout. The per-request
+// deadlines (cache.Handler.fetchTimeout via DoDeadline / ctx) are the
+// sole, authoritative origin-wait bound; the builder resolves each
+// route's unset fetch_timeout to the pool's response_header_timeout so
+// the historical default still applies. The FastHandler passthrough
+// path passes its own DoTimeout explicitly.
 func newOriginClient(cc clientConfig) *fasthttp.Client {
 	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
 	return &fasthttp.Client{
 		MaxConnsPerHost:     cc.maxConnsPerHost,
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
-		ReadTimeout:         cc.responseHeaderTimeout,
+		ReadTimeout:         0,
 		WriteTimeout:        5 * time.Minute,
 		Dial: func(addr string) (net.Conn, error) {
 			return dialer.Dial("tcp", addr)

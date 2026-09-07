@@ -78,7 +78,7 @@ config:
   #       max_connections: 64           # per origin host (default 64)
   #       max_idle_conn_duration: 90s   # idle pooled-connection lifetime (default 90s);
   #                                     # keep below any LB idle timeout in the path (AWS NLB: 350s)
-  #       response_header_timeout: 30s  # wait for origin response headers (default 30s)
+  #       response_header_timeout: 30s  # origin wait default inherited by routes without cache.fetch_timeout; keep < 5m (data plane safety net)
   #       hedge_timeout: 50ms           # fire a duplicate request after this delay
   upstream_pools: []
   routes: []

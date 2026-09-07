@@ -230,6 +230,25 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 	}
 }
 
+// resolveRouteFetchTimeout applies the per-route origin-fetch timeout
+// resolution order: an explicit cache.fetch_timeout wins; otherwise the
+// route inherits the pool's connect.response_header_timeout (resolved
+// with its built-in default by origin.NewPool), so a route without its
+// own knob keeps today's effective origin-wait bound. With the pool
+// client no longer carrying a client-level ReadTimeout cap (see
+// newOriginClient), this is the only defaulting site — an unset value
+// must never fall through to cache.defaultFetchTimeout (60s), which
+// would silently double the historical origin wait.
+func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
+	if rc.Cache.FetchTimeout > 0 {
+		return rc.Cache.FetchTimeout
+	}
+	if p != nil {
+		return p.ResolvedClientConfig().ResponseHeaderTimeout
+	}
+	return 0
+}
+
 // buildRouter constructs the server.Router by iterating over the route table
 // and wiring each route to its upstream pool and cache handler. For every route
 // it resolves connection settings (dial timeout, keep-alive, optional hedge
@@ -274,7 +293,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
-			FetchTimeout:            rc.Cache.FetchTimeout,
+			FetchTimeout:            resolveRouteFetchTimeout(rc, p),
 			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
 			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),

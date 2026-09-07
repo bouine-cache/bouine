@@ -548,6 +548,15 @@ func validatePoolDurations(p *UpstreamPool) error {
 	if p.Connect.ResponseHeaderTimeout < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
 	}
+	// This knob is the fallback origin-fetch bound for every route on the
+	// pool that does not set its own cache.fetch_timeout. The same
+	// safety-net ordering that applies to route fetch_timeout (the data
+	// plane's 5-minute WriteTimeout must be able to outlive the fetch)
+	// must hold here, or an inherited default aborts the client
+	// connection before the origin wait gives up.
+	if p.Connect.ResponseHeaderTimeout >= maxFetchTimeout {
+		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be < %v (data plane safety-net WriteTimeout), got %v", p.Name, maxFetchTimeout, p.Connect.ResponseHeaderTimeout)
+	}
 	if p.Connect.MaxConnections < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.max_connections must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
 	}

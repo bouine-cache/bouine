@@ -52,7 +52,11 @@
      `cap` (reactor at 4096 conns).
    - `bouine_h1_reactor_returns_total` — blocking-parser hand-backs;
      this is what keeps mixed-traffic connections cycling back to the
-     loop.
+     loop. The return fires only once no pipelined follower bytes
+     remain buffered on the blocking goroutine: under batch-writing
+     clients (many requests per connection) a low `returns_total`
+     alongside climbing `hits_total` means followers are being drained
+     inline — not a return-path regression.
    - `bouine_h1_reactor_conns_dropped_total` — reactor-initiated
      closes (errors, idle expiry, stuck writers).
 3. If drops recur (not just at shutdown): capture `pprof` CPU on the

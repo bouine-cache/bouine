@@ -10,6 +10,26 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- **Pipelined request identity and stranding on the H1 blocking path**:
+  a client writing multiple requests per connection (HTTP/1.1
+  pipelining — load generators, `h2load --h1`-style batch writers) got
+  two wrong behaviors. First, when bytes followed a fast-path hit, the
+  fallback handler was re-invoked with the *already-served* request and
+  the follower's bytes as its pipeline — the client received the first
+  request's response twice and the follower was never served. Second,
+  any request that followed a miss was swallowed into the fallback
+  handler's internal read buffer and stalled until the idle deadline
+  killed the connection (up to 120 s), because `handleFallThrough`'s
+  bufio consumed follower bytes it never returned. The fallback now
+  returns its unread leftover, `parseRequest` accepts a buffered
+  prefix, and every pipelined follower is parsed and served as itself,
+  in order, on both the blocking path and the reactor (whose
+  miss-handoff replay had the same behavior). The reactor return
+  (`h1_reactor`) now fires only once no follower bytes remain buffered
+  — a mid-batch return would have orphaned bytes held by the blocking
+  goroutine after the reactor re-registered the fd.
+
 ## [0.5.8] - 2026-09-04
 
 ### Fixed

@@ -915,7 +915,7 @@ func TestParser_Serve_MissPathReadDeadlineError(t *testing.T) {
 func TestHandleFallThrough_NilRequest(t *testing.T) {
 	t.Parallel()
 	p := New(nil, noopHandler)
-	close, err := p.handleFallThrough(&mockConn{}, nil, nil)
+	close, _, err := p.handleFallThrough(&mockConn{}, nil, nil)
 	assert.Error(t, err)
 	assert.False(t, close)
 }
@@ -944,7 +944,7 @@ func TestHandleFallThrough_WriteError(t *testing.T) {
 		NHeaders:    0,
 	}
 
-	_, err := p.handleFallThrough(wrapped, req, nil)
+	_, _, err := p.handleFallThrough(wrapped, req, nil)
 	assert.Error(t, err)
 }
 
@@ -974,7 +974,7 @@ func TestHandleFallThrough_HandlerSetsConnectionClose(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		close, _ := p.handleFallThrough(serverConn, req, nil)
+		close, _, _ := p.handleFallThrough(serverConn, req, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 		_ = close
@@ -1093,7 +1093,7 @@ func TestHandleFallThrough_WithQueryString(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = p.handleFallThrough(serverConn, req, nil)
+		_, _, _ = p.handleFallThrough(serverConn, req, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()

@@ -44,7 +44,7 @@ func TestHandleFallThrough_ServesResponse(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = parser.handleFallThrough(serverConn, req, nil)
+		_, _, _ = parser.handleFallThrough(serverConn, req, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()
@@ -98,7 +98,7 @@ func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = parser.handleFallThrough(serverConn, req, nil)
+		_, _, _ = parser.handleFallThrough(serverConn, req, nil)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()
@@ -153,7 +153,7 @@ func TestHandleFallThrough_PassesExcessBody(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = parser.handleFallThrough(serverConn, req, excess)
+		_, _, _ = parser.handleFallThrough(serverConn, req, excess)
 		_ = serverConn.Close()
 		done <- struct{}{}
 	}()

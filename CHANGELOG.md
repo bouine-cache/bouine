@@ -10,6 +10,23 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Changed
+- **Miss round-trip cost on the H1 reactor** (ADR-0043; requires
+  `experimental.h1_reactor`): the spawn-per-miss handoff model is
+  replaced by a bounded worker pool (dispatcher + up to 1024 workers
+  over a 128-slot queue), so a miss under load queues for a worker
+  instead of resetting the connection at the first 128-job boundary,
+  and sustained missy traffic no longer pays a goroutine spawn + ~32 KiB
+  stack growth per miss. The handed-off `reactorConn` (~20 KiB inline)
+  is now reused: the return hook re-registers the SAME struct on the
+  reactor loop (fd-identity-checked), and a conn that dies on a worker
+  recycles its struct to a pool. The fall-through path draws its
+  rebuilt request head, 16 KiB bufio reader, and leftover copy from a
+  per-cycle pool instead of allocating all three per miss. Net effect:
+  ~50 KiB of heap churn per miss round trip drops to the fasthttp ctx
+  internals, gated by new `Reactor_MissRoundTrip` and
+  `FallThrough_Pooled` alloc budgets in `bench/run.sh`.
+
 ### Fixed
 - **Pipelined request identity and stranding on the H1 blocking path**:
   a client writing multiple requests per connection (HTTP/1.1

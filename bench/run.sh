@@ -49,6 +49,14 @@
 #   H1Parse_Get:                      0
 #   Reactor_Hit:                      0  (epoll reactor batch serving;
 #                                      parse+TryHit+serialize+flush)
+#   Reactor_MissRoundTrip:             4  (worker pool dispatch + Serve miss
+#                                      cycle + return-hook reuse + recycle;
+#                                      was ~45 KiB + spawn per round trip
+#                                      before the pool — the remaining allocs
+#                                      are fasthttp's header parser)
+#   FallThrough_Pooled:                2  (pooled RequestCtx + head into the
+#                                      pooled buffer + owned leftover copy;
+#                                      the 16 KiB bufio is pooled)
 
 set -euo pipefail
 
@@ -94,6 +102,8 @@ declare -A BUDGETS=(
 # the stale-budget check stays honest on darwin.
 if [ "$(go env GOOS)" = "linux" ]; then
     BUDGETS[Reactor_Dispatch]=0
+    BUDGETS[Reactor_MissRoundTrip]=4
+    BUDGETS[FallThrough_Pooled]=2
 fi
 
 run_bench() {

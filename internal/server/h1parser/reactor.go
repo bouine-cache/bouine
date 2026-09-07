@@ -178,25 +178,39 @@ type reactorConn struct {
 	readBuf [readBufferSize]byte
 }
 
-// newReactorConn builds the state machine. The transport wires the
-// raw-fd I/O functions; they must return errAgain instead of blocking.
+// newReactorConn builds the state machine, drawing the struct from
+// reactorConnPool when a previous life was recycled into it (the miss
+// round-trip reuse path: workers recycle on conn death, the next
+// accept/return draws it back). The transport wires the raw-fd I/O
+// functions; they must return errAgain instead of blocking. All state
+// is re-initialized — a pooled struct carries only its inline bulk
+// (readBuf, scratch, writeVecArr), never request state.
 func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int, error)) *reactorConn {
 	now := p.nowFunc()
-	rc := &reactorConn{
-		conn:     conn,
-		parser:   p,
-		readFn:   readFn,
-		writeFn:  writeFn,
-		fd:       -1,
-		state:    rcReading,
-		reqStart: now,
-		writeBuf: (*reactorWritePool.Get().(*[]byte))[:0],
-		scratch:  api.RawRequest{Scheme: p.scheme},
+	var rc *reactorConn
+	if v, ok := reactorConnPool.Get().(*reactorConn); ok && v != nil {
+		rc = v
+	} else {
+		rc = &reactorConn{}
 	}
-	// Pre-size the writev slice over the inlined backing array (3
-	// slots: status line, header block, body — the FastPathResponse
-	// layout) so parsed() never grows it mid-hit.
+	rc.conn = conn
+	rc.parser = p
+	rc.readFn = readFn
+	rc.writeFn = writeFn
+	rc.fd = -1
+	rc.state = rcReading
+	rc.reqStart = now
+	rc.writeBuf = (*reactorWritePool.Get().(*[]byte))[:0]
 	rc.writeVec = rc.writeVecArr[:0]
+	rc.writeVecFn = nil
+	rc.writeLen = 0
+	rc.rLen = 0
+	rc.scanned = 0
+	rc.retainResp = nil
+	rc.retainFP = nil
+	rc.closeAfterFlush = false
+	rc.epollInterest = 0
+	rc.scratch = api.RawRequest{Scheme: p.scheme}
 	return rc
 }
 
@@ -537,10 +551,57 @@ func (rc *reactorConn) finishWrite() {
 // handoffConn wraps the connection with the buffered bytes so the
 // blocking parser re-reads the request from the buffer and continues
 // from the live socket. The blocking parser takes exclusive ownership
-// of the net.Conn from here.
+// of the net.Conn from here. The paired reactorConn rides along so
+// the worker can recycle it when the conn dies — or hand it back to
+// the loop, reused, when the conn returns (see Serve's reactorReturn).
 func (rc *reactorConn) handoffConn() net.Conn {
-	return &prefixConn{Conn: rc.conn, prefix: rc.readBuf[:rc.rLen]}
+	return &prefixConn{Conn: rc.conn, prefix: rc.readBuf[:rc.rLen], rc: rc}
 }
+
+// reset prepares a reactorConn for reuse on the same conn/fd: clears
+// request/flush state and re-arms the per-request idle window. The fd,
+// I/O closures, and inline readBuf stay (they are conn-bound, not
+// request-bound); scratch is NOT re-zeroed — parseBuffer soft-resets
+// it before every parse.
+func (rc *reactorConn) reset(now time.Time) {
+	rc.state = rcReading
+	rc.rLen = 0
+	rc.scanned = 0
+	rc.writeLen = 0
+	rc.retainResp = nil
+	rc.retainFP = nil
+	rc.writeVec = rc.writeVec[:0]
+	rc.writeBuf = rc.writeBuf[:0]
+	rc.closeAfterFlush = false
+	rc.reqStart = now
+}
+
+// recycle releases the conn's buffers back to their pools and wipes
+// identifying state, leaving the struct valid for reactorConnPool. The
+// struct is ~20 KiB inline (16 KiB readBuf + ~4 KiB scratch) — pooling
+// it is the difference between a miss round-trip costing a fresh
+// allocation and costing nothing. The CALLER guarantees the conn is
+// closed or its ownership moved elsewhere (the worker recycles only
+// after Serve returned without handing the rc back to the loop); the
+// readBuf's bytes may be stale — the next reset + parse overwrite them.
+// Loop-owned drop/sweep/close paths do NOT recycle: their conns died
+// on the loop's watch and the structs go to GC with them.
+func (rc *reactorConn) recycle() {
+	rc.release() // writeBuf back to its pool; retained response released
+	rc.conn = nil
+	rc.fd = -1
+	rc.parser = nil
+	rc.epollInterest = 0
+	rc.state = rcReading
+	reactorConnPool.Put(rc)
+}
+
+// reactorConnPool recycles handed-off reactorConn structs. Only the
+// miss handoff path puts (via the tracker's recycle); accept and
+// return draw — a fresh accept builds one connection's worth of state
+// exactly once, and the return path reuses the struct the original
+// handoff parked.
+var reactorConnPool sync.Pool
 
 // idleExpired reports whether the current request exceeded the
 // reactor idle budget without completing. Measured from reqStart

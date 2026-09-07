@@ -18,12 +18,14 @@
   observations were not counted in `bouine_requests_total` /
   `request_duration_seconds` / `response_bytes_out_total` for the
   fast path. Steady state should see zero.
-- **Spawner saturation**: under extreme miss storms, a full handoff
-  spawn queue (128 slots per listener) resets the excess miss
-  connections instead of serving them — clients see connection resets
-  while hit-path latency stays flat. This is deliberate: the
+- **Spawner saturation**: under extreme miss storms the handoff worker
+  pool sheds (resets) miss connections only after BOTH the 128-slot
+  job queue and the 1024-worker pool saturate — clients see connection
+  resets while hit-path latency stays flat. This is deliberate: the
   alternative would stall every cache hit multiplexed on that
-  listener.
+  listener. Before the worker-pool change (ADR-0043) the shed point
+  was the 128-job spawn queue alone; sustained miss storms now queue
+  for workers instead of resetting until roughly 8x deeper saturation.
 - **Starved loop** (diagnose with the telemetry below, not pprof): if
   `bouine_h1_reactor_hits_total` is flat while
   `bouine_requests_total{cache_result="HIT"}` climbs, the reactor is
@@ -88,3 +90,6 @@
 - `docs/decisions/0042-h1-epoll-reactor-return-path.md` —
   return-to-reactor, pipelined-inline hits, and the telemetry
   counters.
+- `docs/decisions/0043-h1-worker-pool-rc-reuse.md` — the miss
+  round-trip worker pool and reactorConn reuse (the shed-point and
+  churn budget changes above).

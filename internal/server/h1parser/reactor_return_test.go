@@ -29,7 +29,7 @@ func TestServe_ReturnsToReactorAfterMiss(t *testing.T) {
 	p := New(&mockFastPathHandler{}, handler)
 
 	var returned net.Conn
-	p.reactorReturn = func(c net.Conn) bool {
+	p.reactorReturn = func(c net.Conn, _ *reactorConn) bool {
 		returned = c
 		return true
 	}
@@ -69,7 +69,7 @@ func TestServe_ReturnsToReactorAfterHitUnwrapsPrefix(t *testing.T) {
 	p := New(&mockSelectiveFastPath{}, noopHandler)
 
 	var returned net.Conn
-	p.reactorReturn = func(c net.Conn) bool {
+	p.reactorReturn = func(c net.Conn, _ *reactorConn) bool {
 		returned = c
 		return true
 	}
@@ -111,7 +111,7 @@ func TestServe_ReturnHookDeclinedKeepsBlocking(t *testing.T) {
 	p := New(&mockFastPathHandler{}, func(ctx *fasthttp.RequestCtx) {
 		ctx.SetBodyString("miss")
 	})
-	p.reactorReturn = func(net.Conn) bool {
+	p.reactorReturn = func(net.Conn, *reactorConn) bool {
 		attempts++
 		return false
 	}

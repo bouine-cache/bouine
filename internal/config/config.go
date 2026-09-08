@@ -310,6 +310,16 @@ type Cluster struct {
 	// pipe and the fetch falls back to origin. validatePeerFetchConfig
 	// enforces the ordering against admin.idle_timeout.
 	PeerMaxIdleConnDuration time.Duration `yaml:"peer_max_idle_conn_duration,omitempty" json:"peer_max_idle_conn_duration,omitempty"`
+	// PeerFetchConcurrency bounds concurrent peer-fetch and peer-put
+	// RPCs per node. The semaphore prevents memory blow-up during miss
+	// fan-out (issue #133). Under strong-mode cluster traffic where most
+	// hits are peer hits (non-owner pods fetch from the key owner), the
+	// default of 4 can queue requests behind in-flight fetches and add
+	// tail latency. Raise together with peer_max_conns_per_host so the
+	// pipeline clients stay the binding constraint. Zero applies the
+	// default (4); negative values and values above 128 are rejected
+	// by validatePeerFetchConfig.
+	PeerFetchConcurrency int `yaml:"peer_fetch_concurrency,omitempty" json:"peer_fetch_concurrency,omitempty"`
 }
 
 // ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.

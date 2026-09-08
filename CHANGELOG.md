@@ -10,6 +10,30 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-09-08
+
+### Fixed
+- Peer fetch could serve the Vary resolver body as a peer HIT: the
+  follow-up to the cross-variant fix (#630) left a second hole in strong
+  cluster mode. A non-owner that misses locally peer-fetches the key
+  owner for the PRIMARY key with a blank variant assertion (it cannot
+  know the Vary list yet); the owner's only stored entry is the
+  primary-key Vary resolver, whose body belongs to whichever variant
+  filled first. Both of the prior gates skip in this flow: the
+  requester's assertion is blank and the storage codec never serialized
+  `VaryValue` (always empty over the wire), so `servePeerHit`'s
+  recompute could not run. Observed in preprod on the doorman
+  `/content/` route: an `it-IT` request filled from origin, then an
+  `fr-FR` request on another pod got `Content-Language: it-IT` as a
+  peer HIT. Two complementary fixes: the owner never serves a Vary
+  resolver body from a peer fetch (blank `VaryKey`, non-empty
+  `VaryValue` is answered with a miss), and the storage codec now
+  serializes `VaryValue` (version 4) so the cross-variant recompute
+  gate works on peer-delivered objects; v3 blobs decode unchanged
+  (warm-tier entries survive the rolling upgrade). New 3-node
+  integration test sweeps fill-node × request-node crossings and fails
+  on main (PR #641, fa0c1e7).
+
 ## [0.5.11] - 2026-09-08
 
 ### Fixed

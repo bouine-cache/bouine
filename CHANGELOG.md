@@ -10,6 +10,50 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-09-08
+
+### Fixed
+- Peer fetch could serve another variant's cached body as a HIT: in
+  strong cluster mode a non-owner that misses locally peer-fetches the
+  key's owner, which could return the primary-key Vary resolver (the
+  first fill's body) for a request selecting a different variant — the
+  handler re-checked only freshness, never the Vary dimension. Observed
+  in production on the doorman route, where per-market content differs
+  only in request headers. Two complementary gates close the hole: the
+  requesting node stamps its variant assertion on the peer-fetch RPC
+  (the previously ignored `VaryKey` field) and, on receipt, recomputes
+  the variant dimension for the actual request, rejecting a foreign
+  body as a miss (origin fallback); the peer honors the assertion,
+  missing with 404 when the only stored entry under the key is another
+  variant's or the resolver's, and the resolver entry is stored with a
+  blank `VaryKey` so protocol-strict peers classify it correctly.
+  Regression tests replay the cross-market incident end to end and pin
+  the protocol semantics in both directions; miss-path alloc budget
+  unchanged (PR #630, e98b7da).
+
+### Added
+- `cluster.peer_fetch_concurrency` (default 4, capped at 128): bounds
+  the peer-fetch/peer-put semaphore, previously hardcoded to 4. In
+  strong-mode clusters most cache hits are peer hits (non-owner pods
+  fetch from the key owner), so the semaphore sits on the hot path and
+  its fixed value queued requests behind in-flight fetches, adding tail
+  latency under load; production could not raise it without a code
+  change. Config-loader validation rejects negative and >128 values;
+  the knob and its relationship to `peer_max_conns_per_host` are
+  documented in ADR-0039 (PR #627).
+- Per-route origin timeout: `routes[].cache.fetch_timeout` is now the
+  authoritative origin-wait bound and can exceed the pool-wide
+  `connect.response_header_timeout`. Previously the origin client baked
+  `response_header_timeout` into its `ReadTimeout`, and fasthttp
+  composes the effective read deadline as `min(per-request deadline,
+  client.ReadTimeout)` — silently capping every route at the pool knob
+  (default 30s), so a slow endpoint could never be given more time
+  without raising the wait for every other route on the pool. Routes
+  without an explicit `fetch_timeout` now inherit
+  `connect.response_header_timeout` (same effective default as
+  before); the pool knob is also validated to stay below the 5-minute
+  data-plane safety net, mirroring `fetch_timeout` (ADR-0043, PR #624).
+
 ## [0.5.10] - 2026-09-08
 
 ### Fixed
@@ -28,18 +72,6 @@ the curated, human-readable summary.
 ## [0.5.9] - 2026-09-08
 
 ### Added
-- Per-route origin timeout: `routes[].cache.fetch_timeout` is now the
-  authoritative origin-wait bound and can exceed the pool-wide
-  `connect.response_header_timeout`. Previously the origin client baked
-  `response_header_timeout` into its `ReadTimeout`, and fasthttp
-  composes the effective read deadline as `min(per-request deadline,
-  client.ReadTimeout)` — silently capping every route at the pool knob
-  (default 30s), so a slow endpoint could never be given more time
-  without raising the wait for every other route on the pool. Routes
-  without an explicit `fetch_timeout` now inherit
-  `connect.response_header_timeout` (same effective default as
-  before); the pool knob is also validated to stay below the 5-minute
-  data-plane safety net, mirroring `fetch_timeout` (ADR-0043).
 - `listen.read_timeout` config option (default 30s): bounds how long
   reading a single request's header and body may take on data-plane
   connections. Previously hard-coded. It is the slowloris defense —
@@ -1088,7 +1120,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.10...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.11...HEAD
+[0.5.11]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.11
 [0.5.10]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.10
 [0.5.9]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.9
 [0.5.8]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.8

@@ -414,6 +414,64 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 	}
 }
 
+func TestPeerFetcher_ConfigurableFetchConcurrencyBoundsFetches(t *testing.T) {
+	t.Parallel()
+	const customConcurrency = 8
+	var inFlight, maxInFlight atomic.Int32
+
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		cur := inFlight.Add(1)
+		for {
+			old := maxInFlight.Load()
+			if cur <= old || maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inFlight.Add(-1)
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+		FetchConcurrency:    customConcurrency,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	var wg sync.WaitGroup
+	for i := 0; i < customConcurrency*3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(),
+				api.PeerInfo{AdminAddr: srv.Addr},
+				api.PeerFetchRequest{Key: testkey.Key(1)})
+		}()
+	}
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > customConcurrency {
+		t.Fatalf("max concurrent peer-fetches = %d, want <= %d", got, customConcurrency)
+	}
+}
+
+func TestPeerFetcher_FetchConcurrencyCappedAtMax(t *testing.T) {
+	t.Parallel()
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		FetchConcurrency: maxPeerFetchConcurrency * 2,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	if got := cap(f.fetchSem); got != maxPeerFetchConcurrency {
+		t.Fatalf("fetch semaphore capacity = %d, want capped at %d", got, maxPeerFetchConcurrency)
+	}
+	if got := cap(f.putSem); got != maxPeerFetchConcurrency {
+		t.Fatalf("put semaphore capacity = %d, want capped at %d", got, maxPeerFetchConcurrency)
+	}
+}
+
 func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	t.Parallel()
 	block := make(chan struct{})

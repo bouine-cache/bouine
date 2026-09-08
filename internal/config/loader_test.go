@@ -217,6 +217,50 @@ func TestClusterHandoffQueueDepth_AtUpperBoundAccepted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestClusterPeerFetchConcurrency_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "peer_fetch_concurrency")
+	require.Contains(t, err.Error(), "must be >=")
+}
+
+func TestClusterPeerFetchConcurrency_ZeroAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterPeerFetchConcurrency_ExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: maxPeerFetchConcurrency + 1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "peer_fetch_concurrency")
+	require.Contains(t, err.Error(), "must be <=")
+}
+
+func TestClusterPeerFetchConcurrency_AtUpperBoundAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: maxPeerFetchConcurrency},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
 func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}

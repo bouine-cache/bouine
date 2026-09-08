@@ -37,6 +37,11 @@ const maxFetchWaitTimeout = 1 * time.Second
 // internal/admin. If you change one, change the other.
 const defaultAdminIdleTimeout = 300 * time.Second
 
+// maxPeerFetchConcurrency mirrors cluster.MaxPeerFetchConcurrency (128).
+// Duplicated because config is a leaf package and cannot import
+// internal/cluster. If you change one, change the other.
+const maxPeerFetchConcurrency = 128
+
 // maxReadTimeout is the upper bound for listen.read_timeout. It must
 // stay strictly below internal/server.safetyNetWriteTimeout so the
 // safety net, not the read deadline, bounds a request's total lifetime.
@@ -625,6 +630,14 @@ func (c *Config) validatePeerFetchConfig() error {
 	if c.Cluster.PeerMaxIdleConnDuration < 0 {
 		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 120s), got %v",
 			c.Cluster.PeerMaxIdleConnDuration)
+	}
+	if c.Cluster.PeerFetchConcurrency < 0 {
+		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be >= 0 (0 = default 4), got %d",
+			c.Cluster.PeerFetchConcurrency)
+	}
+	if c.Cluster.PeerFetchConcurrency > maxPeerFetchConcurrency {
+		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be <= %d, got %d",
+			maxPeerFetchConcurrency, c.Cluster.PeerFetchConcurrency)
 	}
 	if c.Admin.IdleTimeout < 0 {
 		return fmt.Errorf("config: admin.idle_timeout must be >= 0 (0 = default 300s), got %v",

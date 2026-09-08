@@ -40,6 +40,15 @@ Two new config fields under `cluster:`:
 - `peer_max_idle_conn_duration` (default 120s) — idle timeout for
   peer connections.
 
+A third field, `peer_fetch_concurrency` (default 4, max 128), bounds the
+fetch/put semaphore on top of the pipeline clients. It exists separately
+because the semaphore caps in-flight RPCs across all peers combined
+(memory-blow-up guard, issue #133), while the pipeline clients cap
+connections per peer. When raising one, keep the semaphore above
+`peer_max_conns_per_host × peerMaxPendingRequests` so the pipeline
+remains the binding constraint; otherwise fetches queue on the
+semaphore and add tail latency.
+
 ### Pipeline depth
 
 `fasthttp.PipelineClient` uses `MaxPendingRequests=16` (hardcoded as

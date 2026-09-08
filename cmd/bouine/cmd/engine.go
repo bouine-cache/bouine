@@ -422,6 +422,7 @@ func (e *engine) initCluster(
 		HopLimit:            e.cfg.Cluster.HopLimit,
 		MaxConnsPerHost:     e.cfg.Cluster.PeerMaxConnsPerHost,
 		MaxIdleConnDuration: e.cfg.Cluster.PeerMaxIdleConnDuration,
+		FetchConcurrency:    e.cfg.Cluster.PeerFetchConcurrency,
 	}, e.metrics.Registry, e.logger)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
 

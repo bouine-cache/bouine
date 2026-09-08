@@ -10,6 +10,8 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-09-08
+
 ### Added
 - `listen.read_timeout` config option (default 30s): bounds how long
   reading a single request's header and body may take on data-plane
@@ -1059,7 +1061,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.8...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.9...HEAD
+[0.5.9]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.9
 [0.5.8]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.8
 [0.5.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.6
 [0.5.5]: https://github.com/bouine-cache/bouine/compare/v0.5.4...v0.5.5

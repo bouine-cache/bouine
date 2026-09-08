@@ -43,7 +43,14 @@ const maxFastPathHeaderBytes = 8 * 1024
 // It holds a reference to the storage store and cache config, and attempts
 // to serve cache hits without constructing a full RequestInfo.
 type FastPathHandler struct {
-	store          storage.Store
+	store storage.Store
+	// ownerFn and peerFetch mirror the slow-path Handler fields of the
+	// same names (handler.go): ownerFn reports the ring owner for a key
+	// and whether it is local; peerFetch asks that owner for the object.
+	// Nil in single-node and eventual modes — the peer branch then never
+	// runs and TryHit behaves exactly as before.
+	ownerFn        func(key api.Key) (owner api.PeerInfo, isLocal bool)
+	peerFetch      func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
 	policy         *KeyPolicy // nil = no query/header policy
 	onStale        func(req *api.RawRequest, key api.Key, stale *api.Object)
 	cachedDate     atomic.Pointer[string]
@@ -55,9 +62,11 @@ type FastPathHandler struct {
 // The Handler must be fully initialized before calling this.
 func NewFastPathHandler(h *Handler) *FastPathHandler {
 	return &FastPathHandler{
-		store:    h.store,
-		poolName: h.poolName,
-		policy:   h.policy,
+		store:     h.store,
+		poolName:  h.poolName,
+		policy:    h.policy,
+		ownerFn:   h.ownerFn,
+		peerFetch: h.peerFetch,
 	}
 }
 
@@ -82,6 +91,20 @@ func NewFastPathHandlerFromStore(store storage.Store) *FastPathHandler {
 	}
 }
 
+// WithPeerFetch wires the cluster owner lookup and peer-fetch closure
+// onto a store-constructed FastPathHandler, mirroring the slow path's
+// HandlerConfig.OwnerFn/PeerFetch. Both are nil (or fetch is nil) in
+// single-node and eventual modes; the peer branch then never runs.
+// The closures must be non-blocking-safe for the h1parser goroutine
+// contract: they may block on network I/O (misses fall through, the
+// parser hands the connection to the slow-path handler), but must not
+// retain req without copying.
+func (f *FastPathHandler) WithPeerFetch(ownerFn func(key api.Key) (owner api.PeerInfo, isLocal bool), peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)) *FastPathHandler {
+	f.ownerFn = ownerFn
+	f.peerFetch = peerFetch
+	return f
+}
+
 // TryHit attempts to serve a cache hit from the parsed request. See
 // api.FastPathHandler for the full contract.
 func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastPathResponse, bool) {
@@ -99,7 +122,10 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	key := buildKeyFromRaw(req, f.policy)
 	obj, src, err := f.store.Get(ctx, key)
 	if err != nil || obj == nil {
-		return nil, false
+		// Local miss: a strong-cluster node asks the key's owner before
+		// falling through to the slow path (peer-fetch again, then
+		// origin). The branch never runs without cluster wiring.
+		return f.tryPeerFetch(ctx, req, key, now, reqCC)
 	}
 
 	// Handle Vary: if the object has a Vary header, re-fetch the variant.
@@ -141,6 +167,129 @@ func (f *FastPathHandler) TryHit(req *api.RawRequest, now time.Time) (*api.FastP
 	default:
 		return nil, false
 	}
+}
+
+// tryPeerFetch serves a local miss by asking the key's cluster owner
+// before falling through to the slow path (which would peer-fetch again
+// then hit origin). It mirrors handleCacheMiss's owner-first lookup
+// (handler.go): consult ownerFn, ask the owner, and re-run the fast-path
+// freshness gate on the returned object. The variant-miss case — a
+// stored Vary resolver exists but the selected variant is missing —
+// never reaches this branch: TryHit returns (nil, false) before it, and
+// the slow path peer-fetches with the resolver's VaryKey
+// (peerVaryAssertion).
+//
+// RFC 9111 §4.1 variant gate (issue #630): the response-side check
+// (peerGateMatchesVary) catches a peer that answers with another
+// variant's body (or the primary-key resolver, whose VaryKey is blank
+// by protocol) and falls back to the slow path instead of serving
+// cross-variant content. The wire assertion for a plain miss is ""
+// (accept-any — no stored resolver to derive one from); the gate below
+// is the actual defense, and the peer's resolver-withhold rule
+// (peerfetch.go, blank-VaryKey answer) is the second.
+//
+// Blocking: this call runs on the h1parser event-loop goroutine and the
+// reactor calls it inline too — the peerFetch closure may block on
+// network I/O for up to the peer-fetch timeout (dial + read). Miss
+// storms therefore serialize misses per loop goroutine, exactly like
+// the parser fallback path does after a fall-through. Acceptable
+// because a miss must hit the network either way; the fallthrough
+// duplicate fetch below is the price of keeping TryHit's contract.
+//
+// The returned response carries Source "peer" so access logs and
+// metrics report the same cache_result/source pair as the slow path.
+// Peer objects are served but never stored — on a non-owner that would
+// make the fleet cache redundant (issue #509).
+//
+// OnlyIfCached (RFC 9111 §5.2.1.7) is honored before any network I/O:
+// a request that forbids network fetches must not pay a peer RPC.
+//
+//nolint:gocyclo // 16: miss/gate/derive/hit/stale branches mirror TryHit
+func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest, lookupKey api.Key, now time.Time, reqCC Directives) (*api.FastPathResponse, bool) {
+	if f.ownerFn == nil || f.peerFetch == nil || reqCC.OnlyIfCached {
+		return nil, false
+	}
+	owner, isLocal := f.ownerFn(lookupKey)
+	if isLocal {
+		return nil, false
+	}
+	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
+	if err != nil || peerObj == nil {
+		return nil, false
+	}
+	if !f.peerGateMatchesVary(req, peerObj) {
+		return nil, false
+	}
+	// Peer-fetch responses arrive as fully materialized api.Object
+	// encodings (issue #187 codec): restore the transient fields the
+	// wire codec does not carry — the warm tier does the same on load
+	// (storage/tiered.go; OriginAge is left to its header-parse fallback
+	// in effectiveOriginAge) — so evaluateFromRaw and serializeResponse
+	// see the same state they would for a local hit.
+	if peerObj.CacheControl == "" {
+		peerObj.CacheControl = peerObj.Header.Get(header.CacheControl)
+		cc := ParseCacheControl(peerObj.CacheControl)
+		peerObj.RespNoCache = cc.NoCache
+		peerObj.RespMustRevalidate = cc.MustRevalidate || cc.ProxyRevalidate
+	}
+	if !peerObj.HasDate {
+		peerObj.HasDate = peerObj.Header.Has(header.Date)
+	}
+	disp := evaluateFromRaw(req, peerObj, now, reqCC)
+	switch disp.Decision {
+	case Hit:
+		resp := f.serializeResponse(req, peerObj, api.SourcePeer, now, "HIT")
+		if resp == nil {
+			return nil, false
+		}
+		return resp, true
+	case StaleHit:
+		resp := f.serializeResponse(req, peerObj, api.SourcePeer, now, "STALE")
+		if resp == nil {
+			return nil, false
+		}
+		return resp, true
+	default:
+		return nil, false
+	}
+}
+
+// reqHeaderMapFromRaw copies a RawRequest's headers into a header.Map —
+// the input format BuildVaryKey (and therefore the wire VaryKey peers
+// compute) is defined over. Keys are interned via header.InternKey, the
+// canonicalizing path headerFromCtx uses, so a wire-typed "bm-market:"
+// looks up the same as the slow path's fasthttp-normalized entry.
+// Allocates the entries/values slices per call (~120 B, 7 allocs) —
+// acceptable on the peer branch, which amortizes a network round-trip;
+// local hits never reach it.
+func reqHeaderMapFromRaw(req *api.RawRequest) header.Map {
+	hm := header.NewMap(req.NHeaders)
+	for i := 0; i < req.NHeaders; i++ {
+		hm.AppendEntryCanonical(header.InternKey(req.Headers[i].Key), req.Headers[i].Value)
+	}
+	hm.SortEntries()
+	return hm
+}
+
+// peerGateMatchesVary reports whether a peer-fetched object's VaryKey
+// matches the variant dimension THIS request selects. Identical
+// comparison to servePeerHit (BuildVaryKey over the request headers) —
+// a mismatch means the peer answered with another variant's body or
+// with the primary-key resolver (blank VaryKey by protocol) — treat as
+// a miss.
+//
+// Note: the production fast path is built per-engine without the route's
+// KeyPolicy (NewFastPathHandlerFromStore sets policy nil). On routes
+// with key.exclude_headers the gate may mismatch a legitimately-stored
+// variant; the branch then falls through and the slow path's gate (with
+// the correct policy) decides. Fail-safe direction: never serves a
+// foreign variant, only falls back.
+func (f *FastPathHandler) peerGateMatchesVary(req *api.RawRequest, peerObj *api.Object) bool {
+	vary := peerObj.VaryValue
+	if vary == "" {
+		return true
+	}
+	return BuildVaryKey(vary, reqHeaderMapFromRaw(req), f.policy) == peerObj.VaryKey
 }
 
 // qualifiesForFastPath checks request-level conditions that must be met

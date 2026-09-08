@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -415,4 +416,96 @@ func TestRefreshFrom304_MultiLineVaryValue(t *testing.T) {
 
 	refreshed := h.refreshFrom304(stale, res, time.Now())
 	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", refreshed.VaryValue)
+}
+
+// TestMultiLineVary_FastPathVariantHIT is the h1parser fast-path
+// regression for the production incident: a stored object whose
+// VaryValue is the RFC-9110 §5.2 join of two Vary field lines
+// ("Accept-Encoding,Accept-Language" + "BM-Market") must be resolved
+// via variantKeyFromRaw on the full joined list. Hashing only the
+// first line's fields served one market's body to another without
+// touching the origin. Mirrors TestHandler_MultiLineVaryFastPathDistinctVariants
+// (handler path) on the fast path.
+func TestMultiLineVary_FastPathVariantHIT(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	reqBase := &api.RawRequest{
+		Method: "GET",
+		Path:   "/market-page",
+		Host:   "example.com",
+		Scheme: "http",
+	}
+	primary := buildKeyFromRaw(reqBase, nil)
+
+	vary := "Accept-Encoding,Accept-Language, BM-Market"
+	// The stored header map keeps the original two field lines, exactly
+	// as the incident response carried them; the RFC-joined list lives
+	// in VaryValue.
+	varyLines := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
+	varyLines.AppendEntry(header.Vary, "BM-Market")
+	primaryObj := &api.Object{
+		Key:        primary,
+		StatusCode: 200,
+		Header:     varyLines,
+		VaryValue:  vary,
+		Body:       []byte("primary"),
+		BodySize:   7,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), primary, primaryObj))
+
+	marketReq := func(market string) *api.RawRequest {
+		req := &api.RawRequest{
+			Method:   "GET",
+			Path:     "/market-page",
+			Host:     "example.com",
+			Scheme:   "http",
+			NHeaders: 3,
+		}
+		req.Headers[0] = api.RawHeader{Key: "Accept-Encoding", Value: "gzip"}
+		req.Headers[1] = api.RawHeader{Key: "Accept-Language", Value: "en"}
+		req.Headers[2] = api.RawHeader{Key: "BM-Market", Value: market}
+		req.RecomputeScanFlags()
+		return req
+	}
+
+	frKey := variantKeyFromRaw(primary, vary, marketReq("fr"), nil)
+	require.NotEqual(t, primary, frKey,
+		"the joined Vary list must produce a non-primary variant key")
+
+	// The incident stored the fr variant under a key that ignored
+	// BM-Market; pin that the key the fast path now computes is
+	// market-sensitive.
+	usKey := variantKeyFromRaw(primary, vary, marketReq("us"), nil)
+	require.NotEqual(t, frKey, usKey, "distinct markets must hash to distinct variant keys")
+
+	frObj := &api.Object{
+		Key:        frKey,
+		StatusCode: 200,
+		Header: headerMap(header.Vary, "Accept-Encoding,Accept-Language",
+			header.ContentLength, "9"),
+		VaryValue: vary,
+		Body:      []byte("market=fr"),
+		BodySize:  9,
+		StoredAt:  time.Now(),
+		TTL:       60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), frKey, frObj))
+
+	// Same market must HIT its own variant through the fast path.
+	resp, ok := fp.TryHit(marketReq("fr"), time.Now())
+	require.True(t, ok, "TryHit should serve the fr variant")
+	require.NotNil(t, resp)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	require.GreaterOrEqual(t, len(resp.Buffers), 3)
+	assert.Equal(t, "market=fr", string(resp.Buffers[2]))
+	fp.Release(resp)
+
+	// A different market must not hit the fr variant.
+	resp2, ok := fp.TryHit(marketReq("us"), time.Now())
+	assert.False(t, ok, "a different BM-Market must not hit the fr variant")
+	assert.Nil(t, resp2)
 }

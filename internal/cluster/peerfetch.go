@@ -512,6 +512,24 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
+	// Resolver-body leak: the primary-key entry is the Vary resolver —
+	// its body belongs to whichever variant filled it first (the handler
+	// stores it so lookups can learn the Vary list, not to be served). A
+	// requester that misses locally peer-fetches its primary key with a
+	// blank assertion (it has no local object to derive the Vary list
+	// from), so the previous gate never fired and the owner handed back
+	// the resolver body — the first market's content — as a peer HIT.
+	// RFC 9111 §4.1: a request that selects a variant must never be
+	// satisfied by an entry stored under the bare primary key, so answer
+	// with a miss and let the requester fill (and assert) its own
+	// variant. A peer fetch for a REAL variant key never lands here:
+	// variant entries carry a non-empty VaryKey.
+	if obj.VaryKey == "" && obj.VaryValue != "" {
+		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
+			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		return
+	}
 
 	h.logger.Info("served peer fetch hit", "key", req.Key, "hops", hops)
 	ctx.Response.Header.Set(header.ContentType, "application/octet-stream")

@@ -569,6 +569,37 @@ func doGet(url, host string) (*Response, error) {
 	return responseFromFastHTTP(resp), nil
 }
 
+// GetWithHeaders performs a GET with extra request headers.
+func (s *ClusterStack) GetWithHeaders(t *testing.T, n int, path string, headers map[string]string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	resp, err := doGetWithHeaders(url, "", headers)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
+// doGetWithHeaders performs a GET with extra request headers.
+func doGetWithHeaders(url, host string, headers map[string]string) (*Response, error) {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+	req.SetRequestURI(url)
+	if host != "" {
+		req.UseHostHeader = true
+		req.Header.SetHost(host)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if err := fasthttp.Do(req, resp); err != nil {
+		return nil, err
+	}
+	return responseFromFastHTTP(resp), nil
+}
+
 // doGetWithClient performs a GET using a pre-allocated client.
 func doGetWithClient(client *fasthttp.Client, url, host string) (*Response, error) {
 	req := fasthttp.AcquireRequest()

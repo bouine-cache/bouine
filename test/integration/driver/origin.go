@@ -109,6 +109,15 @@ func originRouteHandler(ctx *fasthttp.RequestCtx) {
 		ctx.Response.Header.Set("Vary", "Accept-Encoding")
 		enc := string(ctx.Request.Header.Peek("Accept-Encoding"))
 		fmt.Fprintf(ctx, "vary enc=%s", enc)
+	case "/vary-multiline":
+		// Multi-line Vary across two field lines, mirroring the
+		// production doorman/content incident shape.
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Vary", "Accept-Language")
+		ctx.Response.Header.Add("Vary", "BM-Market")
+		lang := string(ctx.Request.Header.Peek("Accept-Language"))
+		market := string(ctx.Request.Header.Peek("BM-Market"))
+		fmt.Fprintf(ctx, "variant lang=%s market=%s", lang, market)
 	case "/error":
 		ctx.SetStatusCode(503)
 		ctx.WriteString("origin error")

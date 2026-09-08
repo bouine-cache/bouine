@@ -14,7 +14,18 @@ import (
 // first byte of every encoded blob so the decoder can reject blobs
 // written by an incompatible codec (including legacy JSON blobs, which
 // begin with '{' = 0x7B and therefore never collide with a version byte).
-const objCodecVersion byte = 3
+// Version 4 adds VaryValue to the wire format: the peer-fetch protocol
+// needs the origin's Vary list to recompute the variant dimension of a
+// peer-delivered object (servePeerHit's cross-variant gate); without it
+// the gate silently skips and a non-owner serves the first fill's body
+// to a request selecting a different variant. v3 blobs (warm tier
+// written before this version) decode unchanged with an empty VaryValue.
+const objCodecVersion byte = 4
+
+// objCodecVersionV3 is the previous encoding version, still accepted by
+// the decoder so warm-tier blobs written before the VaryValue field
+// survive an upgrade. New writes always use objCodecVersion.
+const objCodecVersionV3 byte = 3
 
 // errCorrupt is returned when an encoded object blob is truncated or
 // otherwise malformed. TieredStore.Get treats it as a durable eviction:
@@ -75,6 +86,7 @@ func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = append(buf, objCodecVersion)
 	buf = append(buf, obj.Key[:]...)
 	buf = appendString(buf, obj.VaryKey)
+	buf = appendString(buf, obj.VaryValue)
 	buf = binary.AppendUvarint(buf, uint64(obj.StatusCode)) //nolint:gosec // HTTP status is small and non-negative
 	buf = binary.AppendVarint(buf, int64(obj.TTL))
 	buf = binary.AppendVarint(buf, int64(obj.StaleWhileRevalidate))
@@ -116,13 +128,19 @@ func decodeObject(blob []byte) (*api.Object, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	if ver != objCodecVersion {
+	// v4 adds VaryValue after VaryKey; v3 blobs (pre-upgrade warm tier)
+	// decode unchanged with an empty VaryValue — the field is re-derivable
+	// from the stored headers on load, matching the v3 behavior.
+	if ver != objCodecVersion && ver != objCodecVersionV3 {
 		return nil, fmt.Errorf("storage: unknown object codec version %d", ver)
 	}
 
 	obj := &api.Object{}
 	copy(obj.Key[:], r.bytes(16))
 	obj.VaryKey = r.str()
+	if ver >= objCodecVersion {
+		obj.VaryValue = r.str()
+	}
 	obj.StatusCode = int(r.uvarint()) //nolint:gosec // bounded by encoder
 	obj.TTL = time.Duration(r.varint())
 	obj.StaleWhileRevalidate = time.Duration(r.varint())

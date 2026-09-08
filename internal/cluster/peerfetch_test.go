@@ -199,16 +199,50 @@ func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
 	require.Equal(t, "market=fr", string(obj.Body))
 }
 
-// TestPeerFetchHandler_VaryKeyEmptyAssertAny pins the pre-existing behaviour
-// for non-variant fetches: an empty VaryKey assertion accepts whatever the
-// peer stores under the key (the primary-key Vary resolver included).
-func TestPeerFetchHandler_VaryKeyEmptyAssertAny(t *testing.T) {
+// TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion pins the
+// non-variant case that must keep working: an object WITHOUT Vary
+// (VaryValue == "") stored under its primary key is served to a
+// blank-assertion fetch. Only Vary resolvers are withheld (see
+// TestPeerFetchHandler_ResolverBodyNeverServed).
+func TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion(t *testing.T) {
 	t.Parallel()
 	key := testkey.Key(13)
+	plainObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("plain"),
+		VaryKey:    "",
+	}
+	plainObj.Header = header.NewMap(1)
+	plainObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: plainObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"an empty VaryKey assertion must serve a stored object without Vary")
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "plain", string(obj.Body))
+}
+
+// TestPeerFetchHandler_ResolverBodyNeverServed closes the resolver-body
+// leak observed in preprod after the first cross-variant fix: a
+// non-owner that misses locally peer-fetches the PRIMARY key with a
+// blank assertion (it has no local object to learn the Vary list from),
+// and the owner's only stored entry under that key is the resolver —
+// whose body belongs to whichever variant filled it first. Serving that
+// body was a peer HIT carrying the first variant's content. The resolver
+// exists to publish the Vary list, never to be served: a fetch landing
+// on it must miss so the requester fills (and stores) its own variant.
+// Objects without Vary (VaryValue == "") are unaffected.
+func TestPeerFetchHandler_ResolverBodyNeverServed(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(14)
 	resolverObj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
-		Body:       []byte("resolver"),
+		Body:       []byte("market=fr"),
 		VaryValue:  "BM-Market",
 		VaryKey:    "",
 	}
@@ -217,9 +251,28 @@ func TestPeerFetchHandler_VaryKeyEmptyAssertAny(t *testing.T) {
 	store := &stubStore{objects: map[api.Key]*api.Object{key: resolverObj}}
 	h := NewPeerFetchHandler(store, 0)
 
+	// Blank-assertion fetch of the primary: the exact flow of a non-owner
+	// cold lookup. Must miss instead of serving the resolver body.
 	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
-	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
-		"an empty VaryKey assertion must not filter the response")
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+		"a peer fetch landing on the Vary resolver must miss, never serve its body")
+
+	// A real (no-Vary) object under a primary key: normal hit must survive.
+	plain := &api.Object{
+		Key:        testkey.Key(15),
+		StatusCode: 200,
+		Body:       []byte("plain"),
+	}
+	plain.Header = header.NewMap(1)
+	plain.Header.AppendEntry("Cache-Control", "max-age=60")
+	store2 := &stubStore{objects: map[api.Key]*api.Object{testkey.Key(15): plain}}
+	h2 := NewPeerFetchHandler(store2, 0)
+	ctx2 := postFetch(t, h2, api.PeerFetchRequest{Key: testkey.Key(15)}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx2.Response.StatusCode(),
+		"a no-Vary primary entry must still be served")
+	obj, err := storage.DecodeObject(ctx2.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "plain", string(obj.Body))
 }
 
 func TestPeerFetchHandler_HopLimit(t *testing.T) {

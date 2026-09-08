@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — release 0.5.9 (changelog curation + promotion, chart bump) — started: 2026-09-08 — ETA: same day
+- [WIP] crush — release 0.5.10 (changelog curation + promotion, chart bump) — started: 2026-09-08 — ETA: same day
 
 ## fasthttp migration — phase claims
 

@@ -10,6 +10,21 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-09-08
+
+### Fixed
+- Vary variants were keyed on the first `Vary` field line only (fasthttp
+  `Map.Get`), so an origin sending `Vary: Accept-Encoding,Accept-Language`
+  plus `Vary: BM-Market` produced a variant key that dropped `BM-Market` —
+  a request differing only in that header was served the wrong market's
+  cached body. RFC 9110 §5.2 makes Vary a list-based field: multi-line
+  values are equivalent to one comma-joined value. The joined read (GetAll)
+  is now used everywhere a Vary value is observed (store keys, star
+  detection already joined, 304 recompute); `MergeHeaders304` replaces
+  `Vary` wholesale instead of writing per-line entries that corrupted
+  stored multi-line values. Miss-path alloc budget unchanged; regression
+  tests cover variant isolation and 304 merge (PR #628, ca4aec4).
+
 ## [0.5.9] - 2026-09-08
 
 ### Added
@@ -1061,7 +1076,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.9...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.10...HEAD
+[0.5.10]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.10
 [0.5.9]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.9
 [0.5.8]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.8
 [0.5.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.6

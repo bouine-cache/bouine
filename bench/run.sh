@@ -45,7 +45,14 @@
 #   Cachaner_AccessSlowPath:           0
 #   Cachaner_EvictBounded:             0
 #   FastPath_Hit:                     0
-#   FastPath_HitWithWrite:             0  (includes WriteTo consumption)
+#   FastPath_HitWithWrite:            0  (includes WriteTo consumption)
+#   FastPath_PeerHit:                 0  (owner-first peer branch, plain key;
+#                                      peer decode excluded — production decodes
+#                                      before the branch; object rotation defeats
+#                                      per-object head caches)
+#   FastPath_PeerHitVary:             7  (variant gate: reqHeaderMapFromRaw +
+#                                      BuildVaryKey; branch amortizes a network
+#                                      round-trip)
 #   H1Parse_Get:                      0
 #   Reactor_Hit:                      0  (epoll reactor batch serving;
 #                                      parse+TryHit+serialize+flush)
@@ -81,6 +88,8 @@ declare -A BUDGETS=(
     [Cachaner_EvictBounded]=0
     [FastPath_Hit]=0
     [FastPath_HitWithWrite]=0
+    [FastPath_PeerHit]=0
+    [FastPath_PeerHitVary]=7
     [H1Parse_Get]=0
     [Reactor_Hit]=0
     [Reactor_Hit_Metrics]=0

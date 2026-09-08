@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -333,6 +334,129 @@ func BenchmarkGate_FastPath_Hit(b *testing.B) {
 		Scheme:      "http",
 		HTTPVersion: "HTTP/1.1",
 	}
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		resp, ok := fp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		fp.Release(resp)
+	}
+}
+
+func BenchmarkGate_FastPath_PeerHit(b *testing.B) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	var ownerFnCalls int
+	fp := NewFastPathHandlerFromStore(store)
+	// The peer objects are pre-built and cycled by pointer: production
+	// decodes a fresh object per fetch before the branch (DecodeObject),
+	// so the decode cost is excluded — what is measured is the branch
+	// itself: owner check, variant gate, transient-field derivation,
+	// serialization. The rotation defeats the composed-head/serializedHead
+	// per-object caches, matching single-use production objects; the
+	// serialize path stays zero-alloc (pooled header buffer).
+	objs := make([]api.Object, 4096)
+	for i := range objs {
+		objs[i] = api.Object{
+			StatusCode: 200,
+			Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+			Body:       []byte("Hello, World!"),
+			BodySize:   13,
+			StoredAt:   time.Now(),
+			TTL:        600 * time.Second,
+		}
+	}
+	var objIdx atomic.Int64
+	fp.WithPeerFetch(
+		func(key api.Key) (api.PeerInfo, bool) {
+			ownerFnCalls++
+			return api.PeerInfo{Addr: "10.0.0.2:8081"}, false
+		},
+		func(_ context.Context, _ api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+			obj := &objs[int(objIdx.Add(1))&(len(objs)-1)]
+			obj.Key = key
+			obj.VaryKey = varyKey
+			return obj, nil
+		},
+	)
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		resp, ok := fp.TryHit(req, now)
+		if !ok {
+			b.Fatal("TryHit returned false")
+		}
+		if resp.CacheResult != "HIT" {
+			b.Fatalf("CacheResult = %q, want HIT", resp.CacheResult)
+		}
+		if resp.Source != string(api.SourcePeer) {
+			b.Fatalf("Source = %q, want peer", resp.Source)
+		}
+		fp.Release(resp)
+	}
+	if ownerFnCalls == 0 {
+		b.Fatal("ownerFn was never consulted")
+	}
+}
+
+// BenchmarkGate_FastPath_PeerHitVary gates the variant gate: the peer
+// answers with a Vary-carrying object, so every iteration pays
+// reqHeaderMapFromRaw + BuildVaryKey (the #630 response-side gate). The
+// budget covers the gate's ~7 allocs; the peer branch amortizes a
+// network round-trip, so a nonzero budget is honest here.
+func BenchmarkGate_FastPath_PeerHitVary(b *testing.B) {
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+	objs := make([]api.Object, 4096)
+	for i := range objs {
+		objs[i] = api.Object{
+			StatusCode: 200,
+			Header: headerMap("Content-Type", "text/html", "Content-Length", "13",
+				header.Vary, "BM-Market"),
+			VaryValue: "BM-Market",
+			Body:      []byte("Hello, World!"),
+			BodySize:  13,
+			StoredAt:  time.Now(),
+			TTL:       600 * time.Second,
+		}
+	}
+	var objIdx atomic.Int64
+	varyKeyUS := BuildVaryKey("BM-Market", headerMap("BM-Market", "US"), nil)
+	fp.WithPeerFetch(
+		func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "10.0.0.2:8081"}, false
+		},
+		func(_ context.Context, _ api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+			obj := &objs[int(objIdx.Add(1))&(len(objs)-1)]
+			obj.Key = key
+			obj.VaryKey = varyKeyUS
+			return obj, nil
+		},
+	)
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-vary",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+		NHeaders:    1,
+	}
+	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.RecomputeScanFlags()
 	now := time.Now()
 
 	b.ResetTimer()
@@ -1341,4 +1465,429 @@ func TestFastPathHandler_HeadRequestComposedHead(t *testing.T) {
 	assert.Nil(t, respHead.BuffersArr[2], "HEAD must not serve a body")
 	assert.Zero(t, respHead.BytesOut)
 	fp.Release(respHead)
+}
+
+// peerHeaderMap13 is the common peer-fetched object header set (13-byte
+// body). Content-Length must be present so serializeHead can elide it
+// in favour of appendDynamicHeaders' Content-Length from BodySize.
+func peerHeaderMap13() header.Map {
+	return headerMap("Content-Type", "text/html", header.ContentLength, "13")
+}
+
+// newPeerFastPathHandler wires a FastPathHandler against a stub ownerFn
+// that always reports a remote owner plus a stub peerFetch returning the
+// given object. The stubs record the last (key, varyKey) pair and the
+// fetch count for assertions.
+type peerFetchStub struct {
+	fp      *FastPathHandler
+	mu      sync.Mutex
+	key     api.Key
+	varyKey string
+	calls   int
+	obj     *api.Object
+	err     error
+}
+
+func newPeerFetchStub(obj *api.Object) *peerFetchStub {
+	s := &peerFetchStub{obj: obj}
+	s.fp = NewFastPathHandlerFromStore(storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20}))
+	s.fp.WithPeerFetch(
+		func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "10.0.0.2:8081"}, false
+		},
+		func(_ context.Context, _ api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.key = key
+			s.varyKey = varyKey
+			s.calls++
+			if s.err != nil {
+				return nil, s.err
+			}
+			return s.obj, nil
+		},
+	)
+	return s
+}
+
+func (s *peerFetchStub) snapshot() (api.Key, string, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.key, s.varyKey, s.calls
+}
+
+// requestInfoFromCtxRaw builds a RequestInfo from a RawRequest so tests
+// can compute BuildVaryKey exactly as the wire peers do (header.Map).
+// Test-only: it copies the raw headers into a header.Map.
+func requestInfoFromCtxRaw(req *api.RawRequest) RequestInfo {
+	return RequestInfo{
+		Header: rawHeaderMap(req),
+	}
+}
+
+// rawHeaderMap converts a RawRequest's headers into a sorted header.Map
+// the way the production peer branch does (reqHeaderMapFromRaw interns
+// keys so wire-typed casing matches the fasthttp-normalized slow path).
+func rawHeaderMap(req *api.RawRequest) header.Map {
+	return reqHeaderMapFromRaw(req)
+}
+
+// TestFastPathHandler_PeerHit verifies the acceptance criteria of issue
+// #636: on a local miss with a remote owner, the fast path consults the
+// owner, peer-fetches, and serves the object with X-Cache-Source: peer —
+// with the variant assertion derived from the request's selecting
+// headers ("" for a plain key, the recomputed variant key when the peer
+// object Varies). Freshness and the response CC are evaluated like any
+// fast-path hit.
+func TestFastPathHandler_PeerHit(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	key := buildKeyFromRaw(req, nil)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header:     peerHeaderMap13(),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	require.True(t, ok, "peer fetch must be served as a fast-path hit")
+	require.NotNil(t, resp)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, string(api.SourcePeer), resp.Source)
+	assert.Equal(t, 13, resp.BytesOut)
+	require.GreaterOrEqual(t, len(resp.Buffers), 3)
+	assert.Equal(t, "Hello, World!", string(resp.Buffers[2]))
+	assert.Contains(t, string(resp.Buffers[1]), "X-Cache-Source: peer")
+	fpKey, varyAssertion, calls := stub.snapshot()
+	assert.Equal(t, key, fpKey)
+	assert.Equal(t, "", varyAssertion, "plain key miss sends an empty Vary assertion")
+	assert.Equal(t, 1, calls)
+	stub.fp.Release(resp)
+}
+
+// TestFastPathHandler_PeerHitStale pins the stale branch: a peer object
+// inside its SWR window is served as STALE through the fast path,
+// mirroring the slow path's servePeerHit. No SWR background revalidation
+// fires — revalidation is the owner's responsibility (issue #509).
+func TestFastPathHandler_PeerHitStale(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-stale",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	key := buildKeyFromRaw(req, nil)
+	obj := &api.Object{
+		Key:                  key,
+		StatusCode:           200,
+		Header:               peerHeaderMap13(),
+		Body:                 []byte("Hello, World!"),
+		BodySize:             13,
+		StoredAt:             time.Now().Add(-90 * time.Second),
+		TTL:                  60 * time.Second,
+		StaleWhileRevalidate: 600 * time.Second,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	require.True(t, ok, "stale-within-SWR peer object must be served")
+	require.NotNil(t, resp)
+	assert.Equal(t, "STALE", resp.CacheResult)
+	assert.Equal(t, string(api.SourcePeer), resp.Source)
+	assert.Contains(t, string(resp.Buffers[1]), `110 - "Response is Stale"`)
+	stub.fp.Release(resp)
+}
+
+// TestFastPathHandler_PeerMissFallsThrough pins the fallback contract:
+// a peer miss (nil, nil) returns (nil, false) so the L1 reactor/parser
+// hands the request to the slow path, which falls through to origin —
+// exactly the pre-change behaviour for local misses.
+func TestFastPathHandler_PeerMissFallsThrough(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-miss",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.mu.Lock()
+	stub.obj = nil // peer miss
+	stub.mu.Unlock()
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok, "peer miss must fall through to the slow path")
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_PeerErrorFallsThrough pins the error contract:
+// peer-fetch network errors are treated as misses (origin fallback), as
+// on the slow path (handler.go handleCacheMiss).
+func TestFastPathHandler_PeerErrorFallsThrough(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-err",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.mu.Lock()
+	stub.err = context.DeadlineExceeded
+	stub.mu.Unlock()
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_PeerNotOwnerSkipsFetch pins the owner check: keys
+// this node owns never trigger a peer RPC (mirror of handleCacheMiss).
+func TestFastPathHandler_PeerNotOwnerSkipsFetch(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-local",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.fp.WithPeerFetch(
+		func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "10.0.0.2:8081"}, true // local
+		},
+		func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			t.Error("peerFetch must not be called for locally owned keys")
+			return nil, nil
+		},
+	)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_PeerNilFetchFallsThrough pins the nil peerFetch
+// contract: handlers wired without a fetcher (single-node, eventual
+// mode) behave exactly as before — miss falls through.
+func TestFastPathHandler_PeerNilFetchFallsThrough(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+	fp.WithPeerFetch(
+		func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "10.0.0.2:8081"}, false
+		},
+		nil,
+	)
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-nil",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	resp, ok := fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_PeerWrongVariantFallsBack is the fast-path
+// counterpart of TestHandleCacheMiss_PeerFetchWrongVariant (issue #630):
+// the peer answers a variant-selecting request with another variant's
+// body (or the primary-key resolver whose VaryKey is blank by
+// protocol). The recomputed Vary assertion mismatches the returned
+// VaryKey, so the fast path must NOT serve the foreign body — it falls
+// back to the slow path, which re-fetches from origin.
+func TestFastPathHandler_PeerWrongVariantFallsBack(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-wrong-variant",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+		NHeaders:    1,
+	}
+	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.RecomputeScanFlags()
+
+	// The peer serves a body cached for a different market: the stored
+	// VaryKey corresponds to the fr request, not ours.
+	otherReq := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-wrong-variant",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+		NHeaders:    1,
+	}
+	otherReq.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "fr"}
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     peerHeaderMap13(),
+		VaryValue:  "BM-Market",
+		VaryKey:    BuildVaryKey("BM-Market", requestInfoFromCtxRaw(otherReq).Header, nil),
+		Body:       []byte("foreign-market"),
+		BodySize:   14,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok, "foreign variant body must not be served from the fast path")
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_PeerMatchingVariantServed pins the response-side
+// variant gate on the peer branch: a peer answer for a plain-key fetch
+// that carries a Vary dimension matching the request's selecting
+// headers is served with the peer source. The fetch itself asserts ""
+// (accept-any — a plain miss has no stored resolver to read an
+// assertion from), so the gate below is the only defense.
+func TestFastPathHandler_PeerMatchingVariantServed(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-right-variant",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+		NHeaders:    1,
+	}
+	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.RecomputeScanFlags()
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", header.ContentLength, "9", header.Vary, "BM-Market"),
+		VaryValue:  "BM-Market",
+		VaryKey:    BuildVaryKey("BM-Market", requestInfoFromCtxRaw(req).Header, nil),
+		Body:       []byte("us-market"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	require.True(t, ok, "matching variant must be served from the fast path")
+	require.NotNil(t, resp)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Equal(t, string(api.SourcePeer), resp.Source)
+	assert.Equal(t, "us-market", string(resp.Buffers[2]))
+
+	_, varyAssertion, _ := stub.snapshot()
+	assert.Equal(t, "", varyAssertion, "plain-key miss asserts accept-any")
+	stub.fp.Release(resp)
+}
+
+// TestFastPathHandler_PeerStaleNotServedWhenRevalidationRequired pins
+// RFC 9111 §5.2.2.2 on the peer path: a stale must-revalidate object
+// from a peer is not served (falls through), matching evaluateFromRaw.
+func TestFastPathHandler_PeerStaleNotServedWhenRevalidationRequired(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-must-reval",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	key := buildKeyFromRaw(req, nil)
+	obj := &api.Object{
+		Key:                key,
+		StatusCode:         200,
+		Header:             peerHeaderMap13(),
+		Body:               []byte("Hello, World!"),
+		BodySize:           13,
+		StoredAt:           time.Now().Add(-90 * time.Second),
+		TTL:                60 * time.Second,
+		RespMustRevalidate: true,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok, "stale must-revalidate peer object must fall through")
+	assert.Nil(t, resp)
+}
+
+// TestFastPathHandler_PeerDecodedObjectTransientFields pins the wire
+// codec contract: a peer-fetched object arrives with the transient
+// fields (CacheControl, RespNoCache, HasDate) zeroed — exactly what
+// storage.DecodeObject produces. tryPeerFetch must re-derive them from
+// the headers so a no-cache peer body is never served as a HIT (RFC
+// 9111 §5.2.2.4) and a Date-less body synthesizes its own Date.
+func TestFastPathHandler_PeerDecodedObjectTransientFields(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-decoded",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	key := buildKeyFromRaw(req, nil)
+
+	// Simulate the wire: CacheControl/RespNoCache/RespMustRevalidate/HasDate
+	// zeroed, only the raw headers travel (peerfetch.go Fetch → DecodeObject).
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header: headerMap("Content-Type", "text/html",
+			header.ContentLength, "13",
+			header.CacheControl, "max-age=600"),
+		Body:     []byte("Hello, World!"),
+		BodySize: 13,
+		StoredAt: time.Now(),
+		TTL:      600 * time.Second,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	require.True(t, ok, "fresh decoded peer object must be served")
+	require.NotNil(t, resp)
+	assert.Equal(t, "HIT", resp.CacheResult)
+	assert.Contains(t, string(resp.Buffers[1]), "Date: ")
+	assert.False(t, obj.RespNoCache, "derived flags must not leak as stale state")
+	stub.fp.Release(resp)
+
+	// The same wire form with no-cache in the headers must be rejected —
+	// the derivation must run BEFORE the freshness gate.
+	objNoCache := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Header: headerMap("Content-Type", "text/html",
+			header.ContentLength, "13",
+			header.CacheControl, "no-cache"),
+		Body:     []byte("Hello, World!"),
+		BodySize: 13,
+		StoredAt: time.Now(),
+		TTL:      600 * time.Second,
+	}
+	stub2 := newPeerFetchStub(objNoCache)
+	resp2, ok2 := stub2.fp.TryHit(req, time.Now())
+	assert.False(t, ok2, "decoded peer object with no-cache must fall through")
+	assert.Nil(t, resp2)
 }

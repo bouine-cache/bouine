@@ -830,6 +830,8 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Ti
 // on missy cluster traffic that churn was the dominant heap producer on
 // the blocking path. Each worker's Serve loop draws them from a pool
 // once and reuses them across requests.
+//
+//nolint:govet // fieldalignment: pointer-grouped by role (ctx/head are the hot pair); the 16-byte saving is noise on a pooled struct.
 type fallThroughBuffers struct {
 	// ctx is the fallback's fasthttp.RequestCtx, reset between
 	// requests (Reset clears the request/response state).
@@ -842,10 +844,10 @@ type fallThroughBuffers struct {
 	// requests so the next request re-reads from the new prefix, not
 	// stale buffered bytes.
 	br *bufio.Reader
-	// leftover is the owned copy of the fallback's unread pipelined
-	// bytes (see handleFallThrough): Peek aliases br's internals, so
-	// the copy is what crosses the return boundary.
-	leftover []byte
+	// (The fallback's unread pipelined bytes — handleFallThrough's
+	// leftover — cross the return boundary as a fresh copy, not pooled
+	// state: the caller holds them past this buffer set's return to
+	// the shared pool.)
 }
 
 // fallThroughPool serves one fallThroughBuffers per blocking goroutine.
@@ -863,7 +865,6 @@ const fallThroughRetainCap = 64 * 1024
 func getFallThroughBuffers() *fallThroughBuffers {
 	if v, ok := fallThroughPool.Get().(*fallThroughBuffers); ok && v != nil {
 		v.head = v.head[:0]
-		v.leftover = v.leftover[:0]
 		return v
 	}
 	return &fallThroughBuffers{
@@ -886,9 +887,6 @@ func putFallThroughBuffers(b *fallThroughBuffers) {
 	b.br.Reset(nil)
 	if cap(b.head) > fallThroughRetainCap {
 		b.head = nil
-	}
-	if cap(b.leftover) > fallThroughRetainCap {
-		b.leftover = nil
 	}
 	fallThroughPool.Put(b)
 }
@@ -992,13 +990,17 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// so what remains buffered belongs to the next pipelined request.
 	// Without returning them, the caller's next conn.Read would block
 	// behind bytes this bufio already consumed — the follower stalls
-	// until the idle deadline kills the connection. Peek aliases br's
-	// internals, so the leftover is copied into the pooled owned buffer
-	// the caller may hold past this request.
+	// until the idle deadline kills the connection. The leftover MUST
+	// be a fresh copy, not a slice of b.leftover: b returns to the
+	// shared fallThroughPool via the defer above the moment this
+	// function returns, while the caller holds the leftover until its
+	// next loop iteration — another worker drawing the same b and
+	// refilling b.leftover would corrupt the bytes mid-copy (observed
+	// live in the A/B rig: cross-connection request swaps under
+	// pipelined missy traffic, ~6 per million).
 	var leftover []byte
 	if br.Buffered() > 0 {
-		b.leftover = append(b.leftover[:0], peekBuffered(br)...)
-		leftover = b.leftover
+		leftover = append(make([]byte, 0, br.Buffered()), peekBuffered(br)...)
 	}
 
 	// If the handler itself set Connection: close (e.g. via

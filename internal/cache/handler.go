@@ -251,9 +251,12 @@ type Handler struct {
 	StreamingBufferBytesSet interface{ Set(float64) }
 	// VaryCapHits is incremented when a variant is rejected; nil-safe.
 	VaryCapHits interface{ Inc() }
-	upstream    fasthttp.RequestHandler
-	done        chan struct{}
-	revalSem    chan struct{} // bounds concurrent SWR background goroutines
+	// peerVariantMismatchInc is incremented when the consumer-side
+	// variant-assertion gate rejects a peer-fetched object; nil-safe.
+	peerVariantMismatchInc interface{ Inc() }
+	upstream               fasthttp.RequestHandler
+	done                   chan struct{}
+	revalSem               chan struct{} // bounds concurrent SWR background goroutines
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
@@ -358,6 +361,10 @@ type HandlerConfig struct {
 	// VaryCapHits, if non-nil, is incremented when a variant is rejected
 	// because MaxVariants is exceeded.
 	VaryCapHits interface{ Inc() }
+	// PeerVariantMismatchInc, if non-nil, is incremented when the
+	// consumer-side variant-assertion gate rejects a peer-fetched object
+	// because its VaryKey does not match the request's selecting headers.
+	PeerVariantMismatchInc interface{ Inc() }
 	// StreamingBufferBytes, if non-nil, is set to the current total
 	// bytes held in live streaming tee buffers. Polled by the engine's
 	// background metrics loop.
@@ -593,6 +600,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		defaultSIE:              cfg.DefaultSIE,
 		variantSets:             make(map[api.Key]map[api.Key]struct{}),
 		VaryCapHits:             cfg.VaryCapHits,
+		peerVariantMismatchInc:  cfg.PeerVariantMismatchInc,
 		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
 		StreamingFallbackInc:    cfg.StreamingFallback,
 		FetchShedInc:            cfg.FetchShed,
@@ -1192,6 +1200,9 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 		h.logger.Debug("peer fetch returned a foreign variant for this request",
 			"key", lookupKey.Hex(), "vary", peerObj.VaryValue,
 			"peer_vary_key", peerObj.VaryKey)
+		if h.peerVariantMismatchInc != nil {
+			h.peerVariantMismatchInc.Inc()
+		}
 		return false
 	}
 	if d := Evaluate(ri, peerObj, now); d.Decision == Hit || d.Decision == StaleHit {

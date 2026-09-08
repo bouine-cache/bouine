@@ -74,4 +74,14 @@ spec:
             severity: warning
           annotations:
             summary: "bouine cluster broadcast failures detected"
+
+        - alert: BouinePeerFetchVariantMismatch
+          expr: |
+            sum(rate(bouine_peer_fetch_variant_mismatch_total[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "bouine peer-fetch variant-assertion gate rejecting objects"
+            description: "Mixed-version fleet or peer bug — check the side label (server=owner rejected, consumer=requester rejected) and investigate peer Vary handling."
 {{- end }}

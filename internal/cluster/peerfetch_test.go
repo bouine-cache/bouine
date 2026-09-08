@@ -275,6 +275,65 @@ func TestPeerFetchHandler_ResolverBodyNeverServed(t *testing.T) {
 	require.Equal(t, "plain", string(obj.Body))
 }
 
+// TestPeerFetchHandler_VariantMismatchMetric verifies the server-side
+// variant-assertion gate increments the mismatch counter for both a
+// foreign-variant rejection and a resolver-body rejection.
+func TestPeerFetchHandler_VariantMismatchMetric(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(20)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+
+	var mismatchCount atomic.Int64
+	h := NewPeerFetchHandler(store, 0)
+	h.SetVariantMismatchCounter(&incCounter{c: &mismatchCount})
+
+	// Foreign variant: requester asserts us, owner has fr.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "ushash"}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
+	require.Equal(t, int64(1), mismatchCount.Load(),
+		"variant mismatch gate must increment the counter")
+
+	// Matching variant: no increment.
+	ctx2 := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "frhash"}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx2.Response.StatusCode())
+	require.Equal(t, int64(1), mismatchCount.Load(),
+		"a matching variant must not increment the counter")
+
+	// Resolver body: blank VaryKey assertion but stored object is a resolver.
+	resolverKey := testkey.Key(21)
+	resolverObj := &api.Object{
+		Key:        resolverKey,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "",
+	}
+	resolverObj.Header = header.NewMap(1)
+	resolverObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store2 := &stubStore{objects: map[api.Key]*api.Object{resolverKey: resolverObj}}
+	h2 := NewPeerFetchHandler(store2, 0)
+	h2.SetVariantMismatchCounter(&incCounter{c: &mismatchCount})
+	ctx3 := postFetch(t, h2, api.PeerFetchRequest{Key: resolverKey}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx3.Response.StatusCode())
+	require.Equal(t, int64(2), mismatchCount.Load(),
+		"resolver body gate must increment the counter")
+}
+
+type incCounter struct {
+	c *atomic.Int64
+}
+
+func (i *incCounter) Inc() { i.c.Add(1) }
+
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)

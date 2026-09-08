@@ -3103,6 +3103,62 @@ func TestHandleCacheMiss_PeerFetchWrongVariant(t *testing.T) {
 	require.NotNil(t, peerFetchVary.Load(), "peer fetch must have been attempted")
 }
 
+// TestHandleCacheMiss_PeerFetchWrongVariantMetric verifies the consumer-side
+// variant-assertion gate increments the mismatch counter when a peer returns
+// a foreign variant.
+func TestHandleCacheMiss_PeerFetchWrongVariantMetric(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+
+	riFr := requestInfoFromHTTP("http://example.com/vary-peer-metric", "/vary-peer-metric",
+		headerMap("BM-Market", "fr"))
+	frObj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Body:       []byte("market=fr"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		VaryValue:  "BM-Market",
+		VaryKey:    BuildVaryKey("BM-Market", riFr.Header, nil),
+	}
+	frObj.CacheControl = "max-age=60"
+
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "BM-Market")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+	}
+
+	var mismatchCount atomic.Int64
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			return frObj, nil
+		},
+		PeerVariantMismatchInc: &incCounterTest{c: &mismatchCount},
+	})
+
+	rUs := testCtxWithHeader("GET", "http://example.com/vary-peer-metric", "BM-Market", "us")
+	h.ServeRequest(rUs)
+	require.Equal(t, "MISS", respHeader(rUs, header.XCache),
+		"a peer fetch that returns another variant's body must be treated as a miss")
+	require.Equal(t, int64(1), mismatchCount.Load(),
+		"the consumer-side variant mismatch gate must increment the counter")
+}
+
+type incCounterTest struct {
+	c *atomic.Int64
+}
+
+func (i *incCounterTest) Inc() { i.c.Add(1) }
+
 // TestHandleCacheMiss_PeerFetchMatchingVariantServes pins the positive case
 // for the Vary gate: a peer object whose variant dimension matches the
 // request's selecting headers is still served (no over-blocking).

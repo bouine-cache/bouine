@@ -236,7 +236,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		dur := prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "bouine", Name: "peer_fetch_duration_seconds",
 			Help:    "Round-trip time for successful peer-fetch RPCs.",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		})
 		f.pDuration = dur
 		f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{

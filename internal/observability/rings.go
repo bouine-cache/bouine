@@ -26,8 +26,8 @@ const (
 	peerBucketSecs    = 30                              // 30-second buckets for the peer health ring
 	peerBuckets       = 30 * 60 / peerBucketSecs        // 60 = 30 min
 	// latencyHistBuckets is the number of fixed log-scale latency buckets
-	// recorded per request window (10 finite bands + 1 overflow).
-	latencyHistBuckets = 11
+	// recorded per request window (13 finite bands + 1 overflow).
+	latencyHistBuckets = 14
 	// routeRingCap is the max number of distinct routes tracked by the
 	// RouteRing. Best-effort: a few extra entries may appear under
 	// concurrent inserts before the cap is observed (same TOCTOU as
@@ -36,10 +36,10 @@ const (
 	routeRingCap = 256
 )
 
-// LatencyBoundsMs are the inclusive upper bounds (ms) for the first 10
-// latency histogram buckets; the 11th bucket captures everything above
+// LatencyBoundsMs are the inclusive upper bounds (ms) for the first 13
+// latency histogram buckets; the 14th bucket captures everything above
 // the last bound. Index i holds requests with bound[i-1] < dur <= bound[i].
-var LatencyBoundsMs = [latencyHistBuckets - 1]int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000}
+var LatencyBoundsMs = [latencyHistBuckets - 1]int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10000}
 
 // latencyBucketIndex returns the histogram bucket for a duration in ms.
 func latencyBucketIndex(durMs int64) int {
@@ -56,7 +56,7 @@ type LatencyHistogram [latencyHistBuckets]int64
 
 // Percentile returns the upper bound (ms) of the bucket containing the
 // p-th percentile (0..1), or 0 when the histogram is empty. The overflow
-// bucket reports the last finite bound (i.e. ">1000ms" → 1000).
+// bucket reports the last finite bound (i.e. ">10000ms" → 10000).
 func (h LatencyHistogram) Percentile(p float64) int64 {
 	var total int64
 	for _, c := range h {

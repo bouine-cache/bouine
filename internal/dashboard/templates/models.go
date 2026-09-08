@@ -755,7 +755,7 @@ func FmtRate(v float64) string {
 
 // LatencyBucketLabels returns the x-axis labels for the latency
 // distribution chart, derived from observability.LatencyBoundsMs. The
-// final label is the overflow bucket (">1s").
+// final label is the overflow bucket (">10s").
 func LatencyBucketLabels() []string {
 	bounds := observability.LatencyBoundsMs
 	out := make([]string, 0, len(bounds)+1)

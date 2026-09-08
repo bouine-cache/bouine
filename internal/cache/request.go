@@ -74,14 +74,14 @@ func (ri RequestInfo) GetPath() string {
 }
 
 // requestInfoFromHTTP builds a RequestInfo from individual request
-// fields. Used by test helpers that work with net/http request fixtures.
-func requestInfoFromHTTP(method, uri, host, path string, tls bool, hdr header.Map) RequestInfo {
+// fields with a GET method on example.com over plain HTTP. Used by test
+// helpers that work with net/http request fixtures.
+func requestInfoFromHTTP(uri, path string, hdr header.Map) RequestInfo {
 	return RequestInfo{
-		Method: method,
+		Method: "GET",
 		URI:    uri,
-		Host:   host,
+		Host:   "example.com",
 		Path:   path,
-		TLS:    tls,
 		Header: hdr,
 	}
 }

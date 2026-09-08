@@ -2884,7 +2884,7 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "peer1:8080"}, false // not local
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			return peerObj, nil
 		},
 	})
@@ -2920,7 +2920,7 @@ func TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			return nil, nil // peer miss
 		},
 		PeerPut: func(_ context.Context, _ api.PeerInfo, obj *api.Object) {
@@ -2973,7 +2973,7 @@ func TestHandleCacheMiss_NonOwnerDoesNotStorePeerFetch(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "owner:8080"}, false // not local
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			return peerObj, nil
 		},
 		PeerPut: func(_ context.Context, _ api.PeerInfo, _ *api.Object) {
@@ -3019,7 +3019,7 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
 			return api.PeerInfo{Addr: "self:8080"}, true // local owner
 		},
-		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key) (*api.Object, error) {
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
 			t.Fatal("owner should not peer-fetch its own keys")
 			return nil, nil
 		},
@@ -3042,6 +3042,107 @@ func TestHandleCacheMiss_OwnerStoresLocally(t *testing.T) {
 
 	// The owner must not forward to itself via peerPut.
 	assert.Equal(t, int32(0), peerPutCalls.Load())
+}
+
+// TestHandleCacheMiss_PeerFetchWrongVariant is the end-to-end regression for
+// the production cross-market body incident: a strong-mode non-owner with a
+// cold variant cache must not serve the owner's primary-key (Vary resolver)
+// entry as if it were the requested variant. Before the gate, the owner
+// returned the first market's body for a second market's request and the
+// non-owner served it as a HIT (X-Cache-Source: peer) without touching origin.
+func TestHandleCacheMiss_PeerFetchWrongVariant(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+
+	// The owner's store holds the fr variant under the primary key (the
+	// pre-fix Vary resolver fill) and returns it for any fetch of that
+	// primary key, regardless of the requesting variant.
+	riFr := requestInfoFromHTTP("http://example.com/vary-peer", "/vary-peer",
+		headerMap("BM-Market", "fr"))
+	frObj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Body:       []byte("market=fr"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		VaryValue:  "BM-Market",
+		// VaryKey stamped at cache-fill time with the fr selecting set.
+		VaryKey: BuildVaryKey("BM-Market", riFr.Header, nil),
+	}
+	frObj.CacheControl = "max-age=60"
+
+	var peerFetchVary atomic.Pointer[string]
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "BM-Market")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, varyKey string) (*api.Object, error) {
+			peerFetchVary.Store(&varyKey)
+			return frObj, nil
+		},
+	})
+
+	// A cold non-owner requests the us market: the peer returns the fr
+	// body; the handler must treat it as a miss and fetch from origin.
+	rUs := testCtxWithHeader("GET", "http://example.com/vary-peer", "BM-Market", "us")
+	h.ServeRequest(rUs)
+	require.Equal(t, "MISS", respHeader(rUs, header.XCache),
+		"a peer fetch that returns another variant's body must be treated as a miss")
+	require.Equal(t, "market=us", respBody(rUs),
+		"the us request must be served the us body, not the fr peer body")
+	require.NotNil(t, peerFetchVary.Load(), "peer fetch must have been attempted")
+}
+
+// TestHandleCacheMiss_PeerFetchMatchingVariantServes pins the positive case
+// for the Vary gate: a peer object whose variant dimension matches the
+// request's selecting headers is still served (no over-blocking).
+func TestHandleCacheMiss_PeerFetchMatchingVariantServes(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	riFr := requestInfoFromHTTP("http://example.com/vary-peer-match", "/vary-peer-match",
+		headerMap("BM-Market", "fr"))
+	frObj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60", header.Vary, "BM-Market"),
+		Body:       []byte("market=fr"),
+		BodySize:   9,
+		StoredAt:   time.Now(),
+		TTL:        60 * time.Second,
+		VaryValue:  "BM-Market",
+		// VaryKey stamped at cache-fill time with the fr selecting set —
+		// identical to what the requesting node recomputes for its fr
+		// request, so the peer hit must be served.
+		VaryKey: BuildVaryKey("BM-Market", riFr.Header, nil),
+	}
+	frObj.CacheControl = "max-age=60"
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			t.Fatal("origin must not be called when the peer returns the matching variant")
+		},
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			return frObj, nil
+		},
+	})
+
+	r := testCtxWithHeader("GET", "http://example.com/vary-peer-match", "BM-Market", "fr")
+	h.ServeRequest(r)
+	require.Equal(t, "HIT", respHeader(r, header.XCache))
+	require.Equal(t, "peer", respHeader(r, header.XCacheSource))
+	require.Equal(t, "market=fr", respBody(r))
 }
 
 func TestLookup_VaryVariantMiss(t *testing.T) {

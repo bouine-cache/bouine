@@ -373,7 +373,7 @@ func TestBuildObject_MultiLineVaryValue(t *testing.T) {
 	resMap := headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Encoding,Accept-Language")
 	resMap.AppendEntry(header.Vary, "BM-Market")
 	res := fetchResult{StatusCode: 200, Header: fromHeaderMap(resMap), Body: []byte("body")}
-	ri := requestInfoFromHTTP("GET", "http://example.com/page", "example.com", "/page", false,
+	ri := requestInfoFromHTTP("http://example.com/page", "/page",
 		headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "fr"))
 	obj := buildObject(testkey.Key(1), ri, res, resMap, 0, 0, 0, 0, 0, 0, nil, time.Now())
 	require.NotNil(t, obj)

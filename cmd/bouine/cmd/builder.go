@@ -315,8 +315,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 				}
 				return owner, rs.clusterNode.IsLocal(key)
 			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
 			}
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
@@ -404,8 +404,8 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 				}
 				return owner, rs.clusterNode.IsLocal(key)
 			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
 			}
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches

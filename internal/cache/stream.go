@@ -569,6 +569,19 @@ func varyContainsStarBytes(vary []byte) bool {
 	return false
 }
 
+// joinedVary returns the effective Vary header value from the stored
+// header.Map: all Vary field lines joined with ", " per RFC 9110 §5.2.
+// Vary is a list-based field, so a Vary split across multiple field
+// lines is equivalent to one comma-joined value. The variant key and
+// the refresh registry must see every field name — Get (first line
+// only) silently dropped the later lines and collapsed distinct
+// variants (e.g. "Vary: Accept-Encoding" + "Vary: BM-Market" stored a
+// key that ignored BM-Market, serving one market's body to another).
+// Single-line Vary returns the stored value directly.
+func joinedVary(h header.Map) string {
+	return h.GetAll(header.Vary)
+}
+
 // streamMissBuffered handles the non-streaming fallback: the client
 // doesn't support body streaming, the request is HEAD, or the response
 // is not cacheable. The body is already in resp.Body().
@@ -640,7 +653,7 @@ func (h *Handler) streamMissBuffered(
 			return
 		}
 		storeKey := primaryKey
-		if vary := resMap.Get(header.Vary); vary != "" {
+		if vary := joinedVary(resMap); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 			if storeKey != primaryKey {
 				if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {
@@ -704,7 +717,7 @@ func (h *Handler) streamMissTee(
 	resMap header.Map,
 ) {
 	storeKey := primaryKey
-	if vary := resMap.Get(header.Vary); vary != "" {
+	if vary := joinedVary(resMap); vary != "" {
 		storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		if storeKey != primaryKey {
 			if !h.reserveVariantSlot(ctx, primaryKey, storeKey) {

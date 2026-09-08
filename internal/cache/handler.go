@@ -1767,7 +1767,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	MergeHeaders304(refreshed, res.Header.ToMap())
 	// Recompute HasDate in case the 304 response added or changed Date.
 	refreshed.HasDate = refreshed.Header.Has(header.Date)
-	refreshed.VaryValue = refreshed.Header.Get(header.Vary)
+	refreshed.VaryValue = joinedVary(refreshed.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	newCC := ParseCacheControl(refreshed.CacheControl)
@@ -1937,7 +1937,7 @@ func (h *Handler) writeAndMaybeStore(
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey
-		if vary := resMap.Get(header.Vary); vary != "" {
+		if vary := joinedVary(resMap); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
@@ -2402,18 +2402,22 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	// pooled fasthttp.Response buffer before calling buildObject.
 	// Using res.Body directly avoids a redundant make+copy per miss.
 	obj := &api.Object{
-		Key:                key,
-		StatusCode:         res.StatusCode,
-		Header:             resMap,
-		Body:               res.Body,
-		BodySize:           int64(len(res.Body)),
-		StoredAt:           now,
-		TTL:                ttl,
-		ETag:               resMap.Get(header.ETag),
-		CacheControl:       ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
-		OriginAge:          originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
-		HasDate:            hasDate,
-		VaryValue:          resMap.Get(header.Vary),
+		Key:          key,
+		StatusCode:   res.StatusCode,
+		Header:       resMap,
+		Body:         res.Body,
+		BodySize:     int64(len(res.Body)),
+		StoredAt:     now,
+		TTL:          ttl,
+		ETag:         resMap.Get(header.ETag),
+		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
+		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
+		HasDate:      hasDate,
+		// joinedVary, not Get: Vary is list-based, so field lines split
+		// across multiple headers combine per RFC 9110 §5.2. Get kept only
+		// the first line and the variant key ignored the later field
+		// names, collapsing distinct variants onto one cache entry.
+		VaryValue:          joinedVary(resMap),
 		RespNoCache:        respCC.NoCache,
 		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
 	}
@@ -2459,7 +2463,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(obj.Header.Get(header.Vary), ri.Header, policy)
+	obj.VaryKey = BuildVaryKey(joinedVary(resMap), ri.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(resMap)
 

@@ -254,3 +254,165 @@ func TestNormaliseListHeader_Comma(t *testing.T) {
 	// Should be trimmed and sorted.
 	assert.Equal(t, "a,b", normaliseListHeader(" b ,  a "))
 }
+
+// TestJoinedVary_MultiLine verifies the RFC 9110 §5.2 join used for
+// VaryValue and variant keys: multiple Vary field lines combine into one
+// comma-joined list. Get (first line only) dropped later lines and
+// collapsed distinct variants onto a single cache entry.
+func TestJoinedVary_MultiLine(t *testing.T) {
+	t.Parallel()
+	// Build the multi-line shape via AppendEntry.
+	multi := headerMap(header.Vary, "Accept-Encoding,Accept-Language")
+	multi.AppendEntry(header.Vary, "BM-Market")
+	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", joinedVary(multi))
+	// Single-line Vary passes through unchanged.
+	single := headerMap(header.Vary, "Accept-Encoding")
+	require.Equal(t, "Accept-Encoding", joinedVary(single))
+	// No Vary header returns empty.
+	require.Equal(t, "", joinedVary(headerMap(header.ContentType, "text/html")))
+}
+
+// TestJoinedVary_VariantKeysDistinguishLaterLines pins the regression:
+// two requests differing only in a header named on the second Vary line
+// must produce distinct variant keys once the joined VaryValue is used.
+func TestJoinedVary_VariantKeysDistinguishLaterLines(t *testing.T) {
+	t.Parallel()
+	primary := testkey.Key(100)
+	vary := "Accept-Encoding,Accept-Language, BM-Market"
+	fr := headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "fr")
+	us := headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "us")
+	kFr := VariantKey(primary, vary, fr, nil)
+	kUs := VariantKey(primary, vary, us, nil)
+	require.NotEqual(t, kFr, kUs)
+	require.NotEqual(t, primary, kFr)
+}
+
+// TestHandler_MultiLineVaryDistinctVariants is the end-to-end regression
+// for the production incident: an origin that sends Vary across two
+// field lines ("Vary: Accept-Encoding,Accept-Language" +
+// "Vary: BM-Market") stored objects under a variant key that ignored
+// BM-Market, so a second market was served the first market's cached
+// body without touching the origin.
+func TestHandler_MultiLineVaryDistinctVariants(t *testing.T) {
+	t.Parallel()
+	var originHits int
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		originHits++
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding,Accept-Language")
+		ctx.Response.Header.Add(header.Vary, "BM-Market")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+	}
+	h := testHandler(t, upstream)
+
+	r1 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r1.Request.Header.Set("BM-Market", "fr")
+	h.ServeRequest(r1)
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+	require.Equal(t, "market=fr", respBody(r1))
+
+	r2 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r2.Request.Header.Set("BM-Market", "us")
+	h.ServeRequest(r2)
+	require.Equal(t, "MISS", respHeader(r2, header.XCache),
+		"a different BM-Market must not hit the first market's variant")
+	require.Equal(t, "market=us", respBody(r2))
+
+	r3 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r3.Request.Header.Set("BM-Market", "fr")
+	h.ServeRequest(r3)
+	require.Equal(t, "HIT", respHeader(r3, header.XCache))
+	require.Equal(t, "market=fr", respBody(r3))
+
+	r4 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r4.Request.Header.Set("BM-Market", "us")
+	h.ServeRequest(r4)
+	require.Equal(t, "HIT", respHeader(r4, header.XCache))
+	require.Equal(t, "market=us", respBody(r4))
+	require.Equal(t, 2, originHits, "origin must have been fetched exactly once per market")
+}
+
+// TestHandler_MultiLineVaryFastPathDistinctVariants pins the same
+// variant isolation on the H1 fast path, which resolves variants from
+// the stored VaryValue instead of the raw response headers.
+func TestHandler_MultiLineVaryFastPathDistinctVariants(t *testing.T) {
+	t.Parallel()
+	upstream := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.Response.Header.Set(header.Vary, "Accept-Encoding,Accept-Language")
+		ctx.Response.Header.Add(header.Vary, "BM-Market")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("market=" + string(ctx.Request.Header.Peek("BM-Market"))))
+	}
+	h := testHandler(t, upstream)
+
+	r1 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r1.Request.Header.Set("BM-Market", "fr")
+	h.ServeRequest(r1)
+	require.Equal(t, "MISS", respHeader(r1, header.XCache))
+
+	r2 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r2.Request.Header.Set("BM-Market", "fr")
+	h.ServeRequest(r2)
+	require.Equal(t, "HIT", respHeader(r2, header.XCache))
+	require.Equal(t, "market=fr", respBody(r2))
+
+	// Distinct market must miss and fetch its own variant.
+	r3 := testCtxWithHeader("GET", "http://example.com/page", header.AcceptEncoding, "gzip")
+	r3.Request.Header.Set("BM-Market", "us")
+	h.ServeRequest(r3)
+	require.Equal(t, "MISS", respHeader(r3, header.XCache))
+	require.Equal(t, "market=us", respBody(r3))
+}
+
+// TestBuildObject_MultiLineVaryValue pins VaryValue and VaryKey on the
+// RFC-joined Vary value for objects built from multi-line responses.
+func TestBuildObject_MultiLineVaryValue(t *testing.T) {
+	t.Parallel()
+	resMap := headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Encoding,Accept-Language")
+	resMap.AppendEntry(header.Vary, "BM-Market")
+	res := fetchResult{StatusCode: 200, Header: fromHeaderMap(resMap), Body: []byte("body")}
+	ri := requestInfoFromHTTP("GET", "http://example.com/page", "example.com", "/page", false,
+		headerMap(header.AcceptEncoding, "gzip", header.AcceptLanguage, "en", "BM-Market", "fr"))
+	obj := buildObject(testkey.Key(1), ri, res, resMap, 0, 0, 0, 0, 0, 0, nil, time.Now())
+	require.NotNil(t, obj)
+	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", obj.VaryValue)
+	require.NotEmpty(t, obj.VaryKey)
+	// The stored header map keeps both field lines; WriteToFastHTTP and
+	// GetAll on the stored map reproduce the same joined value.
+	require.Equal(t, obj.VaryValue, joinedVary(obj.Header))
+}
+
+// TestRefreshFrom304_MultiLineVaryValue pins the 304 revalidation path:
+// when the 304 response re-sends Vary across multiple field lines, the
+// refreshed object's VaryValue must be the RFC-joined list, not the
+// first line only (Get), or the variant key would change shape after
+// refresh and orphan the previously stored variant.
+func TestRefreshFrom304_MultiLineVaryValue(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t, origin200("body"))
+
+	multi := headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Encoding,Accept-Language")
+	multi.AppendEntry(header.Vary, "BM-Market")
+	stale := &api.Object{
+		Key:        BuildKeyFromURL("http://example.com/test", nil),
+		StatusCode: 200,
+		Header:     multi.Clone(),
+		Body:       []byte("body"),
+		BodySize:   4,
+		StoredAt:   time.Now().Add(-time.Minute),
+		TTL:        time.Minute,
+		ETag:       `"v1"`,
+		VaryValue:  joinedVary(multi),
+	}
+	stale.CacheControl = stale.Header.Get(header.CacheControl)
+
+	res := fetchResult{
+		StatusCode: 304,
+		Header:     fromHeaderMap(multi.Clone()),
+	}
+
+	refreshed := h.refreshFrom304(stale, res, time.Now())
+	require.Equal(t, "Accept-Encoding,Accept-Language, BM-Market", refreshed.VaryValue)
+}

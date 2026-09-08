@@ -22,6 +22,11 @@ import (
 // corresponding test corpus when bumping memberlist.
 const handlerQueueFullMsg = "handler queue full"
 
+// closedConnMsg is the substring memberlist logs when a UDP write fails
+// because the socket was already closed by Shutdown. Anchored to
+// memberlist@v0.6.0 net.go / ping.go write-error paths.
+const closedConnMsg = "use of closed network connection"
+
 type slogAdapter struct {
 	logger observability.Logger
 	// metrics is read atomically so that SetMetrics can update it
@@ -29,8 +34,14 @@ type slogAdapter struct {
 	// inside memberlist.Create (before the caller can call SetMetrics).
 	metrics   atomic.Pointer[Metrics]
 	component string
-	buf       bytes.Buffer
-	mu        sync.Mutex
+	// closing is set by Cluster.Leave before memberlist.Shutdown closes
+	// the UDP socket. Once true, "use of closed network connection"
+	// errors from memberlist's in-flight goroutines are downgraded to
+	// DEBUG — they are an expected race inside memberlist.Shutdown, not
+	// actionable diagnostics.
+	closing atomic.Bool
+	buf     bytes.Buffer
+	mu      sync.Mutex
 }
 
 // newSlogAdapter returns an io.Writer that forwards memberlist log lines
@@ -45,6 +56,13 @@ func newSlogAdapter(logger observability.Logger) *slogAdapter {
 // concurrently with Write — the pointer is read atomically in emit.
 func (a *slogAdapter) setMetrics(m *Metrics) {
 	a.metrics.Store(m)
+}
+
+// markClosing signals that Cluster.Leave has started. Subsequent
+// "use of closed network connection" errors from memberlist's
+// background goroutines are downgraded to DEBUG.
+func (a *slogAdapter) markClosing() {
+	a.closing.Store(true)
 }
 
 // Write implements io.Writer, buffering partial lines until a newline arrives.
@@ -78,6 +96,15 @@ func (a *slogAdapter) emit(line string) {
 		return
 	}
 	level, msg := parseMemberlistLine(line)
+	// During shutdown, memberlist.Shutdown closes the UDP socket while
+	// background gossip/ping goroutines may still be mid-send. The
+	// resulting "use of closed network connection" errors are a benign
+	// race inside memberlist — downgrade to DEBUG so they don't pollute
+	// logs as spurious ERRORs during graceful teardown.
+	if a.closing.Load() && strings.Contains(msg, closedConnMsg) {
+		a.logger.Debug(msg, "component", a.component)
+		return
+	}
 	switch level {
 	case "WARN":
 		a.logger.Warn(msg, "component", a.component)

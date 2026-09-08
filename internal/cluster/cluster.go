@@ -257,6 +257,7 @@ func (c *Cluster) Digest() api.RingDigest {
 
 // Leave announces departure and shuts down the gossip layer.
 func (c *Cluster) Leave(ctx context.Context) error {
+	c.adapter.markClosing()
 	if err := c.ml.Leave(0); err != nil {
 		c.logger.Warn("cluster leave error", "error", err)
 	}

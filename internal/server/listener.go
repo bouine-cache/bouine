@@ -461,7 +461,14 @@ func (s *Listener) Shutdown(_ context.Context) error {
 			s.reactorLoop.Close()
 		}
 	})
-	return s.inner.Shutdown()
+	// Serve's ctx.Done branch may have already closed the listener
+	// and called inner.Shutdown concurrently. A double-close surfaces
+	// as net.ErrClosed — the listener is in the desired state, so
+	// suppress the benign error instead of logging it as shutdown noise.
+	if err := s.inner.Shutdown(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // Name returns the protocol label ("http", "https").

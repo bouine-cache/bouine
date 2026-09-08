@@ -1051,6 +1051,20 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 }
 
 func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
+	// Leave the cluster and stop the gossip layer before tearing down
+	// data-plane listeners. If memberlist is still active while peers
+	// close their UDP sockets, gossip/ping goroutines log a flurry of
+	// "use of closed network connection" errors — noise, not bugs.
+	if rs.clusterNode != nil {
+		if rs.peerFetcher != nil {
+			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
+				return rs.peerFetcher.Close(ctx)
+			})
+		}
+		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
+			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
+		})
+	}
 	rs.seq.AddStep("mark-not-ready", 15*time.Second, func(ctx context.Context) error {
 		var wg errgroup.Group
 		for _, ln := range rs.listeners {
@@ -1080,16 +1094,6 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 		rs.seq.AddStep("drain-cloudflare", 5*time.Second, func(ctx context.Context) error {
 			rs.cfCancel()
 			return rs.cfProp.Close(ctx)
-		})
-	}
-	if rs.clusterNode != nil {
-		if rs.peerFetcher != nil {
-			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
-				return rs.peerFetcher.Close(ctx)
-			})
-		}
-		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
-			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
 		})
 	}
 	g.Go("shutdown-sequencer", func(sqCtx context.Context) error {

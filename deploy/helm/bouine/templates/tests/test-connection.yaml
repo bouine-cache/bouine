@@ -1,12 +1,12 @@
+{{- $adminSvc := include "bouine.adminServiceName" . }}
+{{- $adminPort := .Values.adminService.port | default .Values.service.adminPort }}
 apiVersion: v1
 kind: Pod
 metadata:
   name: "{{ include "bouine.fullname" . }}-test"
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+  {{- include "bouine.annotations" (list . (dict "helm.sh/hook" "test" "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded")) | nindent 2 }}
 spec:
   restartPolicy: Never
   securityContext:
@@ -27,4 +27,4 @@ spec:
         - -sf
         - --max-time
         - "10"
-        - http://{{ include "bouine.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.adminPort }}/healthz
+        - http://{{ $adminSvc }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $adminPort }}/healthz

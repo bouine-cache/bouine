@@ -15,6 +15,12 @@ import (
 // for zero-alloc cache-hit serving. On miss, the h1parser calls the
 // fallback handler (fasthttp.RequestHandler) directly — no byte
 // reconstruction or net/http handoff needed.
+//
+// When the reactor is enabled and available (Linux, epoll), the
+// accept loop hands the listener to a single-goroutine event loop
+// that batch-serves cache hits (see reactor.go); every non-hit
+// connection is handed off to the blocking path, so behavior is
+// unchanged except for how hits are scheduled.
 func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 	scheme := s.scheme
 	if scheme == "" {
@@ -33,6 +39,42 @@ func (s *Listener) serveFastPath(ctx context.Context, ln net.Listener) error {
 		h1parser.WithMetricsHook(s.fastMetrics.RecordHit),
 		h1parser.WithSmugglingHook(s.fastMetrics.IncrementSmugglingRejected),
 	)
+
+	// The reactor raw-reads the socket fd and parses plaintext HTTP/1.1
+	// — TLS listeners (https) would feed it ciphertext. Never route
+	// encrypted listeners through the reactor (ADR-0041).
+	if s.h1Reactor && s.name != "https" {
+		if loop, ok := h1parser.NewReactorLoop(parser, ln); ok {
+			s.logger.Info("H1 reactor enabled (epoll batch hit serving)",
+				"name", s.name, "addr", ln.Addr().String())
+			// Publish the handle before Run: Shutdown (called from the
+			// shutdown sequencer, possibly before ctx cancellation)
+			// must find it and drain the reactor.
+			s.reactorLoopOnce.Do(func() { s.reactorLoop = loop })
+			// Shutdown wiring: ctx cancellation closes the listener
+			// (killing the accept loop) and stops the reactor loop, which
+			// then drains in-flight handed-off requests before Serve
+			// returns — the supervised group's Wait is what the shutdown
+			// sequencer blocks on, so Serve must not outlive ctx.
+			go func() {
+				<-ctx.Done()
+				_ = ln.Close()
+				loop.Close()
+			}()
+			loop.Run()
+			if dropped := loop.MetricsDropped(); dropped > 0 {
+				// Async hit-metrics ring overflow (reactor_metrics.go):
+				// the drainer could not keep up and that many hit
+				// records were not counted. Zero in steady state; see
+				// docs/runbook for the failure mode.
+				s.logger.Warn("H1 reactor dropped hit-metric records",
+					"name", s.name, "dropped", dropped)
+			}
+			return nil
+		}
+		s.logger.Warn("h1_reactor requested but unavailable on this platform; using blocking path",
+			"name", s.name)
+	}
 
 	var wg sync.WaitGroup
 

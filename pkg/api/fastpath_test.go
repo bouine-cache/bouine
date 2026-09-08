@@ -80,13 +80,13 @@ func TestFastPathResponse_Fields(t *testing.T) {
 		StatusCode:  200,
 		CacheResult: "hit",
 		Source:      "hot",
-		Route:       "api",
+		Pool:        "api",
 		BytesOut:    1024,
 	}
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "hit", resp.CacheResult)
 	assert.Equal(t, "hot", resp.Source)
-	assert.Equal(t, "api", resp.Route)
+	assert.Equal(t, "api", resp.Pool)
 	assert.Equal(t, 1024, resp.BytesOut)
 }
 
@@ -120,7 +120,7 @@ type fakeFastPathMetrics struct {
 	smugglingCount int
 }
 
-func (f *fakeFastPathMetrics) RecordHit(_, _, _, _ string, _, _ int, _ time.Duration) {
+func (f *fakeFastPathMetrics) RecordHit(_, _, _ string, _, _ int, _ time.Duration) {
 	f.hitCount++
 }
 
@@ -131,7 +131,7 @@ func (f *fakeFastPathMetrics) IncrementSmugglingRejected() {
 func TestFastPathMetrics_Interface(t *testing.T) {
 	t.Parallel()
 	var m FastPathMetrics = &fakeFastPathMetrics{}
-	m.RecordHit("GET", "api", "hit", "hot", 200, 1024, 5*time.Millisecond)
+	m.RecordHit("api", "hit", "hot", 200, 1024, 5*time.Millisecond)
 	m.IncrementSmugglingRejected()
 	assert.Equal(t, 1, m.(*fakeFastPathMetrics).hitCount)
 	assert.Equal(t, 1, m.(*fakeFastPathMetrics).smugglingCount)

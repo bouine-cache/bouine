@@ -44,3 +44,9 @@ admin:
   # Example (Kubernetes): inject via a Secret mounted as a config volume
   # or use --admin-token-file pointing at a secrets volume.
   # token: "REPLACE_ME"
+  # Keep-alive idle timeout for admin-server connections, including
+  # cluster peer RPCs (/v1/peer/*). Default 300s. Peer clients MUST
+  # keep cluster.peer_max_idle_conn_duration (default 120s) BELOW this
+  # so they close idle connections first; config validation rejects
+  # inversions at load time.
+  # idle_timeout: 300s

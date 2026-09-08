@@ -63,6 +63,12 @@ const (
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
+	// MaxPeerFetchConcurrency is the exported upper bound for the
+	// configurable fetch/put concurrency (cluster.peer_fetch_concurrency).
+	// The config loader uses it for validation; each in-flight peer fetch
+	// holds a goroutine and buffers up to maxPeerFetchBytes (64 MiB) while
+	// decoding, so the cap bounds worst-case decode memory.
+	MaxPeerFetchConcurrency = 128
 )
 
 // maxPeerFetchBytes caps the response body read from a peer during
@@ -74,7 +80,14 @@ const maxPeerFetchBytes int64 = 64 << 20
 // Default pipelining configuration (issue #521, Phase 6.4).
 const (
 	defaultPeerMaxConnsPerHost = 8
-	defaultPeerMaxIdleConnDur  = 120 * time.Second
+	// defaultPeerMaxIdleConnDur must stay below the peer's admin-server
+	// idle timeout (default 300s, internal/admin/server.go). The client
+	// must close idle connections before the server reaps them,
+	// otherwise the first request on a reaped connection fails with EOF
+	// or broken pipe and the fetch falls back to origin
+	// (internal/config/config.go documents the same invariant for
+	// listen.idle_timeout).
+	defaultPeerMaxIdleConnDur = 120 * time.Second
 	// peerMaxPendingRequests is the maximum number of pending pipelined
 	// requests per connection. With 8 connections × 16 pending = 128
 	// concurrent peer fetches per peer, matching the old HTTP/2 capacity.
@@ -87,6 +100,10 @@ type PeerFetcherConfig struct {
 	HopLimit            int
 	MaxConnsPerHost     int
 	MaxIdleConnDuration time.Duration
+	// FetchConcurrency bounds concurrent peer-fetch and peer-put RPCs.
+	// Zero applies defaultPeerFetchConcurrency. Negative values are
+	// rejected by the config loader (cluster.peer_fetch_concurrency).
+	FetchConcurrency int
 }
 
 // PeerFetcher issues cache-lookup RPCs to peer nodes using HTTP/1.1
@@ -112,8 +129,13 @@ type PeerFetcher struct {
 	putSem    chan struct{}
 	tlsConfig *tls.Config
 	fetchSem  chan struct{}
-	// pipelineClients caches one PipelineClient per peer address.
-	pipelineClients sync.Map // map[string]*fasthttp.PipelineClient
+	// pipelineClients caches one PipelineClient per peer address. Held
+	// behind an atomic.Pointer so Close can drop the whole map without
+	// racing concurrent Fetch/Put lookups: swapping a bare sync.Map field
+	// is a non-atomic struct write against readers (data race caught by
+	// the nightly -race integration run, TestTLS_CertRotation). nil means
+	// the fetcher is closed — callers fail fast and fall back to origin.
+	pipelineClients atomic.Pointer[sync.Map] // map[string]*fasthttp.PipelineClient
 	latSumMs        atomic.Int64
 	maxBodyBytes    int64
 	// pipelining configuration (Phase 6.4).
@@ -132,15 +154,15 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 	return f.hits.Load(), f.misses.Load(), f.hopLimitHits.Load(), f.latN.Load(), f.latSumMs.Load()
 }
 
-// Close drains idle cluster connections. Should be called during shutdown
-// so that rolling restarts don't leave TIME_WAIT sockets on peers.
+// Close drops the pipeline client map so idle cluster connections are
+// collected. Should be called during shutdown so that rolling restarts
+// don't leave TIME_WAIT sockets on peers. Race-free against concurrent
+// Fetch/Put: the map pointer is swapped atomically and later lookups see
+// nil (closed) instead of torn sync.Map state. In-flight RPCs that
+// already loaded the old map complete on their own goroutines; the
+// PipelineClients' own idle timeouts reclaim their sockets.
 func (f *PeerFetcher) Close(_ context.Context) error {
-	f.pipelineClients.Range(func(_, v any) bool {
-		// PipelineClient has no CloseIdleConnections method.
-		// Dropping the reference allows GC to collect idle connections.
-		return true
-	})
-	f.pipelineClients = sync.Map{} // prevent new lookups
+	f.pipelineClients.Store(nil)
 	return nil
 }
 
@@ -160,17 +182,25 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	if maxIdle <= 0 {
 		maxIdle = defaultPeerMaxIdleConnDur
 	}
+	fetchConcurrency := cfg.FetchConcurrency
+	if fetchConcurrency <= 0 {
+		fetchConcurrency = defaultPeerFetchConcurrency
+	}
+	if fetchConcurrency > MaxPeerFetchConcurrency {
+		fetchConcurrency = MaxPeerFetchConcurrency
+	}
 	f := &PeerFetcher{
 		useTLS:              cfg.TLSConfig != nil,
 		hopLimit:            hopLimit,
 		maxBodyBytes:        maxPeerFetchBytes,
-		fetchSem:            make(chan struct{}, defaultPeerFetchConcurrency),
-		putSem:              make(chan struct{}, defaultPeerFetchConcurrency),
+		fetchSem:            make(chan struct{}, fetchConcurrency),
+		putSem:              make(chan struct{}, fetchConcurrency),
 		logger:              observability.ResolveLogger(logger),
 		maxConnsPerHost:     maxConns,
 		maxIdleConnDuration: maxIdle,
 		tlsConfig:           cfg.TLSConfig,
 	}
+	f.pipelineClients.Store(&sync.Map{})
 	if reg != nil {
 		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine", Name: "peer_fetch_hits_total",
@@ -199,13 +229,18 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	return f
 }
 
-// getPipelineClient returns a PipelineClient for the given peer address,
-// creating one on first use. Each PipelineClient maintains a small pool
+// getPipelineClient returns the PipelineClient for the given peer
+// address, creating one on first use, or nil once the fetcher is closed
+// (Close dropped the map). Each PipelineClient maintains a small pool
 // of pipelined connections (default 8) that can handle up to 16
 // concurrent in-flight requests per connection, matching the old HTTP/2
 // capacity with ~85% less connection pool memory.
 func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
-	if v, ok := f.pipelineClients.Load(addr); ok {
+	clients := f.pipelineClients.Load()
+	if clients == nil {
+		return nil // closed during shutdown
+	}
+	if v, ok := clients.Load(addr); ok {
 		return v.(*fasthttp.PipelineClient)
 	}
 	pc := &fasthttp.PipelineClient{
@@ -225,7 +260,7 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 			}).Dial("tcp", addr)
 		},
 	}
-	actual, _ := f.pipelineClients.LoadOrStore(addr, pc)
+	actual, _ := clients.LoadOrStore(addr, pc)
 	return actual.(*fasthttp.PipelineClient)
 }
 
@@ -266,7 +301,11 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) 
 	return httpReq
 }
 
-// Fetch asks a peer for a cached object. Returns nil, nil on a cache
+// Fetch asks a peer for a cached object. varyKey, when non-empty, is the
+// requesting node's Vary assertion for key (RFC 9111 §4.1): the peer must
+// only return an object stored under that same variant dimension — a peer
+// whose only entry for key is the primary-key Vary resolver answers with a
+// miss instead of another variant's body. Returns nil, nil on a cache
 // miss at the peer; returns an error only on network/protocol failure.
 //
 //nolint:gocyclo // 16: hop/error/decode branches are inherently branchy
@@ -299,6 +338,9 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 
 	start := time.Now()
 	pc := f.getPipelineClient(peerAddr(peer))
+	if pc == nil {
+		return nil, fmt.Errorf("peer fetch %s: fetcher closed during shutdown", peer.Addr)
+	}
 	if err := transport.PipelineDo(ctx, pc, httpReq, resp); err != nil {
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
@@ -375,6 +417,32 @@ func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger,
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
 }
 
+// parsePeerFetchBody decodes the peer-fetch request body: binary framing
+// (v2) or the legacy JSON fallback. ok=false maps to a 400 response.
+func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
+	var req api.PeerFetchRequest
+	switch body[0] {
+	case peerFetchBinaryVersion:
+		if len(body) < 18 {
+			return req, false
+		}
+		copy(req.Key[:], body[1:17])
+		varyLen := int(body[17])
+		if len(body) < 18+varyLen {
+			return req, false
+		}
+		req.VaryKey = string(body[18 : 18+varyLen])
+		return req, true
+	case '{':
+		if err := json.Unmarshal(body, &req); err != nil {
+			return req, false
+		}
+		return req, true
+	default:
+		return req, false
+	}
+}
+
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
 func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	if !bytes.Equal(ctx.Method(), []byte(fasthttp.MethodPost)) {
@@ -401,26 +469,8 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	var req api.PeerFetchRequest
-	switch body[0] {
-	case peerFetchBinaryVersion:
-		if len(body) < 18 {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-		copy(req.Key[:], body[1:17])
-		varyLen := int(body[17])
-		if len(body) < 18+varyLen {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-		req.VaryKey = string(body[18 : 18+varyLen])
-	case '{':
-		if err := json.Unmarshal(body, &req); err != nil {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-	default:
+	req, ok := parsePeerFetchBody(body)
+	if !ok {
 		ctx.Error("bad request", fasthttp.StatusBadRequest)
 		return
 	}
@@ -428,6 +478,36 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	obj, _, err := h.store.Get(ctx, req.Key)
 	if err != nil || obj == nil {
 		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		return
+	}
+	// Vary assertion (RFC 9111 §4.1): when the requester asked for a
+	// specific variant and the only stored entry under req.Key is the
+	// primary-key Vary resolver (filled by a different selecting-header
+	// set), answer with a miss. Returning the resolver's body would serve
+	// one variant's content to a request selecting another — the
+	// cross-market body served in production before this gate.
+	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
+		h.logger.Info("served peer fetch miss: variant mismatch",
+			"key", req.Key, "want_vary", req.VaryKey, "have_vary", obj.VaryKey, "hops", hops)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		return
+	}
+	// Resolver-body leak: the primary-key entry is the Vary resolver —
+	// its body belongs to whichever variant filled it first (the handler
+	// stores it so lookups can learn the Vary list, not to be served). A
+	// requester that misses locally peer-fetches its primary key with a
+	// blank assertion (it has no local object to derive the Vary list
+	// from), so the previous gate never fired and the owner handed back
+	// the resolver body — the first market's content — as a peer HIT.
+	// RFC 9111 §4.1: a request that selects a variant must never be
+	// satisfied by an entry stored under the bare primary key, so answer
+	// with a miss and let the requester fill (and assert) its own
+	// variant. A peer fetch for a REAL variant key never lands here:
+	// variant entries carry a non-empty VaryKey.
+	if obj.VaryKey == "" && obj.VaryValue != "" {
+		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
+			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
@@ -484,7 +564,11 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	if err := transport.PipelineDo(ctx, f.getPipelineClient(peerAddr(peer)), req, resp); err != nil {
+	putClient := f.getPipelineClient(peerAddr(peer))
+	if putClient == nil {
+		return fmt.Errorf("peer put %s: fetcher closed during shutdown", peer.Addr)
+	}
+	if err := transport.PipelineDo(ctx, putClient, req, resp); err != nil {
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
 	if resp.StatusCode() != fasthttp.StatusOK {

@@ -31,13 +31,37 @@ echo ">>> Building bouine..."
 BOUINE_BIN="$REPO_ROOT/bin/bouine"
 
 # 2. Clone or update cache-tests.
+# clone_cache_tests fetches the upstream suite, tolerating the transient
+# "GitHub is temporarily limiting some unauthenticated downloads" errors
+# that failed the nightly conformance job: gh is used when available
+# (authenticated, as on Actions runners), and plain git gets a short
+# retry loop.
+clone_cache_tests() {
+    if command -v gh >/dev/null 2>&1; then
+        gh repo clone http-tests/cache-tests "$CACHETESTS_DIR" -- --depth=1 && return 0
+        echo ">>> gh clone failed; falling back to git"
+        rm -rf "$CACHETESTS_DIR"
+    fi
+    local attempt
+    for attempt in 1 2 3; do
+        if git clone --depth=1 https://github.com/http-tests/cache-tests.git "$CACHETESTS_DIR"; then
+            return 0
+        fi
+        echo ">>> clone attempt $attempt failed; retrying in 30s"
+        rm -rf "$CACHETESTS_DIR"
+        sleep 30
+    done
+    echo ">>> unable to clone cache-tests after 3 attempts" >&2
+    return 1
+}
+
 if [ -d "$CACHETESTS_DIR/.git" ]; then
     echo ">>> Updating cache-tests..."
     (cd "$CACHETESTS_DIR" && git pull --ff-only 2>/dev/null || true)
 else
     echo ">>> Cloning http-tests/cache-tests..."
     rm -rf "$CACHETESTS_DIR"
-    git clone --depth=1 https://github.com/http-tests/cache-tests.git "$CACHETESTS_DIR"
+    clone_cache_tests
 fi
 
 echo ">>> Installing cache-tests dependencies..."
@@ -72,6 +96,10 @@ echo ">>> Origin is up."
 # 4. Write bouine config and start bouine.
 BOUINE_CONFIG=$(mktemp)
 EXPERIMENTAL_YAML="${BOUINE_FAST_PATH:-}"
+REACTOR_YAML=""
+if [ "${BOUINE_H1_REACTOR:-}" = "true" ]; then
+    REACTOR_YAML="  h1_reactor: true"
+fi
 if [ "$EXPERIMENTAL_YAML" = "true" ]; then
     cat > "$BOUINE_CONFIG" <<YAML
 listen:
@@ -87,8 +115,9 @@ routes:
     pool: cache-tests
 experimental:
   h1_fast_path: true
+${REACTOR_YAML}
 YAML
-    echo ">>> H1 fast path ENABLED for conformance run"
+    echo ">>> H1 fast path ENABLED for conformance run${REACTOR_YAML:+ (+ h1_reactor)}"
 else
     cat > "$BOUINE_CONFIG" <<YAML
 listen:

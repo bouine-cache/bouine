@@ -253,7 +253,13 @@ func TestFastPathHandler_StaleHitTriggersSWR(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, 1, callCount, "StaleHit within the SWR window must fire onStale exactly once")
 	assert.Equal(t, key, gotKey, "the lookup (variant) key must be passed")
-	assert.Same(t, obj, gotObj)
+	// Get returns a cache-owned copy of the stored object (never the
+	// caller's Put pointer), so assert the stale content, not identity.
+	require.NotNil(t, gotObj)
+	assert.Equal(t, obj.Key, gotObj.Key)
+	assert.Equal(t, obj.Body, gotObj.Body)
+	assert.Equal(t, obj.StatusCode, gotObj.StatusCode)
+	assert.Equal(t, obj.StaleWhileRevalidate, gotObj.StaleWhileRevalidate)
 }
 
 // TestFastPathHandler_HitDoesNotTriggerSWR verifies the onStale hook
@@ -682,6 +688,7 @@ func TestQualifiesForFastPath_IfRange(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: "If-Range", Value: `"etag"`}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -691,6 +698,7 @@ func TestQualifiesForFastPath_IfMatch(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: "If-Match", Value: `"etag"`}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -700,6 +708,7 @@ func TestQualifiesForFastPath_TransferEncoding(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.TransferEncoding, Value: "chunked"}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -709,6 +718,7 @@ func TestQualifiesForFastPath_PragmaNoCache(t *testing.T) {
 	req := &api.RawRequest{Method: "GET", Path: "/", Host: "x.com", Scheme: "http"}
 	req.Headers[0] = api.RawHeader{Key: header.Pragma, Value: "no-cache"}
 	req.NHeaders = 1
+	req.RecomputeScanFlags()
 	_, ok := qualifiesForFastPath(req)
 	assert.False(t, ok)
 }
@@ -849,7 +859,7 @@ func TestNewFastPathHandler(t *testing.T) {
 	fp := NewFastPathHandler(h)
 	require.NotNil(t, fp)
 	// Verify it shares the same store.
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/test", "example.com", "/test", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromHTTP("http://example.com/test", "/test", header.Map{}), nil)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,
@@ -1211,4 +1221,124 @@ func TestFastPathHandler_SchemeDefault(t *testing.T) {
 	reqHTTP := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
 	reqEmpty := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: ""}
 	assert.Equal(t, buildKeyFromRaw(reqHTTP, nil), buildKeyFromRaw(reqEmpty, nil))
+}
+
+func TestFastPathHandler_ComposedHeadCache(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj.Key = key
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	now := time.Now()
+
+	// First hit composes and caches the head. Bytes are captured before
+	// Release — the pooled struct may be reused by the next TryHit.
+	resp1, ok := fp.TryHit(req, now)
+	require.True(t, ok)
+	require.Contains(t, string(resp1.BuffersArr[1]), "Connection: keep-alive")
+	status1 := string(resp1.BuffersArr[0])
+	headers1 := string(resp1.BuffersArr[1])
+	fp.Release(resp1)
+
+	// Second hit within the same second must reuse the cached composed
+	// head: identical bytes, still a valid response, and the pool header
+	// buffer untouched (BufPtr nil — the composed head owns its bytes).
+	// The identical timestamp is used so the second cannot roll over.
+	resp2, ok := fp.TryHit(req, now)
+	require.True(t, ok)
+	require.Nil(t, resp2.BufPtr, "composed-head hit must not consume a pool buffer")
+	require.Nil(t, resp2.HeaderBuf, "composed-head hit must not carry a pool buffer")
+	assert.Equal(t, status1, string(resp2.BuffersArr[0]))
+	assert.Equal(t, headers1, string(resp2.BuffersArr[1]))
+	assert.Equal(t, "Hello, World!", string(resp2.BuffersArr[2]))
+	fp.Release(resp2)
+
+	// A different second recomposes (Age changes), and a Connection:
+	// close request gets the close variant — different trailer, and
+	// CloseConn set so callers close after the flush.
+	resp3, ok := fp.TryHit(req, now.Add(1500*time.Millisecond))
+	require.True(t, ok)
+	fp.Release(resp3)
+
+	reqClose := *req
+	reqClose.ConnectionClose = true
+	resp4, ok := fp.TryHit(&reqClose, now.Add(1500*time.Millisecond))
+	require.True(t, ok)
+	assert.True(t, resp4.CloseConn, "close-request hit must carry CloseConn")
+	require.Contains(t, string(resp4.BuffersArr[1]), "Connection: close")
+	require.NotContains(t, string(resp4.BuffersArr[1]), "Connection: keep-alive")
+	fp.Release(resp4)
+
+	// The keep-alive variant must not have been poisoned by the close
+	// variant composing on the same object.
+	resp5, ok := fp.TryHit(req, now.Add(1500*time.Millisecond))
+	require.True(t, ok)
+	assert.False(t, resp5.CloseConn)
+	require.Contains(t, string(resp5.BuffersArr[1]), "Connection: keep-alive")
+	fp.Release(resp5)
+}
+
+func TestFastPathHandler_HeadRequestComposedHead(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20})
+	fp := NewFastPathHandlerFromStore(store)
+
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap("Content-Type", "text/html", "Content-Length", "13"),
+		Body:       []byte("Hello, World!"),
+		BodySize:   13,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	key := buildKeyFromRaw(&api.RawRequest{
+		Method: "GET", Path: "/", Host: "example.com", Scheme: "http",
+	}, nil)
+	obj.Key = key
+	require.NoError(t, store.Put(context.Background(), key, obj))
+
+	getReq := &api.RawRequest{Method: "GET", Path: "/", Host: "example.com", Scheme: "http"}
+	headReq := &api.RawRequest{Method: "HEAD", Path: "/", Host: "example.com", Scheme: "http"}
+	now := time.Now()
+
+	// A GET composes the head and caches it. The status/header bytes are
+	// captured before Release: the pooled response struct may be reused
+	// by the very next TryHit, and reading its fields afterwards would
+	// compare the struct against itself.
+	respGet, ok := fp.TryHit(getReq, now)
+	require.True(t, ok)
+	assert.Equal(t, 13, respGet.BytesOut)
+	getStatus := string(respGet.BuffersArr[0])
+	getHeaders := string(respGet.BuffersArr[1])
+	fp.Release(respGet)
+
+	// A HEAD in the same second reuses the composed head bytes but
+	// elides the body.
+	respHead, ok := fp.TryHit(headReq, now)
+	require.True(t, ok)
+	assert.Equal(t, getStatus, string(respHead.BuffersArr[0]))
+	assert.Equal(t, getHeaders, string(respHead.BuffersArr[1]))
+	assert.Nil(t, respHead.BuffersArr[2], "HEAD must not serve a body")
+	assert.Zero(t, respHead.BytesOut)
+	fp.Release(respHead)
 }

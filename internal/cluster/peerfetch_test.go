@@ -149,6 +149,132 @@ func TestPeerFetchHandler_Miss(t *testing.T) {
 	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
+// TestPeerFetchHandler_VaryKeyMismatchMiss is the protocol-side regression
+// for the cross-market body incident: a peer whose only entry under the
+// requested key is a DIFFERENT variant (or the primary-key Vary resolver)
+// must answer a variant-asserting fetch with a miss instead of returning
+// the foreign variant's body.
+func TestPeerFetchHandler_VaryKeyMismatchMiss(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(11)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	// Requester asserts the us variant.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "ushash"}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+		"a variant-asserting fetch must miss when the stored object is another variant")
+}
+
+// TestPeerFetchHandler_VaryKeyMatchHit pins the positive case: an object
+// whose VaryKey equals the requester's assertion is served.
+func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(12)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "frhash"}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err, "decode")
+	require.Equal(t, "market=fr", string(obj.Body))
+}
+
+// TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion pins the
+// non-variant case that must keep working: an object WITHOUT Vary
+// (VaryValue == "") stored under its primary key is served to a
+// blank-assertion fetch. Only Vary resolvers are withheld (see
+// TestPeerFetchHandler_ResolverBodyNeverServed).
+func TestPeerFetchHandler_NoVaryObjectServedOnBlankAssertion(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(13)
+	plainObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("plain"),
+		VaryKey:    "",
+	}
+	plainObj.Header = header.NewMap(1)
+	plainObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: plainObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"an empty VaryKey assertion must serve a stored object without Vary")
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "plain", string(obj.Body))
+}
+
+// TestPeerFetchHandler_ResolverBodyNeverServed closes the resolver-body
+// leak observed in preprod after the first cross-variant fix: a
+// non-owner that misses locally peer-fetches the PRIMARY key with a
+// blank assertion (it has no local object to learn the Vary list from),
+// and the owner's only stored entry under that key is the resolver —
+// whose body belongs to whichever variant filled it first. Serving that
+// body was a peer HIT carrying the first variant's content. The resolver
+// exists to publish the Vary list, never to be served: a fetch landing
+// on it must miss so the requester fills (and stores) its own variant.
+// Objects without Vary (VaryValue == "") are unaffected.
+func TestPeerFetchHandler_ResolverBodyNeverServed(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(14)
+	resolverObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "",
+	}
+	resolverObj.Header = header.NewMap(1)
+	resolverObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: resolverObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	// Blank-assertion fetch of the primary: the exact flow of a non-owner
+	// cold lookup. Must miss instead of serving the resolver body.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+		"a peer fetch landing on the Vary resolver must miss, never serve its body")
+
+	// A real (no-Vary) object under a primary key: normal hit must survive.
+	plain := &api.Object{
+		Key:        testkey.Key(15),
+		StatusCode: 200,
+		Body:       []byte("plain"),
+	}
+	plain.Header = header.NewMap(1)
+	plain.Header.AppendEntry("Cache-Control", "max-age=60")
+	store2 := &stubStore{objects: map[api.Key]*api.Object{testkey.Key(15): plain}}
+	h2 := NewPeerFetchHandler(store2, 0)
+	ctx2 := postFetch(t, h2, api.PeerFetchRequest{Key: testkey.Key(15)}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx2.Response.StatusCode(),
+		"a no-Vary primary entry must still be served")
+	obj, err := storage.DecodeObject(ctx2.Response.Body())
+	require.NoError(t, err)
+	require.Equal(t, "plain", string(obj.Body))
+}
+
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)
@@ -414,6 +540,64 @@ func TestPeerFetcher_ConcurrencySemaphoreBoundsFetches(t *testing.T) {
 	}
 }
 
+func TestPeerFetcher_ConfigurableFetchConcurrencyBoundsFetches(t *testing.T) {
+	t.Parallel()
+	const customConcurrency = 8
+	var inFlight, maxInFlight atomic.Int32
+
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		cur := inFlight.Add(1)
+		for {
+			old := maxInFlight.Load()
+			if cur <= old || maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inFlight.Add(-1)
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+		FetchConcurrency:    customConcurrency,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	var wg sync.WaitGroup
+	for i := 0; i < customConcurrency*3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(),
+				api.PeerInfo{AdminAddr: srv.Addr},
+				api.PeerFetchRequest{Key: testkey.Key(1)})
+		}()
+	}
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > customConcurrency {
+		t.Fatalf("max concurrent peer-fetches = %d, want <= %d", got, customConcurrency)
+	}
+}
+
+func TestPeerFetcher_FetchConcurrencyCappedAtMax(t *testing.T) {
+	t.Parallel()
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		FetchConcurrency: MaxPeerFetchConcurrency * 2,
+	}, nil, nil)
+	defer f.Close(context.Background())
+
+	if got := cap(f.fetchSem); got != MaxPeerFetchConcurrency {
+		t.Fatalf("fetch semaphore capacity = %d, want capped at %d", got, MaxPeerFetchConcurrency)
+	}
+	if got := cap(f.putSem); got != MaxPeerFetchConcurrency {
+		t.Fatalf("put semaphore capacity = %d, want capped at %d", got, MaxPeerFetchConcurrency)
+	}
+}
+
 func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	t.Parallel()
 	block := make(chan struct{})
@@ -527,4 +711,65 @@ func BenchmarkPeerFetcher_Fetch(b *testing.B) {
 			b.Fatalf("unexpected result: %+v", got)
 		}
 	}
+}
+
+// TestPeerFetcher_CloseConcurrentWithFetchAndPut pins the shutdown
+// race the nightly -race integration run caught in TestTLS_CertRotation:
+// Close swapped the bare pipelineClients sync.Map field while concurrent
+// Fetch/Put goroutines read it. The map now lives behind an
+// atomic.Pointer; under -race this test fails on any unsynchronized
+// access, and it also asserts the post-Close behavior: RPCs fail fast
+// with a "fetcher closed" error instead of touching a torn map.
+func TestPeerFetcher_CloseConcurrentWithFetchAndPut(t *testing.T) {
+	t.Parallel()
+
+	key := testkey.Key(9)
+	obj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("concurrent-close"),
+	}
+	obj.Header = header.NewMap(1)
+
+	srv := fasthttptest.NewServer(t, NewPeerFetchHandler(&stubStore{objects: map[api.Key]*api.Object{
+		key: obj,
+	}}, 0).Handle)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	peer := api.PeerInfo{AdminAddr: srv.Addr}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: key})
+				_ = f.Put(context.Background(), peer, obj)
+			}
+		}()
+	}
+
+	// Race Close against the RPC workers: before the atomic.Pointer fix
+	// this plain-field swap tripped the race detector against the
+	// workers' map lookups.
+	for range 20 {
+		require.NoError(t, f.Close(context.Background()))
+	}
+	close(stop)
+	wg.Wait()
+
+	// After Close every RPC must fail fast with the closed error rather
+	// than consulting a (torn) client map.
+	_, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: key})
+	require.ErrorContains(t, err, "fetcher closed")
+	err = f.Put(context.Background(), peer, obj)
+	require.ErrorContains(t, err, "fetcher closed")
 }

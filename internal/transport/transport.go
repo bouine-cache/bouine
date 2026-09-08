@@ -73,10 +73,22 @@ func (c *Client) DoTimeout(req *fasthttp.Request, resp *fasthttp.Response, timeo
 // If ctx has a deadline, PipelineDo uses DoDeadline. If ctx has no
 // deadline, PipelineDo uses DoTimeout with a 60s default. If ctx is
 // already done, PipelineDo returns ctx.Err() immediately.
+//
+// Unlike fasthttp.Client, PipelineClient does not retry requests that
+// fail on a pooled connection the server has just closed: the first
+// call after an idle gap surfaces io.EOF (server closed before the
+// response), EPIPE (write into a closed socket), or
+// "pipeline connection has been stopped" (the worker tore down the
+// connection while the request was queued). Callers must therefore
+// keep their idle timeout below the peer's admin-server idle timeout
+// so the client closes idle connections first (see
+// config.Cluster.PeerMaxIdleConnDuration); retries belong at the
+// caller for idempotent RPCs if that ordering cannot be guaranteed.
 func PipelineDo(ctx context.Context, c *fasthttp.PipelineClient, req *fasthttp.Request, resp *fasthttp.Response) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if deadline, ok := ctx.Deadline(); ok {
 		return c.DoDeadline(req, resp, deadline)
 	}

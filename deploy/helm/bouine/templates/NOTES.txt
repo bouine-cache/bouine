@@ -1,3 +1,5 @@
+{{- $adminSvc := include "bouine.adminServiceName" . }}
+{{- $adminPort := .Values.adminService.port | default .Values.service.adminPort }}
 Thank you for installing {{ include "bouine.name" . }}!
 
 Your bouine cache cluster is being deployed as a StatefulSet with {{ .Values.replicaCount }} replica(s).
@@ -7,10 +9,15 @@ Your bouine cache cluster is being deployed as a StatefulSet with {{ .Values.rep
   HTTPS: {{ .Values.service.httpsPort }}
 
 == Admin port ==
-  {{ .Values.service.adminPort }}
+  {{ $adminPort }}
+
+  Served by the dedicated admin (management plane) Service, ClusterIP by
+  default so the admin surface (metrics, pprof, /drain, admin API) is
+  never exposed by a data-plane LoadBalancer:
+    svc/{{ $adminSvc }}
 
   Health check:
-    kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "bouine.fullname" . }} 9000:{{ .Values.service.adminPort }}
+    kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ $adminSvc }} 9000:{{ $adminPort }}
     curl -sf http://localhost:9000/healthz
 
 == Admin token ==

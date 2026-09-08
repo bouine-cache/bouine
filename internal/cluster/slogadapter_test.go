@@ -322,3 +322,39 @@ func TestSlogAdapter_InfoLevelDropDoesNotIncrement(t *testing.T) {
 	}
 	t.Fatal("bouine_cluster_gossip_drops_total not registered")
 }
+
+func TestSlogAdapter_ClosingDowngradesClosedConnErrors(t *testing.T) {
+	t.Parallel()
+	logger, mu, buf := captureLogger(t)
+	a := newSlogAdapter(logger)
+
+	// Before markClosing, a closed-connection error is emitted at ERROR.
+	_, err := a.Write([]byte(
+		"2026/07/03 23:15:00 [ERR] memberlist: Failed to send gossip to 127.0.0.1:5000: " +
+			"write udp 127.0.0.1:5001->127.0.0.1:5000: use of closed network connection\n"))
+	require.NoError(t, err, "Write before closing")
+
+	records := parseAdapterRecords(t, mu, buf)
+	require.Len(t, records, 1)
+	assert.Equal(t, "ERROR", records[0]["level"])
+
+	// After markClosing, the same error is downgraded to DEBUG.
+	a.markClosing()
+	_, err = a.Write([]byte(
+		"2026/07/03 23:15:01 [ERR] memberlist: Failed to send UDP ping: " +
+			"write udp 127.0.0.1:5001->127.0.0.1:5002: use of closed network connection\n"))
+	require.NoError(t, err, "Write after closing")
+
+	records = parseAdapterRecords(t, mu, buf)
+	require.Len(t, records, 2)
+	assert.Equal(t, "DEBUG", records[1]["level"])
+
+	// A non-closed-connection error is still emitted at ERROR after closing.
+	_, err = a.Write([]byte(
+		"2026/07/03 23:15:02 [ERR] memberlist: Failed to encode message for broadcast: eof\n"))
+	require.NoError(t, err, "Write unrelated error")
+
+	records = parseAdapterRecords(t, mu, buf)
+	require.Len(t, records, 3)
+	assert.Equal(t, "ERROR", records[2]["level"])
+}

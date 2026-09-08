@@ -16,7 +16,9 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/platform"
+	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
 )
@@ -42,6 +44,28 @@ const maxServerConcurrency = 256 * 1024
 // layering rules (L1 and L2 cannot depend on each other) prevent a
 // shared import. If you change one, change the other.
 const safetyNetWriteTimeout = 5 * time.Minute
+
+// sseWriteTimeout is the per-request write deadline fasthttp applies to
+// requests that announced SSE intent (Accept: text/event-stream) when the
+// data plane runs without the H1 fast path (inner.Serve mode). The default
+// safetyNetWriteTimeout is absolute for the whole response write, which
+// would cut every event stream after 5 minutes. fasthttp offers no idle
+// re-arm seam on this path, so the deadline is simply extended to an hour
+// (a bound, not unbounded — SSE clients reconnect on stream end per the
+// WHATWG contract). The H1 fast path does not need this: its fall-through
+// write re-arms the deadline per Write (h1parser.idleWriteConn).
+const sseWriteTimeout = time.Hour
+
+// sseHeaderReceived is the fasthttp.Server HeaderReceived hook: requests
+// that announced SSE intent get the extended write deadline; every other
+// request keeps the server defaults (a zero RequestConfig field falls
+// back to the server-level value).
+func sseHeaderReceived(h *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	if header.AcceptsEventStream(h.Peek(header.Accept)) {
+		return fasthttp.RequestConfig{WriteTimeout: sseWriteTimeout}
+	}
+	return fasthttp.RequestConfig{}
+}
 
 // quickAckListener wraps a net.Listener so that each accepted connection
 // gets TCP_QUICKACK set immediately. This tells the kernel to ACK
@@ -119,31 +143,51 @@ type ListenerConfig struct {
 	TLSConfig      *tls.Config
 	Addr           string
 	Scheme         string
+	Name           string
 	MaxConnections int
 	IdleTimeout    time.Duration
+	// ReadTimeout bounds how long reading a single request's header and
+	// body may take (fasthttp ReadTimeout); zero applies
+	// DefaultReadTimeout (30s).
+	ReadTimeout    time.Duration
 	TCPFastOpen    bool
 	TCPDeferAccept bool
 	ReusePort      bool
+	// H1Reactor enables the single-goroutine epoll hit-path event loop
+	// (Linux only; experimental). When true but unavailable, the
+	// listener logs a warning and uses the blocking parser path.
+	H1Reactor bool
 }
 
 // Listener wraps a fasthttp.Server with lifecycle methods matching
 // the supervised-group contract. Each protocol has its own instance.
 //
 // Stable.
+// state); the tool's interleaved order saves 8 bytes on a cold struct.
+//
+//nolint:govet // fieldalignment: grouped by role (deps, config, runtime
 type Listener struct {
-	logger         observability.Logger
-	resolved       atomic.Value // stores string
-	fastPath       api.FastPathHandler
-	fastMetrics    api.FastPathMetrics
-	inner          *fasthttp.Server
-	addr           string
-	name           string
-	scheme         string
-	maxConns       int
-	idleTimeout    time.Duration
-	tcpFastOpen    bool
-	tcpDeferAccept bool
-	reusePort      bool
+	logger      observability.Logger
+	inner       *fasthttp.Server
+	fastPath    api.FastPathHandler
+	fastMetrics api.FastPathMetrics
+	resolved    atomic.Value // stores string
+	// reactorLoop is the H1 reactor handle when the reactor started
+	// (Linux + h1Reactor + fast path). Shutdown drains it so
+	// in-flight handed-off requests finish before the shutdown
+	// sequencer closes the store. Set once by serveFastPath before
+	// Serve's reactor branch; read by Shutdown.
+	reactorLoop     *h1parser.ReactorLoop
+	reactorLoopOnce sync.Once
+	addr            string
+	name            string
+	scheme          string
+	maxConns        int
+	idleTimeout     time.Duration
+	tcpFastOpen     bool
+	tcpDeferAccept  bool
+	reusePort       bool
+	h1Reactor       bool
 }
 
 // DefaultIdleTimeout is the keep-alive idle timeout for data-plane
@@ -151,11 +195,25 @@ type Listener struct {
 // Mirrors h1parser's default; listen.idle_timeout overrides both.
 const DefaultIdleTimeout = 120 * time.Second
 
+// DefaultReadTimeout bounds how long reading a single request's header
+// and body may take (fasthttp ReadTimeout). listen.read_timeout
+// overrides it.
+const DefaultReadTimeout = 30 * time.Second
+
 // resolveIdleTimeout applies the built-in default when the operator has
 // not configured listen.idle_timeout.
 func resolveIdleTimeout(v time.Duration) time.Duration {
 	if v == 0 {
 		return DefaultIdleTimeout
+	}
+	return v
+}
+
+// resolveReadTimeout applies the built-in default when the operator has
+// not configured listen.read_timeout.
+func resolveReadTimeout(v time.Duration) time.Duration {
+	if v == 0 {
+		return DefaultReadTimeout
 	}
 	return v
 }
@@ -169,7 +227,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 
 	srv := &fasthttp.Server{
 		Handler:               cfg.Handler,
-		ReadTimeout:           30 * time.Second,
+		ReadTimeout:           resolveReadTimeout(cfg.ReadTimeout),
 		WriteTimeout:          safetyNetWriteTimeout,
 		IdleTimeout:           idle,
 		ReadBufferSize:        64 << 10,
@@ -178,6 +236,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		NoDefaultContentType:  true,
 		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
+		HeaderReceived:        sseHeaderReceived,
 	}
 	return &Listener{
 		inner:          srv,
@@ -189,6 +248,7 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		tcpFastOpen:    cfg.TCPFastOpen,
 		tcpDeferAccept: cfg.TCPDeferAccept,
 		reusePort:      cfg.ReusePort,
+		h1Reactor:      cfg.H1Reactor,
 		fastPath:       cfg.FastPath,
 		fastMetrics:    cfg.FastMetrics,
 		scheme:         cfg.Scheme,
@@ -207,7 +267,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 
 	srv := &fasthttp.Server{
 		Handler:               cfg.Handler,
-		ReadTimeout:           30 * time.Second,
+		ReadTimeout:           resolveReadTimeout(cfg.ReadTimeout),
 		WriteTimeout:          safetyNetWriteTimeout,
 		IdleTimeout:           resolveIdleTimeout(cfg.IdleTimeout),
 		ReadBufferSize:        64 << 10,
@@ -217,6 +277,7 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
 		TLSConfig:             cfg.TLSConfig,
+		HeaderReceived:        sseHeaderReceived,
 	}
 	return &Listener{
 		inner:          srv,
@@ -390,9 +451,24 @@ func (s *Listener) serveMulti(ctx context.Context) error {
 }
 
 // Shutdown gracefully stops the listener, waiting for in-flight
-// requests to complete. Safe to call concurrently with Serve.
+// requests to complete. Safe to call concurrently with Serve. When
+// the H1 reactor is running, its Close drains in-flight handed-off
+// blocking-parser goroutines first — the fasthttp Shutdown below does
+// not know about them (they bypass fasthttp entirely).
 func (s *Listener) Shutdown(_ context.Context) error {
-	return s.inner.Shutdown()
+	s.reactorLoopOnce.Do(func() {
+		if s.reactorLoop != nil {
+			s.reactorLoop.Close()
+		}
+	})
+	// Serve's ctx.Done branch may have already closed the listener
+	// and called inner.Shutdown concurrently. A double-close surfaces
+	// as net.ErrClosed — the listener is in the desired state, so
+	// suppress the benign error instead of logging it as shutdown noise.
+	if err := s.inner.Shutdown(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // Name returns the protocol label ("http", "https").

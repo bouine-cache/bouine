@@ -12,7 +12,7 @@ permissions:
   attestations: write
 
 env:
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.1"
   DOCKER_IMAGE: bouinecache/bouine
 
 jobs:
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4.2.0
+        uses: docker/setup-qemu-action@v4.3.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.3.0

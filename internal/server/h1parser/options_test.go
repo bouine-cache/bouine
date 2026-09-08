@@ -40,10 +40,10 @@ func TestWithScheme(t *testing.T) {
 func TestWithMetricsHook(t *testing.T) {
 	t.Parallel()
 	var called bool
-	fn := func(_, _, _, _ string, _, _ int, _ time.Duration) { called = true }
+	fn := func(_, _, _ string, _, _ int, _ time.Duration) { called = true }
 	p := New(nil, noopHandler, WithMetricsHook(fn))
 	require.NotNil(t, p.metricsHook)
-	p.metricsHook("GET", "/", "HIT", "hot", 200, 100, 5*time.Millisecond)
+	p.metricsHook("/", "HIT", "hot", 200, 100, 5*time.Millisecond)
 	assert.True(t, called)
 }
 
@@ -105,13 +105,20 @@ func (m *mockFastPathHandler) Release(_ *api.FastPathResponse) {}
 
 type mockFastPathHit struct{}
 
-func (m *mockFastPathHit) TryHit(_ *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+func (m *mockFastPathHit) TryHit(req *api.RawRequest, _ time.Time) (*api.FastPathResponse, bool) {
+	trailer := "Connection: keep-alive\r\n"
+	if req.ConnectionClose {
+		// Mirror the real handler's contract (RFC 9110 §9.6): the hit
+		// response ends with Connection: close and carries CloseConn.
+		trailer = "Connection: close\r\n"
+	}
 	resp := &api.FastPathResponse{
 		BuffersArr: [3][]byte{
 			[]byte("HTTP/1.1 200 OK\r\n"),
-			[]byte("Content-Length: 5\r\nContent-Type: text/plain\r\n\r\n"),
+			[]byte("Content-Length: 5\r\nContent-Type: text/plain\r\n" + trailer + "\r\n"),
 			[]byte("hello"),
 		},
+		CloseConn: req.ConnectionClose,
 	}
 	resp.Buffers = resp.BuffersArr[:]
 	return resp, true
@@ -122,7 +129,7 @@ func (m *mockFastPathHit) Release(_ *api.FastPathResponse) {}
 func TestParser_Serve_FastPathHit(t *testing.T) {
 	t.Parallel()
 	fp := &mockFastPathHit{}
-	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
+	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _ string, _, _ int, _ time.Duration) {}))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -201,7 +208,7 @@ func TestParser_Serve_LargeHeaders(t *testing.T) {
 func TestParser_Serve_KeepAliveAfterHit(t *testing.T) {
 	t.Parallel()
 	fp := &mockFastPathHit{}
-	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _, _ string, _, _ int, _ time.Duration) {}))
+	p := New(fp, noopHandler, WithMetricsHook(func(_, _, _ string, _, _ int, _ time.Duration) {}))
 
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
@@ -698,6 +705,16 @@ func TestIsConnectionClose(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			// isConnectionClose reads the parser-derived flag; derive it
+			// from the hand-built header array exactly as the fused scan
+			// would (the token scan is part of the derivation).
+			tt.req.ConnectionClose = false
+			for i := 0; i < tt.req.NHeaders; i++ {
+				if api.EqualFold(tt.req.Headers[i].Key, "Connection") {
+					tt.req.ConnectionClose = connectionCloseValue(tt.req.Headers[i].Value)
+					break
+				}
+			}
 			assert.Equal(t, tt.want, isConnectionClose(tt.req))
 		})
 	}
@@ -1100,7 +1117,7 @@ func TestParser_Serve_MetricsHookOnHit(t *testing.T) {
 	t.Parallel()
 
 	var hookCalled bool
-	hook := func(_, _, _, _ string, _, _ int, _ time.Duration) {
+	hook := func(_, _, _ string, _, _ int, _ time.Duration) {
 		hookCalled = true
 	}
 

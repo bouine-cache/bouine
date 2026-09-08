@@ -27,12 +27,17 @@ import (
 //
 // Stable.
 type Pool struct {
-	logger  observability.Logger
-	client  *fasthttp.Client
-	Name    string
-	targets []*Target
-	next    atomic.Uint64
-	mu      sync.RWMutex
+	logger observability.Logger
+	client *fasthttp.Client
+	// streamClient serves requests that announced SSE intent
+	// (Accept: text/event-stream): its connections use per-read idle
+	// read deadlines so event streams are not cut by the absolute
+	// fetch deadline (see sse.go).
+	streamClient *fasthttp.Client
+	Name         string
+	targets      []*Target
+	next         atomic.Uint64
+	mu           sync.RWMutex
 
 	// clientConfig holds the resolved connect settings the shared
 	// client was built with. Kept after the pointer/lock fields to
@@ -199,7 +204,11 @@ type PoolConfig struct {
 	// Zero applies a 90s default.
 	MaxIdleConnDuration time.Duration
 	// ResponseHeaderTimeout bounds the wait for origin response headers.
-	// Zero applies a 30s default.
+	// Zero applies a 30s default. Also serves as the default origin wait
+	// inherited by every route on the pool that does not set its own
+	// fetch timeout (see cmd/bouine/cmd.resolveRouteFetchTimeout); the
+	// client no longer carries a client-level read cap, so per-request
+	// deadlines are the only bound.
 	ResponseHeaderTimeout time.Duration
 }
 
@@ -234,12 +243,22 @@ func resolveDefaultInt(v, def int) int {
 // DisableHeaderNamesNormalizing fasthttp Peek misses them and the
 // cache misclassifies freshness and conditional revalidation
 // (http-tests/cache-tests drops to 283/365).
+//
+// ReadTimeout stays 0 (unlimited): fasthttp composes the effective
+// read deadline as min(per-request deadline, client.ReadTimeout), so a
+// non-zero client-level value silently caps every route's fetch
+// timeout at the pool-wide response_header_timeout. The per-request
+// deadlines (cache.Handler.fetchTimeout via DoDeadline / ctx) are the
+// sole, authoritative origin-wait bound; the builder resolves each
+// route's unset fetch_timeout to the pool's response_header_timeout so
+// the historical default still applies. The FastHandler passthrough
+// path passes its own DoTimeout explicitly.
 func newOriginClient(cc clientConfig) *fasthttp.Client {
 	dialer := &net.Dialer{Timeout: cc.dialTimeout, KeepAlive: cc.keepAlive}
 	return &fasthttp.Client{
 		MaxConnsPerHost:     cc.maxConnsPerHost,
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
-		ReadTimeout:         cc.responseHeaderTimeout,
+		ReadTimeout:         0,
 		WriteTimeout:        5 * time.Minute,
 		Dial: func(addr string) (net.Conn, error) {
 			return dialer.Dial("tcp", addr)
@@ -267,6 +286,7 @@ func NewPool(cfg PoolConfig) (*Pool, error) {
 		},
 	}
 	p.client = newOriginClient(p.clientConfig)
+	p.streamClient = newOriginStreamClient(p.clientConfig)
 
 	for _, addr := range cfg.Targets {
 		t, err := newTarget(addr)
@@ -434,16 +454,21 @@ func (p *Pool) ResolvedClientConfig() ClientSettings {
 // target is available, returns an error.
 func (p *Pool) FastClient() *PoolFastClient {
 	return &PoolFastClient{
-		pool:   p,
-		client: p.client,
+		pool:         p,
+		client:       p.client,
+		streamClient: p.streamClient,
 	}
 }
 
 // PoolFastClient implements cache.FastClient by selecting a target
-// from the pool and fetching via fasthttp.Client.
+// from the pool and fetching via fasthttp.Client. Requests that
+// announced SSE intent are routed to the pool's stream client, whose
+// connections carry per-read idle read deadlines instead of the
+// absolute fetch deadline (see sse.go).
 type PoolFastClient struct {
-	pool   *Pool
-	client *fasthttp.Client
+	pool         *Pool
+	client       *fasthttp.Client
+	streamClient *fasthttp.Client
 }
 
 // Do performs an origin fetch via fasthttp.
@@ -463,7 +488,15 @@ func (c *PoolFastClient) Do(ctx context.Context, req *fasthttp.Request, resp *fa
 	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)
 	originStart := time.Now()
 
-	tc := transport.NewClient(c.client)
+	// SSE-intent requests go through the stream client (idle read
+	// deadlines) so the event stream is not cut by the absolute fetch
+	// deadline armed before the response headers (sse.go).
+	fetchClient := c.client
+	if c.streamClient != nil && isSSERequest(req) {
+		fetchClient = c.streamClient
+	}
+
+	tc := transport.NewClient(fetchClient)
 	err := tc.Do(ctx, req, resp)
 	if err != nil {
 		connErrReason := classifyConnError(err)
@@ -505,7 +538,15 @@ func (c *PoolFastClient) DoDeadline(req *fasthttp.Request, resp *fasthttp.Respon
 	defer t.metrics.decActiveConnection(c.pool.Name, t.addr)
 	originStart := time.Now()
 
-	err := c.client.DoDeadline(req, resp, deadline)
+	// SSE-intent requests go through the stream client (per-read idle
+	// read deadlines) so the event stream is not cut by the absolute
+	// deadline fasthttp arms before the response headers (sse.go).
+	fetchClient := c.client
+	if c.streamClient != nil && isSSERequest(req) {
+		fetchClient = c.streamClient
+	}
+
+	err := fetchClient.DoDeadline(req, resp, deadline)
 	if err != nil {
 		connErrReason := classifyConnError(err)
 		t.metrics.incConnectionError(c.pool.Name, t.addr, connErrReason)

@@ -239,9 +239,9 @@ func TestRouteRing_RecordRouteZeroAllocs(t *testing.T) {
 }
 
 // TestRouteRing_CapEnforced verifies that RecordRoute stops creating new
-// route entries after routeRingCap is reached. This is a defense-in-depth
-// bound; the primary fix for route-label cardinality is stripping the
-// inbound X-Bouine-Route header in the metrics middleware.
+// route entries after routeRingCap is reached. Defense-in-depth: ring
+// entries only ever come from router-set route labels (config-derived);
+// the cap guards against future wiring mistakes.
 func TestRouteRing_CapEnforced(t *testing.T) {
 	t.Parallel()
 	r := &RouteRing{}

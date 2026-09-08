@@ -16,6 +16,345 @@ the curated, human-readable summary.
   still set it now fail to load because the config loader uses strict
   YAML field checking — delete the key from your configuration.
 
+## [0.5.12] - 2026-09-08
+
+### Fixed
+- Peer fetch could serve the Vary resolver body as a peer HIT: the
+  follow-up to the cross-variant fix (#630) left a second hole in strong
+  cluster mode. A non-owner that misses locally peer-fetches the key
+  owner for the PRIMARY key with a blank variant assertion (it cannot
+  know the Vary list yet); the owner's only stored entry is the
+  primary-key Vary resolver, whose body belongs to whichever variant
+  filled first. Both of the prior gates skip in this flow: the
+  requester's assertion is blank and the storage codec never serialized
+  `VaryValue` (always empty over the wire), so `servePeerHit`'s
+  recompute could not run. Observed in preprod on the doorman
+  `/content/` route: an `it-IT` request filled from origin, then an
+  `fr-FR` request on another pod got `Content-Language: it-IT` as a
+  peer HIT. Two complementary fixes: the owner never serves a Vary
+  resolver body from a peer fetch (blank `VaryKey`, non-empty
+  `VaryValue` is answered with a miss), and the storage codec now
+  serializes `VaryValue` (version 4) so the cross-variant recompute
+  gate works on peer-delivered objects; v3 blobs decode unchanged
+  (warm-tier entries survive the rolling upgrade). New 3-node
+  integration test sweeps fill-node × request-node crossings and fails
+  on main (PR #641, fa0c1e7).
+
+## [0.5.11] - 2026-09-08
+
+### Fixed
+- Peer fetch could serve another variant's cached body as a HIT: in
+  strong cluster mode a non-owner that misses locally peer-fetches the
+  key's owner, which could return the primary-key Vary resolver (the
+  first fill's body) for a request selecting a different variant — the
+  handler re-checked only freshness, never the Vary dimension. Observed
+  in production on the doorman route, where per-market content differs
+  only in request headers. Two complementary gates close the hole: the
+  requesting node stamps its variant assertion on the peer-fetch RPC
+  (the previously ignored `VaryKey` field) and, on receipt, recomputes
+  the variant dimension for the actual request, rejecting a foreign
+  body as a miss (origin fallback); the peer honors the assertion,
+  missing with 404 when the only stored entry under the key is another
+  variant's or the resolver's, and the resolver entry is stored with a
+  blank `VaryKey` so protocol-strict peers classify it correctly.
+  Regression tests replay the cross-market incident end to end and pin
+  the protocol semantics in both directions; miss-path alloc budget
+  unchanged (PR #630, e98b7da).
+
+### Added
+- `cluster.peer_fetch_concurrency` (default 4, capped at 128): bounds
+  the peer-fetch/peer-put semaphore, previously hardcoded to 4. In
+  strong-mode clusters most cache hits are peer hits (non-owner pods
+  fetch from the key owner), so the semaphore sits on the hot path and
+  its fixed value queued requests behind in-flight fetches, adding tail
+  latency under load; production could not raise it without a code
+  change. Config-loader validation rejects negative and >128 values;
+  the knob and its relationship to `peer_max_conns_per_host` are
+  documented in ADR-0039 (PR #627).
+- Per-route origin timeout: `routes[].cache.fetch_timeout` is now the
+  authoritative origin-wait bound and can exceed the pool-wide
+  `connect.response_header_timeout`. Previously the origin client baked
+  `response_header_timeout` into its `ReadTimeout`, and fasthttp
+  composes the effective read deadline as `min(per-request deadline,
+  client.ReadTimeout)` — silently capping every route at the pool knob
+  (default 30s), so a slow endpoint could never be given more time
+  without raising the wait for every other route on the pool. Routes
+  without an explicit `fetch_timeout` now inherit
+  `connect.response_header_timeout` (same effective default as
+  before); the pool knob is also validated to stay below the 5-minute
+  data-plane safety net, mirroring `fetch_timeout` (ADR-0043, PR #624).
+
+## [0.5.10] - 2026-09-08
+
+### Fixed
+- Vary variants were keyed on the first `Vary` field line only (fasthttp
+  `Map.Get`), so an origin sending `Vary: Accept-Encoding,Accept-Language`
+  plus `Vary: BM-Market` produced a variant key that dropped `BM-Market` —
+  a request differing only in that header was served the wrong market's
+  cached body. RFC 9110 §5.2 makes Vary a list-based field: multi-line
+  values are equivalent to one comma-joined value. The joined read (GetAll)
+  is now used everywhere a Vary value is observed (store keys, star
+  detection already joined, 304 recompute); `MergeHeaders304` replaces
+  `Vary` wholesale instead of writing per-line entries that corrupted
+  stored multi-line values. Miss-path alloc budget unchanged; regression
+  tests cover variant isolation and 304 merge (PR #628, ca4aec4).
+
+## [0.5.9] - 2026-09-08
+
+### Added
+- `listen.read_timeout` config option (default 30s): bounds how long
+  reading a single request's header and body may take on data-plane
+  connections. Previously hard-coded. It is the slowloris defense —
+  raise it for slow mobile clients or large uploads. Validated to stay
+  below the 5-minute data-plane safety-net WriteTimeout, and exposed in
+  the Helm chart values (`config.listen.read_timeout`).
+
+## [0.5.8] - 2026-09-04
+
+### Fixed
+- Data race on shutdown caught by the nightly -race integration run
+  (TestTLS_CertRotation): `PeerFetcher.Close` swapped the bare
+  `pipelineClients` sync.Map field while concurrent Fetch/Put goroutines
+  read it. The client map now lives behind an `atomic.Pointer`;
+  `Close` drops it atomically and post-Close RPCs fail fast with a
+  "fetcher closed" error (callers already fall back to origin).
+  Regression-tested with concurrent Close/Fetch/Put under -race.
+- Nightly conformance job failed on GitHub's transient unauthenticated
+  clone rate limit ("temporarily limiting some unauthenticated
+  downloads"): the cache-tests clone now uses `gh` when available
+  (authenticated, as on Actions runners) and retries plain git up to 3
+  times with a 30s gap.
+- Nightly cluster and dashboard-under-load jobs failed because the
+  self-hosted load-test-k8s runner image is missing `make`: both jobs
+  now self-heal by installing it when absent (the runner user has
+  sudo), keeping the nightly green until the runner image is rebuilt
+  with make baked in — after which the steps become no-ops and can be
+  dropped.
+- `bouine_request_duration_seconds` minted ~9,600 idle series per
+  configured route at startup and attributed every request to
+  `_default`, because the router published the route as a request
+  header the metrics middleware never read (Grafana Cloud showed the
+  metric at ~20% of total scrape cardinality, bouine#607). Attribution
+  now rides process-local fasthttp UserValues and reports the serving
+  route's upstream pool — a small config-bounded set that still answers
+  "which upstream is slow or 5xx-ing" — with pool-less and unmatched
+  traffic landing on `_default` (a static-file route name can no longer
+  leak into the `upstream_pool` label). The duration histogram drops
+  the `source` axis (correlated with `cache_result`; no consumer
+  queries it) and the 2.5/5/10s tail buckets (a cache's latency mass
+  sits far below 1s; hung-fetch tails are already 5xx counts on
+  `bouine_requests_total`), shrinking the histogram footprint ~90%.
+  The dashboard rings keep per-route attribution, so the routes panel
+  loses nothing.
+- Singleflight followers of unbuffered streams (non-hinted SSE and
+  Vary variant-overflow responses) got a 200 with an empty body: the
+  leader streamed unbuffered but still published a body-less result,
+  so followers waited out the leader's entire stream (up to
+  `fetch_timeout`) for nothing — silent data loss for concurrent
+  clients of the same URL. The leader now releases followers at
+  header time with `ErrStreamUnshareable` and each follower fetches
+  its own response outside singleflight (ADR-0042).
+
+### Added
+- Data-integrity regression net for the hot-store ownership bug class
+  (bouine#611): a slow-client body-lifetime race on the standard
+  fasthttp hit path (`ServeRequest` — the path that kept corrupting
+  after the fast path was disabled) and on the Linux epoll reactor hit
+  path; a chaos scenario that validates every payload byte under SIEVE
+  eviction churn with a buffer-reusing origin (working set over a 2 MiB
+  hot budget, `ClusterOptions.HotMaxBytes` knob added to the driver);
+  and load-test scenario §3.7 (payload integrity under eviction churn,
+  50k deterministic 64 KiB payloads, per-request boundary/rotating-probe
+  checks plus sampled full byte compares, zero-tolerance threshold)
+  registered in the nightly suite. All integrity layers verified
+  red-capable: reverting the CloneForStorage fix makes each fail.
+- Server-Sent Events now stream end to end. Requests announcing
+  `Accept: text/event-stream` (the WHATWG client contract) are served
+  as live unbuffered streams — never cached, never singleflight-
+  collapsed, fetch slot released at header time, each event flushed
+  as it arrives — including POST-based SSE (the dominant AI API
+  shape), whose invalidation semantics are preserved (purge at header
+  time on 2xx/3xx). A dedicated origin-pool client converts the
+  absolute read deadline into per-read idle semantics (10-minute
+  budget) and the H1 fall-through write path re-arms its write
+  deadline per Write, so live streams survive indefinitely while
+  dead peers and stalled clients are still cut. Non-hinted SSE
+  responses stream unbuffered too but stay bounded by `fetch_timeout`
+  (ADR-0042). Also fixes two latent bugs the work surfaced:
+  `doFetchStream` dropped request bodies entirely, and `streamBypass`
+  delivered streamed bodies in 4 KiB batches.
+- The request-duration histogram is exposed natively (client_golang
+  dual representation): classic `_bucket` series stay for
+  layout-agnostic consumers, while the sparse-bucket native form lets
+  Grafana Cloud / Mimir `histogram_quantile` work without
+  materializing bucket series server-side. Resolution factor 1.1,
+  capped at 80 sparse buckets with a 1h minimum reset window
+  (adversarially probed: 10k distinct latencies hold the spread at 44
+  buckets). The runbook documents the `metric_relabel_configs` recipe
+  that drops the classic bucket series from scrapes and the one-field
+  rollback. Zero-alloc gates `BenchmarkGate_HistogramObserve_Native`
+  and `..._Distinct` pin 0 allocs/op; enabling the feature exposed a
+  pre-existing `strconv.Itoa` per hit in `RecordHit`, now replaced by
+  the existing statusStrings table.
+
+### Changed
+- The `method` label is gone from the data-plane RED metrics: no
+  dashboard or SLO query used it, response bytes and status already
+  answer everything consumers plot, and dropping the axis shrinks the
+  pre-resolved slot table (the reactor metrics ring record is now
+  entirely stable handler-owned strings). The access log keeps the
+  method: logs are per-request, not label spaces.
+- Go toolchain bumped from 1.27.0 to 1.27.1 (go.mod, CI workflow
+  envs, digest-pinned `golang:1.27.1-bookworm` build image, prek
+  GO_VERSION_STAMP refreshed) and all direct and indirect dependencies
+  rolled forward.
+
+## [0.5.7] - 2026-09-03
+
+### Fixed
+- Hot-store entries aliased the caller's body and header buffers when
+  the slab was disabled (the default): `Put` stored the caller's
+  `*Object` as-is, so any post-Put mutation or buffer reuse on the
+  origin/revalidation/peer-promote paths changed the bytes an in-flight
+  fast-path hit writev was serving — clients received well-framed 200
+  responses with mutated or reused body bytes (the preprod front-office
+  `Cannot read properties of undefined (reading 'forEach')` 500s on
+  `/content/page/*`). `Put` now always stores a cache-owned clone
+  (`Object.CloneForStorage`: copied body, deep-cloned header map), so
+  every body a hit can alias is immutable-after-store and GC-pinned
+  for the life of the write. The hit path stays zero-allocation; the
+  copy lands on the miss path only. Regression-tested with a
+  slow-reading client racing concurrent Put-overwrite, SIEVE eviction
+  pressure, and caller buffer reuse.
+
+## [0.5.6] - 2026-09-03
+
+### Added
+- Helm chart metadata controls (PR #602): global `commonLabels` /
+  `commonAnnotations` applied to every rendered resource, and
+  resource-specific labels/annotations for the data-plane Service
+  (plus `loadBalancerSourceRanges` and `externalTrafficPolicy` when
+  `type: LoadBalancer`), StatefulSet, HPA, NetworkPolicy, PDB,
+  PrometheusRule, ServiceMonitor, Ingress, and ServiceAccount. A new
+  dedicated `adminService` (ClusterIP by default) splits the admin
+  plane (metrics, pprof, `/drain`, admin API) off the data-plane
+  Service, so exposing the data plane via LoadBalancer can never
+  expose the admin surface. With `autoscaling.enabled: true` the
+  StatefulSet no longer renders `spec.replicas` — the HPA owns the
+  replica count; GitOps users (e.g. ArgoCD) should add an
+  `ignoreDifferences` entry for `/spec/replicas`.
+- `admin.idle_timeout` (default 300s, PR #606): keep-alive idle
+  timeout for admin-server connections, including cluster peer RPCs
+  (`/v1/peer/*`). Previously a hard-coded 30s.
+
+### Fixed
+- Cluster peer RPC stale-connection failures (PR #606): the admin
+  server's 30s idle timeout reaped keep-alive connections while peer
+  clients still held them pooled, so the next peer-fetch/peer-put
+  failed with EOF or broken pipe ("error in PipelineClient: EOF" in
+  preprod) and fell back to origin, spiking latency and wasting origin
+  bandwidth; `fasthttp.PipelineClient` does not retry requests that
+  die on a pooled connection. The fix orders the timeouts instead of
+  papering over them with retries: the peer client idle default stays
+  at 120s, the admin server default rises to 300s so idle peer
+  connections survive quiet periods, and config validation rejects any
+  explicit `cluster.peer_max_idle_conn_duration >= admin.idle_timeout`
+  at load time (plus negative values for either) so operator overrides
+  cannot reintroduce the race.
+- WAL async drain wrote one O_DSYNC `Write` syscall per entry, so
+  draining a full sync channel (4096 entries) at Close issued 4096
+  synchronous writes — slow enough on saturated disks to exceed test
+  timeouts (CI hung in `TestAsyncDropOnFull` /
+  `TestDroppedEntriesResets` cleanup) and avoidable syscall overhead in
+  production. Each drain batch is now coalesced into a single durable
+  Write on a reused ~168 KiB scratch buffer. The WAL write-duration
+  metrics test is also made deterministic via `Sync()` instead of a
+  fixed sleep racing the sync-loop ticker.
+
+### Changed
+- Helm: the `podAntiAffinity` values key (added in 0.5.3) is removed
+  in favor of the raw `affinity` values (explicit affinity takes
+  precedence); templates are normalized on `with` statements instead
+  of mixed `if`/`with` logic.
+
+## [0.5.5] - 2026-09-02
+
+### Added
+- **H1 epoll reactor** (`experimental.h1_reactor`, Linux-only, requires
+  `experimental.h1_fast_path`, default off; ADR-0041): a
+  single-goroutine event loop per plaintext listener that serves
+  batches of cache hits from one `epoll_wait` wakeup — parse, cache
+  lookup, and `writev` flush inline on raw fds, with no goroutine
+  park/unpark per request. Gate benchmark: 370–405 ns and 0 allocs/op
+  per reactor hit. Non-hit traffic (miss, conditional, range, pipelined
+  bodies, oversize headers, malformed input) hands off *before any
+  response byte is written* to the existing blocking parser with the
+  buffered bytes replayed, so fall-through framing, smuggling 400s, and
+  SWR semantics are shared, not reimplemented. Bounded by design: 4096
+  connections per loop (overflow falls back to the blocking path), a
+  bounded handoff-spawn queue, and the loop goroutine as sole owner of
+  the epoll set. TLS listeners are never reactor-served. Config
+  validation rejects `h1_reactor` without `h1_fast_path` at load time.
+  The reactor is enabled in the nightly load-test configuration, so
+  benchmark numbers from 0.5.4 and earlier are not comparable.
+- Reactor steady-state safety nets, each observable per runbook
+  `docs/runbook/51-h1-reactor.md`: a 5-minute write-timeout sweep drops
+  clients that stop reading mid-response (they would otherwise pin the
+  per-loop connection budget); an idle sweep closes keep-alive
+  connections at `listen.idle_timeout` parity with the blocking path;
+  async hit metrics use a per-loop ring (drop-newest on overflow,
+  counted and logged at shutdown) so the metric hook is never serial
+  loop time; and stuck-writer, spawner-saturation, and shutdown-storm
+  regression tests pin the contracts.
+
+### Fixed
+- `request.strip_prefix` on proxied routes was parsed and validated but
+  never applied since the fasthttp-native migration (v0.5.0): origins
+  received the full prefixed path (issue #595). The stripped URI is now
+  written at every origin-bound request site (foreground and streaming
+  miss, bypass, foreground and SWR-background revalidation,
+  refresh-before-expiry, POST invalidation), while cache keys, ban
+  matching, `X-Bouine-Path`, and `Location` keep the original path per
+  the documented contract. `stripPrefixFastHTTP` (static routes) now
+  strips path and query together, fixing a dropped query string; the
+  boundary rules live in one exported helper shared by both sites.
+- Nightly load-test runner: the k6 install had failed with "Permission
+  denied" on every nightly since Aug 9 (23 consecutive red runs, no
+  performance baseline since the fast path landed) because the container
+  runs as uid 1001 against a root-owned `/usr/local/bin`. The install
+  now uses sudo and hands ownership to the runner user; a prerequisites
+  check fails fast with a clear message.
+- Nightly load-test suite reliability: the load-gen container needed
+  bash for its scenario drivers, its memory limit OOM-killed every k6
+  scenario, it could not write to the `/results` bind mount, and
+  compose reused stale per-project images instead of the built ones —
+  all now fixed; the restored origin Dockerfile needed its fasthttp
+  dependency.
+
+### Changed
+- Reactor loop cost work (all measured, gates and cache-tests
+  conformance unchanged): hit responses flush via one zero-copy,
+  zero-alloc `writev` over the fast path's `net.Buffers` with
+  exact-offset resume on partial writes (previously a full-body memcpy
+  per hit); redundant `epoll_ctl` re-arming is elided by tracking
+  per-connection interest; four O(NHeaders) header re-scans and the
+  ~3.3 KB per-request struct memset collapse into a fused header-parse
+  pass with a ScanFlags bitmask; hits within a cached wall-clock second
+  reuse a fully serialized response head stored on the object.
+  FastPath_Hit gate: 181→129 ns (−29%, benchstat p=0.002).
+- Reactor keep-alive RTT: a bounded adaptive busy-poll after each
+  served batch cut single-client keep-alive p50 from 41.7 to 10.2 µs
+  (−75%) and lifted sustained 16-client throughput from 138k to 160k
+  RPS (+16%) at equal CPU, with measured zero CPU ticks over an idle
+  2 s window (not a busy loop). The spin budget defaults to 80 and is
+  operator-overridable via `BOUINE_REACTOR_SPIN_BUDGET` (0 disables) for
+  A/B and field rollback.
+- The nightly scenario set is trimmed to fit the job budget: the
+  20-minute `3.4_working_set_overflow` eviction scenario and the
+  duplicated 50k/100k ramp legs are cut from the nightly default
+  (restorable ad hoc via `SCENARIOS`/`RATES_OVERRIDE`), and a
+  competitor's k6 threshold no longer fails the suite.
+
 ## [0.5.4] - 2026-09-01
 
 ### Added
@@ -103,6 +442,58 @@ the curated, human-readable summary.
 - h1parser clock now uses `platform.CoarseNow` on Linux, matching the
   dataplane middleware (~2-4ns vs ~25-40ns per call).
 
+### Added
+- Experimental epoll reactor for batch cache-hit serving
+  (`experimental.h1_reactor`, Linux only, requires `h1_fast_path`,
+  default off; ADR-0041). One goroutine per listener multiplexes all
+  hit-path connections — one `epoll_wait` wakeup serves a batch
+  instead of one goroutine park/unpark per request, which is the
+  residual structural gap to nginx's worker event loop. Misses,
+  conditional requests, ranges, pipelined bodies, and oversize
+  headers hand off to the existing blocking parser path unchanged.
+  Enabled in the loadtest configuration as the measured increment on
+  top of the blocking-path fast-path numbers the nightly runner
+  established; if nightly numbers don't move, the flag goes back off.
+
+### Fixed (reactor review round)
+- Handed-off connections no longer leak their fd: the blocking-parser
+  goroutine spawned at handoff now closes the connection when Serve
+  returns (previously every miss/handoff pinned its fd in CLOSE_WAIT
+  forever, burning the fd table at miss-heavy traffic).
+- Reactor shutdown is wired: ctx cancellation closes the listener and
+  stops the loop, Listener.Shutdown drains in-flight handed-off
+  requests via a WaitGroup, and the accept loop survives transient
+  Accept errors (EMFILE, ECONNABORTED) instead of dying permanently —
+  previously the loop spun forever after cancellation and the shutdown
+  sequencer closed the store under live handed-off requests.
+- The reactor's idle budget is now per-request (measured from the
+  request's first byte), closing the slowloris hole where a client
+  dribbling one byte per interval kept resetting a last-byte-based
+  clock forever.
+- The idle sweep no longer kills connections that are mid-flush to a
+  slow client: writers are governed by the write safety net, not the
+  read idle budget.
+- `Connection: close` on a cache hit is honored: the fast path emits
+  the close trailer (RFC 9110 §9.6) and both the blocking parser and
+  the reactor close the connection after the response instead of
+  parking it for the full 120s idle window.
+- The reactor's first hit no longer pays a redundant `epoll_ctl MOD`:
+  registration records the armed interest mask, so the common
+  full-flush case issues zero `epoll_ctl` syscalls per request, as the
+  code comments always claimed.
+- Fast-path hits reuse a per-second composed response head cached on
+  the object: status line + static + dynamic headers are a pure
+  function of the object, unix second, and composition inputs, so hits
+  inside a cached second skip per-hit header appends entirely (the
+  last real per-hit CPU in the fast path after the parser work).
+- The reactor's per-hit scratch re-zero (~4 KiB copy per request,
+  duplicating the reset parseBuffer already does) and a dead
+  never-read `writeVecOffs` field were removed.
+- The two broken epoll tests were fixed or deleted: the keep-alive
+  test actually serves two hits on one connection now, and the
+  miss-handoff test that asserted nothing is replaced by one that
+  proves the handoff serves the miss and closes the connection.
+
 ### Changed
 - `bench/loadtest/config/bouine.yaml` enables
   `experimental.h1_fast_path` so proxy comparisons exercise the
@@ -117,6 +508,10 @@ the curated, human-readable summary.
   ServiceMonitor, whose default scrape interval relaxed from 15s to
   60s; default topologySpreadConstraints now use ScheduleAnyway with
   both zone and hostname keys.
+- `request_duration_seconds` no longer enables Prometheus
+  native-histogram bucketing: the sparse-bucket math cost per Observe
+  was called out in the hit-path plan, and no dashboard queries native
+  histograms (all PromQL uses classic `_bucket` series).
 
 ## [0.5.2] - 2026-08-30
 
@@ -755,7 +1150,13 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.11...HEAD
+[0.5.11]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.11
+[0.5.10]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.10
+[0.5.9]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.9
+[0.5.8]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.8
+[0.5.6]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.6
+[0.5.5]: https://github.com/bouine-cache/bouine/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/bouine-cache/bouine/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.3
 

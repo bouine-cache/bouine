@@ -32,6 +32,23 @@ const maxFetchTimeout = 5 * time.Minute
 // stays coherent with the Retry-After: 1 sent to shed clients.
 const maxFetchWaitTimeout = 1 * time.Second
 
+// defaultAdminIdleTimeout mirrors admin.DefaultAdminIdleTimeout (300s).
+// Duplicated because config is a leaf package and cannot import
+// internal/admin. If you change one, change the other.
+const defaultAdminIdleTimeout = 300 * time.Second
+
+// MaxPeerFetchConcurrency mirrors cluster.MaxPeerFetchConcurrency (128).
+// Duplicated because config is a leaf package and cannot import
+// internal/cluster. If you change one, change the other.
+const MaxPeerFetchConcurrency = 128
+
+// maxReadTimeout is the upper bound for listen.read_timeout. It must
+// stay strictly below internal/server.safetyNetWriteTimeout so the
+// safety net, not the read deadline, bounds a request's total lifetime.
+// Duplicated across packages because the layering rules (config is a
+// leaf) prevent a shared import. If you change one, change the other.
+const maxReadTimeout = 5 * time.Minute
+
 // Defaults returns a Config populated with safe defaults. The
 // "admin: :9000" listener is enabled so the daemon is operable even
 // with an empty config file.
@@ -179,6 +196,22 @@ func (c *Config) Validate() error {
 
 	if c.Listen.IdleTimeout < 0 {
 		return fmt.Errorf("config: listen.idle_timeout must be >= 0, got %v", c.Listen.IdleTimeout)
+	}
+
+	if c.Listen.ReadTimeout < 0 {
+		return fmt.Errorf("config: listen.read_timeout must be >= 0, got %v", c.Listen.ReadTimeout)
+	}
+	if c.Listen.ReadTimeout >= maxReadTimeout {
+		return fmt.Errorf("config: listen.read_timeout must be < %v (data plane safety-net WriteTimeout), got %v", maxReadTimeout, c.Listen.ReadTimeout)
+	}
+
+	// The reactor multiplexes fast-path hit serving; without the fast
+	// path it has nothing to serve and would silently no-op. The
+	// listener wiring also gates on H1FastPath, so reject the
+	// combination early at load time instead of logging a warning at
+	// startup.
+	if c.Experimental.H1Reactor && !c.Experimental.H1FastPath {
+		return errors.New("config: experimental.h1_reactor requires experimental.h1_fast_path")
 	}
 
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
@@ -515,6 +548,15 @@ func validatePoolDurations(p *UpstreamPool) error {
 	if p.Connect.ResponseHeaderTimeout < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be >= 0, got %v", p.Name, p.Connect.ResponseHeaderTimeout)
 	}
+	// This knob is the fallback origin-fetch bound for every route on the
+	// pool that does not set its own cache.fetch_timeout. The same
+	// safety-net ordering that applies to route fetch_timeout (the data
+	// plane's 5-minute WriteTimeout must be able to outlive the fetch)
+	// must hold here, or an inherited default aborts the client
+	// connection before the origin wait gives up.
+	if p.Connect.ResponseHeaderTimeout >= maxFetchTimeout {
+		return fmt.Errorf("config: upstream pool %q connect.response_header_timeout must be < %v (data plane safety-net WriteTimeout), got %v", p.Name, maxFetchTimeout, p.Connect.ResponseHeaderTimeout)
+	}
 	if p.Connect.MaxConnections < 0 {
 		return fmt.Errorf("config: upstream pool %q connect.max_connections must be >= 0, got %v", p.Name, p.Connect.MaxConnections)
 	}
@@ -597,6 +639,35 @@ func (c *Config) validatePeerFetchConfig() error {
 	if c.Cluster.PeerMaxIdleConnDuration < 0 {
 		return fmt.Errorf("config: cluster.peer_max_idle_conn_duration must be >= 0 (0 = default 120s), got %v",
 			c.Cluster.PeerMaxIdleConnDuration)
+	}
+	if c.Cluster.PeerFetchConcurrency < 0 {
+		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be >= 0 (0 = default 4), got %d",
+			c.Cluster.PeerFetchConcurrency)
+	}
+	if c.Cluster.PeerFetchConcurrency > MaxPeerFetchConcurrency {
+		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be <= %d, got %d",
+			MaxPeerFetchConcurrency, c.Cluster.PeerFetchConcurrency)
+	}
+	if c.Admin.IdleTimeout < 0 {
+		return fmt.Errorf("config: admin.idle_timeout must be >= 0 (0 = default 300s), got %v",
+			c.Admin.IdleTimeout)
+	}
+	// The peer client must close idle connections before the admin
+	// server reaps them; otherwise the first peer RPC on a
+	// server-reaped connection fails with EOF or broken pipe and the
+	// fetch falls back to origin. Only enforced when both values are
+	// explicitly set: the built-in defaults (120s client / 300s server)
+	// already satisfy the ordering.
+	if id := c.Cluster.PeerMaxIdleConnDuration; id > 0 {
+		adminIdle := c.Admin.IdleTimeout
+		if adminIdle <= 0 {
+			adminIdle = defaultAdminIdleTimeout
+		}
+		if id >= adminIdle {
+			return fmt.Errorf(
+				"config: cluster.peer_max_idle_conn_duration (%v) must be below admin.idle_timeout (%v): the client must close idle peer connections before the admin server reaps them, or peer RPCs fail with EOF/broken pipe",
+				id, adminIdle)
+		}
 	}
 	return nil
 }

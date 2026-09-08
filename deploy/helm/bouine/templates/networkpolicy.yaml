@@ -5,6 +5,7 @@ metadata:
   name: {{ include "bouine.fullname" . }}
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+  {{- include "bouine.annotations" (list . .Values.networkPolicy.annotations) | nindent 2 }}
 spec:
   podSelector:
     matchLabels:

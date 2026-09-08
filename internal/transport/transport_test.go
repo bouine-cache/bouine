@@ -3,6 +3,7 @@ package transport_test
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,4 +108,39 @@ func TestNewServer(t *testing.T) {
 	ts := transport.NewServer(fs)
 	require.NotNil(t, ts)
 	require.NotNil(t, ts.Server)
+}
+
+// TestPipelineDo_NoRetryOnTimeout pins that timeouts are never retried:
+// a timed-out request may have been processed by the peer, and a retry
+// could duplicate a non-idempotent side effect.
+func TestPipelineDo_NoRetryOnTimeout(t *testing.T) {
+	var hits atomic.Int64
+	ln := fasthttputil.NewInmemoryListener()
+	srv := &fasthttp.Server{
+		Handler: func(ctx *fasthttp.RequestCtx) {
+			hits.Add(1)
+			time.Sleep(50 * time.Millisecond)
+			ctx.SetStatusCode(fasthttp.StatusOK)
+		},
+	}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Shutdown() }()
+
+	pc := &fasthttp.PipelineClient{
+		Addr: "example.com:80",
+		Dial: func(addr string) (net.Conn, error) { return ln.Dial() },
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	req := fasthttp.AcquireRequest()
+	req.SetRequestURI("http://example.com/slow")
+	resp := fasthttp.AcquireResponse()
+	defer func() {
+		fasthttp.ReleaseRequest(req)
+		fasthttp.ReleaseResponse(resp)
+	}()
+	err := transport.PipelineDo(ctx, pc, req, resp)
+	require.Error(t, err)
+	require.Equal(t, int64(1), hits.Load(), "timeout must not be retried")
 }

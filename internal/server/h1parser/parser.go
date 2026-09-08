@@ -32,17 +32,17 @@ import (
 // this fall through to the fallback handler.
 const readBufferSize = 16 * 1024
 
-// writeRefreshThreshold is the minimum remaining write-deadline window
-// below which serveHit re-arms the safety-net write deadline. Mirrors
-// the read-deadline refresh strategy in Serve: one setsockopt per
-// threshold interval instead of one per request. Each hit response is
-// guaranteed at least this much write budget, and the full safety-net
-// window (p.writeTime, 5 minutes) is far larger.
 // refreshThreshold is the minimum remaining read-deadline window below
 // which Serve re-arms the read deadline: one setsockopt per interval
 // instead of one per request.
 const refreshThreshold = 2 * time.Second
 
+// writeRefreshThreshold is the minimum remaining write-deadline window
+// below which serveHit re-arms the safety-net write deadline. Mirrors
+// the read-deadline refresh strategy: one setsockopt per threshold
+// interval instead of one per request. Each hit response is guaranteed
+// at least this much write budget, and the full safety-net window
+// (p.writeTime, 5 minutes) is far larger.
 const writeRefreshThreshold = time.Minute
 
 // Parser parses HTTP/1.1 requests from a net.Conn and dispatches to
@@ -51,11 +51,17 @@ type Parser struct {
 	fastPath      api.FastPathHandler
 	fallback      fasthttp.RequestHandler
 	nowFunc       func() time.Time
-	metricsHook   func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)
+	metricsHook   func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)
 	smugglingHook func()
-	scheme        string
-	idleRead      time.Duration
-	writeTime     time.Duration
+	// metricsRing, when non-nil, redirects the reactor's hit metrics
+	// through the async SPSC ring (reactor_metrics.go). Set by the
+	// reactor transport (newReactorLoop) only — the blocking path
+	// always calls metricsHook directly, and tests that want sync
+	// observation leave it nil.
+	metricsRing *metricsRing
+	scheme      string
+	idleRead    time.Duration
+	writeTime   time.Duration
 }
 
 // New creates a Parser. fastPath may be nil — when nil, all requests
@@ -100,7 +106,7 @@ func WithScheme(scheme string) Option {
 }
 
 // WithMetricsHook sets a callback invoked after each fast-path hit.
-func WithMetricsHook(fn func(method, route, cacheResult, source string, status, bytesOut int, duration time.Duration)) Option {
+func WithMetricsHook(fn func(pool, cacheResult, source string, status, bytesOut int, duration time.Duration)) Option {
 	return func(p *Parser) { p.metricsHook = fn }
 }
 
@@ -253,23 +259,33 @@ func (p *Parser) Serve(conn net.Conn) error {
 		}
 
 		// Miss path: call the fallback handler with a fasthttp.RequestCtx.
-		close, ftErr := p.handleFallThrough(conn, req, excess)
-		if ftErr != nil {
-			return ftErr
-		}
-		if close {
-			return nil
-		}
-		// Re-arm the read deadline for the next keep-alive request.
-		deadline = p.nowFunc().Add(p.idleRead)
-		if err := conn.SetReadDeadline(deadline); err != nil {
+		if res, err := p.serveFastMiss(conn, req, excess, &deadline, &writeDeadline); res == serveClose || err != nil {
 			return err
 		}
-		// handleFallThrough cleared the OS write deadline so the fallback
-		// handler could manage its own timeouts; reset the tracker so the
-		// next hit re-arms it.
-		writeDeadline = time.Time{}
 	}
+}
+
+// serveFastMiss runs the blocking fallback for a request the fast path
+// declined, then re-arms the parser's deadline ownership for the next
+// keep-alive request. Returns serveClose when the connection ends.
+func (p *Parser) serveFastMiss(conn net.Conn, req *api.RawRequest, excess []byte, deadline *time.Time, wd *time.Time) (serveResult, error) {
+	close, ftErr := p.handleFallThrough(conn, req, excess)
+	if ftErr != nil {
+		return serveClose, ftErr
+	}
+	if close {
+		return serveClose, nil
+	}
+	// Re-arm the read deadline for the next keep-alive request.
+	*deadline = p.nowFunc().Add(p.idleRead)
+	if err := conn.SetReadDeadline(*deadline); err != nil {
+		return serveClose, err
+	}
+	// handleFallThrough cleared the OS write deadline so the fallback
+	// handler could manage its own timeouts; reset the tracker so the
+	// next hit re-arms it.
+	*wd = time.Time{}
+	return serveContinue, nil
 }
 
 // serveFastHit attempts the fast path for a parsed request. A hit serves
@@ -291,10 +307,17 @@ func (p *Parser) serveFastHit(conn net.Conn, req *api.RawRequest, excess []byte,
 	}
 	if p.metricsHook != nil {
 		dur := p.nowFunc().Sub(now)
-		p.metricsHook(req.Method, resp.Route, resp.CacheResult,
+		p.metricsHook(resp.Pool, resp.CacheResult,
 			resp.Source, resp.StatusCode, resp.BytesOut, dur)
 	}
+	closeConn := resp.CloseConn
 	p.fastPath.Release(resp)
+	if closeConn {
+		// The request asked for Connection: close (RFC 9110 §9.6) and
+		// the serialized response ended with "Connection: close" — the
+		// connection must not be reused after this response.
+		return serveClose, nil
+	}
 	if len(excess) == 0 {
 		return serveContinue, nil
 	}
@@ -368,8 +391,38 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scra
 		}
 	}
 
+	req, fallThrough, excess, err := p.parseBuffer(buf, headerEnd, scratch)
+	if err != nil || fallThrough {
+		return req, fallThrough, excess, err
+	}
+	return req, false, excess, nil
+}
+
+// parseBuffer parses one request from a fully-read header block. It is
+// the parser half of parseRequest, shared with the reactor: the reactor
+// accumulates bytes itself (raw non-blocking reads) and calls this once
+// the header terminator is present. headerEnd is the index just past
+// the \r\n\r\n terminator, or -1 when the buffer ended at EOF without
+// one. The returned request aliases scratch and buf and is valid only
+// until the next parse call.
+func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest) (*api.RawRequest, bool, []byte, error) {
 	req := scratch
-	*req = api.RawRequest{Scheme: p.scheme}
+	// Soft reset: assign the scalar fields instead of zeroing the
+	// whole struct — the [100]RawHeader array (~3.3 KB) is not read
+	// past NHeaders by any consumer, and the struct-literal assignment
+	// would memset it plus evict ~56 cache lines the header writes
+	// immediately refill. parseHeaders re-derives every flag field, so
+	// clearing them here is unnecessary work.
+	req.Method = ""
+	req.Path = ""
+	req.Query = ""
+	req.Host = ""
+	req.HTTPVersion = ""
+	req.CacheControlRaw = ""
+	req.ScanFlags = 0
+	req.NHeaders = 0
+	req.ConnectionClose = false
+	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
 	}
@@ -391,13 +444,34 @@ func (p *Parser) parseRequest(conn net.Conn, readBuf *[readBufferSize]byte, scra
 	return req, false, excess, nil
 }
 
-// findHeaderEnd searches for \r\n\r\n in buf.
+// findHeaderEnd searches for the \r\n\r\n terminator in buf.
 func findHeaderEnd(buf []byte) int {
 	idx := bytes.Index(buf, []byte("\r\n\r\n"))
 	if idx < 0 {
 		return -1
 	}
 	return idx + 4
+}
+
+// headerTermOverlap is how far before the current buffer end a
+// terminator search must resume after a miss: a terminator that began
+// in the last len-1 bytes of the previous segment could still
+// complete in the next one. Searching from rLen-overlap is O(1)
+// resumption instead of rescanning consumed bytes per read.
+const headerTermOverlap = len("\r\n\r\n") - 1
+
+// findHeaderEndFrom searches for the \r\n\r\n terminator in buf,
+// starting at byte offset from. Callers that have already searched
+// buf[:from] pass the previously searched length so multi-segment
+// accumulation stays O(n) overall instead of O(n²) rescan per read.
+func findHeaderEndFrom(buf []byte, from int) int {
+	if from < len(buf)-1 {
+		if idx := bytes.Index(buf[from:], []byte("\r\n\r\n")); idx >= 0 {
+			return from + idx + 4
+		}
+		return -1
+	}
+	return findHeaderEnd(buf)
 }
 
 // parseRequestLine parses the first line: "METHOD SP PATH SP VERSION\r\n".
@@ -441,7 +515,13 @@ func parseRequestLine(buf []byte, req *api.RawRequest) error {
 	return nil
 }
 
-// parseHeaders parses header lines from buf, starting after the request line.
+// parseHeaders parses header lines from buf, starting after the
+// request line. The single pass also derives everything downstream
+// consumers need — Host (first wins), Cache-Control raw value (last
+// wins), scan flags (conditional/precondition/TE/CL/duplicate-CL/
+// Pragma: no-cache, per api.ScanFlagForHeader), and the Connection
+// close token — so no consumer re-scans the header array on the hit
+// path (the fused scan, W2 of docs/plans/h1-reactor-perf-round-4.md).
 func parseHeaders(buf []byte, req *api.RawRequest) error {
 	pos := skipRequestLine(buf)
 
@@ -471,14 +551,31 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 		pos = lineEnd + 2
 	}
 
-	for i := 0; i < req.NHeaders; i++ {
-		if api.EqualFold(req.Headers[i].Key, "Host") {
-			req.Host = req.Headers[i].Value
-			break
+	// Connection: close detection (RFC 9110 §7.6.1/§9.6): the request
+	// asked to terminate the connection after the response. The flag is
+	// read by the fast path (Connection trailer + CloseConn) and by
+	// Serve to leave its keep-alive loop after a hit. appendHeader sets
+	// the flag when any Connection header carries a close token (the
+	// !ConnectionClose guard skips already-decided requests), so it
+	// needs no reset here; a request with no Connection header at all
+	// leaves the soft reset's false in place.
+	return nil
+}
+
+// connectionCloseValue reports whether a Connection header value
+// contains a "close" token (case-insensitive, comma-separated list per
+// RFC 9110 §7.6.1). Zero allocation — tokens are subslices of the
+// header value, which itself aliases the read buffer.
+func connectionCloseValue(val string) bool {
+	if val == "" {
+		return false
+	}
+	for _, token := range splitHeaderTokens(val) {
+		if api.EqualFold(token, "close") {
+			return true
 		}
 	}
-
-	return nil
+	return false
 }
 
 // skipRequestLine advances past the first \r\n in buf.
@@ -491,30 +588,24 @@ func skipRequestLine(buf []byte) int {
 }
 
 // smugglingDetected checks for HTTP request smuggling indicators per
-// RFC 9110 §6.6.2 and AGENTS.md §6.
+// RFC 9110 §6.6.2 and AGENTS.md §6: CL+TE together, or a duplicate
+// Content-Length. Both facts were derived by the parser's fused scan
+// (FlagHasCL / FlagHasTE / FlagDuplicateCL); hand-built requests that
+// skip RecomputeScanFlags must call it first.
 func smugglingDetected(req *api.RawRequest) bool {
-	var hasCL, hasTE bool
-	var clCount int
-	for i := 0; i < req.NHeaders; i++ {
-		h := &req.Headers[i]
-		if api.EqualFold(h.Key, header.ContentLength) {
-			clCount++
-			hasCL = true
-		}
-		if api.EqualFold(h.Key, header.TransferEncoding) {
-			hasTE = true
-		}
-	}
-	if hasCL && hasTE {
+	f := req.ScanFlags
+	if f&api.FlagHasCL != 0 && f&api.FlagHasTE != 0 {
 		return true
 	}
-	if clCount > 1 {
-		return true
-	}
-	return false
+	return f&api.FlagDuplicateCL != 0
 }
 
-// appendHeader parses a single header line and appends it to req.
+// appendHeader parses a single header line, appends it to req, and
+// folds the scan-flag/Host/Cache-Control/Connection-close derivation
+// into the same pass (W2: no consumer re-scans the header array).
+// Header-name dispatch is length-guarded before EqualFold: every
+// matched name has a distinct length, so the common non-matching
+// header pays only a length compare, not a case-insensitive compare.
 func appendHeader(req *api.RawRequest, line []byte) {
 	colon := 0
 	for colon < len(line) && line[colon] != ':' {
@@ -536,6 +627,30 @@ func appendHeader(req *api.RawRequest, line []byte) {
 		Value: value,
 	}
 	req.NHeaders++
+
+	// Decide from the pre-merge flag state (first-Host-wins reads
+	// FlagHostSeen as "was a Host already recorded"), then merge this
+	// header's flags — merging first would make every Host look like
+	// a duplicate. Duplicate Content-Length is per-request state no
+	// single-header helper can derive: the second CL sets the flag,
+	// matching RecomputeScanFlags' saturated count (2+ duplicates are
+	// smuggling either way).
+	flags := api.ScanFlagForHeader(key, value)
+	hostSeen := req.ScanFlags&api.FlagHostSeen != 0
+	if flags&api.FlagHasCL != 0 && req.ScanFlags&api.FlagHasCL != 0 {
+		flags |= api.FlagDuplicateCL
+	}
+	req.ScanFlags |= flags
+	switch {
+	case flags&api.FlagHostSeen != 0 && !hostSeen:
+		req.Host = value
+	case api.EqualFold(key, header.CacheControl):
+		// Last Cache-Control wins, matching the pre-fusion scan
+		// (each occurrence overwrote ccRaw in header order).
+		req.CacheControlRaw = value
+	case flags&api.FlagHasConnection != 0 && !req.ConnectionClose:
+		req.ConnectionClose = connectionCloseValue(value)
+	}
 }
 
 // serveHit writes the fast path response to the connection via
@@ -557,14 +672,6 @@ func (p *Parser) serveHit(conn net.Conn, resp *api.FastPathResponse, now time.Ti
 	return err
 }
 
-// handleFallThrough serves a miss-path request via the fallback
-// fasthttp.RequestHandler. It constructs a *fasthttp.RequestCtx from
-// the parsed RawRequest, calls the handler, and writes the response
-// to the connection.
-//
-// Returns (close, err). When close is true the caller should return
-// from the keep-alive loop — the client requested Connection: close
-// or the response indicates the connection should be closed.
 // handleFallThrough serves a miss-path request via the fallback
 // fasthttp.RequestHandler. Instead of copying pre-buffered bytes into the
 // ctx and truncating bodies that span multiple TCP reads, it replays the
@@ -664,11 +771,21 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 		ctx.Response.Header.SetConnectionClose()
 	}
 
-	// Write the response to the connection.
+	// Write the response to the connection. Streamed responses (body
+	// set via SetBodyStreamWriter — SSE, unbuffered passthrough) manage
+	// their own lifetime: an absolute write deadline would cut every
+	// long-lived stream at p.writeTime. Wrap the conn so each Write
+	// re-arms the deadline instead (idle semantics): a stream that keeps
+	// writing lives as long as it flows; a client that stops reading is
+	// still dropped after one idle budget, preserving the slowloris net.
+	writeConn := conn
+	if ctx.Response.IsBodyStream() {
+		writeConn = &idleWriteConn{Conn: conn, budget: p.writeTime}
+	}
 	if err := conn.SetWriteDeadline(p.nowFunc().Add(p.writeTime)); err != nil {
 		return false, err
 	}
-	if _, err := ctx.Response.WriteTo(conn); err != nil {
+	if _, err := ctx.Response.WriteTo(writeConn); err != nil {
 		return false, err
 	}
 
@@ -677,23 +794,6 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	return clientClose || ctx.Response.Header.ConnectionClose(), nil
 }
 
-// handleFallThroughRaw serves a request whose headers exceeded the
-// fast parser's 16 KiB read buffer: buffered holds the bytes already
-// consumed from the socket; the rest of the request (headers and body)
-// is still on the wire. The fallback handler parses the complete request
-// via fasthttp with proper framing. Because the fallback owns the
-// connection's read state afterwards, this connection is closed after
-// the response (HTTP/1.1 pipelining across the boundary is not safe).
-// handleFallThroughRaw serves a request whose headers exceeded the
-// fast parser's 16 KiB read buffer: buffered holds the bytes already
-// consumed from the socket; the rest of the request (headers and body)
-// is still on the wire. The fallback handler parses the complete request
-// via fasthttp with proper framing. Because the fallback owns the
-// connection's read state afterwards, the connection is always closed
-// after the response (HTTP/1.1 pipelining across the boundary is not
-// safe). The returned error is always nil: every failure path is a
-// per-connection outcome the caller already handles as close.
-//
 // handleFallThroughRaw serves a request whose headers exceeded the
 // fast parser's 16 KiB read buffer: buffered holds the bytes already
 // consumed from the socket; the rest of the request (headers and body)
@@ -726,8 +826,38 @@ func (p *Parser) handleFallThroughRaw(conn net.Conn, buffered []byte) {
 	p.fallback(&ctx)
 	ctx.Response.Header.SetConnectionClose()
 
+	// Streamed responses re-arm the write deadline per Write (see
+	// handleFallThrough); this connection always closes after the
+	// response either way (the fallback owned the read state).
+	writeConn := conn
+	if ctx.Response.IsBodyStream() {
+		writeConn = &idleWriteConn{Conn: conn, budget: p.writeTime}
+	}
 	_ = conn.SetWriteDeadline(p.nowFunc().Add(p.writeTime))
-	_, _ = ctx.Response.WriteTo(conn)
+	_, _ = ctx.Response.WriteTo(writeConn)
+}
+
+// idleWriteConn re-arms the write deadline before every Write, turning
+// an absolute write-time budget into an idle budget. Long-lived streamed
+// responses (SSE) are cut by an absolute deadline even while actively
+// delivering events; with per-Write re-arming they survive as long as
+// they keep making progress, while a client that stops reading entirely
+// is dropped after one budget — the slowloris protection is preserved.
+//
+// Only the fall-through response write path uses this wrapper; the hit
+// path's zero-copy writev is untouched.
+type idleWriteConn struct {
+	net.Conn
+	budget time.Duration
+}
+
+func (c *idleWriteConn) Write(p []byte) (int, error) {
+	// SetWriteDeadline is not overridden, so the selector-free call
+	// resolves to the embedded conn; c.Conn.Write IS deliberate — Write is
+	// overridden here, so the embedded-field selector is required to avoid
+	// infinite recursion.
+	_ = c.SetWriteDeadline(time.Now().Add(c.budget))
+	return c.Conn.Write(p)
 }
 
 // prefixConn serves Read calls from prefix before falling through to the
@@ -759,21 +889,14 @@ func indexByte(s string, b byte) int {
 }
 
 // isConnectionClose reports whether the request contains a
-// Connection: close token (RFC 9110 §7.6.1). The Connection header
-// is a comma-separated list of tokens; "close" may appear alongside
-// other tokens like "keep-alive". This determines whether the
-// keep-alive loop should terminate after serving the response.
+// Connection: close token (RFC 9110 §7.6.1). The parser's fused header
+// scan already derived the token decision into req.ConnectionClose
+// (any Connection header carrying a close token sets it); reading
+// the flag here replaces a header-array scan per fall-through.
+// Hand-built requests that set Headers directly must derive the flag
+// themselves — tests construct ConnectionClose directly.
 func isConnectionClose(req *api.RawRequest) bool {
-	val := req.Header(header.Connection)
-	if val == "" {
-		return false
-	}
-	for _, token := range splitHeaderTokens(val) {
-		if api.EqualFold(token, "close") {
-			return true
-		}
-	}
-	return false
+	return req.ConnectionClose
 }
 
 // splitHeaderTokens splits a comma-separated header value into trimmed

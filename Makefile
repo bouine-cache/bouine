@@ -226,9 +226,9 @@ govulncheck: ## Run govulncheck.
 ci: lint test-short build hooks-run ## Run the CI gate locally (lint, test, build, hooks).
 
 .PHONY: test-k8s-setup
-test-k8s-setup: build ## Build images and deploy bouine + test origin on Kubernetes.
-	docker build -t bouine:dev .
-	docker build -t bouine-test-origin:dev test/integration/origin/
+test-k8s-setup: build ensure-buildx ## Build images and deploy bouine + test origin on Kubernetes.
+	DOCKER_BUILDKIT=1 docker build -t bouine:dev .
+	DOCKER_BUILDKIT=1 docker build -t bouine-test-origin:dev test/integration/origin/
 	-kubectl create namespace bouine-test 2>/dev/null
 	-kubectl -n bouine-test delete pod origin --force 2>/dev/null
 	-kubectl -n bouine-test delete svc origin 2>/dev/null
@@ -296,12 +296,44 @@ LOADTEST_DIR := bench/loadtest
 RESULTS_DIR  := $(LOADTEST_DIR)/results
 CHARTS_DIR   := $(RESULTS_DIR)/charts
 PYTHON       ?= python3
+# Nightly single-node scenario list. 3.1's high-rate legs are the
+# default casualty of the 120-min job budget: they duplicate 3.2's
+# sustained 50k measurement at 8 extra minutes. Override on demand:
+#   make loadtest-scenarios SCENARIOS="3.4_working_set_overflow 3.2_hit_only"
+# 3.7 stays in the nightly: it is the only scenario validating payload
+# bytes (data-integrity net), not just status codes and latency.
+SCENARIOS    ?= 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
+                3.5_vary_blowup 3.6_mixed_realistic 3.7_payload_integrity
+
+# BUILDX_VERSION pins the docker buildx CLI plugin that loadtest-setup
+# installs on demand. The load-test runner image ships docker without
+# the plugin, and the legacy builder cannot expand the $BUILDPLATFORM /
+# TARGETOS / TARGETARCH ARGs the main Dockerfile relies on — it fails
+# with "failed to parse platform : '' is an invalid OS component".
+BUILDX_VERSION := v0.30.0
+
+# ensure-buildx installs the docker buildx CLI plugin to the invoking
+# user's plugin directory (~/.docker/cli-plugins — no sudo needed) when
+# `docker buildx` is unavailable. Idempotent: a no-op once installed.
+.PHONY: ensure-buildx
+ensure-buildx:
+	@if docker buildx version >/dev/null 2>&1; then \
+		echo "buildx plugin present"; \
+	else \
+		echo "installing docker buildx $(BUILDX_VERSION) to ~/.docker/cli-plugins"; \
+		mkdir -p "$$HOME/.docker/cli-plugins"; \
+		curl -fsSL "https://github.com/docker/buildx/releases/download/$(BUILDX_VERSION)/buildx-$(BUILDX_VERSION).linux-$$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')" \
+			-o "$$HOME/.docker/cli-plugins/docker-buildx"; \
+		chmod +x "$$HOME/.docker/cli-plugins/docker-buildx"; \
+		docker buildx version; \
+	fi
 
 .PHONY: loadtest-setup
-loadtest-setup: build ## Build all TUT images + origin for load testing.
-	docker build -t bouine:loadtest .
-	docker build -t bouine-test-origin:loadtest test/integration/origin/
-	@echo "bouine:loadtest and bouine-test-origin:loadtest images built."
+loadtest-setup: build ensure-buildx ## Build all TUT images + origin for load testing.
+	DOCKER_BUILDKIT=1 docker build -t bouine:loadtest .
+	DOCKER_BUILDKIT=1 docker build -t bouine-test-origin:loadtest test/integration/origin/
+	DOCKER_BUILDKIT=1 docker build -t bouine-load-gen:bash -f $(LOADTEST_DIR)/load-gen.Dockerfile $(LOADTEST_DIR)
+	@echo "bouine:loadtest, bouine-test-origin:loadtest and bouine-load-gen:bash images built."
 	@echo "Pull NGINX/Varnish/Envoy base images:"
 	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml pull nginx varnish envoy 2>/dev/null || true
 
@@ -332,19 +364,36 @@ loadtest-clean: ## Remove load-test result files and charts.
 	rm -rf $(RESULTS_DIR)
 	@echo "Load test results cleaned."
 
-.PHONY: loadtest
-loadtest: loadtest-setup ## Run single-node scenarios and generate report.
+.PHONY: loadtest-scenarios
+loadtest-scenarios: ## Run the §3.1–§3.6 single-node scenarios against the compose stack.
 	@mkdir -p $(RESULTS_DIR)
-	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
+	docker compose --progress quiet -f $(LOADTEST_DIR)/docker-compose.yaml up -d bouine nginx varnish envoy origin
 	@echo "Waiting for services to be healthy..."
 	@sleep 5
-	@for scenario in 3.1_throughput_ramp 3.2_hit_only 3.3_miss_storm \
-	                  3.4_working_set_overflow 3.5_vary_blowup 3.6_mixed_realistic; do \
+	@# A scenario's k6 thresholds run against whichever TUT the loop is
+	@# driving — including nginx/varnish/envoy, whose revalidation and
+	@# timeout semantics legitimately differ (the 3.6 script itself notes
+	@# varnish counts grace-served hits differently). One competitor
+	@# crossing a threshold must not kill the suite: every scenario runs
+	@# and all four TUTs' results land in $(RESULTS_DIR). Regression
+	@# gating on bouine is the nightly workflow's own p99 check on these
+	@# files — not the k6 exit code.
+	@#
+	@# 3.4_working_set_overflow is deliberately absent from the nightly
+	@# default (SCENARIOS): 20 minutes of storage-eviction pressure that
+	@# no report verdict reads and that nothing in this suite gates on.
+	@# Run it on demand when touching storage/eviction:
+	@#   make loadtest-scenarios SCENARIOS=3.4_working_set_overflow
+	@for scenario in $(SCENARIOS); do \
 		echo "--- Running $$scenario ---"; \
-		docker compose -f $(LOADTEST_DIR)/docker-compose.yaml run --rm load-gen \
-			bash /scenarios/$$scenario/run.sh; \
+		docker compose --progress quiet -f $(LOADTEST_DIR)/docker-compose.yaml run --rm load-gen \
+			bash /scenarios/$$scenario/run.sh || \
+		echo "WARNING: $$scenario exited non-zero (details in its results log); continuing"; \
 	done
-	docker compose -f $(LOADTEST_DIR)/docker-compose.yaml down
+	docker compose --progress quiet -f $(LOADTEST_DIR)/docker-compose.yaml down
+
+.PHONY: loadtest-report
+loadtest-report: ## Generate charts and REPORT.md from existing load-test results.
 	@command -v $(PYTHON) >/dev/null || { echo "python3 is required"; exit 1; }
 	@$(PYTHON) -c "import plotly, kaleido" 2>/dev/null || \
 		$(PYTHON) -m pip install -q plotly kaleido
@@ -358,6 +407,9 @@ loadtest: loadtest-setup ## Run single-node scenarios and generate report.
 		--output REPORT.md
 	@echo "Report: $(LOADTEST_DIR)/REPORT.md"
 	@echo "Charts: $(CHARTS_DIR)/"
+
+.PHONY: loadtest
+loadtest: loadtest-setup loadtest-scenarios loadtest-report ## Run single-node scenarios and generate report.
 
 .PHONY: release
 release: ## Create a GitHub release. Requires TAG=v0.X.Y and a git tag on main.

@@ -177,13 +177,13 @@ func stripPrefixFastHTTP(prefix string, next fasthttp.RequestHandler) fasthttp.R
 
 func (e *engine) buildHandler(rs *runState) fasthttp.RequestHandler {
 	router := e.buildRouter(rs)
-	routeNames := make([]string, 0, len(e.cfg.Routes))
-	for _, rc := range e.cfg.Routes {
-		if rc.Name != "" {
-			routeNames = append(routeNames, rc.Name)
-		}
+	// The metrics middleware attributes by upstream pool: the label set
+	// stays bounded by the pool configuration, unlike route names.
+	poolNames := make([]string, 0, len(e.cfg.UpstreamPools))
+	for _, pc := range e.cfg.UpstreamPools {
+		poolNames = append(poolNames, pc.Name)
 	}
-	rs.dpMetrics.PreResolveRoutes(routeNames)
+	rs.dpMetrics.PreResolveRoutes(poolNames)
 	rs.dpMetrics.SetNowFunc(platform.CoarseNow)
 
 	// Native fasthttp middleware chain: tracing → metrics → router.
@@ -230,7 +230,26 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 	}
 }
 
-// buildRouter constructs the pipeline.Router by iterating over the route table
+// resolveRouteFetchTimeout applies the per-route origin-fetch timeout
+// resolution order: an explicit cache.fetch_timeout wins; otherwise the
+// route inherits the pool's connect.response_header_timeout (resolved
+// with its built-in default by origin.NewPool), so a route without its
+// own knob keeps today's effective origin-wait bound. With the pool
+// client no longer carrying a client-level ReadTimeout cap (see
+// newOriginClient), this is the only defaulting site — an unset value
+// must never fall through to cache.defaultFetchTimeout (60s), which
+// would silently double the historical origin wait.
+func resolveRouteFetchTimeout(rc config.Route, p *origin.Pool) time.Duration {
+	if rc.Cache.FetchTimeout > 0 {
+		return rc.Cache.FetchTimeout
+	}
+	if p != nil {
+		return p.ResolvedClientConfig().ResponseHeaderTimeout
+	}
+	return 0
+}
+
+// buildRouter constructs the server.Router by iterating over the route table
 // and wiring each route to its upstream pool and cache handler. For every route
 // it resolves connection settings (dial timeout, keep-alive, optional hedge
 // transport) from the matching upstream pool config, then builds a
@@ -274,7 +293,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			MaxObjectSize:           rc.Cache.MaxObjectSize.Bytes(),
 			MaxResponseBytes:        rc.Cache.MaxResponseBytes.Bytes(),
 			MaxFetchConcurrency:     rc.Cache.MaxFetchConcurrency,
-			FetchTimeout:            rc.Cache.FetchTimeout,
+			FetchTimeout:            resolveRouteFetchTimeout(rc, p),
 			FetchWaitTimeout:        rc.Cache.FetchWaitTimeout,
 			MaxStreamingBufferBytes: rc.Cache.MaxStreamingBufferBytes.Bytes(),
 			Policy:                  buildKeyPolicy(rc.Cache.Key),
@@ -284,6 +303,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
+			PoolName:                rc.Pool,
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
@@ -295,8 +315,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 				}
 				return owner, rs.clusterNode.IsLocal(key)
 			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
 			}
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
@@ -315,7 +335,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 		}
 		cached := cache.NewHandler(cfg)
 		rs.handlers = append(rs.handlers, cached)
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, cached.ServeRequest)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, cached.ServeRequest)
 	}
 	return router
 }
@@ -384,8 +404,8 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 				}
 				return owner, rs.clusterNode.IsLocal(key)
 			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key})
+			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
 			}
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
@@ -410,11 +430,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	// When cache is not enabled, wire the staticfile handler's native
 	// fasthttp ServeRequest method directly — no adaptor needed.
 	if !cacheEnabled {
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, sh.ServeRequest)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, sh.ServeRequest)
 		return
 	}
 
-	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Match.Methods, handler)
+	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler)
 }
 
 // buildKeyPolicy compiles the route's cache key config into a

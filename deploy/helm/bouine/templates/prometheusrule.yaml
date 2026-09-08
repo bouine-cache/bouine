@@ -9,6 +9,7 @@ metadata:
     {{- with .Values.prometheusRule.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+  {{- include "bouine.annotations" (list . .Values.prometheusRule.annotations) | nindent 2 }}
 spec:
   groups:
     - name: bouine-slo

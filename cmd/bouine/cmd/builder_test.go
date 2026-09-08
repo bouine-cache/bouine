@@ -194,6 +194,62 @@ func TestBuildHedgeTimeout_WithHedgeTimeout(t *testing.T) {
 	require.Equal(t, 500*time.Millisecond, rt)
 }
 
+// newTestPool builds an origin pool from an UpstreamPool config so the
+// resolveRouteFetchTimeout tests exercise the same resolution path
+// (buildPoolConfig → origin.NewPool → defaults) as the engine.
+func newTestPool(t *testing.T, pc config.UpstreamPool) *origin.Pool {
+	t.Helper()
+	p, err := origin.NewPool(buildPoolConfig(pc, newTestLogger(), nil))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close(t.Context()) })
+	return p
+}
+
+// TestResolveRouteFetchTimeout pins the per-route origin timeout
+// resolution order: an explicit route fetch_timeout wins; otherwise the
+// route inherits the pool's connect.response_header_timeout (with its
+// built-in default applied). The inheritance must not fall through to
+// cache.defaultFetchTimeout (60s), which would silently double the
+// historical 30s origin wait.
+func TestResolveRouteFetchTimeout(t *testing.T) {
+	t.Parallel()
+
+	newPool := func(t *testing.T, headerTimeout time.Duration) *origin.Pool {
+		return newTestPool(t, config.UpstreamPool{
+			Name:    "app",
+			Targets: []string{"127.0.0.1:1"},
+			Connect: config.ConnectPolicy{ResponseHeaderTimeout: headerTimeout},
+		})
+	}
+
+	t.Run("explicit route timeout overrides the pool", func(t *testing.T) {
+		t.Parallel()
+		p := newPool(t, 20*time.Second)
+		rc := config.Route{Cache: config.RouteCache{FetchTimeout: 90 * time.Second}}
+		require.Equal(t, 90*time.Second, resolveRouteFetchTimeout(rc, p))
+	})
+
+	t.Run("unset route inherits configured pool timeout", func(t *testing.T) {
+		t.Parallel()
+		p := newPool(t, 45*time.Second)
+		rc := config.Route{}
+		require.Equal(t, 45*time.Second, resolveRouteFetchTimeout(rc, p))
+	})
+
+	t.Run("unset route inherits pool default when pool unset too", func(t *testing.T) {
+		t.Parallel()
+		p := newPool(t, 0)
+		rc := config.Route{}
+		require.Equal(t, origin.DefaultResponseHeaderTimeout, resolveRouteFetchTimeout(rc, p))
+	})
+
+	t.Run("nil pool leaves the timeout unset", func(t *testing.T) {
+		t.Parallel()
+		rc := config.Route{}
+		require.Zero(t, resolveRouteFetchTimeout(rc, nil))
+	})
+}
+
 func TestSanitizedConfig(t *testing.T) {
 	t.Parallel()
 	cfg := config.Config{

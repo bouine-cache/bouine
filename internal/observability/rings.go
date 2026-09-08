@@ -31,9 +31,8 @@ const (
 	// routeRingCap is the max number of distinct routes tracked by the
 	// RouteRing. Best-effort: a few extra entries may appear under
 	// concurrent inserts before the cap is observed (same TOCTOU as
-	// URLRing). This is a defense-in-depth bound — the primary fix for
-	// route-label cardinality is stripping the inbound X-Bouine-Route
-	// header in the metrics middleware.
+	// URLRing). Entries only ever come from router-set labels
+	// (config-derived); the cap is defense-in-depth.
 	routeRingCap = 256
 )
 

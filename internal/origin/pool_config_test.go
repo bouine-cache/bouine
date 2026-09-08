@@ -82,7 +82,14 @@ func TestPoolClient_UsesConfiguredSettings(t *testing.T) {
 	require.NoError(t, err)
 	c := p.ResolvedClientConfig()
 	require.Equal(t, 1234*time.Millisecond, c.ResponseHeaderTimeout)
-	require.Equal(t, 1234*time.Millisecond, p.client.ReadTimeout)
+	// The shared client must NOT bake responseHeaderTimeout into its
+	// ReadTimeout: fasthttp composes the effective read deadline as
+	// min(per-request deadline, client.ReadTimeout), so a client-level
+	// cap silently truncated every route's fetch timeout at the
+	// pool-wide knob. Per-request deadlines are the sole bound; the
+	// FastHandler passthrough passes its own DoTimeout.
+	require.Zero(t, p.client.ReadTimeout,
+		"client-level ReadTimeout would cap per-route fetch deadlines")
 	require.Equal(t, 60*time.Second, p.client.MaxIdleConnDuration)
 	// Header-name normalizing must stay enabled: the cache layer reads
 	// origin responses with canonical Peek keys, and origins commonly

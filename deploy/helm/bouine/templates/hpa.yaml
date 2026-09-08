@@ -5,6 +5,7 @@ metadata:
   name: {{ include "bouine.fullname" . }}
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+  {{- include "bouine.annotations" (list . .Values.autoscaling.annotations) | nindent 2 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

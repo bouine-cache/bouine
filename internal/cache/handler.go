@@ -59,6 +59,14 @@ var ErrAbortHandler = errors.New("abort handler")
 // with a dead cancellation arm and nothing ever un-parked them.
 var ErrFetchShed = errors.New("origin fetch queue wait timeout")
 
+// ErrStreamUnshareable is published to singleflight followers when the
+// leader's response is delivered unbuffered (non-hinted SSE, Vary variant
+// overflow): nothing is ever buffered, so there is no complete result to
+// share. Followers fetch their own response instead — an unbuffered
+// stream is per-connection by design and cannot be replayed from a
+// buffer that does not exist (ADR-0042).
+var ErrStreamUnshareable = errors.New("streaming response not shareable")
+
 // StripRequestURI removes prefix from the start of uri on a path boundary:
 // an exact-prefix match ("/api/v1") yields "/", a remainder starting with
 // "/" passes trimmed, a "?query" remainder keeps its "/" root, and a
@@ -246,7 +254,7 @@ type Handler struct {
 	revalSem    chan struct{} // bounds concurrent SWR background goroutines
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
-	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
 	// peerPut forwards a freshly origin-fetched object to the owner
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
@@ -273,6 +281,7 @@ type Handler struct {
 	// no stripping (zero cost on routes without strip_prefix).
 	stripPrefix []byte
 	routeName   string
+	poolName    string
 	// inflightStreams tracks in-progress streaming fetches for
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
@@ -359,9 +368,15 @@ type HandlerConfig struct {
 	// and eventual modes.
 	PeerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
 	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
-	// the key is owned by a remote peer. Returns nil, nil on peer miss;
+	// the key is owned by a remote peer. RequestKey carries the cache key
+	// (primary or variant) and varyKey the computed Vary assertion: a
+	// peer MUST NOT return an object whose Vary dimension set differs
+	// from the one asserted (RFC 9111 §4.1 — variants are keyed per
+	// selecting header set). Implementations assert this via the
+	// PeerFetchRequest.VaryKey field; the handler re-verifies on receipt
+	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
-	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
 	Upstream  fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
@@ -376,6 +391,10 @@ type HandlerConfig struct {
 	RefreshMetrics *observability.RefreshMetrics
 	// RouteName labels refresh metrics. Set from the route's config name.
 	RouteName string
+	// PoolName is the route's upstream pool name, stamped onto fast-path
+	// hit responses for the metrics middleware's upstream_pool label.
+	// Empty for routes without a pool (static-file routes).
+	PoolName string
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
@@ -590,6 +609,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		refreshMinScore:         cfg.RefreshMinScore,
 		refreshReactiveFirst:    cfg.RefreshReactiveFirst,
 		routeName:               cfg.RouteName,
+		poolName:                cfg.PoolName,
 		done:                    make(chan struct{}),
 	}
 	if h.maxResponseBytes == 0 {
@@ -1037,7 +1057,7 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 // and all others to the cache lookup pipeline.
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if isInvalidatingBytes(ctx.Method()) {
-		h.invalidateAndProxy(ctx)
+		h.serveInvalidating(ctx)
 		return
 	}
 
@@ -1053,6 +1073,17 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	// the api.Key→any boxing allocation (1 alloc) on the hit path.
 	// Access logging handles a missing cacheKey gracefully (zero-value key).
 	disp := evaluateFast(ctx, obj, now)
+
+	// SSE intent (Accept: text/event-stream, WHATWG §9.2.2 client
+	// contract) changes how the origin is fetched and the response
+	// delivered: live unbuffered stream, never cached, never collapsed
+	// (see handleSSE). It never applies to a stored hit — a cached
+	// response is complete and is served normally — so the hit path
+	// pays nothing.
+	if disp.Decision != Hit && disp.Decision != StaleHit && h.sseIntent(ctx) {
+		h.handleSSE(ctx)
+		return
+	}
 
 	switch disp.Decision {
 	case Hit, StaleHit:
@@ -1100,6 +1131,26 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	}
 }
 
+// sseIntent reports whether the request announced Server-Sent Events
+// intent via Accept: text/event-stream. Zero allocations: Peek returns
+// the raw header bytes and the matcher walks them in place. A bare "*/*"
+// never matches — every ordinary browser request carries it.
+func (h *Handler) sseIntent(ctx *fasthttp.RequestCtx) bool {
+	return header.AcceptsEventStream(ctx.Request.Header.Peek(header.Accept))
+}
+
+// serveInvalidating handles cache-invalidating methods (POST/PUT/DELETE).
+// POST-style SSE (AI streaming APIs) must not take the buffered proxy
+// path: an endless body would stall the request until fetch_timeout and
+// fail with 502, so hinted requests are streamed live instead.
+func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
+	if h.sseIntent(ctx) {
+		h.handleSSE(ctx)
+		return
+	}
+	h.invalidateAndProxy(ctx)
+}
+
 // handleCacheMiss handles a cache miss: attempts peer-fetch (L5) first, then
 // falls back to origin via fetchAndStore or fetchAndStoreStayinAlive.
 // Cluster peer-fetch: if this node does not own the key, ask the owner before
@@ -1112,21 +1163,54 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 // keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
+// peerVaryAssertion derives the Vary assertion sent with a peer fetch:
+// the stale/miss-side object's stored VaryKey when lookup found one
+// (variant miss), the primary-key object's otherwise, and "" on a plain
+// miss with no stored Vary context.
+func peerVaryAssertion(obj *api.Object) string {
+	if obj == nil {
+		return ""
+	}
+	return obj.VaryKey
+}
+
+// servePeerHit validates and serves a peer-fetched object. Returns true
+// when the response was written (the caller must return), false when the
+// peer object was rejected or not fresh (the caller falls back to origin).
+// RFC 9111 §4.1: a Vary-carrying object belongs to one selecting-header
+// set. Recompute the variant dimension the fetched object must carry for
+// THIS request and compare against its stored VaryKey: a mismatch means
+// the peer answered with another variant's body or with the primary-key
+// Vary resolver (whose VaryKey is blank by protocol). Treat it as a miss
+// instead of serving cross-variant content (cross-market body served in
+// production before this gate).
+func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peerObj *api.Object, now time.Time, ri RequestInfo) bool {
+	if peerObj.VaryValue != "" &&
+		BuildVaryKey(peerObj.VaryValue, ri.Header, h.policy) != peerObj.VaryKey {
+		h.logger.Debug("peer fetch returned a foreign variant for this request",
+			"key", lookupKey.Hex(), "vary", peerObj.VaryValue,
+			"peer_vary_key", peerObj.VaryKey)
+		return false
+	}
+	if d := Evaluate(ri, peerObj, now); d.Decision == Hit || d.Decision == StaleHit {
+		cacheRes := cacheHit
+		if d.Decision == StaleHit {
+			cacheRes = cacheStale
+		}
+		h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
+		// Do not store or revalidate: the object came from the owner.
+		// Caching it on a non-owner would make the fleet cache redundant
+		// (issue #509). Revalidation is the owner's responsibility.
+		return true
+	}
+	return false
+}
+
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(ctx, owner, lookupKey); err == nil && peerObj != nil {
-				// Re-evaluate: the peer may have returned a stale object.
-				if d2 := Evaluate(ri, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-					cacheRes := cacheHit
-					if d2.Decision == StaleHit {
-						cacheRes = cacheStale
-					}
-					h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
-					// Do not store or revalidate: the object came from the
-					// owner. Caching it on a non-owner would make the fleet
-					// cache redundant (issue #509). Revalidation is the
-					// owner's responsibility.
+			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
+				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
 					return
 				}
 			} else if err != nil {
@@ -1535,6 +1619,15 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 		<-existing.done
 		res := existing.res
 		if res.Err != nil {
+			if errors.Is(res.Err, ErrStreamUnshareable) {
+				// The leader's response is delivered unbuffered (SSE,
+				// variant overflow): no body was buffered to share, and
+				// the leader released us at header time. Fetch our own
+				// response — outside singleflight, since a live stream
+				// cannot be replayed to a second client (ADR-0042).
+				h.streamMiss(ctx, primaryKey, ri, &inflightStream{done: make(chan struct{})})
+				return
+			}
 			if errors.Is(res.Err, ErrFetchShed) {
 				h.writeShed503(ctx, "MISS")
 				return
@@ -1713,7 +1806,7 @@ func (h *Handler) refreshFrom304(stale *api.Object, res fetchResult, now time.Ti
 	MergeHeaders304(refreshed, res.Header.ToMap())
 	// Recompute HasDate in case the 304 response added or changed Date.
 	refreshed.HasDate = refreshed.Header.Has(header.Date)
-	refreshed.VaryValue = refreshed.Header.Get(header.Vary)
+	refreshed.VaryValue = joinedVary(refreshed.Header)
 	// Recompute CacheControl string and parsed TTL from the updated headers.
 	refreshed.CacheControl = refreshed.Header.Get(header.CacheControl)
 	newCC := ParseCacheControl(refreshed.CacheControl)
@@ -1883,7 +1976,7 @@ func (h *Handler) writeAndMaybeStore(
 		// primaryKey is passed in from lookup() to avoid a redundant
 		// buildKey call on the same request.
 		storeKey := primaryKey
-		if vary := resMap.Get(header.Vary); vary != "" {
+		if vary := joinedVary(resMap); vary != "" {
 			storeKey = VariantKey(primaryKey, vary, ri.Header, h.policy)
 		}
 		// Enforce MaxVariants cap: skip storage if this primary key already
@@ -1916,6 +2009,14 @@ func (h *Handler) writeAndMaybeStore(
 			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
+			// The primary-key entry is the Vary resolver, not a variant:
+			// blank its VaryKey so a peer that only holds the primary
+			// entry answers a variant fetch with a miss (the consumer
+			// gate in handleCacheMiss rejects on VaryKey mismatch)
+			// instead of another variant's body. VaryValue stays set:
+			// lookup() still needs the stored Vary list to compute the
+			// variant key for subsequent requests.
+			primaryObj.VaryKey = ""
 			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
 			// Forward the primary (Vary-resolver) entry to its owner too —
 			// the primary key may hash to a different owner than the variant.
@@ -2348,18 +2449,22 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 	// pooled fasthttp.Response buffer before calling buildObject.
 	// Using res.Body directly avoids a redundant make+copy per miss.
 	obj := &api.Object{
-		Key:                key,
-		StatusCode:         res.StatusCode,
-		Header:             resMap,
-		Body:               res.Body,
-		BodySize:           int64(len(res.Body)),
-		StoredAt:           now,
-		TTL:                ttl,
-		ETag:               resMap.Get(header.ETag),
-		CacheControl:       ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
-		OriginAge:          originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
-		HasDate:            hasDate,
-		VaryValue:          resMap.Get(header.Vary),
+		Key:          key,
+		StatusCode:   res.StatusCode,
+		Header:       resMap,
+		Body:         res.Body,
+		BodySize:     int64(len(res.Body)),
+		StoredAt:     now,
+		TTL:          ttl,
+		ETag:         resMap.Get(header.ETag),
+		CacheControl: ccHeader,  // Lead 1: pre-stored, avoids re-parsing on every hit
+		OriginAge:    originAge, // Lead 3: pre-stored, avoids re-parsing on the read path
+		HasDate:      hasDate,
+		// joinedVary, not Get: Vary is list-based, so field lines split
+		// across multiple headers combine per RFC 9110 §5.2. Get kept only
+		// the first line and the variant key ignored the later field
+		// names, collapsing distinct variants onto one cache entry.
+		VaryValue:          joinedVary(resMap),
 		RespNoCache:        respCC.NoCache,
 		RespMustRevalidate: respCC.MustRevalidate || respCC.ProxyRevalidate,
 	}
@@ -2405,7 +2510,7 @@ func buildObject(key api.Key, ri RequestInfo, res fetchResult, resMap header.Map
 			obj.LastModified = t
 		}
 	}
-	obj.VaryKey = BuildVaryKey(obj.Header.Get(header.Vary), ri.Header, policy)
+	obj.VaryKey = BuildVaryKey(joinedVary(resMap), ri.Header, policy)
 
 	obj.SurrogateKeys = parseSurrogateKeys(resMap)
 

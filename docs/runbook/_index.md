@@ -15,6 +15,9 @@ code change that introduces a new failure mode.
 | [30-rolling-restart.md](30-rolling-restart.md) | Zero-5xx rolling restart in a Kubernetes StatefulSet. |
 | [40-memory-accounting.md](40-memory-accounting.md) | Interpreting hot_store_bytes vs heap metrics; capturing pprof profiles. |
 | [50-warm-disk-exhaustion.md](50-warm-disk-exhaustion.md) | Diagnosing and mitigating warm-tier disk pressure and ENOSPC errors. |
+| [51-h1-reactor.md](51-h1-reactor.md) | H1 reactor: stuck writers, dropped hit-metric records, spawner saturation. |
+| [52-sse-streaming.md](52-sse-streaming.md) | SSE streaming: hint contract, idle deadlines, tuning per route. |
+| [53-origin-timeouts.md](53-origin-timeouts.md) | Origin timeouts: per-route fetch_timeout resolution and pool fallback. |
 
 ## Naming convention
 

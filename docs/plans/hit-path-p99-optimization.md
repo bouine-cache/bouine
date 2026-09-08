@@ -33,6 +33,61 @@ All four were fixed on this branch. Measured combined result
 | GC cycles     | ~63/s       | ~0.3/s      | ~-200× |
 | allocs/15s    | 7.29GB      | ~9KB        | ~-99.9%|
 
+## 2026-08-30 follow-up 2: native histogram off + the epoll reactor
+
+Two changes land after the fast-path-enabling audit:
+
+1. **`NativeHistogramBucketFactor` dropped from
+   `request_duration_seconds`** — the plan's own revisit note above
+   ("no dashboard uses native histogram queries; all PromQL uses
+   classic `_bucket` series") plus the per-Observe sparse-bucket math
+   cost on the hit path's duration histogram. Classic buckets are
+   unchanged; dashboards unaffected.
+
+2. **epoll reactor for batch hit serving** (ADR-0041,
+   `experimental.h1_reactor`, Linux, default off, requires
+   `h1_fast_path`). This attacks the "Known remaining gap" below
+   directly: one goroutine per listener multiplexes all hit-path
+   connections via `epoll_wait` — one wakeup per batch instead of one
+   per request, no goroutine park/unpark, no Go runtime poller on the
+   hit path. Everything that is not a plain hit (miss, conditional,
+   range, pipelined body, oversize headers, malformed) hands off to a
+   per-connection goroutine running the existing blocking Parser with
+   the buffered bytes replayed, so all correctness semantics stay
+   shared. Verified: portable state-machine unit tests (12), Linux
+   epoll end-to-end tests (4) under `-race`, a 0-alloc
+   `BenchmarkGate_Reactor_Hit` (370-405ns on the Linux runner), and a
+   live-daemon smoke (1 MISS handoff + 29 keep-alive HITs on one
+   connection).
+
+The reactor is now enabled for benchmarks (`h1_reactor: true` in
+`bench/loadtest/config/bouine.yaml`): the nightly runner established
+the blocking-path numbers with the fast path on (PR #563), and this is
+the measured increment — if the nightly numbers don't move, the flag
+goes back off.
+
+Post-review hardening (the PR-567 review round) fixed: the handoff fd
+leak (the blocking-parser goroutine now closes the conn on exit),
+shutdown wiring (loop.Close from ctx cancellation and
+Listener.Shutdown, with handoff-goroutine draining via a WaitGroup —
+previously the reactor loop spun forever after ctx cancel and the
+shutdown sequencer closed the store under in-flight handoffs), the
+slowloris hole (idle is measured per request from its first byte, not
+from the last byte received), Connection: close on hits (the fast path
+now emits the close trailer and both transports close after the
+flush), the idle sweep killing slow writers (writers are skipped; the
+write safety net governs them), the first-hit epoll_ctl elision that
+was not actually elided (register now records the armed mask), and the
+two theater tests in reactor_epoll_test.go (a broken keep-alive loop
+and an assert-nothing miss-handoff stub), which now assert real
+behavior. The dead writeVecOffs field was deleted and the redundant
+~4 KiB scratch re-zero per hit removed (parseBuffer already resets it
+on the next parse). A per-second composed-head cache was added to the
+fast path: the fully serialized response header block (status line +
+static + dynamic headers) is a pure function of the object, the unix
+second, and the composition inputs, so hits inside a cached second
+skip all header appends.
+
 ## Rejected: sharding the hot Prometheus metrics tuple
 
 **Candidate**: `RecordHit` updates

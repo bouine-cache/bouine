@@ -26,6 +26,7 @@ type routeEntry struct {
 	pathPrefix string
 	label      string
 	labelVal   string
+	pool       string
 }
 
 // RouterMetrics are the data-plane counters exposed by the router.
@@ -54,8 +55,12 @@ func NewRouter(cfg RouterConfig) *Router {
 }
 
 // AddRoute registers a route entry. When methods is non-empty, only
-// requests whose HTTP method is in the set match this route.
-func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, handler fasthttp.RequestHandler) {
+// requests whose HTTP method is in the set match this route. pool is
+// the route's upstream pool ("" for pool-less routes, e.g. static
+// files): the metrics middleware uses it as the upstream_pool label and
+// falls back to "_default" when empty, so that label set stays bounded
+// by the pool configuration. The label still feeds the dashboard rings.
+func (rt *Router) AddRoute(host, pathPrefix, label, pool string, methods []string, handler fasthttp.RequestHandler) {
 	if label == "" {
 		switch {
 		case host != "":
@@ -79,6 +84,7 @@ func (rt *Router) AddRoute(host, pathPrefix, label string, methods []string, han
 		methods:    mset,
 		label:      label,
 		labelVal:   label,
+		pool:       pool,
 		handler:    handler,
 	})
 }
@@ -128,7 +134,15 @@ func (rt *Router) ServeRequest(ctx *fasthttp.RequestCtx) {
 		if re.methods != nil && !re.methods[string(ctx.Method())] { //nolint:staticcheck // SA6001: method is used once per iteration, not worth inlining
 			continue
 		}
-		ctx.Request.Header.Set(header.XBouineRoute, re.labelVal)
+		// Attribution travels as UserValues, not request headers: the
+		// old header form was forwarded verbatim upstream, leaking
+		// internal route names. The pool UserValue is set only for
+		// pool-bearing routes, so the middleware's _default fallback
+		// applies to static routes.
+		ctx.SetUserValue(header.XBouineRoute, re.labelVal)
+		if re.pool != "" {
+			ctx.SetUserValue(header.XBouinePool, re.pool)
+		}
 		re.handler(ctx)
 		return
 	}

@@ -16,11 +16,11 @@ func TestDataPlaneMetrics_IncrementSmugglingRejected(t *testing.T) {
 	m.IncrementSmugglingRejected()
 }
 
-func TestDataPlaneMetrics_RecordHit_NoRouteTable(t *testing.T) {
+func TestDataPlaneMetrics_RecordHit_NoPoolTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	m.RecordHit("GET", "/api", "HIT", "hot", 200, 1024, 5*time.Millisecond)
+	m.RecordHit("/api", "HIT", "hot", 200, 1024, 5*time.Millisecond)
 }
 
 func TestDataPlaneMetrics_VaryCapHitsCount(t *testing.T) {
@@ -83,13 +83,13 @@ func TestRefreshMetricsVec(t *testing.T) {
 	m.RefreshMetricsVec()
 }
 
-func TestDataPlaneMetrics_LookupRouteMetrics_NilTable(t *testing.T) {
+func TestDataPlaneMetrics_LookupPoolMetrics_NilTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	rm, ok := m.lookupRouteMetrics("test")
+	pm, ok := m.lookupPoolMetrics("test")
 	assert.False(t, ok)
-	assert.Nil(t, rm)
+	assert.Nil(t, pm)
 }
 
 func TestDataPlaneMetrics_AccessLogMessage(t *testing.T) {
@@ -113,25 +113,25 @@ func TestDataPlaneMetrics_AccessLogMessage(t *testing.T) {
 	}
 }
 
-func TestDataPlaneMetrics_LookupRouteMetrics_NotInTable(t *testing.T) {
+func TestDataPlaneMetrics_LookupPoolMetrics_NotInTable(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	m.routeIDs = map[string]int{"test": 0}
-	rm, ok := m.lookupRouteMetrics("test")
+	m.poolIDs = map[string]int{"test": 0}
+	pm, ok := m.lookupPoolMetrics("test")
 	assert.False(t, ok)
-	assert.Nil(t, rm)
+	assert.Nil(t, pm)
 }
 
-func TestDataPlaneMetrics_LookupRouteMetrics_Found(t *testing.T) {
+func TestDataPlaneMetrics_LookupPoolMetrics_Found(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
-	m.routeIDs = map[string]int{"test": 0}
-	m.routeTable = []*routeMetrics{nil}
-	rm, ok := m.lookupRouteMetrics("test")
+	m.poolIDs = map[string]int{"test": 0}
+	m.poolTable = []*poolMetrics{nil}
+	pm, ok := m.lookupPoolMetrics("test")
 	assert.True(t, ok)
-	assert.Nil(t, rm)
+	assert.Nil(t, pm)
 }
 
 func TestDataPlaneMetrics_TierMaxBytesGauges(t *testing.T) {
@@ -192,18 +192,18 @@ func TestDataPlaneMetrics_RequestQueueDepth(t *testing.T) {
 	assert.Fail(t, "request_queue_depth not found")
 }
 
-// TestFastPath_RecordHit_EmptyRouteMapsToDefault verifies that
-// fast-path hits arriving with route="" (the engine-level fast path
-// carries no route name) are recorded on the pre-resolved _default
-// route metrics instead of falling through to WithLabelValues, and
-// that the route label is normalized to _default.
-func TestFastPath_RecordHit_EmptyRouteMapsToDefault(t *testing.T) {
+// TestFastPath_RecordHit_EmptyPoolMapsToDefault verifies that
+// fast-path hits arriving with pool="" (the engine-level fast path
+// carries no pool attribution) are recorded on the pre-resolved
+// _default pool metrics instead of falling through to WithLabelValues,
+// and that the upstream_pool label is normalized to _default.
+func TestFastPath_RecordHit_EmptyPoolMapsToDefault(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := NewDataPlaneMetrics(reg)
 	m.PreResolveRoutes(nil)
 
-	m.RecordHit("GET", "", "HIT", "hot", 200, 1024, 5*time.Millisecond)
+	m.RecordHit("", "HIT", "hot", 200, 1024, 5*time.Millisecond)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -213,14 +213,14 @@ func TestFastPath_RecordHit_EmptyRouteMapsToDefault(t *testing.T) {
 		}
 		for _, met := range fam.GetMetric() {
 			labels := met.GetLabel()
-			route := ""
+			pool := ""
 			for _, l := range labels {
-				if l.GetName() == "route" {
-					route = l.GetValue()
+				if l.GetName() == "upstream_pool" {
+					pool = l.GetValue()
 				}
 			}
-			if route == "" {
-				t.Errorf("fast-path hit with empty route must be labelled _default, got route=\"\"")
+			if pool == "" {
+				t.Errorf("fast-path hit with empty pool must be labelled _default, got upstream_pool=\"\"")
 			}
 		}
 	}

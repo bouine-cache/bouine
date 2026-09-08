@@ -118,6 +118,10 @@ type Log struct {
 	syncCh  chan []byte        // buffered 4096; carries encoded entries
 	flushCh chan chan struct{} // per-caller done channels for Sync()
 	stopCh  chan struct{}
+	// writeBuf coalesces one drain batch into a single Write. Owned by
+	// the sync loop, grown under mu to syncChSize*recLenV2 (~168 KiB)
+	// and reused across cycles; zero-length in sync mode.
+	writeBuf []byte
 	// metrics holds Prometheus collectors for WAL write operations.
 	// Nil when metrics are not registered (tests, sync-only mode).
 	metrics      *Metrics
@@ -289,9 +293,13 @@ func (l *Log) walSyncLoop() {
 }
 
 // drainAndSync drains all pending entries from syncCh and writes them
-// to the file in a single batch under l.mu, then fsyncs once. If done
-// is non-nil it is closed after the flush completes (or after the
-// channel is found empty) so the requesting Sync() caller unblocks.
+// to the file in a single batched Write under l.mu. The file is opened
+// with O_DSYNC/O_SYNC, so that one Write is durable — one synchronous
+// syscall per drain cycle instead of one per entry (a full channel is
+// 4096 entries; per-entry writes made Close-time drains slow enough to
+// stall on saturated disks). If done is non-nil it is closed after the
+// flush completes (or after the channel is found empty) so the
+// requesting Sync() caller unblocks.
 func (l *Log) drainAndSync(done chan struct{}) {
 	var batch [][]byte
 	for {
@@ -311,23 +319,19 @@ write:
 	}
 	writeStart := time.Now()
 	l.mu.Lock()
-	written := 0
-	var writeErr error
+	l.writeBuf = l.writeBuf[:0]
 	for _, buf := range batch {
-		if _, err := l.f.Write(buf); err != nil {
-			writeErr = err
-			break
-		}
-		written++
+		l.writeBuf = append(l.writeBuf, buf...)
 		entryBufPool.Put(&buf)
 	}
+	_, writeErr := l.f.Write(l.writeBuf)
 	if writeErr == nil {
 		l.lastSync.Store(time.Now().UnixNano())
 	} else {
-		l.dropped.Add(int64(len(batch) - written))
-		for _, buf := range batch[written:] {
-			entryBufPool.Put(&buf)
-		}
+		// The batched Write is all-or-nothing from os.File.Write's
+		// contract (a short write returns an error), so count the
+		// whole batch as dropped.
+		l.dropped.Add(int64(len(batch)))
 	}
 	l.mu.Unlock()
 	l.metrics.ObserveWriteDuration(time.Since(writeStart))

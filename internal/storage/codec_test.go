@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -232,4 +233,75 @@ func TestDecodeObject_ZeroTimes(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, decoded.StoredAt.IsZero())
 	assert.True(t, decoded.LastModified.IsZero())
+}
+
+// TestEncodeDecodeVaryValueRoundTrip pins the v4 wire addition: VaryValue
+// must survive the warm-tier and peer-fetch codecs. The peer-fetch
+// protocol needs the origin's Vary list on the receiving side to
+// recompute the variant dimension (servePeerHit's cross-variant gate);
+// v3 dropped the field, silently disabling that gate.
+func TestEncodeDecodeVaryValueRoundTrip(t *testing.T) {
+	orig := &api.Object{
+		Key:       testkey.Key(0x1234),
+		VaryKey:   "frhash",
+		VaryValue: "Accept-Language, BM-Market",
+		Header:    headerMap(header.CacheControl, "max-age=60", header.Vary, "Accept-Language", header.Vary, "BM-Market"),
+		Body:      []byte("body"),
+		BodySize:  4,
+		StoredAt:  time.Unix(1_700_000_000, 0).UTC(),
+	}
+	// Two Vary field lines in the stored header (the multi-line shape).
+	orig.Header.AppendEntry(header.Vary, "BM-Market")
+
+	got, err := decodeObject(encodeObject(orig))
+	require.NoError(t, err)
+	require.Equal(t, orig.VaryValue, got.VaryValue, "VaryValue must survive the wire")
+	require.Equal(t, orig.VaryKey, got.VaryKey)
+}
+
+// TestDecodeV3BlobWithoutVaryValue pins the upgrade path: a v3 blob
+// (written before the VaryValue field existed) decodes cleanly with an
+// empty VaryValue instead of being rejected, so warm-tier entries
+// survive a rolling upgrade and get rewritten in v4 on the next Put.
+func TestDecodeV3BlobWithoutVaryValue(t *testing.T) {
+	// Hand-build a v3 blob: version byte + key + VaryKey + (no VaryValue)
+	// + the same field order v3 used.
+	orig := &api.Object{
+		Key:        testkey.Key(0x5678),
+		VaryKey:    "v3hash",
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("v3body"),
+		StoredAt:   time.Unix(1_700_000_000, 0).UTC(),
+	}
+	blob := []byte{objCodecVersionV3}
+	blob = append(blob, orig.Key[:]...)
+	blob = appendString(blob, orig.VaryKey)
+	blob = binary.AppendUvarint(blob, uint64(orig.StatusCode))
+	blob = binary.AppendVarint(blob, int64(orig.TTL))
+	blob = binary.AppendVarint(blob, int64(orig.StaleWhileRevalidate))
+	blob = binary.AppendVarint(blob, int64(orig.StaleIfError))
+	blob = appendTime(blob, orig.StoredAt)
+	blob = appendTime(blob, orig.LastModified)
+	blob = binary.AppendUvarint(blob, orig.Hits)
+	blob = appendString(blob, orig.ETag)
+	blob = binary.AppendUvarint(blob, uint64(orig.Header.Len()))
+	orig.Header.Range(func(k, v string) bool {
+		blob = appendString(blob, k)
+		blob = appendString(blob, v)
+		return true
+	})
+	blob = binary.AppendUvarint(blob, uint64(len(orig.SurrogateKeys)))
+	for _, sk := range orig.SurrogateKeys {
+		blob = appendString(blob, sk)
+	}
+	blob = binary.AppendUvarint(blob, uint64(len(orig.Body)))
+	blob = append(blob, orig.Body...)
+
+	got, err := decodeObject(blob)
+	require.NoError(t, err, "v3 blob must decode after the v4 upgrade")
+	require.Equal(t, "", got.VaryValue, "v3 blobs have no VaryValue on the wire")
+	require.Equal(t, orig.VaryKey, got.VaryKey)
+	require.Equal(t, orig.StatusCode, got.StatusCode)
+	require.Equal(t, "v3body", string(got.Body))
 }

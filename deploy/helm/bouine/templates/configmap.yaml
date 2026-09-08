@@ -4,6 +4,7 @@ metadata:
   name: {{ include "bouine.fullname" . }}-config
   labels:
     {{- include "bouine.labels" . | nindent 4 }}
+  {{- include "bouine.annotations" (list . (dict)) | nindent 2 }}
 data:
   config.yaml: |
     {{- $fullname := include "bouine.fullname" . }}

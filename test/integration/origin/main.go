@@ -89,6 +89,27 @@ func originHandler(ctx *fasthttp.RequestCtx) {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		ctx.Response.Header.Set("Cache-Control", "max-age=60")
 		fmt.Fprintf(ctx, "slow %dms", ms)
+	case "/payload":
+		// Deterministic, checksummable body for data-integrity load
+		// tests (bench/loadtest scenario 3.7): every 8-byte block i is
+		// LE32(fnv32a(k)^i) || LE32(i), so k6 can regenerate the exact
+		// expected bytes for a given (k, kb). Mirrored by
+		// test/integration/driver (chaos integrity scenario) and
+		// bench/loadtest/scenarios/lib/payload.js.
+		k := string(ctx.QueryArgs().Peek("k"))
+		kb, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("kb")))
+		if k == "" {
+			k = "default"
+		}
+		if kb <= 0 {
+			kb = 64
+		}
+		if kb > 4096 {
+			kb = 4096
+		}
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Content-Type", "application/octet-stream")
+		ctx.Write(deterministicPayload(k, kb))
 	case "/large":
 		kb, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("kb")))
 		if kb <= 0 {
@@ -118,4 +139,42 @@ func originHandler(ctx *fasthttp.RequestCtx) {
 	default:
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 	}
+}
+
+// deterministicPayload builds the deterministic body served by /payload:
+// kb KiB of 8-byte blocks where block i is LE32(fnv32a(k)^i) || LE32(i).
+// Clients regenerate the same bytes to verify cache integrity (chaos
+// driver and the k6 payload helper mirror this scheme).
+func deterministicPayload(k string, kb int) []byte {
+	if kb <= 0 {
+		kb = 64
+	}
+	body := make([]byte, kb*1024)
+	seed := fnv32a(k)
+	var block [8]byte
+	for off := 0; off+8 <= len(body); off += 8 {
+		i := off / 8
+		le32(block[:4], seed^uint32(i))
+		le32(block[4:], uint32(i))
+		copy(body[off:], block[:])
+	}
+	return body
+}
+
+// fnv32a is the standard 32-bit FNV-1a hash, mirrored by the k6 payload
+// helper so origin and client agree on the per-key seed.
+func fnv32a(s string) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func le32(dst []byte, v uint32) {
+	dst[0] = byte(v)
+	dst[1] = byte(v >> 8)
+	dst[2] = byte(v >> 16)
+	dst[3] = byte(v >> 24)
 }

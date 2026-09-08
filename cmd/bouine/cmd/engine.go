@@ -422,6 +422,7 @@ func (e *engine) initCluster(
 		HopLimit:            e.cfg.Cluster.HopLimit,
 		MaxConnsPerHost:     e.cfg.Cluster.PeerMaxConnsPerHost,
 		MaxIdleConnDuration: e.cfg.Cluster.PeerMaxIdleConnDuration,
+		FetchConcurrency:    e.cfg.Cluster.PeerFetchConcurrency,
 	}, e.metrics.Registry, e.logger)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
 
@@ -736,6 +737,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		MaxBodyBytes:       e.cfg.Admin.MaxBodyBytes,
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
 		PprofEnabled:       e.cfg.Admin.PprofEnabled,
+		IdleTimeout:        e.cfg.Admin.IdleTimeout,
 		OnPurged:           rs.cfProp.PropagateForPurge,
 		OnRefreshed:        rs.cfProp.PropagateForRefresh,
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {
@@ -928,6 +930,8 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 		e.logger.Info("H1 fast path enabled", "experimental", true)
 	}
 
+	h1Reactor := e.cfg.Experimental.H1Reactor && e.cfg.Experimental.H1FastPath
+
 	if e.cfg.Listen.HTTP != "" {
 		srv := server.NewHTTP(server.ListenerConfig{
 			Addr:           e.cfg.Listen.HTTP,
@@ -935,12 +939,14 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 			Logger:         e.logger,
 			MaxConnections: e.cfg.Listen.MaxConnections,
 			IdleTimeout:    e.cfg.Listen.IdleTimeout,
+			ReadTimeout:    e.cfg.Listen.ReadTimeout,
 			TCPFastOpen:    tcpFastOpen,
 			TCPDeferAccept: tcpDeferAccept,
 			ReusePort:      reusePort,
 			FastPath:       fastPathHandler,
 			FastMetrics:    rs.dpMetrics,
 			Scheme:         "http",
+			H1Reactor:      h1Reactor,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-http", srv.Serve)
@@ -959,12 +965,14 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 			TLSConfig:      tlsCfg,
 			MaxConnections: e.cfg.Listen.MaxConnections,
 			IdleTimeout:    e.cfg.Listen.IdleTimeout,
+			ReadTimeout:    e.cfg.Listen.ReadTimeout,
 			TCPFastOpen:    tcpFastOpen,
 			TCPDeferAccept: tcpDeferAccept,
 			ReusePort:      reusePort,
 			FastPath:       fastPathHandler,
 			FastMetrics:    rs.dpMetrics,
 			Scheme:         "https",
+			H1Reactor:      h1Reactor,
 		})
 		rs.listeners = append(rs.listeners, srv)
 		g.Go("listener-https", srv.Serve)
@@ -1043,6 +1051,20 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 }
 
 func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
+	// Leave the cluster and stop the gossip layer before tearing down
+	// data-plane listeners. If memberlist is still active while peers
+	// close their UDP sockets, gossip/ping goroutines log a flurry of
+	// "use of closed network connection" errors — noise, not bugs.
+	if rs.clusterNode != nil {
+		if rs.peerFetcher != nil {
+			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
+				return rs.peerFetcher.Close(ctx)
+			})
+		}
+		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
+			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
+		})
+	}
 	rs.seq.AddStep("mark-not-ready", 15*time.Second, func(ctx context.Context) error {
 		var wg errgroup.Group
 		for _, ln := range rs.listeners {
@@ -1072,16 +1094,6 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 		rs.seq.AddStep("drain-cloudflare", 5*time.Second, func(ctx context.Context) error {
 			rs.cfCancel()
 			return rs.cfProp.Close(ctx)
-		})
-	}
-	if rs.clusterNode != nil {
-		if rs.peerFetcher != nil {
-			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
-				return rs.peerFetcher.Close(ctx)
-			})
-		}
-		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {
-			return rs.clusterNode.Leave(context.WithoutCancel(ctx))
 		})
 	}
 	g.Go("shutdown-sequencer", func(sqCtx context.Context) error {

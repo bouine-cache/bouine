@@ -217,6 +217,50 @@ func TestClusterHandoffQueueDepth_AtUpperBoundAccepted(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestClusterPeerFetchConcurrency_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: -1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "peer_fetch_concurrency")
+	require.Contains(t, err.Error(), "must be >=")
+}
+
+func TestClusterPeerFetchConcurrency_ZeroAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterPeerFetchConcurrency_ExceedsUpperBoundRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: MaxPeerFetchConcurrency + 1},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "peer_fetch_concurrency")
+	require.Contains(t, err.Error(), "must be <=")
+}
+
+func TestClusterPeerFetchConcurrency_AtUpperBoundAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{PeerFetchConcurrency: MaxPeerFetchConcurrency},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
 func TestClusterMode_NonStrongRequiresListener(t *testing.T) {
 	t.Parallel()
 	cfg := Config{Listen: Listen{Admin: ":9000"}, Cluster: Cluster{Mode: ClusterModeEventual}}
@@ -343,6 +387,73 @@ func TestValidate_ListenIdleTimeout_NegativeRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "listen.idle_timeout") {
 		t.Fatalf("error %q does not mention listen.idle_timeout", err)
+	}
+}
+
+func TestValidate_ListenReadTimeout_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000", ReadTimeout: -1}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative listen.read_timeout")
+	}
+	if !strings.Contains(err.Error(), "listen.read_timeout") {
+		t.Fatalf("error %q does not mention listen.read_timeout", err)
+	}
+}
+
+func TestValidate_ListenReadTimeout_AtOrAboveSafetyNetRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []time.Duration{maxReadTimeout, maxReadTimeout + time.Second} {
+		cfg := Config{Listen: Listen{Admin: ":9000", ReadTimeout: v}}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("expected error for listen.read_timeout %v", v)
+		}
+		if !strings.Contains(err.Error(), "listen.read_timeout") {
+			t.Fatalf("error %q does not mention listen.read_timeout", err)
+		}
+	}
+}
+
+func TestValidate_ListenReadTimeout_BelowSafetyNetAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{Listen: Listen{Admin: ":9000", ReadTimeout: maxReadTimeout - time.Second}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid listen.read_timeout rejected: %v", err)
+	}
+}
+
+// TestValidate_PoolResponseHeaderTimeout_AtOrAboveSafetyNetRejected
+// pins the ordering constraint on the pool knob that routes inherit as
+// their default origin wait: connect.response_header_timeout must stay
+// strictly below the data plane's 5-minute safety-net WriteTimeout, the
+// same rule fetch_timeout already follows.
+func TestValidate_PoolResponseHeaderTimeout_AtOrAboveSafetyNetRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []time.Duration{maxFetchTimeout, maxFetchTimeout + time.Second} {
+		cfg := Config{
+			Listen:        Listen{Admin: ":9000"},
+			UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}, Connect: ConnectPolicy{ResponseHeaderTimeout: v}}},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("expected error for connect.response_header_timeout %v", v)
+		}
+		if !strings.Contains(err.Error(), "connect.response_header_timeout") {
+			t.Fatalf("error %q does not mention connect.response_header_timeout", err)
+		}
+	}
+}
+
+func TestValidate_PoolResponseHeaderTimeout_BelowSafetyNetAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:        Listen{Admin: ":9000"},
+		UpstreamPools: []UpstreamPool{{Name: "app", Targets: []string{"a:1"}, Connect: ConnectPolicy{ResponseHeaderTimeout: maxFetchTimeout - time.Second}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid connect.response_header_timeout rejected: %v", err)
 	}
 }
 
@@ -856,4 +967,83 @@ storage:
 	cfg, err := Parse([]byte(yamlSrc))
 	require.NoError(t, err)
 	require.Equal(t, "cachaner", cfg.Storage.WarmEvictionAlgorithm)
+}
+
+// TestValidate_H1ReactorRequiresFastPath asserts that
+// experimental.h1_reactor without experimental.h1_fast_path is
+// rejected at load time instead of silently no-oping at startup.
+func TestValidate_H1ReactorRequiresFastPath(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Listen.HTTP = ":8080"
+	cfg.Experimental.H1Reactor = true
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "h1_reactor requires experimental.h1_fast_path")
+
+	// With the fast path on, the same config validates.
+	cfg.Experimental.H1FastPath = true
+	assert.NoError(t, cfg.Validate())
+}
+
+// TestValidate_PeerIdleBelowAdminIdle asserts the idle-timeout ordering
+// between the peer-fetch client and the admin server: the client must
+// close idle peer connections before the admin server reaps them, or
+// the first peer RPC on a reaped connection fails with EOF/broken pipe.
+func TestValidate_PeerIdleBelowAdminIdle(t *testing.T) {
+	t.Parallel()
+
+	// Explicit inversion must be rejected.
+	cfg := Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Cluster.PeerMaxIdleConnDuration = 360 * time.Second
+	cfg.Admin.IdleTimeout = 300 * time.Second
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
+
+	// Equal values must also be rejected (strict ordering).
+	cfg.Cluster.PeerMaxIdleConnDuration = 300 * time.Second
+	require.Error(t, cfg.Validate())
+
+	// Client below server must validate.
+	cfg.Cluster.PeerMaxIdleConnDuration = 120 * time.Second
+	cfg.Admin.IdleTimeout = 300 * time.Second
+	require.NoError(t, cfg.Validate())
+
+	// Client set against the built-in 300s server default must enforce
+	// the ordering too.
+	cfg = Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Cluster.PeerMaxIdleConnDuration = 360 * time.Second
+	require.Error(t, cfg.Validate())
+
+	// Unset client idle uses the built-in 120s default and validates.
+	cfg = Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Admin.IdleTimeout = 300 * time.Second
+	require.NoError(t, cfg.Validate())
+}
+
+// TestValidate_AdminIdleTimeout_NegativeRejected asserts negative
+// admin.idle_timeout values are rejected at load time.
+func TestValidate_AdminIdleTimeout_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Admin.IdleTimeout = -1
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "admin.idle_timeout")
+}
+
+// TestValidate_PeerIdleNegativeRejected asserts negative
+// cluster.peer_max_idle_conn_duration values are rejected.
+func TestValidate_PeerIdleNegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Defaults()
+	cfg.Listen.Cluster = ":8443"
+	cfg.Cluster.PeerMaxIdleConnDuration = -1 * time.Second
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "peer_max_idle_conn_duration")
 }

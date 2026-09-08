@@ -61,6 +61,14 @@ type ExperimentalConfig struct {
 	// and non-GET/HEAD requests fall through to net/http unchanged.
 	// Default false.
 	H1FastPath bool `yaml:"h1_fast_path,omitempty" json:"h1_fast_path,omitempty"`
+
+	// H1Reactor enables the single-goroutine epoll event loop that
+	// batch-serves cache hits without per-request goroutine park/unpark
+	// (Linux only; see docs/decisions/0041-h1-epoll-reactor.md). Requires
+	// h1_fast_path. When true but unavailable (non-Linux, epoll
+	// failure), the listener logs a warning and uses the blocking
+	// parser path. Default false.
+	H1Reactor bool `yaml:"h1_reactor,omitempty" json:"h1_reactor,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.
@@ -96,6 +104,13 @@ type Listen struct {
 	// that idle keep-alive connections still hold a
 	// Listen.MaxConnections slot.
 	IdleTimeout time.Duration `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
+	// ReadTimeout bounds how long reading a single request's header and
+	// body may take, per request. It is the slowloris defense for
+	// clients that drip-feed bytes; it is NOT an end-to-end request
+	// deadline (origin fetches are bounded by fetch_timeout). Zero
+	// applies a 30s built-in default. Must be less than the data-plane
+	// safety-net WriteTimeout (5 minutes).
+	ReadTimeout time.Duration `yaml:"read_timeout,omitempty" json:"read_timeout,omitempty"`
 }
 
 // TLS configures the data-plane TLS handshake. Multiple certs are
@@ -280,9 +295,23 @@ type Cluster struct {
 	// capacity. Set to 1 to disable pipelining.
 	PeerMaxConnsPerHost int `yaml:"peer_max_conns_per_host,omitempty" json:"peer_max_conns_per_host,omitempty"`
 	// PeerMaxIdleConnDuration controls how long idle peer connections
-	// are kept before closing. Default 120s (longer than fasthttp's
-	// 10s default) to keep connections warm between peer fetch bursts.
+	// are kept before closing. Default 120s. This MUST stay below the
+	// peer's admin-server idle timeout (default 300s): the client must
+	// close idle connections before the server reaps them, otherwise
+	// the first request on a reaped connection fails with EOF or broken
+	// pipe and the fetch falls back to origin. validatePeerFetchConfig
+	// enforces the ordering against admin.idle_timeout.
 	PeerMaxIdleConnDuration time.Duration `yaml:"peer_max_idle_conn_duration,omitempty" json:"peer_max_idle_conn_duration,omitempty"`
+	// PeerFetchConcurrency bounds concurrent peer-fetch and peer-put
+	// RPCs per node. The semaphore prevents memory blow-up during miss
+	// fan-out (issue #133). Under strong-mode cluster traffic where most
+	// hits are peer hits (non-owner pods fetch from the key owner), the
+	// default of 4 can queue requests behind in-flight fetches and add
+	// tail latency. Raise together with peer_max_conns_per_host so the
+	// pipeline clients stay the binding constraint. Zero applies the
+	// default (4); negative values and values above 128 are rejected
+	// by validatePeerFetchConfig.
+	PeerFetchConcurrency int `yaml:"peer_fetch_concurrency,omitempty" json:"peer_fetch_concurrency,omitempty"`
 }
 
 // ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.
@@ -352,9 +381,14 @@ type ConnectPolicy struct {
 	MaxIdleConnDuration time.Duration `yaml:"max_idle_conn_duration,omitempty" json:"max_idle_conn_duration,omitempty"`
 	// ResponseHeaderTimeout bounds the time waiting for the origin's
 	// response headers after the request is fully sent. Zero applies a
-	// safe built-in default (30s). This is the primary defence against
-	// slow-origin resource exhaustion now that WriteTimeout is 0 on the
-	// data plane.
+	// safe built-in default (30s). With the origin client no longer
+	// carrying a client-level read cap, this knob doubles as the
+	// per-route origin timeout default: every route on the pool that
+	// does not set its own cache.fetch_timeout inherits this value as
+	// its origin wait (header + body). It is the primary defence
+	// against slow-origin resource exhaustion now that WriteTimeout is
+	// 0 on the data plane. Must stay below the data plane's 5-minute
+	// safety-net WriteTimeout (config.maxFetchTimeout).
 	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty" json:"response_header_timeout,omitempty"`
 	// HedgeTimeout fires a duplicate request to the same pool when the
 	// primary does not respond within this duration. Zero disables hedging.
@@ -485,8 +519,14 @@ type RouteCache struct {
 	MaxFetchConcurrency int `yaml:"max_fetch_concurrency,omitempty" json:"max_fetch_concurrency,omitempty"`
 	// FetchTimeout bounds the total time for an origin fetch (header +
 	// body). When exceeded, the fetch is aborted and the client receives
-	// a 502 (or stale content if stayin-alive is enabled). Zero applies
-	// a safe built-in default (60s). This replaces the blanket
+	// a 502 (or stale content if stayin-alive is enabled). It is the
+	// per-route origin timeout: it overrides the pool-wide
+	// connect.response_header_timeout for this route, and — since the
+	// origin client no longer applies a client-level read cap — the
+	// configured value is enforced verbatim, in either direction.
+	// Zero (unset) makes the route inherit the pool's
+	// connect.response_header_timeout (default 30s) instead of the
+	// built-in 60s fetch default. This replaces the blanket
 	// WriteTimeout on the data plane, which was the wrong tool for a
 	// caching reverse proxy.
 	//
@@ -762,6 +802,15 @@ type AdminConfig struct {
 	// returning. Used by the K8s preStop httpGet hook to keep the pod
 	// alive while kube-proxy deregisters it. Zero defaults to 10s.
 	DrainDuration time.Duration `yaml:"drain_duration,omitempty" json:"drain_duration,omitempty"`
+	// IdleTimeout is the keep-alive idle timeout for admin-server
+	// connections, including cluster peer RPCs (/v1/peer/*). Zero
+	// defaults to 300s so idle peer connections survive quiet periods.
+	// Peer clients MUST configure
+	// cluster.peer_max_idle_conn_duration below this value so they
+	// close idle connections first; otherwise the first peer RPC on a
+	// server-reaped connection fails with EOF or broken pipe.
+	// validatePeerFetchConfig enforces the ordering.
+	IdleTimeout time.Duration `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
 }
 
 // ByteSize is a typed size in bytes, parsed from strings like "2Go"

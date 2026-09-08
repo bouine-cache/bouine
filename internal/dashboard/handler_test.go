@@ -60,19 +60,19 @@ func TestApdexScore(t *testing.T) {
 	})
 	t.Run("all_satisfied", func(t *testing.T) {
 		t.Parallel()
-		h := observability.LatencyHistogram{100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		h := observability.LatencyHistogram{100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 		score := apdexScore(h, 100)
 		assert.Equal(t, 1.0, score)
 	})
 	t.Run("all_tolerating", func(t *testing.T) {
 		t.Parallel()
-		h := observability.LatencyHistogram{0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0}
+		h := observability.LatencyHistogram{0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0}
 		score := apdexScore(h, 100)
 		assert.Equal(t, 0.5, score)
 	})
 	t.Run("mixed", func(t *testing.T) {
 		t.Parallel()
-		h := observability.LatencyHistogram{50, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0}
+		h := observability.LatencyHistogram{50, 0, 0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0}
 		score := apdexScore(h, 100)
 		assert.Equal(t, 0.75, score)
 	})
@@ -90,7 +90,7 @@ func TestSLOBuckets(t *testing.T) {
 	})
 	t.Run("all_under_10ms", func(t *testing.T) {
 		t.Parallel()
-		h := observability.LatencyHistogram{100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		h := observability.LatencyHistogram{100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 		buckets := sloBuckets(h, 100)
 		require.Equal(t, 3, len(buckets))
 		assert.Equal(t, 100.0, buckets[0].Pct) // 10ms
@@ -99,7 +99,7 @@ func TestSLOBuckets(t *testing.T) {
 	})
 	t.Run("some_over_10ms", func(t *testing.T) {
 		t.Parallel()
-		h := observability.LatencyHistogram{30, 0, 0, 0, 0, 0, 0, 70, 0, 0, 0}
+		h := observability.LatencyHistogram{30, 0, 0, 0, 0, 0, 0, 70, 0, 0, 0, 0, 0, 0}
 		buckets := sloBuckets(h, 100)
 		assert.Equal(t, 30.0, buckets[0].Pct)  // 10ms
 		assert.Equal(t, 30.0, buckets[1].Pct)  // 100ms
@@ -188,9 +188,9 @@ func TestParseTimeRange(t *testing.T) {
 
 func TestLatHistToInts(t *testing.T) {
 	t.Parallel()
-	h := observability.LatencyHistogram{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0}
+	h := observability.LatencyHistogram{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	ints := latHistToInts(h)
-	assert.Equal(t, []int64{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0}, ints)
+	assert.Equal(t, []int64{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, ints)
 }
 
 func TestBuildOverviewStats(t *testing.T) {

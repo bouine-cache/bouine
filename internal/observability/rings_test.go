@@ -314,7 +314,8 @@ func TestLatencyBucketIndex(t *testing.T) {
 		want  int
 	}{
 		{0, 0}, {1, 0}, {2, 1}, {3, 2}, {10, 3}, {11, 4},
-		{1000, 9}, {1001, latencyHistBuckets - 1}, {99999, latencyHistBuckets - 1},
+		{1000, 9}, {1001, 10}, {2000, 10}, {2001, 11}, {5000, 11}, {5001, 12},
+		{10000, 12}, {10001, latencyHistBuckets - 1}, {99999, latencyHistBuckets - 1},
 	}
 	for _, c := range cases {
 		got := latencyBucketIndex(c.durMs)
@@ -326,7 +327,7 @@ func TestRequestRing_LatencyHistogramFlush(t *testing.T) {
 	r := &RequestRing{}
 	r.RecordRequest("HIT", 200, 1)
 	r.RecordRequest("HIT", 200, 8)
-	r.RecordRequest("MISS", 200, 2000)
+	r.RecordRequest("MISS", 200, 20000)
 	r.Flush(time.Unix(100, 0))
 	snap := r.Snapshot(1)
 	b := snap[0]

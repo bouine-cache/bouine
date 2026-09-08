@@ -130,8 +130,8 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "bouine",
 			Name:      "request_duration_seconds",
-			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no source dimension; use bouine_requests_total for exact codes. The top bucket is 1s: a cache should never be slow, so hung-fetch tails are tracked as 5xx counts on bouine_requests_total, not as sub-second histogram resolution. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
-			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
+			Help:      "Histogram of request durations in seconds. The status label carries the response class (1xx-5xx, 0 for unknown), not the exact code, and there is no source dimension; use bouine_requests_total for exact codes. The tail buckets (2.5/5/10s) distinguish slow misses from hung-fetches; the overflow +Inf bucket captures anything beyond 10s. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:   []float64{.0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 			// Native: 1.1 growth factor, capped at 80 sparse buckets;
 			// warm Observe measured 0 allocs/op (client_golang v1.24.1).
 			NativeHistogramBucketFactor:     1.1,

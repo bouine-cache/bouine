@@ -29,7 +29,7 @@ metric_relabel_configs:
 Keep `_sum`/`_count` (average latency) and the native histogram (all
 quantiles). After the relabel is in place, each active label tuple costs
 `_sum` + `_count` + sparse buckets (~1-45 depending on traffic spread,
-capped at 80) instead of 11 classic bucket series per tuple.
+capped at 80) instead of 16 classic bucket series per tuple.
 
 ## Cost
 
@@ -39,8 +39,9 @@ capped at 80) instead of 11 classic bucket series per tuple.
 - Sparse buckets self-compact when the cap would be exceeded (resolution
   halves). Under adversarial spread (10k distinct latencies over
   0.5 ms-1.5 s) the compaction settled at 44 buckets.
-- The 2.5/5/10s classic buckets were dropped earlier in this PR; hung
-  fetches are tracked as 5xx counts on `bouine_requests_total`.
+- The 2.5/5/10s classic tail buckets are retained so slow misses and
+  hung-fetch tails are distinguishable in `histogram_quantile` queries;
+  anything beyond 10s lands in the `+Inf` overflow bucket.
 
 ## Rollback
 

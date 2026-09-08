@@ -320,7 +320,11 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) 
 	return httpReq
 }
 
-// Fetch asks a peer for a cached object. Returns nil, nil on a cache
+// Fetch asks a peer for a cached object. varyKey, when non-empty, is the
+// requesting node's Vary assertion for key (RFC 9111 §4.1): the peer must
+// only return an object stored under that same variant dimension — a peer
+// whose only entry for key is the primary-key Vary resolver answers with a
+// miss instead of another variant's body. Returns nil, nil on a cache
 // miss at the peer; returns an error only on network/protocol failure.
 //
 //nolint:gocyclo // 16: hop/error/decode branches are inherently branchy
@@ -432,6 +436,32 @@ func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger,
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
 }
 
+// parsePeerFetchBody decodes the peer-fetch request body: binary framing
+// (v2) or the legacy JSON fallback. ok=false maps to a 400 response.
+func parsePeerFetchBody(body []byte) (api.PeerFetchRequest, bool) {
+	var req api.PeerFetchRequest
+	switch body[0] {
+	case peerFetchBinaryVersion:
+		if len(body) < 18 {
+			return req, false
+		}
+		copy(req.Key[:], body[1:17])
+		varyLen := int(body[17])
+		if len(body) < 18+varyLen {
+			return req, false
+		}
+		req.VaryKey = string(body[18 : 18+varyLen])
+		return req, true
+	case '{':
+		if err := json.Unmarshal(body, &req); err != nil {
+			return req, false
+		}
+		return req, true
+	default:
+		return req, false
+	}
+}
+
 // Handle is the fasthttp.RequestHandler for peer fetch requests.
 func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	if !bytes.Equal(ctx.Method(), []byte(fasthttp.MethodPost)) {
@@ -458,26 +488,8 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	var req api.PeerFetchRequest
-	switch body[0] {
-	case peerFetchBinaryVersion:
-		if len(body) < 18 {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-		copy(req.Key[:], body[1:17])
-		varyLen := int(body[17])
-		if len(body) < 18+varyLen {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-		req.VaryKey = string(body[18 : 18+varyLen])
-	case '{':
-		if err := json.Unmarshal(body, &req); err != nil {
-			ctx.Error("bad request", fasthttp.StatusBadRequest)
-			return
-		}
-	default:
+	req, ok := parsePeerFetchBody(body)
+	if !ok {
 		ctx.Error("bad request", fasthttp.StatusBadRequest)
 		return
 	}
@@ -485,6 +497,18 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	obj, _, err := h.store.Get(ctx, req.Key)
 	if err != nil || obj == nil {
 		h.logger.Info("served peer fetch miss", "key", req.Key, "hops", hops)
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+		return
+	}
+	// Vary assertion (RFC 9111 §4.1): when the requester asked for a
+	// specific variant and the only stored entry under req.Key is the
+	// primary-key Vary resolver (filled by a different selecting-header
+	// set), answer with a miss. Returning the resolver's body would serve
+	// one variant's content to a request selecting another — the
+	// cross-market body served in production before this gate.
+	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
+		h.logger.Info("served peer fetch miss: variant mismatch",
+			"key", req.Key, "want_vary", req.VaryKey, "have_vary", obj.VaryKey, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}

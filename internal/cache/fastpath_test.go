@@ -859,7 +859,7 @@ func TestNewFastPathHandler(t *testing.T) {
 	fp := NewFastPathHandler(h)
 	require.NotNil(t, fp)
 	// Verify it shares the same store.
-	key := BuildKey(requestInfoFromHTTP("GET", "http://example.com/test", "example.com", "/test", false, header.Map{}), nil)
+	key := BuildKey(requestInfoFromHTTP("http://example.com/test", "/test", header.Map{}), nil)
 	obj := &api.Object{
 		Key:        key,
 		StatusCode: 200,

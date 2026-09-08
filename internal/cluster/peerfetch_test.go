@@ -149,6 +149,79 @@ func TestPeerFetchHandler_Miss(t *testing.T) {
 	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode())
 }
 
+// TestPeerFetchHandler_VaryKeyMismatchMiss is the protocol-side regression
+// for the cross-market body incident: a peer whose only entry under the
+// requested key is a DIFFERENT variant (or the primary-key Vary resolver)
+// must answer a variant-asserting fetch with a miss instead of returning
+// the foreign variant's body.
+func TestPeerFetchHandler_VaryKeyMismatchMiss(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(11)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	// Requester asserts the us variant.
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "ushash"}, 0)
+	require.Equal(t, fasthttp.StatusNotFound, ctx.Response.StatusCode(),
+		"a variant-asserting fetch must miss when the stored object is another variant")
+}
+
+// TestPeerFetchHandler_VaryKeyMatchHit pins the positive case: an object
+// whose VaryKey equals the requester's assertion is served.
+func TestPeerFetchHandler_VaryKeyMatchHit(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(12)
+	frObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("market=fr"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "frhash",
+	}
+	frObj.Header = header.NewMap(1)
+	frObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: frObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key, VaryKey: "frhash"}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	obj, err := storage.DecodeObject(ctx.Response.Body())
+	require.NoError(t, err, "decode")
+	require.Equal(t, "market=fr", string(obj.Body))
+}
+
+// TestPeerFetchHandler_VaryKeyEmptyAssertAny pins the pre-existing behaviour
+// for non-variant fetches: an empty VaryKey assertion accepts whatever the
+// peer stores under the key (the primary-key Vary resolver included).
+func TestPeerFetchHandler_VaryKeyEmptyAssertAny(t *testing.T) {
+	t.Parallel()
+	key := testkey.Key(13)
+	resolverObj := &api.Object{
+		Key:        key,
+		StatusCode: 200,
+		Body:       []byte("resolver"),
+		VaryValue:  "BM-Market",
+		VaryKey:    "",
+	}
+	resolverObj.Header = header.NewMap(1)
+	resolverObj.Header.AppendEntry("Cache-Control", "max-age=60")
+	store := &stubStore{objects: map[api.Key]*api.Object{key: resolverObj}}
+	h := NewPeerFetchHandler(store, 0)
+
+	ctx := postFetch(t, h, api.PeerFetchRequest{Key: key}, 0)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode(),
+		"an empty VaryKey assertion must not filter the response")
+}
+
 func TestPeerFetchHandler_HopLimit(t *testing.T) {
 	t.Parallel()
 	h := NewPeerFetchHandler(&stubStore{}, 0)

@@ -254,7 +254,7 @@ type Handler struct {
 	revalSem    chan struct{} // bounds concurrent SWR background goroutines
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
-	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
 	// peerPut forwards a freshly origin-fetched object to the owner
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
@@ -368,9 +368,15 @@ type HandlerConfig struct {
 	// and eventual modes.
 	PeerPut func(ctx context.Context, owner api.PeerInfo, obj *api.Object)
 	// PeerFetch, if non-nil, is called on a miss when OwnerFn reports
-	// the key is owned by a remote peer. Returns nil, nil on peer miss;
+	// the key is owned by a remote peer. RequestKey carries the cache key
+	// (primary or variant) and varyKey the computed Vary assertion: a
+	// peer MUST NOT return an object whose Vary dimension set differs
+	// from the one asserted (RFC 9111 §4.1 — variants are keyed per
+	// selecting header set). Implementations assert this via the
+	// PeerFetchRequest.VaryKey field; the handler re-verifies on receipt
+	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
-	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key) (*api.Object, error)
+	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
 	Upstream  fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
@@ -1157,21 +1163,54 @@ func (h *Handler) serveInvalidating(ctx *fasthttp.RequestCtx) {
 // keys they do not own (issue #509).
 // src is the storage-tier source from lookup (hot/warm); it is overridden
 // to "peer" on a successful peer hit.
+// peerVaryAssertion derives the Vary assertion sent with a peer fetch:
+// the stale/miss-side object's stored VaryKey when lookup found one
+// (variant miss), the primary-key object's otherwise, and "" on a plain
+// miss with no stored Vary context.
+func peerVaryAssertion(obj *api.Object) string {
+	if obj == nil {
+		return ""
+	}
+	return obj.VaryKey
+}
+
+// servePeerHit validates and serves a peer-fetched object. Returns true
+// when the response was written (the caller must return), false when the
+// peer object was rejected or not fresh (the caller falls back to origin).
+// RFC 9111 §4.1: a Vary-carrying object belongs to one selecting-header
+// set. Recompute the variant dimension the fetched object must carry for
+// THIS request and compare against its stored VaryKey: a mismatch means
+// the peer answered with another variant's body or with the primary-key
+// Vary resolver (whose VaryKey is blank by protocol). Treat it as a miss
+// instead of serving cross-variant content (cross-market body served in
+// production before this gate).
+func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peerObj *api.Object, now time.Time, ri RequestInfo) bool {
+	if peerObj.VaryValue != "" &&
+		BuildVaryKey(peerObj.VaryValue, ri.Header, h.policy) != peerObj.VaryKey {
+		h.logger.Debug("peer fetch returned a foreign variant for this request",
+			"key", lookupKey.Hex(), "vary", peerObj.VaryValue,
+			"peer_vary_key", peerObj.VaryKey)
+		return false
+	}
+	if d := Evaluate(ri, peerObj, now); d.Decision == Hit || d.Decision == StaleHit {
+		cacheRes := cacheHit
+		if d.Decision == StaleHit {
+			cacheRes = cacheStale
+		}
+		h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
+		// Do not store or revalidate: the object came from the owner.
+		// Caching it on a non-owner would make the fleet cache redundant
+		// (issue #509). Revalidation is the owner's responsibility.
+		return true
+	}
+	return false
+}
+
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
-			if peerObj, err := h.peerFetch(ctx, owner, lookupKey); err == nil && peerObj != nil {
-				// Re-evaluate: the peer may have returned a stale object.
-				if d2 := Evaluate(ri, peerObj, now); d2.Decision == Hit || d2.Decision == StaleHit {
-					cacheRes := cacheHit
-					if d2.Decision == StaleHit {
-						cacheRes = cacheStale
-					}
-					h.serveObject(ctx, peerObj, now, cacheRes, api.SourcePeer)
-					// Do not store or revalidate: the object came from the
-					// owner. Caching it on a non-owner would make the fleet
-					// cache redundant (issue #509). Revalidation is the
-					// owner's responsibility.
+			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
+				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {
 					return
 				}
 			} else if err != nil {
@@ -1970,6 +2009,14 @@ func (h *Handler) writeAndMaybeStore(
 			// shared-head branch will start earning its keep.
 			primaryObj := obj.CloneForReturn(obj.Body)
 			primaryObj.Key = primaryKey
+			// The primary-key entry is the Vary resolver, not a variant:
+			// blank its VaryKey so a peer that only holds the primary
+			// entry answers a variant fetch with a miss (the consumer
+			// gate in handleCacheMiss rejects on VaryKey mismatch)
+			// instead of another variant's body. VaryValue stays set:
+			// lookup() still needs the stored Vary list to compute the
+			// variant key for subsequent requests.
+			primaryObj.VaryKey = ""
 			h.storeObject(ctx, primaryKey, primaryObj, ri, false, 0)
 			// Forward the primary (Vary-resolver) entry to its owner too —
 			// the primary key may hash to a different owner than the variant.

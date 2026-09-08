@@ -68,10 +68,7 @@ const (
 	// The config loader uses it for validation; each in-flight peer fetch
 	// holds a goroutine and buffers up to maxPeerFetchBytes (64 MiB) while
 	// decoding, so the cap bounds worst-case decode memory.
-	MaxPeerFetchConcurrency = maxPeerFetchConcurrency
-	// maxPeerFetchConcurrency is the internal cap applied even when a
-	// constructor receives an out-of-range value directly.
-	maxPeerFetchConcurrency = 128
+	MaxPeerFetchConcurrency = 128
 )
 
 // maxPeerFetchBytes caps the response body read from a peer during
@@ -208,8 +205,8 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	if fetchConcurrency <= 0 {
 		fetchConcurrency = defaultPeerFetchConcurrency
 	}
-	if fetchConcurrency > maxPeerFetchConcurrency {
-		fetchConcurrency = maxPeerFetchConcurrency
+	if fetchConcurrency > MaxPeerFetchConcurrency {
+		fetchConcurrency = MaxPeerFetchConcurrency
 	}
 	f := &PeerFetcher{
 		useTLS:              cfg.TLSConfig != nil,

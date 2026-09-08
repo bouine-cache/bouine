@@ -460,15 +460,15 @@ func TestPeerFetcher_ConfigurableFetchConcurrencyBoundsFetches(t *testing.T) {
 func TestPeerFetcher_FetchConcurrencyCappedAtMax(t *testing.T) {
 	t.Parallel()
 	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
-		FetchConcurrency: maxPeerFetchConcurrency * 2,
+		FetchConcurrency: MaxPeerFetchConcurrency * 2,
 	}, nil, nil)
 	defer f.Close(context.Background())
 
-	if got := cap(f.fetchSem); got != maxPeerFetchConcurrency {
-		t.Fatalf("fetch semaphore capacity = %d, want capped at %d", got, maxPeerFetchConcurrency)
+	if got := cap(f.fetchSem); got != MaxPeerFetchConcurrency {
+		t.Fatalf("fetch semaphore capacity = %d, want capped at %d", got, MaxPeerFetchConcurrency)
 	}
-	if got := cap(f.putSem); got != maxPeerFetchConcurrency {
-		t.Fatalf("put semaphore capacity = %d, want capped at %d", got, maxPeerFetchConcurrency)
+	if got := cap(f.putSem); got != MaxPeerFetchConcurrency {
+		t.Fatalf("put semaphore capacity = %d, want capped at %d", got, MaxPeerFetchConcurrency)
 	}
 }
 

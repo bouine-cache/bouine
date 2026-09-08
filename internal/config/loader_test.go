@@ -243,7 +243,7 @@ func TestClusterPeerFetchConcurrency_ExceedsUpperBoundRejected(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
-		Cluster: Cluster{PeerFetchConcurrency: maxPeerFetchConcurrency + 1},
+		Cluster: Cluster{PeerFetchConcurrency: MaxPeerFetchConcurrency + 1},
 	}
 	err := cfg.Validate()
 	require.Error(t, err)
@@ -255,7 +255,7 @@ func TestClusterPeerFetchConcurrency_AtUpperBoundAccepted(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
 		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
-		Cluster: Cluster{PeerFetchConcurrency: maxPeerFetchConcurrency},
+		Cluster: Cluster{PeerFetchConcurrency: MaxPeerFetchConcurrency},
 	}
 	err := cfg.Validate()
 	require.NoError(t, err)

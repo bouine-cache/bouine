@@ -1061,6 +1061,19 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 				break
 			}
 		}
+		// Wire the cluster peer branch (issue #636): on a local miss the
+		// fast path asks the key's owner before falling through to the
+		// slow path. Same closures the slow-path handlers use. NOT wired
+		// under the epoll reactor: TryHit runs inline on the reactor's
+		// event loop, which must never block on network I/O (a miss
+		// would stall every connection on that loop for the peer-fetch
+		// timeout). The h1parser path blocks too, but it is already
+		// per-connection blocking by design; the reactor is not.
+		fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs)
+		if fpOwnerFn != nil && fpPeerFetch != nil && !e.cfg.Experimental.H1Reactor {
+			fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+			e.logger.Info("H1 fast path peer fetch enabled")
+		}
 		fastPathHandler = fp
 		e.logger.Info("H1 fast path enabled", "experimental", true)
 	}

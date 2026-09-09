@@ -36,6 +36,11 @@ type Metrics struct {
 	// correctness regression: the node is failing open to single-node
 	// ownership. See issue #305.
 	RingEmpty prometheus.Counter
+	// BroadcastOverflows counts batcher queue overflows. Non-zero
+	// means invalidation events bypass batching and fall back to
+	// unbatched delivery (delivery preserved, batching win lost).
+	// See ADR-0044.
+	BroadcastOverflows prometheus.Counter
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
@@ -80,6 +85,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_ring_empty_total",
 			Help:      "Number of times Owner was called with an empty consistent-hash ring. Non-zero indicates a silent correctness regression.",
 		}),
+		BroadcastOverflows: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "cluster_broadcast_overflows_total",
+			Help:      "Invalidation batcher queue overflows. Events fall back to unbatched delivery; delivery is preserved.",
+		}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -88,6 +98,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.BroadcastFailures,
 		m.GossipDrops,
 		m.RingEmpty,
+		m.BroadcastOverflows,
 	)
 	return m
 }
@@ -143,6 +154,14 @@ func (m *Metrics) IncGossipDrop() {
 		return
 	}
 	m.GossipDrops.Inc()
+}
+
+// IncBroadcastOverflow increments the batcher-overflow counter.
+func (m *Metrics) IncBroadcastOverflow() {
+	if m == nil || m.BroadcastOverflows == nil {
+		return
+	}
+	m.BroadcastOverflows.Inc()
 }
 
 // IncRingEmpty increments the ring-empty counter. Called when Owner

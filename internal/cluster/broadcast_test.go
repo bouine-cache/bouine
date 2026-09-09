@@ -25,14 +25,14 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 	t.Parallel()
 	var received []api.PurgeEvent
 	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
-		if string(ctx.Path()) != "/v1/peer/purge" {
+		if string(ctx.Path()) != "/v1/peer/purge/batch" {
 			t.Errorf("unexpected path: %s", string(ctx.Path()))
 		}
-		evt, err := DecodePurgeHTTP(ctx.PostBody())
+		evts, err := DecodePurgeBatchHTTP(ctx.PostBody())
 		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
-		received = append(received, evt)
+		received = append(received, evts...)
 		ctx.SetStatusCode(fasthttp.StatusOK)
 	})
 	defer srv.Close()
@@ -45,6 +45,7 @@ func TestBroadcaster_BroadcastPurge(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(42), "")
+	b.Close()
 
 	require.Len(t, received, 1)
 	assert.Equal(t, testkey.Key(42), received[0].Key)
@@ -77,6 +78,7 @@ func TestBroadcaster_BroadcastBan(t *testing.T) {
 		HostRegex: "example.com",
 		CreatedAt: time.Now(),
 	})
+	b.Close()
 
 	require.Len(t, received, 1)
 	assert.Equal(t, "example.com", received[0].Predicate.HostRegex)
@@ -103,6 +105,7 @@ func TestBroadcaster_SkipsSelf(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(1), "")
+	b.Close()
 
 	assert.Equal(t, 1, called)
 }
@@ -124,6 +127,7 @@ func TestBroadcastPurge_Eventual_NoHTTPFanout(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(99), "/v")
+	b.Close()
 
 	require.Equal(t, 0, httpCalled)
 }
@@ -145,6 +149,7 @@ func TestBroadcastPurge_Strong_DoesHTTPFanout(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(7), "")
+	b.Close()
 
 	require.Equal(t, 1, httpCalled)
 }
@@ -166,6 +171,7 @@ func TestBroadcastBan_Eventual_NoHTTPFanout(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastBan(context.Background(), api.BanExpr{HostRegex: "test\\.com"})
+	b.Close()
 
 	require.Equal(t, 0, httpCalled)
 }
@@ -189,6 +195,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(1), "")
+	b.Close()
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather")
@@ -217,6 +224,7 @@ func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(77), "")
+	b.Close()
 
 	families, _ := reg.Gather()
 	var reason string
@@ -268,6 +276,7 @@ func TestBroadcastPurge_NotCancelledByParentContext(t *testing.T) {
 	cancel()
 
 	b.BroadcastPurge(ctx, testkey.Key(42), "")
+	b.Close()
 
 	if got := received.Load(); got != 1 {
 		t.Fatalf("expected 1 peer to receive purge despite cancelled parent ctx, got %d", got)
@@ -295,6 +304,7 @@ func TestBroadcastBan_NotCancelledByParentContext(t *testing.T) {
 	cancel()
 
 	b.BroadcastBan(ctx, api.BanExpr{HostRegex: "test\\.com"})
+	b.Close()
 
 	if got := received.Load(); got != 1 {
 		t.Fatalf("expected 1 peer to receive ban despite cancelled parent ctx, got %d", got)
@@ -317,6 +327,7 @@ func TestBroadcaster_UsesHTTPWhenNoTLS(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastPurge(context.Background(), testkey.Key(1), "")
+	b.Close()
 
 	if gotTLS {
 		t.Fatal("expected plaintext HTTP with nil fetcher, got TLS")
@@ -344,6 +355,7 @@ func TestBroadcaster_UsesHTTPSWhenFetcherHasTLS(t *testing.T) {
 
 	b := NewBroadcaster(c, fetcher)
 	b.BroadcastPurge(context.Background(), testkey.Key(1), "")
+	b.Close()
 
 	if !gotTLS {
 		t.Fatal("expected HTTPS with TLS fetcher, got plaintext")
@@ -376,6 +388,7 @@ func TestBroadcaster_SendsAuthToken(t *testing.T) {
 
 			b := NewBroadcaster(c, nil, "secret-token")
 			tc.op(b)
+			b.Close()
 
 			if authHeader != "Bearer secret-token" {
 				t.Fatalf("expected Authorization header %q, got %q", "Bearer secret-token", authHeader)
@@ -388,14 +401,14 @@ func TestBroadcaster_BroadcastRefresh(t *testing.T) {
 	t.Parallel()
 	var received []api.RefreshEvent
 	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
-		if string(ctx.Path()) != "/v1/peer/refresh" {
+		if string(ctx.Path()) != "/v1/peer/refresh/batch" {
 			t.Errorf("unexpected path: %s", string(ctx.Path()))
 		}
-		evt, err := DecodeRefreshHTTP(ctx.PostBody())
+		evts, err := DecodeRefreshBatchHTTP(ctx.PostBody())
 		if err != nil {
 			t.Errorf("decode: %v", err)
 		}
-		received = append(received, evt)
+		received = append(received, evts...)
 		ctx.SetStatusCode(fasthttp.StatusOK)
 	})
 	defer srv.Close()
@@ -408,6 +421,7 @@ func TestBroadcaster_BroadcastRefresh(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastRefresh(context.Background(), testkey.Key(42))
+	b.Close()
 
 	require.Len(t, received, 1)
 	assert.Equal(t, testkey.Key(42), received[0].Key)
@@ -432,6 +446,7 @@ func TestBroadcastRefresh_Eventual_NoHTTPFanout(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastRefresh(context.Background(), testkey.Key(1))
+	b.Close()
 
 	require.Equal(t, 0, called, "eventual mode should not use HTTP fan-out")
 }
@@ -454,6 +469,7 @@ func TestBroadcastRefresh_Strong_DoesHTTPFanout(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastRefresh(context.Background(), testkey.Key(1))
+	b.Close()
 
 	require.Equal(t, 1, called, "strong mode should use HTTP fan-out")
 }
@@ -479,6 +495,7 @@ func TestBroadcastRefresh_SkipsSelf(t *testing.T) {
 
 	b := NewBroadcaster(c, nil)
 	b.BroadcastRefresh(context.Background(), testkey.Key(1))
+	b.Close()
 
 	require.Equal(t, 1, called, "should skip self, only contact node-1")
 }
@@ -504,5 +521,6 @@ func TestBroadcastRefresh_NotCancelledByParentContext(t *testing.T) {
 	cancel()
 
 	b.BroadcastRefresh(ctx, testkey.Key(1))
+	b.Close()
 	require.Equal(t, int32(1), hits.Load(), "refresh broadcast must not be cancelled by parent context")
 }

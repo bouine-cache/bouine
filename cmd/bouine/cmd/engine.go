@@ -781,7 +781,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerRefreshHandler: cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
 			return rs.softPurgeKey(ctx, evt.Key)
 		}),
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit).Handle,
+		PeerFetchHandler:   e.buildPeerFetchHandler(rs).Handle,
 		PeerPutHandler:     e.buildPeerPutHandler(rs).Handle,
 		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:   dashMux,
@@ -789,6 +789,16 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	minimalAdmin.SwapHandler(srv.Handler())
+}
+
+// buildPeerFetchHandler creates the PeerFetchHandler and wires the
+// server-side variant-mismatch counter for observability.
+func (e *engine) buildPeerFetchHandler(rs *runState) *cluster.PeerFetchHandler {
+	pfh := cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit)
+	if rs.dpMetrics != nil {
+		pfh.SetVariantMismatchCounter(rs.dpMetrics.PeerFetchVariantMismatch.WithLabelValues("server"))
+	}
+	return pfh
 }
 
 // buildPeerPutHandler creates the PeerPutHandler and wires its onStore
@@ -839,9 +849,10 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 			}
 			hits, misses, hopLimitHits, _, _ := rs.peerFetcher.PeerFetchStats()
 			return templates.PeerFetchStats{
-				Hits6h:       hits,
-				Misses6h:     misses,
-				HopLimitHits: hopLimitHits,
+				Hits6h:               hits,
+				Misses6h:             misses,
+				HopLimitHits:         hopLimitHits,
+				VariantMismatchTotal: rs.dpMetrics.PeerFetchVariantMismatchCount(),
 			}
 		},
 		CFStatusFn: func() templates.CFStatusCard {

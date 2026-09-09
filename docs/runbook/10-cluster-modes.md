@@ -209,9 +209,22 @@ No data migration needed — each node starts with an empty cache.
     summary: "Full-mode node at >90% hot store capacity"
 ```
 
----
+```yaml
+# Alert on peer-fetch variant mismatches — indicates a mixed-version
+# fleet or a peer bug. The side label distinguishes server-side
+# rejections (owner refused a foreign variant or resolver body) from
+# consumer-side rejections (requester detected a foreign variant).
+- alert: BouinePeerFetchVariantMismatch
+  expr: sum(rate(bouine_peer_fetch_variant_mismatch_total[5m])) > 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Peer-fetch variant-assertion gate is rejecting objects — possible mixed-version fleet or peer bug"
+    description: "Check the side label: server=owner rejected, consumer=requester rejected. Investigate peer software versions and Vary handling."
+```
 
-## Troubleshooting quick reference
+---
 
 | Symptom | Mode | Probable cause | Check |
 |---------|------|---------------|-------|

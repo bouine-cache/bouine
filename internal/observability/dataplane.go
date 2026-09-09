@@ -35,6 +35,12 @@ type DataPlaneMetrics struct {
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
+	// PeerFetchVariantMismatch counts peer-fetch variant-assertion gate
+	// rejections. The side label is "server" (the owner refused to serve
+	// a foreign variant or resolver body) or "consumer" (the requester
+	// detected the peer returned a foreign variant). A non-zero rate
+	// indicates a mixed-version fleet or a peer bug; alert at > 0 for 5m.
+	PeerFetchVariantMismatch *prometheus.CounterVec // labels: side
 	// accessLog receives structured access log entries. nil disables
 	// access logging (used in tests and when the operator sets log
 	// level above Info).
@@ -213,6 +219,11 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "http_smuggling_rejected_total",
 		Help:      "Total HTTP smuggling attempts rejected by the h1parser (CL+TE conflict, duplicate Content-Length, obs-fold).",
 	})
+	m.PeerFetchVariantMismatch = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "peer_fetch_variant_mismatch_total",
+		Help:      "Peer-fetch variant-assertion gate rejections. The side label is \"server\" (owner refused a foreign variant or resolver body) or \"consumer\" (requester detected a foreign variant from the peer). A non-zero rate indicates a mixed-version fleet or a peer bug.",
+	}, []string{"side"})
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
 		m.CFBatchFlushed, m.CFBatchDeduped, m.CFBatchFlushErr,
@@ -226,7 +237,8 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
-		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal)
+		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
+		m.PeerFetchVariantMismatch)
 	return m
 }
 
@@ -580,6 +592,22 @@ func (m *DataPlaneMetrics) VaryCapHitsCount() int64 {
 	var d dto.Metric
 	_ = m.VaryCapHits.(prometheus.Metric).Write(&d)
 	return int64(d.GetCounter().GetValue())
+}
+
+// PeerFetchVariantMismatchCount returns the total peer-fetch variant
+// mismatch count (both server and consumer sides) for the dashboard.
+func (m *DataPlaneMetrics) PeerFetchVariantMismatchCount() int64 {
+	if m == nil || m.PeerFetchVariantMismatch == nil {
+		return 0
+	}
+	var total int64
+	for _, side := range []string{"server", "consumer"} {
+		var d dto.Metric
+		if err := m.PeerFetchVariantMismatch.WithLabelValues(side).(prometheus.Metric).Write(&d); err == nil {
+			total += int64(d.GetCounter().GetValue())
+		}
+	}
+	return total
 }
 
 // CFPurgeSkippedCount returns the total CF purge skip count across all

@@ -150,3 +150,36 @@ func TestMetricCardinalityBudget_ManyPoolsValidate(t *testing.T) {
 	}
 	require.NoError(t, newCfg(64).Validate(), "64 pools must validate: no pool-count cap")
 }
+
+// TestPeerFetchVariantMismatchCardinality pins the AGENTS.md §9
+// cardinality budget for bouine_peer_fetch_variant_mismatch_total: the
+// only label is "side" with two fixed values (server, consumer). No
+// key, peer, or route cardinality leaks in.
+func TestPeerFetchVariantMismatchCardinality(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+
+	// Increment both sides to materialize the series.
+	m.PeerFetchVariantMismatch.WithLabelValues("server").Inc()
+	m.PeerFetchVariantMismatch.WithLabelValues("consumer").Inc()
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err, "gather")
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_peer_fetch_variant_mismatch_total" {
+			continue
+		}
+		// Exactly two series: server and consumer.
+		assert.Len(t, mf.GetMetric(), 2,
+			"side label must have exactly two values: server and consumer")
+		for _, met := range mf.GetMetric() {
+			assert.Len(t, met.GetLabel(), 1, "only the side label is allowed")
+			side := met.GetLabel()[0].GetValue()
+			assert.Contains(t, []string{"server", "consumer"}, side,
+				"side label must be server or consumer")
+		}
+		return
+	}
+	t.Fatal("bouine_peer_fetch_variant_mismatch_total not found in gathered metrics")
+}

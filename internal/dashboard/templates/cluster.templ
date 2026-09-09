@@ -105,6 +105,7 @@ templ Cluster(d ClusterData) {
 						</span>
 					</div>
 					<div class="stat-row"><span class="stat-k" title="Number of requests that reached the hop limit and went straight to origin. A non-zero value may indicate a routing misconfiguration or ring imbalance.">hop limit hits</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.HopLimitHits, 10) }</span></div>
+					<div class="stat-row"><span class="stat-k" title="Peer-fetch variant-assertion gate rejections since boot. A non-zero value indicates a mixed-version fleet or a peer bug. The gate prevents serving a foreign variant's body to a request selecting a different variant.">variant mismatches</span><span class="stat-v">{ strconv.FormatInt(d.FetchStats.VariantMismatchTotal, 10) }</span></div>
 					<div class="stat-row" style="margin-top:.5rem">
 						<span class="stat-k" title="Average percentage of the last 30 minutes during which each peer was reachable. Computed from 30-second health samples.">uptime avg 30m</span>
 						<span class="stat-v">{ peerHealthSummary(d.PeerHealth) }</span>

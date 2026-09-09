@@ -253,11 +253,12 @@ type ClusterMeta struct {
 
 // PeerFetchStats holds aggregated peer fetch telemetry for the cluster page.
 type PeerFetchStats struct {
-	Hits6h       int64
-	Misses6h     int64
-	AvgLatMs     float64
-	HopLimitHits int64
-	DigestCount  int64
+	Hits6h               int64
+	Misses6h             int64
+	AvgLatMs             float64
+	HopLimitHits         int64
+	DigestCount          int64
+	VariantMismatchTotal int64
 }
 
 // ClusterData is the view model for the cluster page.

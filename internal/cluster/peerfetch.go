@@ -410,9 +410,10 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 // PeerFetchHandler is a fasthttp.RequestHandler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
 type PeerFetchHandler struct {
-	store    PeerStore
-	logger   observability.Logger
-	hopLimit int
+	variantMismatchInc interface{ Inc() }
+	store              PeerStore
+	logger             observability.Logger
+	hopLimit           int
 }
 
 // PeerStore is the minimal storage interface needed by peer fetch.
@@ -434,6 +435,21 @@ func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger,
 		hopLimit = MaxHops
 	}
 	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
+}
+
+// SetVariantMismatchCounter injects the counter incremented when the
+// server-side variant-assertion gate rejects a peer-fetch request
+// (foreign variant or resolver body). nil-safe.
+func (h *PeerFetchHandler) SetVariantMismatchCounter(c interface{ Inc() }) {
+	h.variantMismatchInc = c
+}
+
+// incVariantMismatch is a nil-safe helper that increments the
+// variant-mismatch counter when set.
+func (h *PeerFetchHandler) incVariantMismatch() {
+	if h.variantMismatchInc != nil {
+		h.variantMismatchInc.Inc()
+	}
 }
 
 // parsePeerFetchBody decodes the peer-fetch request body: binary framing
@@ -509,6 +525,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
 		h.logger.Info("served peer fetch miss: variant mismatch",
 			"key", req.Key, "want_vary", req.VaryKey, "have_vary", obj.VaryKey, "hops", hops)
+		h.incVariantMismatch()
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}
@@ -527,6 +544,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	if obj.VaryKey == "" && obj.VaryValue != "" {
 		h.logger.Info("served peer fetch miss: primary entry is a Vary resolver",
 			"key", req.Key, "vary", obj.VaryValue, "hops", hops)
+		h.incVariantMismatch()
 		ctx.SetStatusCode(fasthttp.StatusNotFound)
 		return
 	}

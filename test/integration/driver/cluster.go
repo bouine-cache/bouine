@@ -859,3 +859,10 @@ func (s *ClusterStack) TLSServerCerts(t *testing.T, n int, serverName string) []
 	defer conn.Close()
 	return conn.ConnectionState().PeerCertificates
 }
+
+// PurgeBatch sends POST /v1/purge/batch to node n with the given URLs.
+func (s *ClusterStack) PurgeBatch(t *testing.T, n int, urls []string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string][]string{"urls": urls})
+	s.adminPost(t, n, "/v1/purge/batch", body)
+}

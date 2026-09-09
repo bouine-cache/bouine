@@ -35,12 +35,16 @@ import (
 //
 // Stable.
 type Config struct {
-	Logger             observability.Logger
-	PeerPutHandler     fasthttp.RequestHandler
-	PeerPurgeHandler   fasthttp.RequestHandler
-	Metrics            *observability.Metrics
-	PeersFn            func() []api.PeerInfo
-	PurgeFn            func(key api.Key) error
+	Logger           observability.Logger
+	PeerPutHandler   fasthttp.RequestHandler
+	PeerPurgeHandler fasthttp.RequestHandler
+	Metrics          *observability.Metrics
+	PeersFn          func() []api.PeerInfo
+	PurgeFn          func(key api.Key) error
+	// PurgeBatchFn applies a whole batch of purge URLs in one call:
+	// one local pass and one cluster broadcast (ADR-0044). Falls back
+	// to PurgeFn per key when unset.
+	PurgeBatchFn       func(urls []string) (purged int, failed int)
 	BanFn              func(expr api.BanExpr) (int, error)
 	CacheCheckFn       func(ctx context.Context, rawURL string) CacheCheckResult
 	ConfigFn           func() any
@@ -560,15 +564,19 @@ func (s *Server) purgeBatch(ctx *fasthttp.RequestCtx) {
 		}
 	}
 	purged, failed := 0, 0
-	for _, u := range req.URLs {
-		key := cache.BuildKeyFromURL(u, nil)
-		if err := s.cfg.PurgeFn(key); err != nil {
-			failed++
-			continue
-		}
-		purged++
-		if s.cfg.OnPurged != nil {
-			s.cfg.OnPurged(context.Background(), u)
+	if s.cfg.PurgeBatchFn != nil {
+		purged, failed = s.cfg.PurgeBatchFn(req.URLs)
+	} else {
+		for _, u := range req.URLs {
+			key := cache.BuildKeyFromURL(u, nil)
+			if err := s.cfg.PurgeFn(key); err != nil {
+				failed++
+				continue
+			}
+			purged++
+			if s.cfg.OnPurged != nil {
+				s.cfg.OnPurged(context.Background(), u)
+			}
 		}
 	}
 	writeJSON(ctx, fasthttp.StatusOK, map[string]any{"status": "purged", "count": purged, "failed": failed})

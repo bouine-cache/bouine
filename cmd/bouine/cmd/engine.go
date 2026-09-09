@@ -931,10 +931,15 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 			if rs.peerFetcher == nil {
 				return templates.PeerFetchStats{}
 			}
-			hits, misses, hopLimitHits, _, _ := rs.peerFetcher.PeerFetchStats()
+			hits, misses, hopLimitHits, latN, latSumMs := rs.peerFetcher.PeerFetchStats()
+			var avgLatMs float64
+			if latN > 0 {
+				avgLatMs = float64(latSumMs) / float64(latN)
+			}
 			return templates.PeerFetchStats{
-				Hits6h:       hits,
-				Misses6h:     misses,
+				HitsTotal:    hits,
+				MissesTotal:  misses,
+				AvgLatMs:     avgLatMs,
 				HopLimitHits: hopLimitHits,
 			}
 		},

@@ -256,6 +256,43 @@ func TestHandler_CFStatusWired(t *testing.T) {
 		"ruleCDNLastError input must see the last error")
 }
 
+// TestHandler_PeerFetchStatsAvgLatency asserts the cluster page shows
+// the average peer-fetch RPC latency: the engine adapter computes it
+// from the fetcher's cumulative lat_sum/lat_n, which it previously
+// discarded, leaving the "avg peer latency" row permanently empty.
+func TestHandler_PeerFetchStatsAvgLatency(t *testing.T) {
+	t.Parallel()
+	rings := observability.NewRings("self")
+	h := &Handler{
+		cfg: Config{
+			Token:       "test",
+			Rings:       rings,
+			Logger:      observability.NoopLogger{},
+			ClusterMeta: templates.ClusterMeta{Mode: "strong"},
+			PeerFetchStatsFn: func() templates.PeerFetchStats {
+				return templates.PeerFetchStats{
+					HitsTotal:    7,
+					MissesTotal:  3,
+					AvgLatMs:     2.5,
+					HopLimitHits: 1,
+				}
+			},
+		},
+		auth: newSessionAuth("test"),
+		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
+	}
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/cluster")
+	h.cluster(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	body := string(ctx.Response.Body())
+	assert.Contains(t, body, "2.50ms", "avg peer latency must render")
+	assert.Contains(t, body, "peer hits (total)")
+	assert.Contains(t, body, "peer misses (total)")
+}
+
 func TestHandler_APIPurge_NotConfigured(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()
@@ -619,7 +656,7 @@ func TestHandler_Cluster_WithRingFn(t *testing.T) {
 			Rings:            rings,
 			Logger:           observability.NoopLogger{},
 			RingFn:           func() []api.RingSegment { return []api.RingSegment{{NodeName: "self", Frac: 1.0}} },
-			PeerFetchStatsFn: func() templates.PeerFetchStats { return templates.PeerFetchStats{Hits6h: 10} },
+			PeerFetchStatsFn: func() templates.PeerFetchStats { return templates.PeerFetchStats{HitsTotal: 10} },
 		},
 		auth: newSessionAuth("test"),
 		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),

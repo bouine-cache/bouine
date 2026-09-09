@@ -664,6 +664,23 @@ func TestBuildClusterMeta_SingleNode(t *testing.T) {
 	rs := &runState{}
 	meta := e.buildClusterMeta(rs)
 	assert.Equal(t, "single-node", meta.Mode)
+	// Derived defaults must match what the runtime actually uses, not
+	// stale hardcoded strings: 120s join budget stepped at 2s, and the
+	// 500ms peer-fetch RPC timeout from the cluster package.
+	assert.Equal(t, "2m0s · 2s step", meta.JoinRetryBudget)
+	assert.Equal(t, "500ms", meta.PeerFetchTimeout)
+}
+
+// A configured join timeout must be reflected in the budget label.
+func TestBuildClusterMeta_ConfiguredJoinTimeout(t *testing.T) {
+	t.Parallel()
+	e := &engine{
+		cfg:    &config.Config{Cluster: config.Cluster{JoinTimeout: 45 * time.Second}},
+		logger: newTestLogger(),
+	}
+	rs := &runState{}
+	meta := e.buildClusterMeta(rs)
+	assert.Equal(t, "45s · 2s step", meta.JoinRetryBudget)
 }
 
 func TestBuildClusterMeta_WithHopLimit(t *testing.T) {

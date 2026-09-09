@@ -44,6 +44,7 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — internal/storage, internal/cluster, internal/admin, cmd/bouine/cmd — invalidation CPU mitigation series: ban scan coalescing + literal fast-path (perf/ban-storm), batched invalidation delivery + seq dedup with ADR-0044 (perf/invalidation-batching), end-to-end /v1/purge/batch (perf/purge-batch, stacked) — 2026-09-09
 - [DONE] crush — release 0.5.12 (changelog curation + promotion, chart bump) — 2026-09-08
 
 - [DONE] crush — release 0.5.11 (changelog curation + promotion, chart bump) — 2026-09-08

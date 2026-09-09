@@ -987,6 +987,9 @@ func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
 	} else {
 		meta.Mode = "single-node"
 	}
+	// An unset hop_limit resolves to the peer fetcher's MaxHops default,
+	// so show the effective value rather than a misleading 0.
+	meta.HopLimit = cluster.MaxHops
 	if e.cfg.Cluster.HopLimit > 0 {
 		meta.HopLimit = e.cfg.Cluster.HopLimit
 	}

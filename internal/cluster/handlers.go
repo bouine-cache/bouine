@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
@@ -85,4 +86,58 @@ func writePeerOK(ctx *fasthttp.RequestCtx, status string) {
 	ctx.Response.Header.Set(header.ContentType, "application/json")
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	_ = json.NewEncoder(ctx).Encode(map[string]string{"status": status})
+}
+
+// NewPeerPurgeBatchHandler returns a fasthttp.RequestHandler that
+// decodes a batch of PurgeEvents and delegates each to fn. Mounted at
+// POST /v1/peer/purge/batch (ADR-0044).
+func NewPeerPurgeBatchHandler(fn func(api.PurgeEvent) error) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > 4<<20 {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		evts, err := DecodePurgeBatchHTTP(body)
+		if err != nil {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		applied := 0
+		for _, evt := range evts {
+			if err := fn(evt); err != nil {
+				writePeerError(ctx, err)
+				return
+			}
+			applied++
+		}
+		writePeerOK(ctx, fmt.Sprintf("purged %d", applied))
+	}
+}
+
+// NewPeerRefreshBatchHandler returns a fasthttp.RequestHandler that
+// decodes a batch of RefreshEvents and delegates each to fn. Mounted
+// at POST /v1/peer/refresh/batch (ADR-0044).
+func NewPeerRefreshBatchHandler(fn func(api.RefreshEvent) error) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		body := ctx.PostBody()
+		if len(body) > 4<<20 {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		evts, err := DecodeRefreshBatchHTTP(body)
+		if err != nil {
+			ctx.Error("bad request", fasthttp.StatusBadRequest)
+			return
+		}
+		applied := 0
+		for _, evt := range evts {
+			if err := fn(evt); err != nil {
+				writePeerError(ctx, err)
+				return
+			}
+			applied++
+		}
+		writePeerOK(ctx, fmt.Sprintf("refreshed %d", applied))
+	}
 }

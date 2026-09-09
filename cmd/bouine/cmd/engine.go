@@ -771,24 +771,76 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			}
 			return nil
 		},
-		PeerPurgeHandler: cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
-			return rs.purgeKey(ctx, evt.Key)
-		}),
-		PeerBanHandler: cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
-			_, err := rs.store.Ban(ctx, evt.Predicate)
-			return err
-		}),
-		PeerRefreshHandler: cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
-			return rs.softPurgeKey(ctx, evt.Key)
-		}),
-		PeerFetchHandler:   cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit).Handle,
-		PeerPutHandler:     e.buildPeerPutHandler(rs).Handle,
-		PeerMetricsHandler: dashboard.PeerMetricsHandler(rs.rings),
-		DashboardHandler:   dashMux,
-		FaviconHandler:     webdash.FaviconHandler(),
+		PeerPurgeHandler:        e.peerPurgeApply(rs, ctx),
+		PeerBanHandler:          e.peerBanApply(rs, ctx),
+		PeerRefreshHandler:      e.peerRefreshApply(rs, ctx),
+		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
+		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
+		PeerFetchHandler:        cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit).Handle,
+		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
+		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
+		DashboardHandler:        dashMux,
+		FaviconHandler:          webdash.FaviconHandler(),
 	})
 	_ = rs.peerFetcher // suppress unused warning when cluster is disabled
 	minimalAdmin.SwapHandler(srv.Handler())
+}
+
+// peerPurgeApply returns the peer purge applier: deduped via the
+// per-issuer seq tracker (ADR-0044) before reaching the store, so a
+// purge delivered by both HTTP fan-out and gossip applies once.
+func (e *engine) peerPurgeApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerPurgeHandler(func(evt api.PurgeEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.purgeKey(ctx, evt.Key)
+	})
+}
+
+// peerBanApply returns the peer ban applier (deduped; see peerPurgeApply).
+func (e *engine) peerBanApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerBanHandler(func(evt api.BanEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		_, err := rs.store.Ban(ctx, evt.Predicate)
+		return err
+	})
+}
+
+// peerRefreshApply returns the peer refresh applier (deduped; see
+// peerPurgeApply). The batch endpoints share it: dedup makes batched
+// and unbatched deliveries interchangeable.
+func (e *engine) peerRefreshApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerRefreshHandler(func(evt api.RefreshEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.softPurgeKey(ctx, evt.Key)
+	})
+}
+
+// peerPurgeBatchApply returns the peer batched-purge applier
+// (deduped; see peerPurgeApply).
+func (e *engine) peerPurgeBatchApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerPurgeBatchHandler(func(evt api.PurgeEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.purgeKey(ctx, evt.Key)
+	})
+}
+
+// peerRefreshBatchApply returns the peer batched-refresh applier
+// (deduped; see peerPurgeApply).
+func (e *engine) peerRefreshBatchApply(rs *runState, ctx context.Context) fasthttp.RequestHandler {
+	return cluster.NewPeerRefreshBatchHandler(func(evt api.RefreshEvent) error {
+		if rs.clusterNode.SeenFromPeer(evt.Issuer, evt.Seq) {
+			return nil
+		}
+		return rs.softPurgeKey(ctx, evt.Key)
+	})
 }
 
 // buildPeerPutHandler creates the PeerPutHandler and wires its onStore
@@ -1059,6 +1111,14 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 		if rs.peerFetcher != nil {
 			rs.seq.AddStep("drain-peer-fetcher", 5*time.Second, func(ctx context.Context) error {
 				return rs.peerFetcher.Close(ctx)
+			})
+		}
+		if rs.broadcaster != nil {
+			// Flush pending invalidation batches before leaving the
+			// cluster so final purges reach all peers (ADR-0044).
+			rs.seq.AddStep("drain-broadcaster", 5*time.Second, func(_ context.Context) error {
+				rs.broadcaster.Close()
+				return nil
 			})
 		}
 		rs.seq.AddStep("cluster-leave", 10*time.Second, func(ctx context.Context) error {

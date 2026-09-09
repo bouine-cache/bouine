@@ -33,6 +33,9 @@ type Config struct {
 	Rings        *observability.Rings
 	// CFPurgeSkippedFn returns total CF purges skipped.
 	CFPurgeSkippedFn func() int64
+	// FetchShedFn returns total foreground origin fetches shed
+	// (queue wait exceeded fetch_wait_timeout).
+	FetchShedFn func() int64
 	// BroadcastFailuresFn returns total cluster broadcast failures.
 	BroadcastFailuresFn func() int64
 	// Storage stats.
@@ -872,6 +875,10 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 	if h.cfg.CFPurgeSkippedFn != nil {
 		cfPurgeSkipped = h.cfg.CFPurgeSkippedFn()
 	}
+	var fetchShed int64
+	if h.cfg.FetchShedFn != nil {
+		fetchShed = h.cfg.FetchShedFn()
+	}
 	return insights.InsightData{
 		Config:            h.cfg.Config,
 		StoreStats:        storeStats,
@@ -885,6 +892,7 @@ func (h *Handler) collectInsightData(merged observability.MetricsSummary, peers 
 		VaryCapHits:       varyCapHits,
 		BroadcastFailures: broadcastFailures,
 		CFPurgeSkipped:    cfPurgeSkipped,
+		FetchShed:         fetchShed,
 	}
 }
 

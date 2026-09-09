@@ -399,6 +399,9 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 				{Key: "https", Value: fmt.Sprintf("%q", cfg.Listen.HTTPS), Kind: "str", Hint: "TLS data plane"},
 				{Key: "admin", Value: fmt.Sprintf("%q", cfg.Listen.Admin), Kind: "str", Hint: "admin API · metrics · health"},
 				{Key: "cluster", Value: fmt.Sprintf("%q", cfg.Listen.Cluster), Kind: "str", Hint: "gossip · peer fetch"},
+				{Key: "read_timeout", Value: FmtDuration(cfg.Listen.ReadTimeout), Kind: "dur", Hint: "per-request slowloris cap (0 = 30s default)"},
+				{Key: "idle_timeout", Value: FmtDuration(cfg.Listen.IdleTimeout), Kind: "dur", Hint: "keep-alive idle (0 = 120s default)"},
+				{Key: "max_connections", Value: fmt.Sprintf("%d", cfg.Listen.MaxConnections), Kind: "num", Hint: "0 = unlimited"},
 			},
 		},
 		{
@@ -423,8 +426,23 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		Rows: []ConfigRow{
 			{Key: "mode", Value: cfg.Cluster.Mode, Kind: "str", Hint: modeHint},
 			{Key: "hop_limit", Value: fmt.Sprintf("%d", cfg.Cluster.HopLimit), Kind: "num", Hint: "max peer-fetch hops (strong only)"},
+			{Key: "peer_fetch_concurrency", Value: fmt.Sprintf("%d", cfg.Cluster.PeerFetchConcurrency), Kind: "num", Hint: "in-flight peer fetches/puts (0 = default)"},
 		},
 	})
+
+	adminSection := ConfigSection{
+		Icon: "⚙", Title: "admin", Badge: "ops surface",
+		Rows: []ConfigRow{
+			{Key: "idle_timeout", Value: FmtDuration(cfg.Admin.IdleTimeout), Kind: "dur", Hint: "admin/peer RPC keep-alive (0 = 300s default)"},
+			{Key: "drain_duration", Value: FmtDuration(cfg.Admin.DrainDuration), Kind: "dur", Hint: "preStop graceful drain (0 = 10s default)"},
+		},
+	}
+	if cfg.Admin.MaxBodyBytes > 0 {
+		adminSection.Rows = append(adminSection.Rows, ConfigRow{
+			Key: "max_body_bytes", Value: fmt.Sprintf("%d", cfg.Admin.MaxBodyBytes), Kind: "size", Hint: "admin request body cap",
+		})
+	}
+	sections = append(sections, adminSection)
 
 	var routeEntries []ConfigRouteEntry
 	for _, rc := range cfg.Routes {
@@ -839,6 +857,9 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 	}
 	if rc.Cache.MaxFetchConcurrency > 0 {
 		rows = append(rows, ConfigRow{Key: "max_fetch_concurrency", Value: strconv.Itoa(rc.Cache.MaxFetchConcurrency), Kind: "number"})
+	}
+	if rc.Cache.FetchTimeout > 0 {
+		rows = append(rows, ConfigRow{Key: "fetch_timeout", Value: rc.Cache.FetchTimeout.String(), Kind: "dur"})
 	}
 	if rc.Cache.FetchWaitTimeout > 0 {
 		rows = append(rows, ConfigRow{Key: "fetch_wait_timeout", Value: rc.Cache.FetchWaitTimeout.String(), Kind: "dur"})

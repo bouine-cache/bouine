@@ -968,6 +968,7 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		VaryCapHitsFn:       func() int64 { return rs.dpMetrics.VaryCapHitsCount() },
 		BroadcastFailuresFn: func() int64 { return rs.clusterMetrics.BroadcastFailuresCount() },
 		CFPurgeSkippedFn:    func() int64 { return rs.dpMetrics.CFPurgeSkippedCount() },
+		FetchShedFn:         func() int64 { return rs.dpMetrics.FetchShedCount() },
 	})
 	return dashHandler
 }

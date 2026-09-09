@@ -663,6 +663,20 @@ func TestRuleCDNPurgeSkipped(t *testing.T) {
 	require.Nil(t, ins)
 }
 
+func TestRuleAnomalyFetchShed(t *testing.T) {
+	t.Parallel()
+	data := InsightData{Config: baseConfig(), FetchShed: 5}
+	ins := ruleAnomalyFetchShed(data)
+	require.NotNil(t, ins)
+	assert.Equal(t, SeverityHigh, ins.Severity, "shed fetches serve 503s — high severity")
+	assert.Contains(t, ins.Evidence, "fetch_shed_total: 5")
+	assert.NotEmpty(t, ins.Action)
+
+	data.FetchShed = 0
+	ins = ruleAnomalyFetchShed(data)
+	require.Nil(t, ins)
+}
+
 func TestRuleConfigPoolPassiveEjectForever(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()

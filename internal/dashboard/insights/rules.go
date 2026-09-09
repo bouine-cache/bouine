@@ -57,6 +57,7 @@ func init() {
 		ruleCDNPurgeSkipped,
 		ruleConfigPoolPassiveEjectForever,
 		ruleClusterPeerHealthDegraded,
+		ruleAnomalyFetchShed,
 	}
 }
 
@@ -320,6 +321,25 @@ func ruleCacheVaryExplosion(data InsightData) *Insight {
 		Detail:   "A route is generating too many Vary variants, exceeding MaxVariants. Check Vary header and key normalization.",
 		Evidence: fmt.Sprintf("vary_cap_hits_total: %d", data.VaryCapHits),
 		Action:   "/dashboard/routes",
+	}
+}
+
+// ruleAnomalyFetchShed reports foreground origin fetches shed after
+// waiting fetch_wait_timeout for a fetch-semaphore slot: miss demand
+// exceeded max_fetch_concurrency, and shed requests were served stale
+// when possible, else 503 + Retry-After.
+func ruleAnomalyFetchShed(data InsightData) *Insight {
+	if data.FetchShed <= 0 {
+		return nil
+	}
+	return &Insight{
+		ID:       "anomaly-fetch-shed",
+		Severity: SeverityHigh,
+		Category: CategoryAnomaly,
+		Title:    fmt.Sprintf("%d origin fetches shed — demand exceeds fetch concurrency", data.FetchShed),
+		Detail:   "Foreground misses waited past fetch_wait_timeout for a fetch slot and were shed (served stale when possible, else 503). Raise max_fetch_concurrency or fetch_wait_timeout, or check for a slow origin.",
+		Evidence: fmt.Sprintf("fetch_shed_total: %d", data.FetchShed),
+		Action:   "/dashboard/config",
 	}
 }
 

@@ -582,6 +582,19 @@ func (m *DataPlaneMetrics) VaryCapHitsCount() int64 {
 	return int64(d.GetCounter().GetValue())
 }
 
+// FetchShedCount returns the total foreground origin fetches shed after
+// waiting fetch_wait_timeout for a fetch-semaphore slot. Used by the
+// dashboard insights engine to detect demand exceeding
+// max_fetch_concurrency.
+func (m *DataPlaneMetrics) FetchShedCount() int64 {
+	if m == nil || m.FetchShedTotal == nil {
+		return 0
+	}
+	var d dto.Metric
+	_ = m.FetchShedTotal.(prometheus.Metric).Write(&d)
+	return int64(d.GetCounter().GetValue())
+}
+
 // CFPurgeSkippedCount returns the total CF purge skip count across all
 // reasons by summing the CounterVec label combinations.
 func (m *DataPlaneMetrics) CFPurgeSkippedCount() int64 {

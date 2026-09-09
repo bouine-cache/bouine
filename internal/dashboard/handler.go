@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,6 +124,10 @@ func (h *Handler) protectedHandler(ctx *fasthttp.RequestCtx) {
 	case "/dashboard/api/purge":
 		if string(ctx.Method()) == "POST" {
 			h.apiPurge(ctx)
+		}
+	case "/dashboard/api/purge/batch":
+		if string(ctx.Method()) == "POST" {
+			h.apiPurgeBatch(ctx)
 		}
 	case "/dashboard/api/ban":
 		if string(ctx.Method()) == "POST" {
@@ -684,6 +689,86 @@ func (h *Handler) apiPurge(ctx *fasthttp.RequestCtx) {
 	}
 	h.cfg.Rings.OpsLog.Record("purge", rawURL, "ok")
 	h.apiOK(ctx, "purged")
+}
+
+// maxPurgeBatchURLs caps the dashboard batch purge form; it mirrors the
+// admin API's default batch cap so both surfaces accept the same load.
+const maxPurgeBatchURLs = 1000
+
+// maxBatchPurgeBytes caps the batch purge request body (the single-URL
+// forms stay at maxAdminFormBytes; a 1000-URL list needs more room).
+const maxBatchPurgeBytes = 128 << 10
+
+// apiPurgeBatch purges a list of URLs submitted one per line (form
+// field "urls") or as a JSON {"urls": [...]} array. Each URL runs the
+// same purge path as the single-URL form; the broadcaster coalesces the
+// per-key events into one batch frame (ADR-0044), so the cluster sees a
+// single wire broadcast.
+func (h *Handler) apiPurgeBatch(ctx *fasthttp.RequestCtx) {
+	if h.cfg.PurgeFn == nil {
+		h.apiError(ctx, "purge not configured")
+		return
+	}
+	if len(ctx.PostBody()) > maxBatchPurgeBytes {
+		ctx.Error("request body too large", fasthttp.StatusRequestEntityTooLarge)
+		return
+	}
+
+	var urls []string
+	if raw := string(ctx.PostArgs().Peek("urls")); raw != "" {
+		for _, line := range strings.Split(raw, "\n") {
+			if u := strings.TrimSpace(line); u != "" {
+				urls = append(urls, u)
+			}
+		}
+	} else {
+		var req struct {
+			URLs []string `json:"urls"`
+		}
+		_ = json.Unmarshal(ctx.PostBody(), &req)
+		urls = req.URLs
+	}
+	if len(urls) == 0 {
+		h.apiError(ctx, "at least one URL is required")
+		return
+	}
+	if len(urls) > maxPurgeBatchURLs {
+		h.apiError(ctx, fmt.Sprintf("batch exceeds the %d URL limit", maxPurgeBatchURLs))
+		return
+	}
+	for _, u := range urls {
+		if msg := validateCacheURL(u); msg != "" {
+			h.apiError(ctx, msg)
+			return
+		}
+	}
+
+	purged := 0
+	var firstErr error
+	for _, u := range urls {
+		if err := h.cfg.PurgeFn(context.Background(), u); err != nil {
+			h.cfg.Rings.OpsLog.Record("purge", u, err.Error())
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		h.cfg.Rings.OpsLog.Record("purge", u, "ok")
+		purged++
+	}
+	if firstErr != nil {
+		h.apiError(ctx, fmt.Sprintf("purged %d of %d — first error: %s", purged, len(urls), firstErr))
+		return
+	}
+	h.apiOK(ctx, fmt.Sprintf("purged %d URL%s", purged, pluralSuffix(purged)))
+}
+
+// pluralSuffix returns "s" for counts other than one.
+func pluralSuffix(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func (h *Handler) apiBan(ctx *fasthttp.RequestCtx) {

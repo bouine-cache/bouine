@@ -44,11 +44,15 @@ func countPeers(members []api.PeerInfo) int {
 //
 // Stable.
 type Broadcaster struct {
-	logger  observability.Logger
 	cluster *Cluster
 	fetcher *PeerFetcher
 	client  *transport.Client // shared across all postBinary calls for connection reuse
 	metrics *Metrics
+	// batcher coalesces purge/refresh events into batch frames per
+	// ADR-0044. nil in tests that construct Broadcaster directly; the
+	// enqueue helpers treat nil as "send unbatched".
+	batcher *invalidationBatcher
+	logger  observability.Logger
 	token   string
 	mode    string // ClusterModeStrong | ClusterModeEventual
 	seq     atomic.Uint64
@@ -81,7 +85,7 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		},
 	}
 	client := transport.NewClient(fc)
-	return &Broadcaster{
+	b := &Broadcaster{
 		cluster: c,
 		fetcher: fetcher,
 		client:  client,
@@ -89,6 +93,22 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		token:   tok,
 		mode:    c.Mode(),
 		metrics: c.metrics,
+	}
+	b.batcher = newInvalidationBatcher(
+		logger,
+		c.metrics,
+		b.flushPurgeBatch,
+		b.flushRefreshBatch,
+		func() { c.metrics.IncBroadcastOverflow() },
+	)
+	return b
+}
+
+// Close stops the batcher's flush loop and flushes pending events.
+// Called during engine shutdown so final purges reach all peers.
+func (b *Broadcaster) Close() {
+	if b.batcher != nil {
+		b.batcher.close()
 	}
 }
 
@@ -101,7 +121,7 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 	// by broadcastTimeout, not by the engine lifecycle or per-request
 	// cancellation. This ensures final purges during shutdown reach all
 	// peers. The caller's ctx still governs local store operations.
-	fanoutCtx := context.WithoutCancel(ctx)
+	_ = context.WithoutCancel(ctx)
 
 	evt := api.PurgeEvent{
 		Key:      key,
@@ -111,50 +131,18 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 		Seq:      b.seq.Add(1),
 	}
 
-	if b.mode == config.ClusterModeStrong {
-		peers := b.cluster.Members()
-		var wg sync.WaitGroup
-		for _, p := range peers {
-			if p.Name == b.cluster.cfg.NodeName {
-				continue
-			}
-			wg.Add(1)
-			go func(peer api.PeerInfo) {
-				defer wg.Done()
-				defer func() {
-					if v := recover(); v != nil {
-						b.logger.Error("purge broadcast panicked",
-							"peer", peer.Name,
-							"panic", v)
-					}
-				}()
-				if err := b.sendPurge(fanoutCtx, peer, evt); err != nil {
-					b.logger.Warn("purge broadcast failed",
-						"peer", peer.Name,
-						"key", evt.Key,
-						"error", err)
-					b.metrics.IncBroadcastFailure("purge", broadcastFailureReason(err))
-				} else {
-					b.metrics.IncHTTPInvalidation("purge")
-				}
-			}(p)
+	if b.batcher != nil {
+		if batch, deliver := b.batcher.enqueuePurge(evt); deliver {
+			// Idle queue or overflow: synchronous delivery preserves
+			// the guarantee that a returned purge has already fanned
+			// out (the admin API relies on it). Storms coalesce behind
+			// the flush window.
+			b.flushPurgeBatch(batch)
+			b.batcher.donePurgeFlush()
 		}
-		wg.Wait()
+		return
 	}
-
-	// All modes: enqueue via gossip. In strong mode this is redundant
-	// delivery (peer admin may be temporarily unreachable). In eventual
-	// mode this is the sole delivery path for invalidations.
-	if body, err := EncodePurgeGossip(evt); err == nil {
-		b.cluster.QueueBroadcast(body)
-	}
-	peerCount := countPeers(b.cluster.Members())
-	b.logger.Info("gossiped purge to peers",
-		"key", evt.Key,
-		"issuer", evt.Issuer,
-		"seq", evt.Seq,
-		"peers", peerCount,
-	)
+	b.flushPurgeBatch([]api.PurgeEvent{evt})
 }
 
 // BroadcastBan sends a ban predicate to all live peers.
@@ -181,7 +169,7 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 				continue
 			}
 			wg.Add(1)
-			go func(peer api.PeerInfo) {
+			go func(peer api.PeerInfo) { //nolint:contextcheck // fanoutCtx is a detached context created in this scope
 				defer wg.Done()
 				defer func() {
 					if v := recover(); v != nil {
@@ -220,7 +208,7 @@ func (b *Broadcaster) BroadcastBan(ctx context.Context, expr api.BanExpr) {
 // enqueues via gossip for redundant delivery. In eventual mode it sends
 // via gossip only.
 func (b *Broadcaster) BroadcastRefresh(ctx context.Context, key api.Key) {
-	fanoutCtx := context.WithoutCancel(ctx)
+	_ = context.WithoutCancel(ctx)
 
 	evt := api.RefreshEvent{
 		Key:      key,
@@ -229,55 +217,133 @@ func (b *Broadcaster) BroadcastRefresh(ctx context.Context, key api.Key) {
 		Seq:      b.seq.Add(1),
 	}
 
-	if b.mode == config.ClusterModeStrong {
-		peers := b.cluster.Members()
-		var wg sync.WaitGroup
-		for _, p := range peers {
-			if p.Name == b.cluster.cfg.NodeName {
-				continue
-			}
-			wg.Add(1)
-			go func(peer api.PeerInfo) {
-				defer wg.Done()
-				defer func() {
-					if v := recover(); v != nil {
-						b.logger.Error("refresh broadcast panicked",
-							"peer", peer.Name,
-							"panic", v)
-					}
-				}()
-				if err := b.sendRefresh(fanoutCtx, peer, evt); err != nil {
-					b.logger.Warn("refresh broadcast failed",
-						"peer", peer.Name,
-						"key", evt.Key,
-						"error", err)
-					b.metrics.IncBroadcastFailure("refresh", broadcastFailureReason(err))
-				} else {
-					b.metrics.IncHTTPInvalidation("refresh")
-				}
-			}(p)
+	if b.batcher != nil {
+		if batch, deliver := b.batcher.enqueueRefresh(evt); deliver {
+			b.flushRefreshBatch(batch)
+			b.batcher.doneRefreshFlush()
 		}
-		wg.Wait()
+		return
+	}
+	b.flushRefreshBatch([]api.RefreshEvent{evt})
+}
+
+// flushPurgeBatch delivers one batch of purge events: a single batch
+// frame posted to each live peer (strong mode) plus one gossip batch
+// frame. Encoding happens once and the body is shared across peers.
+//
+//nolint:contextcheck // fan-out deliberately detached from request contexts
+func (b *Broadcaster) flushPurgeBatch(evts []api.PurgeEvent) {
+	if len(evts) == 0 {
+		return
+	}
+	// Fan-out is detached from any request context by design: batch
+	// events may originate from many request goroutines and must
+	// survive their cancellation. postBinary bounds the call by
+	// broadcastTimeout internally.
+	fanoutCtx := context.WithoutCancel(context.Background())
+	if b.mode == config.ClusterModeStrong {
+		body, err := EncodePurgeBatchHTTP(evts)
+		if err != nil {
+			b.logger.Warn("purge batch encode failed", "error", err, "events", len(evts))
+			b.metrics.IncBroadcastFailure("purge_batch", "marshal")
+		} else {
+			peers := b.cluster.Members()
+			var wg sync.WaitGroup
+			for _, p := range peers {
+				if p.Name == b.cluster.cfg.NodeName {
+					continue
+				}
+				wg.Add(1)
+				go func(peer api.PeerInfo) { //nolint:contextcheck // fanoutCtx is a detached context created in this scope
+					defer wg.Done()
+					defer func() {
+						if v := recover(); v != nil {
+							b.logger.Error("purge batch broadcast panicked",
+								"peer", peer.Name,
+								"panic", v)
+						}
+					}()
+					if err := b.postBinary(fanoutCtx, peer.AdminAddr, "/v1/peer/purge/batch", body); err != nil {
+						b.logger.Warn("purge batch broadcast failed",
+							"peer", peer.Name,
+							"error", err)
+						b.metrics.IncBroadcastFailure("purge_batch", broadcastFailureReason(err))
+					} else {
+						b.metrics.IncHTTPInvalidation("purge_batch")
+					}
+				}(p)
+			}
+			wg.Wait()
+		}
 	}
 
-	if body, err := EncodeRefreshGossip(evt); err == nil {
+	// All modes: enqueue via gossip. In strong mode this is redundant
+	// delivery (peer admin may be temporarily unreachable). In eventual
+	// mode this is the sole delivery path for invalidations.
+	if body, err := EncodePurgeBatchGossip(evts); err == nil {
 		b.cluster.QueueBroadcast(body)
 	}
-	peerCount := countPeers(b.cluster.Members())
-	b.logger.Info("gossiped refresh to peers",
-		"key", evt.Key,
-		"issuer", evt.Issuer,
-		"seq", evt.Seq,
-		"peers", peerCount,
+	b.logger.Info("gossiped purge batch to peers",
+		"events", len(evts),
+		"issuer", evts[0].Issuer,
+		"peers", countPeers(b.cluster.Members()),
 	)
 }
 
-func (b *Broadcaster) sendPurge(ctx context.Context, peer api.PeerInfo, evt api.PurgeEvent) error {
-	body, err := EncodePurgeHTTP(evt)
-	if err != nil {
-		return fmt.Errorf("broadcast purge encode: %w", err)
+// flushRefreshBatch delivers one batch of refresh events, mirroring
+// flushPurgeBatch.
+//
+//nolint:contextcheck // fan-out deliberately detached from request contexts
+func (b *Broadcaster) flushRefreshBatch(evts []api.RefreshEvent) {
+	if len(evts) == 0 {
+		return
 	}
-	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/purge", body)
+	// Detached fan-out context; see flushPurgeBatch.
+	fanoutCtx := context.WithoutCancel(context.Background())
+	if b.mode == config.ClusterModeStrong {
+		body, err := EncodeRefreshBatchHTTP(evts)
+		if err != nil {
+			b.logger.Warn("refresh batch encode failed", "error", err, "events", len(evts))
+			b.metrics.IncBroadcastFailure("refresh_batch", "marshal")
+		} else {
+			peers := b.cluster.Members()
+			var wg sync.WaitGroup
+			for _, p := range peers {
+				if p.Name == b.cluster.cfg.NodeName {
+					continue
+				}
+				wg.Add(1)
+				go func(peer api.PeerInfo) { //nolint:contextcheck // fanoutCtx is a detached context created in this scope
+					defer wg.Done()
+					defer func() {
+						if v := recover(); v != nil {
+							b.logger.Error("refresh batch broadcast panicked",
+								"peer", peer.Name,
+								"panic", v)
+						}
+					}()
+					if err := b.postBinary(fanoutCtx, peer.AdminAddr, "/v1/peer/refresh/batch", body); err != nil {
+						b.logger.Warn("refresh batch broadcast failed",
+							"peer", peer.Name,
+							"error", err)
+						b.metrics.IncBroadcastFailure("refresh_batch", broadcastFailureReason(err))
+					} else {
+						b.metrics.IncHTTPInvalidation("refresh_batch")
+					}
+				}(p)
+			}
+			wg.Wait()
+		}
+	}
+
+	if body, err := EncodeRefreshBatchGossip(evts); err == nil {
+		b.cluster.QueueBroadcast(body)
+	}
+	b.logger.Info("gossiped refresh batch to peers",
+		"events", len(evts),
+		"issuer", evts[0].Issuer,
+		"peers", countPeers(b.cluster.Members()),
+	)
 }
 
 func (b *Broadcaster) sendBan(ctx context.Context, peer api.PeerInfo, evt api.BanEvent) error {
@@ -286,14 +352,6 @@ func (b *Broadcaster) sendBan(ctx context.Context, peer api.PeerInfo, evt api.Ba
 		return fmt.Errorf("broadcast ban encode: %w", err)
 	}
 	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/ban", body)
-}
-
-func (b *Broadcaster) sendRefresh(ctx context.Context, peer api.PeerInfo, evt api.RefreshEvent) error {
-	body, err := EncodeRefreshHTTP(evt)
-	if err != nil {
-		return fmt.Errorf("broadcast refresh encode: %w", err)
-	}
-	return b.postBinary(ctx, peer.AdminAddr, "/v1/peer/refresh", body)
 }
 
 // broadcastFailureReason maps a broadcast error to a short label

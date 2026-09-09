@@ -18,9 +18,11 @@ const (
 )
 
 const (
-	msgTypePurge   byte = 1
-	msgTypeBan     byte = 2
-	msgTypeRefresh byte = 3
+	msgTypePurge        byte = 1
+	msgTypeBan          byte = 2
+	msgTypeRefresh      byte = 3
+	msgTypePurgeBatch   byte = 4
+	msgTypeRefreshBatch byte = 5
 )
 
 var (

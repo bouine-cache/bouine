@@ -103,6 +103,10 @@ type Cluster struct {
 	peers   map[string]*Member // keyed by NodeName
 	metrics *Metrics
 	adapter *slogAdapter
+	// seqs dedups received invalidation events by (Issuer, Seq) per
+	// ADR-0044: strong mode double-delivers (HTTP + gossip) and both
+	// paths share this tracker so each event applies exactly once.
+	seqs *seqTracker
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipQueue []gossipBroadcast
@@ -140,6 +144,7 @@ func New(cfg Config) (*Cluster, error) {
 		local:  cfg.PeerInfo,
 		logger: cfg.Logger,
 		ring:   newRing(cfg.VirtualNodes),
+		seqs:   newSeqTracker(),
 	}
 
 	mlCfg := memberlist.DefaultLANConfig()
@@ -287,72 +292,182 @@ func (c *Cluster) NotifyMsg(msg []byte) {
 	c.handleJSONGossip(msg)
 }
 
+// SeenFromPeer reports whether an invalidation event from issuer with
+// the given Seq has already been applied, and records it otherwise.
+// The HTTP peer endpoints use it to dedup the gossip fallback copy of
+// each event (ADR-0044). It returns false for events that carry no
+// issuer, so legacy senders are never dropped.
+func (c *Cluster) SeenFromPeer(issuer string, seq uint64) bool {
+	return c.seqs.seen(issuer, seq)
+}
+
+// seenFromPeer is the nil-safe internal form used by the gossip
+// receive path. Clusters constructed outside New (tests) have a nil
+// seqs tracker; they never dedup.
+func (c *Cluster) seenFromPeer(issuer string, seq uint64) bool {
+	if c.seqs == nil {
+		return false
+	}
+	return c.seqs.seen(issuer, seq)
+}
+
 func (c *Cluster) handleBinaryGossip(msg []byte) {
 	switch GossipMsgType(msg) {
 	case msgTypePurge:
-		if c.inv.PurgeFn == nil {
-			return
-		}
-		evt, err := DecodePurgeGossip(msg)
-		if err != nil {
-			c.logger.Warn("cluster: gossip purge decode failed", "error", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		defer cancel()
-		if err := c.inv.PurgeFn(ctx, evt); err != nil {
-			c.logger.Warn("cluster: gossip purge apply failed", "error", err)
-			return
-		}
-		c.metrics.IncGossipInvalidation("purge")
-		c.logger.Info("received purge from peer",
-			"key", evt.Key,
-			"issuer", evt.Issuer,
-			"seq", evt.Seq,
-		)
+		c.handleGossipPurge(msg)
+	case msgTypePurgeBatch:
+		c.handleGossipPurgeBatch(msg)
 	case msgTypeBan:
-		if c.inv.BanFn == nil {
-			return
-		}
-		evt, err := DecodeBanGossip(msg)
-		if err != nil {
-			c.logger.Warn("cluster: gossip ban decode failed", "error", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		defer cancel()
-		if err := c.inv.BanFn(ctx, evt); err != nil {
-			c.logger.Warn("cluster: gossip ban apply failed", "error", err)
-			return
-		}
-		c.metrics.IncGossipInvalidation("ban")
-		c.logger.Info("received ban from peer",
-			"issuer", evt.Issuer,
-			"seq", evt.Seq,
-		)
+		c.handleGossipBan(msg)
 	case msgTypeRefresh:
-		if c.inv.RefreshFn == nil {
-			return
-		}
-		evt, err := DecodeRefreshGossip(msg)
-		if err != nil {
-			c.logger.Warn("cluster: gossip refresh decode failed", "error", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
-		defer cancel()
-		if err := c.inv.RefreshFn(ctx, evt); err != nil {
-			c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
-			return
-		}
-		c.metrics.IncGossipInvalidation("refresh")
-		c.logger.Info("received refresh from peer",
-			"key", evt.Key,
-			"issuer", evt.Issuer,
-			"seq", evt.Seq,
-		)
+		c.handleGossipRefresh(msg)
+	case msgTypeRefreshBatch:
+		c.handleGossipRefreshBatch(msg)
 	default:
 		c.logger.Debug("cluster: unrecognized binary gossip msgType", "msgType", GossipMsgType(msg), "len", len(msg))
+	}
+}
+
+// handleGossipPurge applies a single purge gossip frame.
+func (c *Cluster) handleGossipPurge(msg []byte) {
+	if c.inv.PurgeFn == nil {
+		return
+	}
+	evt, err := DecodePurgeGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip purge decode failed", "error", err)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+	defer cancel()
+	if err := c.inv.PurgeFn(ctx, evt); err != nil {
+		c.logger.Warn("cluster: gossip purge apply failed", "error", err)
+		return
+	}
+	c.metrics.IncGossipInvalidation("purge")
+	c.logger.Info("received purge from peer",
+		"key", evt.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+	)
+}
+
+// handleGossipPurgeBatch applies a batched purge gossip frame,
+// deduping events already delivered via the HTTP fan-out path
+// (ADR-0044).
+func (c *Cluster) handleGossipPurgeBatch(msg []byte) {
+	if c.inv.PurgeFn == nil {
+		return
+	}
+	evts, err := DecodePurgeBatchGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip purge batch decode failed", "error", err)
+		return
+	}
+	applied := 0
+	for _, evt := range evts {
+		if c.seenFromPeer(evt.Issuer, evt.Seq) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		err := c.inv.PurgeFn(ctx, evt)
+		cancel()
+		if err != nil {
+			c.logger.Warn("cluster: gossip purge batch apply failed", "error", err, "issuer", evt.Issuer, "seq", evt.Seq)
+			continue
+		}
+		applied++
+	}
+	if applied > 0 {
+		c.metrics.IncGossipInvalidation("purge_batch")
+		c.logger.Info("received purge batch from peer", "events", len(evts), "applied", applied)
+	}
+}
+
+// handleGossipBan applies a single ban gossip frame.
+func (c *Cluster) handleGossipBan(msg []byte) {
+	if c.inv.BanFn == nil {
+		return
+	}
+	evt, err := DecodeBanGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip ban decode failed", "error", err)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+	defer cancel()
+	if err := c.inv.BanFn(ctx, evt); err != nil {
+		c.logger.Warn("cluster: gossip ban apply failed", "error", err)
+		return
+	}
+	c.metrics.IncGossipInvalidation("ban")
+	c.logger.Info("received ban from peer",
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+	)
+}
+
+// handleGossipRefresh applies a single refresh gossip frame.
+func (c *Cluster) handleGossipRefresh(msg []byte) {
+	if c.inv.RefreshFn == nil {
+		return
+	}
+	evt, err := DecodeRefreshGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip refresh decode failed", "error", err)
+		return
+	}
+	if c.seenFromPeer(evt.Issuer, evt.Seq) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+	defer cancel()
+	if err := c.inv.RefreshFn(ctx, evt); err != nil {
+		c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
+		return
+	}
+	c.metrics.IncGossipInvalidation("refresh")
+	c.logger.Info("received refresh from peer",
+		"key", evt.Key,
+		"issuer", evt.Issuer,
+		"seq", evt.Seq,
+	)
+}
+
+// handleGossipRefreshBatch applies a batched refresh gossip frame,
+// deduping events already delivered via the HTTP fan-out path.
+func (c *Cluster) handleGossipRefreshBatch(msg []byte) {
+	if c.inv.RefreshFn == nil {
+		return
+	}
+	evts, err := DecodeRefreshBatchGossip(msg)
+	if err != nil {
+		c.logger.Warn("cluster: gossip refresh batch decode failed", "error", err)
+		return
+	}
+	applied := 0
+	for _, evt := range evts {
+		if c.seenFromPeer(evt.Issuer, evt.Seq) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.GossipApplyTimeout)
+		err := c.inv.RefreshFn(ctx, evt)
+		cancel()
+		if err != nil {
+			c.logger.Warn("cluster: gossip refresh batch apply failed", "error", err, "issuer", evt.Issuer, "seq", evt.Seq)
+			continue
+		}
+		applied++
+	}
+	if applied > 0 {
+		c.metrics.IncGossipInvalidation("refresh_batch")
+		c.logger.Info("received refresh batch from peer", "events", len(evts), "applied", applied)
 	}
 }
 

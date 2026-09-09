@@ -227,7 +227,7 @@ func TestMergeRemoteState_BadJSONNoOp(t *testing.T) {
 	require.Len(t, c.Members(), 1)
 }
 
-func TestMergeRemoteState_SameHashNoOp(t *testing.T) {
+func TestMergeRemoteState_SameHashKeepsLivePeers(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig(t, "same-hash", "127.0.0.1:0")
 	c, err := New(cfg)

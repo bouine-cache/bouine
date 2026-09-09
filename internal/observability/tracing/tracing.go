@@ -179,3 +179,10 @@ type TracingConfig struct {
 	// SamplingRate is a float in [0, 1]. 0 = never sample, 1 = always sample (default).
 	SamplingRate float64 `yaml:"sampling_rate"`
 }
+
+// EnableForTest toggles span creation for tests in other packages that
+// install their own tracer provider via a test-support helper. Production
+// code must use InitTracer instead.
+func EnableForTest(enabled bool) {
+	tracerEnabled.Store(enabled)
+}

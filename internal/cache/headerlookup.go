@@ -84,6 +84,19 @@ func (h headerLookup) ToMap() header.Map {
 	return h.hdr
 }
 
+// ownedClone returns a lookup over a private copy of the header.Map.
+// Used by the singleflight helpers: they share one fetchResult across
+// all concurrent callers, and callers mutate the Map (buildObject adds
+// attribution headers), so every caller must own a detached copy. The
+// string values themselves are immutable and shared — only the entry
+// slices are copied.
+func (h headerLookup) ownedClone() headerLookup {
+	if h.fastHdr != nil {
+		return headerLookup{hdr: header.FromFastHTTP(h.fastHdr)}
+	}
+	return headerLookup{hdr: h.hdr.Clone()}
+}
+
 // CopyToFastHTTP copies all headers to dst using the fastest available
 // method. When the underlying source is a *fasthttp.ResponseHeader, it
 // uses CopyTo (a bulk struct copy without per-header normalization).

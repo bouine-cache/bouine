@@ -10,6 +10,34 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-09-09
+
+### Changed
+- Invalidation storms no longer fan out one HTTP POST per event per
+  peer. Purge and refresh events now coalesce into count-prefixed
+  batch frames (new msgTypes 4/5) flushed by a bounded batcher on 256
+  events, a 10 ms interval, or Close. Events arriving on an idle
+  queue still flush synchronously, preserving the purge API's
+  fan-out-before-return guarantee. Receivers dedup by per-issuer
+  monotonic Seq, collapsing the double delivery and post-partition
+  replays. A 1000-key purge burst in a 3-peer cluster now produces a
+  handful of batched POSTs instead of 3000, with gossip frames
+  reduced ~256x per batch; apply-side work is halved under storms.
+  Ban events stay unbatched (rare, immediacy dominates). See ADR-0044
+  for the latency trade-offs and fallback semantics.
+- The `/v1/purge/batch` endpoint no longer purges each URL
+  independently: one store delete plus one full cluster broadcast and
+  one Cloudflare propagation per URL was replaced by a single local
+  purge pass, one batched fan-out via the broadcaster's batch frame
+  (ADR-0044), and per-URL Cloudflare propagation for successfully
+  purged entries only. A 1000-URL batch previously fired 1000
+  broadcasts (3000 peer POSTs in a 3-node cluster); now it produces a
+  single batched fan-out.
+- Ban scans now coalesce across concurrent callers and dedup
+  identical bans, reducing redundant cache walks and duplicate ban
+  entries when multiple invalidations target overlapping key ranges
+  simultaneously.
+
 ## [0.5.13] - 2026-09-09
 
 ### Fixed
@@ -1192,7 +1220,10 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.11...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.14...HEAD
+[0.5.14]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.14
+[0.5.13]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.13
+[0.5.12]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.12
 [0.5.11]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.11
 [0.5.10]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.10
 [0.5.9]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.9

@@ -660,6 +660,27 @@ func (rs *runState) softPurgeKey(ctx context.Context, key api.Key) error {
 	return nil
 }
 
+// purgeKeysBatch purges every key locally, then fans the whole batch
+// out to peers in one broadcast (ADR-0044). It backs the admin
+// /v1/purge/batch endpoint: N keys cost one local pass and one POST
+// per peer instead of N of each. ok[i] reports which keys were purged
+// locally so the caller can skip Cloudflare propagation for failures.
+func (rs *runState) purgeKeysBatch(ctx context.Context, keys []api.Key) (purged, failed int, ok []bool) {
+	ok = make([]bool, len(keys))
+	for i, key := range keys {
+		if err := rs.purgeKey(ctx, key); err != nil {
+			failed++
+			continue
+		}
+		ok[i] = true
+		purged++
+	}
+	if rs.broadcaster != nil {
+		rs.broadcaster.BroadcastPurges(ctx, keys)
+	}
+	return purged, failed, ok
+}
+
 // buildInvalidationOps creates the shared purge/ban/refresh closures.
 // The broadcaster internally detaches from the engine's root context so
 // peer fan-out survives shutdown; local store operations use dCtx.
@@ -752,6 +773,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 			}
 			return nil
 		},
+		PurgeBatchFn: e.purgeBatchFn(rs, ctx),
 		BanFn: func(expr api.BanExpr) (int, error) {
 			n, err := rs.store.Ban(ctx, expr)
 			if err != nil {
@@ -796,6 +818,26 @@ func (e *engine) peerPurgeApply(rs *runState, ctx context.Context) fasthttp.Requ
 		}
 		return rs.purgeKey(ctx, evt.Key)
 	})
+}
+
+// purgeBatchFn builds the admin /v1/purge/batch applier: one local
+// purge pass plus one batched cluster broadcast (ADR-0044). Cloudflare
+// propagation stays per-URL for successfully purged entries; the CF
+// batcher coalesces them into ≤30-item API calls.
+func (e *engine) purgeBatchFn(rs *runState, ctx context.Context) func(urls []string) (int, int) {
+	return func(urls []string) (int, int) {
+		keys := make([]api.Key, len(urls))
+		for i, u := range urls {
+			keys[i] = cache.BuildKeyFromURL(u, nil)
+		}
+		purged, failed, ok := rs.purgeKeysBatch(ctx, keys)
+		for i, u := range urls {
+			if ok[i] {
+				rs.cfProp.PropagateForPurge(ctx, u)
+			}
+		}
+		return purged, failed
+	}
 }
 
 // peerBanApply returns the peer ban applier (deduped; see peerPurgeApply).

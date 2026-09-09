@@ -187,6 +187,64 @@ func TestClusterPeers(t *testing.T) {
 	assert.Equal(t, "node1", peers[0].Name)
 }
 
+// TestInvalidations_RecordedToOpsLog asserts admin-API invalidations are
+// recorded in the ops history the dashboard invalidation page renders.
+// Before this wiring only dashboard-issued invalidations were logged, so
+// a purge issued via POST /v1/purge by an external service (e.g.
+// cache-lifecycle) never appeared in the history.
+func TestInvalidations_RecordedToOpsLog(t *testing.T) {
+	t.Parallel()
+	type entry struct{ op, arg, result string }
+	var got []entry
+	logFn := func(op, arg, result string) { got = append(got, entry{op, arg, result}) }
+
+	s := New(Config{
+		Token:     "secret",
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		OpsLogFn:  logFn,
+		PurgeFn:   func(_ api.Key) error { return nil },
+		BanFn:     func(_ api.BanExpr) (int, error) { return 2, nil },
+		RefreshFn: func(_ api.Key) error { return nil },
+	})
+
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/a"}`), "secret")
+	s.Handler()(ctx)
+	ctx = testCtxWithBodyAuth("POST", "/v1/purge/batch", []byte(`{"urls":["https://example.com/b","https://example.com/c"]}`), "secret")
+	s.Handler()(ctx)
+	ctx = testCtxWithBodyAuth("POST", "/v1/ban", []byte(`{"path_regex":"^/reviews/"}`), "secret")
+	s.Handler()(ctx)
+	ctx = testCtxWithBodyAuth("POST", "/v1/refresh", []byte(`{"url":"https://example.com/d"}`), "secret")
+	s.Handler()(ctx)
+
+	require.Len(t, got, 5)
+	assert.Equal(t, entry{"purge", "https://example.com/a", "ok"}, got[0])
+	assert.Equal(t, entry{"purge", "https://example.com/b", "ok"}, got[1])
+	assert.Equal(t, entry{"purge", "https://example.com/c", "ok"}, got[2])
+	assert.Equal(t, entry{"ban", "^/reviews/", "ok, 2 evicted"}, got[3])
+	assert.Equal(t, entry{"refresh", "https://example.com/d", "ok"}, got[4])
+}
+
+// TestInvalidations_RecordFailureToOpsLog asserts failed invalidations
+// are recorded with their error so the history shows the failure.
+func TestInvalidations_RecordFailureToOpsLog(t *testing.T) {
+	t.Parallel()
+	type entry struct{ op, arg, result string }
+	var got []entry
+	s := New(Config{
+		Token:    "secret",
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		OpsLogFn: func(op, arg, result string) { got = append(got, entry{op, arg, result}) },
+		PurgeFn:  func(_ api.Key) error { return errors.New("storage error") },
+	})
+	ctx := testCtxWithBodyAuth("POST", "/v1/purge", []byte(`{"url":"https://example.com/a"}`), "secret")
+	s.Handler()(ctx)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "purge", got[0].op)
+	assert.Equal(t, "https://example.com/a", got[0].arg)
+	assert.Equal(t, "storage error", got[0].result)
+}
+
 func TestPurge_PurgeFnError(t *testing.T) {
 	t.Parallel()
 	s := New(Config{

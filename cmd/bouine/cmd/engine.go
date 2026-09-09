@@ -759,6 +759,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		RateLimitPerSecond: e.cfg.Admin.RateLimitPerSecond,
 		PprofEnabled:       e.cfg.Admin.PprofEnabled,
 		IdleTimeout:        e.cfg.Admin.IdleTimeout,
+		OpsLogFn:           rs.rings.OpsLog.Record,
 		OnPurged:           rs.cfProp.PropagateForPurge,
 		OnRefreshed:        rs.cfProp.PropagateForRefresh,
 		OnBanned: func(bCtx context.Context, expr api.BanExpr) {

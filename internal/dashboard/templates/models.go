@@ -203,7 +203,7 @@ type RouteRow struct {
 	Jitter     string
 	Host       string
 	Pool       string
-	TTL        string // formatted NegativeTTL or "—"
+	TTL        string // formatted ttl_override or "—" (inherit origin TTL)
 	SWR        string // StaleWhileRevalidate or "—"
 	PathPrefix string
 	SIE        string // StaleIfError or "—"
@@ -640,7 +640,7 @@ func BuildRouteRows(cfgRoutes []config.Route, stats []observability.RouteStat) [
 			PathPrefix:  rc.Match.PathPrefix,
 			Host:        rc.Match.Host,
 			Pool:        rc.Pool,
-			TTL:         FmtDuration(rc.Cache.NegativeTTL),
+			TTL:         FmtDuration(rc.Cache.TTLOverride),
 			SWR:         FmtDuration(rc.Cache.StaleWhileRevalidate),
 			SIE:         FmtDuration(rc.Cache.StaleIfError),
 			NegTTL:      FmtDuration(rc.Cache.NegativeTTL),

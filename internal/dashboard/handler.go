@@ -994,7 +994,7 @@ func clientNode() templates.ArchNode {
 		Type:   "client",
 		Label:  "Clients",
 		Status: "healthy",
-		Detail: "HTTP/1.1 + h2c + h3",
+		Detail: "HTTP/1.1 only (ADR-0034)",
 	}
 }
 

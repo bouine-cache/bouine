@@ -388,7 +388,7 @@ func BuildConfigSections(cfg *config.Config) []ConfigSection {
 		{
 			Icon: "⟁", Title: "listen", Badge: "listeners",
 			Rows: []ConfigRow{
-				{Key: "http", Value: fmt.Sprintf("%q", cfg.Listen.HTTP), Kind: "str", Hint: "HTTP/1.1 + h2c data plane"},
+				{Key: "http", Value: fmt.Sprintf("%q", cfg.Listen.HTTP), Kind: "str", Hint: "HTTP/1.1 data plane"},
 				{Key: "https", Value: fmt.Sprintf("%q", cfg.Listen.HTTPS), Kind: "str", Hint: "TLS data plane"},
 				{Key: "admin", Value: fmt.Sprintf("%q", cfg.Listen.Admin), Kind: "str", Hint: "admin API · metrics · health"},
 				{Key: "cluster", Value: fmt.Sprintf("%q", cfg.Listen.Cluster), Kind: "str", Hint: "gossip · peer fetch"},

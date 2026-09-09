@@ -175,7 +175,8 @@ func TestParseTimeRange(t *testing.T) {
 		label   string
 	}{
 		{"1h", 360, "1h"},
-		{"24h", 2160, "24h"},
+		{"24h", 2160, "6h"}, // legacy URL falls back to the 6h view
+		{"6h", 2160, "6h"},
 		{"", 2160, "6h"},
 		{"invalid", 2160, "6h"},
 	}

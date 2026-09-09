@@ -226,12 +226,14 @@ func sortURLStats(stats []observability.URLStat) []observability.URLStat {
 	return stats
 }
 
+// parseTimeRange maps the range query parameter to a bucket count and
+// display label. Only 1h and 6h are selectable; the request ring holds
+// 6h of 10-second buckets (requestBuckets), so a longer range cannot be
+// served truthfully. Legacy 24h URLs fall back to the 6h view.
 func parseTimeRange(s string) (buckets int, label string) {
 	switch s {
 	case "1h":
 		return 360, "1h"
-	case "24h":
-		return 2160, "24h"
 	default:
 		return 2160, "6h"
 	}

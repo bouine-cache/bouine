@@ -184,6 +184,72 @@ func BenchmarkHotGet_WithBan_Parallel(b *testing.B) {
 	})
 }
 
+// BenchmarkGate_HotStore_Get_Hit_Bans pins the hit-path cost while a
+// ban list is active (the continuous invalidation-storm case: bans sit
+// in the lazy list for banTTL and are evaluated on every hit). The
+// literal fast-path keeps this at zero allocations and a handful of
+// comparisons per active ban. Alloc budget: 0.
+func BenchmarkGate_HotStore_Get_Hit_Bans(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-hit-with-bans"))
+	_ = s.Put(context.Background(), k, obj(k, 1024))
+	// Register non-matching bans with future CreatedAt so no hit evicts
+	// and each Get pays the full ban-list walk.
+	for range 8 {
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			HostRegex: "nomatch.invalid",
+			CreatedAt: time.Now().Add(time.Hour),
+		})
+	}
+	_, _, _ = s.Get(context.Background(), k) // warm the visited bit
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotStore_Ban_Steady measures the ban registration cost once
+// scan coalescing absorbs the eager pass (the storm steady state: every
+// ban after the first inside the window). The literal host pattern
+// avoids regexp compilation on this path.
+func BenchmarkHotStore_Ban_Steady(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-hit-ban-storm"))
+	_ = s.Put(context.Background(), k, obj(k, 1024))
+	// Prime the coalescer so b.Loop iterations exercise the skip path.
+	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "prime.invalid"})
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "storm.invalid"})
+	}
+}
+
+// BenchmarkHotStore_Ban_Eager measures a full eager scan (the spike
+// case: first ban outside the coalesce window) against a populated
+// store. Not a gate — cost is O(entries) by design.
+func BenchmarkHotStore_Ban_Eager(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	for i := range 50_000 {
+		k := testkey.Key(uint64(i))
+		_ = s.Put(context.Background(), k, obj(k, 256))
+	}
+	// Coalesce window elapsed between iterations is NOT guaranteed, so
+	// reset the coalescer per iteration to force the eager path.
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		s.lastBanScan.Store(0)
+		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "scan.invalid"})
+	}
+}
+
 // BenchmarkHotPut_Overflow drives a working set 1.5x larger than the
 // budget so every Put after warmup triggers SIEVE eviction. Tracks the
 // cost (and allocs) of the eviction-on-Put critical path targeted by

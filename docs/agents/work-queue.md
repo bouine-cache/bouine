@@ -18,6 +18,8 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
+- [WIP] crush — internal/cluster, internal/admin, internal/cache, cmd/bouine/cmd — invalidation CPU mitigation series (PR 2: broadcast batching+dedup; PR 3: end-to-end purge/batch; PR 1 done on perf/ban-storm) — started: 2026-09-09 — ETA: 2026-09-10
+
 - [WIP] crush — release 0.5.12 (changelog curation + promotion, chart bump) — started: 2026-09-08 — ETA: same day
 
 ## fasthttp migration — phase claims

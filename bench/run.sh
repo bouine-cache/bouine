@@ -72,6 +72,7 @@ GATE_BENCH='^BenchmarkGate_'
 declare -A BUDGETS=(
     [Evaluate_Hit]=0
     [HotStore_Get_Hit]=0
+    [HotStore_Get_Hit_Bans]=0
     [Handler_CacheHit_ReusableWriter]=0
     [Handler_CacheMiss_Cacheable]=18
     [SIEVE_Access]=0

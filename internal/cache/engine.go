@@ -57,10 +57,6 @@ func Evaluate(ri RequestInfo, obj *api.Object, now time.Time) Disposition {
 	var reqCC Directives
 	if rawCC := ri.Header.Get(header.CacheControl); rawCC != "" {
 		reqCC = ParseCacheControl(rawCC)
-		if false {
-			// Rare: multiple Cache-Control headers. Re-parse merged value.
-			reqCC = ParseCacheControl(ri.Header.Get(header.CacheControl))
-		}
 	}
 
 	// Pragma: no-cache is equivalent to Cache-Control: no-cache

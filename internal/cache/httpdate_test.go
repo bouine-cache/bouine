@@ -102,23 +102,24 @@ func TestParseOriginAge(t *testing.T) {
 	}
 }
 
-func TestMergeHeaderValues(t *testing.T) {
+func TestGetAll_JoinsMultiValues(t *testing.T) {
 	t.Parallel()
 	t.Run("single_value", func(t *testing.T) {
 		t.Parallel()
 		h := headerMap(header.CacheControl, "max-age=60")
-		assert.Equal(t, "max-age=60", mergeHeaderValues(h, header.CacheControl))
+		assert.Equal(t, "max-age=60", h.GetAll(header.CacheControl))
 	})
 	t.Run("multiple_values", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.SetValues(header.CacheControl, []string{"max-age=60", "public"})
-		assert.Equal(t, "max-age=60, public", mergeHeaderValues(h, header.CacheControl))
+		h.AppendEntry(header.CacheControl, "max-age=60")
+		h.AppendEntry(header.CacheControl, "public")
+		assert.Equal(t, "max-age=60, public", h.GetAll(header.CacheControl))
 	})
 	t.Run("absent", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		assert.Equal(t, "", mergeHeaderValues(h, header.CacheControl))
+		assert.Equal(t, "", h.GetAll(header.CacheControl))
 	})
 }
 

@@ -10,6 +10,12 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Removed
+- The `experimental.fasthttp_migration` flag. The ADR-0034 fasthttp
+  migration is complete and the flag has gated nothing; configs that
+  still set it now fail to load because the config loader uses strict
+  YAML field checking — delete the key from your configuration.
+
 ## [0.5.12] - 2026-09-08
 
 ### Fixed

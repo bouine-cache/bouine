@@ -142,20 +142,6 @@ func TestMap_Range_StopEarly(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
-func TestMap_SetValues(t *testing.T) {
-	h := Map{}
-	h.SetValues("X-Multi", []string{"a", "b", "c"})
-	got := h.Get("X-Multi")
-	assert.Equal(t, "a, b, c", got)
-
-	h.SetValues("X-Single", []string{"only"})
-	got = h.Get("X-Single")
-	assert.Equal(t, "only", got)
-
-	h.SetValues("X-Multi", []string{})
-	assert.False(t, h.Has("X-Multi"))
-}
-
 func TestMap_InternKey(t *testing.T) {
 	k1 := InternKey("content-type")
 	k2 := InternKey("Content-Type")
@@ -275,9 +261,9 @@ func TestInternKey_Deduplicates(t *testing.T) {
 
 func TestInternValue_Deduplicates(t *testing.T) {
 	t.Parallel()
-	a := InternValue("text/html")
-	b := InternValue("text/html")
-	c := InternValue("application/json")
+	a := internValue("text/html")
+	b := internValue("text/html")
+	c := internValue("application/json")
 	require.Equal(t, b, a)
 	require.NotEqual(t, c, a)
 }

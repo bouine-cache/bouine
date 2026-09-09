@@ -426,11 +426,11 @@ func FreshnessLifetime(respCC Directives, getHdr func(string) string) (time.Dura
 }
 
 // FreshnessLifetimeH is like FreshnessLifetime but takes header.Map
-// directly so it can detect multiple Expires headers (which are
-// invalid per RFC 9110 §5.3) and read CDN-Cache-Control.
+// directly so it can detect multiple Expires headers, which are
+// invalid per RFC 9110 §5.3.
 func FreshnessLifetimeH(respCC Directives, h header.Map) (time.Duration, bool) {
 	// CDN-Cache-Control takes precedence when present (RFC 9211).
-	if cdnCC := mergeHeaderValues(h, header.CDNCacheControl); cdnCC != "" {
+	if cdnCC := h.GetAll(header.CDNCacheControl); cdnCC != "" {
 		cdnD := ParseCacheControl(cdnCC)
 		if cdnD.MaxAgeSet {
 			return cdnD.MaxAge, true
@@ -448,6 +448,21 @@ func FreshnessLifetimeH(respCC Directives, h header.Map) (time.Duration, bool) {
 	}
 	expiresVal := h.Get(header.Expires)
 	if expiresVal == "" {
+		return 0, false
+	}
+	// Multiple Expires headers → invalid (RFC 9110 §5.3); treat as no
+	// freshness information, same as a syntactically invalid date.
+	expiresCount := 0
+	h.Range(func(key, _ string) bool {
+		if key == header.Expires {
+			expiresCount++
+		}
+		if expiresCount > 1 {
+			return false
+		}
+		return true
+	})
+	if expiresCount > 1 {
 		return 0, false
 	}
 	expTime := parseHTTPDate(expiresVal)

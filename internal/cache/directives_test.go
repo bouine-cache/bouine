@@ -137,7 +137,8 @@ func TestFreshnessLifetimeH(t *testing.T) {
 	t.Run("multiple_expires_rejected", func(t *testing.T) {
 		t.Parallel()
 		h := header.Map{}
-		h.SetValues(header.Expires, []string{"Mon, 01 Jan 2024 01:00:00 GMT", "Mon, 01 Jan 2024 02:00:00 GMT"})
+		h.AppendEntry(header.Expires, "Mon, 01 Jan 2024 01:00:00 GMT")
+		h.AppendEntry(header.Expires, "Mon, 01 Jan 2024 02:00:00 GMT")
 		_, ok := FreshnessLifetimeH(Directives{}, h)
 		require.False(t, ok)
 	})

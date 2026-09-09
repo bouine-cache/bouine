@@ -10,6 +10,7 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/bouine-cache/bouine/internal/config"
+	"github.com/bouine-cache/bouine/internal/dashboard/insights"
 	"github.com/bouine-cache/bouine/internal/dashboard/templates"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
@@ -254,6 +255,39 @@ func TestHandler_CFStatusWired(t *testing.T) {
 	data := h.collectInsightData(merged, peers)
 	assert.Equal(t, "429 too many requests", data.CFStatus.LastError,
 		"ruleCDNLastError input must see the last error")
+}
+
+// TestHandler_Insights_Polling asserts the insights page self-polls like
+// the other live pages, and that the polling swap re-applies the
+// operator's filter/focus instead of resetting the view.
+func TestHandler_Insights_Polling(t *testing.T) {
+	t.Parallel()
+	rings := observability.NewRings("self")
+	h := &Handler{
+		cfg: Config{
+			Token:  "test",
+			Rings:  rings,
+			Logger: observability.NoopLogger{},
+			Config: &config.Config{Routes: []config.Route{{Name: "api", Pool: "origin1"}}},
+		},
+		auth:          newSessionAuth("test"),
+		agg:           NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
+		insightEngine: insights.New(),
+	}
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/insights")
+	h.insights(ctx)
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+
+	body := string(ctx.Response.Body())
+	assert.Contains(t, body, `hx-get="/dashboard/insights"`, "insights page must self-poll")
+	assert.Contains(t, body, "every 15s")
+	assert.Contains(t, body, `hx-select="#insights-container"`)
+	// Poll-safety: document keydown guarded, filter/focus state kept on
+	// window and re-applied after each swap.
+	assert.Contains(t, body, "__insightsKeyBound")
+	assert.Contains(t, body, "__insightsState")
 }
 
 // TestHandler_PeerFetchStatsAvgLatency asserts the cluster page shows

@@ -26,6 +26,13 @@ templ Invalidation(d InvalidationData) {
 				</div>
 				<div id="purge-resp" style="font-size:.7rem;color:var(--m)" aria-live="polite"></div>
 				<div style="font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem">Removes the exact cache key. In a cluster, forwarded to the key's owner node. Vary variants are all purged.</div>
+				<div class="fgroup" style="margin-top:.75rem">
+					<label for="purge-urls">Batch — one URL per line</label>
+					<textarea class="finput" id="purge-urls" rows="4" style="resize:vertical;font-family:'JetBrains Mono',monospace;font-size:.7rem" aria-label="URLs to purge, one per line"></textarea>
+					<button class="btn bo" style="margin-top:.4rem" hx-post="/dashboard/api/purge/batch" hx-vals="js:{&quot;urls&quot;:document.getElementById('purge-urls').value}" hx-target="#purge-batch-resp" hx-swap="innerHTML" aria-label="Purge batch of URLs">Purge batch</button>
+				</div>
+				<div id="purge-batch-resp" style="font-size:.7rem;color:var(--m)" aria-live="polite"></div>
+				<div style="font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem">Up to 1000 URLs, purged locally then fanned out to peers in a single batched broadcast.</div>
 			</div>
 			<div class="bc">
 				<div class="bc-t">Ban — predicate</div>

@@ -47,7 +47,7 @@ func Invalidation(d InvalidationData) templ.Component {
 				}()
 			}
 			ctx = templ.InitializeContext(ctx)
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"pg-hd\"><div><h2>Invalidation</h2><div class=\"sub\">purge · ban · refresh — broadcast to all cluster peers</div></div></div><div class=\"r3\" style=\"margin-bottom:.6rem\"><div class=\"bc\"><div class=\"bc-t\">Purge — exact URL</div><div class=\"fgroup\"><label for=\"purge-url\">URL</label><div class=\"frow\"><input class=\"finput\" id=\"purge-url\" name=\"url\" placeholder=\"https://example.com/products/42\" aria-label=\"URL to purge\"> <button class=\"btn bp\" hx-post=\"/dashboard/api/purge\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('purge-url').value}\" hx-target=\"#purge-resp\" hx-swap=\"innerHTML\" aria-label=\"Purge URL\">Purge</button></div></div><div id=\"purge-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Removes the exact cache key. In a cluster, forwarded to the key's owner node. Vary variants are all purged.</div></div><div class=\"bc\"><div class=\"bc-t\">Ban — predicate</div><div class=\"fgroup\"><label for=\"ban-host\">Host regex</label><input class=\"finput\" id=\"ban-host\" placeholder=\"example\\.com\"></div><div class=\"fgroup\"><label for=\"ban-path\">Path regex</label><input class=\"finput\" id=\"ban-path\" placeholder=\"^/api/v1/\"></div><button class=\"btn by\" hx-post=\"/dashboard/api/ban\" hx-vals=\"js:{&quot;host_regex&quot;:document.getElementById('ban-host').value,&quot;path_regex&quot;:document.getElementById('ban-path').value}\" hx-target=\"#ban-resp\" hx-swap=\"innerHTML\">Issue ban</button><div id=\"ban-resp\" style=\"font-size:.7rem;color:var(--m);margin-top:.4rem\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.6rem\">Matching entries are eagerly evicted (at most one scan per 50ms — bursts report 0 evicted now) and the predicate is registered lazily, so entries are also rejected on every subsequent lookup. Broadcast to all peers.</div></div><div class=\"bc\"><div class=\"bc-t\">Refresh — soft-purge</div><div class=\"fgroup\"><label for=\"refresh-url\">URL</label><div class=\"frow\"><input class=\"finput\" id=\"refresh-url\" name=\"url\" placeholder=\"https://example.com/page\" aria-label=\"URL to refresh\"> <button class=\"btn bg2\" hx-post=\"/dashboard/api/refresh\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('refresh-url').value}\" hx-target=\"#refresh-resp\" hx-swap=\"innerHTML\">Refresh</button></div></div><div id=\"refresh-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Marks entry stale. Next request revalidates with origin using <code style=\"font-family:'JetBrains Mono',monospace;font-size:.68rem\">If-None-Match</code>. If origin returns 304, cached body reused.</div></div></div><!-- Recent invalidations history --> <div id=\"ops-log-panel\" class=\"bc\" hx-get=\"/dashboard/invalidation\" hx-trigger=\"every 15s, refreshOpsLog from:body\" hx-swap=\"outerHTML\" hx-select=\"#ops-log-panel\"><div class=\"bc-t\">Recent invalidations</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"pg-hd\"><div><h2>Invalidation</h2><div class=\"sub\">purge · ban · refresh — broadcast to all cluster peers</div></div></div><div class=\"r3\" style=\"margin-bottom:.6rem\"><div class=\"bc\"><div class=\"bc-t\">Purge — exact URL</div><div class=\"fgroup\"><label for=\"purge-url\">URL</label><div class=\"frow\"><input class=\"finput\" id=\"purge-url\" name=\"url\" placeholder=\"https://example.com/products/42\" aria-label=\"URL to purge\"> <button class=\"btn bp\" hx-post=\"/dashboard/api/purge\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('purge-url').value}\" hx-target=\"#purge-resp\" hx-swap=\"innerHTML\" aria-label=\"Purge URL\">Purge</button></div></div><div id=\"purge-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Removes the exact cache key. In a cluster, forwarded to the key's owner node. Vary variants are all purged.</div><div class=\"fgroup\" style=\"margin-top:.75rem\"><label for=\"purge-urls\">Batch — one URL per line</label> <textarea class=\"finput\" id=\"purge-urls\" rows=\"4\" style=\"resize:vertical;font-family:'JetBrains Mono',monospace;font-size:.7rem\" aria-label=\"URLs to purge, one per line\"></textarea> <button class=\"btn bo\" style=\"margin-top:.4rem\" hx-post=\"/dashboard/api/purge/batch\" hx-vals=\"js:{&quot;urls&quot;:document.getElementById('purge-urls').value}\" hx-target=\"#purge-batch-resp\" hx-swap=\"innerHTML\" aria-label=\"Purge batch of URLs\">Purge batch</button></div><div id=\"purge-batch-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Up to 1000 URLs, purged locally then fanned out to peers in a single batched broadcast.</div></div><div class=\"bc\"><div class=\"bc-t\">Ban — predicate</div><div class=\"fgroup\"><label for=\"ban-host\">Host regex</label><input class=\"finput\" id=\"ban-host\" placeholder=\"example\\.com\"></div><div class=\"fgroup\"><label for=\"ban-path\">Path regex</label><input class=\"finput\" id=\"ban-path\" placeholder=\"^/api/v1/\"></div><button class=\"btn by\" hx-post=\"/dashboard/api/ban\" hx-vals=\"js:{&quot;host_regex&quot;:document.getElementById('ban-host').value,&quot;path_regex&quot;:document.getElementById('ban-path').value}\" hx-target=\"#ban-resp\" hx-swap=\"innerHTML\">Issue ban</button><div id=\"ban-resp\" style=\"font-size:.7rem;color:var(--m);margin-top:.4rem\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.6rem\">Matching entries are eagerly evicted (at most one scan per 50ms — bursts report 0 evicted now) and the predicate is registered lazily, so entries are also rejected on every subsequent lookup. Broadcast to all peers.</div></div><div class=\"bc\"><div class=\"bc-t\">Refresh — soft-purge</div><div class=\"fgroup\"><label for=\"refresh-url\">URL</label><div class=\"frow\"><input class=\"finput\" id=\"refresh-url\" name=\"url\" placeholder=\"https://example.com/page\" aria-label=\"URL to refresh\"> <button class=\"btn bg2\" hx-post=\"/dashboard/api/refresh\" hx-vals=\"js:{&quot;url&quot;:document.getElementById('refresh-url').value}\" hx-target=\"#refresh-resp\" hx-swap=\"innerHTML\">Refresh</button></div></div><div id=\"refresh-resp\" style=\"font-size:.7rem;color:var(--m)\" aria-live=\"polite\"></div><div style=\"font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.5rem\">Marks entry stale. Next request revalidates with origin using <code style=\"font-family:'JetBrains Mono',monospace;font-size:.68rem\">If-None-Match</code>. If origin returns 304, cached body reused.</div></div></div><!-- Recent invalidations history --> <div id=\"ops-log-panel\" class=\"bc\" hx-get=\"/dashboard/invalidation\" hx-trigger=\"every 15s, refreshOpsLog from:body\" hx-swap=\"outerHTML\" hx-select=\"#ops-log-panel\"><div class=\"bc-t\">Recent invalidations</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -87,7 +87,7 @@ func Invalidation(d InvalidationData) templ.Component {
 				var templ_7745c5c3_Var5 string
 				templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(e.Op)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 64, Col: 60}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 71, Col: 60}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 				if templ_7745c5c3_Err != nil {
@@ -100,7 +100,7 @@ func Invalidation(d InvalidationData) templ.Component {
 				var templ_7745c5c3_Var6 string
 				templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(e.Arg)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 65, Col: 35}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 72, Col: 35}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 				if templ_7745c5c3_Err != nil {
@@ -118,7 +118,7 @@ func Invalidation(d InvalidationData) templ.Component {
 					var templ_7745c5c3_Var7 string
 					templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(" ")
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 68, Col: 51}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 75, Col: 51}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 					if templ_7745c5c3_Err != nil {
@@ -132,7 +132,7 @@ func Invalidation(d InvalidationData) templ.Component {
 				var templ_7745c5c3_Var8 string
 				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(TimeAgo(time.Unix(e.Timestamp, 0)))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 70, Col: 42}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 77, Col: 42}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 				if templ_7745c5c3_Err != nil {
@@ -165,7 +165,7 @@ func Invalidation(d InvalidationData) templ.Component {
 					var templ_7745c5c3_Var9 string
 					templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(d.CFStatus.ZoneID)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 84, Col: 93}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 91, Col: 93}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 					if templ_7745c5c3_Err != nil {
@@ -198,7 +198,7 @@ func Invalidation(d InvalidationData) templ.Component {
 						var templ_7745c5c3_Var10 string
 						templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(d.CFStatus.LastError)
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 97, Col: 79}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 104, Col: 79}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 						if templ_7745c5c3_Err != nil {
@@ -221,7 +221,7 @@ func Invalidation(d InvalidationData) templ.Component {
 						var templ_7745c5c3_Var11 string
 						templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(d.CFStatus.LastSuccessAt)
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 103, Col: 79}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 110, Col: 79}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 						if templ_7745c5c3_Err != nil {
@@ -249,7 +249,7 @@ func Invalidation(d InvalidationData) templ.Component {
 							var templ_7745c5c3_Var12 string
 							templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(d.CFStatus.CircuitState)
 							if templ_7745c5c3_Err != nil {
-								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 110, Col: 59}
+								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 117, Col: 59}
 							}
 							_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 							if templ_7745c5c3_Err != nil {
@@ -267,7 +267,7 @@ func Invalidation(d InvalidationData) templ.Component {
 							var templ_7745c5c3_Var13 string
 							templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(d.CFStatus.CircuitState)
 							if templ_7745c5c3_Err != nil {
-								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 112, Col: 58}
+								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 119, Col: 58}
 							}
 							_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
 							if templ_7745c5c3_Err != nil {
@@ -295,7 +295,7 @@ func Invalidation(d InvalidationData) templ.Component {
 						var templ_7745c5c3_Var14 string
 						templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(strconv.Itoa(d.CFStatus.DLQDepth))
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 119, Col: 67}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/dashboard/templates/invalidation.templ`, Line: 126, Col: 67}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 						if templ_7745c5c3_Err != nil {

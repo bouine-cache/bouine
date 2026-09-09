@@ -98,8 +98,13 @@ type CFStatusCard struct {
 	LastError     string // empty when no error
 	LastSuccessAt string // RFC 3339 or empty
 	LastLagMs     int64  // async propagation latency (0 when sync or disabled)
-	Enabled       bool
-	Async         bool
+	// CircuitState is the Cloudflare client circuit breaker state
+	// ("closed", "open", "half-open"), empty when batching is off.
+	CircuitState string
+	// DLQDepth is the number of failed purges queued for retry.
+	DLQDepth int
+	Enabled  bool
+	Async    bool
 }
 
 // HotFillPct returns the hot-tier fill percentage (0–100), clamped.

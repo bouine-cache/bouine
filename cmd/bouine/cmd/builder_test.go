@@ -15,6 +15,7 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/admin"
 	"github.com/bouine-cache/bouine/internal/cache"
+	"github.com/bouine-cache/bouine/internal/cluster"
 	"github.com/bouine-cache/bouine/internal/config"
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/origin"
@@ -674,6 +675,20 @@ func TestBuildClusterMeta_WithHopLimit(t *testing.T) {
 	rs := &runState{}
 	meta := e.buildClusterMeta(rs)
 	assert.Equal(t, 3, meta.HopLimit)
+}
+
+// An unset hop_limit falls back to the peer fetcher's MaxHops default,
+// so the cluster page must show the effective value, not 0.
+func TestBuildClusterMeta_DefaultHopLimit(t *testing.T) {
+	t.Parallel()
+	e := &engine{
+		cfg:    &config.Config{},
+		logger: newTestLogger(),
+	}
+	rs := &runState{}
+	meta := e.buildClusterMeta(rs)
+	assert.Equal(t, cluster.MaxHops, meta.HopLimit)
+	assert.NotZero(t, meta.HopLimit)
 }
 
 func TestInsightsPoolHealth_Nil(t *testing.T) {

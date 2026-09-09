@@ -195,6 +195,9 @@ func TestMmapFdCacheEviction(t *testing.T) {
 // this test ensures the RLock/Lock hierarchy prevents use-after-munmap.
 func TestMmapConcurrentReadDuringCompact(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping heavy concurrent I/O test in short mode")
+	}
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 100 << 20, SegMax: 1 << 20})
 	require.NoError(t, err)

@@ -913,6 +913,9 @@ func TestGet_StaleSegmentSelfHeals(t *testing.T) {
 // acceptable outcomes under concurrency are a value or nil.
 func TestGet_StaleSegmentConcurrentCompact(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping heavy concurrent I/O test in short mode")
+	}
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 1 << 20})
 	require.NoError(t, err)
@@ -1590,6 +1593,9 @@ func TestEvict_ConcurrentEvictAndPutPreservesData(t *testing.T) {
 
 func TestScanSegment_MmapCorrectness(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping heavy I/O test in short mode")
+	}
 	dir := t.TempDir()
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 256 << 20, SegMax: 4 << 20})
 	require.NoError(t, err)
@@ -1824,6 +1830,9 @@ func TestCompact_RestoresStatsBytes(t *testing.T) {
 // segment during the unlocked scan window (the pre-fix bug).
 func TestCompact_ConcurrentPutNoDataLoss(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping heavy concurrent I/O test in short mode")
+	}
 	dir := t.TempDir()
 	// SegMax just large enough for a few records so Put rolls into new
 	// segments frequently during compaction.
@@ -2323,6 +2332,9 @@ func TestCompactSegment_ActiveSegmentRejected(t *testing.T) {
 // non-active segments never being written to by Put.
 func TestCompactSegment_ConcurrentPutNoDataLoss(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping heavy concurrent I/O test in short mode")
+	}
 	dir := t.TempDir()
 	// Small SegMax to force many segments.
 	s, err := NewStore(Config{Dir: dir, MaxBytes: 1 << 30, SegMax: 512})

@@ -580,6 +580,9 @@ func TestTombstoneDrain_ConfigurableQueueSize(t *testing.T) {
 // objects above body_threshold are persisted to warm. With warm sync,
 // all hot-only entries are synced to warm before restart and survive.
 func TestWarmSync_CacheSurvivalRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping heavy I/O test in short mode")
+	}
 	const (
 		smallObjCount = 1000
 		largeObjCount = 100

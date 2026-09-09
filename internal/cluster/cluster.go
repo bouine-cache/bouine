@@ -32,6 +32,11 @@ const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
 // Config controls the cluster membership layer.
 //
 // Stable.
+// DefaultPushPullInterval is the memberlist push/pull sync interval used
+// when the config leaves it unset. It replaces memberlist's 30s default
+// so invalidations propagate promptly. Also surfaced on the dashboard.
+const DefaultPushPullInterval = 5 * time.Second
+
 type Config struct {
 	// PeerInfo is the metadata this node broadcasts to peers.
 	PeerInfo api.PeerInfo
@@ -166,7 +171,7 @@ func New(cfg Config) (*Cluster, error) {
 	if cfg.PushPullInterval > 0 {
 		mlCfg.PushPullInterval = cfg.PushPullInterval
 	} else {
-		mlCfg.PushPullInterval = 5 * time.Second
+		mlCfg.PushPullInterval = DefaultPushPullInterval
 	}
 
 	if cfg.BindAddr != "" {

@@ -57,6 +57,14 @@ func newEngine(cfg *config.Config, configPath string, logger *slog.Logger) *engi
 	}
 }
 
+// defaultJoinTimeout bounds the cluster join retry budget when
+// cluster.join_timeout is unset; surfaced on the dashboard cluster page.
+const defaultJoinTimeout = 120 * time.Second
+
+// joinRetryInterval steps the cluster join retry loop; surfaced on the
+// dashboard cluster page.
+const joinRetryInterval = 2 * time.Second
+
 // runState bundles subsystem references created during engine startup.
 // Passed to startAdmin and buildDashboard instead of 10+ positional args.
 type runState struct {
@@ -978,13 +986,24 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 func (e *engine) buildClusterMeta(rs *runState) templates.ClusterMeta {
 	meta := templates.ClusterMeta{
 		ProtocolVersion:  cluster.ClusterProtocolVersion,
-		GossipInterval:   "5s",
-		JoinRetryBudget:  "60s · 2s step",
-		PeerFetchTimeout: "500ms",
+		PeerFetchTimeout: cluster.PeerFetchTimeout.String(),
 	}
+	// Derived from the effective values (including defaults) so the
+	// card cannot drift from what the runtime actually does.
+	joinTimeout := e.cfg.Cluster.JoinTimeout
+	if joinTimeout == 0 {
+		joinTimeout = defaultJoinTimeout
+	}
+	meta.JoinRetryBudget = fmt.Sprintf("%s · %s step", joinTimeout, joinRetryInterval)
 	if rs.clusterNode != nil {
-		meta.VirtualNodes = rs.clusterNode.Config().VirtualNodes
+		nodeCfg := rs.clusterNode.Config()
+		meta.VirtualNodes = nodeCfg.VirtualNodes
 		meta.Mode = rs.clusterNode.Mode()
+		if nodeCfg.PushPullInterval > 0 {
+			meta.GossipInterval = nodeCfg.PushPullInterval.String()
+		} else {
+			meta.GossipInterval = cluster.DefaultPushPullInterval.String()
+		}
 	} else {
 		meta.Mode = "single-node"
 	}
@@ -1130,7 +1149,7 @@ func (e *engine) startClusterJoin(g *supervised.Group, rs *runState) {
 
 	joinTimeout := e.cfg.Cluster.JoinTimeout
 	if joinTimeout == 0 {
-		joinTimeout = 120 * time.Second
+		joinTimeout = defaultJoinTimeout
 	}
 
 	g.Go("cluster-join", func(joinCtx context.Context) error {
@@ -1231,7 +1250,7 @@ func (e *engine) registerShutdownSteps(g *supervised.Group, rs *runState) {
 // or an error identifying the failure if the deadline was reached.
 func (e *engine) joinWithRetry(ctx context.Context, c *cluster.Cluster, joinTimeout time.Duration) error {
 	seeds := e.cfg.Cluster.Join
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(joinRetryInterval)
 	defer ticker.Stop()
 
 	deadline := time.After(joinTimeout)

@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net"
 	"regexp"
 	"runtime"
@@ -68,8 +69,12 @@ type Config struct {
 	PeerMetricsHandler      fasthttp.RequestHandler
 	OnPurged                func(ctx context.Context, url string)
 	FaviconHandler          fasthttp.RequestHandler
-	Addr                    string
-	Token                   string
+	// OpsLogFn records an invalidation operation (purge/ban/refresh) in
+	// the ops history shown on the dashboard invalidation page. nil
+	// disables history recording. Set to OpsLogRing.Record by the engine.
+	OpsLogFn func(op, arg, result string)
+	Addr     string
+	Token    string
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
 	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride
 	// this server, so peer clients must keep their idle timeout strictly
@@ -527,9 +532,11 @@ func (s *Server) purge(ctx *fasthttp.RequestCtx) {
 	}
 	key := cache.BuildKeyFromURL(req.URL, nil)
 	if err := s.cfg.PurgeFn(key); err != nil {
+		s.recordOp("purge", req.URL, err.Error())
 		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.recordOp("purge", req.URL, "ok")
 	if s.cfg.OnPurged != nil {
 		s.cfg.OnPurged(context.Background(), req.URL)
 	}
@@ -566,14 +573,23 @@ func (s *Server) purgeBatch(ctx *fasthttp.RequestCtx) {
 	purged, failed := 0, 0
 	if s.cfg.PurgeBatchFn != nil {
 		purged, failed = s.cfg.PurgeBatchFn(req.URLs)
+		// The batch callback reports counts only, so the history gets a
+		// single batch entry; per-URL outcomes are not visible here.
+		res := fmt.Sprintf("ok, %d/%d purged", purged, len(req.URLs))
+		if failed > 0 {
+			res = fmt.Sprintf("partial, %d/%d purged, %d failed", purged, len(req.URLs), failed)
+		}
+		s.recordOp("purge", fmt.Sprintf("batch of %d urls", len(req.URLs)), res)
 	} else {
 		for _, u := range req.URLs {
 			key := cache.BuildKeyFromURL(u, nil)
 			if err := s.cfg.PurgeFn(key); err != nil {
 				failed++
+				s.recordOp("purge", u, err.Error())
 				continue
 			}
 			purged++
+			s.recordOp("purge", u, "ok")
 			if s.cfg.OnPurged != nil {
 				s.cfg.OnPurged(context.Background(), u)
 			}
@@ -609,9 +625,15 @@ func (s *Server) ban(ctx *fasthttp.RequestCtx) {
 	}
 	count, err := s.cfg.BanFn(expr)
 	if err != nil {
+		s.recordOp("ban", banArg(expr), err.Error())
 		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	res := "ok"
+	if count > 0 {
+		res = fmt.Sprintf("ok, %d evicted", count)
+	}
+	s.recordOp("ban", banArg(expr), res)
 	if s.cfg.OnBanned != nil {
 		s.cfg.OnBanned(context.Background(), expr)
 	}
@@ -631,13 +653,28 @@ func (s *Server) refresh(ctx *fasthttp.RequestCtx) {
 	}
 	key := cache.BuildKeyFromURL(req.URL, nil)
 	if err := s.cfg.RefreshFn(key); err != nil {
+		s.recordOp("refresh", req.URL, err.Error())
 		writeJSON(ctx, fasthttp.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.recordOp("refresh", req.URL, "ok")
 	if s.cfg.OnRefreshed != nil {
 		s.cfg.OnRefreshed(context.Background(), req.URL)
 	}
 	writeJSON(ctx, fasthttp.StatusOK, map[string]string{"status": "refreshed"})
+}
+
+// recordOp appends an invalidation outcome to the ops history shown on
+// the dashboard invalidation page, when recording is wired.
+func (s *Server) recordOp(op, arg, result string) {
+	if s.cfg.OpsLogFn != nil {
+		s.cfg.OpsLogFn(op, arg, result)
+	}
+}
+
+// banArg renders a ban expression as a compact history label.
+func banArg(expr api.BanExpr) string {
+	return strings.TrimSpace(expr.HostRegex + " " + expr.PathRegex)
 }
 
 // Serve starts the admin server on the configured address.

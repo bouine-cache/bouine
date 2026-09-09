@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,16 +72,19 @@ type HotStore struct {
 	// snapshot — no lock, no allocation, no mutation on the hit path.
 	// Objects stored AFTER a ban's CreatedAt are not subject to it
 	// (RFC 9111 §4.4 semantics).
-	bans   atomic.Pointer[[]activeBan]
+	bans atomic.Pointer[[]activeBan]
+	// lastBanScan is the wall-clock time the last eager ban scan
+	// completed. Ban uses it to coalesce scans within
+	// banScanCoalesceWindow so a ban storm costs one scan instead of
+	// one per ban. Accessed atomically; stored as int64 nanoseconds
+	// (UnixNano) to keep the fast path lock-free.
 	shards []shard
 	stats  hotStats
-	// wg tracks the sweeper and reaper goroutines so Close can wait
-	// for them to fully exit before munmapping slab regions. Without
-	// this, a goroutine mid-flushSlabFrees could access munmap'd
-	// memory and segfault.
-	wg       sync.WaitGroup
-	maxBytes int64
-	mask     uint64
+	wg     sync.WaitGroup
+
+	lastBanScan atomic.Int64
+	maxBytes    int64
+	mask        uint64
 	// reaperInterval is how often the TTL reaper wakes to scan for
 	// expired entries. Zero disables background reaping.
 	reaperInterval time.Duration
@@ -90,6 +95,31 @@ type HotStore struct {
 type activeBan struct {
 	pred    banPredicate
 	created time.Time
+	// expr records the pattern fields of the api.BanExpr the predicate
+	// was compiled from (CreatedAt excluded). BanExpr patterns are
+	// strings, so this is comparable and used to dedup identical
+	// re-issued bans: re-registering the same pattern refreshes the
+	// existing entry instead of growing the list (a storm of 10k
+	// identical bans must not leave 10k list entries that every
+	// subsequent cache hit walks).
+	pattern banPattern
+}
+
+// banPattern holds the comparable pattern fields of a BanExpr. Two
+// bans with equal patterns are the same ban.
+type banPattern struct {
+	hostRegex    string
+	pathRegex    string
+	surrogateKey string
+}
+
+// patternOf extracts the comparable identity of expr.
+func patternOf(expr api.BanExpr) banPattern {
+	return banPattern{
+		hostRegex:    expr.HostRegex,
+		pathRegex:    expr.PathRegex,
+		surrogateKey: expr.SurrogateKey,
+	}
 }
 
 // banTTL is how long a lazy ban stays in the active list. Bans older
@@ -98,6 +128,23 @@ type activeBan struct {
 // have either been re-cached or expired by now. This is a bouine policy
 // constant, not an RFC requirement.
 const banTTL = 24 * time.Hour
+
+// banListCap bounds the lazy ban list. A storm of distinct bans must
+// not degrade every cache hit linearly (matchesActiveBan walks the
+// list) or make Ban's snapshot copy quadratic. When the cap is hit,
+// the oldest bans are dropped first — they are the least likely to
+// match anything still cached (their matching entries have had the
+// longest time to be evicted lazily or reclaimed by the reaper).
+const banListCap = 1024
+
+// banScanCoalesceWindow bounds how eagerly Ban rescans the hot tier.
+// The eager scan is the expensive half of Ban — a full O(entries) walk
+// under each shard's write lock. During a ban storm, rescanning per ban
+// multiplies CPU linearly with storm length and stalls hot-path reads.
+// Within the window, a prior eager scan is deemed sufficient: entries
+// that were missed are still caught lazily by matchesActiveBan on the
+// next lookup and reclaimed by the TTL reaper if never looked up again.
+const banScanCoalesceWindow = 50 * time.Millisecond
 
 type shard struct {
 	entries     map[api.Key]*hotEntry
@@ -704,10 +751,33 @@ func (h *HotStore) Delete(_ context.Context, key api.Key) error {
 // filled after this scan are also checked on next lookup (RFC 9111
 // §4.4 lazy semantics). This handles the common case of
 // host/path/surrogate-key invalidation on administrative APIs.
+//
+// Scan coalescing: the eager scan is O(entries) under each shard's
+// write lock. During a ban storm (an invalidation spike), rescanning
+// per ban multiplies CPU linearly with storm length and stalls the
+// hot path. Within banScanCoalesceWindow of the last completed scan,
+// the eager pass is skipped and correctness rests on the lazy ban
+// list — every lookup of a matching object still evicts it, and the
+// TTL reaper reclaims entries that are never looked up again. The
+// predicate is always registered in the lazy list regardless.
 func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	pred, err := compileBanPredicate(expr)
 	if err != nil {
 		return 0, err
+	}
+
+	// Register in the lazy ban list FIRST so objects filled during
+	// (and after) the eager scan are also checked on next lookup
+	// (RFC 9111 §4.4 lazy semantics).
+	now := h.registerBan(expr, pred)
+
+	// Coalesce the eager scan: at most one full-store walk per
+	// banScanCoalesceWindow. A zero lastBanScan means no scan has
+	// run yet (store construction), so the first ban always scans.
+	nowNano := now.UnixNano()
+	last := h.lastBanScan.Load()
+	if last != 0 && nowNano-last < int64(banScanCoalesceWindow) {
+		return 0, nil
 	}
 
 	var total atomic.Int64
@@ -726,30 +796,56 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	if err := g.Wait(); err != nil {
 		return 0, err
 	}
+	h.lastBanScan.Store(nowNano)
+	return int(total.Load()), nil
+}
 
-	// Register in the lazy ban list so objects filled AFTER this scan
-	// are also checked on next lookup (RFC 9111 §4.4 lazy semantics).
+// registerBan appends (or refreshes) expr's predicate in the lazy ban
+// list and returns the registration wall-clock time. Identical
+// re-issued patterns refresh in place instead of duplicating; the
+// list is capped at banListCap with the oldest bans dropped first.
+func (h *HotStore) registerBan(expr api.BanExpr, pred banPredicate) time.Time {
 	createdAt := expr.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
+	parget := patternOf(expr)
 	h.bansMu.Lock()
 	cur := h.bans.Load()
 	var base []activeBan
 	if cur != nil {
 		base = *cur
 	}
-	updated := make([]activeBan, 0, len(base)+1)
+	updated := make([]activeBan, 0, min(len(base)+1, banListCap))
 	now := time.Now()
+	refreshed := false
 	for _, b := range base {
-		if now.Sub(b.created) < banTTL {
-			updated = append(updated, b)
+		if now.Sub(b.created) >= banTTL {
+			continue
 		}
+		if b.pattern == parget {
+			// Identical re-issued ban: refresh its timestamp so it
+			// lives a full banTTL from now, instead of appending a
+			// duplicate that every subsequent hit would walk.
+			b.created = createdAt
+			refreshed = true
+		}
+		updated = append(updated, b)
 	}
-	updated = append(updated, activeBan{pred: pred, created: createdAt})
+	if !refreshed {
+		// Enforce the cap by dropping the oldest ban. base is
+		// ordered oldest-first (append order); its matching entries
+		// have had the longest time to be evicted lazily or
+		// reclaimed by the TTL reaper.
+		if len(updated) >= banListCap {
+			copy(updated, updated[1:])
+			updated = updated[:len(updated)-1]
+		}
+		updated = append(updated, activeBan{pred: pred, created: createdAt, pattern: parget})
+	}
 	h.bans.Store(&updated)
 	h.bansMu.Unlock()
-	return int(total.Load()), nil
+	return now
 }
 
 // banShard locks one shard, evicts all entries matching pred, and
@@ -789,47 +885,81 @@ type banPredicate func(*api.Object) bool
 
 // compileBanPredicate pre-compiles the regexps in expr and returns a
 // closure that evaluates the full predicate against a single Object.
+//
+// Literal fast-path: expressions whose host/path pattern contains no
+// regexp metacharacters ("example.com", "/api/v1") match by plain
+// string equality instead of a *regexp.Regexp. Most administrative
+// bans are literals, and the predicate runs both in the eager scan
+// (per stored entry) and in matchesActiveBan (per cache hit) —
+// replacing regexp.MatchString with == removes the dominant CPU and
+// allocation cost on both paths while preserving semantics for
+// anchors ("^/foo") which the regexp engine evaluates identically.
 func compileBanPredicate(expr api.BanExpr) (banPredicate, error) {
-	var hostRE, pathRE *regexp.Regexp
-	if expr.HostRegex != "" {
-		re, err := regexp.Compile(expr.HostRegex)
-		if err != nil {
-			return nil, fmt.Errorf("ban: invalid host_regex: %w", err)
-		}
-		hostRE = re
+	hostRE, hostLit, err := compileBanPattern(expr.HostRegex)
+	if err != nil {
+		return nil, fmt.Errorf("ban: invalid host_regex: %w", err)
 	}
-	if expr.PathRegex != "" {
-		re, err := regexp.Compile(expr.PathRegex)
-		if err != nil {
-			return nil, fmt.Errorf("ban: invalid path_regex: %w", err)
-		}
-		pathRE = re
+	pathRE, pathLit, err := compileBanPattern(expr.PathRegex)
+	if err != nil {
+		return nil, fmt.Errorf("ban: invalid path_regex: %w", err)
 	}
 	return func(obj *api.Object) bool {
-		// Skip objects stored after the ban was issued.
+		// Skip objects stored after the ban was issued. Checked
+		// first: it is a single comparison and exempts the vast
+		// majority of post-ban traffic from every other check.
 		if !expr.CreatedAt.IsZero() && obj.StoredAt.After(expr.CreatedAt) {
 			return false
 		}
 		if hostRE != nil && !hostRE.MatchString(obj.Header.Get(header.XBouineHost)) {
 			return false
 		}
+		if hostLit != "" && obj.Header.Get(header.XBouineHost) != hostLit {
+			return false
+		}
 		if pathRE != nil && !pathRE.MatchString(obj.Header.Get(header.XBouinePath)) {
 			return false
 		}
-		if expr.SurrogateKey != "" {
-			found := false
-			for _, sk := range obj.SurrogateKeys {
-				if sk == expr.SurrogateKey {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return false
-			}
+		if pathLit != "" && obj.Header.Get(header.XBouinePath) != pathLit {
+			return false
+		}
+		if expr.SurrogateKey != "" && !hasSurrogateKey(obj.SurrogateKeys, expr.SurrogateKey) {
+			return false
 		}
 		return true
 	}, nil
+}
+
+// hasSurrogateKey reports whether keys contains key. Surrogate-key
+// lists are tiny (typically 0-3 entries), so a linear scan beats a map.
+func hasSurrogateKey(keys []string, key string) bool {
+	return slices.Contains(keys, key)
+}
+
+// compileBanPattern compiles one host/path ban pattern. When the
+// pattern is regexp-metacharacter-free it returns a literal to
+// compare with == (re nil, lit non-empty); otherwise it compiles and
+// returns the regexp (re non-nil, lit ""). An empty pattern matches
+// everything and returns both zero values.
+func compileBanPattern(pattern string) (re *regexp.Regexp, lit string, err error) {
+	if pattern == "" {
+		return nil, "", nil
+	}
+	if isBanLiteral(pattern) {
+		return nil, pattern, nil
+	}
+	r, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, "", err
+	}
+	return r, "", nil
+}
+
+// isBanLiteral reports whether pattern contains no regexp
+// metacharacters and can be matched with plain string equality.
+// Go's regexp syntax reserves these characters; a pattern without
+// any of them can only match itself.
+func isBanLiteral(pattern string) bool {
+	return !strings.ContainsAny(pattern, `\.+*?()|[]{}^$`)
 }
 
 // MatchesActiveBan reports whether obj is subject to any active lazy

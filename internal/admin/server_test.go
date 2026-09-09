@@ -592,3 +592,33 @@ func TestAdminIdleTimeout_DefaultAndOverride(t *testing.T) {
 	m := NewMinimal("", nil, nil, nil, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	require.Equal(t, DefaultAdminIdleTimeout, m.inner.IdleTimeout)
 }
+
+// TestPurgeBatch_BatchFnCoalesced verifies that when PurgeBatchFn is
+// wired (the engine does), a batch request reaches it as one call
+// carrying every URL, instead of per-URL PurgeFn dispatches
+// (ADR-0044 end-to-end batch purge).
+func TestPurgeBatch_BatchFnCoalesced(t *testing.T) {
+	t.Parallel()
+	var singleCalls, batchCalls int
+	var batchURLs []string
+	s := New(Config{
+		Token:  "secret",
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PurgeFn: func(_ api.Key) error {
+			singleCalls++
+			return nil
+		},
+		PurgeBatchFn: func(urls []string) (int, int) {
+			batchCalls++
+			batchURLs = urls
+			return len(urls), 0
+		},
+	})
+	body := `{"urls":["https://a.com/","https://b.com/","https://c.com/"]}`
+	code, respBody := postWithToken(t, s, "/v1/purge/batch", body)
+	require.Equal(t, fasthttp.StatusOK, code)
+	require.Equal(t, 1, batchCalls, "batch must reach PurgeBatchFn exactly once")
+	require.Equal(t, 0, singleCalls, "per-URL PurgeFn must not be used when PurgeBatchFn is set")
+	require.Equal(t, []string{"https://a.com/", "https://b.com/", "https://c.com/"}, batchURLs)
+	require.True(t, bytes.Contains(respBody, []byte(`"count":3`)))
+}

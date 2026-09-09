@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bouine-cache/bouine/test/integration/driver"
 )
 
 // Strong mode: consistent hash ring, peer fetch on miss, HTTP+gossip invalidation.
@@ -143,4 +145,48 @@ func TestStrong_HopLimit(t *testing.T) {
 	// under normal conditions (no loops). Just verify no crash — metric may
 	// not be registered if no peer-fetcher was created.
 	_ = s.MetricValue(t, 0, "bouine_peer_fetch_hop_limit_hits_total")
+}
+
+// TestStrong_PurgeBatchEndToEnd verifies the batched admin purge
+// endpoint: one /v1/purge/batch request clears multiple URLs across
+// the cluster via a single batched broadcast (ADR-0044). Uses the
+// cross-node host so all nodes derive the same cache key. Success is
+// observed as the body changing (fresh origin fetch) after the purge.
+func TestStrong_PurgeBatchEndToEnd(t *testing.T) {
+	s := sharedCluster(t, "strong")
+
+	paths := []string{"/hit?x=strong-purge-batch-1", "/hit?x=strong-purge-batch-2"}
+	urls := make([]string, len(paths))
+	for i, p := range paths {
+		urls[i] = "http://" + driver.CrossNodeHost + p
+	}
+
+	// Warm every node for every path and record the cached body.
+	preBodies := make(map[string]string)
+	for _, i := range s.AliveNodes() {
+		for _, p := range paths {
+			s.GetWithHost(t, i, p, crossNodeHost)
+			driver.RetryUntil(t, 5*time.Second, 200*time.Millisecond, func() bool {
+				resp := s.GetWithHost(t, i, p, crossNodeHost)
+				return resp.Header.Get("X-Cache") == "HIT"
+			})
+			resp := s.GetWithHost(t, i, p, crossNodeHost)
+			preBodies[p] = string(resp.Body)
+		}
+	}
+
+	// One batched purge on node 0 must clear all URLs on every node.
+	s.PurgeBatch(t, 0, urls)
+
+	// After the purge, each node must re-fetch from origin: the body
+	// differs from the pre-purge cached body. The RetryUntil GETs can
+	// re-populate the cache, so a changed body observed once is proof.
+	for _, i := range s.AliveNodes() {
+		for _, p := range paths {
+			driver.RetryUntil(t, driver.GossipConvergence, 200*time.Millisecond, func() bool {
+				resp := s.GetWithHost(t, i, p, crossNodeHost)
+				return string(resp.Body) != preBodies[p]
+			})
+		}
+	}
 }

@@ -145,6 +145,32 @@ func (b *Broadcaster) BroadcastPurge(ctx context.Context, key api.Key, varyKey s
 	b.flushPurgeBatch([]api.PurgeEvent{evt})
 }
 
+// BroadcastPurges sends one purge event per key in a single batch
+// frame (ADR-0044). It is the fan-out counterpart of the admin
+// /v1/purge/batch endpoint: N keys produce one POST per peer instead
+// of N. Delivery is synchronous, like BroadcastPurge on an idle
+// queue, so a returned call has already fanned out.
+func (b *Broadcaster) BroadcastPurges(ctx context.Context, keys []api.Key) {
+	// Detached like BroadcastPurge: bounded by broadcastTimeout, not
+	// the engine lifecycle or per-request cancellation.
+	_ = context.WithoutCancel(ctx)
+
+	if len(keys) == 0 {
+		return
+	}
+	now := time.Now()
+	evts := make([]api.PurgeEvent, len(keys))
+	for i, key := range keys {
+		evts[i] = api.PurgeEvent{
+			Key:      key,
+			Issuer:   b.cluster.cfg.NodeName,
+			IssuedAt: now,
+			Seq:      b.seq.Add(1),
+		}
+	}
+	b.flushPurgeBatch(evts)
+}
+
 // BroadcastBan sends a ban predicate to all live peers.
 // In strong mode it posts to each peer's admin API. In eventual
 // mode it sends via gossip only.

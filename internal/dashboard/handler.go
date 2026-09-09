@@ -106,7 +106,11 @@ func New(cfg Config) (fasthttp.RequestHandler, *Handler) {
 }
 
 func (h *Handler) protectedHandler(ctx *fasthttp.RequestCtx) {
-	switch string(ctx.Path()) {
+	p, m := string(ctx.Path()), string(ctx.Method())
+	if h.handleAPIRoutes(ctx, p, m) {
+		return
+	}
+	switch p {
 	case "/dashboard/":
 		h.overview(ctx)
 	case "/dashboard/performance":
@@ -121,25 +125,31 @@ func (h *Handler) protectedHandler(ctx *fasthttp.RequestCtx) {
 		h.config(ctx)
 	case "/dashboard/insights":
 		h.insights(ctx)
-	case "/dashboard/api/purge":
-		if string(ctx.Method()) == "POST" {
-			h.apiPurge(ctx)
-		}
-	case "/dashboard/api/purge/batch":
-		if string(ctx.Method()) == "POST" {
-			h.apiPurgeBatch(ctx)
-		}
-	case "/dashboard/api/ban":
-		if string(ctx.Method()) == "POST" {
-			h.apiBan(ctx)
-		}
-	case "/dashboard/api/refresh":
-		if string(ctx.Method()) == "POST" {
-			h.apiRefresh(ctx)
-		}
 	default:
 		ctx.Error("not found", fasthttp.StatusNotFound)
 	}
+}
+
+// handleAPIRoutes dispatches the POST-only invalidation API endpoints.
+// It returns false for anything else so the page router handles it
+// (unknown paths, or wrong methods, fall through to 404).
+func (h *Handler) handleAPIRoutes(ctx *fasthttp.RequestCtx, p, m string) bool {
+	if m != "POST" {
+		return false
+	}
+	switch p {
+	case "/dashboard/api/purge":
+		h.apiPurge(ctx)
+	case "/dashboard/api/purge/batch":
+		h.apiPurgeBatch(ctx)
+	case "/dashboard/api/ban":
+		h.apiBan(ctx)
+	case "/dashboard/api/refresh":
+		h.apiRefresh(ctx)
+	default:
+		return false
+	}
+	return true
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

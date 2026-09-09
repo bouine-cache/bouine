@@ -97,10 +97,10 @@ type CFStatusCard struct {
 	ZoneID        string
 	LastError     string // empty when no error
 	LastSuccessAt string // RFC 3339 or empty
-	LastLagMs     int64  // async propagation latency (0 when sync or disabled)
 	// CircuitState is the Cloudflare client circuit breaker state
 	// ("closed", "open", "half-open"), empty when batching is off.
 	CircuitState string
+	LastLagMs    int64 // async propagation latency (0 when sync or disabled)
 	// DLQDepth is the number of failed purges queued for retry.
 	DLQDepth int
 	Enabled  bool
@@ -827,19 +827,10 @@ func FmtAddrPort(addr string) string {
 }
 
 func buildRouteCacheRows(rc config.Route) []ConfigRow {
-	var rows []ConfigRow
-	if rc.Cache.NegativeTTL > 0 {
-		rows = append(rows, ConfigRow{Key: "negative_ttl", Value: rc.Cache.NegativeTTL.String(), Kind: "dur"})
-	}
-	if rc.Cache.TTLOverride > 0 {
-		rows = append(rows, ConfigRow{Key: "ttl_override", Value: rc.Cache.TTLOverride.String(), Kind: "dur"})
-	}
-	if rc.Cache.StaleWhileRevalidate > 0 {
-		rows = append(rows, ConfigRow{Key: "stale_while_revalidate", Value: rc.Cache.StaleWhileRevalidate.String(), Kind: "dur"})
-	}
-	if rc.Cache.StaleIfError > 0 {
-		rows = append(rows, ConfigRow{Key: "stale_if_error", Value: rc.Cache.StaleIfError.String(), Kind: "dur"})
-	}
+	rows := appendDurRow(nil, "negative_ttl", rc.Cache.NegativeTTL)
+	rows = appendDurRow(rows, "ttl_override", rc.Cache.TTLOverride)
+	rows = appendDurRow(rows, "stale_while_revalidate", rc.Cache.StaleWhileRevalidate)
+	rows = appendDurRow(rows, "stale_if_error", rc.Cache.StaleIfError)
 	if rc.Cache.JitterPercent > 0 {
 		rows = append(rows, ConfigRow{Key: "jitter_percent", Value: fmt.Sprintf("%d", rc.Cache.JitterPercent), Kind: "num"})
 	}
@@ -858,17 +849,22 @@ func buildRouteCacheRows(rc config.Route) []ConfigRow {
 	if rc.Cache.MaxFetchConcurrency > 0 {
 		rows = append(rows, ConfigRow{Key: "max_fetch_concurrency", Value: strconv.Itoa(rc.Cache.MaxFetchConcurrency), Kind: "number"})
 	}
-	if rc.Cache.FetchTimeout > 0 {
-		rows = append(rows, ConfigRow{Key: "fetch_timeout", Value: rc.Cache.FetchTimeout.String(), Kind: "dur"})
-	}
-	if rc.Cache.FetchWaitTimeout > 0 {
-		rows = append(rows, ConfigRow{Key: "fetch_wait_timeout", Value: rc.Cache.FetchWaitTimeout.String(), Kind: "dur"})
-	}
+	rows = appendDurRow(rows, "fetch_timeout", rc.Cache.FetchTimeout)
+	rows = appendDurRow(rows, "fetch_wait_timeout", rc.Cache.FetchWaitTimeout)
 	if rc.Cache.MaxStreamingBufferBytes > 0 {
 		rows = append(rows, ConfigRow{Key: "max_streaming_buffer_bytes", Value: rc.Cache.MaxStreamingBufferBytes.String(), Kind: "size"})
 	}
 	if len(rc.Cache.Key.StripQueryParams) > 0 {
 		rows = append(rows, ConfigRow{Key: "strip_query_params", Value: strings.Join(rc.Cache.Key.StripQueryParams, ", "), Kind: "list"})
+	}
+	return rows
+}
+
+// appendDurRow appends a duration config row when the value is set
+// (zero reads as "inherit the default" and is omitted).
+func appendDurRow(rows []ConfigRow, key string, d time.Duration) []ConfigRow {
+	if d > 0 {
+		rows = append(rows, ConfigRow{Key: key, Value: d.String(), Kind: "dur"})
 	}
 	return rows
 }

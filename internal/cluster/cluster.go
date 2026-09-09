@@ -29,14 +29,14 @@ const defaultHandoffQueueDepth = 4096
 // mirrors this value for YAML validation.
 const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
 
-// Config controls the cluster membership layer.
-//
-// Stable.
 // DefaultPushPullInterval is the memberlist push/pull sync interval used
 // when the config leaves it unset. It replaces memberlist's 30s default
 // so invalidations propagate promptly. Also surfaced on the dashboard.
 const DefaultPushPullInterval = 5 * time.Second
 
+// Config controls the cluster membership layer.
+//
+// Stable.
 type Config struct {
 	// PeerInfo is the metadata this node broadcasts to peers.
 	PeerInfo api.PeerInfo

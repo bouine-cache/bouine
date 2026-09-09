@@ -1,6 +1,9 @@
 package templates
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Invalidation renders the cache invalidation forms and the recent invalidations history.
 templ Invalidation(d InvalidationData) {
@@ -98,6 +101,22 @@ templ Invalidation(d InvalidationData) {
 						<div class="stat-row">
 							<span class="stat-k">last success</span>
 							<span class="stat-v" style="font-size:.68rem">{ d.CFStatus.LastSuccessAt }</span>
+						</div>
+					}
+					if d.CFStatus.CircuitState != "" {
+						<div class="stat-row">
+							<span class="stat-k" title="Circuit breaker guarding the Cloudflare purge API. 'open' means purges are failing fast and being queued in the DLQ instead of hitting the API.">circuit</span>
+							if d.CFStatus.CircuitState == "closed" {
+								<span class="stat-v good">{ d.CFStatus.CircuitState }</span>
+							} else {
+								<span class="stat-v bad">{ d.CFStatus.CircuitState }</span>
+							}
+						</div>
+					}
+					if d.CFStatus.DLQDepth > 0 {
+						<div class="stat-row">
+							<span class="stat-k" title="Failed Cloudflare purge requests queued for retry. Non-zero means the CDN is out of sync with bouine.">dlq depth</span>
+							<span class="stat-v bad">{ strconv.Itoa(d.CFStatus.DLQDepth) }</span>
 						</div>
 					}
 				}

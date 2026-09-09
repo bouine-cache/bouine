@@ -940,12 +940,23 @@ func (e *engine) buildDashboard(rs *runState, addr string, ops invalidationOps) 
 		},
 		CFStatusFn: func() templates.CFStatusCard {
 			s := rs.cfProp.Status()
-			return templates.CFStatusCard{
+			card := templates.CFStatusCard{
 				Enabled:   s.Enabled,
 				ZoneID:    s.ZoneID,
 				Async:     s.Async,
 				LastLagMs: s.LastLagMs,
 			}
+			if s.LastError != nil {
+				card.LastError = *s.LastError
+			}
+			if s.LastSuccessAt != nil {
+				card.LastSuccessAt = *s.LastSuccessAt
+			}
+			if s.BatchEnabled {
+				card.CircuitState = s.CircuitState
+				card.DLQDepth = s.DLQDepth
+			}
+			return card
 		},
 		PoolHealthFn:        insightsPoolHealth(rs),
 		OriginHeaderAuditFn: insightsHeaderAudit(rs),

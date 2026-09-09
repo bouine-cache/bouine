@@ -208,6 +208,54 @@ func TestHandler_Insights_WithAllClosures(t *testing.T) {
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
 }
 
+// TestHandler_CFStatusWired asserts the Cloudflare card the engine
+// supplies actually reaches both surfaces that consume it: the
+// invalidation page card (last error / last success / circuit / DLQ)
+// and the insight engine input that drives ruleCDNLastError. Before
+// this wiring the engine dropped every status field except
+// enabled/zone/async/lag, so the CDN error insight could never fire.
+func TestHandler_CFStatusWired(t *testing.T) {
+	t.Parallel()
+	rings := observability.NewRings("self")
+	h := &Handler{
+		cfg: Config{
+			Token:  "test",
+			Rings:  rings,
+			Logger: observability.NoopLogger{},
+			CFStatusFn: func() templates.CFStatusCard {
+				return templates.CFStatusCard{
+					Enabled:       true,
+					ZoneID:        "zone1",
+					Async:         true,
+					LastError:     "429 too many requests",
+					LastSuccessAt: "2026-09-09T12:00:00Z",
+					LastLagMs:     42,
+					CircuitState:  "open",
+					DLQDepth:      3,
+				}
+			},
+		},
+		auth: newSessionAuth("test"),
+		agg:  NewAggregator(rings, nil, "self:9999", observability.NoopLogger{}),
+	}
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("http://test/dashboard/invalidation")
+	h.invalidation(ctx)
+	body := string(ctx.Response.Body())
+	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	assert.Contains(t, body, "429 too many requests")
+	assert.Contains(t, body, "2026-09-09T12:00:00Z")
+	assert.Contains(t, body, "open")
+	assert.Contains(t, body, "3")
+
+	merged, peers := h.agg.Collect(context.Background())
+	data := h.collectInsightData(merged, peers)
+	assert.Equal(t, "429 too many requests", data.CFStatus.LastError,
+		"ruleCDNLastError input must see the last error")
+}
+
 func TestHandler_APIPurge_NotConfigured(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRings()

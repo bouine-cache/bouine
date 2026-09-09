@@ -99,3 +99,57 @@ func TestLoginHandler_RendersForm(t *testing.T) {
 	assert.Contains(t, body, `name="token"`)
 	assert.Contains(t, body, `type="password"`)
 }
+
+// newBanHandler builds a Handler whose BanFn reports n evictions.
+func newBanHandler(t *testing.T, n int) *Handler {
+	t.Helper()
+	return &Handler{
+		cfg: Config{
+			Logger: observability.NoopLogger{},
+			Rings:  observability.NewRings("self"),
+			BanFn: func(_ context.Context, _, _ string) (int, error) {
+				return n, nil
+			},
+		},
+	}
+}
+
+// TestAPIBan_FeedbackEagerScan asserts the success flash reports the
+// eager-scan eviction count when the scan ran and matched entries.
+func TestAPIBan_FeedbackEagerScan(t *testing.T) {
+	t.Parallel()
+	h := newBanHandler(t, 12)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("path_regex", `^/api/`)
+
+	h.apiBan(ctx)
+
+	resp := string(ctx.Response.Body())
+	assert.Contains(t, resp, "banned, 12 entries evicted")
+	assert.Contains(t, resp, "class=\"flash-ok\"")
+}
+
+// TestAPIBan_FeedbackCoalescedScan asserts that a zero eviction count —
+// which happens when the eager scan coalesced into a recent 50ms window
+// or genuinely matched nothing — still reads as a successful ban, with
+// wording that explains the lazy predicate semantics instead of
+// implying the ban was a no-op.
+func TestAPIBan_FeedbackCoalescedScan(t *testing.T) {
+	t.Parallel()
+	h := newBanHandler(t, 0)
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("POST")
+	ctx.Request.SetRequestURI("http://test/dashboard/api/ban")
+	ctx.Request.Header.SetContentType("application/x-www-form-urlencoded")
+	ctx.PostArgs().Set("path_regex", `^/api/`)
+
+	h.apiBan(ctx)
+
+	resp := string(ctx.Response.Body())
+	assert.Contains(t, resp, "banned; predicate is registered")
+	assert.Contains(t, resp, "class=\"flash-ok\"")
+	assert.NotContains(t, resp, "0 entries evicted")
+}

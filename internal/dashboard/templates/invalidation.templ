@@ -30,7 +30,7 @@ templ Invalidation(d InvalidationData) {
 				<div class="fgroup"><label for="ban-path">Path regex</label><input class="finput" id="ban-path" placeholder="^/api/v1/"/></div>
 				<button class="btn by" hx-post="/dashboard/api/ban" hx-vals="js:{&quot;host_regex&quot;:document.getElementById('ban-host').value,&quot;path_regex&quot;:document.getElementById('ban-path').value}" hx-target="#ban-resp" hx-swap="innerHTML">Issue ban</button>
 				<div id="ban-resp" style="font-size:.7rem;color:var(--m);margin-top:.4rem" aria-live="polite"></div>
-				<div style="font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.6rem">Lazy predicate — entries are checked on next lookup. Broadcast to all peers.</div>
+				<div style="font-size:.7rem;color:var(--m);line-height:1.5;margin-top:.6rem">Matching entries are eagerly evicted (at most one scan per 50ms — bursts report 0 evicted now) and the predicate is registered lazily, so entries are also rejected on every subsequent lookup. Broadcast to all peers.</div>
 			</div>
 			<div class="bc">
 				<div class="bc-t">Refresh — soft-purge</div>

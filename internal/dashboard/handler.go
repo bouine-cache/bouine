@@ -723,7 +723,15 @@ func (h *Handler) apiBan(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	h.cfg.Rings.OpsLog.Record("ban", arg, fmt.Sprintf("ok, %d evicted", n))
-	h.apiOK(ctx, fmt.Sprintf("banned, %d entries evicted", n))
+	if n > 0 {
+		h.apiOK(ctx, fmt.Sprintf("banned, %d entries evicted now; matching entries are also rejected on every subsequent lookup (lazy)", n))
+	} else {
+		// n == 0 either when no entry matches or when the eager scan was
+		// coalesced into a recent scan window (ban scan coalescing); in
+		// both cases the predicate is registered and applied lazily on
+		// every lookup, so the ban is in force either way.
+		h.apiOK(ctx, "banned; predicate is registered and matching entries are rejected on next lookup (lazy — the eager eviction scan may have been coalesced)")
+	}
 }
 
 func (h *Handler) apiRefresh(ctx *fasthttp.RequestCtx) {

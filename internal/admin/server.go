@@ -50,18 +50,22 @@ type Config struct {
 	ConditionsFn       func() []Condition
 	PeerBanHandler     fasthttp.RequestHandler
 	PeerRefreshHandler fasthttp.RequestHandler
-	ReadyFn            func() bool
-	CFStatusFn         func() CloudflareStatus
-	DashboardHandler   fasthttp.RequestHandler
-	OnRefreshed        func(ctx context.Context, url string)
-	OnBanned           func(ctx context.Context, expr api.BanExpr)
-	PeerFetchHandler   fasthttp.RequestHandler
-	CFPropagateFn      func(ctx context.Context, req CFPropagateRequest) error
-	PeerMetricsHandler fasthttp.RequestHandler
-	OnPurged           func(ctx context.Context, url string)
-	FaviconHandler     fasthttp.RequestHandler
-	Addr               string
-	Token              string
+	// PeerPurgeBatchHandler serves POST /v1/peer/purge/batch (ADR-0044).
+	PeerPurgeBatchHandler fasthttp.RequestHandler
+	// PeerRefreshBatchHandler serves POST /v1/peer/refresh/batch (ADR-0044).
+	PeerRefreshBatchHandler fasthttp.RequestHandler
+	ReadyFn                 func() bool
+	CFStatusFn              func() CloudflareStatus
+	DashboardHandler        fasthttp.RequestHandler
+	OnRefreshed             func(ctx context.Context, url string)
+	OnBanned                func(ctx context.Context, expr api.BanExpr)
+	PeerFetchHandler        fasthttp.RequestHandler
+	CFPropagateFn           func(ctx context.Context, req CFPropagateRequest) error
+	PeerMetricsHandler      fasthttp.RequestHandler
+	OnPurged                func(ctx context.Context, url string)
+	FaviconHandler          fasthttp.RequestHandler
+	Addr                    string
+	Token                   string
 	// IdleTimeout is the keep-alive idle timeout for admin connections.
 	// Zero applies DefaultAdminIdleTimeout (300s). Cluster peer RPCs ride
 	// this server, so peer clients must keep their idle timeout strictly
@@ -377,6 +381,8 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 			peerPurge(ctx)
 			return true
 		}
+	case "/v1/peer/purge/batch":
+		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/ban":
 		if peerBan != nil {
 			peerBan(ctx)
@@ -387,6 +393,8 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 			peerRefresh(ctx)
 			return true
 		}
+	case "/v1/peer/refresh/batch":
+		return s.handlePeerBatchRoute(ctx, p)
 	case "/v1/peer/fetch":
 		if peerFetch != nil {
 			peerFetch(ctx)
@@ -400,6 +408,25 @@ func (s *Server) handlePeerRoutes(ctx *fasthttp.RequestCtx, p string, peerPurge,
 	case "/v1/peer/metrics":
 		if peerMetrics != nil {
 			peerMetrics(ctx)
+			return true
+		}
+	}
+	return false
+}
+
+// handlePeerBatchRoute dispatches the ADR-0044 batch endpoints, which
+// live on Server.Config directly rather than the positional
+// buildPeerHandlers returns (which predate them).
+func (s *Server) handlePeerBatchRoute(ctx *fasthttp.RequestCtx, p string) bool {
+	switch p {
+	case "/v1/peer/purge/batch":
+		if s.cfg.PeerPurgeBatchHandler != nil {
+			s.cfg.PeerPurgeBatchHandler(ctx)
+			return true
+		}
+	case "/v1/peer/refresh/batch":
+		if s.cfg.PeerRefreshBatchHandler != nil {
+			s.cfg.PeerRefreshBatchHandler(ctx)
 			return true
 		}
 	}
@@ -689,7 +716,8 @@ func (s *Server) authMiddleware(next fasthttp.RequestHandler) fasthttp.RequestHa
 		"/healthz": true, "/readyz": true, "/drain": true,
 		"/metrics": true, "/version": true, "/v1/cluster/peers": true,
 		"/v1/peer/fetch": true, "/v1/peer/put": true, "/v1/peer/purge": true,
-		"/v1/peer/ban": true, "/v1/peer/refresh": true, "/v1/peer/metrics": true,
+		"/v1/peer/purge/batch": true, "/v1/peer/ban": true, "/v1/peer/refresh": true,
+		"/v1/peer/refresh/batch": true, "/v1/peer/metrics": true,
 	}
 	return func(ctx *fasthttp.RequestCtx) {
 		defer func() {

@@ -429,12 +429,21 @@ func (c *Cluster) LocalState(_ bool) []byte {
 }
 
 // MergeRemoteState reconciles a remote node's ring digest with the
-// local peer table. If the remote node reports peers this node doesn't
-// know about it re-parses their NodeMeta as PeerInfo and adds them to
-// the ring so ownership stays consistent across restarts. It also prunes
-// peers present locally but absent from memberlist's live member set —
-// dead peers evicted during partition recovery would otherwise stay in
-// the ring forever, routing keys to dead nodes (issue #305).
+// local peer table. It does two things:
+//
+//   - Add path (digest mismatch only): if the remote node reports peers
+//     this node doesn't know about, re-parse their NodeMeta as PeerInfo
+//     and add them to the ring so ownership stays consistent across
+//     restarts. Matching digests imply identical peer sets, so the add
+//     loop can safely skip.
+//   - Prune path (always): remove peers present locally but absent from
+//     memberlist's live member set. Dead peers evicted during partition
+//     recovery would otherwise stay in the ring forever, routing keys to
+//     dead nodes (issue #305). The prune must run even when digests
+//     match: when every peer holds the same stale ring (e.g. after an
+//     HPA scale-down where push/pull resurrected the dead node during
+//     the convergence window), matching digests are precisely the
+//     equilibrium that prevents cleanup (issue #648).
 func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	if len(buf) == 0 {
 		return
@@ -444,23 +453,24 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 		c.logger.Debug("cluster: bad remote state", "error", err)
 		return
 	}
-	local := c.Digest()
-	if local.Hash == remote.Hash {
-		return // rings already in sync
-	}
-	c.logger.Debug("cluster: ring digest mismatch, re-syncing",
-		"local", local.Hash, "remote", remote.Hash,
-		"join", join)
 	liveMembers := c.ml.Members()
+	local := c.Digest()
+	if local.Hash != remote.Hash {
+		c.logger.Debug("cluster: ring digest mismatch, re-syncing",
+			"local", local.Hash, "remote", remote.Hash,
+			"join", join)
+		for _, n := range liveMembers {
+			c.mu.RLock()
+			_, ok := c.peers[n.Name]
+			c.mu.RUnlock()
+			if !ok {
+				c.NotifyJoin(n)
+			}
+		}
+	}
 	liveSet := make(map[string]struct{}, len(liveMembers))
 	for _, n := range liveMembers {
 		liveSet[n.Name] = struct{}{}
-		c.mu.RLock()
-		_, ok := c.peers[n.Name]
-		c.mu.RUnlock()
-		if !ok {
-			c.NotifyJoin(n)
-		}
 	}
 	c.mu.RLock()
 	stale := make([]string, 0, len(c.peers))
@@ -512,6 +522,11 @@ func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.peers[name] = &Member{Info: info}
+	// Remove any existing vnodes first so the ring doesn't accumulate
+	// duplicates on resurrection cycles (issue #648). ring.add appends
+	// without checking, so a re-add without remove would grow r.nodes
+	// unboundedly across HPA scale-up/down cycles.
+	c.ring.remove(name)
 	c.ring.add(name, c.cfg.VirtualNodes)
 }
 

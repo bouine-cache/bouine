@@ -216,10 +216,12 @@ func ageHeader(d time.Duration) string {
 	return strconv.Itoa(int(d.Seconds()))
 }
 
-// fetchResult is the outcome of an origin fetch, shared across collapsed requests.
+// fetchResult is the outcome of an origin fetch, shared across collapsed
+// requests. It must own its data: singleflight may hand it to several
+// concurrent callers, so a live pointer into a pooled *fasthttp.Response
+// would race with the pool reusing that response for another request.
 type fetchResult struct {
 	Err        error
-	fastResp   *fasthttp.Response // non-nil when the response is kept alive for CopyTo
 	Header     headerLookup
 	Body       []byte
 	StatusCode int
@@ -1504,12 +1506,17 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 }
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
+// The shared fetchResult is detached per caller: buildObject mutates its
+// resMap (attribution headers), so concurrent callers must not share one
+// mutable header.Map.
 func (h *Handler) collapsedFetch(ctx *fasthttp.RequestCtx, key api.Key) fetchResult {
 	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
 		res := h.doFetch(ctx)
 		return res, nil
 	})
-	return v.(fetchResult)
+	res := v.(fetchResult)
+	res.Header = res.Header.ownedClone()
+	return res
 }
 
 // revalKeySuffix XORs the key with a constant to produce a singleflight
@@ -1522,7 +1529,9 @@ func (h *Handler) collapsedFetchBg(ctx context.Context, req *fasthttp.Request, k
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
-	return v.(fetchResult)
+	res := v.(fetchResult)
+	res.Header = res.Header.ownedClone()
+	return res
 }
 
 func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Request, key api.Key) fetchResult {
@@ -1531,7 +1540,9 @@ func (h *Handler) collapsedRevalidateBg(ctx context.Context, req *fasthttp.Reque
 		res := h.doFetchBg(ctx, req)
 		return res, nil
 	})
-	return v.(fetchResult)
+	res := v.(fetchResult)
+	res.Header = res.Header.ownedClone()
+	return res
 }
 
 func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fetchResult) {
@@ -1598,14 +1609,6 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		StatusCode: statusCode,
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
-	}
-}
-
-// releaseFetchResult releases the pooled fasthttp.Response if it was
-// kept alive in fetchResult.fastResp for CopyTo-based header copying.
-func releaseFetchResult(res fetchResult) {
-	if res.fastResp != nil {
-		fasthttp.ReleaseResponse(res.fastResp)
 	}
 }
 
@@ -1691,7 +1694,6 @@ func (h *Handler) writeBufferedResult(
 
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	res := h.collapsedFetch(ctx, lookupKey)
-	defer releaseFetchResult(res)
 	if res.Err != nil {
 		if errors.Is(res.Err, ErrFetchShed) {
 			// Shed — the fetch queue was full for fetchWaitTimeout. The
@@ -1737,7 +1739,6 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 	// with a constant to avoid colliding with regular fetch collapsing
 	// while still deduplicating revalidations for the same cache key.
 	res := h.collapsedRevalidateBg(context.Background(), revalReq, lookupKey)
-	defer releaseFetchResult(res)
 
 	// stale-on-error gate: both the connection-error path (res.Err) and
 	// the 5xx path use the same staleFallbackAllowed check so the policy
@@ -2356,10 +2357,9 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	resp := fasthttp.AcquireResponse()
-	// resp is NOT released via defer — it's returned in fetchResult.fastResp
-	// so that Body (which references resp's internal buffer) survives.
-	// The caller (collapsedFetch) releases it after all singleflight
-	// waiters have finished.
+	// resp is released inside doFetchFast after the headers are detached
+	// into an owned header.Map and the body copied: the result is shared
+	// with singleflight followers, so it must not alias pooled state.
 
 	// Populate the request from *fasthttp.RequestCtx.
 	// Use *Bytes variants to avoid string([]byte) conversions.
@@ -2384,22 +2384,25 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 	}
 
-	// Copy the body into an exact-size slice. The pooled response is
-	// kept alive in fetchResult.fastResp so writeAndMaybeStore can use
-	// CopyTo for zero-normalization header copying. It is released by
-	// releaseFetchResult after all singleflight waiters have finished.
-	// The exact-size copy is load-bearing: this body is stored in the
-	// cache on cacheable revalidate/stayin-alive fills, and the hot tier
-	// pins whatever slack the slice carries for the object's lifetime.
 	statusCode := resp.StatusCode()
 	bodyCopy := make([]byte, len(resp.Body()))
 	copy(bodyCopy, resp.Body())
 
+	// Detach into an owned header.Map and release the pooled response
+	// before returning. collapsedFetch shares this result with every
+	// singleflight caller; keeping fastResp alive here meant each caller's
+	// releaseFetchResult re-released the SAME pooled response, corrupting
+	// fasthttp's response pool (the same *fasthttp.Response handed to two
+	// requests — one parsing origin headers into it while the other
+	// iterated All() in FromFastHTTP, panicking with "index out of range"
+	// on the miss path). The conversion cost is miss-path only.
+	hdrMap := header.FromFastHTTP(&resp.Header)
+	fasthttp.ReleaseResponse(resp)
+
 	return fetchResult{
 		StatusCode: statusCode,
-		Header:     fromFastHTTPHeader(&resp.Header),
+		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
-		fastResp:   resp,
 	}
 }
 

@@ -10,6 +10,54 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-09-09
+
+### Fixed
+- Concurrent cache-miss callers could crash a pod with "index out of
+  range [1] with length 1": collapsed fetches share one fetch result
+  across all singleflight callers, but that result kept a live pointer
+  into a pooled fasthttp response that every caller released. Multiple
+  releases of the same pooled response corrupted fasthttp's response
+  pool, so two requests could hold the same response at once, one
+  parsing origin headers into it while the other iterated its headers.
+  The fetch now detaches headers into an owned map and releases the
+  pooled response exactly once; each singleflight caller also gets a
+  private header-map clone, closing a related latent race where
+  concurrent callers mutated one shared header map.
+- An HPA scale-down could leave a dead peer permanently stuck in the
+  consistent-hash ring: push/pull resurrected the node during the
+  convergence window, so every surviving peer ended up with the same
+  stale ring, whose digest matched and therefore skipped the pruning
+  path. The dead peer kept receiving peer-fetch RPCs (dial timeouts)
+  until a rolling restart broke digest symmetry. The prune now runs
+  unconditionally (only the add-missing-peers path is gated on the
+  digest comparison), and re-adding a known peer removes its existing
+  virtual nodes first, so resurrecting a peer no longer accumulates
+  duplicate ring entries across scale-up/down cycles.
+
+### Added
+- 2.5 s, 5 s, and 10 s tail buckets on the `request_duration_seconds`
+  and `peer_fetch_duration_seconds` Prometheus histograms (and the
+  matching in-process latency bounds): both previously capped at 1 s,
+  collapsing all slow misses and hung fetches into a single +Inf
+  bucket, making a 1.01 s miss indistinguishable from a 30 s miss via
+  PromQL. Series count per tuple grows 13 → 16 and stays well under
+  the cardinality budget.
+- The admin API now emits an OpenTelemetry server span for
+  invalidation calls (`POST /v1/ban`, `/v1/refresh`): the admin server
+  previously ran uninstrumented, so a distributed trace initiated by
+  cache-lifecycle ended at the caller's client span. The admin handler
+  chain joins the caller's trace via the propagated W3C traceparent
+  (`bouine.admin` span), and a test-only tracing helper lets other
+  packages' tests assert on exported spans (PR #653, 06eb7be).
+
+### Dependencies
+- fasthttp v1.73.0 → v1.74.0 (replaces the indirect Brotli dependency
+  with a pure-Go RFC 7932 implementation), golang.org/x/sync →
+  v0.23.0, golang.org/x/sys → v0.48.0, and the genproto api/rpc pins
+  to their 2026-09-08 revisions. All gate benchmarks stay within
+  their allocs/op budgets.
+
 ## [0.5.12] - 2026-09-08
 
 ### Fixed

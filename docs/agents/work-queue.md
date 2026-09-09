@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — release 0.5.12 (changelog curation + promotion, chart bump) — started: 2026-09-08 — ETA: same day
+- [WIP] crush — release 0.5.13 (changelog curation + promotion, chart bump) — started: 2026-09-09 — ETA: same day
 
 ## fasthttp migration — phase claims
 
@@ -42,6 +42,8 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 **Parallelization:** Phases 5-8 can run in parallel after Phase 2 lands the `fasthttp.RequestHandler` interface. Phases 3-4 depend on Phase 5 but can overlap with 6-8. One agent per package at a time. PR size limit: 400 changed lines (AGENTS.md §15.4).
 
 ## Recently completed
+
+- [DONE] crush — release 0.5.12 (changelog curation + promotion, chart bump) — 2026-09-08
 
 - [DONE] crush — release 0.5.11 (changelog curation + promotion, chart bump) — 2026-09-08
 

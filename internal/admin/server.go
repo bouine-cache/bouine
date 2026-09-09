@@ -24,6 +24,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/buildinfo"
 	"github.com/bouine-cache/bouine/internal/cache"
 	"github.com/bouine-cache/bouine/internal/observability"
+	"github.com/bouine-cache/bouine/internal/observability/tracing"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -203,6 +204,11 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 	if s.cfg.RateLimitPerSecond > 0 {
 		top = s.rateLimitMiddleware(limited, s.cfg.RateLimitPerSecond)
 	}
+	// Outermost: OTel server span. Extracts the W3C traceparent the
+	// invalidation caller (cache-lifecycle) propagates on /v1/ban and
+	// /v1/refresh, joining the platform trace into bouine. Skipped for the
+	// dashboard subtree, which has its own handler below.
+	traced := tracing.FastHTTPMiddleware("bouine.admin", top)
 	if s.cfg.DashboardHandler != nil {
 		dashHandler := s.cfg.DashboardHandler
 		faviconHandler := s.cfg.FaviconHandler
@@ -233,10 +239,10 @@ func (s *Server) fullHandler() fasthttp.RequestHandler {
 					return
 				}
 			}
-			top(ctx)
+			traced(ctx)
 		}
 	}
-	return top
+	return traced
 }
 
 func (s *Server) routeHandler() fasthttp.RequestHandler {

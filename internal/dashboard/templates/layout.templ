@@ -96,7 +96,6 @@ templ Layout(props LayoutProps) {
 					<div class="tg" role="group" aria-label="Time range">
 						<a href={ templ.SafeURL(pageHref(props.Page, "1h")) } class={ "tb", templ.KV("active", props.TimeRange == "1h") } aria-label="1 hour range" aria-pressed={ boolStr(props.TimeRange == "1h") }>1H</a>
 						<a href={ templ.SafeURL(pageHref(props.Page, "6h")) } class={ "tb", templ.KV("active", props.TimeRange == "6h" || props.TimeRange == "") } aria-label="6 hour range" aria-pressed={ boolStr(props.TimeRange == "6h" || props.TimeRange == "") }>6H</a>
-						<a href={ templ.SafeURL(pageHref(props.Page, "24h")) } class={ "tb", templ.KV("active", props.TimeRange == "24h") } aria-label="24 hour range" aria-pressed={ boolStr(props.TimeRange == "24h") }>24H</a>
 					</div>
 				</div>
 				<div class="body" role="tabpanel">

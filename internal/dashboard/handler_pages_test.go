@@ -77,6 +77,8 @@ func TestHandler_Performance(t *testing.T) {
 	ctx.Request.SetRequestURI("http://test/dashboard/performance?range=24h")
 	h.performance(ctx)
 	require.Equal(t, fasthttp.StatusOK, ctx.Response.StatusCode())
+	// Legacy 24h URLs fall back to the 6h view; the ring only holds 6h.
+	require.Contains(t, string(ctx.Response.Body()), "latency over time (6h)")
 }
 
 func TestHandler_Routes(t *testing.T) {

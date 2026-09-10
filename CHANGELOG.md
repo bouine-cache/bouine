@@ -10,6 +10,49 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-09-10
+
+### Changed
+- With many active bans, every cache hit previously walked the lazy
+  ban list and evaluated each ban predicate against the object's host,
+  path, and surrogate keys — 3.8 µs at 256 bans and 10.6 µs at the
+  1024-entry cap, measured, taxing hot and warm hits alike for the
+  full 24 h banTTL even after traffic stopped. Ban registration now
+  compiles the list into an immutable snapshot: literal hosts, paths,
+  and surrogate keys become set lookups carrying the per-ban exemption
+  time (RFC 9111 §4.4), anchored prefixes (^api\., ^/blog/) become
+  HasPrefix checks with the full predicate applied only on a prefix
+  hit, and genuinely regex or multi-condition bans keep the linear
+  predicate walk. The rejection is sound: a miss in every set rules
+  out all literal bans, and multi-condition bans never join the sets
+  because a host hit alone would be a false positive. Measured:
+  hit at 256 bans 3.8 µs → 21 ns (-99.45%), hit at 1024 bans
+  10.6 µs → 22 ns (-99.79%), flat in ban count; opaque regex bans
+  unchanged by design; zero allocations on all paths. At 30k RPS with
+  a full ban list this removes ~0.3 core of pure ban-walk CPU.
+- The TTL reaper now prunes expired lazy bans each tick (30 s default)
+  and rebuilds the ban snapshot, so a quiet period after a ban storm
+  stops taxing hits within one reaper interval instead of the full
+  24 h banTTL.
+
+### Fixed
+- Admin-API invalidations (purge/ban/refresh) are recorded in the
+  ops history ring so operators can audit recent invalidation
+  activity from the dashboard.
+- The dashboard no longer claims h2c or HTTP/3 support on the data
+  plane (HTTP/1.1 only, ADR-0034).
+- Ban feedback on the dashboard no longer implies a coalesced scan
+  was a no-op.
+- The insights page polls every 15 seconds and surfaces origin
+  fetch shedding as a high-severity insight.
+- Avg peer-fetch latency is wired and cumulative counters are
+  relabeled correctly on the cluster page.
+- Cloudflare status fields are wired into the dashboard CF card.
+- The routes TTL column shows ttl_override, the config viewer shows
+  recently added knobs, and the cluster page shows the effective hop
+  limit default.
+- The 24H range tab that displayed only 6h of data was dropped.
+
 ## [0.5.14] - 2026-09-09
 
 ### Changed
@@ -1220,7 +1263,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.14...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.15...HEAD
+[0.5.15]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.15
 [0.5.14]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.14
 [0.5.13]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.13
 [0.5.12]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.12

@@ -15,6 +15,45 @@ entries:
         - name: container image
           url: https://hub.docker.com/r/bouinecache/bouine
     apiVersion: v2
+    appVersion: 0.5.15
+    created: "2026-09-10T08:40:44.491245842Z"
+    description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit
+      path, gossip clustering, no external K/V store.
+    digest: a97ae912b552d0eb629880a2eaca17c1390f725169f012b6822abbadc99532e9
+    home: https://github.com/bouine-cache/bouine
+    icon: https://raw.githubusercontent.com/bouine-cache/bouine/main/docs/assets/logo_font.png
+    keywords:
+    - cache
+    - reverse-proxy
+    - http
+    - rfc9111
+    - kubernetes
+    - golang
+    - cdn
+    maintainers:
+    - name: bouine-cache
+      url: https://github.com/bouine-cache
+    name: bouine
+    sources:
+    - https://github.com/bouine-cache/bouine
+    type: application
+    urls:
+    - bouine-0.5.15.tgz
+    version: 0.5.15
+  - annotations:
+      artifacthub.io/category: integration-delivery
+      artifacthub.io/images: |
+        - name: bouine
+          image: docker.io/bouinecache/bouine:latest
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: source
+          url: https://github.com/bouine-cache/bouine
+        - name: documentation
+          url: https://bouine.org
+        - name: container image
+          url: https://hub.docker.com/r/bouinecache/bouine
+    apiVersion: v2
     appVersion: 0.5.14
     created: "2026-09-09T13:23:09.099077477Z"
     description: Cloud-native HTTP cache in Go - RFC9111 compliant, zero-alloc hit
@@ -1249,4 +1288,4 @@ entries:
     urls:
     - https://charts.bouine.org/bouine-0.1.0.tgz
     version: 0.1.0
-generated: "2026-09-09T13:23:09.100255847Z"
+generated: "2026-09-10T08:40:44.492116427Z"

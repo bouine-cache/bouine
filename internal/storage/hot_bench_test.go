@@ -483,3 +483,24 @@ func BenchmarkHotStore_Get_Parallel_64Shards(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkHotStore_Ban_SurrogateStorm measures the dominant production
+// ban shape: distinct surrogate-key bans against a populated store.
+// Option B makes these O(1) (lazy enforcement, no eager scan), so the
+// per-ban cost is registration + snapshot rebuild only — compare with
+// BenchmarkHotStore_Ban_Eager for the scanned path.
+func BenchmarkHotStore_Ban_SurrogateStorm(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	for i := range 50_000 {
+		k := testkey.Key(uint64(i))
+		_ = s.Put(context.Background(), k, obj(k, 256))
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			SurrogateKey: fmt.Sprintf("storm-tag-%d", b.N),
+		})
+	}
+}

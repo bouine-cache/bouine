@@ -128,8 +128,10 @@ func TestBan_ParallelEvictionCount(t *testing.T) {
 	require.Equal(t, int64(n), after-before)
 }
 
-// TestBan_ParallelSurrogateKey verifies that parallel Ban correctly
-// matches by surrogate key across shards.
+// TestBan_ParallelSurrogateKey verifies that surrogate-key bans are
+// enforced across shards. Surrogate-only bans skip the eager scan
+// (Option B): the count is 0 and matching entries are evicted lazily
+// on next lookup, with non-matching entries untouched.
 func TestBan_ParallelSurrogateKey(t *testing.T) {
 	t.Parallel()
 
@@ -150,8 +152,7 @@ func TestBan_ParallelSurrogateKey(t *testing.T) {
 
 	count, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "target"})
 	require.NoError(t, err, "Ban")
-	want := n / 3
-	require.Equal(t, want, count)
+	require.Zero(t, count, "surrogate-only bans skip the eager scan (lazy enforcement)")
 
 	for i := range n {
 		got, _, _ := s.Get(context.Background(), testkey.Key(uint64(i)))

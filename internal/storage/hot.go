@@ -65,36 +65,39 @@ type HotStore struct {
 	// slab allocates body bytes from mmap'd regions to reduce GC
 	// pressure. nil means use Go heap (default, backward compatible).
 	slab *SlabAllocator
-	// bans is the lazy ban list, stored as an atomic pointer to an
-	// immutable snapshot. Ban() appends + prunes under bansMu, then
-	// publishes a new slice via atomic.Store. The read path
-	// (matchesActiveBan) does a lock-free atomic.Load and iterates the
-	// snapshot — no lock, no allocation, no mutation on the hit path.
-	// Objects stored AFTER a ban's CreatedAt are not subject to it
-	// (RFC 9111 §4.4 semantics).
-	bans atomic.Pointer[[]activeBan]
 	// lastBanScan is the wall-clock time the last eager ban scan
 	// completed. Ban uses it to coalesce scans within
 	// banScanCoalesceWindow so a ban storm costs one scan instead of
 	// one per ban. Accessed atomically; stored as int64 nanoseconds
 	// (UnixNano) to keep the fast path lock-free.
 	shards []shard
-	stats  hotStats
-	wg     sync.WaitGroup
+	// bans is the lazy ban state: the ordered activeBan list (source
+	// of truth for eager scans) plus a compiled banSnapshot giving the
+	// hit path an O(1) rejection check instead of a per-ban predicate
+	// walk (see bans.go). The read path (matchesActiveBan) reads the
+	// snapshot without locks or allocation. Objects stored AFTER a
+	// ban's CreatedAt are not subject to it (RFC 9111 §4.4 semantics);
+	// the TTL reaper prunes expired bans each tick.
+	bans  banListState
+	stats hotStats
+	wg    sync.WaitGroup
 
-	lastBanScan atomic.Int64
-	maxBytes    int64
-	mask        uint64
-	// reaperInterval is how often the TTL reaper wakes to scan for
-	// expired entries. Zero disables background reaping.
+	lastBanScan    atomic.Int64
+	maxBytes       int64
+	mask           uint64
 	reaperInterval time.Duration
-	bansMu         sync.Mutex
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
 type activeBan struct {
 	pred    banPredicate
 	created time.Time
+	// exemptAfter is the ORIGINAL expr.CreatedAt of the ban (possibly
+	// zero = no exemption). It mirrors the exemption check inside pred:
+	// objects stored after this instant are not subject to the ban
+	// (RFC 9111 §4.4). The composite ban snapshot consults it directly
+	// to reject exempt objects without calling pred.
+	exemptAfter time.Time
 	// expr records the pattern fields of the api.BanExpr the predicate
 	// was compiled from (CreatedAt excluded). BanExpr patterns are
 	// strings, so this is comparable and used to dedup identical
@@ -638,6 +641,7 @@ func (h *HotStore) reaperLoop() {
 // has elapsed. Each shard is locked individually and for at most
 // reaperShardBudget to avoid blocking readers.
 func (h *HotStore) reapExpired(now time.Time) {
+	h.bans.pruneExpired(now)
 	for i := range h.shards {
 		h.reapShard(i, now)
 	}
@@ -804,47 +808,15 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 // list and returns the registration wall-clock time. Identical
 // re-issued patterns refresh in place instead of duplicating; the
 // list is capped at banListCap with the oldest bans dropped first.
+// Each registration rebuilds the compiled snapshot (O(list), bounded
+// by the cap).
 func (h *HotStore) registerBan(expr api.BanExpr, pred banPredicate) time.Time {
 	createdAt := expr.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
-	parget := patternOf(expr)
-	h.bansMu.Lock()
-	cur := h.bans.Load()
-	var base []activeBan
-	if cur != nil {
-		base = *cur
-	}
-	updated := make([]activeBan, 0, min(len(base)+1, banListCap))
 	now := time.Now()
-	refreshed := false
-	for _, b := range base {
-		if now.Sub(b.created) >= banTTL {
-			continue
-		}
-		if b.pattern == parget {
-			// Identical re-issued ban: refresh its timestamp so it
-			// lives a full banTTL from now, instead of appending a
-			// duplicate that every subsequent hit would walk.
-			b.created = createdAt
-			refreshed = true
-		}
-		updated = append(updated, b)
-	}
-	if !refreshed {
-		// Enforce the cap by dropping the oldest ban. base is
-		// ordered oldest-first (append order); its matching entries
-		// have had the longest time to be evicted lazily or
-		// reclaimed by the TTL reaper.
-		if len(updated) >= banListCap {
-			copy(updated, updated[1:])
-			updated = updated[:len(updated)-1]
-		}
-		updated = append(updated, activeBan{pred: pred, created: createdAt, pattern: parget})
-	}
-	h.bans.Store(&updated)
-	h.bansMu.Unlock()
+	h.bans.register(expr, pred, createdAt)
 	return now
 }
 
@@ -970,23 +942,13 @@ func (h *HotStore) MatchesActiveBan(obj *api.Object) bool {
 }
 
 // matchesActiveBan reports whether obj is subject to any active lazy
-// ban. It loads the immutable ban snapshot via atomic.Pointer (lock-
-// free, zero allocation) and iterates it. Pruning of expired bans
-// happens in Ban(), not on the read path.
+// ban. It reads the compiled ban snapshot and applies the O(1)
+// rejection: literal host/path/surrogate set lookups first, anchored
+// prefixes second, and only non-rejectable (regex or multi-condition)
+// bans fall through to predicate evaluation. Pruning of expired bans
+// happens in Ban() and in the TTL reaper, not on the read path.
 func (h *HotStore) matchesActiveBan(obj *api.Object) bool {
-	cur := h.bans.Load()
-	if cur == nil || len(*cur) == 0 {
-		return false
-	}
-	for _, b := range *cur {
-		if obj.StoredAt.After(b.created) {
-			continue // object stored after ban — not subject to it
-		}
-		if b.pred(obj) {
-			return true
-		}
-	}
-	return false
+	return h.bans.snapshot().matches(obj)
 }
 
 // Stats returns an atomic snapshot.

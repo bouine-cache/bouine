@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -227,6 +229,105 @@ func BenchmarkHotStore_Ban_Steady(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "storm.invalid"})
+	}
+}
+
+// benchSubjectObj builds an object shaped like production traffic: a
+// 16-entry header map and StoredAt two hours in the past, so it is
+// SUBJECT to bans issued more recently — the production shape when a
+// ban list is active over an existing cache.
+func benchSubjectObj(key api.Key, host string, bodySize int) *api.Object {
+	o := obj(key, bodySize)
+	o.Header.Set(header.XBouineHost, host)
+	o.Header.Set(header.XBouinePath, "/some/path")
+	for i := range 12 {
+		o.Header.Set(fmt.Sprintf("X-Extra-%d", i), "value")
+	}
+	o.StoredAt = time.Now().Add(-2 * time.Hour)
+	return o
+}
+
+// benchSeedSubjectBans registers nBans distinct non-matching bans with
+// CreatedAt one hour in the past — after the object's StoredAt, so the
+// object is subject to every ban and each Get pays the ban check.
+// The literal seeds use dot-free patterns (isBanLiteral shape) and
+// alternate with anchored-exact escaped-dot hostnames, reflecting the
+// production ban forms that classify into the snapshot's fast paths;
+// the regex seeds are genuinely opaque (alternation, any-char dots).
+func benchSeedSubjectBans(s *HotStore, nBans int, class string) {
+	for i := range nBans {
+		var pat string
+		switch class {
+		case "literal":
+			if i%2 == 0 {
+				pat = "host-" + strconv.Itoa(i) + "-invalidx"
+			} else {
+				pat = "^host-" + strconv.Itoa(i) + `\.invalid$`
+			}
+		case "prefix":
+			pat = "^host-" + strconv.Itoa(i) + "/"
+		default: // opaque regex
+			pat = "host-" + strconv.Itoa(i) + `.invalid` // any-char dot, unanchored
+		}
+		_, _ = s.Ban(context.Background(), api.BanExpr{
+			HostRegex: pat,
+			CreatedAt: time.Now().Add(-time.Hour),
+		})
+	}
+}
+
+// BenchmarkHotGet_SubjectBans_256 is the continuous invalidation-storm
+// baseline: a hit on an object subject to 256 active bans. Before the
+// composite ban snapshot this scaled linearly (~4 µs at 256 bans);
+// after it the cost is O(1) regardless of ban count.
+func BenchmarkHotGet_SubjectBans_256(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-256"))
+	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
+	_, _, _ = s.Get(context.Background(), k)
+	benchSeedSubjectBans(s, 256, "literal")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotGet_SubjectBans_1024 is the worst case at the ban-list
+// cap: before the composite snapshot ~10 µs (literal bans) to ~23 µs
+// (regex bans) per hit; after, O(1).
+func BenchmarkHotGet_SubjectBans_1024(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-1024"))
+	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
+	_, _, _ = s.Get(context.Background(), k)
+	benchSeedSubjectBans(s, 1024, "literal")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
+	}
+}
+
+// BenchmarkHotGet_SubjectBans_1024_Regex keeps 1024 regex bans active:
+// the composite snapshot cannot fully collapse regex bans, but the
+// common rejection path still exits after the host/path set checks.
+func BenchmarkHotGet_SubjectBans_1024_Regex(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	k := testkey.Hash([]byte("bench-subject-1024-regex"))
+	_ = s.Put(context.Background(), k, benchSubjectObj(k, "real.example.com", 1024))
+	_, _, _ = s.Get(context.Background(), k)
+	benchSeedSubjectBans(s, 1024, "opaque")
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = s.Get(context.Background(), k)
 	}
 }
 

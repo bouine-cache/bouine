@@ -1047,9 +1047,7 @@ func TestBan_PruneExpiredBans(t *testing.T) {
 	require.NoError(t, err)
 
 	// The snapshot should contain only the live ban.
-	cur := s.bans.Load()
-	require.NotNil(t, cur)
-	require.Len(t, *cur, 1, "expired ban should be pruned")
+	require.Equal(t, 1, s.bans.len(), "expired ban should be pruned")
 
 	// An object matching the expired ban's host but not the live ban
 	// should NOT be banned (the expired ban was pruned).
@@ -1086,9 +1084,7 @@ func TestBan_PruneKeepsLiveBans(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	cur := s.bans.Load()
-	require.NotNil(t, cur)
-	require.Len(t, *cur, 2, "both live bans should be kept")
+	require.Equal(t, 2, s.bans.len(), "both live bans should be kept")
 }
 
 // TestBan_MultipleBansAllChecked verifies that matchesActiveBan

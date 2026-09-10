@@ -18,7 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — internal/cluster, internal/admin, internal/cache, cmd/bouine/cmd — invalidation CPU mitigation series (PR 2: broadcast batching+dedup; PR 3: end-to-end purge/batch; PR 1 done on perf/ban-storm) — started: 2026-09-09 — ETA: 2026-09-10
+- [WIP] crush — internal/storage — ban hit-path O(1) rejection (composite literal/prefix snapshot) + reaper-driven ban pruning (follow-up to PRs #654-#656) — started: 2026-09-09 — ETA: same day
 - [WIP] crush — release 0.5.13 (changelog curation + promotion, chart bump) — started: 2026-09-09 — ETA: same day
 
 ## fasthttp migration — phase claims

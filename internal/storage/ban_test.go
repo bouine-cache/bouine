@@ -340,14 +340,11 @@ func TestBan_IdenticalReissuedDedups(t *testing.T) {
 	for range 1000 {
 		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "same.example.com"})
 	}
-	cur := s.bans.Load()
-	require.NotNil(t, cur)
-	assert.Len(t, *cur, 1, "identical re-issued bans must dedup to one list entry")
+	assert.Equal(t, 1, s.bans.len(), "identical re-issued bans must dedup to one list entry")
 
 	// A different pattern still appends.
 	_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: "other.example.com"})
-	cur = s.bans.Load()
-	assert.Len(t, *cur, 2)
+	assert.Equal(t, 2, s.bans.len())
 }
 
 // TestBan_ListCapBoundsGrowth verifies that distinct bans stop growing
@@ -361,9 +358,7 @@ func TestBan_ListCapBoundsGrowth(t *testing.T) {
 	for i := range banListCap + 50 {
 		_, _ = s.Ban(context.Background(), api.BanExpr{HostRegex: fmt.Sprintf("host-%d.example.com", i)})
 	}
-	cur := s.bans.Load()
-	require.NotNil(t, cur)
-	require.Len(t, *cur, banListCap, "ban list must be capped")
+	require.Equal(t, banListCap, s.bans.len(), "ban list must be capped")
 
 	// The newest ban must still be active. Store a matching object
 	// BEFORE re-issuing the ban so it is subject to it (objects

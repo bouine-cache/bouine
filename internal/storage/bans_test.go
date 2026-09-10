@@ -310,3 +310,131 @@ func TestBanGet_EvictsLiteralSubjectOnHotPath(t *testing.T) {
 	// The eviction must have removed it from the shard.
 	assert.False(t, s.Has(k))
 }
+
+// TestBanSurrogate_SkipsEagerScan verifies Option B: a pure
+// surrogate-key ban performs no eager store walk (count 0, no scan
+// recorded) yet the ban list is populated and enforcement is lazy.
+func TestBanSurrogate_SkipsEagerScan(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4, ReaperInterval: -1})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	k := testkey.Hash([]byte("surrogate-lazy"))
+	o := obj(k, 64)
+	o.SurrogateKeys = []string{"tag-1"}
+	o.StoredAt = time.Now().Add(-time.Hour)
+	require.NoError(t, s.Put(context.Background(), k, o))
+
+	count, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "tag-1"})
+	require.NoError(t, err)
+	require.Zero(t, count, "surrogate-only ban must skip the eager scan")
+	require.Equal(t, 1, s.bans.len(), "ban list must hold the lazy entry")
+
+	// Enforcement is lazy: the tagged object is evicted on Get.
+	got, _, err := s.Get(context.Background(), k)
+	require.NoError(t, err)
+	assert.Nil(t, got, "banned object must be evicted lazily on lookup")
+	assert.False(t, s.Has(k), "evicted lazily; entry removed from shard")
+}
+
+// TestBanSurrogate_ReaperReclaims verifies the memory-reclaim half of
+// Option B: entries matching a surrogate ban that are never looked up
+// are collected by the TTL reaper instead of the eager scan.
+func TestBanSurrogate_ReaperReclaims(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4, ReaperInterval: -1})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Entry with a 1-minute TTL, subject to the ban, never accessed.
+	k := testkey.Hash([]byte("surrogate-reaper"))
+	o := obj(k, 64)
+	o.SurrogateKeys = []string{"tag-1"}
+	o.StoredAt = time.Now().Add(-2 * time.Hour)
+	o.TTL = time.Minute
+	require.NoError(t, s.Put(context.Background(), k, o))
+
+	_, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "tag-1"})
+	require.NoError(t, err)
+
+	// Simulate the reaper tick after the entry's full TTL elapsed.
+	s.reapExpired(time.Now().Add(2 * time.Hour))
+
+	assert.False(t, s.Has(k), "banned entry must be reclaimed by the reaper")
+}
+
+// TestBanSurrogate_ExemptObjectsNotEvicted verifies the RFC 9111 §4.4
+// exemption holds on the lazy path: objects stored after the ban's
+// CreatedAt are served normally.
+func TestBanSurrogate_ExemptObjectsNotEvicted(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	oldK := testkey.Hash([]byte("surrogate-old"))
+	oldObj := obj(oldK, 64)
+	oldObj.SurrogateKeys = []string{"tag-1"}
+	oldObj.StoredAt = time.Now().Add(-2 * time.Hour)
+	require.NoError(t, s.Put(context.Background(), oldK, oldObj))
+
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		SurrogateKey: "tag-1",
+		CreatedAt:    time.Now().Add(-time.Hour),
+	})
+	require.NoError(t, err)
+
+	// Object stored after the ban: exempt, still served.
+	newK := testkey.Hash([]byte("surrogate-new"))
+	newObj := obj(newK, 64)
+	newObj.SurrogateKeys = []string{"tag-1"}
+	newObj.StoredAt = time.Now().Add(-30 * time.Minute)
+	require.NoError(t, s.Put(context.Background(), newK, newObj))
+
+	got, _, err := s.Get(context.Background(), newK)
+	require.NoError(t, err)
+	assert.NotNil(t, got, "object stored after the ban is exempt")
+
+	// Object stored before the ban: evicted lazily.
+	got, _, err = s.Get(context.Background(), oldK)
+	require.NoError(t, err)
+	assert.Nil(t, got, "object stored before the ban is subject to it")
+}
+
+// TestBanSurrogate_MultiConditionStillScans verifies bans carrying a
+// surrogate key PLUS host/path patterns keep the eager scan: they
+// classify opaque and need immediate reclaim of matching entries.
+func TestBanSurrogate_MultiConditionStillScans(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4, ReaperInterval: -1})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	k := testkey.Hash([]byte("multi-cond"))
+	o := obj(k, 64)
+	o.Header.Set(header.XBouineHost, "shop.example.com")
+	o.SurrogateKeys = []string{"tag-1"}
+	o.StoredAt = time.Now().Add(-time.Hour)
+	require.NoError(t, s.Put(context.Background(), k, o))
+
+	count, err := s.Ban(context.Background(), api.BanExpr{
+		SurrogateKey: "tag-1",
+		HostRegex:    "shop.example.com",
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "multi-condition ban must run the eager scan")
+	assert.False(t, s.Has(k))
+}
+
+// TestBanSurrogate_RepeatBanIsCheap verifies re-issuing the same
+// surrogate ban (the dominant production pattern: tags re-invalidate
+// ~26x/day) costs no scan and no ban-list growth.
+func TestBanSurrogate_RepeatBanIsCheap(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	for range 100 {
+		count, err := s.Ban(context.Background(), api.BanExpr{SurrogateKey: "tag-1"})
+		require.NoError(t, err)
+		require.Zero(t, count, "every repeat skip the scan")
+	}
+	assert.Equal(t, 1, s.bans.len(), "identical bans dedup to one list entry")
+}

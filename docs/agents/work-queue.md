@@ -19,6 +19,7 @@ at the bottom. Entries older than 30 days may be pruned.
 ## Active claims
 
 - [WIP] crush — release 0.5.15 (changelog curation + promotion, chart bump) — started: 2026-09-10 — ETA: same day
+- [WIP] crush — internal/storage — Option B: surrogate-key bans skip the eager scan (lazy-only, reaper reclaims) (follow-up to #660) — started: 2026-09-10 — ETA: same day
 
 ## fasthttp migration — phase claims
 

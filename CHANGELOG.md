@@ -10,6 +10,28 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-09-10
+
+### Changed
+- Pure surrogate-key bans previously walked every shard under a write
+  lock to find the few tagged entries — ~550 µs per ban at 50K entries,
+  measured — work entirely redundant with the O(1) lazy check (the ban
+  snapshot's surrogates set, landed in 0.5.15) that evicts matching
+  entries on lookup and with the TTL reaper that collects entries never
+  accessed again. Surrogate-only bans now skip the eager scan entirely:
+  enforcement is identical (a banned entry is never served) and memory
+  reclaim moves from invalidation time to the reaper's pass (bounded by
+  entry TTL + SWR + SIE). Host/path bans and multi-condition bans
+  carrying a surrogate key plus patterns keep the coalesced scan.
+  `Ban` now returns 0 for surrogate-only bans instead of the
+  eager-match count. Measured (darwin/arm64, 50K entries): surrogate
+  ban ~550 µs → ~300 ns (~1800x faster), 8 allocs; hit path, put path,
+  and alloc budgets unchanged. This targets the production invalidation
+  workload — 100% surrogate-key bans, ~110K distinct bans/day bursting
+  to ~18/s during storms over ~500K hot entries — where each scan
+  held shard write locks for an O(entries) pass, the suspected driver
+  of storm-window HIT p99 spikes (245-323 ms vs 130 ms average).
+
 ## [0.5.15] - 2026-09-10
 
 ### Changed
@@ -1263,7 +1285,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.15...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.16...HEAD
+[0.5.16]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.16
 [0.5.15]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.15
 [0.5.14]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.14
 [0.5.13]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.13

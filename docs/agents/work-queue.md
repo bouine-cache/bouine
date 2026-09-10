@@ -18,8 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — release 0.5.15 (changelog curation + promotion, chart bump) — started: 2026-09-10 — ETA: same day
-- [WIP] crush — internal/storage — Option B: surrogate-key bans skip the eager scan (lazy-only, reaper reclaims) (follow-up to #660) — started: 2026-09-10 — ETA: same day
+- [WIP] crush — release 0.5.16 (changelog curation + promotion, chart bump) — started: 2026-09-10 — ETA: same day
 
 ## fasthttp migration — phase claims
 
@@ -44,6 +43,8 @@ Reference: [Issue #521](https://github.com/bouine-cache/bouine/issues/521) — f
 
 ## Recently completed
 
+- [DONE] crush — internal/storage — Option B: surrogate-key bans skip the eager scan (lazy-only, reaper reclaims) (follow-up to #660, PR #664) — 2026-09-10
+- [DONE] crush — release 0.5.15 (changelog curation + promotion, chart bump) — 2026-09-10
 - [DONE] crush — internal/storage, internal/cluster, internal/admin, cmd/bouine/cmd — invalidation CPU mitigation series: ban scan coalescing + literal fast-path (perf/ban-storm), batched invalidation delivery + seq dedup with ADR-0044 (perf/invalidation-batching), end-to-end /v1/purge/batch (perf/purge-batch, stacked) — 2026-09-09
 - [DONE] crush — release 0.5.12 (changelog curation + promotion, chart bump) — 2026-09-08
 

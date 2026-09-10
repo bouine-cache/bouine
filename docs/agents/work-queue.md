@@ -18,8 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
-- [WIP] crush — internal/storage — ban hit-path O(1) rejection (composite literal/prefix snapshot) + reaper-driven ban pruning (follow-up to PRs #654-#656) — started: 2026-09-09 — ETA: same day
-- [WIP] crush — release 0.5.13 (changelog curation + promotion, chart bump) — started: 2026-09-09 — ETA: same day
+- [WIP] crush — release 0.5.15 (changelog curation + promotion, chart bump) — started: 2026-09-10 — ETA: same day
 
 ## fasthttp migration — phase claims
 

@@ -175,8 +175,12 @@ type PeerFetcher struct {
 	// the nightly -race integration run, TestTLS_CertRotation). nil means
 	// the fetcher is closed — callers fail fast and fall back to origin.
 	pipelineClients atomic.Pointer[sync.Map] // map[string]*fasthttp.PipelineClient
-	latSumMs        atomic.Int64
-	maxBodyBytes    int64
+	// httpLog routes fasthttp's internal pipeline-worker errors into slog
+	// at Warn/Error level instead of fasthttp's unstructured stderr
+	// fallback (which collectors label as info).
+	httpLog      *fasthttpLogger
+	latSumMs     atomic.Int64
+	maxBodyBytes int64
 	// pipelining configuration (Phase 6.4).
 	maxConnsPerHost     int
 	maxIdleConnDuration time.Duration
@@ -205,6 +209,9 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // already loaded the old map complete on their own goroutines; the
 // PipelineClients' own idle timeouts reclaim their sockets.
 func (f *PeerFetcher) Close(_ context.Context) error {
+	if f.httpLog != nil {
+		f.httpLog.markClosing()
+	}
 	f.pipelineClients.Store(nil)
 	return nil
 }
@@ -266,6 +273,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		fetchSem:            make(chan struct{}, fetchConcurrency),
 		putSem:              make(chan struct{}, fetchConcurrency),
 		logger:              observability.ResolveLogger(logger),
+		httpLog:             newFasthttpLogger(logger),
 		maxConnsPerHost:     maxConns,
 		maxIdleConnDuration: maxIdle,
 		tlsConfig:           cfg.TLSConfig,
@@ -322,6 +330,7 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 	}
 	pc := &fasthttp.PipelineClient{
 		Addr:                          addr,
+		Logger:                        f.httpLog,
 		MaxConns:                      f.maxConnsPerHost,
 		MaxPendingRequests:            peerMaxPendingRequests,
 		MaxIdleConnDuration:           f.maxIdleConnDuration,

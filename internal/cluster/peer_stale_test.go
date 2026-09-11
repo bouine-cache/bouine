@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,4 +244,173 @@ func TestPeerFetcher_PutRespectsBlacklist(t *testing.T) {
 		Key: testkey.Key(1), StatusCode: 200, Body: []byte("x"), StoredAt: time.Now(),
 	})
 	require.ErrorIs(t, err, ErrPeerBlacklisted)
+}
+
+// ---- stale PipelineClient retirement ----
+
+// TestPeerFetcher_RetireAddress_ParksDial covers the residual v0.5.17
+// defect observed in prod-eu: after a rolling restart, fasthttp's
+// pipeline worker for a dead peer address re-dials it forever (its
+// restart loop has no exit on dial failure and PipelineClient has no
+// Close). RetireAddress must evict the client and park its dial: no
+// dial attempt, released at fetcher close.
+func TestPeerFetcher_RetireAddress_ParksDial(t *testing.T) {
+	t.Parallel()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	addr := "10.0.0.99:9000"
+
+	pc := f.getPipelineClient(addr)
+	require.NotNil(t, pc)
+	require.NotNil(t, pc.Dial, "precondition: dial closure is set")
+
+	f.RetireAddress(addr)
+
+	parked := make(chan error, 1)
+	go func() { _, err := pc.Dial(addr); parked <- err }()
+	select {
+	case err := <-parked:
+		t.Fatalf("dial for a retired address must park, got immediate return: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	require.NoError(t, f.Close(context.Background()))
+	select {
+	case err := <-parked:
+		require.ErrorIs(t, err, errPeerAddrRetired)
+		var netErr net.Error
+		require.ErrorAs(t, err, &netErr)
+		assert.True(t, netErr.Timeout(), "released dial must look like a timeout so fasthttp throttles its restart loop")
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked dial must be released by Close")
+	}
+}
+
+// TestPeerFetcher_RetireAddress_FreshClientForReturnedAddress verifies
+// retirement is not a permanent eviction of the address: traffic for a
+// retired address transparently gets a fresh client (the retired mark
+// is dropped in getPipelineClient), so a peer that comes back at the
+// same address keeps working.
+func TestPeerFetcher_RetireAddress_FreshClientForReturnedAddress(t *testing.T) {
+	t.Parallel()
+
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		ctx.Response.SetStatusCode(fasthttp.StatusNotFound)
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	defer f.Close(context.Background())
+	peer := api.PeerInfo{Name: "live", Addr: srv.Addr, AdminAddr: srv.Addr}
+
+	_, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: testkey.Key(1)})
+	require.NoError(t, err, "precondition: fetch works before retirement")
+
+	f.RetireAddress(srv.Addr)
+
+	for range 2 {
+		_, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: testkey.Key(2)})
+		require.NoError(t, err, "fetch after retirement must get a fresh client and succeed")
+	}
+	_, retired := f.retiredAddrs.Load(srv.Addr)
+	assert.False(t, retired, "retired mark must be dropped once the address is used again")
+}
+
+// TestCluster_RemovePeer_RetiresAddress verifies the cluster notifies
+// the retire callback with the removed peer's address, so the fetcher
+// can evict the stale PipelineClient when a peer leaves the ring.
+func TestCluster_RemovePeer_RetiresAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t, "retire-remove", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var mu sync.Mutex
+	var retired []string
+	c.SetOnPeerRetired(func(addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		retired = append(retired, addr)
+	})
+
+	stale := "10.0.0.99:9000"
+	c.addPeer("ghost", api.PeerInfo{Name: "ghost", Addr: stale, AdminAddr: stale})
+	c.removePeer("ghost")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{stale}, retired, "removed peer's address must be retired")
+}
+
+// TestCluster_PeerAddressChange_RetiresOldAddress covers the rolling
+// restart case from prod: the peer rejoins under the same node name at
+// a new address, so the ring entry is refreshed in place. The old
+// address must be retired even though the peer never left the ring,
+// and an unchanged address must not be.
+func TestCluster_PeerAddressChange_RetiresOldAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t, "retire-refresh", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var mu sync.Mutex
+	var retired []string
+	c.SetOnPeerRetired(func(addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		retired = append(retired, addr)
+	})
+
+	oldAddr, newAddr := "10.0.0.55:9000", "10.0.0.56:9000"
+	c.addPeer("restarted", api.PeerInfo{Name: "restarted", Addr: oldAddr, AdminAddr: oldAddr})
+	c.addPeer("restarted", api.PeerInfo{Name: "restarted", Addr: newAddr, AdminAddr: newAddr})
+	c.addPeer("restarted", api.PeerInfo{Name: "restarted", Addr: newAddr, AdminAddr: newAddr})
+
+	members := c.Members()
+	for _, m := range members {
+		if m.Name == "restarted" {
+			assert.Equal(t, newAddr, m.AdminAddr, "ring entry must carry the new address")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{oldAddr}, retired,
+		"only the address replaced by a restart must be retired, an unchanged re-add must not")
+}
+
+// TestCluster_ReconcilePrune_RetiresAddress reproduces the prod-eu
+// scenario where a peer dies without a delivered NotifyLeave and the
+// reconcile pass prunes it: the pruned peer's address must reach the
+// retire callback so the fetcher evicts its stale PipelineClient. (The
+// reconcile refresh path funnels through the addPeer address-change
+// retirement covered above.)
+func TestCluster_ReconcilePrune_RetiresAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t, "retire-reconcile", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var mu sync.Mutex
+	var retired []string
+	c.SetOnPeerRetired(func(addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		retired = append(retired, addr)
+	})
+
+	stale := "10.0.0.55:9000"
+	c.addPeer("ghost", api.PeerInfo{Name: "ghost", Addr: stale, AdminAddr: stale})
+	c.reconcileOnce()
+
+	require.Len(t, c.Members(), 1, "precondition: reconcile pruned the ghost peer")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{stale}, retired, "the pruned peer's address must be retired")
 }

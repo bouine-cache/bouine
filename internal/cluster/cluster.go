@@ -129,6 +129,10 @@ type Cluster struct {
 	// ADR-0044: strong mode double-delivers (HTTP + gossip) and both
 	// paths share this tracker so each event applies exactly once.
 	seqs *seqTracker
+	// onPeerRetired, when set, receives peer addresses that stopped
+	// being current (peer left, or restarted at a new address). Set
+	// via SetOnPeerRetired before Join.
+	onPeerRetired func(addr string)
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipQueue   []gossipBroadcast
@@ -753,7 +757,7 @@ func (c *Cluster) NotifyUpdate(n *memberlist.Node) {
 
 func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	old, existed := c.peers[name]
 	c.peers[name] = &Member{Info: info}
 	// Remove any existing vnodes first so the ring doesn't accumulate
 	// duplicates on resurrection cycles (issue #648). ring.add appends
@@ -761,13 +765,29 @@ func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	// unboundedly across HPA scale-up/down cycles.
 	c.ring.remove(name)
 	c.ring.add(name, c.cfg.VirtualNodes)
+	c.mu.Unlock()
+	// A peer restarting at a new address leaves its old address dead:
+	// retire the old PipelineClient so its worker stops dialing it
+	// (fasthttp cannot stop a worker whose dial fails — see
+	// PeerFetcher.RetireAddress).
+	if existed && c.onPeerRetired != nil && name != c.cfg.NodeName {
+		if oldAddr, newAddr := peerAddr(old.Info), peerAddr(info); oldAddr != "" && oldAddr != newAddr {
+			c.onPeerRetired(oldAddr)
+		}
+	}
 }
 
 func (c *Cluster) removePeer(name string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	old, existed := c.peers[name]
 	delete(c.peers, name)
 	c.ring.remove(name)
+	c.mu.Unlock()
+	if existed && c.onPeerRetired != nil && name != c.cfg.NodeName {
+		if addr := peerAddr(old.Info); addr != "" {
+			c.onPeerRetired(addr)
+		}
+	}
 }
 
 // ---- Consistent-hash ring ----
@@ -900,3 +920,11 @@ func (c *Cluster) SetMetrics(m *Metrics) {
 // SetInvalidator registers callbacks for applying purge and ban events
 // received via gossip. Must be called before Join.
 func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
+
+// SetOnPeerRetired registers a callback invoked with a peer's address
+// when that address stops being current: the peer left the ring, or it
+// restarted and now lives at a different address. The PeerFetcher uses
+// it to evict and park the stale PipelineClient (fasthttp's worker
+// would otherwise re-dial the dead address forever). Must be called
+// before Join. The callback must not call back into the Cluster.
+func (c *Cluster) SetOnPeerRetired(fn func(addr string)) { c.onPeerRetired = fn }

@@ -432,6 +432,7 @@ func (e *engine) initCluster(
 		MaxIdleConnDuration: e.cfg.Cluster.PeerMaxIdleConnDuration,
 		FetchConcurrency:    e.cfg.Cluster.PeerFetchConcurrency,
 	}, e.metrics.Registry, e.logger)
+	clusterNode.SetOnPeerRetired(peerFetcher.RetireAddress)
 	broadcaster := cluster.NewBroadcaster(clusterNode, peerFetcher, token)
 
 	if e.cfg.Cluster.HopLimit > 0 && e.cfg.Cluster.Mode != config.ClusterModeStrong {

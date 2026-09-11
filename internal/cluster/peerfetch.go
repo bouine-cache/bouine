@@ -111,6 +111,18 @@ const (
 // like any other peer-fetch error: fall back to origin.
 var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive failures")
 
+// errPeerAddrRetired is returned by a parked dial once the fetcher
+// closes. It reports itself as a timeout so fasthttp's pipeline worker
+// throttles its restart loop (1s sleep) instead of spinning while the
+// process drains.
+var errPeerAddrRetired = &timeoutError{errors.New("peer address retired")}
+
+type timeoutError struct{ error }
+
+func (e *timeoutError) Error() string   { return e.error.Error() }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
 // addrFailureState tracks consecutive transport failures for one peer
 // address and the cooldown deadline once the threshold trips.
 type addrFailureState struct {
@@ -175,8 +187,22 @@ type PeerFetcher struct {
 	// the nightly -race integration run, TestTLS_CertRotation). nil means
 	// the fetcher is closed — callers fail fast and fall back to origin.
 	pipelineClients atomic.Pointer[sync.Map] // map[string]*fasthttp.PipelineClient
-	latSumMs        atomic.Int64
-	maxBodyBytes    int64
+	// retiredAddrs holds addresses whose cached PipelineClient was
+	// evicted because the address is no longer a live peer's current
+	// address (ring prune or peer restart). Dials for these addresses
+	// park instead of dialing: fasthttp's pipeline worker cannot be
+	// stopped once its dial fails (no Close API; it exits only after a
+	// successful dial plus idle retire), so without the guard a worker
+	// whose peer died would re-dial the dead address every ~3s forever,
+	// logging "error in PipelineClient" for the life of the process.
+	//
+	// done is closed by Close (guarded by doneClosed) to release dials
+	// parked on retired addresses. Both sit with the pointer-carrying
+	// fields so the GC-scan prefix stays compact.
+	done         chan struct{}
+	retiredAddrs sync.Map // set[string]
+	latSumMs     atomic.Int64
+	maxBodyBytes int64
 	// pipelining configuration (Phase 6.4).
 	maxConnsPerHost     int
 	maxIdleConnDuration time.Duration
@@ -190,6 +216,7 @@ type PeerFetcher struct {
 	hits             atomic.Int64
 	hopLimit         int
 	useTLS           bool
+	doneClosed       atomic.Bool
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -205,8 +232,29 @@ func (f *PeerFetcher) PeerFetchStats() (hits, misses, hopLimitHits, latN, latSum
 // already loaded the old map complete on their own goroutines; the
 // PipelineClients' own idle timeouts reclaim their sockets.
 func (f *PeerFetcher) Close(_ context.Context) error {
+	if f.doneClosed.CompareAndSwap(false, true) {
+		close(f.done)
+	}
 	f.pipelineClients.Store(nil)
 	return nil
+}
+
+// RetireAddress evicts the PipelineClient cached for addr and parks
+// its dialing worker. Call when addr stops being a live peer's current
+// address: a peer that left the ring (prune, NotifyLeave) or a peer
+// that restarted at a new address (ring refresh). The eviction means
+// later traffic for a returned address transparently gets a fresh
+// client; the parked worker — which fasthttp offers no way to stop —
+// costs one parked goroutine until process exit instead of a dial
+// attempt and a log line every ~3s.
+func (f *PeerFetcher) RetireAddress(addr string) {
+	if addr == "" {
+		return
+	}
+	f.retiredAddrs.Store(addr, struct{}{})
+	if clients := f.pipelineClients.Load(); clients != nil {
+		clients.Delete(addr)
+	}
 }
 
 // NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
@@ -272,6 +320,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		breaker:             make(map[string]*addrFailureState),
 		failureThreshold:    failureThreshold,
 		failureCooldown:     failureCooldown,
+		done:                make(chan struct{}),
 	}
 	f.pipelineClients.Store(&sync.Map{})
 	if reg != nil {
@@ -317,6 +366,14 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 	if clients == nil {
 		return nil // closed during shutdown
 	}
+	// A retired address reaching here means it is a routing target
+	// again: drop the retired mark so the fresh client below dials
+	// normally, and never hand back the evicted client whose worker
+	// may already be parked on the retired mark.
+	if _, retired := f.retiredAddrs.Load(addr); retired {
+		clients.Delete(addr)
+		f.retiredAddrs.Delete(addr)
+	}
 	if v, ok := clients.Load(addr); ok {
 		return v.(*fasthttp.PipelineClient)
 	}
@@ -331,6 +388,16 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 		TLSConfig:                     f.tlsConfig,
 		DisableHeaderNamesNormalizing: true,
 		Dial: func(addr string) (net.Conn, error) {
+			if _, retired := f.retiredAddrs.Load(addr); retired {
+				// Park instead of dialing: this client was evicted by
+				// RetireAddress, and returning a dial error would send
+				// fasthttp's worker into its restart loop, re-dialing
+				// the dead address forever. Block until the fetcher
+				// closes; the goroutine dies with the process, bounded
+				// by one per retired address.
+				<-f.done
+				return nil, errPeerAddrRetired
+			}
 			return (&net.Dialer{
 				Timeout:   2 * time.Second,
 				KeepAlive: 30 * time.Second,

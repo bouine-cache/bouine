@@ -18,6 +18,7 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
+- [WIP] crush — internal/cluster — retire stale peer PipelineClients (park dial of evicted addresses on ring prune/refresh) — started: 2026-09-11 — ETA: same day
 - [WIP] crush — release 0.5.17 (changelog curation + promotion, chart bump) — started: 2026-09-11 — ETA: same day
 
 ## fasthttp migration — phase claims

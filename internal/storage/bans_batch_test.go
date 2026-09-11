@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,4 +144,54 @@ func surrogateObj(key string) *api.Object {
 	obj := banTestObj("any.example.com", "/p", time.Hour)
 	obj.SurrogateKeys = []string{key}
 	return obj
+}
+
+// TestBanRegister_ConcurrentRegisterAndRead hammers registrations and
+// snapshot reads concurrently: registrations mutate the list in place
+// under the mutex while reads lazily compile and publish immutable
+// snapshots. Run under -race (the suite default). After the writers
+// stop, the final read must enforce every registered tag — the 256
+// distinct keys sit far below banListCap, so none can be evicted.
+func TestBanRegister_ConcurrentRegisterAndRead(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	const writers = 4
+	const tags = 256
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			i := 0
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = s.Ban(context.Background(), api.BanExpr{
+					SurrogateKey: fmt.Sprintf("tag-%d", i%tags),
+				})
+				i++
+			}
+		}()
+	}
+
+	// Interleave reads with the registrations: each read either
+	// compiles a fresh snapshot or reuses the published one.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_ = s.MatchesActiveBan(surrogateObj(fmt.Sprintf("tag-%d", tags/2)))
+	}
+	close(stop)
+	wg.Wait()
+
+	// The final read compiles the settled list; every tag is enforced.
+	for k := range tags {
+		assert.True(t, s.MatchesActiveBan(surrogateObj(fmt.Sprintf("tag-%d", k))),
+			"final snapshot must enforce every registered tag")
+	}
 }

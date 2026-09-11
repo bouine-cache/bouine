@@ -816,7 +816,12 @@ func (h *HotStore) Ban(_ context.Context, expr api.BanExpr) (int, error) {
 	if err := g.Wait(); err != nil {
 		return 0, err
 	}
-	h.lastBanScan.Store(nowNano)
+	// Anchor the coalesce window at scan completion, not registration:
+	// the window must not be eaten by the scan's own duration, or a
+	// slow scan (large store, CPU contention) leaves bans that arrive
+	// right after it paying a full eager pass — exactly the storm
+	// amplification the window exists to prevent.
+	h.lastBanScan.Store(time.Now().UnixNano())
 	return int(total.Load()), nil
 }
 

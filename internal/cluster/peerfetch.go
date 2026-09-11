@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -94,6 +95,29 @@ const (
 	peerMaxPendingRequests = 16
 )
 
+// Peer address breaker defaults. A peer address that fails
+// consecutive RPCs (dial timeouts against a peer that died without a
+// ring update — e.g. a pod restart whose NotifyUpdate was never
+// delivered) is blacklisted for a cooldown so fetches fail fast and
+// fall back to origin instead of paying a full dial timeout per
+// request.
+const (
+	defaultPeerFailureThreshold = 3
+	defaultPeerFailureCooldown  = 30 * time.Second
+)
+
+// ErrPeerBlacklisted is returned by Fetch and Put when the target
+// address is in cooldown after consecutive failures. Callers treat it
+// like any other peer-fetch error: fall back to origin.
+var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive failures")
+
+// addrFailureState tracks consecutive transport failures for one peer
+// address and the cooldown deadline once the threshold trips.
+type addrFailureState struct {
+	trippedUntil time.Time
+	consecutive  int
+}
+
 // PeerFetcherConfig configures a PeerFetcher.
 type PeerFetcherConfig struct {
 	TLSConfig           *tls.Config
@@ -104,6 +128,14 @@ type PeerFetcherConfig struct {
 	// Zero applies defaultPeerFetchConcurrency. Negative values are
 	// rejected by the config loader (cluster.peer_fetch_concurrency).
 	FetchConcurrency int
+	// FailureThreshold is the number of consecutive transport failures
+	// before an address is blacklisted. Zero applies
+	// defaultPeerFailureThreshold.
+	FailureThreshold int
+	// FailureCooldown is how long a blacklisted address stays tripped
+	// before the fetcher probes it again. Zero applies
+	// defaultPeerFailureCooldown.
+	FailureCooldown time.Duration
 }
 
 // PeerFetcher issues cache-lookup RPCs to peer nodes using HTTP/1.1
@@ -122,6 +154,13 @@ type PeerFetcher struct {
 	// pActive is the current number of in-flight peer-fetch RPCs.
 	// Detects queue buildup before timeouts appear.
 	pActive prometheus.Gauge
+	// pBlacklisted reports the number of peer addresses currently in
+	// breaker cooldown, when a registry was passed.
+	pBlacklisted prometheus.Gauge
+	// breaker is the per-address failure breaker: consecutive transport
+	// failures trip a cooldown so dead peer addresses fail fast
+	// instead of paying a dial timeout per RPC.
+	breaker map[string]*addrFailureState
 	// Prometheus counters — registered if a non-nil registry is passed.
 	logger observability.Logger
 	// putSem bounds concurrent write-to-owner RPCs to prevent memory
@@ -141,12 +180,16 @@ type PeerFetcher struct {
 	// pipelining configuration (Phase 6.4).
 	maxConnsPerHost     int
 	maxIdleConnDuration time.Duration
-	hopLimitHits        atomic.Int64
-	latN                atomic.Int64
-	misses              atomic.Int64
-	hits                atomic.Int64
-	hopLimit            int
-	useTLS              bool
+	// breaker tuning: consecutive-failure threshold and cooldown.
+	breakerMu        sync.Mutex
+	failureThreshold int
+	failureCooldown  time.Duration
+	hopLimitHits     atomic.Int64
+	latN             atomic.Int64
+	misses           atomic.Int64
+	hits             atomic.Int64
+	hopLimit         int
+	useTLS           bool
 }
 
 // PeerFetchStats returns a snapshot of peer fetch telemetry.
@@ -208,6 +251,14 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	if fetchConcurrency > MaxPeerFetchConcurrency {
 		fetchConcurrency = MaxPeerFetchConcurrency
 	}
+	failureThreshold := cfg.FailureThreshold
+	if failureThreshold <= 0 {
+		failureThreshold = defaultPeerFailureThreshold
+	}
+	failureCooldown := cfg.FailureCooldown
+	if failureCooldown <= 0 {
+		failureCooldown = defaultPeerFailureCooldown
+	}
 	f := &PeerFetcher{
 		useTLS:              cfg.TLSConfig != nil,
 		hopLimit:            hopLimit,
@@ -218,6 +269,9 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		maxConnsPerHost:     maxConns,
 		maxIdleConnDuration: maxIdle,
 		tlsConfig:           cfg.TLSConfig,
+		breaker:             make(map[string]*addrFailureState),
+		failureThreshold:    failureThreshold,
+		failureCooldown:     failureCooldown,
 	}
 	f.pipelineClients.Store(&sync.Map{})
 	if reg != nil {
@@ -243,7 +297,11 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 			Namespace: "bouine", Name: "peer_fetch_active",
 			Help: "Current number of in-flight peer-fetch RPCs. A rising value indicates queue buildup before timeouts appear.",
 		})
-		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive)
+		f.pBlacklisted = prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "bouine", Name: "peer_addr_blacklisted",
+			Help: "Peer addresses currently in cooldown after consecutive transport failures.",
+		})
+		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, f.pBlacklisted)
 	}
 	return f
 }
@@ -290,6 +348,76 @@ func peerAddr(peer api.PeerInfo) string {
 		addr = peer.Addr
 	}
 	return addr
+}
+
+// breakerAllowed reports whether addr may be dialed now. A blacklisted
+// address becomes allowed again once its cooldown lapses — the next
+// request then probes the address (the peer may have come back); if it
+// fails again the retained consecutive count re-trips the breaker
+// immediately, so a still-dead address costs at most one dial per
+// cooldown.
+func (f *PeerFetcher) breakerAllowed(addr string) bool {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	st, ok := f.breaker[addr]
+	if !ok || st.trippedUntil.IsZero() {
+		return true
+	}
+	if time.Now().Before(st.trippedUntil) {
+		return false
+	}
+	st.trippedUntil = time.Time{}
+	f.updateBlacklistedLocked()
+	return true
+}
+
+// recordPeerSuccess clears the failure state for addr: any successful
+// round trip (including a 404 miss — the peer is reachable) proves the
+// address healthy.
+func (f *PeerFetcher) recordPeerSuccess(addr string) {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	if _, ok := f.breaker[addr]; !ok {
+		return
+	}
+	delete(f.breaker, addr)
+	f.updateBlacklistedLocked()
+}
+
+// recordPeerFailure counts one transport failure for addr and trips the
+// cooldown once the configured threshold of consecutive failures is
+// reached.
+func (f *PeerFetcher) recordPeerFailure(addr string) {
+	f.breakerMu.Lock()
+	defer f.breakerMu.Unlock()
+	st := f.breaker[addr]
+	if st == nil {
+		st = &addrFailureState{}
+		f.breaker[addr] = st
+	}
+	st.consecutive++
+	if st.consecutive >= f.failureThreshold && st.trippedUntil.IsZero() {
+		st.trippedUntil = time.Now().Add(f.failureCooldown)
+		f.logger.Warn("peer address blacklisted after consecutive failures",
+			"addr", addr, "consecutive", st.consecutive, "cooldown", f.failureCooldown.String())
+	}
+	f.updateBlacklistedLocked()
+}
+
+// updateBlacklistedLocked refreshes the blacklisted-address gauge. The
+// breaker mutex must be held.
+func (f *PeerFetcher) updateBlacklistedLocked() {
+	if f.pBlacklisted == nil {
+		return
+	}
+	now := time.Now()
+	n := 0
+	for _, st := range f.breaker {
+		if !st.trippedUntil.IsZero() && now.Before(st.trippedUntil) {
+			n++
+		}
+	}
+	f.pBlacklisted.Set(float64(n))
 }
 
 // buildPeerRequest constructs a fasthttp.Request for a peer-fetch RPC.
@@ -341,6 +469,11 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	httpReq := buildPeerRequest(peer, req, f.useTLS)
 	defer fasthttp.ReleaseRequest(httpReq)
 
+	addr := peerAddr(peer)
+	if !f.breakerAllowed(addr) {
+		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ErrPeerBlacklisted)
+	}
+
 	select {
 	case f.fetchSem <- struct{}{}:
 		defer func() { <-f.fetchSem }()
@@ -356,13 +489,19 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	defer fasthttp.ReleaseResponse(resp)
 
 	start := time.Now()
-	pc := f.getPipelineClient(peerAddr(peer))
+	pc := f.getPipelineClient(addr)
 	if pc == nil {
 		return nil, fmt.Errorf("peer fetch %s: fetcher closed during shutdown", peer.Addr)
 	}
 	if err := transport.PipelineDo(ctx, pc, httpReq, resp); err != nil {
+		// A canceled caller context is not a peer failure — do not
+		// count it toward the breaker.
+		if ctx.Err() == nil {
+			f.recordPeerFailure(addr)
+		}
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
+	f.recordPeerSuccess(addr)
 
 	if resp.StatusCode() == fasthttp.StatusNotFound {
 		f.misses.Add(1)
@@ -555,16 +694,18 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 		return nil
 	}
 
+	addr := peerAddr(peer)
+	if !f.breakerAllowed(addr) {
+		return fmt.Errorf("peer put %s: %w", peer.Addr, ErrPeerBlacklisted)
+	}
+
 	select {
 	case f.putSem <- struct{}{}:
 		defer func() { <-f.putSem }()
 	case <-ctx.Done():
 		return fmt.Errorf("peer put %s: %w", peer.Addr, ctx.Err())
 	}
-	fetchAddr := peer.AdminAddr
-	if fetchAddr == "" {
-		fetchAddr = peer.Addr
-	}
+	fetchAddr := addr
 	scheme := "http"
 	if f.useTLS {
 		scheme = "https"
@@ -583,13 +724,19 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
 
-	putClient := f.getPipelineClient(peerAddr(peer))
+	putClient := f.getPipelineClient(addr)
 	if putClient == nil {
 		return fmt.Errorf("peer put %s: fetcher closed during shutdown", peer.Addr)
 	}
 	if err := transport.PipelineDo(ctx, putClient, req, resp); err != nil {
+		// A canceled caller context is not a peer failure — do not
+		// count it toward the breaker.
+		if ctx.Err() == nil {
+			f.recordPeerFailure(addr)
+		}
 		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
+	f.recordPeerSuccess(addr)
 	if resp.StatusCode() != fasthttp.StatusOK {
 		return fmt.Errorf("peer put %s: status %d", peer.Addr, resp.StatusCode())
 	}

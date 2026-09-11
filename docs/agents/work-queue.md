@@ -18,6 +18,8 @@ at the bottom. Entries older than 30 days may be pruned.
 
 ## Active claims
 
+- [WIP] crush — internal/cluster — self-heal stale peer ring entries + peer-address failure breaker — started: 2026-09-11 — ETA: same day
+- [WIP] crush — internal/storage — batch the ban snapshot rebuild (deferred compile on read) — started: 2026-09-11 — ETA: same day
 - [WIP] crush — release 0.5.16 (changelog curation + promotion, chart bump) — started: 2026-09-10 — ETA: same day
 
 ## fasthttp migration — phase claims

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/xxhash/v3"
@@ -33,6 +34,12 @@ const MaxHandoffQueueDepth = 1 << 20 // 1,048,576
 // when the config leaves it unset. It replaces memberlist's 30s default
 // so invalidations propagate promptly. Also surfaced on the dashboard.
 const DefaultPushPullInterval = 5 * time.Second
+
+// DefaultReconcileInterval is how often the background reconcile pass
+// self-heals the ring from memberlist's live member view. It backs up
+// the NotifyJoin/NotifyLeave event delegates and the push/pull prune,
+// which can both miss a peer that restarted without a delivered event.
+const DefaultReconcileInterval = 30 * time.Second
 
 // Config controls the cluster membership layer.
 //
@@ -78,6 +85,11 @@ type Config struct {
 	// upstream default of 1024 to absorb production bursts of cache
 	// invalidations. See issue #201.
 	HandoffQueueDepth int
+	// ReconcileInterval is how often the background reconcile pass
+	// prunes dead ring entries and refreshes stale peer addresses from
+	// memberlist metadata. Default 30s. Negative disables the loop
+	// (the push/pull merge prune still runs).
+	ReconcileInterval time.Duration
 }
 
 // Invalidator holds callbacks for applying purge, ban, and refresh
@@ -108,16 +120,24 @@ type Cluster struct {
 	peers   map[string]*Member // keyed by NodeName
 	metrics *Metrics
 	adapter *slogAdapter
+	// done is closed by Leave to stop the reconcile loop;
+	// closeOnce makes repeated Leave calls safe. The reconcile
+	// liveness fields are grouped at the tail so the small values
+	// pack after the mutexes instead of padding before pointers.
+	done chan struct{}
 	// seqs dedups received invalidation events by (Issuer, Seq) per
 	// ADR-0044: strong mode double-delivers (HTTP + gossip) and both
 	// paths share this tracker so each event applies exactly once.
 	seqs *seqTracker
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
-	gossipQueue []gossipBroadcast
-	cfg         Config
-	mu          sync.RWMutex
-	gossipMu    sync.Mutex
+	gossipQueue   []gossipBroadcast
+	cfg           Config
+	mu            sync.RWMutex
+	gossipMu      sync.Mutex
+	closeOnce     sync.Once
+	reconcileLive atomic.Bool
+	reconcileWg   sync.WaitGroup
 }
 
 // New creates a Cluster and starts the gossip listener. Call Join
@@ -150,6 +170,7 @@ func New(cfg Config) (*Cluster, error) {
 		logger: cfg.Logger,
 		ring:   newRing(cfg.VirtualNodes),
 		seqs:   newSeqTracker(),
+		done:   make(chan struct{}),
 	}
 
 	mlCfg := memberlist.DefaultLANConfig()
@@ -205,7 +226,22 @@ func New(cfg Config) (*Cluster, error) {
 	}
 	c.ml = ml
 	c.addPeer(cfg.NodeName, cfg.PeerInfo)
+	c.startReconcileLoop(cfg.ReconcileInterval)
 	return c, nil
+}
+
+// startReconcileLoop starts the background reconcile loop unless
+// interval is negative (disabled). Zero applies the default interval.
+func (c *Cluster) startReconcileLoop(interval time.Duration) {
+	if interval < 0 {
+		return
+	}
+	if interval == 0 {
+		interval = DefaultReconcileInterval
+	}
+	c.reconcileLive.Store(true)
+	c.reconcileWg.Add(1)
+	go c.reconcileLoop(interval)
 }
 
 // Join connects to the given seed addresses.
@@ -267,6 +303,8 @@ func (c *Cluster) Digest() api.RingDigest {
 
 // Leave announces departure and shuts down the gossip layer.
 func (c *Cluster) Leave(ctx context.Context) error {
+	c.closeOnce.Do(func() { close(c.done) })
+	c.reconcileWg.Wait()
 	c.adapter.markClosing()
 	if err := c.ml.Leave(0); err != nil {
 		c.logger.Warn("cluster leave error", "error", err)
@@ -588,6 +626,14 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 			}
 		}
 	}
+	c.pruneStalePeers(liveMembers)
+}
+
+// pruneStalePeers removes ring entries that are absent from the given
+// memberlist live member set (issue #305, #648). Callers pass
+// c.ml.Members() so the prune reflects this node's own liveness view,
+// not a remote ring's.
+func (c *Cluster) pruneStalePeers(liveMembers []*memberlist.Node) {
 	liveSet := make(map[string]struct{}, len(liveMembers))
 	for _, n := range liveMembers {
 		liveSet[n.Name] = struct{}{}
@@ -602,8 +648,75 @@ func (c *Cluster) MergeRemoteState(buf []byte, join bool) {
 	c.mu.RUnlock()
 	for _, name := range stale {
 		c.removePeer(name)
-		c.logger.Info("cluster: pruned stale peer during state merge", "name", name)
+		c.logger.Info("cluster: pruned stale peer", "name", name)
 	}
+}
+
+// reconcileOnce self-heals the local peer set from memberlist's live
+// member view. It complements the event delegates (NotifyJoin/Leave)
+// and the push/pull merge prune, which only run when memberlist pushes
+// an event or a remote state exchange happens. Two failure modes are
+// healed here:
+//
+//   - A peer that left without a delivered NotifyLeave (e.g. a pod
+//     killed mid-partition, or a resurrected-then-dead entry from
+//     issue #648) lingers in the ring between merges, and every
+//     peer-fetch routed to it pays a full dial timeout.
+//   - A live member whose recorded PeerInfo still carries a
+//     pre-restart address (observed in production after a rolling
+//     restart: memberlist reports the node alive at its new address,
+//     but the ring entry keeps the old AdminAddr, so peer fetches dial
+//     a dead IP indefinitely). The entry is re-read from the
+//     memberlist node metadata and refreshed in place.
+func (c *Cluster) reconcileOnce() {
+	liveMembers := c.ml.Members()
+	c.pruneStalePeers(liveMembers)
+	for _, n := range liveMembers {
+		var info api.PeerInfo
+		if err := json.Unmarshal(n.Meta, &info); err != nil {
+			continue
+		}
+		info.Name = n.Name
+		c.mu.RLock()
+		existing, ok := c.peers[n.Name]
+		c.mu.RUnlock()
+		if !ok {
+			c.addPeer(n.Name, info)
+			continue
+		}
+		old := existing.Info
+		if info.Addr != old.Addr || info.AdminAddr != old.AdminAddr || info.DataAddr != old.DataAddr {
+			c.addPeer(n.Name, info)
+			c.logger.Info("cluster: refreshed stale peer address from memberlist",
+				"name", n.Name, "addr", info.Addr, "admin_addr", info.AdminAddr,
+				"old_admin_addr", old.AdminAddr)
+		}
+	}
+}
+
+// reconcileLoop periodically runs reconcileOnce so stale ring state
+// heals within one interval regardless of memberlist event delivery
+// or push/pull timing. Started by New when ReconcileInterval is not
+// negative; stopped by Leave.
+func (c *Cluster) reconcileLoop(interval time.Duration) {
+	defer c.reconcileWg.Done()
+	defer c.reconcileLive.Store(false)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			c.reconcileOnce()
+		}
+	}
+}
+
+// reconcileRunning reports whether the reconcile loop goroutine is
+// still registered (used by tests to verify shutdown).
+func (c *Cluster) reconcileRunning() bool {
+	return c.reconcileLive.Load()
 }
 
 // ---- memberlist.EventDelegate ----

@@ -10,6 +10,54 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.17] - 2026-09-11
+
+### Changed
+- Every ban registration previously rebuilt the full compiled snapshot:
+  a fresh 1024-entry list copy plus the three host/path/surrogate maps —
+  about 624 KB of garbage per registration once the list sits at
+  banListCap, which is the production steady state (cache-lifecycle
+  registers 100+ surrogate-key bans/s over a list saturated at the cap;
+  bursts reach 130/s for minutes). With GOGC=200 the heap fills to 3x
+  live before GC, so these rebuild bursts showed up as periodic
+  working-set spikes to 13-16 GB on every prod-eu pod during ban storms
+  (measured: heap_alloc 6.5 → 13.4 GB in ~4 min at the 08:05 UTC
+  storm, heap objects flat — large transient buffers, not object
+  growth). Registration now only marks the snapshot dirty and mutates
+  the list in place — re-issued patterns refresh the existing entry,
+  expired bans drop, and the cap eviction shifts in place during one
+  scan — and the compile happens on the next snapshot() read, so a
+  batch of N registrations costs one O(list) compile instead of N.
+  Enforcement is unchanged: the first lookup after registration reads
+  a fresh snapshot and sees the new ban (no staleness window).
+  Measured (darwin/arm64, list saturated at banListCap=1024): register
+  (refresh) 95 µs / 624 KB / 32 allocs → 6.8 µs / 128 B / 1 alloc;
+  register (evict+append) 88 µs / 624 KB → 6.9 µs / 128 B. The hit
+  path is untouched: BenchmarkGate_HotStore_Get_Hit_Bans stays at
+  0 allocs/op, and new bench gates pin the batching itself.
+
+### Fixed
+- Since the v0.5.16 rolling restart, a pod could keep routing
+  peer-fetch RPCs to a peer address that died with the restart: every
+  fetch paid the full RPC timeout while fasthttp's pipeline worker
+  hot-restarted the dial (2s dial timeout + 1s throttle), logging
+  "error in PipelineClient" roughly every 3 seconds for 12+ hours.
+  Two complementary fixes: a background reconcile pass (default every
+  30s, `ReconcileInterval`) now re-derives the peer set from
+  memberlist's live member view — entries absent from the live set are
+  pruned even when no push/pull merge arrives, and live members whose
+  recorded address no longer matches their memberlist metadata are
+  refreshed in place — healing both a missed NotifyLeave and a missed
+  NotifyUpdate after a peer restart; and a per-address failure breaker
+  in the peer fetcher blacklists an address after three consecutive
+  transport failures for a 30s cooldown, so Fetch and Put return
+  immediately and the handler falls back to origin instead of
+  stalling on a dead address. The cooldown expiry allows one re-probe
+  and a retained failure count re-trips the breaker; a successful
+  round trip (including a 404 miss) resets the count, and canceled
+  caller contexts never count as peer failures. A new
+  `bouine_peer_addr_blacklisted` gauge surfaces tripped addresses.
+
 ## [0.5.16] - 2026-09-10
 
 ### Changed
@@ -1285,7 +1333,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.16...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.17...HEAD
+[0.5.17]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.17
 [0.5.16]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.16
 [0.5.15]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.15
 [0.5.14]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.14

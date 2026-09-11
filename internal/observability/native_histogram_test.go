@@ -117,3 +117,58 @@ func BenchmarkGate_HistogramObserve_Native_Distinct(b *testing.B) {
 		m.RecordHit("p", "HIT", "hot", 200, 10, time.Duration(1+i%990_000))
 	}
 }
+
+// TestCFPurgeDuration_NativeHistogramPresent pins the native histogram
+// contract for the Cloudflare purge duration metric: it must expose the
+// sparse-bucket representation alongside the classic buckets.
+func TestCFPurgeDuration_NativeHistogramPresent(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewDataPlaneMetrics(reg)
+	m.CFPurgeDuration.WithLabelValues("purge").Observe(0.05)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_cloudflare_purge_duration_seconds" {
+			continue
+		}
+		found = true
+		for _, met := range mf.GetMetric() {
+			h := met.GetHistogram()
+			assert.Equal(t, int32(3), h.GetSchema(),
+				"native histogram schema must be present (3 = factor 1.1)")
+			assert.Equal(t, uint64(1), h.GetSampleCount(),
+				"one observation must land in the native histogram")
+		}
+	}
+	assert.True(t, found, "bouine_cloudflare_purge_duration_seconds must be gathered")
+}
+
+// TestStartupDuration_NativeHistogramPresent pins the native histogram
+// contract for the startup duration metric.
+func TestStartupDuration_NativeHistogramPresent(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	m := NewStartupMetrics(reg)
+	m.ObserveStartupDuration(1.5)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_startup_duration_seconds" {
+			continue
+		}
+		found = true
+		for _, met := range mf.GetMetric() {
+			h := met.GetHistogram()
+			assert.Equal(t, int32(3), h.GetSchema(),
+				"native histogram schema must be present (3 = factor 1.1)")
+			assert.Equal(t, uint64(1), h.GetSampleCount(),
+				"one observation must land in the native histogram")
+		}
+	}
+	assert.True(t, found, "bouine_startup_duration_seconds must be gathered")
+}

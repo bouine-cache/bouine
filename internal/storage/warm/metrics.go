@@ -102,10 +102,13 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Help:      "Warm-tier Compact() calls since boot. The production compactLoop only calls Compact when NeedsCompaction is true, but direct callers (tests, admin) increment it regardless.",
 		}),
 		CompactionDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "bouine",
-			Name:      "warm_compaction_duration_seconds",
-			Help:      "Wall time of a single warm-tier compaction cycle (Compact or CompactSegment). High values indicate compaction is blocking request handlers.",
-			Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			Namespace:                       "bouine",
+			Name:                            "warm_compaction_duration_seconds",
+			Help:                            "Wall time of a single warm-tier compaction cycle (Compact or CompactSegment). High values indicate compaction is blocking request handlers. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:                         []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  80,
+			NativeHistogramMinResetDuration: time.Hour,
 		}),
 		CompactionBytesReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "bouine",

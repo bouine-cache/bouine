@@ -337,9 +337,13 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 			Help: "Peer-fetch attempts aborted because MaxHops was reached.",
 		})
 		dur := prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "bouine", Name: "peer_fetch_duration_seconds",
-			Help:    "Round-trip time for successful peer-fetch RPCs.",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			Namespace:                       "bouine",
+			Name:                            "peer_fetch_duration_seconds",
+			Help:                            "Round-trip time for successful peer-fetch RPCs. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  80,
+			NativeHistogramMinResetDuration: time.Hour,
 		})
 		f.pDuration = dur
 		f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{

@@ -447,10 +447,13 @@ func (m *DataPlaneMetrics) initCFPurgeMetrics() {
 		Help:      "Cloudflare cache invalidation API calls by operation and status.",
 	}, []string{"operation", "status"})
 	m.CFPurgeDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "bouine",
-		Name:      "cloudflare_purge_duration_seconds",
-		Help:      "Latency of Cloudflare cache invalidation API calls.",
-		Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
+		Namespace:                       "bouine",
+		Name:                            "cloudflare_purge_duration_seconds",
+		Help:                            "Latency of Cloudflare cache invalidation API calls. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+		Buckets:                         []float64{.01, .05, .1, .25, .5, 1, 2.5, 5},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  80,
+		NativeHistogramMinResetDuration: time.Hour,
 	}, []string{"operation"})
 	m.CFPurgeSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "bouine",

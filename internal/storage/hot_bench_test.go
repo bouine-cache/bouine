@@ -232,6 +232,40 @@ func BenchmarkHotStore_Ban_Steady(b *testing.B) {
 	}
 }
 
+// BenchmarkHotStore_Ban_SaturatedList measures ban registration against
+// a list pre-filled to banListCap — the production steady state, where
+// cache-lifecycle registers 100+ surrogate bans/s over a list that sits
+// at the cap. The refresh path (re-issued tag) and the evict-append
+// path (distinct tag rotating through a fixed set, keeping the list at
+// cap) are measured separately.
+func BenchmarkHotStore_Ban_SaturatedList(b *testing.B) {
+	s := NewHotStore(HotConfig{MaxBytes: 256 << 20, NumShards: 16})
+	defer func() { _ = s.Close(context.Background()) }()
+	for i := range banListCap {
+		_, _ = s.Ban(context.Background(), api.BanExpr{SurrogateKey: "fill-" + strconv.Itoa(i)})
+	}
+
+	b.Run("refresh", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _ = s.Ban(context.Background(), api.BanExpr{SurrogateKey: "fill-0"})
+		}
+	})
+	b.Run("evict-append", func(b *testing.B) {
+		keys := make([]string, 64)
+		for i := range keys {
+			keys[i] = "rotate-" + strconv.Itoa(i)
+		}
+		next := 0
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			_, _ = s.Ban(context.Background(), api.BanExpr{SurrogateKey: keys[next%len(keys)]})
+			next++
+		}
+	})
+}
+
 // benchSubjectObj builds an object shaped like production traffic: a
 // 16-entry header map and StoredAt two hours in the past, so it is
 // SUBJECT to bans issued more recently — the production shape when a

@@ -331,17 +331,28 @@ func literalOfBody(body string) (string, bool) {
 }
 
 // banListState couples the authoritative ordered ban list with its
-// compiled snapshot. All mutations go through rebuild().
+// compiled snapshot. Mutations mark the state dirty; the snapshot is
+// recompiled lazily on the next snapshot() read, so a batch of N
+// registrations costs one O(list) compile, not N.
 type banListState struct {
 	snap *banSnapshot
 	list []activeBan
-	mu   sync.Mutex
+	// dirty records that list changed since snap was compiled.
+	dirty bool
+	mu    sync.Mutex
 }
 
-// register appends (or refreshes) a ban and rebuilds the snapshot.
-// The rebuild is O(len(list)) which is bounded by banListCap; under a
-// storm of distinct bans this is amortized by the coalesced eager
-// scan — one rebuild per registration batch is the steady state.
+// register appends (or refreshes) a ban and marks the snapshot dirty
+// without compiling it: the rebuild happens on the next snapshot()
+// read, which amortizes registration batches (cache-lifecycle storms
+// register 100+ bans/s against a list saturated at banListCap) into a
+// single O(list) compile. Enforcement is unchanged — the first lookup
+// after registration reads a fresh snapshot and sees the new ban.
+//
+// The list is mutated in place with zero allocations: expired bans are
+// dropped and a matching pattern refreshed during one scan, a new
+// pattern appends, and a full list evicts the oldest entry by shifting
+// in place.
 func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -350,9 +361,9 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	// ban's ORIGINAL CreatedAt (possibly zero = no exemption), not the
 	// normalized registration time used for TTL accounting.
 	exemptAfter := expr.CreatedAt
-	refreshed := false
-	list := make([]activeBan, 0, min(len(b.list)+1, banListCap))
 	now := time.Now()
+	pruned := b.list[:0]
+	refreshed := false
 	for _, ban := range b.list {
 		if now.Sub(ban.created) >= banTTL {
 			continue
@@ -362,48 +373,64 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 			ban.exemptAfter = exemptAfter
 			refreshed = true
 		}
-		list = append(list, ban)
+		pruned = append(pruned, ban)
 	}
-	if !refreshed {
-		if len(list) >= banListCap {
-			copy(list, list[1:])
-			list = list[:len(list)-1]
-		}
-		list = append(list, activeBan{pred: pred, created: createdAt, exemptAfter: exemptAfter, pattern: pat})
+	b.list = pruned
+	if refreshed {
+		b.dirty = true
+		return
 	}
-	b.list = list
-	b.snap = compileBanSnapshot(list)
+	ban := activeBan{pred: pred, created: createdAt, exemptAfter: exemptAfter, pattern: pat}
+	if len(b.list) >= banListCap {
+		copy(b.list, b.list[1:])
+		b.list[len(b.list)-1] = ban
+	} else {
+		b.list = append(b.list, ban)
+	}
+	b.dirty = true
 }
 
-// pruneExpired drops bans older than banTTL and rebuilds when anything
-// was dropped. Called by the TTL reaper each tick so a quiet day after
-// a storm does not keep taxing hits for the full 24 h window.
+// pruneExpired rebuilds the state as of now, dropping bans older than
+// banTTL. Called by the TTL reaper each tick so a quiet day after a
+// storm does not keep taxing hits for the full 24 h window. Returns
+// whether any ban was dropped.
 func (b *banListState) pruneExpired(now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	kept := b.list[:0:0]
-	dropped := false
-	for _, ban := range b.list {
-		if now.Sub(ban.created) >= banTTL {
-			dropped = true
-			continue
-		}
-		kept = append(kept, ban)
-	}
-	if dropped {
-		b.list = kept
-		b.snap = compileBanSnapshot(kept)
-	}
-	return dropped
+	before := len(b.list)
+	b.rebuildLocked(now)
+	return len(b.list) != before
 }
 
-// snapshot returns the current compiled view for lock-free reads.
-// The returned pointer is immutable after publication.
+// snapshot returns the current compiled view. When registrations have
+// marked the state dirty, the snapshot is recompiled first (pruning
+// expired bans per compileBanSnapshot's precondition); otherwise the
+// previously published immutable snapshot is returned as-is. The hit
+// path therefore pays the O(list) compile at most once per
+// registration batch.
 func (b *banListState) snapshot() *banSnapshot {
 	b.mu.Lock()
-	snap := b.snap
-	b.mu.Unlock()
-	return snap
+	defer b.mu.Unlock()
+	if b.dirty || b.snap == nil {
+		b.rebuildLocked(time.Now())
+	}
+	return b.snap
+}
+
+// rebuildLocked prunes bans older than banTTL and recompiles the
+// snapshot from the surviving list, clearing the dirty flag. The filter
+// reuses the list's backing array. The mutex must be held.
+func (b *banListState) rebuildLocked(now time.Time) {
+	pruned := b.list[:0]
+	for _, ban := range b.list {
+		if now.Sub(ban.created) >= banTTL {
+			continue
+		}
+		pruned = append(pruned, ban)
+	}
+	b.list = pruned
+	b.snap = compileBanSnapshot(b.list)
+	b.dirty = false
 }
 
 // len reports the active ban count (tests and metrics).

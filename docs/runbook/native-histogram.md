@@ -1,9 +1,19 @@
-# Native histogram for bouine_request_duration_seconds
+# Native histograms for bouine duration metrics
 
 ## What changed
 
-The request-duration histogram is now registered with
+All bouine duration histograms are now registered with
 `NativeHistogramBucketFactor: 1.1` and `NativeHistogramMaxBucketNumber: 80`.
+The affected metrics are:
+
+- `bouine_request_duration_seconds` (data-plane RED)
+- `bouine_cloudflare_purge_duration_seconds` (Cloudflare purge API latency)
+- `bouine_startup_duration_seconds` (process startup)
+- `bouine_peer_fetch_duration_seconds` (cluster peer-fetch RPCs)
+- `bouine_warm_compaction_duration_seconds` (warm-tier compaction)
+- `bouine_wal_write_duration_seconds` (WAL drain-and-sync)
+- `bouine_origin_request_duration_seconds` (origin response time)
+
 Prometheus exposition contains BOTH:
 
 - the classic `_bucket`/`_sum`/`_count` series (unchanged, all existing
@@ -22,7 +32,7 @@ config for bouine pods:
 ```yaml
 metric_relabel_configs:
   - action: drop
-    regex: bouine_request_duration_seconds_bucket
+    regex: bouine_(request_duration_seconds|cloudflare_purge_duration_seconds|startup_duration_seconds|peer_fetch_duration_seconds|warm_compaction_duration_seconds|wal_write_duration_seconds|origin_request_duration_seconds)_bucket
     source_labels: [__name__]
 ```
 
@@ -46,6 +56,6 @@ capped at 80) instead of 16 classic bucket series per tuple.
 ## Rollback
 
 Native support is a field on the histogram constructor. To revert,
-delete the three `NativeHistogram*` fields in
-`internal/observability/dataplane.go` (`NewDataPlaneMetrics`); the
-classic representation is unaffected and no query changes.
+delete the three `NativeHistogram*` fields from any of the affected
+histogram constructors (listed above); the classic representation is
+unaffected and no query changes.

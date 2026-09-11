@@ -38,10 +38,13 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 	}
 	m := &Metrics{
 		WriteDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "bouine",
-			Name:      "wal_write_duration_seconds",
-			Help:      "Wall time of a single WAL drain-and-sync cycle (batch write + fsync). High values indicate disk I/O pressure.",
-			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+			Namespace:                       "bouine",
+			Name:                            "wal_write_duration_seconds",
+			Help:                            "Wall time of a single WAL drain-and-sync cycle (batch write + fsync). High values indicate disk I/O pressure. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  80,
+			NativeHistogramMinResetDuration: time.Hour,
 		}),
 		WriteQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "bouine",

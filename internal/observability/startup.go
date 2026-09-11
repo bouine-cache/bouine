@@ -1,6 +1,8 @@
 package observability
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -36,10 +38,13 @@ func NewStartupMetrics(reg *prometheus.Registry) *StartupMetrics {
 			Help:      "Readiness condition status: 1=ready, 0=not-ready. Label 'condition' is bounded to startup gate names.",
 		}, []string{"condition"}),
 		StartupDurationSeconds: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: "bouine",
-			Name:      "startup_duration_seconds",
-			Help:      "Total startup duration from process start to all readiness conditions met.",
-			Buckets:   prometheus.ExponentialBuckets(0.1, 2, 12),
+			Namespace:                       "bouine",
+			Name:                            "startup_duration_seconds",
+			Help:                            "Total startup duration from process start to all readiness conditions met. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:                         prometheus.ExponentialBuckets(0.1, 2, 12),
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  80,
+			NativeHistogramMinResetDuration: time.Hour,
 		}),
 	}
 	if reg != nil {

@@ -1,6 +1,8 @@
 package origin
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -61,10 +63,13 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Help:      "Current in-flight origin requests per pool and target. A value near the connection pool cap indicates pool exhaustion.",
 		}, []string{"pool", "target"}),
 		RequestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: "bouine",
-			Name:      "origin_request_duration_seconds",
-			Help:      "Origin response time per pool, target, and status. Separate from bouine's handler latency.",
-			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			Namespace:                       "bouine",
+			Name:                            "origin_request_duration_seconds",
+			Help:                            "Origin response time per pool, target, and status. Separate from bouine's handler latency. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+			Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  80,
+			NativeHistogramMinResetDuration: time.Hour,
 		}, []string{"pool", "target", "status"}),
 		ConnectionErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",

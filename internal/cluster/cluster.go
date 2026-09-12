@@ -133,6 +133,12 @@ type Cluster struct {
 	// being current (peer left, or restarted at a new address). Set
 	// via SetOnPeerRetired before Join.
 	onPeerRetired func(addr string)
+	// onPeerUnretired, when set, receives an address the moment the
+	// ring learns it is current again (a peer added or re-added at
+	// that address). The PeerFetcher uses it to lift a previous
+	// retirement so fetches dial the address again. Set via
+	// SetOnPeerRetired before Join.
+	onPeerUnretired func(addr string)
 	// gossipQueue holds pending broadcast messages to be delivered via
 	// memberlist's compound-message gossip protocol.
 	gossipQueue   []gossipBroadcast
@@ -766,6 +772,15 @@ func (c *Cluster) addPeer(name string, info api.PeerInfo) {
 	c.ring.remove(name)
 	c.ring.add(name, c.cfg.VirtualNodes)
 	c.mu.Unlock()
+	// The address is current the moment the ring carries it: lift any
+	// previous retirement (a peer that comes back at the same address
+	// keeps working). This — not getPipelineClient — is the only place
+	// a retirement may be lifted: a fetch can hold a stale owner
+	// PeerInfo from before a ring change, and clearing the mark from
+	// the fetch path would resurrect a client for a dead address.
+	if addr := peerAddr(info); addr != "" && c.onPeerUnretired != nil {
+		c.onPeerUnretired(addr)
+	}
 	// A peer restarting at a new address leaves its old address dead:
 	// retire the old PipelineClient so its worker stops dialing it
 	// (fasthttp cannot stop a worker whose dial fails — see
@@ -921,10 +936,17 @@ func (c *Cluster) SetMetrics(m *Metrics) {
 // received via gossip. Must be called before Join.
 func (c *Cluster) SetInvalidator(inv Invalidator) { c.inv = inv }
 
-// SetOnPeerRetired registers a callback invoked with a peer's address
-// when that address stops being current: the peer left the ring, or it
-// restarted and now lives at a different address. The PeerFetcher uses
-// it to evict and park the stale PipelineClient (fasthttp's worker
-// would otherwise re-dial the dead address forever). Must be called
-// before Join. The callback must not call back into the Cluster.
-func (c *Cluster) SetOnPeerRetired(fn func(addr string)) { c.onPeerRetired = fn }
+// SetOnPeerRetired registers the retire/unretire callbacks. retire is
+// invoked with a peer's address when that address stops being current
+// (the peer left the ring, or restarted at a different address); the
+// PeerFetcher uses it to evict and park the stale PipelineClient
+// (fasthttp's worker would otherwise re-dial the dead address
+// forever). unretire is invoked when the ring learns an address is
+// current again (a peer added or re-added at that address), so a
+// previous retirement is lifted and fetches dial it normally. Must be
+// called before Join. The callbacks must not call back into the
+// Cluster.
+func (c *Cluster) SetOnPeerRetired(retire, unretire func(addr string)) {
+	c.onPeerRetired = retire
+	c.onPeerUnretired = unretire
+}

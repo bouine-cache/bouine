@@ -178,6 +178,15 @@ type PeerFetcher struct {
 	// pActive is the current number of in-flight peer-fetch RPCs.
 	// Detects queue buildup before timeouts appear.
 	pActive prometheus.Gauge
+	// pQueueWait observes the time a fetch spends waiting for a
+	// fetchSem slot before the RPC is submitted. The RPC-duration
+	// histogram starts after the semaphore, so a saturated fetch
+	// pipeline (bursts, or slots pinned by fetches slow to fail against
+	// dead addresses) was invisible: fetch RPCs looked healthy while
+	// requests queued — on prod-eu, peer-served "HITs" sat in the
+	// 1–2.5s duration bucket with a clean fetch histogram. This metric
+	// makes the queue the first thing the dashboards see.
+	pQueueWait prometheus.Observer
 	// pBlacklisted reports the number of peer addresses currently in
 	// breaker cooldown, when a registry was passed.
 	pBlacklisted prometheus.Gauge
@@ -259,6 +268,12 @@ func (f *PeerFetcher) Close(_ context.Context) error {
 // client; the parked worker — which fasthttp offers no way to stop —
 // costs one parked goroutine until process exit instead of a dial
 // attempt and a log line every ~3s.
+//
+// Retirement stays until UnretireAddress reports the address current
+// again. getPipelineClient must NOT clear the mark itself: a fetch
+// holding a stale owner PeerInfo (captured before a ring change) can
+// race RetireAddress and would re-create a client for the dead
+// address — resurrecting the exact zombie the retire exists to park.
 func (f *PeerFetcher) RetireAddress(addr string) {
 	if addr == "" {
 		return
@@ -267,6 +282,18 @@ func (f *PeerFetcher) RetireAddress(addr string) {
 	if clients := f.pipelineClients.Load(); clients != nil {
 		clients.Delete(addr)
 	}
+}
+
+// UnretireAddress lifts a retirement. Only the Cluster may call it —
+// when a peer (re)joins at addr, the address is provably current
+// again, so new fetches dial it normally and a leftover parked worker
+// (if any) is dropped along with its retired mark. Called from addPeer
+// for every current address so the common case is a no-op.
+func (f *PeerFetcher) UnretireAddress(addr string) {
+	if addr == "" {
+		return
+	}
+	f.retiredAddrs.Delete(addr)
 }
 
 // NewPeerFetcher creates a PeerFetcher. tlsCfg must have the cluster
@@ -336,39 +363,56 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	}
 	f.pipelineClients.Store(&sync.Map{})
 	if reg != nil {
-		f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine", Name: "peer_fetch_hits_total",
-			Help: "Cache objects served from a cluster peer (L0 promotion).",
-		})
-		f.pMisses = prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine", Name: "peer_fetch_misses_total",
-			Help: "Peer-fetch RPCs that returned a miss; fell through to origin.",
-		})
-		f.pHopLimit = prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "bouine", Name: "peer_fetch_hop_limit_hits_total",
-			Help: "Peer-fetch attempts aborted because MaxHops was reached.",
-		})
-		dur := prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace:                       "bouine",
-			Name:                            "peer_fetch_duration_seconds",
-			Help:                            "Round-trip time for successful peer-fetch RPCs. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
-			Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-			NativeHistogramBucketFactor:     1.1,
-			NativeHistogramMaxBucketNumber:  80,
-			NativeHistogramMinResetDuration: time.Hour,
-		})
-		f.pDuration = dur
-		f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "bouine", Name: "peer_fetch_active",
-			Help: "Current number of in-flight peer-fetch RPCs. A rising value indicates queue buildup before timeouts appear.",
-		})
-		f.pBlacklisted = prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "bouine", Name: "peer_addr_blacklisted",
-			Help: "Peer addresses currently in cooldown after consecutive transport failures.",
-		})
-		reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, f.pBlacklisted)
+		f.registerMetrics(reg)
 	}
 	return f
+}
+
+// registerMetrics constructs and registers the fetcher's Prometheus
+// series on reg. Every field it assigns is nil-guarded at use: the
+// fetcher works with a nil registry (tests, embedded use).
+func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
+	f.pHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_hits_total",
+		Help: "Cache objects served from a cluster peer (L0 promotion).",
+	})
+	f.pMisses = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_misses_total",
+		Help: "Peer-fetch RPCs that returned a miss; fell through to origin.",
+	})
+	f.pHopLimit = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_hop_limit_hits_total",
+		Help: "Peer-fetch attempts aborted because MaxHops was reached.",
+	})
+	dur := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace:                       "bouine",
+		Name:                            "peer_fetch_duration_seconds",
+		Help:                            "Round-trip time for successful peer-fetch RPCs. Also exposed as a native (sparse-bucket) histogram; the classic _bucket series stay on the wire until a metric_relabel_configs rule drops them (see docs/runbook/native-histogram.md).",
+		Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  80,
+		NativeHistogramMinResetDuration: time.Hour,
+	})
+	f.pDuration = dur
+	f.pActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine", Name: "peer_fetch_active",
+		Help: "Current number of in-flight peer-fetch RPCs. A rising value indicates queue buildup before timeouts appear.",
+	})
+	queueWait := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace:                       "bouine",
+		Name:                            "peer_fetch_queue_wait_seconds",
+		Help:                            "Time a peer fetch spent waiting for a fetch-semaphore slot before the RPC was submitted. The RPC-duration histogram starts after the semaphore, so a saturated fetch pipeline (bursts, or slots pinned by fetches slow to fail against dead addresses) is only visible here. Also exposed as a native (sparse-bucket) histogram.",
+		Buckets:                         []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		NativeHistogramBucketFactor:     1.1,
+		NativeHistogramMaxBucketNumber:  80,
+		NativeHistogramMinResetDuration: time.Hour,
+	})
+	f.pQueueWait = queueWait
+	f.pBlacklisted = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine", Name: "peer_addr_blacklisted",
+		Help: "Peer addresses currently in cooldown after consecutive transport failures.",
+	})
+	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted)
 }
 
 // getPipelineClient returns the PipelineClient for the given peer
@@ -378,22 +422,23 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 // concurrent in-flight requests per connection, matching the old HTTP/2
 // capacity with ~85% less connection pool memory.
 //
-// A retired address reaching here means it is a routing target
-// again: drop the retired mark so the fresh client below dials
-// normally, and never hand back the evicted client whose worker
-// may already be parked on the retired mark.
+// A retired address gets a client whose dial parks: the caller's RPC
+// fails fast (the fetch/put timeout), falls back to origin, and the
+// parked worker costs nothing further. The retired mark is never
+// cleared here — a fetch can hold a stale owner PeerInfo captured
+// before a ring change, and minting a live client for a dead address
+// would resurrect the zombie the retire exists to park. Only
+// UnretireAddress (driven by the Cluster's addPeer) lifts a
+// retirement, once the address is provably current again.
 func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 	clients := f.pipelineClients.Load()
 	if clients == nil {
 		return nil // closed during shutdown
 	}
-	// A retired address reaching here means it is a routing target
-	// again: drop the retired mark so the fresh client below dials
-	// normally, and never hand back the evicted client whose worker
-	// may already be parked on the retired mark.
+	// Never hand back the evicted client whose worker may already be
+	// parked on the retired mark.
 	if _, retired := f.retiredAddrs.Load(addr); retired {
 		clients.Delete(addr)
-		f.retiredAddrs.Delete(addr)
 	}
 	if v, ok := clients.Load(addr); ok {
 		return v.(*fasthttp.PipelineClient)
@@ -555,6 +600,41 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) 
 	return httpReq
 }
 
+// acquireFetchSlot takes one fetchSem slot, observing the time spent
+// waiting in pQueueWait (queueStart is taken by the caller before this
+// call) and bumping pActive for the slot's hold. Returns the release
+// function paired with the acquisition, or the caller's ctx error when
+// the context is cancelled while queued.
+func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
+	select {
+	case f.fetchSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if f.pQueueWait != nil {
+		f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+	}
+	if f.pActive != nil {
+		f.pActive.Inc()
+	}
+	return func() {
+		if f.pActive != nil {
+			f.pActive.Dec()
+		}
+		<-f.fetchSem
+	}, nil
+}
+
+// recordPeerMiss counts and logs one peer-fetch miss (404 answer).
+func (f *PeerFetcher) recordPeerMiss(req api.PeerFetchRequest, peer api.PeerInfo) {
+	f.misses.Add(1)
+	if f.pMisses != nil {
+		f.pMisses.Inc()
+	}
+	f.logger.Info("peer fetch miss",
+		"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
+}
+
 // Fetch asks a peer for a cached object. varyKey, when non-empty, is the
 // requesting node's Vary assertion for key (RFC 9111 §4.1): the peer must
 // only return an object stored under that same variant dimension — a peer
@@ -581,16 +661,16 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ErrPeerBlacklisted)
 	}
 
-	select {
-	case f.fetchSem <- struct{}{}:
-		defer func() { <-f.fetchSem }()
-		if f.pActive != nil {
-			f.pActive.Inc()
-			defer f.pActive.Dec()
-		}
-	case <-ctx.Done():
-		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, ctx.Err())
+	// queueStart precedes the semaphore: the wait for a fetchSem slot
+	// is the queue time acquireFetchSlot observes. Time on this line
+	// is not part of the RPC-duration measurement below, which starts
+	// after acquisition.
+	queueStart := time.Now()
+	releaseSlot, err := f.acquireFetchSlot(ctx, queueStart)
+	if err != nil {
+		return nil, fmt.Errorf("peer fetch %s: %w", peer.Addr, err)
 	}
+	defer releaseSlot()
 
 	resp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseResponse(resp)
@@ -611,12 +691,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	f.recordPeerSuccess(addr)
 
 	if resp.StatusCode() == fasthttp.StatusNotFound {
-		f.misses.Add(1)
-		if f.pMisses != nil {
-			f.pMisses.Inc()
-		}
-		f.logger.Info("peer fetch miss",
-			"key", req.Key, "peer", peer.Addr, "hops", req.Hops)
+		f.recordPeerMiss(req, peer)
 		return nil, nil // peer miss
 	}
 	if resp.StatusCode() != fasthttp.StatusOK {

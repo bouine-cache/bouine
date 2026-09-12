@@ -45,6 +45,13 @@ has a configuration drift — every pod must use the same mode.
 - **Peer fetch is slow or failing.** Check `bouine_peer_fetch_duration_seconds`
   (should be < 2 ms on LAN). If elevated, check cluster network health (`kubectl
   get endpoints bouine-headless`). Increase `hop_limit` if node churn is high.
+  If the RPC duration looks healthy but requests still stall behind peer
+  fetches, check `bouine_peer_fetch_queue_wait_seconds` — the fetch-semaphore
+  queue time, invisible in the RPC histogram (it starts after the semaphore).
+  A saturated queue means fetches are slow to fail (dead addresses before the
+  breaker trips, or a slow peer admin server): raise
+  `cluster.peer_fetch_concurrency` and look for "error in PipelineClient"
+  log lines naming the peer address.
 
 ### `eventual`
 

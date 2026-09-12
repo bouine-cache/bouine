@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -309,12 +310,28 @@ func TestPeerFetcher_RetireAddress_FreshClientForReturnedAddress(t *testing.T) {
 
 	f.RetireAddress(srv.Addr)
 
+	// A fetch holding a stale owner PeerInfo must NOT resurrect the
+	// retired address: getPipelineClient no longer lifts the mark (the
+	// Cluster does, via UnretireAddress, once the ring proves the
+	// address current again). The fetch fails fast — the parked dial
+	// makes the RPC time out inside pipelineDo's PeerFetchTimeout
+	// budget — and the mark survives.
+	fetchCtx, cancelFetch := context.WithTimeout(context.Background(), PeerFetchTimeout)
+	defer cancelFetch()
+	_, err = f.Fetch(fetchCtx, peer, api.PeerFetchRequest{Key: testkey.Key(2)})
+	require.Error(t, err, "fetch for a retired address must not succeed from the fetch path")
+	_, retired := f.retiredAddrs.Load(srv.Addr)
+	assert.True(t, retired, "retired mark must survive fetches; only UnretireAddress lifts it")
+
+	// The ring re-learned the address: the retirement is lifted and
+	// subsequent fetches dial it normally with a fresh client.
+	f.UnretireAddress(srv.Addr)
 	for range 2 {
 		_, err := f.Fetch(context.Background(), peer, api.PeerFetchRequest{Key: testkey.Key(2)})
-		require.NoError(t, err, "fetch after retirement must get a fresh client and succeed")
+		require.NoError(t, err, "fetch after unretire must get a fresh client and succeed")
 	}
-	_, retired := f.retiredAddrs.Load(srv.Addr)
-	assert.False(t, retired, "retired mark must be dropped once the address is used again")
+	_, retired = f.retiredAddrs.Load(srv.Addr)
+	assert.False(t, retired, "unretired address must stay unretired")
 }
 
 // TestCluster_RemovePeer_RetiresAddress verifies the cluster notifies
@@ -334,7 +351,7 @@ func TestCluster_RemovePeer_RetiresAddress(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		retired = append(retired, addr)
-	})
+	}, func(string) {})
 
 	stale := "10.0.0.99:9000"
 	c.addPeer("ghost", api.PeerInfo{Name: "ghost", Addr: stale, AdminAddr: stale})
@@ -364,7 +381,7 @@ func TestCluster_PeerAddressChange_RetiresOldAddress(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		retired = append(retired, addr)
-	})
+	}, func(string) {})
 
 	oldAddr, newAddr := "10.0.0.55:9000", "10.0.0.56:9000"
 	c.addPeer("restarted", api.PeerInfo{Name: "restarted", Addr: oldAddr, AdminAddr: oldAddr})
@@ -403,7 +420,7 @@ func TestCluster_ReconcilePrune_RetiresAddress(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		retired = append(retired, addr)
-	})
+	}, func(string) {})
 
 	stale := "10.0.0.55:9000"
 	c.addPeer("ghost", api.PeerInfo{Name: "ghost", Addr: stale, AdminAddr: stale})
@@ -413,4 +430,177 @@ func TestCluster_ReconcilePrune_RetiresAddress(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []string{stale}, retired, "the pruned peer's address must be retired")
+}
+
+// TestCluster_RejoinAtSameAddress_LiftsRetirement covers the peer
+// resurrection cycle: a peer leaves the ring (its address is retired
+// and the parked worker stays parked) and later comes back at the SAME
+// address. addPeer must lift the retirement so fetches dial it again —
+// the un-retire is what makes retirement recoverable, since the fetch
+// path itself can no longer clear the mark.
+func TestCluster_RejoinAtSameAddress_LiftsRetirement(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig(t, "retire-resurrect", "127.0.0.1:0")
+	c, err := New(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Leave(t.Context()) }()
+
+	var mu sync.Mutex
+	var retired []string
+	var unretired []string
+	c.SetOnPeerRetired(func(addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		retired = append(retired, addr)
+	}, func(addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		unretired = append(unretired, addr)
+	})
+
+	addr := "10.0.0.77:9000"
+	info := api.PeerInfo{Name: "phoenix", Addr: addr, AdminAddr: addr}
+	c.addPeer("phoenix", info)
+	c.removePeer("phoenix")
+	// The resurrected node is added at its old address.
+	c.addPeer("phoenix", info)
+	// An unchanged re-add fires the un-retire again — idempotent by
+	// construction (a set delete); the ring view must stay consistent.
+	c.addPeer("phoenix", info)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{addr}, retired,
+		"only the prune must retire the address")
+	assert.Contains(t, unretired, addr,
+		"re-adding a peer at the same address must lift the retirement")
+}
+
+// TestPeerFetcher_RetiredAddrNotResurrectedByStaleOwner pins the race
+// the clear-on-use semantics left open: a Fetch that captured its owner
+// PeerInfo before a ring change can call getPipelineClient concurrently
+// with RetireAddress. The stale-owner fetch must not mint a live client
+// for the dead address (which would re-arm fasthttp's dial-restart
+// loop); it must fail through the parked dial and leave the mark set.
+func TestPeerFetcher_RetiredAddrNotResurrectedByStaleOwner(t *testing.T) {
+	t.Parallel()
+
+	// An address with nothing listening: a dial would fail outright.
+	deadAddr := "127.0.0.1:1"
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{}, nil, nil)
+	defer f.Close(context.Background())
+	staleOwner := api.PeerInfo{Name: "dead", Addr: deadAddr, AdminAddr: deadAddr}
+
+	// The fetcher's client cache still holds a live client for the
+	// address when the retirement lands (the eviction races this call).
+	f.RetireAddress(deadAddr)
+
+	// Bounded by the caller deadline for speed: the parked dial means
+	// pipelineDo's PeerFetchTimeout budget would also bound the RPC.
+	fetchCtx, cancelFetch := context.WithTimeout(context.Background(), PeerFetchTimeout)
+	defer cancelFetch()
+	_, err := f.Fetch(fetchCtx, staleOwner, api.PeerFetchRequest{Key: testkey.Key(1)})
+	require.Error(t, err, "a fetch for a retired address must fail")
+
+	// The mark must survive the failed fetch — the stale-owner fetch
+	// must not lift the retirement.
+	_, retired := f.retiredAddrs.Load(deadAddr)
+	assert.True(t, retired, "a stale-owner fetch must not lift the retirement")
+
+	// Any client a stale-owner fetch could still obtain for the dead
+	// address must dial into the parked state — the RPC fails fast and
+	// the pipeline worker never re-dials the dead address, which is
+	// what stops the zombie (log spam + wasted dials) the retire
+	// mechanism exists to kill.
+	pc := f.getPipelineClient(deadAddr)
+	require.NotNil(t, pc)
+	parked := make(chan error, 1)
+	go func() { _, derr := pc.Dial(deadAddr); parked <- derr }()
+	select {
+	case err := <-parked:
+		t.Fatalf("dial for a retired address must park, got: %v", err)
+	case <-time.After(300 * time.Millisecond):
+		// parked, as required.
+	}
+	require.NoError(t, f.Close(context.Background()))
+	select {
+	case err := <-parked:
+		require.ErrorIs(t, err, errPeerAddrRetired)
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked dial must be released by Close")
+	}
+}
+
+// TestPeerFetcher_QueueWaitMeasuredWhenSaturated pins the fetch
+// queue-wait metric: with the fetch semaphore saturated by slow RPCs,
+// a queued fetch's wait for a slot must be observable in
+// bouine_peer_fetch_queue_wait_seconds — the RPC-duration histogram
+// starts after the semaphore and cannot see it. This is the signal
+// that was missing during the 2026-09-12 prod-eu incident (peer-served
+// "HITs" queueing behind dead-address dials with a clean fetch
+// histogram).
+func TestPeerFetcher_QueueWaitMeasuredWhenSaturated(t *testing.T) {
+	t.Parallel()
+
+	block := make(chan struct{})
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		<-block
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		ctx.Response.SetStatusCode(fasthttp.StatusNotFound)
+	})
+	defer srv.Close()
+
+	reg := prometheus.NewRegistry()
+	f := NewPeerFetcherWithLogger(nil, reg, nil, 0)
+	defer f.Close(context.Background())
+	require.NotNil(t, f.pQueueWait)
+
+	// Saturate all fetch slots with in-flight RPCs.
+	var wg sync.WaitGroup
+	for range defaultPeerFetchConcurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.Fetch(context.Background(),
+				api.PeerInfo{Name: "slow", Addr: srv.Addr, AdminAddr: srv.Addr},
+				api.PeerFetchRequest{Key: testkey.Key(1)})
+		}()
+	}
+
+	// This fetch queues behind the saturated slots; give the wait time
+	// to accumulate, then cancel via the caller context (the wait is
+	// released by ctx cancellation on the blocked select).
+	queuedCtx, cancelQueued := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancelQueued()
+	_, _ = f.Fetch(queuedCtx,
+		api.PeerInfo{Name: "slow", Addr: srv.Addr, AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(2)})
+
+	close(block)
+	wg.Wait()
+
+	// The histogram must have observed at least one wait of >=100ms:
+	// the queued fetch held the 150ms caller budget waiting for a slot
+	// that never freed (the RPCs blocked on the server's channel).
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() != "bouine_peer_fetch_queue_wait_seconds" {
+			continue
+		}
+		found = true
+		for _, met := range mf.GetMetric() {
+			h := met.GetHistogram()
+			assert.NotZero(t, h.GetSampleCount(),
+				"at least one queue wait must be observed")
+			assert.GreaterOrEqual(t, h.GetSampleSum(), float64(0.1),
+				"the queued fetch's wait must land in the histogram")
+			assert.Equal(t, int32(3), h.GetSchema(),
+				"native histogram schema must be present (3 = factor 1.1)")
+		}
+	}
+	assert.True(t, found, "bouine_peer_fetch_queue_wait_seconds must be gathered")
 }

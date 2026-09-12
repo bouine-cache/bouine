@@ -300,3 +300,82 @@ type FastPathMetrics interface {
 	// obs-fold). The implementation increments a Prometheus counter.
 	IncrementSmugglingRejected()
 }
+
+// ReactorMetrics is an optional capability that FastPathMetrics
+// implementations may also satisfy: when the H1 reactor (the
+// single-goroutine epoll hit loop) is active, the h1parser reports
+// loop lifecycle events through it. Without these counters an
+// operator cannot tell how much traffic the reactor actually serves
+// versus the blocking path — the gap that hid the starved-reactor
+// regression under mixed hit/miss workloads.
+//
+// Every method is a plain counter increment (a single atomic add); the
+// h1parser calls them from the reactor loop goroutine, so none may do
+// table lookups or allocation.
+//
+// Unstable.
+type ReactorMetrics interface {
+	// IncrementReactorConnRegistered is called when a connection joins
+	// the reactor's epoll set (at accept, or when the blocking parser
+	// returns a connection after serving a miss).
+	IncrementReactorConnRegistered()
+	// IncrementReactorHit is called for every cache hit served inline
+	// by the reactor loop.
+	IncrementReactorHit()
+	// IncrementReactorHitN is the batched form of IncrementReactorHit:
+	// the loop batches hit observations and flushes them off the hot
+	// path (see reactor_metrics.go), one add per flush. Implementations
+	// that satisfy only the legacy single-increment surface can embed
+	// ReactorHitBatcher to inherit it.
+	IncrementReactorHitN(n uint64)
+	// IncrementReactorHandoff is called when a connection leaves the
+	// reactor for the blocking parser. reason is one of the
+	// ReactorHandoff* constants.
+	IncrementReactorHandoff(reason string)
+	// IncrementReactorReturn is called when the blocking parser hands a
+	// keep-alive connection back to the reactor after serving a miss.
+	IncrementReactorReturn()
+	// IncrementReactorDrop is called when the reactor closes a
+	// connection (error, idle expiry, stuck writer, shutdown overflow).
+	IncrementReactorDrop()
+}
+
+// ReactorHitBatcher adapts a single-increment implementation to the
+// batched IncrementReactorHitN method: embed it in a ReactorMetrics
+// implementation whose hit counter only knows how to add one.
+type ReactorHitBatcher struct {
+	// HitOne is the single-increment implementation (one atomic add
+	// against the shared counter).
+	HitOne func()
+}
+
+// IncrementReactorHitN implements ReactorMetrics via the embedded
+// single-increment func.
+func (b ReactorHitBatcher) IncrementReactorHitN(n uint64) {
+	for ; n > 0; n-- {
+		b.HitOne()
+	}
+}
+
+// Handoff reasons reported via ReactorMetrics.IncrementReactorHandoff.
+// The set is closed: the label's cardinality budget depends on it
+// staying fixed.
+const (
+	// ReactorHandoffMiss: the request qualified for the fast path but
+	// TryHit declined (no local object) — the blocking path serves it
+	// (origin fetch or peer fetch).
+	ReactorHandoffMiss = "miss"
+	// ReactorHandoffDisqualified: the request cannot take the fast path
+	// (conditional headers, range, body framing, non-GET/HEAD method).
+	ReactorHandoffDisqualified = "disqualified"
+	// ReactorHandoffMalformed: the request failed parsing or tripped
+	// smuggling detection; the blocking path writes the 400 and closes.
+	ReactorHandoffMalformed = "malformed"
+	// ReactorHandoffOversize: the header block exceeded the reactor's
+	// 16 KiB read buffer.
+	ReactorHandoffOversize = "oversize"
+	// ReactorHandoffOverflow: the accept-side pending queue was full.
+	ReactorHandoffOverflow = "overflow"
+	// ReactorHandoffCap: the reactor's connection cap was reached.
+	ReactorHandoffCap = "cap"
+)

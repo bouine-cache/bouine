@@ -35,6 +35,20 @@ type DataPlaneMetrics struct {
 	// HTTP smuggling rejection counter. Incremented when the h1parser
 	// detects CL+TE conflict, duplicate Content-Length, or obs-fold.
 	HTTPSmugglingRejected prometheus.Counter
+	// H1 reactor telemetry (see api.ReactorMetrics). These counters make
+	// the reactor's actual engagement observable: how many connections
+	// it tracks, how many hits it serves inline, why connections leave
+	// for the blocking path, and how many the blocking path returns.
+	ReactorConnsRegistered prometheus.Counter
+	ReactorHits            prometheus.Counter
+	ReactorHandoffs        *prometheus.CounterVec // labels: reason
+	// reactorHandoffChildren holds the pre-resolved closed-set handoff
+	// counters: IncrementReactorHandoff is called from the reactor loop
+	// goroutine, and a WithLabelValues per miss would hash labels on the
+	// serial path of every hit multiplexed on that listener.
+	reactorHandoffChildren map[string]prometheus.Counter
+	ReactorReturns         prometheus.Counter
+	ReactorDrops           prometheus.Counter
 	// accessLog receives structured access log entries. nil disables
 	// access logging (used in tests and when the operator sets log
 	// level above Info).
@@ -117,6 +131,13 @@ type DataPlaneMetrics struct {
 	accessSampleRate uint64
 	accessCounter    atomic.Uint64
 }
+
+// Compile-time proof that DataPlaneMetrics satisfies both fast-path
+// metric contracts the h1parser (L1) consumes through pkg/api.
+var (
+	_ api.FastPathMetrics = (*DataPlaneMetrics)(nil)
+	_ api.ReactorMetrics  = (*DataPlaneMetrics)(nil)
+)
 
 // NewDataPlaneMetrics registers and returns the data-plane RED
 // counters on the given registry.
@@ -213,6 +234,15 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "http_smuggling_rejected_total",
 		Help:      "Total HTTP smuggling attempts rejected by the h1parser (CL+TE conflict, duplicate Content-Length, obs-fold).",
 	})
+	m.initReactorMetrics()
+	m.registerMetrics(reg)
+	return m
+}
+
+// registerMetrics registers every collector on the registry. Called by
+// NewDataPlaneMetrics; extracted to keep NewDataPlaneMetrics under the
+// funlen limit.
+func (m *DataPlaneMetrics) registerMetrics(reg *prometheus.Registry) {
 	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.ResponseBytesOut, m.VaryCapHits,
 		m.CFPurgeTotal, m.CFPurgeDuration, m.CFPurgeSkipped,
 		m.CFBatchFlushed, m.CFBatchDeduped, m.CFBatchFlushErr,
@@ -226,8 +256,53 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
+		m.ReactorConnsRegistered, m.ReactorHits, m.ReactorHandoffs, m.ReactorReturns, m.ReactorDrops,
 		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal)
-	return m
+}
+
+// initReactorMetrics creates the H1 reactor telemetry counters (see
+// api.ReactorMetrics). Called by NewDataPlaneMetrics; extracted to keep
+// NewDataPlaneMetrics under the funlen limit. The handoff reason label
+// is a closed set (api.ReactorHandoff* constants), so cardinality is
+// bounded at six regardless of traffic.
+func (m *DataPlaneMetrics) initReactorMetrics() {
+	m.ReactorConnsRegistered = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "h1_reactor_conns_registered_total",
+		Help:      "Connections that joined the H1 reactor epoll set (accept or return from the blocking parser). Compare with handoffs and returns to see the loop's real engagement.",
+	})
+	m.ReactorHits = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "h1_reactor_hits_total",
+		Help:      "Cache hits served inline by the H1 reactor loop (a subset of requests_total{cache_result=\"HIT\"} on that listener).",
+	})
+	m.ReactorHandoffs = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "h1_reactor_handoffs_total",
+		Help:      "Connections handed from the H1 reactor to the blocking parser, by reason (miss, disqualified, malformed, oversize, overflow, cap).",
+	}, []string{"reason"})
+	m.ReactorReturns = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "h1_reactor_returns_total",
+		Help:      "Keep-alive connections the blocking parser handed back to the H1 reactor after serving a request (return-to-reactor path).",
+	})
+	m.ReactorDrops = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "h1_reactor_conns_dropped_total",
+		Help:      "Connections closed by the H1 reactor (socket error, idle expiry, stuck writer, shutdown overflow).",
+	})
+	// Pre-resolve the closed-set children so the loop-side handoff call
+	// is a map load on a six-entry map created once (no Prometheus label
+	// hashing per miss); the map is populated below via WithLabelValues,
+	// which returns the same child the label lookup would.
+	m.reactorHandoffChildren = map[string]prometheus.Counter{
+		api.ReactorHandoffMiss:         m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffMiss),
+		api.ReactorHandoffDisqualified: m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffDisqualified),
+		api.ReactorHandoffMalformed:    m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffMalformed),
+		api.ReactorHandoffOversize:     m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffOversize),
+		api.ReactorHandoffOverflow:     m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffOverflow),
+		api.ReactorHandoffCap:          m.ReactorHandoffs.WithLabelValues(api.ReactorHandoffCap),
+	}
 }
 
 // initStreamingMetrics creates the streaming buffer gauge and fallback
@@ -938,6 +1013,49 @@ func (m *DataPlaneMetrics) RecordHit(pool, cacheResult, source string, status, b
 // duplicate Content-Length, or obs-fold.
 func (m *DataPlaneMetrics) IncrementSmugglingRejected() {
 	m.HTTPSmugglingRejected.Inc()
+}
+
+// IncrementReactorConnRegistered implements api.ReactorMetrics.
+func (m *DataPlaneMetrics) IncrementReactorConnRegistered() {
+	m.ReactorConnsRegistered.Inc()
+}
+
+// IncrementReactorHit implements api.ReactorMetrics.
+func (m *DataPlaneMetrics) IncrementReactorHit() {
+	m.ReactorHits.Inc()
+}
+
+// IncrementReactorHitN implements the batched api.ReactorMetrics
+// method: the reactor loop batches hit observations and flushes them
+// here — one Add per batch instead of one contended atomic per hit
+// crossing every loop's CPU core.
+func (m *DataPlaneMetrics) IncrementReactorHitN(n uint64) {
+	m.ReactorHits.Add(float64(n))
+}
+
+// IncrementReactorHandoff implements api.ReactorMetrics. reason must be
+// one of the api.ReactorHandoff* constants (closed label set); the
+// children are pre-resolved at init (reactorHandoffChildren) so the
+// loop-side call is a switch over the closed set, never a Prometheus
+// label map lookup.
+func (m *DataPlaneMetrics) IncrementReactorHandoff(reason string) {
+	if c, ok := m.reactorHandoffChildren[reason]; ok {
+		c.Inc()
+		return
+	}
+	// Unknown reason: fall through to the label lookup (never reached
+	// with the closed set; keeps the counter honest if the set grows).
+	m.ReactorHandoffs.WithLabelValues(reason).Inc()
+}
+
+// IncrementReactorReturn implements api.ReactorMetrics.
+func (m *DataPlaneMetrics) IncrementReactorReturn() {
+	m.ReactorReturns.Inc()
+}
+
+// IncrementReactorDrop implements api.ReactorMetrics.
+func (m *DataPlaneMetrics) IncrementReactorDrop() {
+	m.ReactorDrops.Inc()
 }
 
 // recordFastHTTPRings updates the dashboard ring buffers for non-HIT

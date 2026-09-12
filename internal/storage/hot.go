@@ -32,8 +32,12 @@ const inlineEvictCap = 4
 const defaultReaperInterval = 30 * time.Second
 
 // reaperShardBudget caps the wall-clock time spent holding the write
-// lock on a single shard during a TTL reaper pass.
-const reaperShardBudget = 10 * time.Millisecond
+// lock on a single shard during a TTL reaper pass. 1 ms: Go's RWMutex
+// is writer-preferring, so every reader arriving behind a reaped-shard
+// write lock — including the reactor loop's TryHit — waits out the
+// full budget; 10 ms was a per-shard hit-latency spike generator under
+// TTL churn.
+const reaperShardBudget = time.Millisecond
 
 // HotStore is the sharded in-memory (L0) cache tier. It implements
 // the Store interface using a fixed number of shards, each protected
@@ -680,6 +684,16 @@ func (h *HotStore) reapShard(idx int, now time.Time) {
 
 // sweeper is the background goroutine that drains overshoot evictions
 // signalled by Put. It terminates when Close() is called.
+// sweeperEvictCap bounds how many entries the sweeper evicts inside
+// one shard-lock hold, mirroring inlineEvictCap's rationale: a single
+// oversized Put into a shard of small objects can put the shard over
+// budget by thousands of entries, and an unbounded drain holds the
+// write lock for the whole pass — stalling every concurrent Get on
+// that shard (writer-preferring RWMutex). The sweeper re-signals
+// itself below, so the overshoot still drains to zero, just in
+// bounded lock holds.
+const sweeperEvictCap = 64
+
 func (h *HotStore) sweeper() {
 	defer h.wg.Done()
 	perShardMax := h.maxBytes / int64(len(h.shards))
@@ -691,6 +705,7 @@ func (h *HotStore) sweeper() {
 			s := &h.shards[idx]
 			var logs []evictionLog
 			var slabFrees [][]byte
+			var evicted int
 			s.mu.Lock()
 			for s.bytes > perShardMax && s.evict.Len() > 0 {
 				evKey, ok := s.evictPreferBacked()
@@ -709,10 +724,25 @@ func (h *HotStore) sweeper() {
 					old.windowHits.Store(0)
 					hotEntryPool.Put(old)
 				}
+				evicted++
+				if evicted >= sweeperEvictCap {
+					break
+				}
 			}
+			stillOver := s.bytes > perShardMax && s.evict.Len() > 0
 			s.mu.Unlock()
 			h.flushEvictionLogs(logs)
 			h.flushSlabFrees(slabFrees)
+			if stillOver {
+				// Yield the lock to waiting readers (their Gets must not
+				// queue behind an unbounded drain), then re-signal for the
+				// next bounded pass — the signal channel is buffered to
+				// len(shards), so the re-send cannot block or be lost.
+				select {
+				case h.evictSignal <- idx:
+				default:
+				}
+			}
 		}
 	}
 }

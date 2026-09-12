@@ -292,6 +292,75 @@ the curated, human-readable summary.
   below the 5-minute data-plane safety-net WriteTimeout, and exposed in
   the Helm chart values (`config.listen.read_timeout`).
 
+### Changed
+- **Coalesced pipelined-hit writev on the H1 reactor** (requires
+  `experimental.h1_reactor`): a pipelined batch of cache hits now
+  flushes as ONE writev syscall carrying up to 5 responses (retained
+  zero-copy and released at batch completion) instead of one writev
+  per hit — batch-writing clients pay 1 write syscall per batch rather
+  than per request. Ordering and correctness guards: a Connection:
+  close follower flushes the pending batch first and rides solo as the
+  conn's last bytes; a miss/disqualified/malformed follower triggers an
+  intercepted handoff that flushes the already-served hits to the
+  socket BEFORE the blocking parser replays the follower's bytes (the
+  handoff prefix then carries exactly the follower); a batch at
+  capacity flushes before parsing further. Single-hit latency
+  unchanged (Gate_Reactor_Hit stays 0 allocs/op, ~185 ns).
+- **Reactor loop hygiene under load** (requires `experimental.h1_reactor`):
+  the loop's busy-poll budget now scales with its connection count (full
+  80 µs window at ≤16 conns, tapering to zero at 256+) — at saturation
+  batches arrive continuously so every spun poll was a core stolen from
+  origin/peer fetch goroutines, while at low concurrency the spin
+  remains the keep-alive RTT win. Hit telemetry is batched per loop
+  (applied via a new `IncrementReactorHitN` capability at 128-hit
+  batches, on handoffs, and at least once per second) instead of one
+  contended shared-counter add per hit, and the handoff-reason
+  counters are pre-resolved at init (no per-miss label hashing on the
+  loop goroutine). Storage lock-hold bounds: the background sweeper's
+  evict drain is capped at 64 entries per shard-lock pass and
+  re-signals itself until the overshoot drains (one oversized Put into
+  a shard of small objects previously held the write lock for the
+  entire multi-thousand-entry drain, stalling every Get on that
+  shard), and the TTL reaper's per-shard budget drops from 10 ms to
+  1 ms (Go's writer-preferring RWMutex made every reader queue behind
+  the full budget — a 10 ms hit-latency spike generator on the
+  reaped-shard fast path).
+- **Miss round-trip cost on the H1 reactor** (ADR-0043; requires
+  `experimental.h1_reactor`): the spawn-per-miss handoff model is
+  replaced by a bounded worker pool (dispatcher + up to 1024 workers
+  over a 128-slot queue), so a miss under load queues for a worker
+  instead of resetting the connection at the first 128-job boundary,
+  and sustained missy traffic no longer pays a goroutine spawn + ~32 KiB
+  stack growth per miss. The handed-off `reactorConn` (~20 KiB inline)
+  is now reused: the return hook re-registers the SAME struct on the
+  reactor loop (fd-identity-checked), and a conn that dies on a worker
+  recycles its struct to a pool. The fall-through path draws its
+  rebuilt request head, 16 KiB bufio reader, and leftover copy from a
+  per-cycle pool instead of allocating all three per miss. Net effect:
+  ~50 KiB of heap churn per miss round trip drops to the fasthttp ctx
+  internals, gated by new `Reactor_MissRoundTrip` and
+  `FallThrough_Pooled` alloc budgets in `bench/run.sh`.
+
+### Fixed
+- **Pipelined request identity and stranding on the H1 blocking path**:
+  a client writing multiple requests per connection (HTTP/1.1
+  pipelining — load generators, `h2load --h1`-style batch writers) got
+  two wrong behaviors. First, when bytes followed a fast-path hit, the
+  fallback handler was re-invoked with the *already-served* request and
+  the follower's bytes as its pipeline — the client received the first
+  request's response twice and the follower was never served. Second,
+  any request that followed a miss was swallowed into the fallback
+  handler's internal read buffer and stalled until the idle deadline
+  killed the connection (up to 120 s), because `handleFallThrough`'s
+  bufio consumed follower bytes it never returned. The fallback now
+  returns its unread leftover, `parseRequest` accepts a buffered
+  prefix, and every pipelined follower is parsed and served as itself,
+  in order, on both the blocking path and the reactor (whose
+  miss-handoff replay had the same behavior). The reactor return
+  (`h1_reactor`) now fires only once no follower bytes remain buffered
+  — a mid-batch return would have orphaned bytes held by the blocking
+  goroutine after the reactor re-registered the fd.
+
 ## [0.5.8] - 2026-09-04
 
 ### Fixed
@@ -338,7 +407,27 @@ the curated, human-readable summary.
   header time with `ErrStreamUnshareable` and each follower fetches
   its own response outside singleflight (ADR-0042).
 
+### Changed
+- **H1 reactor engagement under mixed traffic** (ADR-0042; requires
+  `experimental.h1_reactor`): the blocking parser now hands keep-alive
+  connections back to the reactor loop after serving each request
+  (return-to-reactor), so a miss no longer strands a connection on the
+  blocking path for its lifetime — cluster peer-fetch and origin-miss
+  traffic keeps cycling connections back to batch hit serving.
+- **Pipelined hits served inline by the reactor**: a cache hit followed
+  by pipelined bytes on the same connection is served inline and the
+  next buffered request is parsed immediately after the flush, instead
+  of forcing a handoff (batch-writing clients stay on the reactor).
+
 ### Added
+- **H1 reactor telemetry**: `bouine_h1_reactor_conns_registered_total`,
+  `bouine_h1_reactor_hits_total`,
+  `bouine_h1_reactor_handoffs_total{reason}` (closed set: miss,
+  disqualified, malformed, oversize, overflow, cap),
+  `bouine_h1_reactor_returns_total`, and
+  `bouine_h1_reactor_conns_dropped_total` make the reactor's actual
+  engagement observable without pprof (previously invisible — the gap
+  that hid the starved-reactor regression under mixed workloads).
 - Data-integrity regression net for the hot-store ownership bug class
   (bouine#611): a slow-client body-lifetime race on the standard
   fasthttp hit path (`ServeRequest` — the path that kept corrupting

@@ -17,7 +17,6 @@ import (
 
 	"github.com/bouine-cache/bouine/internal/observability"
 	"github.com/bouine-cache/bouine/internal/storage"
-	"github.com/bouine-cache/bouine/internal/transport"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
 
@@ -93,6 +92,19 @@ const (
 	// requests per connection. With 8 connections × 16 pending = 128
 	// concurrent peer fetches per peer, matching the old HTTP/2 capacity.
 	peerMaxPendingRequests = 16
+	// peerDialTimeout bounds one TCP dial to a peer. Peer traffic is
+	// intra-cluster (same VPC, usually the same zone): healthy dials
+	// complete in single-digit milliseconds. The previous 2s meant a
+	// dead address held a fetch slot for the full window before erroring
+	// — on prod-eu, fetches queued behind dial timeouts to pod IPs that
+	// died during a rolling restart showed up as 1–2.5s "HIT" latencies
+	// (a peer-served hit is attributed X-Cache: HIT). 200ms is ~40 round
+	// trips of headroom and stays comfortably above the fetch RPC
+	// budget's own envelope: with the RPC bounded by PeerFetchTimeout
+	// (see pipelineDo), the caller abandons the request at 500ms, but
+	// the dial itself must also fail inside that window or the pipeline
+	// worker parks a connection slot for the dial duration.
+	peerDialTimeout = 200 * time.Millisecond
 )
 
 // Peer address breaker defaults. A peer address that fails
@@ -365,6 +377,11 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 // of pipelined connections (default 8) that can handle up to 16
 // concurrent in-flight requests per connection, matching the old HTTP/2
 // capacity with ~85% less connection pool memory.
+//
+// A retired address reaching here means it is a routing target
+// again: drop the retired mark so the fresh client below dials
+// normally, and never hand back the evicted client whose worker
+// may already be parked on the retired mark.
 func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 	clients := f.pipelineClients.Load()
 	if clients == nil {
@@ -403,13 +420,32 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 				return nil, errPeerAddrRetired
 			}
 			return (&net.Dialer{
-				Timeout:   2 * time.Second,
+				Timeout:   peerDialTimeout,
 				KeepAlive: 30 * time.Second,
 			}).Dial("tcp", addr)
 		},
 	}
 	actual, _ := clients.LoadOrStore(addr, pc)
 	return actual.(*fasthttp.PipelineClient)
+}
+
+// pipelineDo performs a bounded peer RPC. Peer callers pass the
+// *fasthttp.RequestCtx as context, which carries no deadline, so
+// transport.PipelineDo's deadline-less fallback applies its 60s default
+// — a hung peer would hold a fetch/put slot for a full minute while
+// only the RPC-level ReadTimeout eventually kills the request. This
+// wrapper guarantees the PeerFetchTimeout budget regardless of the
+// caller's context: a caller deadline shorter than the budget is
+// preserved (honoured via DoDeadline), and a deadline-less context is
+// capped by the budget itself (DoTimeout).
+func (f *PeerFetcher) pipelineDo(ctx context.Context, c *fasthttp.PipelineClient, req *fasthttp.Request, resp *fasthttp.Response) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < PeerFetchTimeout {
+		return c.DoDeadline(req, resp, deadline)
+	}
+	return c.DoTimeout(req, resp, PeerFetchTimeout)
 }
 
 // peerAddr returns the address (with scheme context) for a peer.
@@ -564,7 +600,7 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 	if pc == nil {
 		return nil, fmt.Errorf("peer fetch %s: fetcher closed during shutdown", peer.Addr)
 	}
-	if err := transport.PipelineDo(ctx, pc, httpReq, resp); err != nil {
+	if err := f.pipelineDo(ctx, pc, httpReq, resp); err != nil {
 		// A canceled caller context is not a peer failure — do not
 		// count it toward the breaker.
 		if ctx.Err() == nil {
@@ -799,7 +835,7 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 	if putClient == nil {
 		return fmt.Errorf("peer put %s: fetcher closed during shutdown", peer.Addr)
 	}
-	if err := transport.PipelineDo(ctx, putClient, req, resp); err != nil {
+	if err := f.pipelineDo(ctx, putClient, req, resp); err != nil {
 		// A canceled caller context is not a peer failure — do not
 		// count it toward the breaker.
 		if ctx.Err() == nil {

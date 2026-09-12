@@ -773,3 +773,116 @@ func TestPeerFetcher_CloseConcurrentWithFetchAndPut(t *testing.T) {
 	err = f.Put(context.Background(), peer, obj)
 	require.ErrorContains(t, err, "fetcher closed")
 }
+
+// slowAdminServer returns a server whose /v1/peer/fetch handling blocks
+// for the given duration before answering, to pin the RPC budget.
+func slowAdminServer(t *testing.T, delay time.Duration) *fasthttptest.Server {
+	t.Helper()
+	return fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		time.Sleep(delay)
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+}
+
+func TestPeerFetcher_DeadlinelessContextBoundedByPeerFetchTimeout(t *testing.T) {
+	t.Parallel()
+	// A server slower than the RPC budget: before the fix, a deadline-less
+	// ctx (the *fasthttp.RequestCtx passed by the cache handler) fell back
+	// to transport.PipelineDo's 60s default, so the fetch held a semaphore
+	// slot until the slow response eventually arrived. pipelineDo must cap
+	// the RPC at PeerFetchTimeout and return a timeout error instead.
+	srv := slowAdminServer(t, 3*PeerFetchTimeout)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	start := time.Now()
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Nil(t, obj)
+	// The failure is a timeout inside the budget, not a slow success:
+	// allow generous headroom over PeerFetchTimeout for CI scheduling
+	// jitter, but nothing remotely near the 60s fallback.
+	require.Less(t, elapsed, 2*PeerFetchTimeout,
+		"deadline-less fetch must be bounded by PeerFetchTimeout, took %s", elapsed)
+	require.ErrorContains(t, err, "timeout")
+	// A timeout with a live (uncanceled) caller context counts toward the
+	// breaker.
+	require.Equal(t, 1, f.breaker[srv.Addr].consecutive)
+}
+
+func TestPeerFetcher_PutDeadlinelessContextBoundedByPeerFetchTimeout(t *testing.T) {
+	t.Parallel()
+	srv := slowAdminServer(t, 3*PeerFetchTimeout)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	start := time.Now()
+	err := f.Put(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, 2*PeerFetchTimeout,
+		"deadline-less put must be bounded by PeerFetchTimeout, took %s", elapsed)
+	require.ErrorContains(t, err, "timeout")
+}
+
+func TestPeerFetcher_ShorterCallerDeadlineHonoured(t *testing.T) {
+	t.Parallel()
+	// A caller deadline shorter than PeerFetchTimeout must win: pipelineDo
+	// routes it through DoDeadline with the caller's own budget.
+	srv := slowAdminServer(t, 10*PeerFetchTimeout)
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), PeerFetchTimeout/4)
+	defer cancel()
+	start := time.Now()
+	_, err := f.Fetch(ctx,
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	// Cancelled-caller failures are not peer failures: the breaker state
+	// must stay clean (the fast path in Fetch checks ctx.Err() first, but
+	// the RPC error path must also skip recordPeerFailure).
+	require.Less(t, elapsed, 2*(PeerFetchTimeout/4),
+		"caller deadline must cap the fetch, took %s", elapsed)
+}
+
+// TestPeerFetcher_DialTimeoutIsSubsecond pins the dial budget: a dead
+// address must fail inside the RPC budget, not the historical 2s. The
+// address is a TCP black hole (LISTEN without accept drain) in the
+// loopback range reserved for benchmarking.
+func TestPeerFetcher_DialTimeoutIsSubsecond(t *testing.T) {
+	t.Parallel()
+	// 198.18.0.0/15 is reserved for benchmarking; nothing routes there,
+	// so the dial hangs until the timeout fires.
+	const blackHole = "198.18.0.1:9000"
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{MaxIdleConnDuration: 100 * time.Millisecond}, nil, nil)
+	defer f.Close(context.Background())
+
+	start := time.Now()
+	_, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: blackHole},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, PeerFetchTimeout+200*time.Millisecond,
+		"dial to a dead address must fail within the RPC budget (dial %+v), took %s", peerDialTimeout, elapsed)
+}

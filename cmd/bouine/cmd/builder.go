@@ -307,17 +307,9 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			RefreshMetrics:          rs.dpMetrics.RefreshMetricsVec(),
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
-			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
-				owner := rs.clusterNode.Owner(key)
-				if owner.Name == "" {
-					return api.PeerInfo{}, true
-				}
-				return owner, rs.clusterNode.IsLocal(key)
-			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
-			}
+		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
+			cfg.OwnerFn = ownerFn
+			cfg.PeerFetch = peerFetchFn
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
 			// hit (issue #509). Fire-and-forget in a bounded goroutine so
@@ -396,17 +388,9 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
-		if rs.clusterNode != nil && rs.peerFetcher != nil && e.cfg.Cluster.Mode == config.ClusterModeStrong {
-			cfg.OwnerFn = func(key api.Key) (api.PeerInfo, bool) {
-				owner := rs.clusterNode.Owner(key)
-				if owner.Name == "" {
-					return api.PeerInfo{}, true
-				}
-				return owner, rs.clusterNode.IsLocal(key)
-			}
-			cfg.PeerFetch = func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
-				return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
-			}
+		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {
+			cfg.OwnerFn = ownerFn
+			cfg.PeerFetch = peerFetchFn
 			// Write-to-owner RPC: a non-owner that fetches from origin
 			// forwards the object to the owner so subsequent peer-fetches
 			// hit (issue #509). Fire-and-forget in a bounded goroutine so
@@ -435,6 +419,27 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	}
 
 	router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, handler)
+}
+
+// clusterFastPathClosures builds the ownerFn/peerFetch closures shared
+// by the slow-path HandlerConfig and the fast-path handler (strong mode
+// only). Reused so both paths hit the same ring and fetcher; nil when
+// clustering is not in strong mode.
+func clusterFastPathClosures(e *engine, rs *runState) (func(key api.Key) (owner api.PeerInfo, isLocal bool), func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)) {
+	if rs.clusterNode == nil || rs.peerFetcher == nil || e.cfg.Cluster.Mode != config.ClusterModeStrong {
+		return nil, nil
+	}
+	ownerFn := func(key api.Key) (api.PeerInfo, bool) {
+		owner := rs.clusterNode.Owner(key)
+		if owner.Name == "" {
+			return api.PeerInfo{}, true
+		}
+		return owner, rs.clusterNode.IsLocal(key)
+	}
+	peerFetch := func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error) {
+		return rs.peerFetcher.Fetch(ctx, peer, api.PeerFetchRequest{Key: key, VaryKey: varyKey})
+	}
+	return ownerFn, peerFetch
 }
 
 // buildKeyPolicy compiles the route's cache key config into a

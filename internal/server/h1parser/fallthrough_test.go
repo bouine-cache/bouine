@@ -124,6 +124,65 @@ func TestHandleFallThrough_TransfersOwnerMissHint(t *testing.T) {
 	}
 }
 
+// TestHandleFallThrough_TransfersOwnerGateRejectHint pins the
+// gate-rejection plumbing: the fallback handler must see
+// api.OwnerGateRejectContextKey in its RequestCtx user values exactly
+// when RawRequest.OwnerGateReject was set, so handleCacheMiss can skip
+// the deterministically-rejected peer retry (nil-policy routes).
+func TestHandleFallThrough_TransfersOwnerGateRejectHint(t *testing.T) {
+	tests := []struct {
+		name       string
+		gateReject bool
+		wantHinted bool
+	}{
+		{"flagged", true, true},
+		{"unflagged", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got any
+			handler := func(ctx *fasthttp.RequestCtx) {
+				got = ctx.UserValue(api.OwnerGateRejectContextKey)
+				ctx.SetStatusCode(fasthttp.StatusOK)
+			}
+			parser := New(nil, handler, WithNowFunc(time.Now))
+			clientConn, serverConn := dialTCPPair(t)
+			defer clientConn.Close()
+
+			req := &api.RawRequest{
+				Method:      "GET",
+				Path:        "/miss",
+				HTTPVersion: "HTTP/1.1",
+				Host:        "example.com",
+				Headers: [api.MaxRawHeaders]api.RawHeader{
+					{Key: "Host", Value: "example.com"},
+					{Key: "Connection", Value: "close"},
+				},
+				NHeaders:        2,
+				OwnerGateReject: tt.gateReject,
+			}
+
+			done := make(chan struct{}, 1)
+			go func() {
+				_, _ = parser.handleFallThrough(serverConn, req, nil)
+				_ = serverConn.Close()
+				done <- struct{}{}
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("handleFallThrough did not return within 5s")
+			}
+
+			if tt.wantHinted {
+				assert.Equal(t, true, got, "hint must be transferred to the fallback ctx")
+			} else {
+				assert.Nil(t, got, "unflagged request must not carry the hint")
+			}
+		})
+	}
+}
+
 func TestHandleFallThrough_PreservesHeaders(t *testing.T) {
 	var gotAccept, gotCustom string
 	var wg sync.WaitGroup

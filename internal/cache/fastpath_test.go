@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"io"
@@ -14,10 +15,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bouine-cache/bouine/internal/server/h1parser"
 	"github.com/bouine-cache/bouine/internal/storage"
 	"github.com/bouine-cache/bouine/internal/testutil/testkey"
 	"github.com/bouine-cache/bouine/pkg/api"
 	"github.com/bouine-cache/bouine/pkg/header"
+
+	"github.com/valyala/fasthttp"
 )
 
 func TestFastPathHandler_TryHit(t *testing.T) {
@@ -1924,7 +1928,9 @@ func TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss(t *testing.T) {
 	resp, ok := stub.fp.TryHit(req, time.Now())
 	assert.False(t, ok, "foreign variant body must not be served from the fast path")
 	assert.Nil(t, resp)
-	assert.False(t, req.OwnerMiss, "gate rejection must not flag OwnerMiss (slow path re-asks)")
+	assert.False(t, req.OwnerMiss, "gate rejection must not flag OwnerMiss (different semantics)")
+	assert.True(t, req.OwnerGateReject,
+		"gate rejection must flag OwnerGateReject (nil-policy slow path skips the duplicate RPC)")
 }
 
 // TestFastPathHandler_PeerDecodedObjectTransientFields pins the wire
@@ -1984,4 +1990,83 @@ func TestFastPathHandler_PeerDecodedObjectTransientFields(t *testing.T) {
 	resp2, ok2 := stub2.fp.TryHit(req, time.Now())
 	assert.False(t, ok2, "decoded peer object with no-cache must fall through")
 	assert.Nil(t, resp2)
+}
+
+// TestPeerVaryGateHeaderParity pins the two-parsers contract the
+// peer-branch variant gate depends on (issue #630): peerObj.VaryKey was
+// computed by the OWNER from its fasthttp-parsed request (headerFromCtx
+// over RequestHeader.All), while the gate recomputes it from the
+// h1parser's raw header view (reqHeaderMapFromRaw). Both parsers must
+// agree for the same wire bytes, or every Vary'd peer hit silently
+// falls through (correct but dead acceleration).
+//
+// Pinned agreements:
+//   - non-canonical key casing (both paths canonicalize before lookup:
+//     fasthttp normalizes on parse, the raw path via header.InternKey)
+//   - leading OWS in values (both parsers strip it: h1parser skips
+//     spaces after the colon, fasthttp's headerScanner trims both ends)
+//   - trailing OWS in values (h1parser keeps it, fasthttp trims it;
+//     reqHeaderMapFromRaw right-trims to close the gap)
+//   - duplicate Vary-relevant headers (both views keep the entries;
+//     Map.Get returns the first occurrence in each)
+//
+// With all cases pinned, the two views are byte-identical for
+// BuildVaryKey purposes — which is what makes the slow path's
+// gate-rejection skip (api.RawRequest.OwnerGateReject) sound.
+func TestPeerVaryGateHeaderParity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		wire string
+	}{
+		{
+			name: "canonical key",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: US\r\n\r\n",
+		},
+		{
+			name: "non-canonical key casing",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nbm-market: US\r\n\r\n",
+		},
+		{
+			name: "leading OWS in value",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: \tUS\r\n\r\n",
+		},
+		{
+			name: "trailing OWS in value",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: US \t\r\n\r\n",
+		},
+		{
+			name: "duplicate vary header first wins",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nBM-Market: US\r\nBM-Market: EU\r\n\r\n",
+		},
+		{
+			name: "list-valued vary field",
+			wire: "GET /v HTTP/1.1\r\nHost: example.com\r\nAccept-Encoding: gzip, br\r\n\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The h1parser view: parse the request head with the real
+			// production header stage (parseHeaders is package-private
+			// upstream; ParseHeadersForTest is the bridge).
+			var scratch api.RawRequest
+			require.NoError(t, h1parser.ParseHeadersForTest([]byte(tt.wire), &scratch))
+			req := &scratch
+
+			fastView := reqHeaderMapFromRaw(req)
+
+			// The owner's view: the same wire bytes re-parsed by
+			// fasthttp (handleFallThrough replays the head through
+			// Request.Read, the owner sees this map).
+			var rctx fasthttp.RequestCtx
+			require.NoError(t, rctx.Request.Read(bufio.NewReader(bytes.NewReader([]byte(tt.wire)))))
+			fasthttpView := headerFromCtx(&rctx)
+
+			raw := BuildVaryKey("BM-Market", fastView, nil)
+			slow := BuildVaryKey("BM-Market", fasthttpView, nil)
+			assert.Equal(t, slow, raw,
+				"raw and fasthttp views must compute identical Vary keys for the same wire bytes")
+		})
+	}
 }

@@ -7,6 +7,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// OwnerMissContextKey is the fasthttp user-value key under which the
+// h1parser transfers RawRequest.OwnerMiss to the fallback RequestCtx
+// on a fast-path fall-through (see RawRequest.OwnerMiss).
+const OwnerMissContextKey = "bouine.owner_miss"
+
 // RawRequest is a parsed HTTP/1.1 request. It is populated by the h1parser
 // from a pooled read buffer — all string fields are slices of that buffer,
 // so they are valid only until the buffer is reused. The FastPathHandler
@@ -52,6 +57,15 @@ type RawRequest struct {
 	// Hand-built RawRequests that set Headers without ScanFlags must
 	// call req.RecomputeScanFlags() first (see its doc).
 	ConnectionClose bool
+	// OwnerMiss reports that the fast path already asked the key's ring
+	// owner for this request and got a definitive miss (nil object, nil
+	// error). The h1parser transfers it to the fallback RequestCtx under
+	// OwnerMissContextKey so handleCacheMiss skips the duplicate owner
+	// lookup and peer RPC and goes straight to origin. Never set on peer
+	// errors (the slow-path retry is kept) or on gate rejections (the
+	// slow path, with the route's key policy, may still accept). Reset
+	// to false by the parser's per-request soft reset; zero value = unset.
+	OwnerMiss bool
 }
 
 // RequestScanFlags is the bitmask of single-pass header scan results

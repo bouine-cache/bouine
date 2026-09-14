@@ -2896,6 +2896,96 @@ func TestHandleCacheMiss_PeerFetch(t *testing.T) {
 	assert.Equal(t, int32(0), originCalls.Load())
 }
 
+// TestHandleCacheMiss_FastPathOwnerMissHintSkipsPeerFetch pins the
+// owner-miss hint: when the H1 fast path already got a definitive miss
+// from the owner for a plain key (transferred via
+// api.OwnerMissContextKey), the slow path skips the duplicate owner
+// lookup + peer RPC and goes straight to origin.
+func TestHandleCacheMiss_FastPathOwnerMissHintSkipsPeerFetch(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	var peerFetchCalls, originCalls atomic.Int32
+	originUpstream := func(ctx *fasthttp.RequestCtx) {
+		originCalls.Add(1)
+		ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+		ctx.SetStatusCode(200)
+		_, _ = ctx.Write([]byte("from-origin"))
+	}
+	h := NewHandler(HandlerConfig{
+		Upstream:   originUpstream,
+		FastClient: &testFastClient{handler: originUpstream},
+		Store:      store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil
+		},
+	})
+
+	r := testCtx("GET", "http://example.com/hinted-miss")
+	r.SetUserValue(api.OwnerMissContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, "from-origin", respBody(rr))
+	assert.Equal(t, int32(0), peerFetchCalls.Load(), "hint must skip the duplicate peer RPC")
+	assert.Equal(t, int32(1), originCalls.Load())
+}
+
+// TestHandleCacheMiss_OwnerMissHintIgnoredWhenStaleObjectStored pins the
+// hint's scope: with a stale object in the store (obj != nil) the slow
+// path's peer question carries peerVaryAssertion(obj) — a different
+// question than the fast path's plain "" — so the hint must not
+// suppress the fetch.
+func TestHandleCacheMiss_OwnerMissHintIgnoredWhenStaleObjectStored(t *testing.T) {
+	t.Parallel()
+	store := storage.NewHotStore(storage.HotConfig{MaxBytes: 1 << 20, NumShards: 2})
+	url := "http://example.com/hinted-stale"
+	key := BuildKey(requestInfoFromURL("GET", url), nil)
+	stale := &api.Object{
+		StatusCode: 200,
+		Header:     headerMap(header.CacheControl, "max-age=60"),
+		Body:       []byte("stale-body"),
+		BodySize:   10,
+		StoredAt:   time.Now().Add(-2 * time.Minute),
+		TTL:        60 * time.Second,
+	}
+	require.NoError(t, store.Put(context.Background(), key, stale))
+
+	var peerFetchCalls atomic.Int32
+	h := NewHandler(HandlerConfig{
+		Upstream: func(ctx *fasthttp.RequestCtx) {
+			ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+			ctx.SetStatusCode(200)
+			_, _ = ctx.Write([]byte("from-origin"))
+		},
+		FastClient: &testFastClient{
+			handler: func(ctx *fasthttp.RequestCtx) {
+				ctx.Response.Header.Set(header.CacheControl, "max-age=60")
+				ctx.SetStatusCode(200)
+				_, _ = ctx.Write([]byte("from-origin"))
+			},
+		},
+		Store: store,
+		OwnerFn: func(key api.Key) (api.PeerInfo, bool) {
+			return api.PeerInfo{Addr: "owner:8080"}, false // not local
+		},
+		PeerFetch: func(_ context.Context, _ api.PeerInfo, _ api.Key, _ string) (*api.Object, error) {
+			peerFetchCalls.Add(1)
+			return nil, nil // peer miss
+		},
+	})
+
+	r := testCtx("GET", url)
+	r.SetUserValue(api.OwnerMissContextKey, true)
+	rr := r
+	h.ServeRequest(rr)
+	require.Equal(t, 200, respCode(rr))
+	assert.Equal(t, int32(1), peerFetchCalls.Load(), "hint must not suppress the fetch when a stale object exists")
+}
+
 // TestHandleCacheMiss_NonOwnerDoesNotStoreOriginFetch pins the strong-mode
 // owner-gated storage invariant: a non-owner that misses locally, misses
 // peer-fetch, then fetches from origin must serve the response to the

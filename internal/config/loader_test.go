@@ -986,6 +986,34 @@ func TestValidate_H1ReactorRequiresFastPath(t *testing.T) {
 	assert.NoError(t, cfg.Validate())
 }
 
+// TestValidate_H1FastPeerPathRequiresFastPath asserts that
+// experimental.h1_fast_peer_path without experimental.h1_fast_path is
+// rejected at load time instead of silently no-oping at startup, and
+// that the flag defaults to off.
+func TestValidate_H1FastPeerPathRequiresFastPath(t *testing.T) {
+	t.Parallel()
+
+	// Default config leaves the flag off.
+	require.False(t, Defaults().Experimental.H1FastPeerPath)
+
+	// Flag on without the fast path must be rejected.
+	cfg := Defaults()
+	cfg.Listen.HTTP = ":8080"
+	cfg.Experimental.H1FastPeerPath = true
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "h1_fast_peer_path requires experimental.h1_fast_path")
+
+	// With the fast path on, the same config validates.
+	cfg.Experimental.H1FastPath = true
+	assert.NoError(t, cfg.Validate())
+
+	// YAML round-trip: the flag parses from its documented key.
+	parsed, err := Parse([]byte("experimental:\n  h1_fast_path: true\n  h1_fast_peer_path: true\n"))
+	require.NoError(t, err)
+	assert.True(t, parsed.Experimental.H1FastPeerPath)
+}
+
 // TestValidate_PeerIdleBelowAdminIdle asserts the idle-timeout ordering
 // between the peer-fetch client and the admin server: the client must
 // close idle peer connections before the admin server reaps them, or

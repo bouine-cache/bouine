@@ -17,7 +17,16 @@ import (
 type originControl struct {
 	latencyMs atomic.Int64 // injected latency per request (0 = none)
 	forceErr  atomic.Bool  // when true, all requests return 503
+	requests  atomic.Int64 // total handled requests (cacheable or not)
 }
+
+// Requests reports the total number of requests the origin has handled.
+// Integration tests use it to prove a path served WITHOUT touching the
+// origin (e.g. a fast-path peer hit): snapshot the counter, drive the
+// request, compare. The pointer is exposed on ClusterStack as
+// Origin.Requests(); a zero value is only safe before the first read
+// because Requests starts at zero at boot.
+func (o *originControl) Requests() int64 { return o.requests.Load() }
 
 // fasthttpTestServer is a minimal fasthttp server with the same lifecycle
 // semantics as httptest.Server: call Close when done.
@@ -40,6 +49,7 @@ func startOriginWithControl() (*fasthttpTestServer, *originControl) {
 	ctrl := &originControl{}
 
 	handler := func(ctx *fasthttp.RequestCtx) {
+		ctrl.requests.Add(1)
 		if ctrl.forceErr.Load() {
 			ctx.SetStatusCode(503)
 			ctx.WriteString("origin forced error")

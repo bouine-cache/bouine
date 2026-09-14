@@ -1833,6 +1833,100 @@ func TestFastPathHandler_PeerStaleNotServedWhenRevalidationRequired(t *testing.T
 	assert.Nil(t, resp)
 }
 
+// TestFastPathHandler_PeerMissFlagsOwnerMiss pins the slow-path hint:
+// a definitive owner miss (nil object, nil error) sets
+// RawRequest.OwnerMiss so the slow path (handleCacheMiss) skips the
+// duplicate owner lookup + peer RPC and goes straight to origin.
+func TestFastPathHandler_PeerMissFlagsOwnerMiss(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-miss-hint",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.mu.Lock()
+	stub.obj = nil // peer miss
+	stub.mu.Unlock()
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+	assert.True(t, req.OwnerMiss, "definitive owner miss must flag RawRequest.OwnerMiss")
+}
+
+// TestFastPathHandler_PeerErrorDoesNotFlagOwnerMiss pins that a
+// peer-fetch error never sets the hint: the slow path's second attempt
+// is a legitimate retry for transient failures.
+func TestFastPathHandler_PeerErrorDoesNotFlagOwnerMiss(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-err-hint",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+	}
+	obj := &api.Object{Key: buildKeyFromRaw(req, nil)}
+	stub := newPeerFetchStub(obj)
+	stub.mu.Lock()
+	stub.err = context.DeadlineExceeded
+	stub.mu.Unlock()
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok)
+	assert.Nil(t, resp)
+	assert.False(t, req.OwnerMiss, "peer-fetch error must not flag OwnerMiss (slow path retries)")
+}
+
+// TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss pins that a
+// Vary-gate rejection never sets the hint: the peer answered with an
+// object, so this is not a definitive miss — the slow path's gate runs
+// with the route's key policy and may legitimately accept what the
+// policy-less fast-path gate rejected (see peerGateMatchesVary).
+func TestFastPathHandler_PeerGateRejectionDoesNotFlagOwnerMiss(t *testing.T) {
+	t.Parallel()
+	req := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-wrong-variant-hint",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+		NHeaders:    1,
+	}
+	req.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "US"}
+	req.RecomputeScanFlags()
+
+	otherReq := &api.RawRequest{
+		Method:      "GET",
+		Path:        "/peer-wrong-variant-hint",
+		Host:        "example.com",
+		Scheme:      "http",
+		HTTPVersion: "HTTP/1.1",
+		NHeaders:    1,
+	}
+	otherReq.Headers[0] = api.RawHeader{Key: "BM-Market", Value: "fr"}
+	obj := &api.Object{
+		StatusCode: 200,
+		Header:     peerHeaderMap13(),
+		VaryValue:  "BM-Market",
+		VaryKey:    BuildVaryKey("BM-Market", requestInfoFromCtxRaw(otherReq).Header, nil),
+		Body:       []byte("foreign-market"),
+		BodySize:   14,
+		StoredAt:   time.Now(),
+		TTL:        600 * time.Second,
+	}
+	stub := newPeerFetchStub(obj)
+
+	resp, ok := stub.fp.TryHit(req, time.Now())
+	assert.False(t, ok, "foreign variant body must not be served from the fast path")
+	assert.Nil(t, resp)
+	assert.False(t, req.OwnerMiss, "gate rejection must not flag OwnerMiss (slow path re-asks)")
+}
+
 // TestFastPathHandler_PeerDecodedObjectTransientFields pins the wire
 // codec contract: a peer-fetched object arrives with the transient
 // fields (CacheControl, RespNoCache, HasDate) zeroed — exactly what

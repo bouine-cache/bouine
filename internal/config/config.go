@@ -77,6 +77,14 @@ type ExperimentalConfig struct {
 	// failure), the listener logs a warning and uses the blocking
 	// parser path. Default false.
 	H1Reactor bool `yaml:"h1_reactor,omitempty" json:"h1_reactor,omitempty"`
+
+	// H1FastPeerPath enables the fast-path peer branch: on a local cache
+	// miss the H1 fast path asks the key's ring owner before falling
+	// through to the slow path (issue #636). Requires h1_fast_path and a
+	// cluster in strong mode; unwired otherwise. Not wired under the
+	// epoll reactor, where TryHit must never block on network I/O.
+	// Default false.
+	H1FastPeerPath bool `yaml:"h1_fast_peer_path,omitempty" json:"h1_fast_peer_path,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.

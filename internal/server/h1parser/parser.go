@@ -422,6 +422,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	req.ScanFlags = 0
 	req.NHeaders = 0
 	req.ConnectionClose = false
+	req.OwnerMiss = false
 	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
@@ -688,41 +689,7 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 		return false, errors.New("h1parser: nil request on fall-through")
 	}
 
-	// Rebuild the wire bytes of the request head so fasthttp's parser can
-	// re-read it: method, path, version, headers, terminator. The bytes
-	// are rebuilt into a fresh buffer (miss path only) because readBuf is
-	// reused by the next request on this connection after the handler
-	// returns. Host is re-emitted first so the fallback sees it even if
-	// the original header block lacked one.
-	head := make([]byte, 0, 256+len(req.Path)+len(req.Query)+len(req.Host))
-	head = append(head, req.Method...)
-	head = append(head, ' ')
-	head = append(head, req.Path...)
-	if req.Query != "" {
-		head = append(head, '?')
-		head = append(head, req.Query...)
-	}
-	head = append(head, ' ')
-	head = append(head, req.HTTPVersion...)
-	head = append(head, '\r', '\n')
-	head = append(head, "Host: "...)
-	head = append(head, req.Host...)
-	head = append(head, '\r', '\n')
-	for i := 0; i < req.NHeaders; i++ {
-		if api.EqualFold(req.Headers[i].Key, header.Host) {
-			// Already re-emitted above from req.Host; replaying the original
-			// would duplicate it and fasthttp rejects multiple Host headers.
-			continue
-		}
-		head = append(head, req.Headers[i].Key...)
-		head = append(head, ": "...)
-		head = append(head, req.Headers[i].Value...)
-		head = append(head, '\r', '\n')
-	}
-	head = append(head, '\r', '\n')
-	if len(excess) > 0 {
-		head = append(head, excess...)
-	}
+	head := rebuildRequestHead(req, excess)
 
 	// Check if the client requested Connection: close.
 	clientClose := isConnectionClose(req)
@@ -760,6 +727,12 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 		}
 	}
 
+	// Transfer the fast path's definitive owner-miss hint (if any) to the
+	// fallback handler: handleCacheMiss reads it to skip the duplicate
+	// owner lookup + peer RPC (the fast path already got a definitive
+	// miss for the plain key). Cheap: only set when the peer branch ran.
+	transferOwnerMissHint(&ctx, req)
+
 	// Call the fallback handler.
 	p.fallback(&ctx)
 
@@ -792,6 +765,56 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	// If the handler itself set Connection: close (e.g. via
 	// ctx.SetConnectionClose), honour that too.
 	return clientClose || ctx.Response.Header.ConnectionClose(), nil
+}
+
+// transferOwnerMissHint forwards the fast path's definitive owner-miss
+// hint (api.RawRequest.OwnerMiss) to the fallback RequestCtx so
+// handleCacheMiss can skip the duplicate owner lookup + peer RPC. Cheap:
+// only set when the fast-path peer branch ran.
+func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
+	if req.OwnerMiss {
+		ctx.SetUserValue(api.OwnerMissContextKey, true)
+	}
+}
+
+// rebuildRequestHead rebuilds the wire bytes of the parsed request head
+// so fasthttp's parser can re-read it: method, path, version, headers,
+// terminator, plus any buffered excess bytes. The bytes are rebuilt into
+// a fresh buffer (miss path only) because readBuf is reused by the next
+// request on this connection after the handler returns. Host is
+// re-emitted first so the fallback sees it even if the original header
+// block lacked one.
+func rebuildRequestHead(req *api.RawRequest, excess []byte) []byte {
+	head := make([]byte, 0, 256+len(req.Path)+len(req.Query)+len(req.Host))
+	head = append(head, req.Method...)
+	head = append(head, ' ')
+	head = append(head, req.Path...)
+	if req.Query != "" {
+		head = append(head, '?')
+		head = append(head, req.Query...)
+	}
+	head = append(head, ' ')
+	head = append(head, req.HTTPVersion...)
+	head = append(head, '\r', '\n')
+	head = append(head, "Host: "...)
+	head = append(head, req.Host...)
+	head = append(head, '\r', '\n')
+	for i := 0; i < req.NHeaders; i++ {
+		if api.EqualFold(req.Headers[i].Key, header.Host) {
+			// Already re-emitted above from req.Host; replaying the original
+			// would duplicate it and fasthttp rejects multiple Host headers.
+			continue
+		}
+		head = append(head, req.Headers[i].Key...)
+		head = append(head, ": "...)
+		head = append(head, req.Headers[i].Value...)
+		head = append(head, '\r', '\n')
+	}
+	head = append(head, '\r', '\n')
+	if len(excess) > 0 {
+		head = append(head, excess...)
+	}
+	return head
 }
 
 // handleFallThroughRaw serves a request whose headers exceeded the

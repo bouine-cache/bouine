@@ -215,6 +215,15 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 	}
 	peerObj, err := f.peerFetch(ctx, owner, lookupKey, "")
 	if err != nil || peerObj == nil {
+		if err == nil {
+			// Definitive owner miss: the owner answered (no error) with no
+			// object for the plain key. Flag the request so the slow path
+			// skips its duplicate owner lookup + peer RPC and goes straight
+			// to origin. Errors keep the slow-path retry; gate rejections
+			// below never set the flag (the slow path's gate, with the
+			// route's key policy, may still accept).
+			req.OwnerMiss = true
+		}
 		return nil, false
 	}
 	if !f.peerGateMatchesVary(req, peerObj) {

@@ -1328,7 +1328,18 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 }
 
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
-	if h.ownerFn != nil && h.peerFetch != nil {
+	// Fast-path owner-miss hint (api.RawRequest.OwnerMiss): on a plain
+	// miss the H1 fast path already asked the owner and got a definitive
+	// miss, so the identical second peer RPC is skipped and the fetch
+	// goes straight to origin. With obj != nil (a stale object or Vary
+	// resolver appeared since the fast path's lookup) the slow path's
+	// peer question carries peerVaryAssertion(obj) — a different
+	// question — so the hint does not apply. Trade-off accepted: the
+	// owner populating the key in the race window is missed here; the
+	// origin fetch is singleflight-collapsed and peer-put to the owner,
+	// so later requests recover through the peer path.
+	fastPathOwnerMiss := obj == nil && ctx.UserValue(api.OwnerMissContextKey) == true
+	if h.ownerFn != nil && h.peerFetch != nil && !fastPathOwnerMiss {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
 				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {

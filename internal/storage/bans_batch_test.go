@@ -149,8 +149,16 @@ func surrogateObj(key string) *api.Object {
 // TestBanRegister_ConcurrentRegisterAndRead hammers registrations and
 // snapshot reads concurrently: registrations mutate the list in place
 // under the mutex while reads lazily compile and publish immutable
-// snapshots. Run under -race (the suite default). After the writers
-// stop, the final read must enforce every registered tag — the 256
+// snapshots. Run under -race (the suite default).
+//
+// Deterministic by construction (AGENTS.md §8 forbids clock-driven
+// assertions): every writer registers a fixed, disjoint set of tags, so
+// the full 256-tag space is covered regardless of scheduling — the
+// original time-driven form failed on a loaded CI runner where writer
+// goroutines were starved and never reached the tail of the tag space
+// before the deadline. The reader loop is bounded by registration
+// progress (it stops after the writers finish), not by wall clock,
+// and the final read must enforce every registered tag — the 256
 // distinct keys sit far below banListCap, so none can be evicted.
 func TestBanRegister_ConcurrentRegisterAndRead(t *testing.T) {
 	t.Parallel()
@@ -159,35 +167,43 @@ func TestBanRegister_ConcurrentRegisterAndRead(t *testing.T) {
 
 	const writers = 4
 	const tags = 256
-	stop := make(chan struct{})
+	const perWriter = tags / writers
+	// Each writer owns a disjoint slice of the tag space, so every tag
+	// is registered exactly once no matter how the scheduler interleaves
+	// the writers.
 	var wg sync.WaitGroup
-	for range writers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			i := 0
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
+	for w := range writers {
+		wg.Go(func() {
+			for i := range perWriter {
 				_, _ = s.Ban(context.Background(), api.BanExpr{
-					SurrogateKey: fmt.Sprintf("tag-%d", i%tags),
+					SurrogateKey: fmt.Sprintf("tag-%d", w*perWriter+i),
 				})
-				i++
 			}
-		}()
+		})
 	}
 
 	// Interleave reads with the registrations: each read either
-	// compiles a fresh snapshot or reuses the published one.
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		_ = s.MatchesActiveBan(surrogateObj(fmt.Sprintf("tag-%d", tags/2)))
-	}
-	close(stop)
+	// compiles a fresh snapshot or reuses the published one. The loop
+	// ends when the writers are done, so no tag can be asserted before
+	// its registration has happened; a read can observe a snapshot
+	// compiled before some writers finish — which is fine, the final
+	// assertion below re-reads the settled state.
+	readerStop := make(chan struct{})
+	readsDone := make(chan struct{})
+	go func() {
+		defer close(readsDone)
+		for {
+			select {
+			case <-readerStop:
+				return
+			default:
+				_ = s.MatchesActiveBan(surrogateObj(fmt.Sprintf("tag-%d", tags/2)))
+			}
+		}
+	}()
 	wg.Wait()
+	close(readerStop)
+	<-readsDone
 
 	// The final read compiles the settled list; every tag is enforced.
 	for k := range tags {

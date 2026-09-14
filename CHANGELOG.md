@@ -10,6 +10,78 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.18] - 2026-09-14
+
+### Added
+- All duration metrics now expose the native sparse-bucket histogram
+  representation alongside their classic `_bucket` series. Six
+  remaining classic-only histograms (cloudflare_purge, startup,
+  peer_fetch, warm_compaction, wal_write, origin_request_duration)
+  join the request_duration_seconds histogram that already had it.
+  Native series keep bucket cardinality bounded while resolving
+  latencies across the full range — no more 5-second-wide buckets
+  hiding multi-second stalls on peer-served fetches. None of the
+  converted histograms are on the cache-hit path, so the zero-alloc
+  hit-path budget is unchanged (pinned by the existing
+  BenchmarkGate_HistogramObserve_Native benchmarks at 0 allocs/op);
+  per-package tests pin the native schema on each metric, and the
+  runbook documents how to query the series in PromQL.
+
+### Fixed
+- After a rolling restart, a pod's cached fasthttp PipelineClient
+  for a peer's pre-restart address re-dialed the dead IP every ~3s
+  for the life of the process (observed on prod-eu: ~60
+  "error in PipelineClient" log lines per minute toward addresses
+  dead since the restart). The v0.5.17 breaker could not stop it: it
+  gates new Fetch/Put submissions, and none reach the healed ring.
+  The Cluster now retires an address as soon as it stops being
+  current — pruned from the ring, or the peer restarted at a new
+  address: the cached pipeline client is evicted and the stale
+  worker's dial parks until the fetcher closes. One parked goroutine
+  per retired address replaces the perpetual dial-restart loop, and
+  a later request for a returned address transparently gets a fresh
+  client.
+- Retirement is now lifted only where the address is provably
+  current again. A Fetch holding a stale owner PeerInfo captured
+  before a ring change could race RetireAddress and re-arm the
+  dial-restart loop — resurrecting the zombie the retire mechanism
+  exists to park. getPipelineClient no longer clears the retired
+  mark; the Cluster lifts it from addPeer via a new PeerFetcher
+  UnretireAddress callback (registered alongside SetOnPeerRetired),
+  so a stale-owner fetch fails fast and falls back to origin while
+  the dead address stays dead.
+- Peer fetches were submitted with the caller's context — a
+  *fasthttp.RequestCtx carrying no deadline — so hung RPCs fell
+  back to the transport's 60s DoTimeout default, and only the
+  pipeline client's 500ms ReadTimeout eventually killed them. On
+  prod-eu this pinned fetch-semaphore slots behind RPCs slow to fail
+  against dead addresses and surfaced as 1-2.5s peer-served "HIT"
+  latencies (prod-eu logged ~3600 dial i/o timeouts/hour to pod IPs
+  dead since the previous day's restart, each pinning a fetch slot;
+  zero successful fetches above 500ms). All peer-fetch and peer-put
+  RPCs are now bounded by the 500ms budget regardless of the
+  caller's context — a shorter caller deadline is honoured, anything
+  looser is capped — and the peer dial timeout drops from 2s to
+  200ms: healthy intra-cluster dials complete in single-digit
+  milliseconds, so the old budget only ever fired against dead
+  addresses.
+- The fetch RPC duration histogram started after the fetch-semaphore,
+  so fetches queued behind slow-to-fail RPCs were invisible — the
+  blind spot that let the peer-stall above go undiagnosed for a day
+  (peer-served "HITs" sat in the 1-2.5s request-duration bucket while
+  every peer-fetch metric looked healthy). A new
+  bouine_peer_fetch_queue_wait_seconds histogram observes the
+  semaphore wait, with a runbook note on reading it against the RPC
+  histogram.
+- The eager ban-scan coalescing window is now anchored at scan
+  completion. It was previously recorded at the registration
+  timestamp captured before the scan, so the scan's own duration ate
+  the window — under CPU contention a slow first scan could shrink
+  the window to zero and the next registration paid a full eager
+  pass. Anchoring at completion keeps the window whole for slow
+  scans in production (large stores under load); exposed by the new
+  concurrent-registration hammer test under -race.
+
 ## [0.5.17] - 2026-09-11
 
 ### Changed
@@ -1333,7 +1405,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.17...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.18...HEAD
+[0.5.18]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.18
 [0.5.17]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.17
 [0.5.16]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.16
 [0.5.15]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.15

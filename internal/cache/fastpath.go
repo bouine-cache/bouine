@@ -219,14 +219,22 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 			// Definitive owner miss: the owner answered (no error) with no
 			// object for the plain key. Flag the request so the slow path
 			// skips its duplicate owner lookup + peer RPC and goes straight
-			// to origin. Errors keep the slow-path retry; gate rejections
-			// below never set the flag (the slow path's gate, with the
-			// route's key policy, may still accept).
+			// to origin. Errors keep the slow-path retry.
 			req.OwnerMiss = true
 		}
 		return nil, false
 	}
 	if !f.peerGateMatchesVary(req, peerObj) {
+		// Variant gate rejection: the owner HAS content for the key,
+		// just not this variant's. Flag the request so the slow path can
+		// skip its retry — for the same rebuilt wire bytes the two
+		// paths' gates are byte-identical (parity pinned by
+		// TestPeerVaryGateHeaderParity), so on a nil-policy route the
+		// identical question is deterministically rejected twice.
+		// handleCacheMiss honors the hint only without a KeyPolicy (and
+		// with no stored object): a policied route's slow-path gate
+		// computes a different VaryKey and may legitimately accept.
+		req.OwnerGateReject = true
 		return nil, false
 	}
 	// Peer-fetch responses arrive as fully materialized api.Object
@@ -267,14 +275,19 @@ func (f *FastPathHandler) tryPeerFetch(ctx context.Context, req *api.RawRequest,
 // the input format BuildVaryKey (and therefore the wire VaryKey peers
 // compute) is defined over. Keys are interned via header.InternKey, the
 // canonicalizing path headerFromCtx uses, so a wire-typed "bm-market:"
-// looks up the same as the slow path's fasthttp-normalized entry.
+// looks up the same as the slow path's fasthttp-normalized entry. Values
+// are right-trimmed of OWS because fasthttp's headerScanner trims both
+// ends while parseHeaders only skips leading — without this, a value
+// like "US\t" would gate-mismatch the owner's view (parity pinned by
+// TestPeerVaryGateHeaderParity).
 // Allocates the entries/values slices per call (~120 B, 7 allocs) —
 // acceptable on the peer branch, which amortizes a network round-trip;
 // local hits never reach it.
 func reqHeaderMapFromRaw(req *api.RawRequest) header.Map {
 	hm := header.NewMap(req.NHeaders)
 	for i := 0; i < req.NHeaders; i++ {
-		hm.AppendEntryCanonical(header.InternKey(req.Headers[i].Key), req.Headers[i].Value)
+		hm.AppendEntryCanonical(header.InternKey(req.Headers[i].Key),
+			strings.TrimRight(req.Headers[i].Value, " \t"))
 	}
 	hm.SortEntries()
 	return hm

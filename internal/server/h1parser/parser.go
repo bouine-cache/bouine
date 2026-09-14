@@ -423,6 +423,7 @@ func (p *Parser) parseBuffer(buf []byte, headerEnd int, scratch *api.RawRequest)
 	req.NHeaders = 0
 	req.ConnectionClose = false
 	req.OwnerMiss = false
+	req.OwnerGateReject = false
 	req.Scheme = p.scheme
 	if err := parseRequestLine(buf, req); err != nil {
 		return nil, true, nil, err
@@ -561,6 +562,14 @@ func parseHeaders(buf []byte, req *api.RawRequest) error {
 	// needs no reset here; a request with no Connection header at all
 	// leaves the soft reset's false in place.
 	return nil
+}
+
+// ParseHeadersForTest exposes the parseHeaders header stage to other
+// packages' test suites (cross-parser parity tests in internal/cache):
+// it runs the real production header parser over a full request head,
+// not a reimplementation. Not for production use.
+func ParseHeadersForTest(buf []byte, req *api.RawRequest) error {
+	return parseHeaders(buf, req)
 }
 
 // connectionCloseValue reports whether a Connection header value
@@ -767,13 +776,18 @@ func (p *Parser) handleFallThrough(conn net.Conn, req *api.RawRequest, excess []
 	return clientClose || ctx.Response.Header.ConnectionClose(), nil
 }
 
-// transferOwnerMissHint forwards the fast path's definitive owner-miss
-// hint (api.RawRequest.OwnerMiss) to the fallback RequestCtx so
-// handleCacheMiss can skip the duplicate owner lookup + peer RPC. Cheap:
-// only set when the fast-path peer branch ran.
+// transferOwnerMissHint forwards the fast path's peer-branch hints
+// (api.RawRequest.OwnerMiss and OwnerGateReject) to the fallback
+// RequestCtx so handleCacheMiss can skip the duplicate owner lookup +
+// peer RPC (definitive miss) or the deterministically-rejected retry
+// (gate rejection, nil-policy routes only). Cheap: only set when the
+// fast-path peer branch ran.
 func transferOwnerMissHint(ctx *fasthttp.RequestCtx, req *api.RawRequest) {
 	if req.OwnerMiss {
 		ctx.SetUserValue(api.OwnerMissContextKey, true)
+	}
+	if req.OwnerGateReject {
+		ctx.SetUserValue(api.OwnerGateRejectContextKey, true)
 	}
 }
 

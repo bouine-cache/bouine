@@ -1070,11 +1070,28 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 		// event loop, which must never block on network I/O (a miss
 		// would stall every connection on that loop for the peer-fetch
 		// timeout). The h1parser path blocks too, but it is already
-		// per-connection blocking by design; the reactor is not.
+		// per-connection blocking by design; the reactor is not. When the
+		// flag is set but a condition above holds, an error is logged and
+		// the daemon starts without the branch (config validation cannot
+		// catch these: they depend on runtime wiring state).
 		fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs)
 		if e.cfg.Experimental.H1FastPeerPath && fpOwnerFn != nil && fpPeerFetch != nil && !e.cfg.Experimental.H1Reactor {
 			fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
 			e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
+		} else if e.cfg.Experimental.H1FastPeerPath {
+			// The operator asked for the peer branch but it cannot run;
+			// a silent no-op here hides a misconfiguration.
+			switch {
+			case e.cfg.Experimental.H1Reactor:
+				e.logger.Error("experimental.h1_fast_peer_path not wired: incompatible with experimental.h1_reactor (TryHit must never block the reactor event loop on peer I/O)",
+					"experimental", true)
+			case fpOwnerFn == nil || fpPeerFetch == nil:
+				e.logger.Error("experimental.h1_fast_peer_path not wired: requires a cluster in strong mode with peer fetching enabled",
+					"experimental", true,
+					"cluster_mode", e.cfg.Cluster.Mode,
+					"cluster_node", rs.clusterNode != nil,
+					"peer_fetcher", rs.peerFetcher != nil)
+			}
 		}
 		fastPathHandler = fp
 		e.logger.Info("H1 fast path enabled", "experimental", true)

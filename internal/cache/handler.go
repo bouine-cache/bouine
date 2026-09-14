@@ -1314,18 +1314,31 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 	return false
 }
 
+//nolint:gocyclo // 16: miss/peer-hint/gate branches mirror the fast path's decision tree
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
-	// Fast-path owner-miss hint (api.RawRequest.OwnerMiss): on a plain
-	// miss the H1 fast path already asked the owner and got a definitive
-	// miss, so the identical second peer RPC is skipped and the fetch
-	// goes straight to origin. With obj != nil (a stale object or Vary
-	// resolver appeared since the fast path's lookup) the slow path's
-	// peer question carries peerVaryAssertion(obj) — a different
-	// question — so the hint does not apply. Trade-off accepted: the
-	// owner populating the key in the race window is missed here; the
-	// origin fetch is singleflight-collapsed and peer-put to the owner,
-	// so later requests recover through the peer path.
-	fastPathOwnerMiss := obj == nil && ctx.UserValue(api.OwnerMissContextKey) == true
+	// Fast-path peer-branch hints (api.RawRequest.OwnerMiss /
+	// OwnerGateReject), transferred by the h1parser under
+	// api.OwnerMissContextKey / api.OwnerGateRejectContextKey:
+	//   - OwnerMiss: on a plain miss the H1 fast path already asked the
+	//     owner and got a definitive miss, so the identical second peer
+	//     RPC is skipped and the fetch goes straight to origin.
+	//   - OwnerGateReject: the fast path asked and the owner's object
+	//     failed the variant gate. On a nil-policy route the two paths'
+	//     gates are byte-identical for the same wire bytes (parity
+	//     pinned by TestPeerVaryGateHeaderParity), so the retry is
+	//     deterministically rejected twice — skip it and go to origin.
+	// Both hints require obj == nil AND h.policy == nil: with a stale
+	// object or Vary resolver present (obj != nil) the slow path's peer
+	// question carries peerVaryAssertion(obj) — a different question —
+	// and with a KeyPolicy the slow path's gate/key differ from the
+	// nil-policy fast path's, so the hints prove nothing. The owner
+	// populating the key in the race window is missed either way;
+	// recovery is the same: the origin fetch is singleflight-collapsed
+	// and peer-put to the owner, so later requests recover through the
+	// peer path.
+	fastPathOwnerMiss := obj == nil && h.policy == nil &&
+		(ctx.UserValue(api.OwnerMissContextKey) == true ||
+			ctx.UserValue(api.OwnerGateRejectContextKey) == true)
 	if h.ownerFn != nil && h.peerFetch != nil && !fastPathOwnerMiss {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {

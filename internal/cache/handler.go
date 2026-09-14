@@ -1314,6 +1314,24 @@ func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peer
 	return false
 }
 
+// peerHintsApply reports whether a fast-path peer-branch hint (transferred
+// by the h1parser under api.OwnerMissContextKey or
+// api.OwnerGateRejectContextKey) suppresses THIS handler's peer RPC.
+// Either hint carries the same proof — the owner was already asked for
+// exactly this nil-policy, plain-key question — so both are honored the
+// same way: skip the RPC, go to origin. The hint is trusted only when
+// the stored object is nil (otherwise the slow path's peer question
+// carries peerVaryAssertion(obj) — a different question) and the route
+// has no KeyPolicy (otherwise the slow path's gate/key differ from the
+// nil-policy fast path's and the hint proves nothing).
+func (h *Handler) peerHintsApply(obj *api.Object, ctx *fasthttp.RequestCtx) bool {
+	if obj != nil || h.policy != nil {
+		return false
+	}
+	return ctx.UserValue(api.OwnerMissContextKey) == true ||
+		ctx.UserValue(api.OwnerGateRejectContextKey) == true
+}
+
 //nolint:gocyclo // 16: miss/peer-hint/gate branches mirror the fast path's decision tree
 func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, lookupKey api.Key, obj *api.Object, now time.Time, src api.Source, ri RequestInfo) {
 	// Fast-path peer-branch hints (api.RawRequest.OwnerMiss /
@@ -1336,10 +1354,10 @@ func (h *Handler) handleCacheMiss(ctx *fasthttp.RequestCtx, primaryKey api.Key, 
 	// recovery is the same: the origin fetch is singleflight-collapsed
 	// and peer-put to the owner, so later requests recover through the
 	// peer path.
-	fastPathOwnerMiss := obj == nil && h.policy == nil &&
-		(ctx.UserValue(api.OwnerMissContextKey) == true ||
-			ctx.UserValue(api.OwnerGateRejectContextKey) == true)
-	if h.ownerFn != nil && h.peerFetch != nil && !fastPathOwnerMiss {
+	if h.peerHintsApply(obj, ctx) {
+		// Either hint proves the owner was already asked for exactly
+		// this (nil-policy, plain-key) question: skip the duplicate RPC.
+	} else if h.ownerFn != nil && h.peerFetch != nil {
 		if owner, isLocal := h.ownerFn(lookupKey); !isLocal {
 			if peerObj, err := h.peerFetch(ctx, owner, lookupKey, peerVaryAssertion(obj)); err == nil && peerObj != nil {
 				if h.servePeerHit(ctx, lookupKey, peerObj, now, ri) {

@@ -214,6 +214,13 @@ func (c *Config) Validate() error {
 		return errors.New("config: experimental.h1_reactor requires experimental.h1_fast_path")
 	}
 
+	// The peer branch only runs inside the fast path's TryHit; without
+	// h1_fast_path the flag would silently no-op. Reject early at load
+	// time instead of logging a warning at startup.
+	if c.Experimental.H1FastPeerPath && !c.Experimental.H1FastPath {
+		return errors.New("config: experimental.h1_fast_peer_path requires experimental.h1_fast_path")
+	}
+
 	// GOGC must be -1 (off) or a positive percentage. Zero is invalid
 	// (would trigger GC on every allocation) and negative values other
 	// than -1 are meaningless.

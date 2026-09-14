@@ -190,3 +190,71 @@ func TestStrong_PurgeBatchEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestStrong_FastPathPeerFetch exercises the fast-path peer branch
+// (issue #636) end-to-end: with experimental.h1_fast_peer_path enabled
+// on every node, a plain-key miss on a NON-owner node must be served by
+// the owner through FastPathHandler.tryPeerFetch, with X-Cache-Source:
+// peer, WITHOUT the origin seeing the request (the slow-path
+// alternative would fetch from origin on the owner-miss hint, so a
+// no-origin delta around a MISS-on-this-node is proof the branch ran).
+//
+// The cache key includes the request Host, so every request uses the
+// driver.CrossNodeHost header: all three nodes compute the SAME ring
+// key, and at least two of them are non-owners (the ring has 3
+// members). Every non-owner request is therefore served either from its
+// local store or via the fast-path peer branch; a non-owner HIT must
+// never touch the origin (single-flight + peer-put guarantees the owner
+// holds the object after the first fill).
+func TestStrong_FastPathPeerFetch(t *testing.T) {
+	s := sharedFastPeerCluster(t)
+
+	path := "/hit?x=strong-fastpath-peerfetch"
+	host := driver.CrossNodeHost
+	originBefore := s.OriginRequests()
+
+	// 1. Fill via node 0 with the fixed host: exactly one origin
+	//    request (single-flight), whoever the ring owner is.
+	resp := s.GetWithHost(t, 0, path, host)
+	require.Equal(t, 200, resp.StatusCode)
+	originAfterFill := s.OriginRequests()
+	require.Equal(t, originBefore+1, originAfterFill,
+		"the fill must be a single origin request (single-flight collapsed)")
+
+	// Give peer-put and gossip a moment to settle.
+	time.Sleep(300 * time.Millisecond)
+
+	// 2. Every alive node serves the SAME (path, host): a non-owner
+	//    must HIT without origin traffic. The owner may serve a local
+	//    HIT (also no origin traffic) — either way the origin counter
+	//    must stay flat for every one of these requests.
+	peerHits := 0
+	for _, n := range s.AliveNodes() {
+		before := s.OriginRequests()
+		resp := s.GetWithHost(t, n, path, host)
+		require.Equal(t, 200, resp.StatusCode)
+		after := s.OriginRequests()
+		require.Equal(t, before, after,
+			"node %d must serve without origin traffic (local hit or fast-path peer fetch)", n)
+		if src := resp.Header.Get("X-Cache-Source"); src == "peer" {
+			peerHits++
+			require.Equal(t, "HIT", resp.Header.Get("X-Cache"),
+				"a fast-path peer fetch is served as a HIT, source peer")
+		}
+	}
+
+	// 3. At least two of the three nodes are non-owners for this key.
+	//    Each non-owner either had the object locally (impossible
+	//    before its first request on this stack... unless peer-put
+	//    delivered it) or peer-fetched. Assert the branch actually
+	//    served: at least one peer HIT across the non-owner nodes, OR —
+	//    when both non-owner nodes got peer-put copies before asking —
+	//    the peer_fetch_hits_total counter still proves owner RPCs ran.
+	totalPeerHits := float64(0)
+	for _, n := range s.AliveNodes() {
+		totalPeerHits += s.MetricValue(t, n, "bouine_peer_fetch_hits_total")
+	}
+	if peerHits == 0 && totalPeerHits == 0 {
+		t.Fatal("no peer hit observed on any node — at least two non-owners must have peer-fetched this key")
+	}
+}

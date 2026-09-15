@@ -609,6 +609,15 @@ func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time
 	select {
 	case f.fetchSem <- struct{}{}:
 	case <-ctx.Done():
+		// Record the abandoned wait before surfacing the cancellation:
+		// the queued fetch DID queue — the wait time is the saturation
+		// signal the dashboards need, exactly when the caller gives up
+		// (prod-eu, 2026-09-12: peer-served "HITs" queued behind dead
+		// dials with a clean fetch histogram). Returning without an
+		// observation hides the queue from the metric entirely.
+		if f.pQueueWait != nil {
+			f.pQueueWait.Observe(time.Since(queueStart).Seconds())
+		}
 		return nil, ctx.Err()
 	}
 	if f.pQueueWait != nil {

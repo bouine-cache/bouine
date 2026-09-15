@@ -80,13 +80,12 @@ func doHedged(
 }
 
 // doHedgedResponse is doHedged carrying a per-attempt payload (the
-// pooled winning response) alongside the error. The winning result is
-// returned to the caller; the losing attempt's result stays buffered on
-// its channel and is released by the loser's own error path or by the
-// next iteration of the pooled channel (the attempt releases its own
-// response before delivering an error, and a successful loser is only
-// possible in the wait-for-second branch, which is error-path-only).
-// The cancel aborts the losing attempt's transport where the fetch is
+// pooled winning response) alongside the error. The winner is returned
+// to the caller; the loser's unconsumed response stays buffered on the
+// channel and is garbage-collected with the channel when doHedgedResponse
+// returns — fasthttp responses are pool-backed but Go-collected, so an
+// unreaped loser costs pool slack, not a leak. The cancel aborts the
+// losing attempt's transport where the fetch is
 // ctx-aware; the absolute-deadline path aborts at the kernel deadline,
 // so the loser's goroutine may linger until then — bounded, not leaked.
 //

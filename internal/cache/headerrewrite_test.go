@@ -127,3 +127,21 @@ func TestHeaderRewrite_NilDirectivesAreNoOps(t *testing.T) {
 	require.Equal(t, "present", string(ctx.Response.Header.Peek("X-Origin-Marker")))
 	require.Equal(t, 200, ctx.Response.StatusCode())
 }
+
+func TestHeaderRewrite_ResponseSetOnUpstreamError(t *testing.T) {
+	t.Parallel()
+	// No fast client: the handler maps the failure to a 502, which
+	// must still carry response rewrites ("every response this
+	// handler emits").
+	cfg := HandlerConfig{
+		Store:                newTestStore(),
+		Logger:               slog.Default(),
+		ResponseHeaderSet:    map[string]string{"X-Content-Type-Options": "nosniff"},
+		ResponseHeaderRemove: []string{"X-Origin-Marker"},
+	}
+	h := NewHandler(cfg)
+	ctx := serveCtx(t, "/err")
+	h.ServeRequest(ctx)
+	require.Equal(t, 502, ctx.Response.StatusCode())
+	require.Equal(t, "nosniff", string(ctx.Response.Header.Peek("X-Content-Type-Options")), "set applies on the 502")
+}

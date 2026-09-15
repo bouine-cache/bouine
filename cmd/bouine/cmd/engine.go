@@ -1062,6 +1062,30 @@ func (e *engine) startListeners(g *supervised.Group, handler fasthttp.RequestHan
 				break
 			}
 		}
+		// Wire the cluster peer branch (issue #636): on a local miss the
+		// fast path asks the key's owner before falling through to the
+		// slow path. Same closures the slow-path handlers use. Opt-in
+		// behind experimental.h1_fast_peer_path (default off). NOT wired
+		// under the epoll reactor: TryHit runs inline on the reactor's
+		// event loop, which must never block on network I/O (a miss
+		// would stall every connection on that loop for the peer-fetch
+		// timeout). The h1parser path blocks too, but it is already
+		// per-connection blocking by design; the reactor is not. When the
+		// flag is set but a condition above holds, an error is logged and
+		// the daemon starts without the branch (config validation cannot
+		// catch these: they depend on runtime wiring state).
+		if !e.cfg.Experimental.H1FastPeerPath {
+			// Flag off: nothing to wire, no diagnostics.
+		} else if e.cfg.Experimental.H1Reactor {
+			e.logger.Error("experimental.h1_fast_peer_path not wired: incompatible with experimental.h1_reactor (TryHit must never block the reactor event loop on peer I/O)",
+				"experimental", true)
+		} else if fpOwnerFn, fpPeerFetch := clusterFastPathClosures(e, rs); fpOwnerFn == nil || fpPeerFetch == nil {
+			e.logger.Error("experimental.h1_fast_peer_path not wired: requires a cluster in strong mode with peer fetching enabled",
+				"experimental", true)
+		} else {
+			fp.WithPeerFetch(fpOwnerFn, fpPeerFetch)
+			e.logger.Info("H1 fast path peer fetch enabled", "experimental", true)
+		}
 		fastPathHandler = fp
 		e.logger.Info("H1 fast path enabled", "experimental", true)
 	}

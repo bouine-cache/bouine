@@ -77,6 +77,14 @@ type ExperimentalConfig struct {
 	// failure), the listener logs a warning and uses the blocking
 	// parser path. Default false.
 	H1Reactor bool `yaml:"h1_reactor,omitempty" json:"h1_reactor,omitempty"`
+
+	// H1FastPeerPath enables the fast-path peer branch: on a local cache
+	// miss the H1 fast path asks the key's ring owner before falling
+	// through to the slow path (issue #636). Requires h1_fast_path and a
+	// cluster in strong mode; unwired otherwise (an error is logged at
+	// startup). Not wired under the epoll reactor, where TryHit must
+	// never block on network I/O. Default false.
+	H1FastPeerPath bool `yaml:"h1_fast_peer_path,omitempty" json:"h1_fast_peer_path,omitempty"`
 }
 
 // Listen enumerates the listener addresses. Empty strings disable.
@@ -320,6 +328,18 @@ type Cluster struct {
 	// default (4); negative values and values above 128 are rejected
 	// by validatePeerFetchConfig.
 	PeerFetchConcurrency int `yaml:"peer_fetch_concurrency,omitempty" json:"peer_fetch_concurrency,omitempty"`
+	// BanTTL is how long a lazy invalidation ban (purge, surrogate-key
+	// or predicate ban) stays in the store's active ban list before the
+	// reaper prunes it. RFC 9111 §4.4 exempts objects stored after the
+	// ban from matching, so the TTL only bounds how long PRE-ban copies
+	// keep being rejected — and those are reclaimed by TTL expiry, the
+	// reaper, and exempt refills anyway. The default (24h) is
+	// conservative; cache-lifecycle surrogate invalidations are safe at
+	// minutes scale, which bounds the hit-ratio damage of an over-broad
+	// ban (a typo currently poisons the hit ratio for the full window).
+	// Zero applies the default; negative values and values below 1s are
+	// rejected by validatePeerFetchConfig.
+	BanTTL time.Duration `yaml:"ban_ttl,omitempty" json:"ban_ttl,omitempty"`
 }
 
 // ClusterTLS holds the mTLS configuration for cluster inter-node RPCs.

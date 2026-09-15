@@ -26,6 +26,12 @@ type DataPlaneMetrics struct {
 	// waiting fetch_wait_timeout for a fetch-semaphore slot (issue #562).
 	// A non-zero rate means miss demand exceeds max_fetch_concurrency.
 	FetchShedTotal prometheus.Counter
+	// RewarmFillTotal counts shed misses that scheduled a bounded
+	// background store refill (the post-ban re-warm allowance). Read
+	// next to FetchShedTotal: sheds are no longer lost refills, so a
+	// rising shed rate during a purge storm no longer implies the hit
+	// ratio is pinned at the shed equilibrium.
+	RewarmFillTotal prometheus.Counter
 	// Streaming miss buffer metrics. The gauge tracks total bytes held
 	// in live SetBodyStreamWriter tee buffers; the counter tracks how
 	// many cacheable misses fell back to the synchronous buffered path
@@ -195,16 +201,7 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		Name:      "metrics_reset_total",
 		Help:      "Metrics re-initialization events. Non-zero indicates the process restarted or metrics were re-registered, explaining histogram count discontinuities.",
 	})
-	m.FetchShedTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "bouine",
-		Name:      "fetch_shed_total",
-		Help:      "Foreground origin fetches shed after waiting fetch_wait_timeout for a fetch-semaphore slot. Non-zero rate means miss demand exceeds max_fetch_concurrency; shed requests serve stale when possible, else 503 + Retry-After.",
-	})
-	m.RequestQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "bouine",
-		Name:      "request_queue_depth",
-		Help:      "Current number of in-flight HTTP requests being processed by the data plane. A rising value indicates CPU starvation before timeouts appear.",
-	})
+	m.initShedMetrics()
 	m.initRefreshMetrics()
 	m.initWALMetrics()
 	m.initStreamingMetrics()
@@ -226,8 +223,31 @@ func NewDataPlaneMetrics(reg *prometheus.Registry) *DataPlaneMetrics {
 		m.WALDroppedEntries, m.WALLastSyncTimestamp,
 		m.MetricsResetTotal, m.RequestQueueDepth,
 		m.HTTPSmugglingRejected,
-		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal)
+		m.StreamingBufferBytes, m.StreamingFallbackTotal, m.FetchShedTotal,
+		m.RewarmFillTotal)
 	return m
+}
+
+// initShedMetrics creates the fetch-shed and re-warm-fill counters
+// (the shed/re-warm pair: ADR-0045) plus the request-queue-depth gauge.
+// Called by NewDataPlaneMetrics; extracted to keep NewDataPlaneMetrics
+// under the funlen limit.
+func (m *DataPlaneMetrics) initShedMetrics() {
+	m.RequestQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "bouine",
+		Name:      "request_queue_depth",
+		Help:      "Current number of in-flight HTTP requests being processed by the data plane. A rising value indicates CPU starvation before timeouts appear.",
+	})
+	m.FetchShedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "fetch_shed_total",
+		Help:      "Foreground origin fetches shed after waiting fetch_wait_timeout for a fetch-semaphore slot. Non-zero rate means miss demand exceeds max_fetch_concurrency; shed requests serve stale when possible, else 503 + Retry-After.",
+	})
+	m.RewarmFillTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine",
+		Name:      "rewarm_fill_total",
+		Help:      "Shed misses that scheduled a bounded background store refill. Compare with fetch_shed_total: sheds re-warm the store instead of being lost refills.",
+	})
 }
 
 // initStreamingMetrics creates the streaming buffer gauge and fallback

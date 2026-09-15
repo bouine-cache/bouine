@@ -188,11 +188,11 @@ func TestBanReaper_PrunesExpiredBans(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.Ban(context.Background(), api.BanExpr{HostRegex: "dead.example.com"})
 	require.NoError(t, err)
-	// Age the dead ban past banTTL directly in the list.
+	// Age the dead ban past the ban TTL directly in the list.
 	s.bans.mu.Lock()
 	for i := range s.bans.list {
 		if s.bans.list[i].pattern.hostRegex == "dead.example.com" {
-			s.bans.list[i].created = time.Now().Add(-banTTL - time.Minute)
+			s.bans.list[i].created = time.Now().Add(-defaultBanTTL - time.Minute)
 		}
 	}
 	s.bans.mu.Unlock()

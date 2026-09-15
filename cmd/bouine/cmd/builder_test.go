@@ -1932,3 +1932,106 @@ func TestStartClusterJoin_WithJoinTimeout(t *testing.T) {
 	cancel()
 	_ = g.Wait()
 }
+
+// testFastClientStub is a cache.FastClient that serves fetches via an
+// in-process handler, letting engine-level tests exercise full miss-path
+// storage (Vary variants, resolvers) without a network origin.
+type testFastClientStub struct {
+	handler fasthttp.RequestHandler
+}
+
+func (c *testFastClientStub) Do(_ context.Context, req *fasthttp.Request, resp *fasthttp.Response) error {
+	rctx := &fasthttp.RequestCtx{}
+	req.CopyTo(&rctx.Request)
+	c.handler(rctx)
+	rctx.Response.CopyTo(resp)
+	return nil
+}
+
+func (c *testFastClientStub) DoDeadline(req *fasthttp.Request, resp *fasthttp.Response, deadline time.Time) error {
+	if !time.Now().Before(deadline) {
+		return fasthttp.ErrTimeout
+	}
+	return c.Do(context.Background(), req, resp)
+}
+
+// TestPurgeKey_IgnoresPurgeEventVaryKey pins ADR-0045: the cluster
+// receive path applies a PurgeEvent to evt.Key and every locally tracked
+// variant, regardless of evt.VaryKey (metadata only, not a purge
+// target). Pinning the behavior prevents a future contributor from
+// "honoring" the field and silently no-oping the delete: the
+// BuildVaryKey assertion hex the field carries cannot be composed into
+// a variant store key (different canonicalization).
+func TestPurgeKey_IgnoresPurgeEventVaryKey(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	cfg.Storage.ResolveHotMaxBytes("64MiB")
+	e := &engine{
+		cfg:     cfg,
+		logger:  newTestLogger(),
+		metrics: observability.NewMetrics(),
+	}
+	store, err := e.buildStore(nil, nil)
+	require.NoError(t, err)
+
+	orig := func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set("Cache-Control", "max-age=3600")
+		ctx.Response.Header.Set("Vary", "X-Test-Variant")
+		_, _ = ctx.Write([]byte(string(ctx.Request.Header.Peek("X-Test-Variant"))))
+	}
+	handler := cache.NewHandler(cache.HandlerConfig{
+		Upstream:   orig,
+		FastClient: &testFastClientStub{handler: orig},
+		Store:      store,
+		Logger:     newTestLogger(),
+	})
+	rs := &runState{store: store, handlers: []*cache.Handler{handler}}
+
+	// Populate two variants plus the primary (Vary resolver) through the
+	// handler, mirroring a real cluster-receive scenario.
+	reqA := &fasthttp.RequestCtx{}
+	reqA.Request.SetRequestURI("http://example.com/vary")
+	reqA.Request.Header.Set("X-Test-Variant", "a")
+	handler.ServeRequest(reqA)
+	reqB := &fasthttp.RequestCtx{}
+	reqB.Request.SetRequestURI("http://example.com/vary")
+	reqB.Request.Header.Set("X-Test-Variant", "b")
+	handler.ServeRequest(reqB)
+
+	// Recompute the variant store keys exactly as the handler's miss
+	// path does (VariantKeyFast over the request selecting headers).
+	primaryKey := cache.BuildKeyFromURL("http://example.com/vary", nil)
+	keyA := cache.VariantKeyFast(primaryKey, "X-Test-Variant", &reqA.Request.Header, nil)
+	keyB := cache.VariantKeyFast(primaryKey, "X-Test-Variant", &reqB.Request.Header, nil)
+	require.NotEqual(t, primaryKey, keyA)
+	require.NotEqual(t, keyA, keyB)
+	objA, _, _ := store.Get(context.Background(), keyA)
+	require.NotNil(t, objA, "variant A must be stored")
+	objB, _, _ := store.Get(context.Background(), keyB)
+	require.NotNil(t, objB, "variant B must be stored")
+	objPK, _, _ := store.Get(context.Background(), primaryKey)
+	require.NotNil(t, objPK, "primary (Vary resolver) must be stored")
+
+	// The receive path applies a PurgeEvent that carries a non-empty
+	// VaryKey. It must purge primary + all variants (not no-op).
+	evt := api.PurgeEvent{
+		Key:      primaryKey,
+		VaryKey:  "a6d6c5e0efc6882f",
+		Issuer:   "peer-1",
+		Seq:      1,
+		IssuedAt: time.Now(),
+	}
+	require.NoError(t, rs.purgeKey(context.Background(), evt.Key))
+
+	for _, probe := range []struct {
+		name string
+		key  api.Key
+	}{
+		{"primary", primaryKey},
+		{"variant A", keyA},
+		{"variant B", keyB},
+	} {
+		obj, _, _ := store.Get(context.Background(), probe.key)
+		require.Nil(t, obj, probe.name+" must be gone after purge")
+	}
+}

@@ -580,6 +580,19 @@ func (s *ClusterStack) GetWithHeaders(t *testing.T, n int, path string, headers 
 	return resp
 }
 
+// GetWithHostAndHeaders performs a GET with a specific Host header and
+// extra request headers. Use with CrossNodeHost so every node derives
+// the same cache key from the same request (see PurgeBatch).
+func (s *ClusterStack) GetWithHostAndHeaders(t *testing.T, n int, path, host string, headers map[string]string) *Response {
+	t.Helper()
+	url := s.Nodes[n].HTTPAddr + path
+	resp, err := doGetWithHeaders(url, host, headers)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
 // doGetWithHeaders performs a GET with extra request headers.
 func doGetWithHeaders(url, host string, headers map[string]string) (*Response, error) {
 	req := fasthttp.AcquireRequest()

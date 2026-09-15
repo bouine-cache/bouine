@@ -62,3 +62,4 @@ field to `Superseded by ADR-NNNN`.
 | 0031   | Pluggable eviction framework                         | Accepted |
 | 0032   | Changelog automation                                 | Accepted |
 | 0033   | RPS-based HPA autoscaling                            | Proposed |
+| 0045   | PurgeEvent.VaryKey is metadata; purge-all on receive | Accepted |

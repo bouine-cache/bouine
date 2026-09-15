@@ -63,6 +63,13 @@ const (
 	// defaultPeerFetchConcurrency bounds concurrent peer-fetch RPCs to
 	// prevent memory blow-up during miss fan-out (issue #133).
 	defaultPeerFetchConcurrency = 4
+	// peerFetchWaitTimeout bounds how long a fetch or put waits for a
+	// semaphore slot before shedding with ErrPeerFetchShed — the peer
+	// analogue of the origin fetch shed bound (cache handler,
+	// fetchWaitTimeout, issue #562). Healthy peer RPC p50 is ~3ms, so
+	// the timer only fires under saturation, when falling back to the
+	// slow path's shed/origin machinery is exactly the right behavior.
+	peerFetchWaitTimeout = 100 * time.Millisecond
 	// MaxPeerFetchConcurrency is the exported upper bound for the
 	// configurable fetch/put concurrency (cluster.peer_fetch_concurrency).
 	// The config loader uses it for validation; each in-flight peer fetch
@@ -122,6 +129,14 @@ const (
 // address is in cooldown after consecutive failures. Callers treat it
 // like any other peer-fetch error: fall back to origin.
 var ErrPeerBlacklisted = errors.New("peer address blacklisted after consecutive failures")
+
+// ErrPeerFetchShed is returned by Fetch and Put when no concurrency
+// slot could be acquired within peerFetchWaitTimeout. It mirrors the
+// cache handler's ErrFetchShed (issue #562): shed excess demand instead
+// of parking callers — without the bound, the fast path's undedlined
+// context parked one keep-alive connection goroutine per queued miss
+// until the whole connection pool sat in the semaphore queue.
+var ErrPeerFetchShed = errors.New("peer fetch queue wait timeout")
 
 // errPeerAddrRetired is returned by a parked dial once the fetcher
 // closes. It reports itself as a timeout so fasthttp's pipeline worker
@@ -190,6 +205,11 @@ type PeerFetcher struct {
 	// pBlacklisted reports the number of peer addresses currently in
 	// breaker cooldown, when a registry was passed.
 	pBlacklisted prometheus.Gauge
+	// pShed counts RPCs that shed at the bounded semaphore wait (no slot
+	// within peerFetchWaitTimeout). pQueueWait only observes successful
+	// acquisitions, so without this counter a saturated queue that sheds
+	// everything is invisible in metrics: no waits land in the histogram.
+	pShed prometheus.Counter
 	// breaker is the per-address failure breaker: consecutive transport
 	// failures trip a cooldown so dead peer addresses fail fast
 	// instead of paying a dial timeout per RPC.
@@ -231,6 +251,11 @@ type PeerFetcher struct {
 	breakerMu        sync.Mutex
 	failureThreshold int
 	failureCooldown  time.Duration
+	// fetchWaitTimeout bounds the fetch/put semaphore wait before
+	// shedding with ErrPeerFetchShed. Zero applies peerFetchWaitTimeout
+	// (tests raise it to pin the brief-contention acquire without racing
+	// the shed arm).
+	fetchWaitTimeout time.Duration
 	hopLimitHits     atomic.Int64
 	latN             atomic.Int64
 	misses           atomic.Int64
@@ -338,6 +363,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 	if fetchConcurrency > MaxPeerFetchConcurrency {
 		fetchConcurrency = MaxPeerFetchConcurrency
 	}
+	waitTimeout := peerFetchWaitTimeout
 	failureThreshold := cfg.FailureThreshold
 	if failureThreshold <= 0 {
 		failureThreshold = defaultPeerFailureThreshold
@@ -352,6 +378,7 @@ func NewPeerFetcherWithConfig(cfg PeerFetcherConfig, reg prometheus.Registerer, 
 		maxBodyBytes:        maxPeerFetchBytes,
 		fetchSem:            make(chan struct{}, fetchConcurrency),
 		putSem:              make(chan struct{}, fetchConcurrency),
+		fetchWaitTimeout:    waitTimeout,
 		logger:              observability.ResolveLogger(logger),
 		maxConnsPerHost:     maxConns,
 		maxIdleConnDuration: maxIdle,
@@ -412,7 +439,11 @@ func (f *PeerFetcher) registerMetrics(reg prometheus.Registerer) {
 		Namespace: "bouine", Name: "peer_addr_blacklisted",
 		Help: "Peer addresses currently in cooldown after consecutive transport failures.",
 	})
-	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted)
+	f.pShed = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "bouine", Name: "peer_fetch_shed_total",
+		Help: "Peer-fetch/put RPCs shed because no concurrency slot freed within the queue-wait bound. Rising alongside peer_fetch_active at capacity means demand exceeds the configured peer_fetch_concurrency.",
+	})
+	reg.MustRegister(f.pHits, f.pMisses, f.pHopLimit, dur, f.pActive, queueWait, f.pBlacklisted, f.pShed)
 }
 
 // getPipelineClient returns the PipelineClient for the given peer
@@ -600,25 +631,64 @@ func buildPeerRequest(peer api.PeerInfo, req api.PeerFetchRequest, useTLS bool) 
 	return httpReq
 }
 
+// acquireSlot takes one slot from sem with a bounded wait: the happy
+// path is a non-blocking send (zero allocs — the fast path's miss budget
+// must not move); the timer is created only when the semaphore is
+// momentarily full. When the bound expires the RPC sheds with
+// ErrPeerFetchShed instead of parking the caller — previously a caller
+// with an undedlined context (the fast path passes context.Background)
+// parked here forever, one keep-alive connection goroutine per queued
+// miss, until the whole connection pool sat in the queue. A live ctx
+// cancellation still wins the race with the timer.
+//
+// The wait bound deliberately does not extend the RPC budget: it bounds
+// the queue, not the RPC, mirroring the cache handler's split between
+// fetchWaitTimeout and fetch_timeout.
+func (f *PeerFetcher) acquireSlot(ctx context.Context, sem chan struct{}) error {
+	select {
+	case sem <- struct{}{}:
+		return nil
+	default:
+	}
+	timer := time.NewTimer(f.waitTimeout())
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-timer.C:
+		if f.pShed != nil {
+			f.pShed.Inc()
+		}
+		return fmt.Errorf("peer fetch queue wait exceeded %s: %w", f.waitTimeout(), ErrPeerFetchShed)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// waitTimeout resolves the configured semaphore-wait bound; zero applies
+// the built-in default.
+func (f *PeerFetcher) waitTimeout() time.Duration {
+	if f.fetchWaitTimeout <= 0 {
+		return peerFetchWaitTimeout
+	}
+	return f.fetchWaitTimeout
+}
+
 // acquireFetchSlot takes one fetchSem slot, observing the time spent
 // waiting in pQueueWait (queueStart is taken by the caller before this
 // call) and bumping pActive for the slot's hold. Returns the release
-// function paired with the acquisition, or the caller's ctx error when
-// the context is cancelled while queued.
+// function paired with the acquisition, or an error when the context is
+// cancelled while queued or the bounded wait expired (ErrPeerFetchShed).
 func (f *PeerFetcher) acquireFetchSlot(ctx context.Context, queueStart time.Time) (func(), error) {
-	select {
-	case f.fetchSem <- struct{}{}:
-	case <-ctx.Done():
-		// Record the abandoned wait before surfacing the cancellation:
-		// the queued fetch DID queue — the wait time is the saturation
-		// signal the dashboards need, exactly when the caller gives up
-		// (prod-eu, 2026-09-12: peer-served "HITs" queued behind dead
-		// dials with a clean fetch histogram). Returning without an
-		// observation hides the queue from the metric entirely.
-		if f.pQueueWait != nil {
+	if err := f.acquireSlot(ctx, f.fetchSem); err != nil {
+		if errors.Is(err, ErrPeerFetchShed) && f.pQueueWait != nil {
+			// A shed after a full wait window is exactly the queue
+			// signal the histogram exists for — record it too, or a
+			// fully-shedding queue disappears from the metric (only
+			// successful acquisitions would ever be observed).
 			f.pQueueWait.Observe(time.Since(queueStart).Seconds())
 		}
-		return nil, ctx.Err()
+		return nil, err
 	}
 	if f.pQueueWait != nil {
 		f.pQueueWait.Observe(time.Since(queueStart).Seconds())
@@ -889,8 +959,9 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 // to the owner for future peer-fetches (issue #509). Best-effort: errors
 // are logged and returned but do not block the caller's response. The
 // caller is responsible for running this off the response path.
-// Bounded by putSem to prevent unbounded goroutine fan-out during miss
-// storms; if the semaphore is full, the RPC is skipped (best-effort).
+// Bounded by putSem with the same wait bound as fetch (acquireSlot) to
+// prevent unbounded goroutine fan-out during miss storms; on a full
+// semaphore the RPC sheds with ErrPeerFetchShed (best-effort skip).
 func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Object) error {
 	if obj == nil {
 		return nil
@@ -901,12 +972,10 @@ func (f *PeerFetcher) Put(ctx context.Context, peer api.PeerInfo, obj *api.Objec
 		return fmt.Errorf("peer put %s: %w", peer.Addr, ErrPeerBlacklisted)
 	}
 
-	select {
-	case f.putSem <- struct{}{}:
-		defer func() { <-f.putSem }()
-	case <-ctx.Done():
-		return fmt.Errorf("peer put %s: %w", peer.Addr, ctx.Err())
+	if err := f.acquireSlot(ctx, f.putSem); err != nil {
+		return fmt.Errorf("peer put %s: %w", peer.Addr, err)
 	}
+	defer func() { <-f.putSem }()
 	fetchAddr := addr
 	scheme := "http"
 	if f.useTLS {

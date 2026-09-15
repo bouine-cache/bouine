@@ -655,6 +655,14 @@ func (c *Config) validatePeerFetchConfig() error {
 		return fmt.Errorf("config: cluster.peer_fetch_concurrency must be <= %d, got %d",
 			MaxPeerFetchConcurrency, c.Cluster.PeerFetchConcurrency)
 	}
+	if c.Cluster.BanTTL < 0 {
+		return fmt.Errorf("config: cluster.ban_ttl must be >= 0 (0 = default 24h), got %v",
+			c.Cluster.BanTTL)
+	}
+	if c.Cluster.BanTTL > 0 && c.Cluster.BanTTL < time.Second {
+		return fmt.Errorf("config: cluster.ban_ttl must be >= 1s when set, got %v",
+			c.Cluster.BanTTL)
+	}
 	if c.Admin.IdleTimeout < 0 {
 		return fmt.Errorf("config: admin.idle_timeout must be >= 0 (0 = default 300s), got %v",
 			c.Admin.IdleTimeout)

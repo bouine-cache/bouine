@@ -1063,6 +1063,35 @@ func TestBan_PruneExpiredBans(t *testing.T) {
 	require.True(t, s.matchesActiveBan(o2), "live ban should match")
 }
 
+// TestBan_ConfigurableTTLBoundsBlastRadius proves the configurable ban
+// TTL (invalidation.ban_ttl): with a 1s BanTTL, a ban registered 2s ago
+// is already pruned by the next registration/rebuild, while the default
+// store keeps it live — the operator lever that bounds how long an
+// over-broad surrogate ban poisons the hit ratio.
+func TestBan_ConfigurableTTLBoundsBlastRadius(t *testing.T) {
+	t.Parallel()
+	s := NewHotStore(HotConfig{MaxBytes: 1 << 20, NumShards: 4, BanTTL: time.Second})
+	defer func() { _ = s.Close(context.Background()) }()
+
+	_, err := s.Ban(context.Background(), api.BanExpr{
+		SurrogateKey: "prod-hot",
+		CreatedAt:    time.Now(),
+	})
+	require.NoError(t, err)
+
+	// Immediately: the ban is live and matches a pre-ban object.
+	o := obj(testkey.Hash([]byte("ttl-blast")), 50)
+	o.SurrogateKeys = []string{"prod-hot"}
+	o.StoredAt = time.Now().Add(-1 * time.Hour)
+	require.True(t, s.matchesActiveBan(o), "fresh ban must match pre-ban object")
+
+	// Age the ban past the configured TTL and force a rebuild.
+	time.Sleep(1100 * time.Millisecond)
+	s.reapExpired(time.Now())
+	require.Equal(t, 0, s.bans.len(), "ban past the configured TTL must be pruned")
+	require.False(t, s.matchesActiveBan(o), "pruned ban must not match")
+}
+
 // TestBan_PruneKeepsLiveBans verifies that bans within the banTTL
 // window are kept when a new ban is added.
 func TestBan_PruneKeepsLiveBans(t *testing.T) {

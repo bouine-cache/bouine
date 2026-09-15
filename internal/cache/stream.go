@@ -31,9 +31,10 @@ const maxStreamBufRetain = 1 << 20
 // When buffered is true, the body is already in resp.Body() (the client
 // doesn't support streaming) and callers should use the buffered path.
 type streamFetchResult struct {
-	resp       *fasthttp.Response // body stream still open (or buffered)
+	resp       *fasthttp.Response // body stream still open (or buffered); nil on the upstream-fallback path
 	req        *fasthttp.Request  // for release after stream
 	sem        chan struct{}      // semaphore to release after stream
+	body       []byte             // upstream-fallback body; empty on the FastClient paths
 	Header     headerLookup
 	StatusCode int
 	buffered   bool // true when resp.BodyStream() is nil (test clients)
@@ -61,6 +62,25 @@ type inflightStream struct {
 // stream writer (for streaming mode) or by the caller (for buffered mode).
 func (h *Handler) doFetchStream(ctx *fasthttp.RequestCtx) (*streamFetchResult, error) {
 	if h.fastClient == nil {
+		if h.upstream != nil {
+			// Upstream fallback (issue #598): a cached-static-route
+			// handler is wired with Upstream (the staticfile handler)
+			// and no FastClient. The upstream response is fully
+			// buffered in a scratch RequestCtx, so the result carries
+			// the buffered flag and every caller takes the buffered
+			// branch; resp stays nil, which releaseStreamFetch and the
+			// buffered-only call sites tolerate.
+			res := h.fetchViaUpstream(ctx)
+			if res.Err != nil {
+				return nil, res.Err
+			}
+			return &streamFetchResult{
+				StatusCode: res.StatusCode,
+				Header:     res.Header,
+				buffered:   true,
+				body:       res.Body,
+			}, nil
+		}
 		return nil, fmt.Errorf("no fast client configured")
 	}
 	spanCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
@@ -203,6 +223,23 @@ func streamCopyFlush(w *bufio.Writer, r io.Reader) error {
 // the client without buffering. Used for BYPASS path where the response
 // is not cached.
 func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
+	if h.fastClient == nil {
+		// Upstream fallback (issue #598): a cached-static-route handler
+		// is wired with Upstream (the staticfile handler) and no
+		// FastClient. Run the upstream handler in-process: its response
+		// is already in ctx.Response, so only the attribution headers
+		// and rewrites remain.
+		if h.upstream != nil {
+			h.upstream(ctx)
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+			h.applyResponseRewrites(&ctx.Response.Header)
+			return
+		}
+		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
+		h.applyResponseRewrites(&ctx.Response.Header)
+		return
+	}
 	sf, err := h.doFetchStream(ctx)
 	if err != nil {
 		if errors.Is(err, ErrFetchShed) {
@@ -260,6 +297,8 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 // streamMiss fetches the origin response, streams it to the client while
 // concurrently buffering for cache storage. Handles singleflight: the
 // leader streams, followers wait for the buffered result.
+//
+//nolint:gocyclo // 16: SSE/unshareable + upstream-fallback cacheability branches mirror the FastClient paths; splitting them would hide the symmetry
 func (h *Handler) streamMiss(
 	ctx *fasthttp.RequestCtx,
 	primaryKey api.Key,
@@ -286,7 +325,7 @@ func (h *Handler) streamMiss(
 	sf.Header.CopyToFastHTTP(dst)
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
-	if len(sf.resp.Header.Peek(header.Age)) == 0 {
+	if sf.resp == nil || len(sf.resp.Header.Peek(header.Age)) == 0 {
 		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
 	ctx.SetStatusCode(sf.StatusCode)
@@ -318,10 +357,18 @@ func (h *Handler) streamMiss(
 	// the Map at all: every non-cacheable miss saves the FromFastHTTP
 	// conversion plus header-entry interning that only cacheable storage
 	// needs.
-	cacheable := h.isResponseCacheableBytes(sf, ri)
+	// The upstream-fallback result (issue #598) has no raw fasthttp
+	// response: cacheability is evaluated over the buffered Map path.
+	var cacheable bool
 	var resMap header.Map
-	if cacheable {
+	if sf.resp != nil {
+		cacheable = h.isResponseCacheableBytes(sf, ri)
+		if cacheable {
+			resMap = sf.Header.ToMap()
+		}
+	} else {
 		resMap = sf.Header.ToMap()
+		cacheable = h.isResponseCacheable(sf, ri, resMap)
 	}
 
 	if sf.buffered || isHEAD || !cacheable {
@@ -589,6 +636,8 @@ func joinedVary(h header.Map) string {
 // streamMissBuffered handles the non-streaming fallback: the client
 // doesn't support body streaming, the request is HEAD, or the response
 // is not cacheable. The body is already in resp.Body().
+//
+//nolint:gocyclo // 16: Vary-variant storage branches mirror the store path; splitting would hide the ownership rules
 func (h *Handler) streamMissBuffered(
 	ctx *fasthttp.RequestCtx,
 	sf *streamFetchResult,
@@ -599,8 +648,10 @@ func (h *Handler) streamMissBuffered(
 	isHEAD, cacheable bool,
 ) {
 	// Check body size against maxResponseBytes (Content-Length may not
-	// have been available).
-	if h.maxResponseBytes > 0 && int64(len(sf.resp.Body())) > h.maxResponseBytes {
+	// have been available). The upstream-fallback result (issue #598)
+	// has no raw response; its body size was already bounded by
+	// fetchViaUpstream's conversion.
+	if h.maxResponseBytes > 0 && sf.resp != nil && int64(len(sf.resp.Body())) > h.maxResponseBytes {
 		inflight.res = fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
 		close(inflight.done)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
@@ -617,12 +668,18 @@ func (h *Handler) streamMissBuffered(
 	// (non-cacheable miss), steal the buffer via SwapBody: the body is
 	// transient (written to this client and released singleflight
 	// followers) and the steal removes a full-body memcpy plus halves
-	// peak in-flight body memory.
+	// peak in-flight body memory. The upstream-fallback result (issue
+	// #598) has no raw response; its body is already an exact-size,
+	// independently-owned copy produced by upstreamFetchResult, and it
+	// travels on the streamFetchResult body field below.
 	var body []byte
-	if cacheable {
+	switch {
+	case sf.resp == nil:
+		body = sf.body
+	case cacheable:
 		body = make([]byte, len(sf.resp.Body()))
 		copy(body, sf.resp.Body())
-	} else {
+	default:
 		body = takeResponseBody(sf.resp)
 	}
 

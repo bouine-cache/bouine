@@ -206,15 +206,23 @@ func (o *Object) CloneForReturn(body []byte) *Object {
 		ETag:                 o.ETag,
 		LastModified:         o.LastModified,
 		SurrogateKeys:        o.SurrogateKeys,
-		Hits:                 o.Hits,
-		CacheControl:         o.CacheControl,
-		OriginAge:            o.OriginAge,
-		HasConnectionList:    o.HasConnectionList,
-		HasNoCacheFields:     o.HasNoCacheFields,
-		HasDate:              o.HasDate,
-		VaryValue:            o.VaryValue,
-		RespNoCache:          o.RespNoCache,
-		RespMustRevalidate:   o.RespMustRevalidate,
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		Hits:               atomic.LoadUint64(&o.Hits),
+		CacheControl:       o.CacheControl,
+		OriginAge:          o.OriginAge,
+		HasConnectionList:  o.HasConnectionList,
+		HasNoCacheFields:   o.HasNoCacheFields,
+		HasDate:            o.HasDate,
+		VaryValue:          o.VaryValue,
+		RespNoCache:        o.RespNoCache,
+		RespMustRevalidate: o.RespMustRevalidate,
 	}
 	if head := o.serializedHead.Load(); head != nil {
 		clone.serializedHead.Store(head)
@@ -277,15 +285,23 @@ func (o *Object) CloneForRefresh() *Object {
 		ETag:                 o.ETag,
 		LastModified:         o.LastModified,
 		SurrogateKeys:        o.SurrogateKeys,
-		Hits:                 o.Hits,
-		CacheControl:         o.CacheControl,
-		OriginAge:            o.OriginAge,
-		HasConnectionList:    o.HasConnectionList,
-		HasNoCacheFields:     o.HasNoCacheFields,
-		HasDate:              o.HasDate,
-		VaryValue:            o.VaryValue,
-		RespNoCache:          o.RespNoCache,
-		RespMustRevalidate:   o.RespMustRevalidate,
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		// Atomic load: the stored object's Hits is incremented with
+		// atomic.AddUint64 by HotStore.Get while this clone may run on
+		// another goroutine (revalidation, warm encode) holding the same
+		// pointer — the read must pair with that store (issue #218).
+		Hits:               atomic.LoadUint64(&o.Hits),
+		CacheControl:       o.CacheControl,
+		OriginAge:          o.OriginAge,
+		HasConnectionList:  o.HasConnectionList,
+		HasNoCacheFields:   o.HasNoCacheFields,
+		HasDate:            o.HasDate,
+		VaryValue:          o.VaryValue,
+		RespNoCache:        o.RespNoCache,
+		RespMustRevalidate: o.RespMustRevalidate,
 	}
 }
 

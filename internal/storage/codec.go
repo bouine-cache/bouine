@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouine-cache/bouine/pkg/api"
@@ -93,7 +94,10 @@ func encodeObjectInto(obj *api.Object, buf []byte) []byte {
 	buf = binary.AppendVarint(buf, int64(obj.StaleIfError))
 	buf = appendTime(buf, obj.StoredAt)
 	buf = appendTime(buf, obj.LastModified)
-	buf = binary.AppendUvarint(buf, obj.Hits)
+	// Atomic load: hot.Get increments Hits under the shard lock while
+	// this encoder runs outside it (tiered.writeHotOnlyToWarm), so the
+	// read must pair with the increment's atomic store (issue #218).
+	buf = binary.AppendUvarint(buf, atomic.LoadUint64(&obj.Hits))
 	buf = appendString(buf, obj.ETag)
 
 	// Header map: count, then (key, value) per entry.

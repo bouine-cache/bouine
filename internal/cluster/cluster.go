@@ -112,13 +112,17 @@ type Member struct {
 //
 // Stable.
 type Cluster struct {
-	local   api.PeerInfo
-	inv     Invalidator
-	logger  observability.Logger
-	ml      *memberlist.Memberlist
-	ring    *ring
-	peers   map[string]*Member // keyed by NodeName
-	metrics *Metrics
+	local  api.PeerInfo
+	inv    Invalidator
+	logger observability.Logger
+	ml     *memberlist.Memberlist
+	ring   *ring
+	peers  map[string]*Member // keyed by NodeName
+	// metrics is stored atomically: memberlist goroutines (gossip
+	// dispatch, reconcile loop) read it and memberlist.Create starts
+	// them before SetMetrics can be called — the same reason the
+	// slogAdapter in this package holds an atomic.Pointer.
+	metrics atomic.Pointer[Metrics]
 	adapter *slogAdapter
 	// done is closed by Leave to stop the reconcile loop;
 	// closeOnce makes repeated Leave calls safe. The reconcile
@@ -288,7 +292,7 @@ func (c *Cluster) Owner(key api.Key) api.PeerInfo {
 	defer c.mu.RUnlock()
 	name := c.ring.get(key)
 	if name == "" {
-		c.metrics.IncRingEmpty()
+		c.metrics.Load().IncRingEmpty()
 		c.logger.Warn("cluster: ring empty, cannot determine owner",
 			"key", key, "peers", len(c.peers))
 		return api.PeerInfo{}
@@ -400,7 +404,7 @@ func (c *Cluster) handleGossipPurge(msg []byte) {
 		c.logger.Warn("cluster: gossip purge apply failed", "error", err)
 		return
 	}
-	c.metrics.IncGossipInvalidation("purge")
+	c.metrics.Load().IncGossipInvalidation("purge")
 	c.logger.Info("received purge from peer",
 		"key", evt.Key,
 		"issuer", evt.Issuer,
@@ -435,7 +439,7 @@ func (c *Cluster) handleGossipPurgeBatch(msg []byte) {
 		applied++
 	}
 	if applied > 0 {
-		c.metrics.IncGossipInvalidation("purge_batch")
+		c.metrics.Load().IncGossipInvalidation("purge_batch")
 		c.logger.Info("received purge batch from peer", "events", len(evts), "applied", applied)
 	}
 }
@@ -459,7 +463,7 @@ func (c *Cluster) handleGossipBan(msg []byte) {
 		c.logger.Warn("cluster: gossip ban apply failed", "error", err)
 		return
 	}
-	c.metrics.IncGossipInvalidation("ban")
+	c.metrics.Load().IncGossipInvalidation("ban")
 	c.logger.Info("received ban from peer",
 		"issuer", evt.Issuer,
 		"seq", evt.Seq,
@@ -485,7 +489,7 @@ func (c *Cluster) handleGossipRefresh(msg []byte) {
 		c.logger.Warn("cluster: gossip refresh apply failed", "error", err)
 		return
 	}
-	c.metrics.IncGossipInvalidation("refresh")
+	c.metrics.Load().IncGossipInvalidation("refresh")
 	c.logger.Info("received refresh from peer",
 		"key", evt.Key,
 		"issuer", evt.Issuer,
@@ -519,7 +523,7 @@ func (c *Cluster) handleGossipRefreshBatch(msg []byte) {
 		applied++
 	}
 	if applied > 0 {
-		c.metrics.IncGossipInvalidation("refresh_batch")
+		c.metrics.Load().IncGossipInvalidation("refresh_batch")
 		c.logger.Info("received refresh batch from peer", "events", len(evts), "applied", applied)
 	}
 }
@@ -926,7 +930,7 @@ func (c *Cluster) Mode() string { return c.cfg.Mode }
 // before Join. Nil receiver is a no-op. Safe to call concurrently with
 // memberlist's logging goroutine — the adapter stores the pointer atomically.
 func (c *Cluster) SetMetrics(m *Metrics) {
-	c.metrics = m
+	c.metrics.Store(m)
 	if c.adapter != nil {
 		c.adapter.setMetrics(m)
 	}

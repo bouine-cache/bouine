@@ -92,14 +92,14 @@ func NewBroadcaster(c *Cluster, fetcher *PeerFetcher, token ...string) *Broadcas
 		logger:  logger,
 		token:   tok,
 		mode:    c.Mode(),
-		metrics: c.metrics,
+		metrics: c.metrics.Load(),
 	}
 	b.batcher = newInvalidationBatcher(
 		logger,
-		c.metrics,
+		c.metrics.Load(),
 		b.flushPurgeBatch,
 		b.flushRefreshBatch,
-		func() { c.metrics.IncBroadcastOverflow() },
+		func() { c.metrics.Load().IncBroadcastOverflow() },
 	)
 	return b
 }

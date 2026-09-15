@@ -55,7 +55,14 @@ type RingSegment struct {
 type PurgeEvent struct {
 	// IssuedAt is the wall-clock time of the purge.
 	IssuedAt time.Time `json:"issued_at"`
-	// VaryKey, if non-empty, targets only the variant.
+	// VaryKey is metadata about the variant identity that triggered the
+	// purge (the BuildVaryKey assertion hex of the local object), not a
+	// purge target. Receivers MUST ignore it and apply the purge to
+	// evt.Key and every locally tracked variant under it: an invalidation
+	// of a resource removes all its variants (RFC 9111 §4.2.4), and a
+	// variant store key cannot be reconstructed from the assertion hex
+	// alone (they use different canonicalization; ADR-0045). Senders
+	// currently pass "".
 	VaryKey string `json:"vary_key,omitempty"`
 	// Issuer is the node name that originated the purge.
 	Issuer string `json:"issuer"`

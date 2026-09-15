@@ -282,8 +282,21 @@ type Handler struct {
 	// and all client-facing surfaces keep the original path. Nil means
 	// no stripping (zero cost on routes without strip_prefix).
 	stripPrefix []byte
-	routeName   string
-	poolName    string
+	// reqHeaderSet sets (overrides) request headers on every origin-bound
+	// fetch (request.header_set). nil = no-op.
+	reqHeaderSet map[string]string
+	// reqHeaderRemove skips the listed (lower-cased) request headers on
+	// every origin-bound fetch (request.header_remove). nil = no-op.
+	reqHeaderRemove map[string]bool
+	// respHeaderSet sets response headers on every client-facing
+	// response, after the stored headers are written (response.header_set).
+	// nil = no-op.
+	respHeaderSet map[string]string
+	// respHeaderRemove deletes the listed response headers from every
+	// client-facing response (response.header_remove). nil = no-op.
+	respHeaderRemove map[string]bool // canonical name set for Del
+	routeName        string
+	poolName         string
 	// inflightStreams tracks in-progress streaming fetches for
 	// singleflight dedup. The leader streams the origin response to
 	// its client while buffering for the cache; followers wait on
@@ -397,6 +410,28 @@ type HandlerConfig struct {
 	// hit responses for the metrics middleware's upstream_pool label.
 	// Empty for routes without a pool (static-file routes).
 	PoolName string
+
+	// RequestHeaderSet sets the listed request headers (name → value)
+	// on every origin-bound fetch, overriding client values. Applied
+	// before the fetch, bypass, revalidation, and the Vary variant
+	// computation, so the rewritten value is what every downstream
+	// surface sees (config.RouteRequest.HeaderSet contract). Header
+	// names are canonicalized by fasthttp's setters at application.
+	RequestHeaderSet map[string]string
+	// RequestHeaderRemove removes the listed request headers from the
+	// origin-bound fetch (config.RouteRequest.HeaderRemove contract).
+	// Names are lower-cased at construction for O(1) skip checks.
+	RequestHeaderRemove []string
+	// ResponseHeaderSet sets the listed response headers (name → value)
+	// on every response this handler emits — hit, stale, revalidated,
+	// miss, and bypass — after the stored headers are written
+	// (config.RouteResponse.HeaderSet contract). Set replaces any
+	// origin value for the same name.
+	ResponseHeaderSet map[string]string
+	// ResponseHeaderRemove removes the listed response headers from
+	// every response this handler emits, after the stored headers are
+	// written (config.RouteResponse.HeaderRemove contract).
+	ResponseHeaderRemove []string
 	// DefaultSWR is applied to every stored object when the origin does not
 	// send stale-while-revalidate. Zero leaves the object at origin semantics.
 	DefaultSWR time.Duration
@@ -572,9 +607,46 @@ func (h *Handler) strippedURI(uri []byte) []byte {
 	return StripRequestURI(h.stripPrefix, uri)
 }
 
+// rewriteRequestCtx applies the request-side rewrite directives directly
+// to the client's RequestCtx headers before they are copied to the
+// origin-bound request. Used by the foreground paths, which copy headers
+// out of the ctx one by one: rewriting the source is simpler and covers
+// the Vary variant computation, which reads ctx.Request.Header.
+// No-op for routes without directives.
+func (h *Handler) rewriteRequestCtx(ctx *fasthttp.RequestCtx) {
+	if h.reqHeaderRemove != nil {
+		for name := range h.reqHeaderRemove {
+			ctx.Request.Header.Del(name)
+		}
+	}
+	if h.reqHeaderSet != nil {
+		for k, v := range h.reqHeaderSet {
+			ctx.Request.Header.Set(k, v)
+		}
+	}
+}
+
+// applyResponseRewrites mutates a client-facing response in place with
+// the route's response header rewrite directives: remove first (Del is a
+// no-op for absent headers), then set (Set replaces any origin value).
+// Called on every response the handler emits; no-op for routes without
+// directives.
+func (h *Handler) applyResponseRewrites(dst *fasthttp.ResponseHeader) {
+	if h.respHeaderRemove != nil {
+		for name := range h.respHeaderRemove {
+			dst.Del(name)
+		}
+	}
+	if h.respHeaderSet != nil {
+		for k, v := range h.respHeaderSet {
+			dst.Set(k, v)
+		}
+	}
+}
+
 // NewHandler creates a caching handler.
 //
-//nolint:funlen // 81 lines: initialization is inherently sequential
+//nolint:funlen,gocyclo // 81 lines: initialization is inherently sequential; the rewrite-directive blocks add four flat branches
 func NewHandler(cfg HandlerConfig) *Handler {
 	cfg.Logger = observability.ResolveLogger(cfg.Logger)
 	h := &Handler{
@@ -671,6 +743,31 @@ func NewHandler(cfg HandlerConfig) *Handler {
 
 	h.revalSem = make(chan struct{}, defaultRevalConcurrency)
 	h.inflightStreams = newInflightTable()
+
+	// Header rewrite policy (request/response header_set/header_remove).
+	// Pre-canonicalized at construction so the per-request work is map
+	// lookups and fasthttp setter calls only, and the nil checks cost
+	// nothing on routes without rewrite directives.
+	if len(cfg.RequestHeaderSet) > 0 {
+		h.reqHeaderSet = cfg.RequestHeaderSet
+	}
+	if len(cfg.RequestHeaderRemove) > 0 {
+		m := make(map[string]bool, len(cfg.RequestHeaderRemove))
+		for _, name := range cfg.RequestHeaderRemove {
+			m[strings.ToLower(name)] = true
+		}
+		h.reqHeaderRemove = m
+	}
+	if len(cfg.ResponseHeaderSet) > 0 {
+		h.respHeaderSet = cfg.ResponseHeaderSet
+	}
+	if len(cfg.ResponseHeaderRemove) > 0 {
+		m := make(map[string]bool, len(cfg.ResponseHeaderRemove))
+		for _, name := range cfg.ResponseHeaderRemove {
+			m[header.InternKey(name)] = true
+		}
+		h.respHeaderRemove = m
+	}
 
 	return h
 }
@@ -1057,11 +1154,20 @@ func (h *Handler) buildKey(ctx *fasthttp.RequestCtx) api.Key {
 // ServeRequest implements fasthttp.RequestHandler. It dispatches
 // cache-invalidating methods (POST/PUT/DELETE) to invalidateAndProxy
 // and all others to the cache lookup pipeline.
+//
+//nolint:gocyclo // 20: the dispatch switch is the RFC 9111 state machine's front door; the header-rewrite hook adds one branch by design
 func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 	if isInvalidatingBytes(ctx.Method()) {
 		h.serveInvalidating(ctx)
 		return
 	}
+
+	// Request-side header rewrite (request.header_set/header_remove).
+	// Applied to the ctx before any read — the cache key does not
+	// depend on request headers, but the Vary variant computation and
+	// every origin-bound copy do, so the rewrite must land before
+	// lookup. No-op for routes without directives.
+	h.rewriteRequestCtx(ctx)
 
 	now := time.Now()
 	primaryKey, key, obj, src := h.lookup(ctx)
@@ -1503,6 +1609,7 @@ func (h *Handler) serveObject(ctx *fasthttp.RequestCtx, obj *api.Object, now tim
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(obj.Body) // #nosec G705 -- obj.Body is an immutable cached origin response
 	}
+	h.applyResponseRewrites(dst)
 }
 
 // collapsedFetch deduplicates concurrent origin fetches for the same key.
@@ -1690,6 +1797,7 @@ func (h *Handler) writeBufferedResult(
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
+	h.applyResponseRewrites(dst)
 }
 
 func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, primaryKey api.Key, stale *api.Object, now time.Time, src api.Source, ri RequestInfo) {
@@ -1961,6 +2069,7 @@ func (h *Handler) writeAndMaybeStore(
 	if !bytes.Equal(ctx.Method(), []byte("HEAD")) {
 		ctx.Response.SetBodyRaw(res.Body)
 	}
+	h.applyResponseRewrites(dst)
 
 	// Pre-parse Cache-Control/CDN-Cache-Control once instead of up to 6
 	// times (IsCacheable parses, isCacheBlocked re-parses for hasCDN,
@@ -2163,6 +2272,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 	dst.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
 	ctx.SetStatusCode(resp.StatusCode())
+	h.applyResponseRewrites(dst)
 	_, _ = ctx.Write(resp.Body())
 
 	// Only invalidate on 2xx/3xx success.

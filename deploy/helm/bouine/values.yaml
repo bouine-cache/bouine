@@ -32,6 +32,11 @@ commonAnnotations: {}
 # bouine config. Rendered into a ConfigMap and mounted at /etc/bouine/.
 config:
   listen:
+    # The ports below are the container ports: the StatefulSet derives
+    # its containerPorts from them, the Services resolve them by name,
+    # and the NetworkPolicy allows them post-DNAT (issue #586).
+    # Overriding any port keeps routing, probes, and policy coherent.
+    # Address form: [host:]port (e.g. ":8080" or "10.0.0.1:9000").
     http: ":80"
     https: ":443"
     admin: ":9000"
@@ -81,6 +86,16 @@ config:
   #       response_header_timeout: 30s  # origin wait default inherited by routes without cache.fetch_timeout; keep < 5m (data plane safety net)
   #       hedge_timeout: 50ms           # fire a duplicate request after this delay
   upstream_pools: []
+  # Header rewrite directives (request.header_set, request.header_remove,
+  # response.header_set, response.header_remove) apply per route:
+  #   routes:
+  #     - name: web
+  #       pool: app
+  #       request:
+  #         header_remove: [X-Client-Trace]
+  #       response:
+  #         header_set:
+  #           X-Content-Type-Options: nosniff
   routes: []
   # Cloudflare Cache API invalidation propagation.
   # When zone_id and api_token are set, bouine forwards purge/ban/refresh

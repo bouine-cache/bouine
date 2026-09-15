@@ -55,7 +55,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		restores: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "bouine",
 			Name:      "origin_restores_total",
-			Help:      "Target restores by health check source (active or manual).",
+			Help:      "Target restores by health check source (active, manual, or eject_for window expiry).",
 		}, []string{"pool", "target", "source"}),
 		ActiveConnections: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "bouine",

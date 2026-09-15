@@ -200,6 +200,7 @@ func (e *engine) run(ctx context.Context) error {
 	e.swapAdminHandler(ctx, rs, minimalAdmin, conditionsFn, drainFn) // swap full admin routes into the minimal server
 	e.startListeners(g, handler, rs)                                 // HTTP/HTTPS data-plane listeners
 	e.startHealthChecks(g, rs.pools)                                 // active health probes per upstream pool
+	e.startEjectReapers(g, rs.pools)                                 // eject_for window reapers (no-op pools without the knob)
 	e.startClusterJoin(g, rs)                                        // gossip join with retry against seed peers
 	e.registerShutdownSteps(g, rs)                                   // ordered drain: readiness, store flush, cluster leave
 
@@ -1140,6 +1141,26 @@ func (e *engine) startHealthChecks(g *supervised.Group, pools map[string]*origin
 			ExpectedCodes:      pc.Health.Active.ExpectedStatusCodes,
 		}, e.logger)
 		g.Go("health-"+pc.Name, hc.Run)
+	}
+}
+
+// startEjectReapers runs the eject_for window reaper for every pool that
+// configured the knob. Pools without eject_for get no goroutine —
+// historical behavior (ejected until an active probe or manual restore).
+func (e *engine) startEjectReapers(g *supervised.Group, pools map[string]*origin.Pool) {
+	for _, pc := range e.cfg.UpstreamPools {
+		if pc.Health.Passive.EjectFor <= 0 {
+			continue
+		}
+		p := pools[pc.Name]
+		if p == nil {
+			continue
+		}
+		reaper := origin.NewEjectReaper(p)
+		if reaper == nil {
+			continue
+		}
+		g.Go("eject-reaper-"+pc.Name, reaper.Run)
 	}
 }
 

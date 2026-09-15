@@ -412,7 +412,12 @@ func (h *HotStore) Get(_ context.Context, key api.Key) (*api.Object, api.Source,
 		s.evict.Access(key, func(k api.Key) *evictor.Entry[api.Key] {
 			return e.entry
 		})
-		e.obj.Hits++
+		// Atomic increment: the warm-tier encoder reads Hits outside
+		// the shard lock (tiered.writeHotOnlyToWarm → encodeObject),
+		// so the read/write pair must not race (issue #218). The lock
+		// already serializes writers; the atomic store pairs with the
+		// encoder's atomic load.
+		atomic.AddUint64(&e.obj.Hits, 1)
 		e.windowHits.Add(1)
 		stored = e.obj
 	}

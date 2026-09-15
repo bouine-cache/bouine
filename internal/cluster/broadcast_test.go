@@ -187,7 +187,7 @@ func TestBroadcastPurge_IncrementsBroadcastFailureCounter(t *testing.T) {
 	m := RegisterMetrics(reg)
 
 	c := minimalCluster(t, "node-0")
-	c.metrics = m
+	c.metrics.Store(m)
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
 		AdminAddr: srv.Addr,
@@ -216,7 +216,7 @@ func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
 	c := minimalCluster(t, "node-0")
 	reg := prometheus.NewRegistry()
 	m := RegisterMetrics(reg)
-	c.metrics = m
+	c.metrics.Store(m)
 	c.peers["node-1"] = &Member{Info: api.PeerInfo{
 		Name:      "node-1",
 		AdminAddr: "127.0.0.1:1",
@@ -246,13 +246,14 @@ func TestBroadcastPurge_DialErrorIncrementsDial(t *testing.T) {
 }
 
 func minimalCluster(_ *testing.T, _ string) *Cluster {
-	return &Cluster{
-		cfg:     Config{NodeName: "node-0", Mode: "strong"},
-		peers:   make(map[string]*Member),
-		ring:    newRing(256),
-		logger:  observability.NoopLogger{},
-		metrics: &Metrics{},
+	c := &Cluster{
+		cfg:    Config{NodeName: "node-0", Mode: "strong"},
+		peers:  make(map[string]*Member),
+		ring:   newRing(256),
+		logger: observability.NoopLogger{},
 	}
+	c.metrics.Store(&Metrics{})
+	return c
 }
 
 func TestBroadcastPurge_NotCancelledByParentContext(t *testing.T) {

@@ -45,6 +45,65 @@ import (
 	"github.com/bouine-cache/bouine/pkg/api"
 )
 
+// pendingHitFlush is the batch threshold that applies pending hit
+// counts mid-load: at this many hits the flush (one IncrementReactorHitN
+// add against the shared counter) is amortized to ~nothing, while the
+// pending window stays far below every scrape interval.
+const pendingHitFlush = 128
+
+// noteReactorHit records an inline-served hit to the telemetry sink.
+// The hit counter is BATCHED, not immediate: ReactorHits is one
+// shared Prometheus counter, and with reuse_port every loop's CPU core
+// hammers that one cacheline per hit — under saturation the atomic
+// add dominates the loop's per-hit cost. The loop adds to a local
+// atomic and flushes via IncrementReactorHitN in batches (flush
+// points: the pendingHitFlush threshold, the 1s idle sweep, and loop
+// shutdown). Loss window: none on clean shutdown; ≤1s of hit counts
+// on a kill -9, which no scrape interval can observe.
+func (p *Parser) noteReactorHit() {
+	if p.reactorMetrics == nil {
+		return
+	}
+	p.pendingReactorHits.Add(1)
+	if p.pendingReactorHits.Load() >= pendingHitFlush {
+		p.flushReactorHits()
+	}
+}
+
+// flushReactorHandsOff applies the pending hit batch with one
+// IncrementReactorHitN call.
+func (p *Parser) flushReactorHits() {
+	if p.reactorMetrics == nil {
+		return
+	}
+	n := p.pendingReactorHits.Swap(0)
+	if n > 0 {
+		p.reactorMetrics.IncrementReactorHitN(n)
+	}
+}
+
+// noteReactorHandoff reports a handoff decision (with its reason) to
+// the telemetry sink. Called on the loop goroutine at each decision
+// site, exactly once per handoff. Rarer than hits (a handoff ends a
+// loop-side request cycle) and already off the pure-hit path, so the
+// batch complexity is not warranted here.
+func (p *Parser) noteReactorHandoff(reason string) {
+	if p.reactorMetrics != nil {
+		p.reactorMetrics.IncrementReactorHandoff(reason)
+	}
+	// Keep any pending hit batch moving even under heavy miss traffic
+	// (the sweep also flushes, but this bounds staleness per handoff).
+	p.flushReactorHits()
+}
+
+// noteReactorDrop reports a reactor-initiated connection close to the
+// telemetry sink.
+func (p *Parser) noteReactorDrop() {
+	if p.reactorMetrics != nil {
+		p.reactorMetrics.IncrementReactorDrop()
+	}
+}
+
 // rcState is the per-connection state machine state.
 type rcState uint8
 
@@ -63,7 +122,32 @@ const (
 	actHandoff                         // start blocking parser with buffered bytes
 	actClose                           // close the connection
 	actCloseAfterFlush                 // finish the in-flight response, then close
+	// actFlushed is internal to advance(): a completed flush. advance
+	// loops straight back to reading, where pipelined bytes preloaded
+	// by parsed() are consumed before any socket read. The transport
+	// never sees it.
+	actFlushed
+	// actParseMore is internal to advance(): a pipelined hit joined
+	// the coalesced writev batch and the next request's bytes are
+	// already buffered — parse the next response into the batch
+	// before flushing. The transport never sees it.
+	actParseMore
 )
+
+// maxBatchedHits caps how many pipelined hit responses one writev
+// batch carries: the inline writeVecArr slots (3 per response) and
+// retainArr are sized to it. IOV_MAX is 1024 on Linux; 5 responses x
+// 3 slots stays trivially inside, while bounding worst-case kernel
+// time per writev and the retained-response window.
+const maxBatchedHits = 5
+
+// retainEntry is one response retained across a coalesced batch: its
+// buffers are aliased by the pending writev, so it may not return to
+// the handler's pool until the batch completes.
+type retainEntry struct {
+	resp *api.FastPathResponse
+	fp   api.FastPathHandler
+}
 
 // errAgain is returned by the injected I/O functions when the socket
 // has no data (read) or no buffer space (write) right now. The Linux
@@ -98,16 +182,19 @@ type reactorConn struct {
 	// header-serialized case and for tests via writeFn). Backed by the
 	// inlined writeVecArr so newReactorConn never allocates it.
 	writeVec [][]byte
-	// writeVecArr is the fixed backing for writeVec (3 slots: status
-	// line, header block, body — the FastPathResponse layout; cap 4
-	// leaves spare slack).
-	writeVecArr [4][]byte
-	// retainResp/retainFP hold the fast-path response and its owning
-	// handler between parsed() and the completed flush: writev aliases
-	// the cache object body, so the response must not return to the
-	// pool until every byte is on the socket. The handler (not a
-	// method value — assigning fp.Release boxes the receiver and costs
-	// an allocation per hit) is stored to call Release at completion.
+	// writeVecArr is the fixed backing for writeVec (up to
+	// maxBatchedHits response layouts of 3 slots each — status line,
+	// header block, body — plus slack; see parsed's coalescing path).
+	writeVecArr [3*maxBatchedHits + 1][]byte
+	// retainArr holds the responses retained across a coalesced batch:
+	// writev aliases each cache object body, so none may return to its
+	// pool until every byte of the batch is on the socket.
+	retainArr [maxBatchedHits]retainEntry
+	// retainCount is how many retainArr slots are live.
+	retainCount int
+	// retainResp/retainFP hold the single-response fast-path state when
+	// coalescing is off or the batch overflows to a flush (kept for the
+	// legacy one-response flush path and tests).
 	retainResp *api.FastPathResponse
 	retainFP   api.FastPathHandler
 	// writeVecFn, when non-nil, flushes the retained response buffers
@@ -146,25 +233,40 @@ type reactorConn struct {
 	readBuf [readBufferSize]byte
 }
 
-// newReactorConn builds the state machine. The transport wires the
-// raw-fd I/O functions; they must return errAgain instead of blocking.
+// newReactorConn builds the state machine, drawing the struct from
+// reactorConnPool when a previous life was recycled into it (the miss
+// round-trip reuse path: workers recycle on conn death, the next
+// accept/return draws it back). The transport wires the raw-fd I/O
+// functions; they must return errAgain instead of blocking. All state
+// is re-initialized — a pooled struct carries only its inline bulk
+// (readBuf, scratch, writeVecArr), never request state.
 func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int, error)) *reactorConn {
 	now := p.nowFunc()
-	rc := &reactorConn{
-		conn:     conn,
-		parser:   p,
-		readFn:   readFn,
-		writeFn:  writeFn,
-		fd:       -1,
-		state:    rcReading,
-		reqStart: now,
-		writeBuf: (*reactorWritePool.Get().(*[]byte))[:0],
-		scratch:  api.RawRequest{Scheme: p.scheme},
+	var rc *reactorConn
+	if v, ok := reactorConnPool.Get().(*reactorConn); ok && v != nil {
+		rc = v
+	} else {
+		rc = &reactorConn{}
 	}
-	// Pre-size the writev slice over the inlined backing array (3
-	// slots: status line, header block, body — the FastPathResponse
-	// layout) so parsed() never grows it mid-hit.
+	rc.conn = conn
+	rc.parser = p
+	rc.readFn = readFn
+	rc.writeFn = writeFn
+	rc.fd = -1
+	rc.state = rcReading
+	rc.reqStart = now
+	rc.writeBuf = (*reactorWritePool.Get().(*[]byte))[:0]
 	rc.writeVec = rc.writeVecArr[:0]
+	rc.writeVecFn = nil
+	rc.retainCount = 0
+	rc.writeLen = 0
+	rc.rLen = 0
+	rc.scanned = 0
+	rc.retainResp = nil
+	rc.retainFP = nil
+	rc.closeAfterFlush = false
+	rc.epollInterest = 0
+	rc.scratch = api.RawRequest{Scheme: p.scheme}
 	return rc
 }
 
@@ -180,6 +282,15 @@ func newReactorConn(conn net.Conn, p *Parser, readFn, writeFn func([]byte) (int,
 // (release runs on the loop goroutine, accept on the accept
 // goroutine), so the pointer is nulled before Put, never after.
 func (rc *reactorConn) release() {
+	for i := range rc.retainCount {
+		e := &rc.retainArr[i]
+		if e.fp != nil && e.resp != nil {
+			e.fp.Release(e.resp)
+			e.resp = nil
+			e.fp = nil
+		}
+	}
+	rc.retainCount = 0
 	if rc.retainFP != nil && rc.retainResp != nil {
 		rc.retainFP.Release(rc.retainResp)
 		rc.retainResp = nil
@@ -193,51 +304,119 @@ func (rc *reactorConn) release() {
 	}
 }
 
-// advance drives the state machine one step. It never blocks: all
-// reads/writes go through the injected non-blocking funcs.
+// advance drives the state machine until it produces an action the
+// transport must handle (arm readiness, hand off, close). A completed
+// flush is an internal transition (actFlushed): finishWrite has
+// already moved the machine back to reading, and the loop immediately
+// consumes any pipelined bytes preloaded by parsed() — iteratively, so
+// a batch of pipelined hits costs one advance() call, not one stack
+// frame per request. It never blocks: all reads/writes go through the
+// injected non-blocking funcs.
 func (rc *reactorConn) advance() rcAction {
-	switch rc.state {
-	case rcReading:
-		act := rc.advanceReading()
-		if act == actHandoff {
-			// Terminal for the reactor: mark before the transport reads
-			// state (tests and idle checks rely on it).
-			rc.state = rcHandoff
+	for {
+		var act rcAction
+		switch rc.state {
+		case rcReading:
+			act = rc.advanceReading()
+		case rcWriting:
+			act = rc.advanceWriting()
+		default:
+			return actClose
 		}
-		return act
-	case rcWriting:
-		act := rc.advanceWriting()
-		if act == actHandoff {
-			rc.state = rcHandoff
+		switch act {
+		case actParseMore:
+			// A pipelined hit joined the coalesced batch and more bytes
+			// are buffered: parse the next response into the batch.
+			rc.state = rcReading
+			continue
+		case actHandoff:
+			if rc.retainCount > 0 {
+				// A coalesced batch is pending when the follower needs
+				// the blocking path (miss, disqualified, malformed,
+				// oversize): the hits already served MUST reach the
+				// socket before the handoff replays the follower's
+				// bytes — handing off now would drop every retained
+				// response. Flush the batch first; the follower's
+				// bytes stay buffered in readBuf (parsed never consumes
+				// on the non-hit paths), so the post-flush reparse
+				// re-arrives here with retainCount == 0 and the handoff
+				// proceeds.
+				rc.state = rcWriting
+				flush := rc.advanceWritingVec()
+				if flush == actFlushed {
+					// Batch fully on the socket: fall into the
+					// actFlushed handling below (reread buffered bytes).
+					act = actFlushed
+				} else {
+					// Partial write (actWaitWrite), error, or the
+					// serialized-phase transition: the transport must
+					// handle it; the buffered follower is re-parsed
+					// after the batch completes and actHandoff fires
+					// again from a clean state.
+					if flush == actClose || flush == actCloseAfterFlush {
+						return flush
+					}
+					rc.state = rcWriting
+					return flush
+				}
+			}
+			if act == actHandoff {
+				// Terminal for the reactor: mark before the transport
+				// reads state (tests and idle checks rely on it).
+				rc.state = rcHandoff
+				return act
+			}
+		case actFlushed:
+			if rc.rLen == 0 {
+				// No pipelined bytes buffered: arm read readiness without
+				// a speculative read attempt — the epoll wakeup delivers
+				// the next request, and an extra EAGAIN read would cost one
+				// syscall per hit (measured +15% on Gate_Reactor_Hit).
+				return actWaitRead
+			}
+			// Pipelined bytes are buffered: consume them before waiting.
+			continue
+		default:
+			return act
 		}
-		return act
-	default:
-		return actClose
 	}
 }
 
-// advanceReading drains socket bytes into readBuf; once a full header
-// block is buffered it parses, tries the fast path, and on a hit
-// serializes the response into writeBuf for flushing.
+// advanceReading consumes bytes toward a full header block: any
+// preloaded pipelined bytes first, then socket reads. Once a full
+// header block is buffered it parses, tries the fast path, and on a
+// hit serializes the response into writeBuf for flushing.
 func (rc *reactorConn) advanceReading() rcAction {
 	for {
-		n, err := rc.readFn(rc.readBuf[rc.rLen:])
-		rc.rLen += n
-		if n > 0 {
+		if rc.rLen > 0 {
+			// Buffered bytes (a preloaded pipelined request, or a partial
+			// request carried across a wait): try to complete the parse
+			// before reading more. rLen == 0 skips the search — a fresh
+			// dispatch pays the terminator scan only after its first read,
+			// matching the pre-pipelining cost model.
 			if idx := findHeaderEndFrom(rc.readBuf[:rc.rLen], rc.scanned); idx >= 0 {
 				return rc.parsed(idx)
 			}
-			// Resume the next search at the oldest position where a
-			// terminator could still begin: four bytes back from the
-			// current end, clamped at zero (three bytes back would miss a
-			// terminator straddling segment boundaries; four keeps the
-			// reasoning simple and the cost is one extra byte probe).
-			rc.scanned = max(0, rc.rLen-headerTermOverlap)
-			if rc.rLen >= len(rc.readBuf) {
-				// Headers exceed the 16 KiB buffer: the blocking path
-				// serves these via handleFallThroughRaw.
-				return actHandoff
-			}
+		}
+		// No terminator in the buffered bytes: resume the next search
+		// at the oldest position where a terminator could still begin:
+		// four bytes back from the current end, clamped at zero (three
+		// bytes back would miss a terminator straddling segment
+		// boundaries; four keeps the reasoning simple and the cost is
+		// one extra byte probe). Updated only after a failed search, so
+		// the next search still sees the bytes where a terminator could
+		// have started before the pending read.
+		rc.scanned = max(0, rc.rLen-headerTermOverlap)
+		if rc.rLen >= len(rc.readBuf) {
+			// Headers exceed the 16 KiB buffer (accumulated reads or a
+			// full preloaded pipelined batch): the blocking path serves
+			// these via handleFallThroughRaw.
+			rc.parser.noteReactorHandoff(api.ReactorHandoffOversize)
+			return actHandoff
+		}
+		n, err := rc.readFn(rc.readBuf[rc.rLen:])
+		rc.rLen += n
+		if n > 0 {
 			continue
 		}
 		if err != nil {
@@ -249,9 +428,9 @@ func (rc *reactorConn) advanceReading() rcAction {
 		// n == 0, err == nil: the raw-fd read contract reports peer EOF
 		// this way. Treating it as want-read would busy-spin the loop
 		// on level-triggered readiness; close instead. A complete header
-		// block cannot be pending here: every n > 0 read returns through
-		// parsed() as soon as the terminator is buffered, so at this
-		// point the buffer holds only a partial request.
+		// block cannot be pending here: the loop-start check returns
+		// through parsed() as soon as the terminator is buffered, so at
+		// this point the buffer holds only a partial request.
 		return actClose
 	}
 }
@@ -259,74 +438,113 @@ func (rc *reactorConn) advanceReading() rcAction {
 // parsed handles a complete header block at idx: parse, qualify, and
 // either serve the hit inline or hand off. Split from advanceReading
 // to stay under the complexity/funlen gates.
+//
+// A hit with pipelined bytes after its header block is served inline:
+// the excess (always the next request — qualifying requests carry no
+// body) is preloaded into readBuf and consumed by advance's
+// post-flush reading pass, instead of forcing a handoff. This is what
+// keeps batch-writing clients (a load generator writing many requests
+// per connection) on the reactor instead of permanently exiling the
+// connection to the blocking path after one pipelined request.
+// recordHitMetrics reports a served hit to the metrics hook: through
+// the async ring when the loop transport wired one (the hook's CPU is
+// serial loop time otherwise), or directly. Split from parsed to keep
+// that function under the complexity gate.
+func (rc *reactorConn) recordHitMetrics(resp *api.FastPathResponse, now time.Time) {
+	hook := rc.parser.metricsHook
+	if hook == nil {
+		return
+	}
+	dur := rc.parser.nowFunc().Sub(now)
+	if rc.parser.metricsRing != nil {
+		// Async path (W3): push a fixed-size record; the loop's
+		// drainer goroutine applies the hook. All record strings are
+		// stable handler-owned values (see reactor_metrics.go for the
+		// retain-safety argument); no request-derived string is
+		// retained. Never blocks: overflow drops.
+		rc.parser.metricsRing.pushHit(hitMetricsRecord{
+			pool:        resp.Pool,
+			cacheResult: resp.CacheResult,
+			source:      resp.Source,
+			durNs:       dur.Nanoseconds(),
+			bytesOut:    resp.BytesOut,
+			status:      resp.StatusCode,
+		})
+		return
+	}
+	hook(resp.Pool, resp.CacheResult,
+		resp.Source, resp.StatusCode, resp.BytesOut, dur)
+}
+
+// stageHitResponse queues a served hit's response for flushing:
+// zero-copy into the coalesced writev batch when the transport
+// supports it and the response can join (not Connection: close, batch
+// under maxBatchedHits — a close response must be the conn's last
+// bytes and a full batch must drain before parsing further), or
+// serialized into the pooled write buffer otherwise. Retained batch
+// responses release at the batch's flush completion (writev aliases
+// each cache object body); the serialized form releases immediately
+// after its copy. Split from parsed to keep that function under the
+// complexity gate.
+func (rc *reactorConn) stageHitResponse(resp *api.FastPathResponse, fp api.FastPathHandler, closeConn bool) {
+	if rc.writeVecFn != nil && !closeConn && rc.retainCount < maxBatchedHits {
+		if rc.retainCount == 0 {
+			rc.writeVec = rc.writeVec[:0]
+			rc.writeLen = 0
+		}
+		rc.writeVec = append(rc.writeVec, resp.Buffers...)
+		rc.retainArr[rc.retainCount] = retainEntry{resp: resp, fp: fp}
+		rc.retainCount++
+		rc.closeAfterFlush = false
+		return
+	}
+	if rc.retainCount == 0 {
+		rc.writeBuf = rc.writeBuf[:0]
+		rc.writeLen = 0
+	}
+	for _, b := range resp.Buffers {
+		rc.writeBuf = append(rc.writeBuf, b...)
+	}
+	fp.Release(resp)
+	rc.retainResp = nil
+	rc.retainFP = nil
+	rc.closeAfterFlush = closeConn
+}
+
 func (rc *reactorConn) parsed(idx int) rcAction {
 	req, fallThrough, excess, err := rc.parser.parseBuffer(
 		rc.readBuf[:rc.rLen], idx, &rc.scratch)
-	if err != nil || fallThrough {
-		// Malformed request line/headers, or smuggling detection: the
-		// blocking path re-reads the buffered bytes and writes the
-		// error/400/fallback response.
+	if err != nil {
+		// Malformed request line/headers: the blocking path re-reads the
+		// buffered bytes and writes the 400.
+		rc.parser.noteReactorHandoff(api.ReactorHandoffMalformed)
 		return actHandoff
 	}
-	if len(excess) > 0 {
-		// Pipelined bytes past the header block (body or next request):
-		// the blocking path consumes them with full framing.
+	if fallThrough {
+		// Smuggling detection, or a request the fast path cannot serve
+		// (conditional, range, body framing, non-GET/HEAD).
+		rc.parser.noteReactorHandoff(api.ReactorHandoffDisqualified)
 		return actHandoff
 	}
 
 	fp := rc.parser.fastPath
 	if fp == nil {
+		rc.parser.noteReactorHandoff(api.ReactorHandoffMiss)
 		return actHandoff
 	}
 	now := rc.parser.nowFunc()
 	resp, hit := fp.TryHit(req, now)
 	if !hit || resp == nil {
+		rc.parser.noteReactorHandoff(api.ReactorHandoffMiss)
 		return actHandoff
 	}
-	rc.closeAfterFlush = resp.CloseConn
+	rc.parser.noteReactorHit()
+	closeConn := resp.CloseConn
 
-	if rc.writeVecFn != nil {
-		// Zero-copy path (Linux transport): retain the response's
-		// net.Buffers slices for writev. Release is deferred until the
-		// flush completes — Buffers[2] is the cache object body, so
-		// copying it would cost a full-body memcpy per hit.
-		rc.writeVec = append(rc.writeVec[:0], resp.Buffers...)
-		rc.retainResp = resp
-		rc.retainFP = fp
-		rc.writeBuf = rc.writeBuf[:0]
-	} else {
-		// No transport writev (tests, non-Linux stubs): copy into the
-		// pooled buffer and release immediately.
-		rc.writeBuf = rc.writeBuf[:0]
-		for _, b := range resp.Buffers {
-			rc.writeBuf = append(rc.writeBuf, b...)
-		}
-		rc.retainResp = nil
-		rc.retainFP = nil
-	}
-	rc.writeLen = 0
+	rc.recordHitMetrics(resp, now)
 
-	if hook := rc.parser.metricsHook; hook != nil {
-		dur := rc.parser.nowFunc().Sub(now)
-		if rc.parser.metricsRing != nil {
-			// Async path (W3): push a fixed-size record; the loop's
-			// drainer goroutine applies the hook. All record strings
-			// are stable handler-owned values (see reactor_metrics.go
-			// for the retain-safety argument); no request-derived
-			// string is retained. Never blocks: overflow drops.
-			rc.parser.metricsRing.pushHit(hitMetricsRecord{
-				pool:        resp.Pool,
-				cacheResult: resp.CacheResult,
-				source:      resp.Source,
-				durNs:       dur.Nanoseconds(),
-				bytesOut:    resp.BytesOut,
-				status:      resp.StatusCode,
-			})
-		} else {
-			hook(resp.Pool, resp.CacheResult,
-				resp.Source, resp.StatusCode, resp.BytesOut, dur)
-		}
-	}
+	rc.stageHitResponse(resp, fp, closeConn)
+	rc.state = rcWriting
 
 	// Reset for the next request on this connection. The scratch struct
 	// is NOT re-zeroed here: parseBuffer already resets it at the start
@@ -334,18 +552,42 @@ func (rc *reactorConn) parsed(idx int) rcAction {
 	// twice per request costs a copy the compiler cannot elide.
 	rc.rLen = 0
 	rc.scanned = 0
-	rc.state = rcWriting
+	if len(excess) > 0 {
+		// Pipelined bytes past this hit's header block: keep them
+		// buffered (memmove to the front — the excess aliases the tail
+		// of the same array) for the next parse. copy is overlap-safe;
+		// the response buffers alias the cache object, never readBuf,
+		// so nothing else references these bytes.
+		copy(rc.readBuf[:], excess)
+		rc.rLen = len(excess)
+	}
+
+	if rc.retainCount > 0 && rc.rLen > 0 && rc.retainCount < maxBatchedHits && !rc.closeAfterFlush && len(rc.writeBuf) == 0 {
+		// Coalesce: the next pipelined request is already buffered, the
+		// batch has room, and no serialized phase is queued — parse
+		// the next response into the same writev batch before
+		// flushing. actParseMore is internal to advance(): it loops
+		// back to reading, which consumes the buffered bytes without
+		// any socket read. A follower miss, a close hit, or a full
+		// batch flushes first on the next parsed() round
+		// (advanceWritingVec falls through to any serialized phase).
+		return actParseMore
+	}
+	if rc.retainCount > 0 {
+		return rc.advanceWritingVec()
+	}
 	return rc.advanceWriting()
 }
 
-// advanceWriting flushes the response; on completion the connection goes
-// back to reading — unless the response ended with Connection: close,
-// in which case the transport is told to close after the flush. Partial
-// writes keep the connection in rcWriting with write readiness re-armed
-// — the reactor finishes every response it started (handoff mid-write
-// is not allowed). When the transport supplied a writev func and the
-// response was retained as buffers, the flush is zero-copy writev;
-// otherwise it uses the single-buffer writeBuf + writeFn path.
+// advanceWriting flushes the response; on completion the connection
+// transitions back to reading (actFlushed — advance consumes it)
+// unless the response ended with Connection: close, in which case the
+// transport is told to close after the flush. Partial writes keep the
+// connection in rcWriting with write readiness re-armed — the reactor
+// finishes every response it started (handoff mid-write is not
+// allowed). When the transport supplied a writev func and the response
+// was retained as buffers, the flush is zero-copy writev; otherwise it
+// uses the single-buffer writeBuf + writeFn path.
 func (rc *reactorConn) advanceWriting() rcAction {
 	if rc.writeVecFn != nil && len(rc.writeVec) > 0 {
 		return rc.advanceWritingVec()
@@ -367,7 +609,7 @@ func (rc *reactorConn) advanceWriting() rcAction {
 	if rc.closeAfterFlush {
 		return actCloseAfterFlush
 	}
-	return actWaitRead
+	return actFlushed
 }
 
 // advanceWritingVec flushes the retained response buffers via the
@@ -394,11 +636,41 @@ func (rc *reactorConn) advanceWritingVec() rcAction {
 			return actWaitWrite
 		}
 	}
+	// The batch is fully on the socket: release its retained
+	// responses now, then check for a serialized phase queued behind it
+	// (a Connection: close hit after a coalesced batch rides writeBuf).
+	// writeLen is reset so the writeBuf phase starts from its first
+	// byte; closeAfterFlush stays armed for whichever phase closes.
+	rc.releaseBatch()
+	rc.writeVec = rc.writeVec[:0]
+	rc.writeLen = 0
+	if len(rc.writeBuf) > 0 {
+		// Serialized phase pending: flush it via the write path. The
+		// state stays rcWriting — advanceWriting dispatches on
+		// writeVec being empty (released above) and uses writeBuf.
+		return rc.advanceWriting()
+	}
 	rc.finishWrite()
 	if rc.closeAfterFlush {
 		return actCloseAfterFlush
 	}
-	return actWaitRead
+	return actFlushed
+}
+
+// releaseBatch releases every response retained by the coalesced
+// writev batch. Called when the batch completes (or on connection
+// exit via release); the responses' bodies were aliased by the
+// writev and may now return to their handler's pool.
+func (rc *reactorConn) releaseBatch() {
+	for i := range rc.retainCount {
+		e := &rc.retainArr[i]
+		if e.fp != nil && e.resp != nil {
+			e.fp.Release(e.resp)
+			e.resp = nil
+			e.fp = nil
+		}
+	}
+	rc.retainCount = 0
 }
 
 // pendingVec returns the unflushed portion of the response as an iov
@@ -437,6 +709,15 @@ func (rc *reactorConn) pendingVec() [][]byte {
 // reads it after this call to decide between actWaitRead and
 // actCloseAfterFlush, and a dropped connection never parses again.
 func (rc *reactorConn) finishWrite() {
+	for i := range rc.retainCount {
+		e := &rc.retainArr[i]
+		if e.fp != nil && e.resp != nil {
+			e.fp.Release(e.resp)
+			e.resp = nil
+			e.fp = nil
+		}
+	}
+	rc.retainCount = 0
 	if rc.retainFP != nil && rc.retainResp != nil {
 		rc.retainFP.Release(rc.retainResp)
 		rc.retainResp = nil
@@ -452,10 +733,58 @@ func (rc *reactorConn) finishWrite() {
 // handoffConn wraps the connection with the buffered bytes so the
 // blocking parser re-reads the request from the buffer and continues
 // from the live socket. The blocking parser takes exclusive ownership
-// of the net.Conn from here.
+// of the net.Conn from here. The paired reactorConn rides along so
+// the worker can recycle it when the conn dies — or hand it back to
+// the loop, reused, when the conn returns (see Serve's reactorReturn).
 func (rc *reactorConn) handoffConn() net.Conn {
-	return &prefixConn{Conn: rc.conn, prefix: rc.readBuf[:rc.rLen]}
+	return &prefixConn{Conn: rc.conn, prefix: rc.readBuf[:rc.rLen], rc: rc}
 }
+
+// reset prepares a reactorConn for reuse on the same conn/fd: clears
+// request/flush state and re-arms the per-request idle window. The fd,
+// I/O closures, and inline readBuf stay (they are conn-bound, not
+// request-bound); scratch is NOT re-zeroed — parseBuffer soft-resets
+// it before every parse.
+func (rc *reactorConn) reset(now time.Time) {
+	rc.state = rcReading
+	rc.rLen = 0
+	rc.scanned = 0
+	rc.writeLen = 0
+	rc.retainCount = 0
+	rc.retainResp = nil
+	rc.retainFP = nil
+	rc.writeVec = rc.writeVec[:0]
+	rc.writeBuf = rc.writeBuf[:0]
+	rc.closeAfterFlush = false
+	rc.reqStart = now
+}
+
+// recycle releases the conn's buffers back to their pools and wipes
+// identifying state, leaving the struct valid for reactorConnPool. The
+// struct is ~20 KiB inline (16 KiB readBuf + ~4 KiB scratch) — pooling
+// it is the difference between a miss round-trip costing a fresh
+// allocation and costing nothing. The CALLER guarantees the conn is
+// closed or its ownership moved elsewhere (the worker recycles only
+// after Serve returned without handing the rc back to the loop); the
+// readBuf's bytes may be stale — the next reset + parse overwrite them.
+// Loop-owned drop/sweep/close paths do NOT recycle: their conns died
+// on the loop's watch and the structs go to GC with them.
+func (rc *reactorConn) recycle() {
+	rc.release() // writeBuf back to its pool; retained response released
+	rc.conn = nil
+	rc.fd = -1
+	rc.parser = nil
+	rc.epollInterest = 0
+	rc.state = rcReading
+	reactorConnPool.Put(rc)
+}
+
+// reactorConnPool recycles handed-off reactorConn structs. Only the
+// miss handoff path puts (via the tracker's recycle); accept and
+// return draw — a fresh accept builds one connection's worth of state
+// exactly once, and the return path reuses the struct the original
+// handoff parked.
+var reactorConnPool sync.Pool
 
 // idleExpired reports whether the current request exceeded the
 // reactor idle budget without completing. Measured from reqStart

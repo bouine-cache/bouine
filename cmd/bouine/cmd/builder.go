@@ -25,6 +25,7 @@ import (
 	"github.com/bouine-cache/bouine/internal/storage/wal"
 	"github.com/bouine-cache/bouine/internal/storage/warm"
 	"github.com/bouine-cache/bouine/pkg/api"
+	"github.com/bouine-cache/bouine/pkg/header"
 
 	"github.com/valyala/fasthttp"
 )
@@ -221,6 +222,8 @@ func buildPoolConfig(pc config.UpstreamPool, logger observability.Logger, metric
 		Targets:               pc.Targets,
 		Logger:                logger,
 		Consecutive5xx:        pc.Health.Passive.Consecutive5xx,
+		EjectFor:              pc.Health.Passive.EjectFor,
+		HedgeTimeout:          buildHedgeTimeout(pc),
 		Metrics:               metrics,
 		DialTimeout:           pc.Connect.Timeout,
 		KeepAlive:             pc.Connect.KeepAlive,
@@ -279,6 +282,10 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			Upstream:                p.FastHandler(0),
 			FastClient:              p.FastClient(),
 			StripPrefix:             rc.Request.StripPrefix,
+			RequestHeaderSet:        rc.Request.HeaderSet,
+			RequestHeaderRemove:     rc.Request.HeaderRemove,
+			ResponseHeaderSet:       rc.Response.HeaderSet,
+			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
 			NegativeTTL:             rc.Cache.NegativeTTL,
@@ -347,6 +354,8 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 // replication as proxied responses. When cache is not explicitly enabled
 // (default for static routes), the static handler serves directly from disk
 // and the OS page cache provides the hot caching layer.
+//
+//nolint:funlen // 84: the cached-static-route wiring mirrors the proxied-route block by design; splitting it would hide the symmetry
 func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config.Route) {
 	sh, err := staticfile.New(staticfile.Config{
 		Root:       rc.Static.Root,
@@ -373,6 +382,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	if cacheEnabled {
 		cfg := cache.HandlerConfig{
 			Upstream:                handler,
+			StripPrefix:             rc.Request.StripPrefix,
+			RequestHeaderSet:        rc.Request.HeaderSet,
+			RequestHeaderRemove:     rc.Request.HeaderRemove,
+			ResponseHeaderSet:       rc.Response.HeaderSet,
+			ResponseHeaderRemove:    rc.Response.HeaderRemove,
 			Store:                   rs.store,
 			Logger:                  e.logger,
 			NegativeTTL:             rc.Cache.NegativeTTL,
@@ -428,9 +442,11 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 	}
 
 	// When cache is not enabled, wire the staticfile handler's native
-	// fasthttp ServeRequest method directly — no adaptor needed.
+	// fasthttp ServeRequest method directly — no adaptor needed. Header
+	// rewrites still apply: they wrap the handler the same way.
 	if !cacheEnabled {
-		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods, sh.ServeRequest)
+		router.AddRoute(rc.Match.Host, rc.Match.PathPrefix, rc.Name, rc.Pool, rc.Match.Methods,
+			wrapStaticRewrites(rc, sh.ServeRequest))
 		return
 	}
 
@@ -440,6 +456,79 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 // buildKeyPolicy compiles the route's cache key config into a
 // pre-compiled KeyPolicy. Returns nil when no query/header policy
 // is active (no allocation).
+// staticHeaderRewriter applies a route's header rewrite directives around
+// a non-cached static handler. The cache.Handler implements the same
+// semantics for cached routes; this keeps the two surfaces honest.
+type staticHeaderRewriter struct {
+	reqSet     map[string]string
+	reqRemove  map[string]bool // lower-cased names
+	respSet    map[string]string
+	respRemove map[string]bool // canonical names
+}
+
+// wrapStaticRewrites wraps a non-cached static handler with the route's
+// header rewrite directives when any are configured; otherwise it
+// returns the handler unwrapped. The cache.Handler implements the same
+// semantics for cached routes.
+func wrapStaticRewrites(rc config.Route, next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	if len(rc.Request.HeaderSet) == 0 && len(rc.Request.HeaderRemove) == 0 &&
+		len(rc.Response.HeaderSet) == 0 && len(rc.Response.HeaderRemove) == 0 {
+		return next
+	}
+	rew := &staticHeaderRewriter{
+		reqSet:     rc.Request.HeaderSet,
+		reqRemove:  lowerRemoveList(rc.Request.HeaderRemove),
+		respSet:    rc.Response.HeaderSet,
+		respRemove: canonicalizeRemoveList(rc.Response.HeaderRemove),
+	}
+	return rew.wrap(next)
+}
+
+// canonicalizeRemoveList interns the response-side remove names so
+// fasthttp's ResponseHeader.Del does canonical comparisons with
+// pre-canonicalized keys.
+func canonicalizeRemoveList(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[header.InternKey(n)] = true
+	}
+	return m
+}
+
+// lowerRemoveList lower-cases the request-side remove names for
+// case-insensitive RequestHeader.Del matching.
+func lowerRemoveList(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[strings.ToLower(n)] = true
+	}
+	return m
+}
+
+func (r *staticHeaderRewriter) wrap(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		for name := range r.reqRemove {
+			ctx.Request.Header.Del(name)
+		}
+		for k, v := range r.reqSet {
+			ctx.Request.Header.Set(k, v)
+		}
+		next(ctx)
+		for name := range r.respRemove {
+			ctx.Response.Header.Del(name)
+		}
+		for k, v := range r.respSet {
+			ctx.Response.Header.Set(k, v)
+		}
+	}
+}
+
 func buildKeyPolicy(rk config.RouteKey) *cache.KeyPolicy {
 	if !hasKeyPolicy(rk) {
 		return nil
@@ -465,8 +554,7 @@ func buildKeepSet(params []string) map[string]bool {
 	return m
 }
 
-// hasKeyPolicy checks query/header fields only. canonicalize_path
-// is handled at the parser level, not in KeyPolicy.
+// hasKeyPolicy checks the query/header fields only.
 func hasKeyPolicy(rk config.RouteKey) bool {
 	return len(rk.StripQueryParams) > 0 || len(rk.ExcludeHeaders) > 0 ||
 		len(rk.KeepQueryParams) > 0 || len(rk.StripQueryPrefix) > 0 ||

@@ -224,6 +224,7 @@ func (h *Handler) streamBypass(ctx *fasthttp.RequestCtx, xCacheHeader string) {
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b(xCacheHeader))
 	ctx.SetStatusCode(sf.StatusCode)
+	h.applyResponseRewrites(dst)
 
 	isHEAD := bytes.Equal(ctx.Method(), []byte("HEAD"))
 
@@ -275,6 +276,7 @@ func (h *Handler) streamMiss(
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 
@@ -287,6 +289,7 @@ func (h *Handler) streamMiss(
 		dst.SetCanonical(header.S2b(header.Age), header.S2b("0"))
 	}
 	ctx.SetStatusCode(sf.StatusCode)
+	h.applyResponseRewrites(dst)
 
 	isHEAD := bytes.Equal(ctx.Method(), []byte("HEAD"))
 

@@ -1127,6 +1127,9 @@ func ruleCDNPurgeSkipped(data InsightData) *Insight {
 
 func ruleConfigPoolPassiveEjectForever(data InsightData) *Insight {
 	for _, pool := range data.Config.UpstreamPools {
+		// Ejected-forever requires BOTH restore paths absent: no
+		// eject_for window and no active health check. A configured
+		// eject_for restores the target automatically (issue #599).
 		if pool.Health.Passive.EjectFor == 0 && pool.Health.Active.Path == "" {
 			return &Insight{
 				ID:       "config-pool-passive-eject-forever",

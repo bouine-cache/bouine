@@ -51,6 +51,26 @@ bouine.adminServiceName returns the name of the dedicated admin
 {{- end }}
 
 {{/*
+bouine.listenPort extracts the numeric port from a config.listen address
+value (e.g. ":80" → 80, "0.0.0.0:8080" → 8080). The StatefulSet's
+containerPorts, the Services' targetPort resolution (named ports must
+match), and the NetworkPolicy's DNAT-side ports all derive from these, so
+a user who overrides config.listen.* keeps routing, probes, and policy
+coherent. A value without a trailing port fails at template time.
+*/}}
+{{- define "bouine.listenPort" -}}
+{{- $addr := toString .value -}}
+{{- $port := "" -}}
+{{- if contains ":" $addr -}}
+{{- $port = last (splitList ":" $addr) -}}
+{{- end -}}
+{{- if not $port -}}
+{{- fail (printf "config.listen.%s must end in a port (got %q)" .key .value) -}}
+{{- end -}}
+{{- $port -}}
+{{- end }}
+
+{{/*
 bouine.goMemLimit returns the GOMEMLIMIT env var value.
 If .Values.goMemLimit is set, it is used as-is (manual override).
 Otherwise, the value is auto-computed as 75% of

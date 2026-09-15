@@ -112,20 +112,25 @@ spec:
                   key: {{ .Values.cloudflare.apiTokenSecretKey | default "CF_API_TOKEN" }}
             {{- end }}
           ports:
+            {{- /* containerPorts derive from config.listen so a listen override keeps routing, probes, and policy coherent (issue #586). */}}
+            {{- $httpPort := include "bouine.listenPort" (dict "key" "http" "value" .Values.config.listen.http) }}
+            {{- $httpsPort := include "bouine.listenPort" (dict "key" "https" "value" .Values.config.listen.https) }}
+            {{- $adminPort := include "bouine.listenPort" (dict "key" "admin" "value" .Values.config.listen.admin) }}
+            {{- $clusterPort := include "bouine.listenPort" (dict "key" "cluster" "value" .Values.config.listen.cluster) }}
             - name: http
-              containerPort: 80
+              containerPort: {{ $httpPort }}
               protocol: TCP
             - name: https
-              containerPort: 443
+              containerPort: {{ $httpsPort }}
               protocol: TCP
             - name: admin
-              containerPort: 9000
+              containerPort: {{ $adminPort }}
               protocol: TCP
             - name: cluster
-              containerPort: 8443
+              containerPort: {{ $clusterPort }}
               protocol: TCP
             - name: cluster-udp
-              containerPort: 8443
+              containerPort: {{ $clusterPort }}
               protocol: UDP
           startupProbe:
             {{- toYaml .Values.startupProbe | nindent 12 }}

@@ -648,12 +648,6 @@ type RouteKey struct {
 	// (matches Varnish qs.unique()). Values are NOT sorted when dedup
 	// is enabled.
 	DedupQueryParams bool `yaml:"dedup_query_params,omitempty" json:"dedup_query_params,omitempty"`
-	// CanonicalizePath normalizes the path component at parse time:
-	// percent-decode unreserved chars, uppercase remaining hex,
-	// resolve dot-segments. Applies at the listener level: if any
-	// route on a listener enables this, all requests on that
-	// listener get canonical paths. Default false.
-	CanonicalizePath bool `yaml:"canonicalize_path,omitempty" json:"canonicalize_path,omitempty"`
 }
 
 // RouteRequest is the per-route request-side header rewrite block.

@@ -67,6 +67,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	}
 	dst.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 	ctx.SetStatusCode(sf.StatusCode)
+	h.applyResponseRewrites(dst)
 
 	// Preserve POST/PUT/DELETE invalidation semantics: purge the affected
 	// keys as soon as success is known from the status code, instead of

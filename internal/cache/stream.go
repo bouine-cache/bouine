@@ -311,6 +311,10 @@ func (h *Handler) streamMiss(
 		close(inflight.done)
 		if errors.Is(err, ErrFetchShed) {
 			h.writeShed503(ctx, "MISS")
+			// The shed must not be a lost re-warm: schedule the bounded
+			// background refill (the followers just resolved above get
+			// their 503, the store still gets the object).
+			h.triggerShedRefill(ri, primaryKey)
 			return
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)

@@ -251,6 +251,50 @@ func TestClusterPeerFetchConcurrency_ExceedsUpperBoundRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "must be <=")
 }
 
+func TestClusterBanTTL_NegativeRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: -time.Minute},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ban_ttl")
+	require.Contains(t, err.Error(), "must be >=")
+}
+
+func TestClusterBanTTL_TooShortRejected(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: 500 * time.Millisecond},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ban_ttl")
+	require.Contains(t, err.Error(), "must be >= 1s")
+}
+
+func TestClusterBanTTL_ZeroAcceptedUsesDefault(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: 0},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestClusterBanTTL_MinutesAccepted(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		Listen:  Listen{Admin: ":9000", Cluster: ":8443"},
+		Cluster: Cluster{BanTTL: 15 * time.Minute},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
 func TestClusterPeerFetchConcurrency_AtUpperBoundAccepted(t *testing.T) {
 	t.Parallel()
 	cfg := Config{

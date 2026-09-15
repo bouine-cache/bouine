@@ -86,6 +86,7 @@ type HotStore struct {
 	maxBytes       int64
 	mask           uint64
 	reaperInterval time.Duration
+	banTTL         time.Duration
 }
 
 // activeBan is a compiled, time-stamped ban predicate in the lazy list.
@@ -125,12 +126,18 @@ func patternOf(expr api.BanExpr) banPattern {
 	}
 }
 
-// banTTL is how long a lazy ban stays in the active list. Bans older
-// than this cannot match any live object: objects stored after the ban
-// are exempt (StoredAt > ban.created), and objects stored before it
-// have either been re-cached or expired by now. This is a bouine policy
-// constant, not an RFC requirement.
-const banTTL = 24 * time.Hour
+// defaultBanTTL is how long a lazy ban stays in the active list by
+// default. Bans older than this cannot match any live object: objects
+// stored after the ban are exempt (StoredAt > ban.created), and objects
+// stored before it have either been re-cached or expired by now. This is
+// a bouine policy constant, not an RFC requirement; operators bound the
+// blast radius of an over-broad ban (a typo currently poisons the hit
+// ratio for the full window) via config invalidation.ban_ttl. The
+// reaper + TTL expiry reclaim pre-ban copies and refills are exempt, so
+// a minutes-scale window is sufficient for cache-lifecycle surrogate
+// invalidations — the default stays conservative (24h) for behavioral
+// compatibility (ADR-0045).
+const defaultBanTTL = 24 * time.Hour
 
 // banListCap bounds the lazy ban list. A storm of distinct bans must
 // not degrade every cache hit linearly (matchesActiveBan walks the
@@ -305,6 +312,12 @@ type HotConfig struct {
 	// default (30 s). A negative value disables background reaping
 	// entirely (lazy expiry on Get remains).
 	ReaperInterval time.Duration
+	// BanTTL is how long a lazy ban stays in the active list before the
+	// reaper prunes it. Zero applies the built-in default (24 h). A
+	// shorter window bounds the blast radius of an over-broad ban: the
+	// reaper + TTL expiry reclaim pre-ban copies and refills are exempt,
+	// so cache-lifecycle surrogate invalidations need only minutes.
+	BanTTL time.Duration
 	// Slab enables the mmap'd slab allocator for body bytes. When
 	// true, bodies are allocated from mmap'd regions instead of Go
 	// heap, reducing GC pressure. Default false (Go heap).
@@ -334,17 +347,23 @@ func NewHotStore(cfg HotConfig) *HotStore {
 	if cfg.ReaperInterval > 0 {
 		reaperInterval = cfg.ReaperInterval
 	}
+	banTTL := defaultBanTTL
+	if cfg.BanTTL > 0 {
+		banTTL = cfg.BanTTL
+	}
 	h := &HotStore{
 		shards:         shards,
 		mask:           uint64(n - 1), //nolint:gosec // n is always a positive power of two
 		maxBytes:       cfg.MaxBytes,
 		evictSignal:    make(chan int, n),
 		reaperInterval: reaperInterval,
+		banTTL:         banTTL,
 		done:           make(chan struct{}),
 		logger:         cfg.Logger,
 		onEvict:        cfg.OnEvict,
 		onEvictDemoted: cfg.OnEvictDemoted,
 	}
+	h.bans.ttl = banTTL
 	if cfg.Slab {
 		slab, err := NewSlabAllocator()
 		if err != nil {

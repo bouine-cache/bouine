@@ -337,9 +337,21 @@ func literalOfBody(body string) (string, bool) {
 type banListState struct {
 	snap *banSnapshot
 	list []activeBan
+	// ttl is how long a ban stays in the list before prune paths drop
+	// it. Zero applies defaultBanTTL. Configured per store via
+	// HotConfig.BanTTL (invalidation.ban_ttl) so operators can bound the
+	// blast radius of an over-broad ban.
+	ttl time.Duration
 	// dirty records that list changed since snap was compiled.
 	dirty bool
 	mu    sync.Mutex
+}
+
+func (b *banListState) ttlOrDefault() time.Duration {
+	if b.ttl <= 0 {
+		return defaultBanTTL
+	}
+	return b.ttl
 }
 
 // register appends (or refreshes) a ban and marks the snapshot dirty
@@ -365,7 +377,7 @@ func (b *banListState) register(expr api.BanExpr, pred banPredicate, createdAt t
 	pruned := b.list[:0]
 	refreshed := false
 	for _, ban := range b.list {
-		if now.Sub(ban.created) >= banTTL {
+		if now.Sub(ban.created) >= b.ttlOrDefault() {
 			continue
 		}
 		if ban.pattern == pat {
@@ -417,13 +429,14 @@ func (b *banListState) snapshot() *banSnapshot {
 	return b.snap
 }
 
-// rebuildLocked prunes bans older than banTTL and recompiles the
-// snapshot from the surviving list, clearing the dirty flag. The filter
-// reuses the list's backing array. The mutex must be held.
+// rebuildLocked prunes bans older than the configured TTL and
+// recompiles the snapshot from the surviving list, clearing the dirty
+// flag. The filter reuses the list's backing array. The mutex must be
+// held.
 func (b *banListState) rebuildLocked(now time.Time) {
 	pruned := b.list[:0]
 	for _, ban := range b.list {
-		if now.Sub(ban.created) >= banTTL {
+		if now.Sub(ban.created) >= b.ttlOrDefault() {
 			continue
 		}
 		pruned = append(pruned, ban)

@@ -49,6 +49,7 @@ func (e *engine) buildStore(warmMetrics *warm.Metrics, walMetrics *wal.Metrics) 
 		MaxBytes:             e.cfg.Storage.HotMaxBytes.Bytes(),
 		Slab:                 e.cfg.Storage.HotMmapSlab,
 		HotEvictionAlgorithm: hotAlgo,
+		BanTTL:               e.cfg.Cluster.BanTTL,
 	}
 	if e.cfg.Storage.WarmDir == "" {
 		return storage.NewHotStore(hotCfg), nil
@@ -308,6 +309,7 @@ func (e *engine) buildRouter(rs *runState) *server.Router {
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
+			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
 			RefreshBeforeExpiry:     rc.Cache.RefreshBeforeExpiry,
 			RouteName:               rc.Name,
 			PoolName:                rc.Pool,
@@ -400,6 +402,7 @@ func (e *engine) buildStaticRoute(router *server.Router, rs *runState, rc config
 			StreamingBufferBytes:    rs.dpMetrics.StreamingBufferBytes,
 			StreamingFallback:       rs.dpMetrics.StreamingFallbackTotal,
 			FetchShed:               rs.dpMetrics.FetchShedTotal,
+			RewarmFill:              rs.dpMetrics.RewarmFillTotal,
 		}
 		applyRefreshConfig(&cfg, rc.Cache)
 		if ownerFn, peerFetchFn := clusterFastPathClosures(e, rs); ownerFn != nil && peerFetchFn != nil {

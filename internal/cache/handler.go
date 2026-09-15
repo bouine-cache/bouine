@@ -211,6 +211,16 @@ const defaultFetchTimeout = 60 * time.Second
 // re-trigger if still stale.
 const defaultRevalConcurrency = 256
 
+// defaultRewarmConcurrency bounds concurrent shed-refill (re-warm)
+// goroutines per Handler. This is the post-purge recovery allowance: a
+// bounded side pool that refills the store while foreground misses shed,
+// so a surrogate-ban miss storm converges back to hits instead of
+// pinning at the shed equilibrium. Deliberately much smaller than
+// revalSem: each refill is a full origin GET, and the pool only exists
+// under saturation — its whole point is to add a little extra origin
+// load, bounded, exactly then.
+const defaultRewarmConcurrency = 32
+
 // ageHeader returns the Age header value string for a duration.
 func ageHeader(d time.Duration) string {
 	return strconv.Itoa(int(d.Seconds()))
@@ -242,10 +252,23 @@ type Handler struct {
 	// FetchShedInc is incremented when a foreground origin fetch sheds
 	// after waiting fetchWaitTimeout for a fetch-semaphore slot; nil-safe.
 	FetchShedInc interface{ Inc() }
-	store        storage.Store
-	flight       singleflight.Group
-	logger       observability.Logger
-	fastClient   FastClient
+	// RewarmFillInc is incremented when a shed foreground miss schedules
+	// a bounded background refill of the store (the post-ban re-warm
+	// allowance); nil-safe. Paired with FetchShedInc: sheds are no longer
+	// lost refills, so a rising shed rate during a purge storm no longer
+	// implies the hit ratio is pinned at the shed equilibrium.
+	RewarmFillInc interface{ Inc() }
+	store         storage.Store
+	flight        singleflight.Group
+	logger        observability.Logger
+	fastClient    FastClient
+	// rewarmSem bounds concurrent shed-refill (re-warm) goroutines. It
+	// is deliberately NOT the foreground fetchSem: the refill exists to
+	// clear the post-ban miss backlog, and sharing the foreground budget
+	// would keep the re-warm starved by the very demand it is recovering
+	// from. Bounded like revalSem so a storm cannot explode goroutines;
+	// tracked by revalWg for shutdown draining.
+	rewarmSem chan struct{}
 	// StreamingBufferBytesSet updates the streaming buffer bytes gauge;
 	// nil-safe. Polled by the engine's background metrics loop.
 	StreamingBufferBytesSet interface{ Set(float64) }
@@ -356,8 +379,11 @@ type HandlerConfig struct {
 	// FetchShed, if non-nil, is incremented when a foreground origin fetch
 	// sheds after waiting fetch_wait_timeout for a fetch-semaphore slot.
 	FetchShed interface{ Inc() }
-	Store     storage.Store
-	Logger    observability.Logger
+	// RewarmFill, if non-nil, is incremented when a shed miss schedules a
+	// bounded background store refill (the post-ban re-warm allowance).
+	RewarmFill interface{ Inc() }
+	Store      storage.Store
+	Logger     observability.Logger
 	// FastClient is used by doFetch to fetch from the origin via
 	// fasthttp. The response is captured directly in a pooled
 	// *fasthttp.Response, eliminating intermediate header.Map and
@@ -668,6 +694,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		StreamingBufferBytesSet: cfg.StreamingBufferBytes,
 		StreamingFallbackInc:    cfg.StreamingFallback,
 		FetchShedInc:            cfg.FetchShed,
+		RewarmFillInc:           cfg.RewarmFill,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
 		peerPut:                 cfg.PeerPut,
@@ -742,6 +769,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 
 	h.revalSem = make(chan struct{}, defaultRevalConcurrency)
+	h.rewarmSem = make(chan struct{}, defaultRewarmConcurrency)
 	h.inflightStreams = newInflightTable()
 
 	// Header rewrite policy (request/response header_set/header_remove).
@@ -784,9 +812,10 @@ func (h *Handler) Close(ctx context.Context) error {
 		h.scheduler.Stop()
 	}
 
-	// Drain both refresh-before-expiry and SWR goroutines. A zero-value
-	// WaitGroup (when refresh-before-expiry is disabled) returns immediately
-	// from Wait(), so this is safe in all configurations.
+	// Drain refresh-before-expiry, SWR, and shed-refill goroutines. A
+	// zero-value WaitGroup (when refresh-before-expiry is disabled)
+	// returns immediately from Wait(), so this is safe in all
+	// configurations.
 	done := make(chan struct{})
 	go func() {
 		h.refreshWg.Wait()
@@ -1783,6 +1812,9 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			}
 			if errors.Is(res.Err, ErrFetchShed) {
 				h.writeShed503(ctx, "MISS")
+				// The leader shed without fetching: schedule the bounded
+				// background refill so this shed is not a lost re-warm.
+				h.triggerShedRefill(ri, lookupKey)
 				return
 			}
 			ctx.Error("upstream error", fasthttp.StatusBadGateway)
@@ -1853,6 +1885,9 @@ func (h *Handler) fetchAndStoreStayinAlive(ctx *fasthttp.RequestCtx, lookupKey, 
 			// signal; keep this at Debug so a shed storm cannot INFO-spam.
 			h.logger.Debug("stayin-alive: fetch wait timeout, serving stale",
 				"key", lookupKey)
+			// Stale protects this client, but the shed must not be a lost
+			// refill: schedule the bounded background re-warm.
+			h.triggerShedRefill(ri, lookupKey)
 		} else {
 			h.logger.Info("stayin-alive: upstream unreachable, serving stale indefinitely",
 				"error", res.Err, "key", lookupKey)
@@ -2465,6 +2500,166 @@ func (h *Handler) storeObject(ctx context.Context, key api.Key, obj *api.Object,
 		}
 		h.refreshRegistry.Register(key, ri, varyHeader, h.refreshPersistCycles)
 		h.scheduler.Schedule(key, obj.StoredAt.Add(obj.TTL-h.refreshMargin))
+	}
+}
+
+// triggerShedRefill schedules a bounded background origin fetch that
+// stores the object WITHOUT serving any client: the caller already got
+// its 503 + Retry-After. This is the post-ban re-warm allowance — a shed
+// used to be a lost refill, so after a surrogate-key purge ban the miss
+// storm pinned the hit ratio at the shed equilibrium until the ban
+// expired. The refill runs on its own bounded pool (rewarmSem) instead
+// of the foreground fetchSem it was just shed from: sharing that budget
+// would keep the re-warm starved by the very demand it recovers from.
+//
+// Deduplication is the same inflight-stream collapse the foreground miss
+// path uses: concurrent sheds for one key share one refill, and a refill
+// that lands while a foreground fetch of the same key is still queued
+// collapses into it. Bounded by defaultRewarmConcurrency; a full pool
+// drops the refill (the next request re-triggers).
+func (h *Handler) triggerShedRefill(ri RequestInfo, key api.Key) {
+	// Bail out early if the handler is already shutting down.
+	select {
+	case <-h.done:
+		return
+	default:
+	}
+	if h.fastClient == nil {
+		return
+	}
+	select {
+	case h.rewarmSem <- struct{}{}:
+	default:
+		return // allowance full — the next request re-triggers
+	}
+	// Materialize the request fields now: ri's []byte fields alias the
+	// *fasthttp.RequestCtx's internal buffers (requestInfoFromCtx),
+	// which are reused by the next keep-alive request the moment the
+	// handler returns. The background goroutine must not read them after
+	// that. ri.Header is an owned header.Map (headerFromCtx copies) —
+	// safe as is.
+	bgReq := RequestInfo{
+		Method: ri.GetMethod(),
+		URI:    ri.GetURI(),
+		Host:   ri.GetHost(),
+		Path:   ri.GetPath(),
+		Header: ri.Header,
+		TLS:    ri.TLS,
+	}
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	h.revalWg.Add(1)
+	go func() {
+		defer func() {
+			h.revalWg.Done()
+			<-h.rewarmSem
+		}()
+		defer bgCancel()
+		// Cancel the refill if the handler is shutting down so we do not
+		// call store.Put on a closed store.
+		go func() {
+			select {
+			case <-h.done:
+				bgCancel()
+			case <-bgCtx.Done():
+			}
+		}()
+		h.doShedRefill(bgCtx, bgReq, key)
+	}()
+}
+
+// doShedRefill fetches the object from origin and stores it, serving no
+// one. It collapses behind any concurrent foreground or background fetch
+// for the same key via the shared singleflight group (same key space as
+// collapsedFetch), so a refill landing while a foreground miss is queued
+// costs zero extra origin load. Deliberately unslotted on fetchSem: the
+// allowance IS this pool.
+func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key) {
+	// Rebuild the origin request from the materialized fields.
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	req.Header.SetMethod(ri.GetMethod())
+	req.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
+	req.Header.SetHost(ri.GetHost())
+	ri.Header.Range(func(k, v string) bool {
+		req.Header.Set(k, v)
+		return true
+	})
+
+	// Deadline-based timeout, mirroring doFetchBg's transport deadline.
+	spanCtx, span := tracing.StartSpan(ctx, "bouine.origin")
+	defer span.End()
+	fetchCtx := spanCtx
+	if h.fetchTimeout > 0 {
+		var cancel context.CancelFunc
+		fetchCtx, cancel = context.WithTimeout(spanCtx, h.fetchTimeout)
+		defer cancel()
+	}
+
+	// Collapse with concurrent foreground misses for this key. The
+	// foreground leader runs the slotted doFetch and stores on success;
+	// if it sheds, our leader slot re-runs the fetch here — unslotted,
+	// which is the point of the allowance.
+	v, _, _ := h.flight.Do(key.SingleFlightKey(0), func() (any, error) {
+		return h.doRefillFetch(fetchCtx, req), nil
+	})
+	res := v.(fetchResult)
+	// Detach the header.Map before buildObject mutates it (attribution
+	// headers, Set-Cookie strip): the flight group shares one result
+	// across all concurrent callers, and concurrent SetEntryRaw/Del on a
+	// shared Map corrupt the entries/values pairing (index-out-of-range).
+	// Same contract as collapsedFetch's ownedClone.
+	res.Header = res.Header.ownedClone()
+	if res.Err != nil {
+		return
+	}
+
+	// Cacheability gate before storage, mirroring the buffered streaming
+	// path's store gate (no client response is written here).
+	resMap := res.Header.ToMap()
+	parsed := newParsedResponse(res.StatusCode, ri.Header, resMap)
+	if !parsed.isCacheableWithDefault(h.negativeTTL, h.defaultTTL) ||
+		(!h.allowSetCookie && resMap.Get(header.SetCookie) != "") ||
+		(h.maxObjectSize > 0 && int64(len(res.Body)) > h.maxObjectSize) {
+		return
+	}
+	obj := buildObject(key, ri, res, resMap, h.negativeTTL, h.defaultTTL, h.overrideTTL, h.defaultSWR, h.defaultSIE, h.jitterPercent, h.policy, time.Now())
+	h.storeObject(ctx, key, obj, ri, true, 0)
+	h.forwardToOwnerIfRemote(ctx, obj)
+}
+
+// doRefillFetch performs one unslotted origin fetch with the same
+// response handling as doFetchBg: bounded body copy, owned header.Map —
+// the result must be safe to share with singleflight callers.
+func (h *Handler) doRefillFetch(ctx context.Context, req *fasthttp.Request) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
+	resp := fasthttp.AcquireResponse()
+	if err := h.fastClient.Do(ctx, req, resp); err != nil {
+		fasthttp.ReleaseResponse(resp)
+		return fetchResult{Err: fmt.Errorf("origin fetch: %w", err)}
+	}
+	if h.maxResponseBytes > 0 && int64(len(resp.Body())) > h.maxResponseBytes {
+		fasthttp.ReleaseResponse(resp)
+		return fetchResult{Err: fmt.Errorf("upstream response exceeds %d bytes", h.maxResponseBytes)}
+	}
+	hdrMap := header.FromFastHTTP(&resp.Header)
+	statusCode := resp.StatusCode()
+	// Exact-size copy: the body may be stored in the cache, and the hot
+	// tier pins slice slack for the object's lifetime.
+	bodyCopy := make([]byte, len(resp.Body()))
+	copy(bodyCopy, resp.Body())
+	fasthttp.ReleaseResponse(resp)
+	return fetchResult{
+		StatusCode: statusCode,
+		Header:     fromHeaderMap(hdrMap),
+		Body:       bodyCopy,
 	}
 }
 

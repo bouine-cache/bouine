@@ -639,6 +639,108 @@ func TestPeerFetcher_ContextCancelWhileWaitingForSemaphore(t *testing.T) {
 	wg.Wait()
 }
 
+// TestPeerFetcher_FetchSlotWaitIsBounded proves the fetch-semaphore wait
+// is bounded even with an undedlined context (the fast path passes
+// context.Background): with every slot held, Fetch sheds with
+// ErrPeerFetchShed instead of parking the calling goroutine forever —
+// the fast-path peer-branch wedge from the stress report. The semaphore
+// is filled directly: wedging RPCs server-side would depend on how
+// PipelineClient distributes them over connections.
+func TestPeerFetcher_FetchSlotWaitIsBounded(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+	}, nil, nil)
+	defer f.Close(context.Background())
+	for range defaultPeerFetchConcurrency {
+		f.fetchSem <- struct{}{} // hold every slot
+	}
+
+	// Bounded caller context so the unfixed code fails this test with a
+	// clean DeadlineExceeded instead of hanging the suite; the fixed code
+	// sheds well before it at the wait bound.
+	start := time.Now()
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := f.Fetch(fetchCtx,
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(2)})
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ErrPeerFetchShed)
+	require.Less(t, elapsed, 5*time.Second, "fetch must not park unboundedly on the semaphore")
+}
+
+// TestPeerFetcher_FetchSlotWaitsBrieflyThenAcquires pins that the wait
+// bound does not over-shed under brief contention: the fetch waits for a
+// slot and proceeds once it is freed well within the bound.
+func TestPeerFetcher_FetchSlotWaitsBrieflyThenAcquires(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+	}, nil, nil)
+	defer f.Close(context.Background())
+	// Generous margins against CI scheduling jitter, mirroring
+	// TestDoFetchWaitsBrieflyThenAcquires: free the slot after ~10ms
+	// against a 5s bound.
+	f.fetchWaitTimeout = 5 * time.Second
+	f.fetchSem <- struct{}{} // hold the only slot
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		<-f.fetchSem // free the slot within the bound
+	}()
+
+	obj, err := f.Fetch(context.Background(),
+		api.PeerInfo{AdminAddr: srv.Addr},
+		api.PeerFetchRequest{Key: testkey.Key(1)})
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+}
+
+// TestPeerFetcher_PutSlotWaitIsBounded is the write-to-owner twin of
+// TestPeerFetcher_FetchSlotWaitIsBounded: a Put that cannot get a putSem
+// slot within the wait bound sheds instead of parking forever.
+func TestPeerFetcher_PutSlotWaitIsBounded(t *testing.T) {
+	t.Parallel()
+	srv := fasthttptest.NewServer(t, func(ctx *fasthttp.RequestCtx) {
+		ctx.Response.Header.Set(header.ContentType, "application/octet-stream")
+		_, _ = ctx.Write(storage.EncodeObject(&api.Object{Key: testkey.Key(1), StatusCode: 200, Body: []byte("x")}))
+	})
+	defer srv.Close()
+
+	f := NewPeerFetcherWithConfig(PeerFetcherConfig{
+		MaxIdleConnDuration: 100 * time.Millisecond,
+	}, nil, nil)
+	defer f.Close(context.Background())
+	for range defaultPeerFetchConcurrency {
+		f.putSem <- struct{}{} // hold every slot
+	}
+
+	start := time.Now()
+	putCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := f.Put(putCtx,
+		api.PeerInfo{AdminAddr: srv.Addr},
+		&api.Object{Key: testkey.Key(2)})
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ErrPeerFetchShed)
+	require.Less(t, elapsed, 5*time.Second, "put must not park unboundedly on the semaphore")
+}
+
 func BenchmarkPeerFetchHandler_ServeHTTP(b *testing.B) {
 	key := testkey.Key(1)
 	obj := &api.Object{

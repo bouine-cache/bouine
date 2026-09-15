@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -108,4 +109,75 @@ func TestRace_HitsVsWarmEncode(t *testing.T) {
 
 	require.Greater(t, increments.Load(), uint64(0),
 		"the hammer must exercise the Hits increment; the race pair is not in play")
+}
+
+// TestRace_HitsVsCloneRefresh pins the second unlocked reader this
+// issue exposed: Object.CloneForRefresh (and CloneForReturn) copy Hits
+// from the live stored pointer while another goroutine's hot.Get
+// slow-path atomically increments the same field. The clone helpers
+// now read atomically; under -race the pre-fix plain read fails here.
+func TestRace_HitsVsCloneRefresh(t *testing.T) {
+	t.Parallel()
+	ts := newTieredStoreWithDir(t, t.TempDir())
+	defer func() { _ = ts.Close(context.Background()) }()
+
+	key := testkey.Hash([]byte("race-clone"))
+	require.NoError(t, ts.Put(context.Background(), key, bigObj(key, 2048)))
+
+	// Fetch the live stored pointer exactly like the cache layer does:
+	// Get returns the stored object (slab disabled → no copy).
+	stale, _, err := ts.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.NotNil(t, stale)
+
+	clearVisited := func() {
+		shard := ts.hot.shard(key)
+		shard.mu.Lock()
+		defer shard.mu.Unlock()
+		if e := shard.entries[key]; e != nil {
+			e.entry.ClearVisited()
+		}
+	}
+	clearVisited()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Increment hammer: hot.Get slow path, the atomic.AddUint64 site.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _, _ = ts.hot.Get(context.Background(), key)
+				clearVisited()
+			}
+		}
+	}()
+
+	// Clone hammer: CloneForRefresh reads Hits from the same pointer —
+	// the revalidation path's exact call.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = stale.CloneForRefresh()
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	close(stop)
+	wg.Wait()
 }

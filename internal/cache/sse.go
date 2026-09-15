@@ -41,6 +41,8 @@ import (
 func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
@@ -53,6 +55,7 @@ func (h *Handler) handleSSE(ctx *fasthttp.RequestCtx) {
 		}
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 

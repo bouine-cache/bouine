@@ -99,12 +99,13 @@ func staleDisposition(obj *api.Object, reqCC Directives, now time.Time) Disposit
 
 // tryConditional304Fast checks if the client's conditional headers match
 // the cached object, using direct Peek calls. Returns true if a 304
-// response was sent.
-func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source) bool {
+// response was sent. rw applies the route's response header rewrite
+// directives to the 304; nil for routes without directives.
+func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, rw func(*fasthttp.ResponseHeader)) bool {
 	inm := ctx.Request.Header.Peek(header.IfNoneMatch)
 	if len(inm) > 0 {
 		if obj.ETag != "" && etagMatch(string(inm), obj.ETag) {
-			write304Fast(ctx, obj, src)
+			write304Fast(ctx, obj, src, rw)
 			return true
 		}
 		return false
@@ -116,13 +117,13 @@ func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.So
 			return false
 		}
 		if !obj.LastModified.IsZero() && !obj.LastModified.After(imsTime) {
-			write304Fast(ctx, obj, src)
+			write304Fast(ctx, obj, src, rw)
 			return true
 		}
 		if obj.LastModified.IsZero() {
 			if d := obj.Header.Get(header.Date); d != "" {
 				if dt := parseHTTPDate(d); !dt.IsZero() && !dt.After(imsTime) {
-					write304Fast(ctx, obj, src)
+					write304Fast(ctx, obj, src, rw)
 					return true
 				}
 			}
@@ -133,13 +134,16 @@ func tryConditional304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.So
 
 // write304Fast sets the headers and status code for a 304 Not Modified
 // response using SetCanonical to skip key normalization.
-func write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source) {
+func write304Fast(ctx *fasthttp.RequestCtx, obj *api.Object, src api.Source, rw func(*fasthttp.ResponseHeader)) {
 	if obj.ETag != "" {
 		ctx.Response.Header.SetCanonical(header.S2b(header.ETag), header.S2b(obj.ETag))
 	}
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("HIT"))
 	ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(src)))
 	ctx.SetStatusCode(fasthttp.StatusNotModified)
+	if rw != nil {
+		rw(&ctx.Response.Header)
+	}
 }
 
 // hasRangeHeader returns true if the request has a Range header, using

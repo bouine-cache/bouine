@@ -1195,7 +1195,7 @@ func (h *Handler) ServeRequest(ctx *fasthttp.RequestCtx) {
 
 	switch disp.Decision {
 	case Hit, StaleHit:
-		if tryConditional304Fast(ctx, disp.Object, src) {
+		if tryConditional304Fast(ctx, disp.Object, src, h.rewriteHook()) {
 			return
 		}
 		// Range requests need the full RequestInfo for ServeRange.
@@ -1511,6 +1511,7 @@ func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
@@ -1745,6 +1746,7 @@ func (h *Handler) fetchAndStore(ctx *fasthttp.RequestCtx, lookupKey, primaryKey 
 			ctx.Error("upstream error", fasthttp.StatusBadGateway)
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 			ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+			h.applyResponseRewrites(&ctx.Response.Header)
 			return
 		}
 		// Write the buffered result without re-storing (leader already stored).
@@ -1877,6 +1879,7 @@ func (h *Handler) revalidate(ctx *fasthttp.RequestCtx, primaryKey api.Key, looku
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		return
 	}
 	if res.StatusCode >= 500 {
@@ -2220,6 +2223,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
@@ -2248,6 +2252,7 @@ func (h *Handler) invalidateAndProxy(ctx *fasthttp.RequestCtx) {
 		tracing.RecordError(span, err)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("MISS"))
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCacheSource), header.S2b(string(api.SourceOrigin)))
+		h.applyResponseRewrites(&ctx.Response.Header)
 		ctx.Error("upstream error", fasthttp.StatusBadGateway)
 		return
 	}
@@ -2750,4 +2755,15 @@ func isInvalidatingBytes(method []byte) bool {
 	return !bytes.Equal(method, []byte("GET")) &&
 		!bytes.Equal(method, []byte("HEAD")) &&
 		!bytes.Equal(method, []byte("OPTIONS"))
+}
+
+// rewriteHook returns the response-rewrite applier when the route
+// configures any response rewrite directive; nil otherwise. Used by
+// package-level response writers (write304Fast) that have no handler
+// reference.
+func (h *Handler) rewriteHook() func(*fasthttp.ResponseHeader) {
+	if h.respHeaderRemove == nil && h.respHeaderSet == nil {
+		return nil
+	}
+	return h.applyResponseRewrites
 }

@@ -1510,9 +1510,22 @@ func (h *Handler) handleBypass(ctx *fasthttp.RequestCtx) {
 
 func (h *Handler) handleBypassFast(ctx *fasthttp.RequestCtx) {
 	if h.fastClient == nil {
+		// Upstream fallback (issue #598): a cached-static-route handler
+		// is wired with Upstream (the staticfile handler) and no
+		// FastClient. Run the upstream handler in-process — its
+		// response is already in ctx.Response.
+		if h.upstream != nil {
+			h.upstream(ctx)
+			ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
+			h.applyResponseRewrites(&ctx.Response.Header)
+			return
+		}
+		// RFC 9111 §5.2.2.2: no fast client configured and no upstream
+		// fallback (misconfiguration) — surface 502, not a panic. The
+		// error body resets the response, so X-Cache is written after.
+		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		ctx.Response.Header.SetCanonical(header.S2b(header.XCache), header.S2b("BYPASS"))
 		h.applyResponseRewrites(&ctx.Response.Header)
-		ctx.Error("upstream error: no fast client configured", fasthttp.StatusBadGateway)
 		return
 	}
 	h.streamBypass(ctx, "BYPASS")
@@ -1664,6 +1677,23 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		}
 	}()
 	if h.fastClient == nil {
+		if h.upstream != nil {
+			// Upstream fallback (issue #598): a cached-static-route
+			// handler is wired with Upstream (the staticfile handler)
+			// and no FastClient. Rebuild the upstream-bound request
+			// shape (method/URI/host/headers/body + conditional
+			// headers) from the request and run it in-process.
+			bgReq := fasthttp.AcquireRequest()
+			defer fasthttp.ReleaseRequest(bgReq)
+			bgReq.Header.SetMethodBytes(req.Header.Method())
+			bgReq.SetRequestURIBytes(req.RequestURI())
+			bgReq.Header.SetHostBytes(req.Header.Host())
+			for k, v := range req.Header.All() {
+				bgReq.Header.AddBytesKV(k, v)
+			}
+			bgReq.SetBodyRaw(req.Body())
+			return h.fetchViaUpstreamRequest(bgReq)
+		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
 	spanCtx, span := tracing.StartSpan(ctx, "bouine.origin")
@@ -2459,6 +2489,15 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		}
 	}()
 	if h.fastClient == nil {
+		if h.upstream != nil {
+			// Upstream fallback (issue #598): a cached-static-route
+			// handler is wired with Upstream (the staticfile handler)
+			// and no FastClient. Materialize the upstream response
+			// through a scratch RequestCtx, then convert it to a
+			// fetchResult. Miss-path only: the interface check stays
+			// off the hit path.
+			return h.fetchViaUpstream(ctx)
+		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
 	fetchCtx, span := tracing.StartSpan(context.Background(), "bouine.origin")
@@ -2519,6 +2558,148 @@ func (h *Handler) doFetchFast(ctx *fasthttp.RequestCtx) (res fetchResult) {
 		Header:     fromHeaderMap(hdrMap),
 		Body:       bodyCopy,
 	}
+}
+
+// fetchViaUpstream materializes a fetchResult by running the configured
+// Upstream fasthttp.RequestHandler in-process (issue #598). A
+// cached-static-route handler is wired with Upstream (the staticfile
+// handler) and no FastClient, so when the cache cannot answer (MISS,
+// revalidation, BYPASS, SSE) the upstream handler is the origin. The
+// request is replayed into a scratch RequestCtx carrying the same
+// method/URI/host/headers/body as the client's, and the upstream's
+// response is converted to the shared fetchResult shape.
+func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
+	if h.fetchTimeout > 0 {
+		deadline := time.NewTimer(h.fetchTimeout)
+		defer deadline.Stop()
+		done := make(chan struct{}, 1)
+		var upstreamCtx *fasthttp.RequestCtx
+		var panicVal any
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicVal = r
+				}
+				done <- struct{}{}
+			}()
+			upstreamCtx = &fasthttp.RequestCtx{}
+			h.runUpstream(ctx, upstreamCtx)
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			if panicVal != nil {
+				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstream maps ErrAbortHandler; the same convention as doFetchFast
+			}
+			defer upstreamCtx.Response.Reset()
+			return upstreamFetchResult(upstreamCtx)
+		case <-deadline.C:
+			return fetchResult{Err: fmt.Errorf("origin fetch: timeout after %s", h.fetchTimeout)}
+		}
+	}
+	upstreamCtx := &fasthttp.RequestCtx{}
+	defer upstreamCtx.Response.Reset()
+	h.runUpstream(ctx, upstreamCtx)
+	return upstreamFetchResult(upstreamCtx)
+}
+
+// runUpstream replays the client request into a scratch RequestCtx and
+// invokes the upstream handler. The body is copied because the scratch
+// ctx outlives the client's conn-owned buffer on streaming paths.
+func (h *Handler) runUpstream(ctx *fasthttp.RequestCtx, upstreamCtx *fasthttp.RequestCtx) {
+	upstreamCtx.Request.Header.SetMethodBytes(ctx.Method())
+	upstreamCtx.Request.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	upstreamCtx.Request.Header.SetHostBytes(ctx.Host())
+	for k, v := range ctx.Request.Header.All() {
+		upstreamCtx.Request.Header.AddBytesKV(k, v)
+	}
+	if body := ctx.Request.Body(); len(body) > 0 {
+		bodyCopy := make([]byte, len(body))
+		copy(bodyCopy, body)
+		upstreamCtx.Request.SetBodyRaw(bodyCopy)
+	}
+	h.upstream(upstreamCtx)
+}
+
+// upstreamFetchResult converts a scratch RequestCtx produced by an
+// in-process upstream handler into the shared fetchResult shape.
+// Exact-size body copy: the result is shared with singleflight
+// followers and may be stored, so it must not alias the scratch ctx.
+func upstreamFetchResult(ctx *fasthttp.RequestCtx) fetchResult {
+	hdrMap := header.FromFastHTTP(&ctx.Response.Header)
+	statusCode := ctx.Response.StatusCode()
+	bodyCopy := make([]byte, len(ctx.Response.Body()))
+	copy(bodyCopy, ctx.Response.Body())
+	return fetchResult{
+		StatusCode: statusCode,
+		Header:     fromHeaderMap(hdrMap),
+		Body:       bodyCopy,
+	}
+}
+
+// fetchViaUpstreamRequest is the request-shaped variant of fetchViaUpstream:
+// the caller (doFetchBg) already built a complete upstream-bound request
+// (method, stripped URI, host, headers, body, conditional headers), so it is
+// replayed verbatim into the scratch RequestCtx.
+func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, ErrAbortHandler) {
+				res = fetchResult{Err: ErrAbortHandler}
+				return
+			}
+			panic(r) //nolint:forbidigo // re-panic for real (non-abort) panics
+		}
+	}()
+	upstreamCtx := &fasthttp.RequestCtx{}
+	defer upstreamCtx.Response.Reset()
+	upstreamCtx.Request.Header.SetMethodBytes(req.Header.Method())
+	upstreamCtx.Request.SetRequestURIBytes(req.RequestURI())
+	upstreamCtx.Request.Header.SetHostBytes(req.Header.Host())
+	for k, v := range req.Header.All() {
+		upstreamCtx.Request.Header.AddBytesKV(k, v)
+	}
+	if body := req.Body(); len(body) > 0 {
+		bodyCopy := make([]byte, len(body))
+		copy(bodyCopy, body)
+		upstreamCtx.Request.SetBodyRaw(bodyCopy)
+	}
+	if h.fetchTimeout > 0 {
+		deadline := time.NewTimer(h.fetchTimeout)
+		defer deadline.Stop()
+		done := make(chan struct{}, 1)
+		var panicVal any
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicVal = r
+				}
+				done <- struct{}{}
+			}()
+			h.upstream(upstreamCtx)
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+			if panicVal != nil {
+				panic(panicVal) //nolint:forbidigo // re-panic: the recover at the top of fetchViaUpstreamRequest maps ErrAbortHandler; the same convention as doFetchFast
+			}
+			return upstreamFetchResult(upstreamCtx)
+		case <-deadline.C:
+			return fetchResult{Err: fmt.Errorf("origin fetch: timeout after %s", h.fetchTimeout)}
+		}
+	}
+	h.upstream(upstreamCtx)
+	return upstreamFetchResult(upstreamCtx)
 }
 
 //nolint:gocyclo // 16: TTL/freshness conditionals are inherently branchy

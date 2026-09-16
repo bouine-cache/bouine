@@ -10,6 +10,22 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-09-16
+
+### Added
+- Peer-fetch variant-assertion rejections are now counted, not just
+  logged. PR #630 added the RFC 9111 §4.1 variant-assertion gate on
+  both peer-fetch sides, but operators could not distinguish a rare
+  foreign variant from a broken cluster.
+  `bouine_peer_fetch_variant_mismatch_total{side="server|consumer"}`
+  counts rejections in the peer-fetch handler (server side) and in
+  the cache handler (consumer side, wired via an OnPeerVariantMismatch
+  callback so the cache package keeps no cluster dependency). The
+  metric carries only the side label (§9 cardinality budget, pinned
+  by a unit test); a sustained non-zero rate indicates a mixed-version
+  fleet or a peer serving wrong-variant content. Runbook alert guidance
+  added.
+
 ### Fixed
 - The origin client now uses a 64 KiB read buffer, matching the
   data-plane and admin servers, instead of fasthttp's 4 KiB default.
@@ -21,6 +37,87 @@ the curated, human-readable summary.
   times and the request surfaced as a 502 (~1 rps on prod-eu,
   exclusively on `/product-page/compare/*`, observed from the
   product-page routing rollout on 2026-09-16).
+- Cached static routes (cache.enabled: true) no longer return 502
+  "no fast client configured" exactly when the cache cannot answer.
+  These routes wire the staticfile handler as Upstream and no
+  FastClient, so every fetch path that only consulted the fast client
+  failed on cold MISS, no-cache/no-store BYPASS, revalidation, POST
+  invalidation, and SSE. The miss fetch, the bypass paths, and SSE now
+  fall back to the Upstream handler, replaying the request into a
+  scratch fasthttp RequestCtx bounded by fetch_timeout; the scratch
+  response is converted to the shared fetchResult shape with an
+  exact-size body copy so singleflight followers and storage never
+  alias the scratch buffer.
+- Four config surfaces that were parsed, validated, and documented
+  while having zero effect on behavior now work — or fail loudly
+  instead of silently. request/response header_set + header_remove
+  rewrite headers on every origin fetch and on every emitted response
+  (hit, stale, revalidated, miss, bypass, SSE), covering proxied and
+  static routes; health.passive.eject_for restores passively ejected
+  targets once the window elapses, with a restore counter label and
+  automatic re-ejection for still-broken targets; connect.hedge_timeout
+  fires a duplicate idempotent (non-SSE) request after the delay and
+  returns the first response, replacing the dead net/http-era
+  HedgeClient (deleted with it). In the chart, containerPorts, the
+  NetworkPolicy's post-DNAT ports, and the listen-address schema
+  patterns now derive from config.listen, so an override keeps
+  routing, probes, and policy coherent instead of blackholing traffic.
+- The documented header-rewrite contract ("every response this
+  handler emits") is now honored on the failure paths: 502s from
+  unreachable origins, no-fast-client bypasses, shed 503s, and 304
+  conditional responses previously skipped
+  response.header_set/header_remove. Every emit site routes through
+  the same rewrite path, pinned by a test on the 502 case; the
+  origin-ejection runbook documents the new eject_for restore path
+  and the origin_restores_total source label.
+- Two latent data races reported by -race are closed, each with a
+  regression test verified to fail against the pre-fix code.
+  Cluster.metrics was assigned by SetMetrics after memberlist.Create
+  had already started the gossip dispatch, reconcile, and logging
+  goroutines that read it; the field is now an atomic.Pointer[Metrics]
+  (the same pattern the package's slogAdapter already used). And
+  hot.Get's slow path incremented the stored object's Hits under
+  the shard write lock while the warm-sync cycle read the same pointer
+  with no lock held; the increment is now an atomic add and the
+  encoder reads atomically — the field stays a plain uint64 so JSON
+  shape and struct copies are unchanged, and the hit path still
+  pays zero allocs. The clone helpers (CloneForReturn,
+  CloneForRefresh) read Hits atomically too: both receive store.Get
+  pointers, and the revalidation path raced the same increment from
+  the other side.
+- The peer-fetch queue-wait histogram records the abandoned wait
+  when a queued caller cancels — exactly the case the 150ms budget
+  produces. The wait was previously observed only after the semaphore
+  slot was acquired, so the saturation signal the metric exists to
+  surface (prod-eu, 2026-09-12) was invisible whenever the queued
+  caller gave up, and TestPeerFetcher_QueueWaitMeasuredWhenSaturated
+  flaked when the observe-vs-cancel race lost.
+- PurgeEvent.VaryKey is documented as metadata. The field's comment
+  claimed a non-empty value scoped the purge to one variant, but every
+  receive path (gossip, HTTP peer-purge, batch endpoints) purges the
+  primary key plus all locally tracked variants, and a scoped delete
+  built from the field would silently no-op — the assertion hex the
+  field carries cannot be composed into a variant store key, which
+  would leave stale variant bodies serving. Receivers stay RFC 9111
+  §4.2.4-conformant (resource-wide invalidation); the decision is
+  recorded in ADR-0045, and new unit and integration tests pin the
+  purge-all receive path.
+
+### Removed
+- cache.key.canonicalize_path, whose listener-level wiring never
+  landed: configs setting the knob now fail at parse time with the
+  strict loader instead of being silently accepted and ignored.
+
+### Security
+- The upstream-replay scratch requests no longer trip CodeQL's
+  go/request-forgery model. The three hand-rolled replay sites
+  (SetRequestURIBytes on user-derived request URIs) now replay via
+  fasthttp's Request.Copy and derive the replayed URI from the parsed
+  URI object — the same accessor shape as every other origin-bound
+  sink in the package, with the strip-prefix rewrite documented at the
+  sink. No behavior change: URI, host, headers, body, and conditional
+  headers replay identically, and doFetchBg drops a duplicate
+  request-build its caller already performed.
 
 ## [0.5.18] - 2026-09-14
 
@@ -1417,7 +1514,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.18...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.19...HEAD
+[0.5.19]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.19
 [0.5.18]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.18
 [0.5.17]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.17
 [0.5.16]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.16

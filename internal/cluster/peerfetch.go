@@ -484,6 +484,13 @@ func (f *PeerFetcher) getPipelineClient(addr string) *fasthttp.PipelineClient {
 		IsTLS:                         f.useTLS,
 		TLSConfig:                     f.tlsConfig,
 		DisableHeaderNamesNormalizing: true,
+		// The pipeline worker logs every connection failure through its
+		// Logger — fasthttp's default is a raw log.Logger on stderr, which
+		// bypasses the slog pipeline and lands in log shippers as
+		// unstructured info-level lines (seen in prod-eu). Classify through
+		// the client adapter: routine teardown noise (EOF, broken pipe,
+		// retired-address parking) at Debug, degraded peers at Warn.
+		Logger: observability.NewFastHTTPClientLogger(f.logger, "cluster"),
 		Dial: func(addr string) (net.Conn, error) {
 			if _, retired := f.retiredAddrs.Load(addr); retired {
 				// Park instead of dialing: this client was evicted by

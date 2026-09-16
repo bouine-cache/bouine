@@ -10,6 +10,23 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- The cluster's peer PipelineClient diagnostics no longer bypass the
+  structured log pipeline. Every "error in PipelineClient(...)" line
+  from fasthttp's pipeline worker — dial refusals, EOFs, broken pipes,
+  timeouts — went to fasthttp's raw stderr logger and landed in log
+  shippers as unstructured info-level lines (the entire content of the
+  prod-eu log export on 2026-09-16: 59 entries during a single
+  rolling-restart window, 41 of them bouine's own retired-address
+  parking). The per-peer PipelineClient is now built with the
+  client-side FastHTTPLogger adapter: records are tagged
+  `component=cluster` and classified by transport error — routine
+  teardown (EOF, broken pipe) and retired-address drain log at Debug,
+  degraded peers (connection refused, timeouts, anything unrecognized)
+  log at Warn. Peer fetch/put on the hit path is unchanged (0 allocs/op
+  bench-gate maintained); the adapter only runs on the worker's error
+  path.
+
 ## [0.5.20] - 2026-09-16
 
 ### Added

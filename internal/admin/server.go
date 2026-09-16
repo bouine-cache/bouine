@@ -156,6 +156,9 @@ func NewMinimal(addr string, readyFn func() bool, conditionsFn func() []Conditio
 		WriteTimeout:          5 * time.Second,
 		IdleTimeout:           DefaultAdminIdleTimeout,
 		NoDefaultServerHeader: true,
+		// Route fasthttp's internal error diagnostics into slog instead
+		// of its raw stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(logger, "admin"),
 	}
 	return s
 }
@@ -181,6 +184,9 @@ func New(cfg Config) *Server {
 		WriteTimeout:          5 * time.Second,
 		IdleTimeout:           resolveAdminIdleTimeout(cfg.IdleTimeout),
 		NoDefaultServerHeader: true,
+		// Route fasthttp's internal error diagnostics into slog instead
+		// of its raw stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(cfg.Logger, "admin"),
 	}
 	if cfg.PprofEnabled {
 		s.inner.WriteTimeout = 0

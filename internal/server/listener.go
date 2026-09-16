@@ -237,6 +237,10 @@ func NewHTTP(cfg ListenerConfig) *Listener {
 		NoDefaultDate:         true,
 		CloseOnShutdown:       true,
 		HeaderReceived:        sseHeaderReceived,
+		// Route fasthttp's internal error diagnostics (accept failures,
+		// per-connection serve errors) into slog instead of its raw
+		// stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(cfg.Logger, "http"),
 	}
 	return &Listener{
 		inner:          srv,
@@ -278,6 +282,9 @@ func NewHTTPS(cfg ListenerConfig) *Listener {
 		CloseOnShutdown:       true,
 		TLSConfig:             cfg.TLSConfig,
 		HeaderReceived:        sseHeaderReceived,
+		// Route fasthttp's internal error diagnostics into slog instead
+		// of its raw stderr default logger; see FastHTTPLogger.
+		Logger: observability.NewFastHTTPLogger(cfg.Logger, "https"),
 	}
 	return &Listener{
 		inner:          srv,

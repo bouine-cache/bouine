@@ -449,8 +449,9 @@ func (m *DataPlaneMetrics) PreResolveRoutes(poolNames []string) {
 }
 
 // SetAccessLog configures the access logger and sampling rate for the
-// merged middleware. logger receives Warn for non-200 responses (always)
-// and Info for 200 responses (sampled 1-in-sampleRate by cache key).
+// merged middleware. logger receives Info for all responses: non-200
+// responses are always logged, 200 responses are sampled
+// 1-in-sampleRate by cache key.
 // sampleRate=0 disables sampling (every request is logged).
 func (m *DataPlaneMetrics) SetAccessLog(logger Logger, sampleRate uint64) {
 	m.accessLog = logger
@@ -810,9 +811,9 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 
 		if m.accessLog != nil {
 			msg := accessLogMessage(cacheResult, statusCode)
+			attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
 			if statusCode != fasthttp.StatusOK {
-				attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
-				m.accessLog.Warn(msg, attrs...)
+				m.accessLog.Info(msg, attrs...)
 			} else {
 				keyVal := ctx.UserValue("cacheKey")
 				var key api.Key
@@ -820,7 +821,6 @@ func (m *DataPlaneMetrics) FastHTTPMiddleware(next fasthttp.RequestHandler) fast
 					key = k
 				}
 				if m.shouldLogAccess(key) {
-					attrs := m.buildFastHTTPAccessLogAttrs(ctx, cacheResult, elapsed, statusCode)
 					m.accessLog.Info(msg, attrs...)
 				}
 			}

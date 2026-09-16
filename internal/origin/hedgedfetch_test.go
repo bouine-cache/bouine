@@ -248,7 +248,10 @@ func TestDoHedged_PrimaryErrorBeforeHedge(t *testing.T) {
 }
 
 func TestDoHedged_NoGoroutineLeak(t *testing.T) {
-	t.Parallel()
+	// Deliberately sequential: the assertion counts goroutines for the
+	// whole process, so running it inside the parallel group pollutes
+	// the count with server/client goroutines from other tests and
+	// fails even when hedging itself leaks nothing.
 	before := countGoroutines()
 	for range 50 {
 		var calls atomic.Int32

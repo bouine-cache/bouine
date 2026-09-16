@@ -2615,7 +2615,7 @@ func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
 func (h *Handler) runUpstream(ctx *fasthttp.RequestCtx, upstreamCtx *fasthttp.RequestCtx) {
 	upstreamCtx.Request.Reset()
 	ctx.Request.CopyTo(&upstreamCtx.Request)
-	upstreamCtx.Request.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
+	upstreamCtx.Request.SetRequestURIBytes(h.strippedURI(ctx.Request.URI().RequestURI()))
 	h.upstream(upstreamCtx)
 }
 

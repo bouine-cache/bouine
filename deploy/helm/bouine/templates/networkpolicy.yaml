@@ -2,7 +2,8 @@
 {{- /* NetworkPolicy matches post-DNAT ports: the container ports derived
   from config.listen, not the Service ports. Under default values the two
   coincide; with listen overrides only the container ports are correct
-  (issue #586). */}}
+  (issue #586). An empty listen address disables the plane, and its
+  derived rule with it. */}}
 {{- $httpPort := include "bouine.listenPort" (dict "key" "http" "value" .Values.config.listen.http) }}
 {{- $httpsPort := include "bouine.listenPort" (dict "key" "https" "value" .Values.config.listen.https) }}
 {{- $adminPort := include "bouine.listenPort" (dict "key" "admin" "value" .Values.config.listen.admin) }}
@@ -23,16 +24,23 @@ spec:
   ingress:
     # Data-plane ports: allow from any source.
     - ports:
+      {{- if $httpPort }}
         - port: {{ $httpPort }}
           protocol: TCP
+      {{- end }}
+      {{- if $httpsPort }}
         - port: {{ $httpsPort }}
           protocol: TCP
+      {{- end }}
+    {{- if $adminPort }}
     # Admin port: allow from same namespace only.
     - from:
         - podSelector: {}
       ports:
         - port: {{ $adminPort }}
           protocol: TCP
+    {{- end }}
+    {{- if $clusterPort }}
     # Cluster gossip: allow from bouine pods only.
     - from:
         - podSelector:
@@ -43,4 +51,5 @@ spec:
           protocol: TCP
         - port: {{ $clusterPort }}
           protocol: UDP
+    {{- end }}
 {{- end }}

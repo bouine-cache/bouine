@@ -37,6 +37,10 @@ config:
     # and the NetworkPolicy allows them post-DNAT (issue #586).
     # Overriding any port keeps routing, probes, and policy coherent.
     # Address form: [host:]port (e.g. ":8080" or "10.0.0.1:9000").
+    # An empty string disables the plane: the app skips the listener and
+    # the chart drops the derived containerPort, Service port, and
+    # NetworkPolicy rule. Set https: "" when TLS terminates upstream
+    # (reverse proxy / LB) — the app requires at least one listener.
     http: ":80"
     https: ":443"
     admin: ":9000"

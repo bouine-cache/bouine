@@ -12,6 +12,13 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
+// shutdownTimeout bounds Server.Close: fasthttp's graceful shutdown waits
+// for open connections to go idle, and a leaked or stuck client connection
+// would otherwise hang Close forever (observed as a 2-minute test-package
+// timeout in CI). The deadline converts the hang into a drain failure and
+// a forced listener close.
+const shutdownTimeout = 2 * time.Second
+
 // Server is a minimal fasthttp test server with the same lifecycle
 // semantics as httptest.Server: call Close when done.
 type Server struct {
@@ -52,8 +59,13 @@ func NewTLSServer(t testing.TB, handler fasthttp.RequestHandler, tlsCfg *tls.Con
 	return &Server{Addr: ln.Addr().String(), server: srv, ln: ln}
 }
 
-// Close shuts down the server gracefully and closes the listener.
+// Close shuts down the server gracefully within shutdownTimeout and
+// closes the listener. A drain that outlives the deadline (a client
+// connection stuck mid-request, e.g. one parked in a dial queue) falls
+// through to the listener close instead of hanging the test.
 func (s *Server) Close() {
-	_ = s.server.Shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	_ = s.server.ShutdownWithContext(ctx)
 	_ = s.ln.Close()
 }

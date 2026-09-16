@@ -41,11 +41,23 @@ type Metrics struct {
 	// unbatched delivery (delivery preserved, batching win lost).
 	// See ADR-0044.
 	BroadcastOverflows prometheus.Counter
+	// PeerFetchVariantMismatch counts peer-fetch RPCs rejected by the
+	// RFC 9111 §4.1 variant-assertion gate, labelled by side:
+	// "server" (the owner answered a requested variant with another
+	// variant's body or the primary-key Vary resolver) or "consumer"
+	// (the fetched object's stored variant does not select the local
+	// request). A sustained non-zero rate indicates a mixed-version
+	// fleet or a peer serving wrong-variant content. See issue #633.
+	PeerFetchVariantMismatch *prometheus.CounterVec
 
 	// broadcastFailuresTotal is a lock-free total of all broadcast
 	// failures, used by the dashboard insights engine without needing
 	// to read Prometheus dto.Metric from the cluster package.
 	broadcastFailuresTotal atomic.Int64
+	// peerFetchVariantMismatchTotal is a lock-free total across both
+	// sides, exposed via PeerFetchVariantMismatchCount for the
+	// insights engine.
+	peerFetchVariantMismatchTotal atomic.Int64
 }
 
 // RegisterMetrics creates and registers the cluster metrics on
@@ -90,6 +102,11 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "cluster_broadcast_overflows_total",
 			Help:      "Invalidation batcher queue overflows. Events fall back to unbatched delivery; delivery is preserved.",
 		}),
+		PeerFetchVariantMismatch: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "bouine",
+			Name:      "peer_fetch_variant_mismatch_total",
+			Help:      "Peer-fetch RPCs rejected by the RFC 9111 variant-assertion gate, by side (server, consumer). Sustained non-zero rate indicates a mixed-version fleet or a peer serving wrong-variant content.",
+		}, []string{"side"}),
 	}
 	reg.MustRegister(
 		m.ModeInfo,
@@ -99,6 +116,7 @@ func RegisterMetrics(reg prometheus.Registerer) *Metrics {
 		m.GossipDrops,
 		m.RingEmpty,
 		m.BroadcastOverflows,
+		m.PeerFetchVariantMismatch,
 	)
 	return m
 }
@@ -162,6 +180,26 @@ func (m *Metrics) IncBroadcastOverflow() {
 		return
 	}
 	m.BroadcastOverflows.Inc()
+}
+
+// IncPeerFetchVariantMismatch increments the variant-mismatch counter
+// for the given side ("server" or "consumer"). Nil-safe: single-node
+// mode never registers the vec.
+func (m *Metrics) IncPeerFetchVariantMismatch(side string) {
+	if m == nil || m.PeerFetchVariantMismatch == nil {
+		return
+	}
+	m.PeerFetchVariantMismatch.WithLabelValues(side).Inc()
+	m.peerFetchVariantMismatchTotal.Add(1)
+}
+
+// PeerFetchVariantMismatchCount returns the total number of variant
+// mismatches across both sides. Used by the dashboard insights engine.
+func (m *Metrics) PeerFetchVariantMismatchCount() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.peerFetchVariantMismatchTotal.Load()
 }
 
 // IncRingEmpty increments the ring-empty counter. Called when Owner

@@ -10,7 +10,90 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+## [0.5.20] - 2026-09-16
+
+### Added
+- The H1 fast path can now serve peer-fetched objects without falling
+  through to the slow path (issue #636, experimental). On a strong-cluster
+  node, a plain-key miss on the fast path asks the key's ring owner first
+  and serves the peer's object directly through `FastPathHandler` with
+  `X-Cache-Source: peer` — removing one full parser/handler round-trip
+  per peer hit — without storing (no ring placement to enforce) and
+  without allocating. The transient fields the wire codec drops
+  (CacheControl flags, HasDate) are re-derived so freshness
+  evaluation matches local hits, and on any peer error the fast path
+  falls through to the slow path's shed/origin machinery unchanged.
+  The branch requires the new `experimental.h1_fast_peer_path` flag
+  (default off, rejected at load time without `h1_fast_path`), is
+  not wired under the epoll reactor (TryHit must never block on
+  network I/O), and logs an error at startup when requested but
+  unavailable (cluster not in strong mode) instead of silently
+  no-oping. Two gating benchmarks pin the budgets:
+  `FastPath_PeerHit` at 0 allocs/op and `FastPath_PeerHitVary`
+  (the RFC 9111 §4.1 variant gate) at 7 allocs/op. An end-to-end
+  integration test (3-node ring, fixed-Host key) proves non-owner
+  requests are served with zero origin traffic. On a definitive
+  owner miss the fast path flags the request so the slow path skips
+  its identical second owner lookup + peer RPC and goes straight to
+  origin; errors and variant-gate rejections keep the slow-path
+  retry, and policied routes keep their retry too since the slow
+  path's gate computes a different VaryKey.
+- `bouine_peer_fetch_shed_total` — peer fetch/put RPCs no longer
+  park indefinitely when the concurrency semaphores are
+  saturated (see the saturation fix below): a shed is counted, and
+  the queue wait that led to it is observed in
+  `peer_fetch_queue_wait_seconds` (previously only successful
+  acquisitions landed in the histogram, so a fully-shedding queue
+  disappeared from the metrics).
+- `bouine_rewarm_fill_total` — background refills scheduled after a
+  shed foreground miss (see the saturation fix below) are counted
+  next to `bouine_fetch_shed_total`.
+
 ### Fixed
+- A 3-node miss-storm stress run (surrogate-key purge of 80% of a
+  360k keyspace at T+15m, 6k req/s, fast path OFF) exposed two
+  compounding saturation behaviors and one operational trap. All
+  three are closed; rationale and alternatives in ADR-0045
+  (bounded-peer-shed-and-rewarm):
+  1. Peer-fetch/put semaphore waits are now bounded. A caller with
+     an undelined context (the fast path passes
+     context.Background to stay zero-alloc) previously parked
+     forever when all slots were busy — every keep-alive
+     connection goroutine parked in the queue (4,386 parked
+     goroutines at end of run vs 225 on the slow-path arm). Slot
+     acquisition now uses the same two-stage shape the origin
+     fetch path got in issue #562: non-blocking send, then a
+     100ms timer, then shed with `ErrPeerFetchShed`. Clients keep
+     their 503/stale protection; the fast path already falls
+     through on any peer error.
+  2. A shed miss no longer loses the refill. After a purge ban,
+     every shed foreground miss fetched and stored nothing, so
+     the miss storm pinned the hit ratio at the shed equilibrium
+     (~7% for the rest of the run, 461k sheds) — each shed was a
+     lost refill and re-warm never converged. A shed miss now
+     schedules a bounded background refill on a dedicated pool
+     (32 per handler, separate from the foreground fetchSem it
+     was just shed from), singleflight-collapsed with foreground
+     fetches and drained on Close. Clients keep their
+     503/stale protection; the store re-warms anyway.
+  3. The lazy-ban list TTL is now configurable via
+     `cluster.ban_ttl` (default 24h, validated >= 1s when set).
+     The TTL was a hard 24h constant, so a typo in a
+     surrogate-key ban poisoned the hit ratio for a full day.
+     RFC 9111 §4.4 exempts post-ban copies and the reaper reclaims
+     pre-ban ones, so cache-lifecycle invalidations are safe at
+     minutes scale.
+- The fast-path owner-miss hint is only honored on routes with no
+  KeyPolicy. The fast path builds keys without the route's
+  KeyPolicy (it is constructed per-engine from the shared store),
+  so on a policied route its miss was computed under a different
+  key and proved nothing about the slow path's key — honoring it
+  silently converted peer hits into origin fetches on routes with
+  query-param stripping. A variant-gate rejection now also flags
+  the request so a nil-policy slow path skips the deterministically
+  rejected duplicate peer RPC and goes straight to origin;
+  reqHeaderMapFromRaw right-trims OWS so both parsers provably
+  agree (parity test gained a trailing-OWS case).
 - The Helm chart again accepts an empty `config.listen.https` (and any
   empty listen address). The 0.5.19 schema patterns and the
   `bouine.listenPort` helper turned the app's documented "empty string
@@ -25,6 +108,19 @@ the curated, human-readable summary.
   the https-disabled variant on every chart change so this cannot ship
   silently again. Downstream consumers pinned to chart 0.5.18 for this
   reason can unpin on the next chart release.
+- Non-200 access-log entries are emitted at Info instead of Warn.
+  Warn made every error response look like a system degradation to
+  log-based alerting. Error entries stay unsampled in the
+  middleware and now follow the sampled logger's 1-in-N Info
+  sampling like all access-log entries.
+- Flaky/failing tests: the shared fasthttptest helper bounds Close
+  with a 2s deadline so a stuck fasthttp graceful-shutdown drain
+  (a never-idle peer-fetch pipeline client connection) falls
+  through to the listener close instead of hanging the whole
+  internal/cluster package (a CI run hit the 2-minute package
+  timeout); TestDoHedged_NoGoroutineLeak now runs sequentially so
+  the process-wide goroutine baseline is not inflated by parallel
+  tests spinning up real fasthttp servers and clients.
 
 ## [0.5.19] - 2026-09-16
 
@@ -1530,7 +1626,8 @@ First public release. A horizontally-scalable, observability-first HTTP/1.1
 - Data-plane authentication and per-route rate limiting.
 - AI traffic-analysis insights.
 
-[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.19...HEAD
+[Unreleased]: https://github.com/bouine-cache/bouine/compare/v0.5.20...HEAD
+[0.5.20]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.20
 [0.5.19]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.19
 [0.5.18]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.18
 [0.5.17]: https://github.com/bouine-cache/bouine/releases/tag/v0.5.17

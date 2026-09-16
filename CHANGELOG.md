@@ -10,6 +10,18 @@ the curated, human-readable summary.
 
 ## [Unreleased]
 
+### Fixed
+- The origin client now uses a 64 KiB read buffer, matching the
+  data-plane and admin servers, instead of fasthttp's 4 KiB default.
+  Origin responses whose header block exceeds 4 KiB — product-page's
+  `/compare/` responses carry a `Cache-Tag` header with one product
+  UUID per variant (~4-5 KiB on phone comparisons) — failed response
+  header parse with `ErrSmallBuffer` on every attempt: the
+  idempotent retry replayed the same deterministic parse error five
+  times and the request surfaced as a 502 (~1 rps on prod-eu,
+  exclusively on `/product-page/compare/*`, observed from the
+  product-page routing rollout on 2026-09-16).
+
 ## [0.5.18] - 2026-09-14
 
 ### Added

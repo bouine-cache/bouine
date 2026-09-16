@@ -740,8 +740,11 @@ func (f *PeerFetcher) Fetch(ctx context.Context, peer api.PeerInfo, req api.Peer
 // PeerFetchHandler is a fasthttp.RequestHandler that serves peer-fetch
 // requests from the local store. Mount on PeerFetchPath.
 type PeerFetchHandler struct {
-	store    PeerStore
-	logger   observability.Logger
+	store  PeerStore
+	logger observability.Logger
+	// metrics counts variant-assertion rejections on the serving side
+	// (label "server"). Nil-safe: nil counts nothing.
+	metrics  *Metrics
 	hopLimit int
 }
 
@@ -760,10 +763,17 @@ func NewPeerFetchHandler(store PeerStore, hopLimit int) *PeerFetchHandler {
 // NewPeerFetchHandlerWithLogger creates a peer-fetch handler with a
 // structured logger.
 func NewPeerFetchHandlerWithLogger(store PeerStore, logger observability.Logger, hopLimit int) *PeerFetchHandler {
+	return NewPeerFetchHandlerWithMetrics(store, logger, hopLimit, nil)
+}
+
+// NewPeerFetchHandlerWithMetrics creates a peer-fetch handler with a
+// structured logger and cluster metrics. metrics may be nil (tests,
+// single-node use); variant-assertion rejections are then only logged.
+func NewPeerFetchHandlerWithMetrics(store PeerStore, logger observability.Logger, hopLimit int, metrics *Metrics) *PeerFetchHandler {
 	if hopLimit <= 0 {
 		hopLimit = MaxHops
 	}
-	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger)}
+	return &PeerFetchHandler{store: store, hopLimit: hopLimit, logger: observability.ResolveLogger(logger), metrics: metrics}
 }
 
 // parsePeerFetchBody decodes the peer-fetch request body: binary framing
@@ -837,6 +847,7 @@ func (h *PeerFetchHandler) Handle(ctx *fasthttp.RequestCtx) {
 	// one variant's content to a request selecting another — the
 	// cross-market body served in production before this gate.
 	if req.VaryKey != "" && obj.VaryKey != req.VaryKey {
+		h.metrics.IncPeerFetchVariantMismatch("server")
 		h.logger.Info("served peer fetch miss: variant mismatch",
 			"key", req.Key, "want_vary", req.VaryKey, "have_vary", obj.VaryKey, "hops", hops)
 		ctx.SetStatusCode(fasthttp.StatusNotFound)

@@ -257,6 +257,9 @@ type Handler struct {
 	// peerFetch asks a peer for a cached object. Returns nil, nil on
 	// peer miss; errors fall through to origin. Nil in single-node mode.
 	peerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
+	// onPeerVariantMismatch is called when servePeerHit rejects a
+	// foreign-variant object. Nil in single-node mode.
+	onPeerVariantMismatch func()
 	// peerPut forwards a freshly origin-fetched object to the owner
 	// node so subsequent peer-fetches hit. Best-effort, fire-and-forget.
 	// Nil in single-node and eventual modes.
@@ -392,7 +395,13 @@ type HandlerConfig struct {
 	// and treats a mismatch as a miss. Returns nil, nil on peer miss;
 	// errors are treated as misses (origin fallback, logged at debug).
 	PeerFetch func(ctx context.Context, peer api.PeerInfo, key api.Key, varyKey string) (*api.Object, error)
-	Upstream  fasthttp.RequestHandler
+	// OnPeerVariantMismatch, if non-nil, is called when the handler
+	// rejects a peer-fetched object because its stored variant does
+	// not select this request (RFC 9111 §4.1 assertion re-verified on
+	// receipt). Wired to the peer-fetch variant-mismatch metric
+	// (consumer side) by the engine; nil in single-node mode.
+	OnPeerVariantMismatch func()
+	Upstream              fasthttp.RequestHandler
 	// OwnerFn, if non-nil, enables cluster-aware routing. It returns the
 	// peer that owns a cache key and whether the key is local. When nil,
 	// the handler operates in single-node mode: every miss goes to origin.
@@ -670,6 +679,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		FetchShedInc:            cfg.FetchShed,
 		ownerFn:                 cfg.OwnerFn,
 		peerFetch:               cfg.PeerFetch,
+		onPeerVariantMismatch:   cfg.OnPeerVariantMismatch,
 		peerPut:                 cfg.PeerPut,
 		allowSetCookie:          cfg.AllowSetCookie,
 		maxObjectSize:           cfg.MaxObjectSize,
@@ -1295,6 +1305,9 @@ func peerVaryAssertion(obj *api.Object) string {
 func (h *Handler) servePeerHit(ctx *fasthttp.RequestCtx, lookupKey api.Key, peerObj *api.Object, now time.Time, ri RequestInfo) bool {
 	if peerObj.VaryValue != "" &&
 		BuildVaryKey(peerObj.VaryValue, ri.Header, h.policy) != peerObj.VaryKey {
+		if h.onPeerVariantMismatch != nil {
+			h.onPeerVariantMismatch()
+		}
 		h.logger.Debug("peer fetch returned a foreign variant for this request",
 			"key", lookupKey.Hex(), "vary", peerObj.VaryValue,
 			"peer_vary_key", peerObj.VaryKey)

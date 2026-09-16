@@ -53,6 +53,22 @@ has a configuration drift — every pod must use the same mode.
   `cluster.peer_fetch_concurrency` and look for "error in PipelineClient"
   log lines naming the peer address.
 
+- **Peer fetch variant mismatches.** `bouine_peer_fetch_variant_mismatch_total`
+  counts peer-fetch RPCs rejected by the RFC 9111 §4.1 variant-assertion gate,
+  labelled by `side`:
+  - `side="server"` — this node is the owner and answered a requested variant
+    with another variant's body or the primary-key Vary resolver.
+  - `side="consumer"` — this node fetched from a peer and rejected the object
+    because its stored variant does not select the local request.
+
+  Isolated increments are benign (cold-variant races). **Alert when the rate
+  is > 0 for 5m** (e.g. `rate(bouine_peer_fetch_variant_mismatch_total[5m]) > 0`):
+  a sustained rate indicates a mixed-version fleet during a rolling upgrade
+  (older peers without the variant-assertion protocol) or a peer serving
+  wrong-variant content. Check fleet versions first (`kubectl get pods -o
+  wide` against the rollout status), then the "served peer fetch miss:
+  variant mismatch" log lines naming the keys.
+
 ### `eventual`
 
 | Check | Expected |

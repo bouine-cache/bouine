@@ -809,7 +809,7 @@ func (e *engine) swapAdminHandler(ctx context.Context, rs *runState, minimalAdmi
 		PeerRefreshHandler:      e.peerRefreshApply(rs, ctx),
 		PeerPurgeBatchHandler:   e.peerPurgeBatchApply(rs, ctx),
 		PeerRefreshBatchHandler: e.peerRefreshBatchApply(rs, ctx),
-		PeerFetchHandler:        cluster.NewPeerFetchHandler(rs.store, e.cfg.Cluster.HopLimit).Handle,
+		PeerFetchHandler:        cluster.NewPeerFetchHandlerWithMetrics(rs.store, nil, e.cfg.Cluster.HopLimit, rs.clusterMetrics).Handle,
 		PeerPutHandler:          e.buildPeerPutHandler(rs).Handle,
 		PeerMetricsHandler:      dashboard.PeerMetricsHandler(rs.rings),
 		DashboardHandler:        dashMux,

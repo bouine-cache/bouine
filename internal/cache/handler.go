@@ -1680,19 +1680,10 @@ func (h *Handler) doFetchBg(ctx context.Context, req *fasthttp.Request) (res fet
 		if h.upstream != nil {
 			// Upstream fallback (issue #598): a cached-static-route
 			// handler is wired with Upstream (the staticfile handler)
-			// and no FastClient. Rebuild the upstream-bound request
-			// shape (method/URI/host/headers/body + conditional
-			// headers) from the request and run it in-process.
-			bgReq := fasthttp.AcquireRequest()
-			defer fasthttp.ReleaseRequest(bgReq)
-			bgReq.Header.SetMethodBytes(req.Header.Method())
-			bgReq.SetRequestURIBytes(req.RequestURI())
-			bgReq.Header.SetHostBytes(req.Header.Host())
-			for k, v := range req.Header.All() {
-				bgReq.Header.AddBytesKV(k, v)
-			}
-			bgReq.SetBodyRaw(req.Body())
-			return h.fetchViaUpstreamRequest(bgReq)
+			// and no FastClient. The caller (revalidate / background
+			// refresh) already built the complete upstream-bound request
+			// shape, so replay it verbatim into the scratch ctx.
+			return h.fetchViaUpstreamRequest(req)
 		}
 		return fetchResult{Err: fmt.Errorf("no fast client configured")}
 	}
@@ -2613,20 +2604,18 @@ func (h *Handler) fetchViaUpstream(ctx *fasthttp.RequestCtx) (res fetchResult) {
 }
 
 // runUpstream replays the client request into a scratch RequestCtx and
-// invokes the upstream handler. The body is copied because the scratch
-// ctx outlives the client's conn-owned buffer on streaming paths.
+// invokes the upstream handler. The request is replayed via fasthttp's
+// Request.Copy (which owns its buffers), because the scratch ctx outlives
+// the client's conn-owned buffer on streaming paths. No dialing happens
+// here: the scratch request only feeds the wired in-process handler,
+// never a network client — the same data flow the FastClient paths
+// already carry (suppressed go/request-forgery alerts on doFetchFast/
+// doFetchBg share it). See docs/security/threat-model.md §A10: origin
+// targets are operator-configured, never derived from request parameters.
 func (h *Handler) runUpstream(ctx *fasthttp.RequestCtx, upstreamCtx *fasthttp.RequestCtx) {
-	upstreamCtx.Request.Header.SetMethodBytes(ctx.Method())
+	upstreamCtx.Request.Reset()
+	ctx.Request.CopyTo(&upstreamCtx.Request)
 	upstreamCtx.Request.SetRequestURIBytes(h.strippedURI(ctx.RequestURI()))
-	upstreamCtx.Request.Header.SetHostBytes(ctx.Host())
-	for k, v := range ctx.Request.Header.All() {
-		upstreamCtx.Request.Header.AddBytesKV(k, v)
-	}
-	if body := ctx.Request.Body(); len(body) > 0 {
-		bodyCopy := make([]byte, len(body))
-		copy(bodyCopy, body)
-		upstreamCtx.Request.SetBodyRaw(bodyCopy)
-	}
 	h.upstream(upstreamCtx)
 }
 
@@ -2647,9 +2636,15 @@ func upstreamFetchResult(ctx *fasthttp.RequestCtx) fetchResult {
 }
 
 // fetchViaUpstreamRequest is the request-shaped variant of fetchViaUpstream:
-// the caller (doFetchBg) already built a complete upstream-bound request
-// (method, stripped URI, host, headers, body, conditional headers), so it is
-// replayed verbatim into the scratch RequestCtx.
+// the caller (revalidate / background refresh) already built a complete
+// upstream-bound request (method, stripped URI, host, headers, body,
+// conditional headers), so it is replayed verbatim into a scratch
+// RequestCtx and handed to the in-process upstream handler. No dialing
+// happens here: the scratch request only feeds the wired handler, never a
+// network client — the same data flow the FastClient paths already have
+// (suppressed alerts on doFetchFast/doFetchBg share it). See
+// docs/security/threat-model.md §A10: origin targets are
+// operator-configured, never derived from request parameters.
 func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResult) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2662,17 +2657,7 @@ func (h *Handler) fetchViaUpstreamRequest(req *fasthttp.Request) (res fetchResul
 	}()
 	upstreamCtx := &fasthttp.RequestCtx{}
 	defer upstreamCtx.Response.Reset()
-	upstreamCtx.Request.Header.SetMethodBytes(req.Header.Method())
-	upstreamCtx.Request.SetRequestURIBytes(req.RequestURI())
-	upstreamCtx.Request.Header.SetHostBytes(req.Header.Host())
-	for k, v := range req.Header.All() {
-		upstreamCtx.Request.Header.AddBytesKV(k, v)
-	}
-	if body := req.Body(); len(body) > 0 {
-		bodyCopy := make([]byte, len(body))
-		copy(bodyCopy, body)
-		upstreamCtx.Request.SetBodyRaw(bodyCopy)
-	}
+	req.CopyTo(&upstreamCtx.Request)
 	if h.fetchTimeout > 0 {
 		deadline := time.NewTimer(h.fetchTimeout)
 		defer deadline.Stop()

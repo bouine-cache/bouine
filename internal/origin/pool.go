@@ -286,6 +286,16 @@ func newOriginClient(cc clientConfig) *fasthttp.Client {
 		MaxIdleConnDuration: cc.maxIdleConnDuration,
 		ReadTimeout:         0,
 		WriteTimeout:        5 * time.Minute,
+		// fasthttp's default read buffer is 4 KiB, capping the
+		// parseable response-header block at that size. Origins
+		// emitting a single large header — product-page's /compare/
+		// Cache-Tag carries one product UUID per variant, ~4-5 KB —
+		// exceed it, and every fetch fails with ErrSmallBuffer: the
+		// idempotent retries replay the same deterministic parse error
+		// and the request surfaces as a 502. The inbound data-plane
+		// and admin servers already use 64 KiB (server/listener.go);
+		// the origin client must not be the smaller pipe.
+		ReadBufferSize: 64 << 10,
 		Dial: func(addr string) (net.Conn, error) {
 			return dialer.Dial("tcp", addr)
 		},

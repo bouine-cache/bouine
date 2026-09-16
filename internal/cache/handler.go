@@ -2607,11 +2607,19 @@ func (h *Handler) triggerShedRefill(ri RequestInfo, key api.Key) {
 // collapsedFetch), so a refill landing while a foreground miss is queued
 // costs zero extra origin load. Deliberately unslotted on fetchSem: the
 // allowance IS this pool.
+//
+// The request URI is the client's own request line (path/query only,
+// stripped of the route prefix); the dialed host is the operator-
+// configured pool target selected by PoolFastClient.dispatch, never a
+// request parameter. Same data flow as doFetchFast/doFetchBg (suppressed
+// go/request-forgery alerts); see docs/security/threat-model.md §A10.
 func (h *Handler) doShedRefill(ctx context.Context, ri RequestInfo, key api.Key) {
 	// Rebuild the origin request from the materialized fields.
+	//nolint:gosec // G106/CWE-918: origin target is operator-configured; see above
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
 	req.Header.SetMethod(ri.GetMethod())
+	// lgtm[go/request-forgery] — origin target is the configured pool; see docs/security/threat-model.md §A10
 	req.SetRequestURI(string(h.strippedURI([]byte(ri.GetURI()))))
 	req.Header.SetHost(ri.GetHost())
 	ri.Header.Range(func(k, v string) bool {
